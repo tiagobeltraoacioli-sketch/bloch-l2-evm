@@ -1921,6 +1921,22 @@ mod c27 {
         let mut b = state_with(spec, big.0, big.1);
         let t_small = empty_block_secs(spec, &mut s);
         let t_big = empty_block_secs(spec, &mut b);
+        // For comparison: what a from-scratch root over the big state costs
+        // (the per-block price before the fix). Visible with --nocapture.
+        let t0 = Instant::now();
+        let scratch_root = compute_keccak_mpt_state_root(&b);
+        let t_scratch = t0.elapsed().as_secs_f64();
+        assert_eq!(scratch_root, b.state_root());
+        println!(
+            "C27 empty block: {:?} -> {:.3} ms | {:?} -> {:.3} ms (x{:.2}) | from-scratch root of {:?}: {:.1} ms",
+            small,
+            t_small * 1e3,
+            big,
+            t_big * 1e3,
+            t_big / t_small,
+            big,
+            t_scratch * 1e3
+        );
         assert!(
             t_big < factor * t_small.max(2e-4),
             "empty block against {:?} took {:.3} ms vs {:.3} ms against {:?} (x{:.1})",
