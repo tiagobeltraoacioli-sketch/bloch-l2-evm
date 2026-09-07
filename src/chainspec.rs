@@ -58,13 +58,14 @@ pub const BEACON_ROOTS_ADDRESS: Address = address!("000F3df6D732807Ef1319fB7B8bB
 /// [`crate::state::L2State::genesis`].
 pub const BEACON_ROOTS_CODE: &[u8] = &hex!("3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500");
 
-/// Placeholder hard cap on the L1 supply, in sats, used to bound deposits:
-/// 21 000 000 BLCH. **Pending the design document** (absent from this
-/// repository) this MUST be replaced by the Bloch L1's actual hard cap; a cap
-/// that is too high weakens the bound, a cap that is too low rejects
-/// legitimate deposits. It is a `ChainSpec` knob so it can be corrected without
-/// touching the executor.
-pub const MAX_L1_SATS_PLACEHOLDER: u64 = 21_000_000 * SATS_PER_BLCH;
+/// Hard cap on the Bloch L1 supply, in sats, used to bound deposits:
+/// **100 000 000 000 BLCH** (confirmed by the project) = 10^19 sats at 8
+/// decimals = 10^29 wei on the L2. The L2 has no cap of its own: its native
+/// supply is bridged BLCH with zero issuance, so this is also the maximum the
+/// supply ledger can ever reach. 10^19 fits `u64` (max ≈ 1.8 × 10^19) but
+/// **not** `i64`, so the L1's amount type must be unsigned 64-bit or wider.
+/// A `ChainSpec` knob so a future L1 change never touches the executor.
+pub const MAX_L1_SATS: u64 = 100_000_000_000 * SATS_PER_BLCH;
 
 /// Genesis / consensus-parameter knobs for the Bloch EVM L2, mirroring
 /// `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1's ChainSpec.
@@ -108,7 +109,7 @@ pub struct ChainSpec {
     pub block_info: Address,
     /// Hard cap on the L1 supply in sats: no single deposit may claim more,
     /// and the cumulative minted supply may never exceed it. See
-    /// [`MAX_L1_SATS_PLACEHOLDER`].
+    /// [`MAX_L1_SATS`].
     pub max_l1_sats: u64,
 }
 
@@ -128,7 +129,7 @@ impl ChainSpec {
             sequencer_fee_vault: SEQUENCER_FEE_VAULT,
             supply_ledger: SUPPLY_LEDGER,
             block_info: BLOCK_INFO,
-            max_l1_sats: MAX_L1_SATS_PLACEHOLDER,
+            max_l1_sats: MAX_L1_SATS,
         }
     }
 
@@ -198,7 +199,17 @@ mod tests {
         assert_ne!(spec.supply_ledger, spec.sequencer_fee_vault);
         assert_ne!(spec.block_info, spec.supply_ledger);
         assert_eq!(BEACON_ROOTS_CODE.len(), 97, "canonical EIP-4788 bytecode");
-        assert_eq!(spec.max_l1_sats, 21_000_000 * SATS_PER_BLCH);
+        assert_eq!(spec.max_l1_sats, 100_000_000_000 * SATS_PER_BLCH);
+    }
+
+    #[test]
+    fn l1_cap_is_100_billion_blch_and_fits_the_amount_types() {
+        assert_eq!(MAX_L1_SATS, 10_000_000_000_000_000_000u64, "10^19 sats");
+        assert!(MAX_L1_SATS > i64::MAX as u64, "needs unsigned 64-bit sats on the L1");
+        // 10^29 wei: the most the L2 supply ledger can ever hold.
+        let cap_wei = crate::scale::sats_to_wei(MAX_L1_SATS);
+        assert_eq!(cap_wei, U256::from(10u128.pow(29)));
+        assert_eq!(cap_wei, U256::from(100_000_000_000u64) * U256::from(10u64).pow(U256::from(18)), "100 billion × 10^18 wei");
     }
 
     #[test]

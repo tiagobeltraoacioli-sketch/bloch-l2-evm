@@ -54,7 +54,7 @@ Os itens **P1** da seção 8 (5 e 6; o item 7 já havia sido absorvido pelo P0) 
 
 **Permanecem abertos** (P2 da seção 8): C26 (views/poda), C27 (custo O(estado) por bloco — **agravado** pela cópia de trabalho da atomicidade, aceito conscientemente até a raiz incremental), C28 (divisão por zero em knobs), C29 (medição de depósitos — a parte "0 sats não materializa conta" está corrigida), C31 (pins exatos/toolchain), além dos itens informativos.
 
-**Ainda exigem confirmação do projeto:** o valor de `max_l1_sats` (placeholder de 21 M BLCH); os endereços das contas de sistema `SUPPLY_LEDGER` (`0x4200…0100`) e `BLOCK_INFO` (`0x4200…0101`); a semântica do valor EIP‑4788 (`anchor_root` = hash do bloco‑âncora Bloch) e a derivação de `prevrandao` a partir dele, que dependem do leitor de âncora (componente do nó).
+**Confirmado pelo projeto (após o P1):** `max_l1_sats` = **100 bilhões de BLCH** = 10^19 sats (cabe em `u64`, não em `i64`; a L1 precisa representar montantes em 64 bits sem sinal) → teto da oferta do L2 de 10^29 wei (`chainspec::MAX_L1_SATS`). O L2 não tem teto próprio: a oferta nativa é BLCH bridgeado com emissão zero, logo é limitada exatamente pelo teto da L1. **Ainda exigem confirmação do projeto:** os endereços das contas de sistema `SUPPLY_LEDGER` (`0x4200…0100`) e `BLOCK_INFO` (`0x4200…0101`); a semântica do valor EIP‑4788 (`anchor_root` = hash do bloco‑âncora Bloch) e a derivação de `prevrandao` a partir dele, que dependem do leitor de âncora (componente do nó).
 
 ---
 

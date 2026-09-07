@@ -47,7 +47,8 @@ running total, so `total_native == total_minted - total_burned` always holds
   `denominator = 250`, initial base fee 1 gwei, **block reward = 0**,
   COINBASE = fee-vault address, the supply-ledger and block-info system
   accounts, the EIP-4788 predeploy (canonical bytecode) and the L1 supply cap
-  (`max_l1_sats`, a **placeholder** of 21M BLCH pending the design document).
+  (`max_l1_sats` = 100 billion BLCH = 10^19 sats, the most the L2 supply can
+  ever reach: 10^29 wei).
   Includes a tested integer-only EIP-1559 next-base-fee computation.
 * **Exact sats⇄wei scaling** (`src/scale.rs`) — `ATOM_SCALE = 10^10`: u64 L1
   sats (8 decimals) scale exactly to U256 L2 wei (18 decimals); the reverse
