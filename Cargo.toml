@@ -54,6 +54,13 @@ alloy-primitives = { version = "=1.6.1", default-features = false }
 # and RLP for account and slot values. Pure Rust, no_std-capable.
 alloy-trie = { version = "=0.9.5", default-features = false }
 alloy-rlp = { version = "=0.3.16", default-features = false }
+# The U256 implementation behind alloy-primitives/revm: pinned here so the
+# manifest, not only the lockfile, fixes it. 1.20.0 is a documented program
+# upgrade over the audited 1.19.0 (RUSTSEC-2026-0220: wrong overflow flags in
+# `overflowing_shl/shr` and truncated shift amounts >= 2^32; revm bounds every
+# EVM shift to < 256 and this crate only shifts by constants, so no executed
+# semantics changed — verified by the full test matrix).
+ruint = { version = "=1.20.0", default-features = false }
 # Optional: state snapshots and the host→guest witness wire format.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 

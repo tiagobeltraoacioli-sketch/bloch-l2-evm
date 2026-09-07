@@ -9,10 +9,11 @@ all-features = true
 
 [advisories]
 version = 2
-# Kept in step with .cargo/audit.toml (same justifications there).
+# cargo-deny checks the RESOLVED graph (`all-features`), so lockfile-only
+# entries that no feature reaches (tracing-subscriber 0.2.x, derivative) are
+# not reported here; they are ignored in .cargo/audit.toml, which scans the
+# lockfile itself. Justifications live there.
 ignore = [
-    "RUSTSEC-2025-0055", # tracing-subscriber 0.2.x: lockfile-only, never compiled
-    "RUSTSEC-2024-0388", # derivative: unmaintained, lockfile-only, never compiled
     "RUSTSEC-2024-0436", # paste: unmaintained proc-macro of the alloy tree
 ]
 

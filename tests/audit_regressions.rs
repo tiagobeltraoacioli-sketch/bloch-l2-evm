@@ -2191,7 +2191,7 @@ mod c31 {
         let root = Path::new(MANIFEST_DIR);
         let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
         let lock = fs::read_to_string(root.join("Cargo.lock")).unwrap();
-        for dep in ["revm", "alloy-primitives", "alloy-trie", "alloy-rlp"] {
+        for dep in ["revm", "alloy-primitives", "alloy-trie", "alloy-rlp", "ruint"] {
             let line = manifest_line(&manifest, dep);
             let req = line
                 .split('"')

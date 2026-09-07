@@ -36,6 +36,7 @@ running total, so `total_native == total_minted - total_burned` always holds
 | `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The design requires ONE pinned revm so the native node and the future SP1 guest re-execute byte-identical code; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled (ecrecover uses the pure-Rust `k256`), nor `blst`/`tracer`. The guest's one feature delta is `c-kzg` → `kzg-rs`. |
 | `alloy-primitives` | **`=1.6.1`** (exact) | `Address`/`U256`/`B256` are one type family across the crate. |
 | `alloy-trie` / `alloy-rlp` | **`=0.9.5`** / **`=0.3.16`** (exact) | Trie node encoders, `HashBuilder`, proofs and RLP: consensus-relevant, pinned like revm. |
+| `ruint` | **`=1.20.0`** (exact) | The U256 implementation. A documented program upgrade over the audited 1.19.0 (RUSTSEC-2026-0220, shift overflow flags); revm bounds every EVM shift to < 256, so no executed semantics changed. |
 | toolchain | **`1.94.1`** (`rust-toolchain.toml`), `rust-version = 1.91.0` | The SP1 vkey depends on the exact compiler; a moving channel is not acceptable. |
 | hardfork | `SpecId::CANCUN` | Cancun at genesis per the design; Prague only via a coordinated, height-gated upgrade. |
 
