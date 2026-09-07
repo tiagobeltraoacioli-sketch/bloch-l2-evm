@@ -40,14 +40,17 @@
 //! scaling, canonical order (hence uniqueness), and the supply cap, all against
 //! committed state.
 
+use alloc::vec::Vec;
+
 use alloy_primitives::{Address, Bytes, B256, U256};
-use revm::database::{AccountState, CacheDB, DbAccount, InMemoryDB};
+use revm::database::{AccountState, Cache, CacheDB, DbAccount, InMemoryDB};
 use revm::primitives::KECCAK_EMPTY;
-use revm::state::Bytecode;
+use revm::state::{AccountInfo, Bytecode};
 use revm::{Database, DatabaseRef};
 
 use crate::chainspec::{ChainSpec, BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE, BLOCK_INFO, SUPPLY_LEDGER};
 use crate::scale::sats_to_wei;
+use crate::stateroot::{compute_keccak_mpt_state_root, StateTrie};
 
 /// Where a deposit mint's value came from, as reported by the derivation layer.
 ///
@@ -107,8 +110,17 @@ impl DepositMint {
 
     /// The canonical L1 position of this deposit's escrow output.
     pub fn position(&self) -> DepositPosition {
-        let DepositProvenance::BridgedBlch { l1_height, l1_tx_index, l1_vout, .. } = self.provenance;
-        DepositPosition { l1_height, l1_tx_index, l1_vout }
+        let DepositProvenance::BridgedBlch {
+            l1_height,
+            l1_tx_index,
+            l1_vout,
+            ..
+        } = self.provenance;
+        DepositPosition {
+            l1_height,
+            l1_tx_index,
+            l1_vout,
+        }
     }
 }
 
@@ -130,7 +142,11 @@ impl DepositPosition {
     /// The cursor value before any deposit: nothing consumed. A real escrow
     /// output can never sit at `(0, 0, 0)` (the L1 genesis coinbase), so this
     /// sentinel excludes no valid deposit.
-    pub const NONE: Self = Self { l1_height: 0, l1_tx_index: 0, l1_vout: 0 };
+    pub const NONE: Self = Self {
+        l1_height: 0,
+        l1_tx_index: 0,
+        l1_vout: 0,
+    };
 
     /// Storage encoding: `height << 64 | tx_index << 32 | vout` (128 bits), so
     /// numeric comparison equals positional order.
@@ -141,7 +157,11 @@ impl DepositPosition {
     /// Inverse of [`Self::packed`] (upper 128 bits ignored).
     pub fn from_packed(v: U256) -> Self {
         let limbs = v.as_limbs();
-        Self { l1_height: limbs[1], l1_tx_index: (limbs[0] >> 32) as u32, l1_vout: limbs[0] as u32 }
+        Self {
+            l1_height: limbs[1],
+            l1_tx_index: (limbs[0] >> 32) as u32,
+            l1_vout: limbs[0] as u32,
+        }
     }
 }
 
@@ -257,9 +277,15 @@ impl core::fmt::Display for DepositError {
                 write!(f, "deposit at L1 position {position} is not after the ledger cursor {cursor} (replay or out of order)")
             }
             DepositError::ExceedsL1Supply { l1_sats, max_l1_sats } => {
-                write!(f, "deposit claims {l1_sats} sats, above the L1 hard cap of {max_l1_sats} sats")
+                write!(
+                    f,
+                    "deposit claims {l1_sats} sats, above the L1 hard cap of {max_l1_sats} sats"
+                )
             }
-            DepositError::CumulativeSupplyExceeded { total_after_wei, cap_wei } => write!(
+            DepositError::CumulativeSupplyExceeded {
+                total_after_wei,
+                cap_wei,
+            } => write!(
                 f,
                 "cumulative minted supply {total_after_wei} wei would exceed the L1 cap {cap_wei} wei"
             ),
@@ -291,13 +317,79 @@ pub struct L2Account {
     pub code_hash: B256,
 }
 
-/// The L2 execution state: revm's in-memory `CacheDB`. The zero-issuance
-/// supply ledger is part of it, as storage of the [`SUPPLY_LEDGER`] account.
+/// The L2 execution state: revm's in-memory `CacheDB` plus a cached,
+/// incrementally maintained keccak-MPT commitment over it. The zero-issuance
+/// supply ledger and the head-block record are part of it, as storage of the
+/// [`SUPPLY_LEDGER`] / [`BLOCK_INFO`] system accounts.
+///
+/// **Sealed database.** `db` is private: reads go through [`Self::db`], and
+/// any direct mutation goes through [`Self::db_mut`], which invalidates the
+/// cached commitment so a stale root can never be served. Blocks are applied
+/// through the executor's overlay merge (`apply_overlay`), which updates the commitment for exactly
+/// the accounts the block touched (audit finding C27) and prunes what the
+/// state trie does not hold — EIP-161-empty accounts and zero-valued slots —
+/// so the live state and the committed root agree account for account
+/// (finding C26).
+///
+/// The database is `CacheDB<EmptyDB>`: everything the chain knows is in the
+/// cache, so the from-scratch root over it is complete. The type is sealed to
+/// keep that guarantee.
 #[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct L2State {
-    /// The underlying revm database the EVM executes against.
-    pub db: InMemoryDB,
+    db: InMemoryDB,
+    /// Derived data (rebuilt from `db` when absent); never serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    trie: Option<StateTrie>,
+}
+
+/// Whether an account exists in the Ethereum state trie sense (EIP-161: not
+/// all of nonce 0, balance 0, empty code). The **single** existence predicate
+/// shared by the views, the state root, the witness generator and the pruning.
+pub(crate) fn info_exists(info: &AccountInfo) -> bool {
+    info.nonce != 0 || !info.balance.is_zero() || !(info.code_hash == KECCAK_EMPTY || info.code_hash == B256::ZERO)
+}
+
+/// [`info_exists`] for a cached database entry (`NotExisting` never exists).
+pub(crate) fn account_exists(acc: &DbAccount) -> bool {
+    acc.account_state != AccountState::NotExisting && info_exists(&acc.info)
+}
+
+/// The post-block form of one account: the overlay's entry merged over the
+/// base entry it was loaded from, pruned as the state trie sees it. `None` if
+/// the account does not exist after the block (destroyed, never created, or
+/// EIP-161 empty). Pure; [`L2State::apply_overlay`] applies the same rules
+/// in place.
+pub(crate) fn merge_account(base: Option<&DbAccount>, overlay: &DbAccount) -> Option<DbAccount> {
+    let mut merged = match overlay.account_state {
+        AccountState::NotExisting => return None,
+        // The overlay's storage is complete: nothing of the base survives.
+        AccountState::StorageCleared => DbAccount {
+            info: overlay.info.clone(),
+            account_state: AccountState::StorageCleared,
+            storage: overlay.storage.clone(),
+        },
+        AccountState::Touched | AccountState::None => {
+            let mut storage = base
+                .filter(|b| account_exists(b))
+                .map(|b| b.storage.clone())
+                .unwrap_or_default();
+            storage.extend(overlay.storage.iter().map(|(k, v)| (*k, *v)));
+            DbAccount {
+                info: overlay.info.clone(),
+                account_state: AccountState::Touched,
+                storage,
+            }
+        }
+    };
+    if !info_exists(&merged.info) {
+        return None;
+    }
+    if merged.info.code_hash == B256::ZERO {
+        merged.info.code_hash = KECCAK_EMPTY;
+    }
+    merged.storage.retain(|_, v| !v.is_zero());
+    Some(merged)
 }
 
 impl L2State {
@@ -307,13 +399,144 @@ impl L2State {
         Self::default()
     }
 
+    /// Read access to the revm database the EVM executes against.
+    pub fn db(&self) -> &InMemoryDB {
+        &self.db
+    }
+
+    /// Direct write access to the database (genesis construction, tests,
+    /// snapshots). Invalidates the cached commitment: the next root is
+    /// rebuilt from scratch, once. Block execution never needs this.
+    pub fn db_mut(&mut self) -> &mut InMemoryDB {
+        self.trie = None;
+        &mut self.db
+    }
+
+    /// The keccak-MPT state root. O(1) while the cached commitment is warm
+    /// (always, right after a block); otherwise computed from scratch without
+    /// caching (see [`Self::commit_root`] to warm it).
+    pub fn state_root(&self) -> B256 {
+        match self.trie.as_ref().and_then(StateTrie::root_cached) {
+            Some(root) => root,
+            None => compute_keccak_mpt_state_root(self),
+        }
+    }
+
+    /// The keccak-MPT state root, building the incremental commitment if it
+    /// is absent (O(state), once) and re-hashing only what changed since the
+    /// last call.
+    pub fn commit_root(&mut self) -> B256 {
+        self.commitment().root()
+    }
+
+    /// Whether the cached commitment is warm (root and proofs are O(touched)).
+    pub fn is_warm(&self) -> bool {
+        self.trie.as_ref().is_some_and(|t| t.root_cached().is_some())
+    }
+
+    /// The cached commitment, built from the database if absent.
+    pub(crate) fn commitment(&mut self) -> &mut StateTrie {
+        if self.trie.is_none() {
+            self.trie = Some(StateTrie::build(&self.db));
+        }
+        self.trie.as_mut().expect("just built")
+    }
+
+    /// The warm commitment, if any.
+    pub(crate) fn warm_commitment(&self) -> Option<&StateTrie> {
+        self.trie.as_ref().filter(|t| t.root_cached().is_some())
+    }
+
+    /// Apply a block's overlay (a `CacheDB` layered over this state and now
+    /// holding every account the block read or wrote) to the live state, and
+    /// update the commitment for exactly those accounts. Returns the touched
+    /// addresses.
+    ///
+    /// Merge rules per overlay entry: `NotExisting` (read while absent, or
+    /// destroyed) removes any live entry; `StorageCleared` (created in-block)
+    /// replaces the live entry, storage included; `Touched`/`None` updates the
+    /// info and applies the written slots on top of the live storage. Then
+    /// EIP-161-empty results and zero-valued slots are pruned, so the live
+    /// state never holds a "ghost" the trie excludes. Reads that only hit
+    /// absent addresses leave no trace.
+    pub(crate) fn apply_overlay(&mut self, cache: Cache) -> Vec<Address> {
+        self.commitment();
+        let Self { db, trie } = self;
+        let trie = trie.as_mut().expect("commitment built above");
+        let Cache {
+            accounts, contracts, ..
+        } = cache;
+        db.cache.contracts.extend(contracts);
+
+        let mut touched = Vec::with_capacity(accounts.len());
+        for (address, overlay) in accounts {
+            touched.push(address);
+            match overlay.account_state {
+                AccountState::NotExisting => {
+                    if db.cache.accounts.remove(&address).is_some() {
+                        trie.remove_account(address);
+                    }
+                }
+                AccountState::StorageCleared => {
+                    if !info_exists(&overlay.info) {
+                        if db.cache.accounts.remove(&address).is_some() {
+                            trie.remove_account(address);
+                        }
+                        continue;
+                    }
+                    let mut acc = overlay;
+                    db.insert_contract(&mut acc.info);
+                    acc.storage.retain(|_, v| !v.is_zero());
+                    trie.set_account(address, &acc);
+                    db.cache.accounts.insert(address, acc);
+                }
+                AccountState::Touched | AccountState::None => {
+                    if !info_exists(&overlay.info) {
+                        if db.cache.accounts.remove(&address).is_some() {
+                            trie.remove_account(address);
+                        }
+                        continue;
+                    }
+                    let mut info = overlay.info;
+                    db.insert_contract(&mut info);
+                    let entry = db.cache.accounts.entry(address).or_default();
+                    if entry.account_state == AccountState::NotExisting {
+                        entry.storage.clear();
+                    }
+                    if entry.account_state != AccountState::StorageCleared {
+                        entry.account_state = AccountState::Touched;
+                    }
+                    entry.info = info;
+                    let mut delta: Vec<(U256, U256)> = Vec::new();
+                    for (slot, value) in overlay.storage {
+                        let previous = entry.storage.get(&slot).copied().unwrap_or(U256::ZERO);
+                        if previous == value {
+                            continue;
+                        }
+                        delta.push((slot, value));
+                        if value.is_zero() {
+                            entry.storage.remove(&slot);
+                        } else {
+                            entry.storage.insert(slot, value);
+                        }
+                    }
+                    trie.update_account(address, &entry.info, &delta);
+                }
+            }
+        }
+        // Re-hash the touched paths now, so the state is always warm (root and
+        // proofs O(1) / O(targets)) after any mutation through an overlay.
+        trie.root();
+        touched
+    }
+
     /// The genesis state this scaffold can produce: empty, with the EIP-4788
     /// beacon-roots predeploy installed (the executor installs it lazily
     /// anyway, so [`Self::new`] behaves identically after the first block).
     /// Genesis alloc / the vault contracts are out of scope for this scaffold.
     pub fn genesis(_spec: &ChainSpec) -> Self {
         let mut state = Self::default();
-        match ensure_system_account(&mut state.db, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())) {
+        match ensure_system_account(state.db_mut(), BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())) {
             Ok(()) => state,
             Err(never) => match never {},
         }
@@ -326,11 +549,15 @@ impl L2State {
     /// deposit's position is strictly after the cursor; advances the cursor
     /// and the total in the committed ledger. Returns the credited wei.
     pub fn deposit_mint(&mut self, spec: &ChainSpec, deposit: &DepositMint) -> Result<U256, DepositError> {
-        match apply_deposit(&mut self.db, spec, deposit) {
-            Ok(wei) => Ok(wei),
-            Err(DepositApplyError::Deposit(e)) => Err(e),
+        let mut overlay = CacheDB::new(&self.db);
+        let wei = match apply_deposit(&mut overlay, spec, deposit) {
+            Ok(wei) => wei,
+            Err(DepositApplyError::Deposit(e)) => return Err(e),
             Err(DepositApplyError::Db(never)) => match never {},
-        }
+        };
+        let CacheDB { cache, .. } = overlay;
+        self.apply_overlay(cache);
+        Ok(wei)
     }
 
     /// Total wei ever minted by deposits (the L2's entire authorized supply),
@@ -403,17 +630,19 @@ impl L2State {
             .cache
             .accounts
             .values()
-            .filter(|acc| acc.account_state != AccountState::NotExisting)
+            .filter(|acc| account_exists(acc))
             .fold(U256::ZERO, |sum, acc| {
                 sum.checked_add(acc.info.balance)
                     .expect("summed balances cannot overflow U256")
             })
     }
 
-    /// Read-only account view (`None` if the account does not exist).
+    /// Read-only account view (`None` if the account does not exist — in the
+    /// EIP-161 sense the state root uses: nonce 0, balance 0 and no code is
+    /// "absent").
     pub fn account(&self, address: &Address) -> Option<L2Account> {
-        let acc: &DbAccount = self.db.cache.accounts.get(address)?;
-        let info = acc.info()?;
+        let acc: &DbAccount = self.db.cache.accounts.get(address).filter(|acc| account_exists(acc))?;
+        let info = &acc.info;
         Some(L2Account {
             balance: info.balance,
             nonce: info.nonce,
@@ -547,9 +776,15 @@ pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
 
     // Load (and record) the ledger account, then read the two slots we depend on.
     db.basic(ledger).map_err(DepositApplyError::Db)?;
-    let cursor = DepositPosition::from_packed(db.storage(ledger, SUPPLY_LEDGER_CURSOR_SLOT).map_err(DepositApplyError::Db)?);
+    let cursor = DepositPosition::from_packed(
+        db.storage(ledger, SUPPLY_LEDGER_CURSOR_SLOT)
+            .map_err(DepositApplyError::Db)?,
+    );
     if position <= cursor {
-        return Err(DepositApplyError::Deposit(DepositError::OutOfOrder { position, cursor }));
+        return Err(DepositApplyError::Deposit(DepositError::OutOfOrder {
+            position,
+            cursor,
+        }));
     }
     let total = db
         .storage(ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT)
@@ -612,10 +847,7 @@ mod tests {
         assert_eq!(state.balance_of(&ALICE), sats_to_wei(200_000_000));
         assert_eq!(state.balance_of(&BOB), sats_to_wei(1));
         // Zero issuance: total supply == sum of mints, nothing else.
-        assert_eq!(
-            state.total_minted_wei(),
-            sats_to_wei(200_000_000) + sats_to_wei(1)
-        );
+        assert_eq!(state.total_minted_wei(), sats_to_wei(200_000_000) + sats_to_wei(1));
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
         assert_eq!(state.total_burned_wei(), U256::ZERO);
         assert!(state.head().is_none(), "no block executed yet");
@@ -641,33 +873,88 @@ mod tests {
         let before_root = crate::compute_keccak_mpt_state_root(&state);
         // Replay of the very same deposit.
         let err = state.deposit_mint(&spec, &dep).unwrap_err();
-        assert_eq!(err, DepositError::OutOfOrder { position: dep.position(), cursor: dep.position() });
+        assert_eq!(
+            err,
+            DepositError::OutOfOrder {
+                position: dep.position(),
+                cursor: dep.position()
+            }
+        );
         // Same position with a different recipient / amount is still rejected.
         let mut other = dep;
         other.recipient = BOB;
-        let DepositProvenance::BridgedBlch { l1_height, l1_tx_index, l1_vout, .. } = dep.provenance;
-        other.provenance = DepositProvenance::BridgedBlch { l1_height, l1_tx_index, l1_txid: [9; 32], l1_vout, l1_sats: 5 };
-        assert!(matches!(state.deposit_mint(&spec, &other), Err(DepositError::OutOfOrder { .. })));
+        let DepositProvenance::BridgedBlch {
+            l1_height,
+            l1_tx_index,
+            l1_vout,
+            ..
+        } = dep.provenance;
+        other.provenance = DepositProvenance::BridgedBlch {
+            l1_height,
+            l1_tx_index,
+            l1_txid: [9; 32],
+            l1_vout,
+            l1_sats: 5,
+        };
+        assert!(matches!(
+            state.deposit_mint(&spec, &other),
+            Err(DepositError::OutOfOrder { .. })
+        ));
         // An earlier position (out-of-order derivation) is rejected too.
         let earlier = DepositMint {
             recipient: BOB,
-            provenance: DepositProvenance::BridgedBlch { l1_height: 0, l1_tx_index: 1, l1_txid: [1; 32], l1_vout: 0, l1_sats: 5 },
+            provenance: DepositProvenance::BridgedBlch {
+                l1_height: 0,
+                l1_tx_index: 1,
+                l1_txid: [1; 32],
+                l1_vout: 0,
+                l1_sats: 5,
+            },
         };
         assert!(earlier.position() < dep.position());
-        assert!(matches!(state.deposit_mint(&spec, &earlier), Err(DepositError::OutOfOrder { .. })));
+        assert!(matches!(
+            state.deposit_mint(&spec, &earlier),
+            Err(DepositError::OutOfOrder { .. })
+        ));
         assert_eq!(state.balance_of(&ALICE), sats_to_wei(100));
         assert_eq!(state.balance_of(&BOB), U256::ZERO);
         assert_eq!(state.total_minted_wei(), sats_to_wei(100));
         assert_eq!(state.deposit_cursor(), dep.position());
-        assert_eq!(crate::compute_keccak_mpt_state_root(&state), before_root, "rejected deposit is a no-op");
+        assert_eq!(
+            crate::compute_keccak_mpt_state_root(&state),
+            before_root,
+            "rejected deposit is a no-op"
+        );
 
         // Positions order lexicographically and round-trip through the packing.
-        let a = DepositPosition { l1_height: 5, l1_tx_index: 7, l1_vout: 9 };
-        let b = DepositPosition { l1_height: 5, l1_tx_index: 8, l1_vout: 0 };
-        let c = DepositPosition { l1_height: 6, l1_tx_index: 0, l1_vout: 0 };
+        let a = DepositPosition {
+            l1_height: 5,
+            l1_tx_index: 7,
+            l1_vout: 9,
+        };
+        let b = DepositPosition {
+            l1_height: 5,
+            l1_tx_index: 8,
+            l1_vout: 0,
+        };
+        let c = DepositPosition {
+            l1_height: 6,
+            l1_tx_index: 0,
+            l1_vout: 0,
+        };
         assert!(a < b && b < c);
         assert!(a.packed() < b.packed() && b.packed() < c.packed());
-        for p in [a, b, c, DepositPosition::NONE, DepositPosition { l1_height: u64::MAX, l1_tx_index: u32::MAX, l1_vout: u32::MAX }] {
+        for p in [
+            a,
+            b,
+            c,
+            DepositPosition::NONE,
+            DepositPosition {
+                l1_height: u64::MAX,
+                l1_tx_index: u32::MAX,
+                l1_vout: u32::MAX,
+            },
+        ] {
             assert_eq!(DepositPosition::from_packed(p.packed()), p);
         }
     }
@@ -676,7 +963,9 @@ mod tests {
     fn deposit_above_l1_cap_is_rejected() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        let err = state.deposit_mint(&spec, &blch_deposit(ALICE, spec.max_l1_sats + 1)).unwrap_err();
+        let err = state
+            .deposit_mint(&spec, &blch_deposit(ALICE, spec.max_l1_sats + 1))
+            .unwrap_err();
         assert!(matches!(err, DepositError::ExceedsL1Supply { .. }));
         assert_eq!(state.total_minted_wei(), U256::ZERO);
         assert!(state.account(&SUPPLY_LEDGER).is_none(), "nothing written");
@@ -692,7 +981,9 @@ mod tests {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
         // Exactly the cap is fine (the whole L1 supply bridged).
-        state.deposit_mint(&spec, &blch_deposit(ALICE, spec.max_l1_sats)).unwrap();
+        state
+            .deposit_mint(&spec, &blch_deposit(ALICE, spec.max_l1_sats))
+            .unwrap();
         assert_eq!(state.total_minted_wei(), sats_to_wei(spec.max_l1_sats));
         // One more sat is not.
         let err = state.deposit_mint(&spec, &blch_deposit(BOB, 1)).unwrap_err();
@@ -712,17 +1003,29 @@ mod tests {
         // Re-ensuring never changes anything (root-stable).
         let root = crate::compute_keccak_mpt_state_root(&state);
         let mut again = state.clone();
-        ensure_system_account(&mut again.db, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())).unwrap();
+        ensure_system_account(again.db_mut(), BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())).unwrap();
         assert_eq!(crate::compute_keccak_mpt_state_root(&again), root);
         // System accounts without code stay code-less; a non-zero nonce is kept.
         let mut s2 = L2State::new();
-        s2.db.insert_account_info(ALICE, revm::state::AccountInfo { nonce: 7, ..Default::default() });
-        ensure_system_account(&mut s2.db, ALICE, None).unwrap();
+        s2.db_mut().insert_account_info(
+            ALICE,
+            revm::state::AccountInfo {
+                nonce: 7,
+                ..Default::default()
+            },
+        );
+        ensure_system_account(s2.db_mut(), ALICE, None).unwrap();
         assert_eq!(s2.nonce_of(&ALICE), 7);
         assert_eq!(s2.account(&ALICE).unwrap().code_hash, KECCAK_EMPTY);
         // ledger_add accumulates.
-        assert_eq!(ledger_add(&mut s2.db, SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT, U256::from(5u64)).unwrap(), U256::from(5u64));
-        assert_eq!(ledger_add(&mut s2.db, SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT, U256::from(6u64)).unwrap(), U256::from(11u64));
+        assert_eq!(
+            ledger_add(s2.db_mut(), SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT, U256::from(5u64)).unwrap(),
+            U256::from(5u64)
+        );
+        assert_eq!(
+            ledger_add(s2.db_mut(), SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT, U256::from(6u64)).unwrap(),
+            U256::from(11u64)
+        );
         assert_eq!(s2.total_burned_wei(), U256::from(11u64));
     }
 
@@ -768,8 +1071,78 @@ mod tests {
             "the deposit cursor is part of the commitment"
         );
         let root_a = crate::compute_keccak_mpt_state_root(&a);
-        a.db.insert_account_storage(SUPPLY_LEDGER, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, U256::from(1u64))
+        assert_eq!(
+            a.state_root(),
+            root_a,
+            "incremental root agrees with the from-scratch root"
+        );
+        a.db_mut()
+            .insert_account_storage(SUPPLY_LEDGER, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, U256::from(1u64))
             .unwrap();
-        assert_ne!(crate::compute_keccak_mpt_state_root(&a), root_a, "ledger total is committed");
+        assert_ne!(
+            crate::compute_keccak_mpt_state_root(&a),
+            root_a,
+            "ledger total is committed"
+        );
+        assert_eq!(
+            a.state_root(),
+            crate::compute_keccak_mpt_state_root(&a),
+            "db_mut invalidated the cache"
+        );
+    }
+
+    #[test]
+    fn views_and_root_share_one_existence_predicate_and_ghosts_are_pruned() {
+        let spec = ChainSpec::testnet();
+        let mut state = L2State::new();
+        // A touched-empty account planted directly in the database is a ghost:
+        // the root excludes it, so the views must too.
+        state.db_mut().insert_account_info(BOB, AccountInfo::default());
+        assert!(state.db().cache.accounts.contains_key(&BOB));
+        assert!(
+            state.account(&BOB).is_none(),
+            "EIP-161-empty account is reported as absent"
+        );
+        assert_eq!(state.total_native_wei(), U256::ZERO);
+        // Applying an overlay that touches the ghost (a zero-value read) prunes it.
+        let mut overlay = CacheDB::new(state.db());
+        overlay.basic(BOB).unwrap();
+        let CacheDB { cache, .. } = overlay;
+        let touched = state.apply_overlay(cache);
+        assert_eq!(touched, alloc::vec![BOB]);
+        assert!(
+            !state.db().cache.accounts.contains_key(&BOB),
+            "ghost pruned from the live state"
+        );
+        // A deposit through the overlay path creates a real account and keeps
+        // the incremental root equal to the from-scratch root.
+        state.deposit_mint(&spec, &blch_deposit(ALICE, 5)).unwrap();
+        assert!(state.is_warm());
+        assert_eq!(state.state_root(), crate::compute_keccak_mpt_state_root(&state));
+        assert_eq!(state.commit_root(), crate::compute_keccak_mpt_state_root(&state));
+        // Zero-valued slots written through an overlay are not kept.
+        let mut overlay = CacheDB::new(state.db());
+        overlay
+            .insert_account_storage(SUPPLY_LEDGER, U256::from(9u64), U256::ZERO)
+            .unwrap();
+        overlay
+            .insert_account_storage(SUPPLY_LEDGER, U256::from(10u64), U256::from(1u64))
+            .unwrap();
+        let CacheDB { cache, .. } = overlay;
+        state.apply_overlay(cache);
+        let ledger = &state.db().cache.accounts[&SUPPLY_LEDGER];
+        assert!(!ledger.storage.contains_key(&U256::from(9u64)));
+        assert_eq!(ledger.storage[&U256::from(10u64)], U256::from(1u64));
+        assert_eq!(state.state_root(), crate::compute_keccak_mpt_state_root(&state));
+        // merge_account agrees with the applied state.
+        let merged = merge_account(
+            None,
+            &DbAccount {
+                info: AccountInfo::default(),
+                account_state: AccountState::Touched,
+                storage: Default::default(),
+            },
+        );
+        assert!(merged.is_none(), "touched-empty merges to non-existence");
     }
 }

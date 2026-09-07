@@ -1,54 +1,72 @@
 # bloch-l2-evm — SCAFFOLD, UNAUDITED, not a working L2.
 #
-# Execution-layer state-transition scaffold for the Bloch EVM L2
-# (docs/specs/BLOCH-L2-EVM-DESIGN.md §1): UNMODIFIED revm at SpecId::CANCUN
-# over an in-memory alloy/revm state layer, with deposit-mint (bridged BLCH
-# only, zero issuance) and vault fee routing (never burn).
+# Execution-layer state-transition core for the Bloch EVM L2 (design document
+# `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1, in the upstream monorepo — not in this
+# repository): UNMODIFIED revm at SpecId::CANCUN over an in-memory revm state
+# layer with a committed supply ledger and head record, deposit mints (bridged
+# BLCH only, zero issuance), vault fee routing (the protocol never burns), header
+# validation, committed block hashes, the EIP-4788 system call, an incremental
+# keccak-MPT state root and the stateless proving primitives (witness
+# generation + guest verification).
 #
-# This is NOT a Reth node, NOT a sequencer, NOT a prover. Everything that
-# would make this a working L2 (keccak-MPT state root, eth_* RPC, txpool,
-# Reth-SDK node embedding, SP1 guest target) is an honest labelled stub.
+# This is NOT a Reth node, NOT a sequencer, NOT a prover. The eth_* RPC, the
+# txpool, the Reth-SDK node embedding and the SP1 guest build target are honest
+# labelled stubs (src/stubs.rs). Internal audit and status: AUDITORIA-L2.md.
 #
-# Standalone-workspace pattern (same as crates/bloch-tokens): its own empty
-# [workspace] table so it builds outside the frozen root members list and
-# can carry the heavy revm dependency tree independently.
+# Standalone-workspace pattern: its own empty [workspace] table so it builds
+# outside the product root workspace and carries the revm tree independently.
 [package]
 name = "bloch-l2-evm"
 version = "0.0.0-scaffold"
 edition = "2021"
+# revm 41.0.0 requires rustc >= 1.91; the exact compiler is pinned in
+# rust-toolchain.toml (determinism contract: node and guest re-execute
+# byte-identical code, so the toolchain is part of the program identity).
+rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "SCAFFOLD, UNAUDITED, not a working L2. Execution-layer state-transition scaffold for the Bloch EVM L2 design: unmodified revm pinned at CANCUN, bridged-BLCH deposit mints (zero issuance), basefee/priority-fee vault routing (never burn). Testnet / zero-value posture; see docs/specs/BLOCH-L2-EVM-DESIGN.md."
+description = "SCAFFOLD, UNAUDITED, not a working L2. Execution-layer state-transition core for the Bloch EVM L2: unmodified revm pinned at CANCUN, bridged-BLCH deposit mints (zero issuance), vault fee routing (the protocol never burns; EIP-6780 burns are accounted), committed ledger/head record, incremental keccak-MPT state root, stateless proving primitives. Testnet / zero-value posture."
 
 # Deliberately empty: this crate is its own workspace root, excluded from
-# the product root workspace (crates/bloch-tokens pattern).
+# the product root workspace.
 [workspace]
 
+# Every consensus-relevant crate is an EXACT pin (`=`), matching the committed
+# Cargo.lock: the design rule is that the node and the future SP1 guest
+# re-execute byte-identical code, and a manifest of caret ranges would let a
+# separate guest crate resolve to different versions. Any bump is a documented
+# program upgrade (and a new SP1 vkey). `default-features = false` everywhere:
+# the feature set is chosen here, explicitly, because it determines the code
+# that is compiled.
 [dependencies]
-# revm is pinned to ONE exact version (design rule: the guest and the node
-# must re-execute byte-identical code; any bump is a documented program
-# upgrade). Record of the pin also lives in README.md.
-revm = "=41.0.0"
-# alloy-primitives resolves to the same version revm 41.0.0 uses (1.6.x),
-# so Address/U256/B256 are one type family across the crate.
-alloy-primitives = "1.6.0"
-# keccak-256 hexary Merkle-Patricia trie (the Ethereum state/storage root the
-# design mandates for anchoring + eth_getProof) and RLP for account/slot values.
-# Pure-Rust, no_std-capable — compatible with the future SP1 guest target.
-alloy-trie = "0.9"
-alloy-rlp = "0.3"
-# Optional: opt-in state serialization for the devnet node's snapshot
-# persistence (crate stays serde-free by default; the node turns it on).
-serde = { version = "1", features = ["derive"], optional = true }
+# revm — the EVM. Features: `c-kzg` provides the Cancun point-evaluation
+# precompile (0x0a; without a KZG backend revm omits the precompile, a
+# consensus change), `portable` builds its C backend without CPU-specific
+# code. NOT enabled from revm's defaults: `secp256k1` (libsecp256k1 in C —
+# ecrecover falls back to the pure-Rust `k256`, same results), `blst`
+# (BLS12-381 precompiles are Prague; the arkworks fallback covers them) and
+# `tracer`. The SP1 guest must swap `c-kzg` for a pure-Rust KZG backend
+# (`kzg-rs`); that is the one documented feature delta between host and guest.
+revm = { version = "=41.0.0", default-features = false, features = ["c-kzg", "portable"] }
+# Address/U256/B256: one type family across the crate (revm 41 uses 1.6.x).
+alloy-primitives = { version = "=1.6.1", default-features = false }
+# keccak-256 hexary Merkle-Patricia trie node encoders / HashBuilder / proofs
+# and RLP for account and slot values. Pure Rust, no_std-capable.
+alloy-trie = { version = "=0.9.5", default-features = false }
+alloy-rlp = { version = "=0.3.16", default-features = false }
+# Optional: state snapshots and the host→guest witness wire format.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+
+[dev-dependencies]
+# Round-trip tests of the serde wire format (already in the lockfile via revm).
+serde_json = "=1.0.151"
 
 [features]
 default = ["std"]
-# `std` is a no-op on this crate's own source (which is no_std + alloc); it
-# exists so the host build is the default and `--no-default-features` exercises
-# the no_std path. Dependency-level std→no_std wiring (revm/alloy) is the SP1
-# toolchain stage, tracked in BLOCH-L2-PROVER-SCOPE.md.
-std = []
-# Serialize/deserialize L2State (the full revm CacheDB + supply ledger) so the
-# devnet node can snapshot and restore state across restarts. Pulls serde on
-# revm + alloy-primitives so their U256/B256/Address/Bytecode/Cache all encode.
-serde = ["dep:serde", "revm/serde", "alloy-primitives/serde"]
+# Host build. Without it the crate — and the whole revm/alloy tree — is
+# `no_std` + `alloc`, the shape an SP1 guest requires
+# (`cargo test --no-default-features` exercises it).
+std = ["revm/std", "alloy-primitives/std", "alloy-trie/std", "alloy-rlp/std", "serde?/std"]
+# Serialize/deserialize `L2State` (snapshots) and `BatchWitness` /
+# `WitnessAccount` (the host→guest wire format, round-trip tested).
+serde = ["dep:serde", "revm/serde", "alloy-primitives/serde", "alloy-trie/serde"]

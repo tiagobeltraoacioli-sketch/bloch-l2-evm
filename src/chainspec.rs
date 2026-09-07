@@ -10,6 +10,15 @@ use revm::primitives::hardfork::SpecId;
 
 use crate::scale::SATS_PER_BLCH;
 
+/// Gas charged to the block budget for each deposit system-transaction
+/// (the cost of a plain value transfer). Deposits pay no fee — the L1 escrow
+/// paid on the L1 — but they consume block capacity like any transaction, so a
+/// block carries at most `gas_limit / deposit_gas` of them and heavy deposit
+/// traffic moves the EIP-1559 base fee exactly like user traffic does (the
+/// OP-Stack precedent). Overflow is carried by the derivation layer into the
+/// following blocks, in canonical order.
+pub const DEPOSIT_GAS: u64 = 21_000;
+
 /// OP-Stack-convention predeploy address for the sequencer fee vault
 /// (priority fees land here; it is also the block's COINBASE, per the design:
 /// "COINBASE returns the fee-vault address").
@@ -111,7 +120,54 @@ pub struct ChainSpec {
     /// and the cumulative minted supply may never exceed it. See
     /// [`MAX_L1_SATS`].
     pub max_l1_sats: u64,
+    /// Block gas charged per deposit (see [`DEPOSIT_GAS`]); bounds the number
+    /// of deposits per block to `gas_limit / deposit_gas`.
+    pub deposit_gas: u64,
 }
+
+/// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
+/// run a block under an invalid spec ([`ChainSpec::validate`]), so no knob can
+/// reach a division by zero or a silent misconfiguration at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainSpecError {
+    /// `chain_id` is zero (no EIP-155 domain).
+    ZeroChainId,
+    /// `gas_limit` is zero.
+    ZeroGasLimit,
+    /// `base_fee_elasticity` is zero (the gas target would be undefined).
+    ZeroElasticity,
+    /// `gas_limit < base_fee_elasticity` (the gas target would be zero).
+    GasLimitBelowElasticity,
+    /// `base_fee_denominator` is zero.
+    ZeroDenominator,
+    /// `block_reward` is not zero: the L2 never issues.
+    NonZeroBlockReward,
+    /// `deposit_gas` is zero (deposits would be unmetered).
+    ZeroDepositGas,
+    /// `deposit_gas > gas_limit` (no deposit could ever be included).
+    DepositGasAboveGasLimit,
+    /// Two system addresses (vaults, ledger, block info, EIP-4788 predeploy)
+    /// coincide.
+    SystemAddressCollision(Address),
+}
+
+impl core::fmt::Display for ChainSpecError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ChainSpecError::ZeroChainId => write!(f, "chain_id must not be zero"),
+            ChainSpecError::ZeroGasLimit => write!(f, "gas_limit must not be zero"),
+            ChainSpecError::ZeroElasticity => write!(f, "base_fee_elasticity must not be zero"),
+            ChainSpecError::GasLimitBelowElasticity => write!(f, "gas_limit must be at least base_fee_elasticity"),
+            ChainSpecError::ZeroDenominator => write!(f, "base_fee_denominator must not be zero"),
+            ChainSpecError::NonZeroBlockReward => write!(f, "block_reward must be zero (the L2 never issues)"),
+            ChainSpecError::ZeroDepositGas => write!(f, "deposit_gas must not be zero"),
+            ChainSpecError::DepositGasAboveGasLimit => write!(f, "deposit_gas must not exceed gas_limit"),
+            ChainSpecError::SystemAddressCollision(a) => write!(f, "system address {a} is used twice"),
+        }
+    }
+}
+
+impl core::error::Error for ChainSpecError {}
 
 impl ChainSpec {
     /// The testnet / zero-value parameter set from the design.
@@ -130,7 +186,57 @@ impl ChainSpec {
             supply_ledger: SUPPLY_LEDGER,
             block_info: BLOCK_INFO,
             max_l1_sats: MAX_L1_SATS,
+            deposit_gas: DEPOSIT_GAS,
         }
+    }
+
+    /// Check every knob for consistency. The executor calls this before any
+    /// block (`BlockExecutionError::InvalidChainSpec`), so an invalid spec can
+    /// never execute a block, divide by zero or pay a block reward.
+    pub fn validate(&self) -> Result<(), ChainSpecError> {
+        if self.chain_id == 0 {
+            return Err(ChainSpecError::ZeroChainId);
+        }
+        if self.gas_limit == 0 {
+            return Err(ChainSpecError::ZeroGasLimit);
+        }
+        if self.base_fee_elasticity == 0 {
+            return Err(ChainSpecError::ZeroElasticity);
+        }
+        if self.gas_limit < self.base_fee_elasticity {
+            return Err(ChainSpecError::GasLimitBelowElasticity);
+        }
+        if self.base_fee_denominator == 0 {
+            return Err(ChainSpecError::ZeroDenominator);
+        }
+        if self.block_reward != U256::ZERO {
+            return Err(ChainSpecError::NonZeroBlockReward);
+        }
+        if self.deposit_gas == 0 {
+            return Err(ChainSpecError::ZeroDepositGas);
+        }
+        if self.deposit_gas > self.gas_limit {
+            return Err(ChainSpecError::DepositGasAboveGasLimit);
+        }
+        let system = [
+            self.base_fee_vault,
+            self.sequencer_fee_vault,
+            self.supply_ledger,
+            self.block_info,
+            BEACON_ROOTS_ADDRESS,
+        ];
+        for (i, a) in system.iter().enumerate() {
+            if system[..i].contains(a) {
+                return Err(ChainSpecError::SystemAddressCollision(*a));
+            }
+        }
+        Ok(())
+    }
+
+    /// The most deposits one block can carry: `gas_limit / deposit_gas`
+    /// (zero for an invalid spec with `deposit_gas == 0`).
+    pub fn max_deposits_per_block(&self) -> u64 {
+        self.gas_limit.checked_div(self.deposit_gas).unwrap_or(0)
     }
 
     /// The address the COINBASE opcode observes (the design routes it to the
@@ -140,18 +246,21 @@ impl ChainSpec {
         self.sequencer_fee_vault
     }
 
-    /// EIP-1559 gas target per block (`gas_limit / elasticity`).
+    /// EIP-1559 gas target per block (`gas_limit / elasticity`). Total: zero
+    /// for the (invalid, see [`Self::validate`]) elasticity 0.
     pub fn gas_target(&self) -> u64 {
-        self.gas_limit / self.base_fee_elasticity
+        self.gas_limit.checked_div(self.base_fee_elasticity).unwrap_or(0)
     }
 
     /// EIP-1559 next-base-fee computation with this chain's elasticity /
     /// denominator knobs. Pure integer math (u128 internally, no overflow for
     /// any realistic base fee), byte-identical to the Ethereum formula with
-    /// retuned constants.
+    /// retuned constants. Total: with a zero gas target or denominator (an
+    /// invalid spec, see [`Self::validate`]) the base fee is left unchanged
+    /// rather than dividing by zero.
     pub fn next_base_fee(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
         let target = self.gas_target();
-        if target == 0 {
+        if target == 0 || self.base_fee_denominator == 0 {
             return parent_base_fee;
         }
         let parent = parent_base_fee as u128;
@@ -200,6 +309,84 @@ mod tests {
         assert_ne!(spec.block_info, spec.supply_ledger);
         assert_eq!(BEACON_ROOTS_CODE.len(), 97, "canonical EIP-4788 bytecode");
         assert_eq!(spec.max_l1_sats, 100_000_000_000 * SATS_PER_BLCH);
+        assert_eq!(spec.deposit_gas, 21_000);
+        assert_eq!(spec.max_deposits_per_block(), 30_000_000 / 21_000);
+        spec.validate().expect("the testnet spec is valid");
+    }
+
+    type Case = (fn(&mut ChainSpec), ChainSpecError);
+
+    #[test]
+    fn validate_rejects_every_degenerate_knob() {
+        let base = ChainSpec::testnet();
+        let cases: [Case; 9] = [
+            (|s| s.chain_id = 0, ChainSpecError::ZeroChainId),
+            (|s| s.gas_limit = 0, ChainSpecError::ZeroGasLimit),
+            (|s| s.base_fee_elasticity = 0, ChainSpecError::ZeroElasticity),
+            (
+                |s| {
+                    s.gas_limit = 1;
+                    s.base_fee_elasticity = 2;
+                    s.deposit_gas = 1;
+                },
+                ChainSpecError::GasLimitBelowElasticity,
+            ),
+            (|s| s.base_fee_denominator = 0, ChainSpecError::ZeroDenominator),
+            (
+                |s| s.block_reward = U256::from(1u64),
+                ChainSpecError::NonZeroBlockReward,
+            ),
+            (|s| s.deposit_gas = 0, ChainSpecError::ZeroDepositGas),
+            (
+                |s| s.deposit_gas = s.gas_limit + 1,
+                ChainSpecError::DepositGasAboveGasLimit,
+            ),
+            (
+                |s| s.block_info = s.supply_ledger,
+                ChainSpecError::SystemAddressCollision(SUPPLY_LEDGER),
+            ),
+        ];
+        for (mutate, expected) in cases {
+            let mut s = base.clone();
+            mutate(&mut s);
+            assert_eq!(s.validate(), Err(expected));
+        }
+        let mut s = base.clone();
+        s.base_fee_vault = BEACON_ROOTS_ADDRESS;
+        assert_eq!(
+            s.validate(),
+            Err(ChainSpecError::SystemAddressCollision(BEACON_ROOTS_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn fee_helpers_are_total_for_zero_knobs() {
+        let parent = 1_000_000_000u64;
+        let mut s = ChainSpec::testnet();
+        s.base_fee_elasticity = 0;
+        assert_eq!(s.gas_target(), 0);
+        for used in [0u64, 1, s.gas_limit / 2, s.gas_limit] {
+            assert_eq!(s.next_base_fee(parent, used), parent);
+        }
+        let mut s = ChainSpec::testnet();
+        s.base_fee_denominator = 0;
+        for used in [
+            0u64,
+            s.gas_target() - 1,
+            s.gas_target(),
+            s.gas_target() + 1,
+            s.gas_limit,
+        ] {
+            assert_eq!(s.next_base_fee(parent, used), parent);
+        }
+        let mut s = ChainSpec::testnet();
+        s.gas_limit = 1;
+        s.base_fee_elasticity = 2;
+        assert_eq!(s.next_base_fee(parent, 0), parent);
+        assert_eq!(s.next_base_fee(parent, 1), parent);
+        let mut s = ChainSpec::testnet();
+        s.deposit_gas = 0;
+        assert_eq!(s.max_deposits_per_block(), 0);
     }
 
     #[test]
@@ -209,7 +396,11 @@ mod tests {
         // 10^29 wei: the most the L2 supply ledger can ever hold.
         let cap_wei = crate::scale::sats_to_wei(MAX_L1_SATS);
         assert_eq!(cap_wei, U256::from(10u128.pow(29)));
-        assert_eq!(cap_wei, U256::from(100_000_000_000u64) * U256::from(10u64).pow(U256::from(18)), "100 billion × 10^18 wei");
+        assert_eq!(
+            cap_wei,
+            U256::from(100_000_000_000u64) * U256::from(10u64).pow(U256::from(18)),
+            "100 billion × 10^18 wei"
+        );
     }
 
     #[test]

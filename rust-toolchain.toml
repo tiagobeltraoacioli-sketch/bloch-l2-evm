@@ -1,0 +1,8 @@
+# The exact compiler this crate is built and tested with. Part of the
+# determinism contract (design §1): the SP1 program vkey depends on the exact
+# toolchain, so a moving channel ("stable") is not acceptable. Bumps are
+# deliberate, reviewed program upgrades.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

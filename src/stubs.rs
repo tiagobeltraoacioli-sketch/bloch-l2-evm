@@ -77,9 +77,12 @@ pub mod node {
 /// wrap — the repo's post-quantum rule). The procedure the guest must run
 /// exists and is tested on the host — [`crate::proving::verify_batch`] over a
 /// [`crate::proving::BatchWitness`] produced by
-/// [`crate::proving::generate_batch_witness`] — but no `sp1_zkvm` entrypoint,
-/// no public-values encoding and no guest crate (with revm/alloy switched to
-/// their no_std features) exist here.
+/// [`crate::proving::generate_batch_witness`] — and the whole crate, revm and
+/// alloy tree included, builds and tests in `no_std` + `alloc` with
+/// `--no-default-features`; the witness has a `serde` wire format. What does
+/// not exist here: the `sp1_zkvm` entrypoint, the public-values encoding, the
+/// guest crate itself and its one documented feature delta (`c-kzg` → the
+/// pure-Rust `kzg-rs` KZG backend for the Cancun point-evaluation precompile).
 pub mod sp1_guest {
     /// Re-execute a batch inside the zkVM guest.
     pub fn guest_main() -> ! {

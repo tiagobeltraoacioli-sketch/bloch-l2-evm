@@ -10,8 +10,8 @@
 > embedding — it is the state-transition core those would call, plus honest
 > labelled stubs. An internal deep audit and its status live in
 > [`AUDITORIA-L2.md`](AUDITORIA-L2.md) (Portuguese) and
-> [`tests/audit_regressions.rs`](tests/audit_regressions.rs); its P0 and P1
-> findings are fixed, the remaining low-severity items are tracked there.
+> [`tests/audit_regressions.rs`](tests/audit_regressions.rs); its P0, P1 and
+> P2 findings are fixed and every finding has a live regression test.
 
 > **The reorg gate (from the design, read first).** An L2 inherits its L1's
 > finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited — a Bloch
@@ -33,11 +33,16 @@ running total, so `total_native == total_minted - total_burned` always holds
 
 | dependency | pin | why |
 |---|---|---|
-| `revm` | **`=41.0.0`** (exact) | The design requires ONE pinned revm so the native node and the future SP1 guest re-execute byte-identical code; any bump is a documented program upgrade. |
-| `alloy-primitives` | `1.6.0` (resolves to 1.6.1 via `Cargo.lock`) | `Address`/`U256`/`B256` are one type family across the crate. Exact pinning of the alloy crates is tracked as audit finding C31. |
+| `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The design requires ONE pinned revm so the native node and the future SP1 guest re-execute byte-identical code; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled (ecrecover uses the pure-Rust `k256`), nor `blst`/`tracer`. The guest's one feature delta is `c-kzg` → `kzg-rs`. |
+| `alloy-primitives` | **`=1.6.1`** (exact) | `Address`/`U256`/`B256` are one type family across the crate. |
+| `alloy-trie` / `alloy-rlp` | **`=0.9.5`** / **`=0.3.16`** (exact) | Trie node encoders, `HashBuilder`, proofs and RLP: consensus-relevant, pinned like revm. |
+| toolchain | **`1.94.1`** (`rust-toolchain.toml`), `rust-version = 1.91.0` | The SP1 vkey depends on the exact compiler; a moving channel is not acceptable. |
 | hardfork | `SpecId::CANCUN` | Cancun at genesis per the design; Prague only via a coordinated, height-gated upgrade. |
 
-`Cargo.lock` is committed (determinism contract, design §1).
+`Cargo.lock` is committed and CI builds `--locked` (determinism contract,
+design §1). Every dependency is `default-features = false` with the feature
+set chosen explicitly in `Cargo.toml`; `cargo deny` (`deny.toml`) bans native
+backends and unknown sources.
 
 ## What is REAL and tested (`cargo test`)
 
@@ -46,15 +51,18 @@ running total, so `total_native == total_minted - total_burned` always holds
   registration), `gas_limit = 30_000_000`, EIP-1559 `elasticity = 2` /
   `denominator = 250`, initial base fee 1 gwei, **block reward = 0**,
   COINBASE = fee-vault address, the supply-ledger and block-info system
-  accounts, the EIP-4788 predeploy (canonical bytecode) and the L1 supply cap
+  accounts, the EIP-4788 predeploy (canonical bytecode), the L1 supply cap
   (`max_l1_sats` = 100 billion BLCH = 10^19 sats, the most the L2 supply can
-  ever reach: 10^29 wei).
-  Includes a tested integer-only EIP-1559 next-base-fee computation.
+  ever reach: 10^29 wei) and the per-deposit gas (`deposit_gas` = 21 000).
+  `ChainSpec::validate` rejects every degenerate knob and the executor refuses
+  an invalid spec. Includes a tested, total, integer-only EIP-1559
+  next-base-fee computation.
 * **Exact sats⇄wei scaling** (`src/scale.rs`) — `ATOM_SCALE = 10^10`: u64 L1
   sats (8 decimals) scale exactly to U256 L2 wei (18 decimals); the reverse
   direction fails (never rounds) on non-aligned amounts. 1 BLCH = 10^18 wei.
-* **`L2State`** (`src/state.rs`) — an account/state layer over revm's
-  `CacheDB`/`InMemoryDB` with **deposit-mint**: credits *exactly*
+* **`L2State`** (`src/state.rs`) — a **sealed** account/state layer over
+  revm's `CacheDB`/`InMemoryDB` (`db()` to read, `db_mut()` invalidates the
+  cached commitment) with **deposit-mint**: credits *exactly*
   `sats_to_wei(l1_sats)`; provenance is a single-variant enum (**bridged BLCH
   only** — no admin mint, no reward, no other asset); deposits must
   **strictly advance a cursor of canonical L1 positions**
@@ -66,11 +74,16 @@ running total, so `total_native == total_minted - total_burned` always holds
   account, and the head-block record plus a 256-entry ring of L2 block
   hashes are storage of the `BLOCK_INFO` system account, so all of it is
   **committed in the state root** and carried by batch witnesses at O(1)
-  size whatever the chain's history.
+  size whatever the chain's history. One EIP-161 existence predicate is
+  shared by the views, the root, the witness and the pruning: touched-empty
+  accounts never persist and zero-valued slots are dropped when a block is
+  applied, so the live state and the committed root agree account for account.
 * **`execute_block`** (`src/executor.rs`) — runs **UNMODIFIED revm** at
-  `SpecId::CANCUN`, **atomically**: the block is validated, applied to a
-  working copy, and the caller's state is replaced only on success (on any
-  error it is byte-identical to the pre-block state). It validates the header
+  `SpecId::CANCUN`, **atomically and in O(what the block touched)**: the
+  block is validated, run on an overlay of the state that holds only the
+  accounts it reads or writes, and merged only on success (on any error the
+  state is byte-identical to the pre-block state; nothing is cloned). It
+  validates the header
   against the committed head record (`number == head + 1`, non-decreasing
   timestamp, `base_fee == next_base_fee(head)`; `BlockContext::next` derives
   a conforming one), defines the L2 block hash (`L2Header::hash`), serves
@@ -78,7 +91,10 @@ running total, so `total_native == total_minted - total_burned` always holds
   the EIP-4788 system call at block start (storing the Bloch anchor root),
   accepts only EIP-155-protected transactions of types 0/1/2 (type 3, every
   other type byte, unprotected and foreign-chain transactions are rejected at
-  the boundary), applies deposit mints at block start, routes the basefee
+  the boundary), applies deposit mints at block start (each metered at
+  `deposit_gas` of the block budget, fee-less, so at most
+  `gas_limit / deposit_gas` deposits fit and deposit load moves the base fee
+  like user load), routes the basefee
   part of what revm actually charged to the `BaseFeeVault` (`0x4200…0019`)
   and the priority fee to the `SequencerFeeVault` (`0x4200…0011`, the block
   beneficiary), reconciles every transaction's balance deltas to measure the
@@ -86,21 +102,29 @@ running total, so `total_native == total_minted - total_burned` always holds
   cover transfers, deploy+call, reverts, fee routing, header rules, block
   hashes, the system call, burns, every error path (state unchanged), replay,
   caps and unsupported types.
-* **keccak-256 MPT state root** (`src/stateroot.rs`) — a real, standard
-  Ethereum keccak-256 hexary Merkle-Patricia trie root over the
-  post-execution account trie + per-account storage tries, built with
-  `alloy-trie`'s `HashBuilder`, accounts/storage RLP-encoded exactly as
-  Ethereum does; empty accounts (EIP-161) and zero slots excluded. Plus
+* **keccak-256 MPT state root** (`src/stateroot.rs`, `src/mpt.rs`) — a
+  real, standard Ethereum keccak-256 hexary Merkle-Patricia trie root over
+  the post-execution account trie + per-account storage tries, accounts and
+  storage RLP-encoded exactly as Ethereum does; empty accounts (EIP-161) and
+  zero slots excluded. The from-scratch reference uses `alloy-trie`'s
+  `HashBuilder`; the state keeps an **incremental** owned trie (`Mpt`: cached
+  node hashes, only changed paths re-hashed, byte-identical roots *and*
+  proofs asserted against `HashBuilder`/`ProofRetainer`), so sealing an
+  empty block costs the same against 1k or 1M accounts. Plus
   **`SparseTrieView` / `stateless_new_root`**: the authenticated sparse-trie
   update a stateless guest uses — the multiproof is hash-linked to
   `prev_state_root` node by node, embedded (< 32-byte) children are decoded
   in place, and every malformed or incomplete witness is a `WitnessError`
   (never a panic or a silently wrong root).
 * **Stateless proving path** (`src/proving.rs`) — host-side
-  `generate_batch_witness` records the batch's full read set with a
-  recording overlay, emits existing accounts (with complete non-zero
-  storage) and absent addresses, builds the multiproof, and self-verifies by
-  running the guest procedure; guest-side `verify_batch` hydrates and
+  `generate_batch_witness` runs the batch **once** on a recording overlay
+  (read set and post-state at the same time, the pre-state is never cloned),
+  emits existing accounts (with complete non-zero storage) and absent
+  addresses, takes the multiproof from the cached trie (a from-scratch pass
+  only when the cache is cold), derives the post-state root through the
+  guest's own sparse-trie update, and self-verifies by running the guest
+  procedure; with the `serde` feature the witness is the round-trip-tested
+  host→guest wire format. Guest-side `verify_batch` hydrates and
   verifies the pre-state (inclusion for every account, provable absence for
   every absent address), re-executes with reads outside the witness
   **failing**, derives the change set itself and computes the post-state
@@ -129,10 +153,17 @@ Standalone cargo crate with its own empty `[workspace]` table (the
 and carries the heavy revm tree independently.
 
 ```sh
-cargo build
-cargo test                                          # unit tests + live audit regressions
-cargo test --test audit_regressions -- --ignored    # still-open audit findings (expected: failures)
-cargo test --no-default-features                    # the crate's own source is no_std-clean
+cargo build --locked
+cargo test --locked                                             # unit tests + every audit regression
+cargo test --locked --features serde                            # + the witness / snapshot wire-format round trip
+cargo test --locked --no-default-features                       # the whole tree (revm, alloy) in no_std + alloc
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo deny check bans sources advisories licenses               # native backends, duplicates, sources, advisories
+cargo test --release --test audit_regressions -- --ignored c27  # C27 benchmark at the audit's sizes (160k)
 ```
+
+CI (`.github/workflows/ci.yml`) runs all of the above with the committed
+lockfile and the pinned toolchain.
 
 License: MIT OR Apache-2.0. `publish = false`, version `0.0.0-scaffold`.

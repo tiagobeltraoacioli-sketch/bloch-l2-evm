@@ -55,15 +55,14 @@ use revm::database::CacheDB;
 use revm::handler::{ExecuteEvm, SystemCallCommitEvm};
 use revm::{Context, Database, DatabaseCommit, DatabaseRef, MainBuilder, MainContext};
 
-use crate::chainspec::{ChainSpec, BEACON_ROOTS_ADDRESS};
+use crate::chainspec::{ChainSpec, ChainSpecError, BEACON_ROOTS_ADDRESS};
 use crate::state::{
     apply_deposit, beacon_roots_bytecode, block_hash_slot, credit_balance, ensure_system_account, ledger_add,
-    DepositApplyError, DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY,
-    BLOCK_INFO_ANCHOR_ROOT_SLOT, BLOCK_INFO_BASE_FEE_SLOT, BLOCK_INFO_DEPOSITS_HASH_SLOT, BLOCK_INFO_FLAG_SLOT,
-    BLOCK_INFO_GAS_USED_SLOT, BLOCK_INFO_NUMBER_SLOT, BLOCK_INFO_PARENT_HASH_SLOT, BLOCK_INFO_PREVRANDAO_SLOT,
-    BLOCK_INFO_TIMESTAMP_SLOT, SUPPLY_LEDGER_BURNED_SLOT,
+    DepositApplyError, DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
+    BLOCK_INFO_BASE_FEE_SLOT, BLOCK_INFO_DEPOSITS_HASH_SLOT, BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_GAS_USED_SLOT,
+    BLOCK_INFO_NUMBER_SLOT, BLOCK_INFO_PARENT_HASH_SLOT, BLOCK_INFO_PREVRANDAO_SLOT, BLOCK_INFO_TIMESTAMP_SLOT,
+    SUPPLY_LEDGER_BURNED_SLOT,
 };
-use crate::stateroot::compute_keccak_mpt_state_root;
 
 /// Per-block environment chosen by the sequencer and **validated** by the
 /// executor against the committed head record (number, timestamp, base fee).
@@ -106,7 +105,10 @@ impl BlockContext {
                 prevrandao: B256::ZERO,
                 anchor_root: B256::ZERO,
             },
-            None => Self { base_fee_per_gas: spec.initial_base_fee, ..Self::default() },
+            None => Self {
+                base_fee_per_gas: spec.initial_base_fee,
+                ..Self::default()
+            },
         }
     }
 }
@@ -119,7 +121,10 @@ pub struct BlockInput {
     /// Deposit system-transactions, applied (minted) at block start, before
     /// any user transaction — they cannot be dropped once anchored. They MUST
     /// be in strictly increasing canonical L1 position order
-    /// ([`DepositMint::position`]), and all after the ledger's cursor.
+    /// ([`DepositMint::position`]), and all after the ledger's cursor. Each
+    /// consumes `ChainSpec::deposit_gas` of the block's gas budget (no fee),
+    /// so a block carries at most `ChainSpec::max_deposits_per_block`; the
+    /// derivation layer carries the overflow into the following blocks.
     ///
     /// **Trust boundary:** the derivation layer must only hand over deposits
     /// that were really escrowed at the stated positions in finalized Bloch
@@ -232,7 +237,8 @@ pub struct TxOutcome {
 pub struct ExecutionOutcome {
     /// The block number executed.
     pub block_number: u64,
-    /// Total gas used by all transactions in the block.
+    /// Total gas used by the block: `deposits × ChainSpec::deposit_gas` plus
+    /// every transaction's gas (what the EIP-1559 rule sees).
     pub gas_used: u64,
     /// The base fee this block executed under.
     pub base_fee_per_gas: u64,
@@ -369,17 +375,31 @@ pub enum BlockExecutionError {
         /// Debug rendering of the database error.
         detail: String,
     },
-    /// `ChainSpec::block_reward` is not zero. The L2 never issues; a non-zero
-    /// reward is a misconfiguration, not a payment.
-    NonZeroBlockReward,
+    /// The [`ChainSpec`] itself is invalid (see [`ChainSpec::validate`]); no
+    /// block executes under it.
+    InvalidChainSpec(ChainSpecError),
+    /// The block's deposits alone exceed the block gas budget
+    /// (`deposits × deposit_gas > gas_limit`).
+    DepositGasExceedsBlock {
+        /// Number of deposits in the block.
+        deposits: usize,
+        /// The most this chain admits per block.
+        max_deposits: u64,
+    },
 }
 
 impl core::fmt::Display for BlockExecutionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             BlockExecutionError::Deposit(e) => write!(f, "deposit failed: {e}"),
-            BlockExecutionError::DepositsOutOfOrder { first_index, second_index } => {
-                write!(f, "deposit {second_index} is not after deposit {first_index} in L1 position order")
+            BlockExecutionError::DepositsOutOfOrder {
+                first_index,
+                second_index,
+            } => {
+                write!(
+                    f,
+                    "deposit {second_index} is not after deposit {first_index} in L1 position order"
+                )
             }
             BlockExecutionError::InvalidBlockNumber { expected, got } => {
                 write!(f, "block number {got}, expected {expected}")
@@ -391,16 +411,25 @@ impl core::fmt::Display for BlockExecutionError {
                 write!(f, "block base fee {got}, EIP-1559 rule requires {expected}")
             }
             BlockExecutionError::BlobTxRejected { tx_index } => {
-                write!(f, "tx {tx_index}: blob (type-3) transactions are rejected at the sequencer")
+                write!(
+                    f,
+                    "tx {tx_index}: blob (type-3) transactions are rejected at the sequencer"
+                )
             }
             BlockExecutionError::UnsupportedTxType { tx_index, tx_type } => {
-                write!(f, "tx {tx_index}: transaction type {tx_type:#04x} is not supported at this hardfork")
+                write!(
+                    f,
+                    "tx {tx_index}: transaction type {tx_type:#04x} is not supported at this hardfork"
+                )
             }
             BlockExecutionError::InconsistentTxEnv { tx_index } => {
                 write!(f, "tx {tx_index}: TxEnv fields are inconsistent with its tx_type")
             }
             BlockExecutionError::ChainIdMismatch { tx_index, got } => {
-                write!(f, "tx {tx_index}: chain id {got:?} is not this chain's (EIP-155 required)")
+                write!(
+                    f,
+                    "tx {tx_index}: chain id {got:?} is not this chain's (EIP-155 required)"
+                )
             }
             BlockExecutionError::TxGasLimitExceedsBlock { tx_index } => {
                 write!(f, "tx {tx_index}: gas limit exceeds the block gas limit")
@@ -412,13 +441,21 @@ impl core::fmt::Display for BlockExecutionError {
                 write!(f, "tx {tx_index}: evm error: {detail}")
             }
             BlockExecutionError::SystemCall { detail } => write!(f, "EIP-4788 system call failed: {detail}"),
-            BlockExecutionError::Conservation { tx_index, lost_wei, base_fee_wei } => write!(
+            BlockExecutionError::Conservation {
+                tx_index,
+                lost_wei,
+                base_fee_wei,
+            } => write!(
                 f,
                 "tx {tx_index}: accounts lost {lost_wei} wei, less than the {base_fee_wei} wei basefee revm charges"
             ),
             BlockExecutionError::Database { detail } => write!(f, "database error: {detail}"),
-            BlockExecutionError::NonZeroBlockReward => {
-                write!(f, "ChainSpec::block_reward must be zero (the L2 never issues)")
+            BlockExecutionError::InvalidChainSpec(e) => write!(f, "invalid chain spec: {e}"),
+            BlockExecutionError::DepositGasExceedsBlock { deposits, max_deposits } => {
+                write!(
+                    f,
+                    "{deposits} deposits exceed the block gas budget (at most {max_deposits} per block)"
+                )
             }
         }
     }
@@ -464,22 +501,29 @@ pub fn deposits_hash(deposits: &[DepositMint]) -> B256 {
 
 /// Pure, state-independent validation of a [`BlockInput`] against the
 /// [`ChainSpec`]: it depends on nothing but the input, so it runs before any
-/// state is touched. Checks every deposit's L1 cap and the strictly increasing
+/// state is touched. Checks the spec itself ([`ChainSpec::validate`]), the
+/// deposits' gas budget, every deposit's L1 cap and the strictly increasing
 /// L1 position order of the deposit list (which also excludes duplicates), and
 /// every transaction's type, blob fields, `TxEnv` consistency, EIP-155 chain
 /// id and gas limit. Stateful rules (header validity against the head, the
 /// deposit cursor, the cumulative cap, revm's own validation) are enforced
 /// during execution on the working copy.
 pub fn validate_block_input(spec: &ChainSpec, input: &BlockInput) -> Result<(), BlockExecutionError> {
-    if spec.block_reward != U256::ZERO {
-        return Err(BlockExecutionError::NonZeroBlockReward);
-    }
+    spec.validate().map_err(BlockExecutionError::InvalidChainSpec)?;
+    deposits_gas(spec, input)?;
     for (i, d) in input.deposits.iter().enumerate() {
         if d.l1_sats() > spec.max_l1_sats {
-            return Err(DepositError::ExceedsL1Supply { l1_sats: d.l1_sats(), max_l1_sats: spec.max_l1_sats }.into());
+            return Err(DepositError::ExceedsL1Supply {
+                l1_sats: d.l1_sats(),
+                max_l1_sats: spec.max_l1_sats,
+            }
+            .into());
         }
         if i > 0 && d.position() <= input.deposits[i - 1].position() {
-            return Err(BlockExecutionError::DepositsOutOfOrder { first_index: i - 1, second_index: i });
+            return Err(BlockExecutionError::DepositsOutOfOrder {
+                first_index: i - 1,
+                second_index: i,
+            });
         }
     }
     for (i, tx) in input.txs.iter().enumerate() {
@@ -487,20 +531,41 @@ pub fn validate_block_input(spec: &ChainSpec, input: &BlockInput) -> Result<(), 
             return Err(BlockExecutionError::BlobTxRejected { tx_index: i });
         }
         if !SUPPORTED_TX_TYPES.contains(&tx.tx_type) {
-            return Err(BlockExecutionError::UnsupportedTxType { tx_index: i, tx_type: tx.tx_type });
+            return Err(BlockExecutionError::UnsupportedTxType {
+                tx_index: i,
+                tx_type: tx.tx_type,
+            });
         }
         let is_1559 = tx.tx_type == 2;
         if is_1559 != tx.gas_priority_fee.is_some() {
             return Err(BlockExecutionError::InconsistentTxEnv { tx_index: i });
         }
         if tx.chain_id != Some(spec.chain_id) {
-            return Err(BlockExecutionError::ChainIdMismatch { tx_index: i, got: tx.chain_id });
+            return Err(BlockExecutionError::ChainIdMismatch {
+                tx_index: i,
+                got: tx.chain_id,
+            });
         }
         if tx.gas_limit > spec.gas_limit {
             return Err(BlockExecutionError::TxGasLimitExceedsBlock { tx_index: i });
         }
     }
     Ok(())
+}
+
+/// Block gas consumed by the block's deposits (`deposits × deposit_gas`), or
+/// the error if they alone exceed the block gas limit.
+fn deposits_gas(spec: &ChainSpec, input: &BlockInput) -> Result<u64, BlockExecutionError> {
+    let too_many = || BlockExecutionError::DepositGasExceedsBlock {
+        deposits: input.deposits.len(),
+        max_deposits: spec.max_deposits_per_block(),
+    };
+    let count = u64::try_from(input.deposits.len()).map_err(|_| too_many())?;
+    let gas = spec.deposit_gas.checked_mul(count).ok_or_else(too_many)?;
+    if gas > spec.gas_limit {
+        return Err(too_many());
+    }
+    Ok(gas)
 }
 
 /// The per-block accounting a run produces (everything in [`ExecutionOutcome`]
@@ -518,6 +583,25 @@ pub(crate) struct BlockRun {
 }
 
 impl BlockRun {
+    /// The full outcome, given the post-state root.
+    pub(crate) fn into_outcome(self, spec: &ChainSpec, input: &BlockInput, state_root: B256) -> ExecutionOutcome {
+        let header = self.header(spec, input, state_root);
+        ExecutionOutcome {
+            block_number: input.context.number,
+            gas_used: self.gas_used,
+            base_fee_per_gas: input.context.base_fee_per_gas,
+            minted_wei: self.minted_wei,
+            burned_wei: self.burned_wei,
+            deposits_hash: self.deposits_hash,
+            base_fee_routed_wei: self.base_fee_routed_wei,
+            priority_fee_routed_wei: self.priority_fee_routed_wei,
+            tx_outcomes: self.tx_outcomes,
+            state_root,
+            block_hash: header.hash(),
+            header,
+        }
+    }
+
     /// The header of the executed block, given its post-state root.
     pub(crate) fn header(&self, spec: &ChainSpec, input: &BlockInput, state_root: B256) -> L2Header {
         L2Header {
@@ -536,7 +620,9 @@ impl BlockRun {
 }
 
 fn db_error<E: core::fmt::Debug>(e: E) -> BlockExecutionError {
-    BlockExecutionError::Database { detail: format!("{e:?}") }
+    BlockExecutionError::Database {
+        detail: format!("{e:?}"),
+    }
 }
 
 fn word_u64(v: U256) -> u64 {
@@ -563,7 +649,11 @@ fn read_head<ExtDB: DatabaseRef>(db: &mut CacheDB<ExtDB>, info: Address) -> Resu
 }
 
 /// Write the head record for the block just executed.
-fn write_head<ExtDB: DatabaseRef>(db: &mut CacheDB<ExtDB>, info: Address, rec: &HeadRecord) -> Result<(), ExtDB::Error> {
+fn write_head<ExtDB: DatabaseRef>(
+    db: &mut CacheDB<ExtDB>,
+    info: Address,
+    rec: &HeadRecord,
+) -> Result<(), ExtDB::Error> {
     ensure_system_account(db, info, None)?;
     db.insert_account_storage(info, BLOCK_INFO_FLAG_SLOT, U256::from(1u64))?;
     db.insert_account_storage(info, BLOCK_INFO_NUMBER_SLOT, U256::from(rec.number))?;
@@ -591,27 +681,43 @@ fn apply_header_rules<ExtDB: DatabaseRef>(
     let head = read_head(db, info).map_err(db_error)?;
     let parent_hash = match head {
         Some(h) => {
-            let expected = h.number.checked_add(1).ok_or(BlockExecutionError::InvalidBlockNumber { expected: u64::MAX, got: ctx.number })?;
+            let expected = h.number.checked_add(1).ok_or(BlockExecutionError::InvalidBlockNumber {
+                expected: u64::MAX,
+                got: ctx.number,
+            })?;
             if ctx.number != expected {
-                return Err(BlockExecutionError::InvalidBlockNumber { expected, got: ctx.number });
+                return Err(BlockExecutionError::InvalidBlockNumber {
+                    expected,
+                    got: ctx.number,
+                });
             }
             if ctx.timestamp < h.timestamp {
-                return Err(BlockExecutionError::InvalidTimestamp { parent: h.timestamp, got: ctx.timestamp });
+                return Err(BlockExecutionError::InvalidTimestamp {
+                    parent: h.timestamp,
+                    got: ctx.timestamp,
+                });
             }
             let expected_fee = spec.next_base_fee(h.base_fee_per_gas, h.gas_used);
             if ctx.base_fee_per_gas != expected_fee {
-                return Err(BlockExecutionError::InvalidBaseFee { expected: expected_fee, got: ctx.base_fee_per_gas });
+                return Err(BlockExecutionError::InvalidBaseFee {
+                    expected: expected_fee,
+                    got: ctx.base_fee_per_gas,
+                });
             }
             // The parent's header is the committed record plus the root it is
             // committed in; its hash enters the ring buffer now.
             let parent_hash = L2Header::from_head(spec.chain_id, &h, prev_state_root).hash();
             ensure_system_account(db, info, None).map_err(db_error)?;
-            db.insert_account_storage(info, block_hash_slot(h.number), parent_hash.into()).map_err(db_error)?;
+            db.insert_account_storage(info, block_hash_slot(h.number), parent_hash.into())
+                .map_err(db_error)?;
             parent_hash
         }
         None => {
             if ctx.base_fee_per_gas != spec.initial_base_fee {
-                return Err(BlockExecutionError::InvalidBaseFee { expected: spec.initial_base_fee, got: ctx.base_fee_per_gas });
+                return Err(BlockExecutionError::InvalidBaseFee {
+                    expected: spec.initial_base_fee,
+                    got: ctx.base_fee_per_gas,
+                });
             }
             B256::ZERO
         }
@@ -621,7 +727,11 @@ fn apply_header_rules<ExtDB: DatabaseRef>(
     // (zero for blocks before the chain started), never from a backing DB.
     let start = ctx.number.saturating_sub(BLOCK_HASH_HISTORY);
     for n in start..ctx.number {
-        let v = if head.is_some() { db.storage(info, block_hash_slot(n)).map_err(db_error)? } else { U256::ZERO };
+        let v = if head.is_some() {
+            db.storage(info, block_hash_slot(n)).map_err(db_error)?
+        } else {
+            U256::ZERO
+        };
         db.cache.block_hashes.insert(U256::from(n), B256::from(v));
     }
     Ok(parent_hash)
@@ -671,21 +781,31 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
             b.difficulty = U256::ZERO;
             // Blobless blocks: BLOBHASH / blob-basefee opcodes still return
             // spec-correct values (zero excess gas) for Cancun.
-            b.blob_excess_gas_and_price =
-                Some(BlobExcessGasAndPrice::new_with_spec(0, spec.spec_id));
+            b.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice::new_with_spec(0, spec.spec_id));
         })
         .build_mainnet();
 
     // 3. EIP-4788 system call: store this block's anchor root under its
     //    timestamp in the canonical beacon-roots predeploy (materialized if
     //    absent), before any transaction.
-    ensure_system_account(&mut evm.ctx.journaled_state.database, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode()))
-        .map_err(db_error)?;
+    ensure_system_account(
+        &mut evm.ctx.journaled_state.database,
+        BEACON_ROOTS_ADDRESS,
+        Some(&beacon_roots_bytecode()),
+    )
+    .map_err(db_error)?;
     let sys = evm
-        .system_call_commit(BEACON_ROOTS_ADDRESS, Bytes::copy_from_slice(input.context.anchor_root.as_slice()))
-        .map_err(|e| BlockExecutionError::SystemCall { detail: format!("{e:?}") })?;
+        .system_call_commit(
+            BEACON_ROOTS_ADDRESS,
+            Bytes::copy_from_slice(input.context.anchor_root.as_slice()),
+        )
+        .map_err(|e| BlockExecutionError::SystemCall {
+            detail: format!("{e:?}"),
+        })?;
     if !sys.is_success() {
-        return Err(BlockExecutionError::SystemCall { detail: format!("{sys:?}") });
+        return Err(BlockExecutionError::SystemCall {
+            detail: format!("{sys:?}"),
+        });
     }
 
     // 4. Deposit mints (before any user tx). This is the ONLY place native
@@ -701,8 +821,9 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
     }
 
     // 5. Execute transactions in order, routing fees and measuring burns per tx.
+    //    Deposits already consumed their (fee-less) share of the block gas.
     let mut tx_outcomes = Vec::with_capacity(input.txs.len());
-    let mut block_gas_used: u64 = 0;
+    let mut block_gas_used: u64 = deposits_gas(spec, input)?;
     let mut base_fee_routed = U256::ZERO;
     let mut priority_fee_routed = U256::ZERO;
     let mut burned_total = U256::ZERO;
@@ -721,17 +842,29 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
 
         // Execute without committing, so the balance deltas of every touched
         // account can be reconciled against the pre-state before they land.
-        let res = evm
-            .transact(tx.clone())
-            .map_err(|e| BlockExecutionError::Evm { tx_index: i, detail: format!("{e:?}") })?;
+        let res = evm.transact(tx.clone()).map_err(|e| BlockExecutionError::Evm {
+            tx_index: i,
+            detail: format!("{e:?}"),
+        })?;
         let result = res.result;
         let gas_used = result.tx_gas_used();
 
         let mut pre_sum = U256::ZERO;
         let mut post_sum = U256::ZERO;
         for (addr, acc) in res.state.iter() {
-            let pre = evm.ctx.journaled_state.database.basic(*addr).map_err(db_error)?.map(|i| i.balance).unwrap_or(U256::ZERO);
-            let post = if acc.is_selfdestructed() { U256::ZERO } else { acc.info.balance };
+            let pre = evm
+                .ctx
+                .journaled_state
+                .database
+                .basic(*addr)
+                .map_err(db_error)?
+                .map(|i| i.balance)
+                .unwrap_or(U256::ZERO);
+            let post = if acc.is_selfdestructed() {
+                U256::ZERO
+            } else {
+                acc.info.balance
+            };
             pre_sum = pre_sum.checked_add(pre).expect("balances cannot overflow U256");
             post_sum = post_sum.checked_add(post).expect("balances cannot overflow U256");
         }
@@ -739,24 +872,40 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
 
         // Conservation: the touched accounts lost exactly the basefee revm
         // collected (uncredited) plus whatever the EVM destroyed (EIP-6780).
-        let base_fee_wei = U256::from(base_fee_paid_per_gas) * U256::from(gas_used);
+        let base_fee_wei = U256::from(base_fee_paid_per_gas)
+            .checked_mul(U256::from(gas_used))
+            .expect("fee cannot overflow U256");
         let lost = pre_sum.saturating_sub(post_sum);
         let burned = lost
             .checked_sub(base_fee_wei)
-            .ok_or(BlockExecutionError::Conservation { tx_index: i, lost_wei: lost, base_fee_wei })?;
-        burned_total = burned_total.checked_add(burned).expect("burned wei cannot overflow U256");
-        block_gas_used += gas_used;
+            .ok_or(BlockExecutionError::Conservation {
+                tx_index: i,
+                lost_wei: lost,
+                base_fee_wei,
+            })?;
+        burned_total = burned_total
+            .checked_add(burned)
+            .expect("burned wei cannot overflow U256");
+        block_gas_used = block_gas_used
+            .checked_add(gas_used)
+            .expect("block gas is bounded by the gas limit");
 
         // Route the basefee portion to the BaseFeeVault (never burn).
         // Protocol-level accounting between transactions, outside EVM opcode
         // semantics — the journal is empty here (transact finalized), so direct
         // DB credit is safe.
         credit_balance(&mut evm.ctx.journaled_state.database, spec.base_fee_vault, base_fee_wei).map_err(db_error)?;
-        base_fee_routed = base_fee_routed.checked_add(base_fee_wei).expect("routed wei cannot overflow U256");
+        base_fee_routed = base_fee_routed
+            .checked_add(base_fee_wei)
+            .expect("routed wei cannot overflow U256");
         // The priority portion was already paid to the beneficiary
         // (= SequencerFeeVault) by revm itself; track it for the outcome.
         priority_fee_routed = priority_fee_routed
-            .checked_add(U256::from(priority_per_gas) * U256::from(gas_used))
+            .checked_add(
+                U256::from(priority_per_gas)
+                    .checked_mul(U256::from(gas_used))
+                    .expect("fee cannot overflow U256"),
+            )
             .expect("routed wei cannot overflow U256");
 
         tx_outcomes.push(TxOutcome {
@@ -812,36 +961,29 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
 /// revm at the spec's pinned hardfork, routing fees to the vaults and
 /// accounting EVM burns; commit the new head record.
 ///
-/// **Atomic:** the block is applied to a working copy of `state`; `state` is
-/// replaced only when the whole block succeeded and is left byte-identical to
-/// the pre-block state on every `Err`. Returns the [`ExecutionOutcome`].
+/// **Atomic and O(touched):** the block runs on an overlay (`CacheDB`) of
+/// `state` that holds only the accounts it reads or writes; `state` is merged
+/// with the overlay only when the whole block succeeded and is left
+/// byte-identical to the pre-block state on every `Err`. The state root is
+/// maintained incrementally (only the touched accounts are re-hashed), so an
+/// empty block costs the same against 1k or 1M accounts. Returns the
+/// [`ExecutionOutcome`].
 pub fn execute_block(
     spec: &ChainSpec,
     state: &mut L2State,
     input: BlockInput,
 ) -> Result<ExecutionOutcome, BlockExecutionError> {
-    let prev_state_root = compute_keccak_mpt_state_root(state);
-    let work = state.db.clone();
-    let (db, run) = run_block(spec, work, prev_state_root, &input)?;
-    state.db = db;
+    // The pre-state root: O(1) once the commitment is warm (built once otherwise).
+    let prev_state_root = state.commit_root();
+    let overlay = CacheDB::new(state.db());
+    let (overlay, run) = run_block(spec, overlay, prev_state_root, &input)?;
+    let CacheDB { cache, .. } = overlay;
+    state.apply_overlay(cache);
 
-    // Real keccak-256 MPT state root over the post-execution state.
-    let state_root = compute_keccak_mpt_state_root(state);
-    let header = run.header(spec, &input, state_root);
-    Ok(ExecutionOutcome {
-        block_number: input.context.number,
-        gas_used: run.gas_used,
-        base_fee_per_gas: input.context.base_fee_per_gas,
-        minted_wei: run.minted_wei,
-        burned_wei: run.burned_wei,
-        deposits_hash: run.deposits_hash,
-        base_fee_routed_wei: run.base_fee_routed_wei,
-        priority_fee_routed_wei: run.priority_fee_routed_wei,
-        tx_outcomes: run.tx_outcomes,
-        state_root,
-        block_hash: header.hash(),
-        header,
-    })
+    // Real keccak-256 MPT state root over the post-execution state, re-hashing
+    // only what this block touched.
+    let state_root = state.commit_root();
+    Ok(run.into_outcome(spec, &input, state_root))
 }
 
 #[cfg(test)]
@@ -849,6 +991,7 @@ mod tests {
     use super::*;
     use crate::scale::{sats_to_wei, SATS_PER_BLCH};
     use crate::state::DepositProvenance;
+    use crate::stateroot::compute_keccak_mpt_state_root;
     use alloy_primitives::{address, bytes, Bytes, TxKind};
     use alloy_trie::EMPTY_ROOT_HASH;
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -896,12 +1039,20 @@ mod tests {
 
     /// A genesis block input (first block: number 1, initial base fee).
     fn genesis(deposits: Vec<DepositMint>, txs: Vec<TxEnv>) -> BlockInput {
-        BlockInput { context: BlockContext::default(), deposits, txs }
+        BlockInput {
+            context: BlockContext::default(),
+            deposits,
+            txs,
+        }
     }
 
     /// The rule-conforming next block after `state`.
     fn next(spec: &ChainSpec, state: &L2State, deposits: Vec<DepositMint>, txs: Vec<TxEnv>) -> BlockInput {
-        BlockInput { context: BlockContext::next(spec, state), deposits, txs }
+        BlockInput {
+            context: BlockContext::next(spec, state),
+            deposits,
+            txs,
+        }
     }
 
     /// Execute the rule-conforming next block after `state` (context computed
@@ -940,7 +1091,7 @@ mod tests {
             state.total_native_wei(),
             state.total_minted_wei(),
             state.total_burned_wei(),
-            state.db.cache.accounts.len(),
+            state.db().cache.accounts.len(),
         )
     }
 
@@ -968,7 +1119,11 @@ mod tests {
         assert!(outcome.tx_outcomes[0].success);
         assert_eq!(outcome.tx_outcomes[0].gas_used, 21_000);
         assert_eq!(outcome.tx_outcomes[0].burned_wei, U256::ZERO);
-        assert_eq!(outcome.gas_used, 21_000);
+        assert_eq!(
+            outcome.gas_used,
+            21_000 + spec.deposit_gas,
+            "tx gas plus the metered deposit"
+        );
         assert_eq!(outcome.deposits_hash, deposits_hash(&deposits));
         assert_eq!(outcome.state_root, compute_keccak_mpt_state_root(&state));
         assert_eq!(outcome.block_hash, outcome.header.hash());
@@ -978,7 +1133,10 @@ mod tests {
         // Post balances / nonces.
         let effective_price = base_fee as u128 + tip; // max fee covers both
         let gas_cost = U256::from(effective_price) * U256::from(21_000u64);
-        assert_eq!(state.balance_of(&ALICE), sats_to_wei(funding_sats) - transfer_wei - gas_cost);
+        assert_eq!(
+            state.balance_of(&ALICE),
+            sats_to_wei(funding_sats) - transfer_wei - gas_cost
+        );
         assert_eq!(state.balance_of(&BOB), transfer_wei);
         assert_eq!(state.nonce_of(&ALICE), 1);
         assert_eq!(state.nonce_of(&BOB), 0);
@@ -999,7 +1157,10 @@ mod tests {
 
         // The head record is committed.
         let head = state.head().expect("head after first block");
-        assert_eq!((head.number, head.gas_used, head.base_fee_per_gas), (1, 21_000, base_fee));
+        assert_eq!(
+            (head.number, head.gas_used, head.base_fee_per_gas),
+            (1, 21_000 + spec.deposit_gas, base_fee)
+        );
         assert_eq!(head.deposits_hash, outcome.deposits_hash);
     }
 
@@ -1037,8 +1198,12 @@ mod tests {
             .build()
             .expect("valid call tx");
 
-        let outcome =
-            execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, funding_sats)], vec![deploy, call])).expect("block executes");
+        let outcome = execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, funding_sats)], vec![deploy, call]),
+        )
+        .expect("block executes");
 
         assert_eq!(outcome.tx_outcomes.len(), 2);
 
@@ -1067,14 +1232,24 @@ mod tests {
         // Gas accounting: block gas = sum of tx gas; payer balance reflects
         // exactly value(0) + gas at the effective price; fees all in vaults.
         let total_gas = deploy_out.gas_used + call_out.gas_used;
-        assert_eq!(outcome.gas_used, total_gas);
+        assert_eq!(
+            outcome.gas_used,
+            total_gas + spec.deposit_gas,
+            "tx gas plus the metered deposit"
+        );
         let effective_price = base_fee as u128 + tip;
         assert_eq!(
             state.balance_of(&ALICE),
             sats_to_wei(funding_sats) - U256::from(effective_price) * U256::from(total_gas)
         );
-        assert_eq!(state.balance_of(&spec.base_fee_vault), U256::from(base_fee) * U256::from(total_gas));
-        assert_eq!(state.balance_of(&spec.sequencer_fee_vault), U256::from(tip) * U256::from(total_gas));
+        assert_eq!(
+            state.balance_of(&spec.base_fee_vault),
+            U256::from(base_fee) * U256::from(total_gas)
+        );
+        assert_eq!(
+            state.balance_of(&spec.sequencer_fee_vault),
+            U256::from(tip) * U256::from(total_gas)
+        );
 
         // Conservation: zero issuance, never burn.
         assert!(conserved(&state));
@@ -1090,10 +1265,19 @@ mod tests {
             let input = if i == 0 {
                 genesis(vec![deposit(ALICE, sats), deposit(BOB, sats / 2 + 1)], vec![])
             } else {
-                next(&spec, &state, vec![deposit(ALICE, sats), deposit(BOB, sats / 2 + 1)], vec![])
+                next(
+                    &spec,
+                    &state,
+                    vec![deposit(ALICE, sats), deposit(BOB, sats / 2 + 1)],
+                    vec![],
+                )
             };
             let outcome = execute_block(&spec, &mut state, input).expect("deposit-only block executes");
-            assert_eq!(outcome.gas_used, 0);
+            assert_eq!(
+                outcome.gas_used,
+                2 * spec.deposit_gas,
+                "deposits consume block gas, fee-less"
+            );
             assert_eq!(outcome.minted_wei, sats_to_wei(sats) + sats_to_wei(sats / 2 + 1));
         }
 
@@ -1152,13 +1336,20 @@ mod tests {
             .build()
             .expect("valid deploy tx");
 
-        let outcome = execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, funding_sats)], vec![revert_deploy]))
-            .expect("block executes even though the tx reverts");
+        let outcome = execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, funding_sats)], vec![revert_deploy]),
+        )
+        .expect("block executes even though the tx reverts");
 
         let out = &outcome.tx_outcomes[0];
         assert!(!out.success, "the deploy reverted");
         assert_eq!(out.created_address, None, "no contract is created on revert");
-        assert!(out.gas_used > 21_000, "a revert still consumes intrinsic + execution gas");
+        assert!(
+            out.gas_used > 21_000,
+            "a revert still consumes intrinsic + execution gas"
+        );
 
         // Fees are routed even for a failed-but-included transaction: a revert
         // is never free, and bridged BLCH is never burned.
@@ -1197,7 +1388,8 @@ mod tests {
             .build()
             .expect("valid tx");
 
-        let outcome = execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, funding_sats)], vec![tx])).expect("block executes");
+        let outcome = execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, funding_sats)], vec![tx]))
+            .expect("block executes");
 
         let realized_tip: u128 = GWEI; // capped down from the requested 2 gwei
         let base_part = U256::from(base_fee) * U256::from(21_000u64);
@@ -1234,7 +1426,8 @@ mod tests {
         assert_eq!(tx.tx_type, 0, "derived as a legacy transaction");
         assert!(tx.gas_priority_fee.is_none());
 
-        let outcome = execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, funding_sats)], vec![tx])).expect("block executes");
+        let outcome = execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, funding_sats)], vec![tx]))
+            .expect("block executes");
 
         let base_part = U256::from(base_fee) * U256::from(21_000u64);
         let tip_part = U256::from(gas_price - base_fee as u128) * U256::from(21_000u64);
@@ -1258,7 +1451,10 @@ mod tests {
             &spec,
             &mut state,
             BlockInput {
-                context: BlockContext { base_fee_per_gas: 0, ..BlockContext::default() },
+                context: BlockContext {
+                    base_fee_per_gas: 0,
+                    ..BlockContext::default()
+                },
                 deposits: vec![deposit(ALICE, 10 * SATS_PER_BLCH)],
                 txs: vec![],
             },
@@ -1267,58 +1463,121 @@ mod tests {
         assert!(matches!(err, BlockExecutionError::InvalidBaseFee { got: 0, .. }));
         assert_eq!(fingerprint(&state), fingerprint(&L2State::new()));
 
-        // Genesis: block 0, timestamp 1000.
-        execute_block(
+        // Genesis: block 0, timestamp 1000 (its one deposit is metered gas).
+        let genesis = execute_block(
             &spec,
             &mut state,
             BlockInput {
-                context: BlockContext { number: 0, timestamp: 1_000, ..BlockContext::default() },
+                context: BlockContext {
+                    number: 0,
+                    timestamp: 1_000,
+                    ..BlockContext::default()
+                },
                 deposits: vec![deposit(ALICE, 10 * SATS_PER_BLCH)],
                 txs: vec![],
             },
         )
         .unwrap();
+        assert_eq!(genesis.gas_used, spec.deposit_gas);
         let before = fingerprint(&state);
-        let expected_bf = spec.next_base_fee(spec.initial_base_fee, 0);
+        let expected_bf = spec.next_base_fee(spec.initial_base_fee, genesis.gas_used);
         assert_ne!(expected_bf, spec.initial_base_fee);
-        let good = BlockContext { number: 1, timestamp: 1_002, base_fee_per_gas: expected_bf, ..BlockContext::default() };
+        let good = BlockContext {
+            number: 1,
+            timestamp: 1_002,
+            base_fee_per_gas: expected_bf,
+            ..BlockContext::default()
+        };
         assert_eq!(BlockContext::next(&spec, &state).base_fee_per_gas, expected_bf);
         assert_eq!(BlockContext::next(&spec, &state).number, 1);
 
         for bad_bf in [0u64, spec.initial_base_fee, 5 * GWEI as u64] {
-            let ctx = BlockContext { base_fee_per_gas: bad_bf, ..good.clone() };
+            let ctx = BlockContext {
+                base_fee_per_gas: bad_bf,
+                ..good.clone()
+            };
             let err = execute_block(
                 &spec,
                 &mut state,
-                BlockInput { context: ctx, deposits: vec![], txs: vec![tx_at_fee(ALICE, BOB, 0, U256::from(1u64), 21_000, bad_bf)] },
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![tx_at_fee(ALICE, BOB, 0, U256::from(1u64), 21_000, bad_bf)],
+                },
             )
             .unwrap_err();
-            assert!(matches!(err, BlockExecutionError::InvalidBaseFee { expected, got } if expected == expected_bf && got == bad_bf), "{err}");
+            assert!(
+                matches!(err, BlockExecutionError::InvalidBaseFee { expected, got } if expected == expected_bf && got == bad_bf),
+                "{err}"
+            );
             assert_eq!(fingerprint(&state), before);
         }
         for bad_number in [0u64, 2, 7] {
-            let ctx = BlockContext { number: bad_number, ..good.clone() };
-            let err = execute_block(&spec, &mut state, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::InvalidBlockNumber { expected: 1, got } if got == bad_number), "{err}");
+            let ctx = BlockContext {
+                number: bad_number,
+                ..good.clone()
+            };
+            let err = execute_block(
+                &spec,
+                &mut state,
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![],
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, BlockExecutionError::InvalidBlockNumber { expected: 1, got } if got == bad_number),
+                "{err}"
+            );
             assert_eq!(fingerprint(&state), before);
         }
-        let ctx = BlockContext { timestamp: 999, ..good.clone() };
-        let err = execute_block(&spec, &mut state, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::InvalidTimestamp { parent: 1_000, got: 999 }));
+        let ctx = BlockContext {
+            timestamp: 999,
+            ..good.clone()
+        };
+        let err = execute_block(
+            &spec,
+            &mut state,
+            BlockInput {
+                context: ctx,
+                deposits: vec![],
+                txs: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BlockExecutionError::InvalidTimestamp {
+                parent: 1_000,
+                got: 999
+            }
+        ));
         assert_eq!(fingerprint(&state), before);
 
         // The conforming header is accepted and routes fees per the 1559 split.
         let out = execute_block(
             &spec,
             &mut state,
-            BlockInput { context: good.clone(), deposits: vec![], txs: vec![tx_at_fee(ALICE, BOB, 0, U256::from(1u64), 21_000, expected_bf)] },
+            BlockInput {
+                context: good.clone(),
+                deposits: vec![],
+                txs: vec![tx_at_fee(ALICE, BOB, 0, U256::from(1u64), 21_000, expected_bf)],
+            },
         )
         .expect("conforming header executes");
         assert_eq!(out.base_fee_per_gas, expected_bf);
         assert_eq!(out.base_fee_routed_wei, U256::from(expected_bf) * U256::from(21_000u64));
-        assert_eq!(state.balance_of(&spec.base_fee_vault), U256::from(expected_bf) * U256::from(21_000u64));
+        assert_eq!(
+            state.balance_of(&spec.base_fee_vault),
+            U256::from(expected_bf) * U256::from(21_000u64)
+        );
         let head = state.head().unwrap();
-        assert_eq!((head.number, head.timestamp, head.base_fee_per_gas, head.gas_used), (1, 1_002, expected_bf, 21_000));
+        assert_eq!(
+            (head.number, head.timestamp, head.base_fee_per_gas, head.gas_used),
+            (1, 1_002, expected_bf, 21_000)
+        );
         // Equal timestamps are allowed (non-decreasing).
         exec_next(&spec, &mut state, vec![], vec![]).unwrap();
         assert_eq!(state.head().unwrap().timestamp, 1_002);
@@ -1338,7 +1597,10 @@ mod tests {
             &spec,
             &mut state,
             BlockInput {
-                context: BlockContext { number: 0, ..BlockContext::default() },
+                context: BlockContext {
+                    number: 0,
+                    ..BlockContext::default()
+                },
                 deposits: vec![deposit(ALICE, 10 * SATS_PER_BLCH)],
                 txs: vec![],
             },
@@ -1360,7 +1622,11 @@ mod tests {
         let probe = out1.tx_outcomes[0].created_address.unwrap();
         assert!(out1.tx_outcomes[0].success);
         assert_eq!(out1.header.parent_hash, out0.block_hash, "block 1 links to block 0");
-        assert_eq!(state.block_hash(0), Some(out0.block_hash), "ring holds hash(0) after block 1");
+        assert_eq!(
+            state.block_hash(0),
+            Some(out0.block_hash),
+            "ring holds hash(0) after block 1"
+        );
         assert_eq!(state.block_hash(1), None, "hash(1) is only known after block 2 starts");
 
         // Block 2: query BLOCKHASH(0), BLOCKHASH(1), BLOCKHASH(2) (self), BLOCKHASH(9).
@@ -1378,13 +1644,22 @@ mod tests {
                 .unwrap()
         };
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
-        let out2 = exec_next(&spec, &mut state, vec![], vec![query(0, 1, bf), query(1, 2, bf), query(2, 3, bf), query(9, 4, bf)])
+        let out2 = exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![query(0, 1, bf), query(1, 2, bf), query(2, 3, bf), query(9, 4, bf)],
+        )
         .unwrap();
         let word = |i: usize| B256::from_slice(out2.tx_outcomes[i].result.output().unwrap());
         assert_eq!(word(0), out0.block_hash, "BLOCKHASH(0) is block 0's header hash");
         assert_eq!(word(1), out1.block_hash, "BLOCKHASH(1) is block 1's header hash");
         assert_eq!(word(2), B256::ZERO, "the current block has no hash yet");
-        assert_eq!(word(3), B256::ZERO, "future / nonexistent blocks are zero, never a placeholder");
+        assert_eq!(
+            word(3),
+            B256::ZERO,
+            "future / nonexistent blocks are zero, never a placeholder"
+        );
         assert_ne!(word(0), keccak256(b"0"), "never revm's EmptyDB placeholder");
         assert_eq!(out2.header.parent_hash, out1.block_hash);
         assert_eq!(state.block_hash(1), Some(out1.block_hash));
@@ -1395,7 +1670,10 @@ mod tests {
             &spec,
             &mut other,
             BlockInput {
-                context: BlockContext { number: 0, ..BlockContext::default() },
+                context: BlockContext {
+                    number: 0,
+                    ..BlockContext::default()
+                },
                 deposits: vec![deposit(ALICE, 11 * SATS_PER_BLCH)],
                 txs: vec![],
             },
@@ -1437,7 +1715,12 @@ mod tests {
             &spec,
             &mut state,
             BlockInput {
-                context: BlockContext { number: 1, timestamp: T, anchor_root: anchor, ..BlockContext::default() },
+                context: BlockContext {
+                    number: 1,
+                    timestamp: T,
+                    anchor_root: anchor,
+                    ..BlockContext::default()
+                },
                 deposits: vec![deposit(ALICE, 10 * SATS_PER_BLCH)],
                 txs: vec![get(0, T), get(1, T + 1)],
             },
@@ -1450,10 +1733,13 @@ mod tests {
         // get(unknown timestamp) reverts, per EIP-4788.
         assert!(!out.tx_outcomes[1].success);
         // Ring-buffer slots as the spec lays them out.
-        let slots = &state.db.cache.accounts[&BEACON_ROOTS_ADDRESS].storage;
+        let slots = &state.db().cache.accounts[&BEACON_ROOTS_ADDRESS].storage;
         assert_eq!(slots[&U256::from(T % 8191)], U256::from(T));
         assert_eq!(slots[&U256::from(T % 8191 + 8191)], U256::from_be_bytes(anchor.0));
-        assert_eq!(state.account(&BEACON_ROOTS_ADDRESS).unwrap().code_hash, keccak256(crate::chainspec::BEACON_ROOTS_CODE));
+        assert_eq!(
+            state.account(&BEACON_ROOTS_ADDRESS).unwrap().code_hash,
+            keccak256(crate::chainspec::BEACON_ROOTS_CODE)
+        );
         assert_eq!(out.header.anchor_root, anchor);
         assert!(conserved(&state), "the system call mints and burns nothing");
     }
@@ -1464,7 +1750,12 @@ mod tests {
     fn unprotected_or_foreign_chain_id_transactions_are_rejected() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![])).unwrap();
+        execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![]),
+        )
+        .unwrap();
         let before = fingerprint(&state);
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
         for chain_id in [None, Some(1u64), Some(10), Some(spec.chain_id + 1)] {
@@ -1480,7 +1771,10 @@ mod tests {
                 .unwrap();
             assert_eq!(t.tx_type, 0);
             let err = exec_next(&spec, &mut state, vec![], vec![t]).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got } if got == chain_id), "{err}");
+            assert!(
+                matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got } if got == chain_id),
+                "{err}"
+            );
             assert_eq!(fingerprint(&state), before);
         }
         // The protected legacy tx for this chain executes.
@@ -1505,7 +1799,12 @@ mod tests {
     fn eip6780_burn_is_accounted_in_the_ledger() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![])).unwrap();
+        execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![]),
+        )
+        .unwrap();
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
         let value = sats_to_wei(SATS_PER_BLCH);
         // CREATE with initcode `ADDRESS SELFDESTRUCT` (0x30ff) and 1 BLCH of value.
@@ -1539,20 +1838,29 @@ mod tests {
             .unwrap();
         let out = exec_next(&spec, &mut state, vec![], vec![burn_tx, move_tx]).unwrap();
         assert!(out.tx_outcomes[0].success && out.tx_outcomes[1].success);
-        assert_eq!(out.tx_outcomes[0].burned_wei, value, "the self-destructed value is measured");
+        assert_eq!(
+            out.tx_outcomes[0].burned_wei, value,
+            "the self-destructed value is measured"
+        );
         assert_eq!(out.tx_outcomes[1].burned_wei, U256::ZERO);
         assert_eq!(out.burned_wei, value);
         assert_eq!(state.total_burned_wei(), value, "committed in the ledger");
         assert_eq!(state.balance_of(&BOB), value);
         assert!(state.account(&ALICE.create(0)).is_none(), "EIP-6780: destroyed");
-        assert_eq!(state.total_native_wei(), state.total_minted_wei() - state.total_burned_wei());
+        assert_eq!(
+            state.total_native_wei(),
+            state.total_minted_wei() - state.total_burned_wei()
+        );
         // Fees of both txs are fully routed.
         let gas = U256::from(out.gas_used);
         assert_eq!(state.balance_of(&spec.base_fee_vault), U256::from(bf) * gas);
         assert_eq!(state.balance_of(&spec.sequencer_fee_vault), U256::from(GWEI) * gas);
         // The burn total is committed: it moves the root.
         let root = compute_keccak_mpt_state_root(&state);
-        state.db.insert_account_storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, U256::ZERO).unwrap();
+        state
+            .db_mut()
+            .insert_account_storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, U256::ZERO)
+            .unwrap();
         assert_ne!(compute_keccak_mpt_state_root(&state), root);
     }
 
@@ -1560,24 +1868,51 @@ mod tests {
     fn block_gas_limit_exceeded_is_rejected_without_touching_state() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![])).unwrap();
+        execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![]),
+        )
+        .unwrap();
         let before = fingerprint(&state);
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
 
         // A single transaction whose gas limit alone exceeds the 30M block
         // limit is rejected by input validation, before anything runs.
-        let err = exec_next(&spec, &mut state, vec![], vec![tx_at_fee(ALICE, BOB, 0, U256::ZERO, spec.gas_limit + 1, bf)])
+        let err = exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![tx_at_fee(ALICE, BOB, 0, U256::ZERO, spec.gas_limit + 1, bf)],
+        )
         .unwrap_err();
-        assert!(matches!(err, BlockExecutionError::TxGasLimitExceedsBlock { tx_index: 0 }));
+        assert!(matches!(
+            err,
+            BlockExecutionError::TxGasLimitExceedsBlock { tx_index: 0 }
+        ));
         assert_eq!(fingerprint(&state), before);
 
         // Cumulative overflow at index 1 (after a valid, committed tx 0) is
         // rejected too — and tx 0 is rolled back with the block.
-        let err = exec_next(&spec, &mut state, vec![deposit(BOB, 1)],
-                vec![tx_at_fee(ALICE, BOB, 0, sats_to_wei(1), 21_000, bf), tx_at_fee(ALICE, BOB, 1, U256::ZERO, spec.gas_limit, bf)])
+        let err = exec_next(
+            &spec,
+            &mut state,
+            vec![deposit(BOB, 1)],
+            vec![
+                tx_at_fee(ALICE, BOB, 0, sats_to_wei(1), 21_000, bf),
+                tx_at_fee(ALICE, BOB, 1, U256::ZERO, spec.gas_limit, bf),
+            ],
+        )
         .unwrap_err();
-        assert!(matches!(err, BlockExecutionError::BlockGasLimitExceeded { tx_index: 1 }));
-        assert_eq!(fingerprint(&state), before, "the whole block (tx 0 and the deposit) is rolled back");
+        assert!(matches!(
+            err,
+            BlockExecutionError::BlockGasLimitExceeded { tx_index: 1 }
+        ));
+        assert_eq!(
+            fingerprint(&state),
+            before,
+            "the whole block (tx 0 and the deposit) is rolled back"
+        );
         assert_eq!(state.nonce_of(&ALICE), 0);
         assert_eq!(state.balance_of(&BOB), U256::ZERO);
     }
@@ -1588,23 +1923,50 @@ mod tests {
     fn evm_errors_leave_state_unchanged() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH), deposit(BOB, 5 * SATS_PER_BLCH)], vec![])).unwrap();
+        execute_block(
+            &spec,
+            &mut state,
+            genesis(
+                vec![deposit(ALICE, 10 * SATS_PER_BLCH), deposit(BOB, 5 * SATS_PER_BLCH)],
+                vec![],
+            ),
+        )
+        .unwrap();
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
-        exec_next(&spec, &mut state, vec![], vec![tx_at_fee(ALICE, BOB, 0, sats_to_wei(SATS_PER_BLCH), 21_000, bf)]).unwrap();
+        exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![tx_at_fee(ALICE, BOB, 0, sats_to_wei(SATS_PER_BLCH), 21_000, bf)],
+        )
+        .unwrap();
         let before = fingerprint(&state);
         assert_ne!(before.0, EMPTY_ROOT_HASH);
         assert_eq!(state.nonce_of(&ALICE), 1);
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
 
         // (a) stale / future nonce at index 1, after a valid tx 0 and a deposit.
-        let err = exec_next(&spec, &mut state, vec![deposit(BOB, 1)], vec![tx_at_fee(ALICE, BOB, 1, U256::ZERO, 21_000, bf), tx_at_fee(ALICE, BOB, 7, U256::ZERO, 21_000, bf)])
+        let err = exec_next(
+            &spec,
+            &mut state,
+            vec![deposit(BOB, 1)],
+            vec![
+                tx_at_fee(ALICE, BOB, 1, U256::ZERO, 21_000, bf),
+                tx_at_fee(ALICE, BOB, 7, U256::ZERO, 21_000, bf),
+            ],
+        )
         .unwrap_err();
         assert!(matches!(err, BlockExecutionError::Evm { tx_index: 1, .. }));
         assert_eq!(fingerprint(&state), before);
         assert_eq!(state.nonce_of(&ALICE), 1, "tx 0 of the failed block is rolled back");
 
         // (b) insufficient balance for max fee.
-        let err = exec_next(&spec, &mut state, vec![], vec![tx_at_fee(ALICE, BOB, 1, sats_to_wei(100 * SATS_PER_BLCH), 21_000, bf)])
+        let err = exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![tx_at_fee(ALICE, BOB, 1, sats_to_wei(100 * SATS_PER_BLCH), 21_000, bf)],
+        )
         .unwrap_err();
         assert!(matches!(err, BlockExecutionError::Evm { tx_index: 0, .. }));
         assert_eq!(fingerprint(&state), before);
@@ -1613,7 +1975,13 @@ mod tests {
         let mut t = tx_at_fee(ALICE, BOB, 1, U256::ZERO, 21_000, bf);
         t.chain_id = Some(1);
         let err = exec_next(&spec, &mut state, vec![], vec![t]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got: Some(1) }));
+        assert!(matches!(
+            err,
+            BlockExecutionError::ChainIdMismatch {
+                tx_index: 0,
+                got: Some(1)
+            }
+        ));
         assert_eq!(fingerprint(&state), before);
 
         // (d) a replayed deposit fails the block and rolls back everything.
@@ -1624,15 +1992,34 @@ mod tests {
         // [replayed, fresh] is in position order, so it reaches the ledger check
         // and fails there; [fresh, replayed] is rejected by pure validation.
         let err = exec_next(&spec, &mut state, vec![dep, fresh], vec![]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::Deposit(DepositError::OutOfOrder { .. })), "{err}");
+        assert!(
+            matches!(err, BlockExecutionError::Deposit(DepositError::OutOfOrder { .. })),
+            "{err}"
+        );
         assert_eq!(fingerprint(&state), after_dep);
         let err = exec_next(&spec, &mut state, vec![fresh, dep], vec![]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 }));
-        assert_eq!(fingerprint(&state), after_dep, "the fresh deposit of the failed block is rolled back too");
+        assert!(matches!(
+            err,
+            BlockExecutionError::DepositsOutOfOrder {
+                first_index: 0,
+                second_index: 1
+            }
+        ));
+        assert_eq!(
+            fingerprint(&state),
+            after_dep,
+            "the fresh deposit of the failed block is rolled back too"
+        );
 
         // The state is still fully usable afterwards.
         let bf = BlockContext::next(&spec, &state).base_fee_per_gas;
-        exec_next(&spec, &mut state, vec![], vec![tx_at_fee(ALICE, BOB, 1, U256::ZERO, 21_000, bf)]).unwrap();
+        exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![tx_at_fee(ALICE, BOB, 1, U256::ZERO, 21_000, bf)],
+        )
+        .unwrap();
         assert_eq!(state.nonce_of(&ALICE), 2);
         assert!(conserved(&state));
     }
@@ -1646,7 +2033,13 @@ mod tests {
         let dep = deposit(ALICE, SATS_PER_BLCH);
 
         let err = execute_block(&spec, &mut state, genesis(vec![dep, dep], vec![])).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 }));
+        assert!(matches!(
+            err,
+            BlockExecutionError::DepositsOutOfOrder {
+                first_index: 0,
+                second_index: 1
+            }
+        ));
         assert_eq!(state.total_minted_wei(), U256::ZERO);
 
         execute_block(&spec, &mut state, genesis(vec![dep], vec![])).unwrap();
@@ -1654,21 +2047,39 @@ mod tests {
         let before = fingerprint(&state);
         for _ in 0..3 {
             let err = exec_next(&spec, &mut state, vec![dep], vec![]).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::Deposit(DepositError::OutOfOrder { .. })));
+            assert!(matches!(
+                err,
+                BlockExecutionError::Deposit(DepositError::OutOfOrder { .. })
+            ));
             assert_eq!(fingerprint(&state), before);
         }
         // Two deposits in the same L1 block: tx index / vout order is enforced.
         let a = DepositMint {
             recipient: BOB,
-            provenance: DepositProvenance::BridgedBlch { l1_height: 1_000_000, l1_tx_index: 3, l1_txid: [1; 32], l1_vout: 1, l1_sats: 5 },
+            provenance: DepositProvenance::BridgedBlch {
+                l1_height: 1_000_000,
+                l1_tx_index: 3,
+                l1_txid: [1; 32],
+                l1_vout: 1,
+                l1_sats: 5,
+            },
         };
         let b = DepositMint {
             recipient: BOB,
-            provenance: DepositProvenance::BridgedBlch { l1_height: 1_000_000, l1_tx_index: 3, l1_txid: [1; 32], l1_vout: 0, l1_sats: 5 },
+            provenance: DepositProvenance::BridgedBlch {
+                l1_height: 1_000_000,
+                l1_tx_index: 3,
+                l1_txid: [1; 32],
+                l1_vout: 0,
+                l1_sats: 5,
+            },
         };
         assert!(matches!(
             exec_next(&spec, &mut state, vec![a, b], vec![]),
-            Err(BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 })
+            Err(BlockExecutionError::DepositsOutOfOrder {
+                first_index: 0,
+                second_index: 1
+            })
         ));
         exec_next(&spec, &mut state, vec![b, a], vec![]).unwrap();
         assert_eq!(state.deposit_cursor(), a.position());
@@ -1683,7 +2094,12 @@ mod tests {
     fn unsupported_tx_types_are_rejected_and_never_inflate_supply() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![])).unwrap();
+        execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, 10 * SATS_PER_BLCH)], vec![]),
+        )
+        .unwrap();
         let before = fingerprint(&state);
 
         for tx_type in [4u8, 5, 0x10, 0x7E, 0xFF] {
@@ -1721,12 +2137,23 @@ mod tests {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
         let err = execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, u64::MAX)], vec![])).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::Deposit(DepositError::ExceedsL1Supply { .. })));
+        assert!(matches!(
+            err,
+            BlockExecutionError::Deposit(DepositError::ExceedsL1Supply { .. })
+        ));
         assert_eq!(fingerprint(&state), fingerprint(&L2State::new()));
 
-        execute_block(&spec, &mut state, genesis(vec![deposit(ALICE, spec.max_l1_sats)], vec![])).unwrap();
+        execute_block(
+            &spec,
+            &mut state,
+            genesis(vec![deposit(ALICE, spec.max_l1_sats)], vec![]),
+        )
+        .unwrap();
         let err = exec_next(&spec, &mut state, vec![deposit(BOB, 1)], vec![]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::Deposit(DepositError::CumulativeSupplyExceeded { .. })));
+        assert!(matches!(
+            err,
+            BlockExecutionError::Deposit(DepositError::CumulativeSupplyExceeded { .. })
+        ));
         assert_eq!(state.total_minted_wei(), sats_to_wei(spec.max_l1_sats));
     }
 

@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Testes de regressão da auditoria profunda (ver `AUDITORIA-L2.md`).
 //!
-//! Cada módulo corresponde a um achado (C01..C31). Os achados **corrigidos**
-//! (P0 e P1 da seção 8: C01–C13, C15–C25, C29, C30) têm testes ativos que
-//! afirmam o comportamento correto e passam. Os achados ainda abertos (C26,
-//! C27, C28, C31) continuam marcados `#[ignore]`: seus testes afirmam o
-//! comportamento esperado após a correção e falham hoje.
+//! Cada módulo corresponde a um achado (C01..C31). Todos os achados (P0, P1 e
+//! P2 da seção 8: C01–C13, C15–C31) estão **corrigidos** e têm testes ativos
+//! que afirmam o comportamento correto e passam. O único teste `#[ignore]` é o
+//! benchmark do C27 nos tamanhos da auditoria (160 k contas / slots), a
+//! executar com `--release`.
 //!
 //! ```sh
-//! cargo test --test audit_regressions              # achados corrigidos
-//! cargo test --test audit_regressions -- --ignored # achados ainda abertos (esperado: falhas)
+//! cargo test --test audit_regressions                                   # todos os achados
+//! cargo test --release --test audit_regressions -- --ignored c27       # benchmark C27 (160k)
 //! ```
 //!
-//! Audit regression tests (see `AUDITORIA-L2.md`). Fixed findings have live
-//! tests; open findings are `#[ignore]`d and fail until fixed.
+//! Audit regression tests (see `AUDITORIA-L2.md`). Every finding has a live
+//! test; the only `#[ignore]`d one is the C27 benchmark at the audit's sizes.
 #![allow(clippy::all)]
 
 mod common {
@@ -112,13 +112,24 @@ mod common {
     /// A chain's FIRST block with an explicit number (any number is valid for
     /// the first block; the base fee must be the initial one).
     pub fn block(number: u64, deposits: Vec<DepositMint>, txs: Vec<TxEnv>) -> BlockInput {
-        BlockInput { context: BlockContext { number, ..Default::default() }, deposits, txs }
+        BlockInput {
+            context: BlockContext {
+                number,
+                ..Default::default()
+            },
+            deposits,
+            txs,
+        }
     }
 
     /// The rule-conforming block after `state`'s head (number + 1, EIP-1559
     /// base fee, non-decreasing timestamp) — the first block when no head exists.
     pub fn next(state: &L2State, deposits: Vec<DepositMint>, txs: Vec<TxEnv>) -> BlockInput {
-        BlockInput { context: BlockContext::next(&ChainSpec::testnet(), state), deposits, txs }
+        BlockInput {
+            context: BlockContext::next(&ChainSpec::testnet(), state),
+            deposits,
+            txs,
+        }
     }
 
     /// Execute the rule-conforming next block after `state`.
@@ -136,7 +147,13 @@ mod common {
     pub fn funded(n: u8) -> L2State {
         let spec = ChainSpec::testnet();
         let mut pre = L2State::new();
-        exec_next(&spec, &mut pre, (1..=n).map(|i| deposit(addr(i), 5 * BLCH)).collect(), vec![]).unwrap();
+        exec_next(
+            &spec,
+            &mut pre,
+            (1..=n).map(|i| deposit(addr(i), 5 * BLCH)).collect(),
+            vec![],
+        )
+        .unwrap();
         pre
     }
 
@@ -147,7 +164,7 @@ mod common {
             state.total_native_wei(),
             state.total_minted_wei(),
             state.total_burned_wei(),
-            state.db.cache.accounts.len(),
+            state.db().cache.accounts.len(),
         )
     }
 
@@ -168,14 +185,28 @@ mod c01 {
     fn failed_block_leaves_state_unchanged() {
         let spec = ChainSpec::testnet();
         let mut st = L2State::new();
-        exec_next(&spec, &mut st, vec![deposit(ALICE, 10 * BLCH), deposit(CAROL, 5 * BLCH)], vec![]).unwrap();
+        exec_next(
+            &spec,
+            &mut st,
+            vec![deposit(ALICE, 10 * BLCH), deposit(CAROL, 5 * BLCH)],
+            vec![],
+        )
+        .unwrap();
         exec_next(&spec, &mut st, vec![], vec![transfer(ALICE, BOB, 0, wei(1), 21_000)]).unwrap();
         let before = fingerprint(&st);
         assert_ne!(before.0, EMPTY_ROOT_HASH);
         assert_eq!(st.nonce_of(&ALICE), 1);
 
         // Evm error at index 1 after a valid tx 0 and a deposit.
-        let err = exec_next(&spec, &mut st, vec![deposit(BOB, BLCH)], vec![transfer(ALICE, BOB, 1, U256::ZERO, 21_000), transfer(ALICE, BOB, 7, U256::ZERO, 21_000)])
+        let err = exec_next(
+            &spec,
+            &mut st,
+            vec![deposit(BOB, BLCH)],
+            vec![
+                transfer(ALICE, BOB, 1, U256::ZERO, 21_000),
+                transfer(ALICE, BOB, 7, U256::ZERO, 21_000),
+            ],
+        )
         .unwrap_err();
         assert!(matches!(err, BlockExecutionError::Evm { tx_index: 1, .. }));
         assert_eq!(fingerprint(&st), before, "state must be untouched after an Evm error");
@@ -183,9 +214,20 @@ mod c01 {
         assert_eq!(st.balance_of(&CAROL), wei(5), "untouched accounts survive");
 
         // Block gas limit exceeded at index 1.
-        let err = exec_next(&spec, &mut st, vec![], vec![transfer(ALICE, BOB, 1, U256::ZERO, 21_000), transfer(ALICE, BOB, 2, U256::ZERO, spec.gas_limit)])
+        let err = exec_next(
+            &spec,
+            &mut st,
+            vec![],
+            vec![
+                transfer(ALICE, BOB, 1, U256::ZERO, 21_000),
+                transfer(ALICE, BOB, 2, U256::ZERO, spec.gas_limit),
+            ],
+        )
         .unwrap_err();
-        assert!(matches!(err, BlockExecutionError::BlockGasLimitExceeded { tx_index: 1 }));
+        assert!(matches!(
+            err,
+            BlockExecutionError::BlockGasLimitExceeded { tx_index: 1 }
+        ));
         assert_eq!(fingerprint(&st), before);
 
         // A transaction for another chain is rejected at the STF boundary (C15).
@@ -193,7 +235,16 @@ mod c01 {
             let mut t = transfer(ALICE, BOB, 1, U256::ZERO, 21_000);
             t.chain_id = Some(1);
             let err = exec_next(&spec, &mut st, vec![], vec![t]).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got: Some(1) }), "{err}");
+            assert!(
+                matches!(
+                    err,
+                    BlockExecutionError::ChainIdMismatch {
+                        tx_index: 0,
+                        got: Some(1)
+                    }
+                ),
+                "{err}"
+            );
             assert_eq!(fingerprint(&st), before);
         }
 
@@ -261,13 +312,28 @@ mod c02 {
         let after = fingerprint(&st);
         let d2 = deposit(ALICE, BLCH);
         let err = exec_next(&spec, &mut st, vec![d2, d2], vec![]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 }));
+        assert!(matches!(
+            err,
+            BlockExecutionError::DepositsOutOfOrder {
+                first_index: 0,
+                second_index: 1
+            }
+        ));
         assert_eq!(fingerprint(&st), after);
         assert_eq!(st.balance_of(&ALICE), U256::ZERO);
 
         // Gas-limit rejection after deposits: deposits rolled back, ledger too.
-        let err = exec_next(&spec, &mut st, vec![d2], vec![transfer(BOB, ALICE, 0, U256::ZERO, spec.gas_limit + 1)]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::TxGasLimitExceedsBlock { tx_index: 0 }));
+        let err = exec_next(
+            &spec,
+            &mut st,
+            vec![d2],
+            vec![transfer(BOB, ALICE, 0, U256::ZERO, spec.gas_limit + 1)],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BlockExecutionError::TxGasLimitExceedsBlock { tx_index: 0 }
+        ));
         assert_eq!(fingerprint(&st), after);
         assert_eq!(st.total_native_wei(), st.total_minted_wei());
     }
@@ -303,7 +369,11 @@ mod c03 {
             assert_eq!(fingerprint(&st), before);
         }
         assert_eq!(st.total_native_wei(), minted, "supply was not inflated");
-        assert_eq!(st.balance_of(&spec.base_fee_vault), U256::ZERO, "BaseFeeVault received nothing");
+        assert_eq!(
+            st.balance_of(&spec.base_fee_vault),
+            U256::ZERO,
+            "BaseFeeVault received nothing"
+        );
     }
 }
 
@@ -315,8 +385,8 @@ mod c04 {
     use alloy_trie::nodes::LeafNode;
     use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
     use bloch_l2_evm::{
-        generate_batch_witness, hydrate_and_verify, stateless_new_root, verify_batch, ChainSpec, SparseTrieView, VerifyError,
-        WitnessError,
+        generate_batch_witness, hydrate_and_verify, stateless_new_root, verify_batch, ChainSpec, SparseTrieView,
+        VerifyError, WitnessError,
     };
     use std::collections::BTreeMap;
 
@@ -334,8 +404,13 @@ mod c04 {
         // (a) phantom leaf injected at an opaque frontier path.
         let mut injected = w.clone();
         let rest = Nibbles::from_nibbles(vec![0u8; 64 - frontier.len()]);
-        injected.proof.insert(frontier, alloy_rlp::encode(&LeafNode::new(rest, vec![0xc0])).into());
-        assert!(matches!(hydrate_and_verify(&injected), Err(VerifyError::Witness(WitnessError::UnanchoredNode { .. }))));
+        injected
+            .proof
+            .insert(frontier, alloy_rlp::encode(&LeafNode::new(rest, vec![0xc0])).into());
+        assert!(matches!(
+            hydrate_and_verify(&injected),
+            Err(VerifyError::Witness(WitnessError::UnanchoredNode { .. }))
+        ));
         assert!(matches!(
             stateless_new_root(w.prev_state_root, &injected.proof, &BTreeMap::new()),
             Err(WitnessError::UnanchoredNode { .. })
@@ -343,7 +418,12 @@ mod c04 {
 
         // (b) tampered exposed node bytes.
         let mut tampered = w.clone();
-        let (deepest, bytes) = tampered.proof.iter().max_by_key(|(p, _)| p.len()).map(|(p, b)| (*p, b.clone())).unwrap();
+        let (deepest, bytes) = tampered
+            .proof
+            .iter()
+            .max_by_key(|(p, _)| p.len())
+            .map(|(p, b)| (*p, b.clone()))
+            .unwrap();
         let mut b = bytes.to_vec();
         let last = b.len() - 1;
         b[last] ^= 0x01;
@@ -361,7 +441,10 @@ mod c04 {
             stateless_new_root(B256::repeat_byte(0x77), &w.proof, &BTreeMap::new()),
             Err(WitnessError::RootMismatch { .. })
         ));
-        assert_eq!(stateless_new_root(EMPTY_ROOT_HASH, &BTreeMap::new(), &BTreeMap::new()), Ok(EMPTY_ROOT_HASH));
+        assert_eq!(
+            stateless_new_root(EMPTY_ROOT_HASH, &BTreeMap::new(), &BTreeMap::new()),
+            Ok(EMPTY_ROOT_HASH)
+        );
         let _ = keccak256([0u8]);
     }
 }
@@ -370,7 +453,9 @@ mod c04 {
 /// instead of being read as empty; lying that it is absent is caught.
 mod c05 {
     use super::common::*;
-    use bloch_l2_evm::{generate_batch_witness, hydrate_and_verify, verify_batch, BlockExecutionError, ChainSpec, VerifyError};
+    use bloch_l2_evm::{
+        generate_batch_witness, hydrate_and_verify, verify_batch, BlockExecutionError, ChainSpec, VerifyError,
+    };
 
     #[test]
     fn omitted_existing_touched_pre_account_must_be_rejected_or_not_change_execution() {
@@ -417,17 +502,26 @@ mod c06 {
         let mut runtime = vec![0x73u8];
         runtime.extend_from_slice(d.as_slice());
         runtime.extend_from_slice(&[0x31, 0x60, 0x00, 0x55, 0x00]);
-        let out = exec_next(&spec, &mut pre, vec![], vec![create(alice, 0, deployer(&runtime), 200_000)]).unwrap();
+        let out = exec_next(
+            &spec,
+            &mut pre,
+            vec![],
+            vec![create(alice, 0, deployer(&runtime), 200_000)],
+        )
+        .unwrap();
         let contract = out.tx_outcomes[0].created_address.unwrap();
 
         let batch = next(&pre, vec![], vec![call_data(alice, contract, 1, Bytes::new(), 100_000)]);
         let (w, _) = generate_batch_witness(&pre, &spec, batch.clone()).expect("generates");
-        assert!(w.pre_accounts.iter().any(|a| a.address == d), "read-only BALANCE target is in the witness");
+        assert!(
+            w.pre_accounts.iter().any(|a| a.address == d),
+            "read-only BALANCE target is in the witness"
+        );
         let verified = verify_batch(&spec, &w, &batch).expect("guest verifies");
         let mut full = pre.clone();
         execute_block(&spec, &mut full, batch).unwrap();
         assert_eq!(verified.new_state_root, compute_keccak_mpt_state_root(&full));
-        assert_eq!(full.db.cache.accounts[&contract].storage[&U256::ZERO], wei(5));
+        assert_eq!(full.db().cache.accounts[&contract].storage[&U256::ZERO], wei(5));
     }
 }
 
@@ -442,7 +536,13 @@ mod c07 {
         let spec = ChainSpec::testnet();
         let mut pre = funded(60);
         let alice = addr(1);
-        let out = exec_next(&spec, &mut pre, vec![], vec![create(alice, 0, deployer(runtime), 200_000)]).unwrap();
+        let out = exec_next(
+            &spec,
+            &mut pre,
+            vec![],
+            vec![create(alice, 0, deployer(runtime), 200_000)],
+        )
+        .unwrap();
         let contract = out.tx_outcomes[0].created_address.unwrap();
         let batch = next(&pre, vec![], vec![call_data(alice, contract, 1, Bytes::new(), 100_000)]);
         let (w, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).expect("generates");
@@ -470,7 +570,9 @@ mod c08 {
     use super::common::*;
     use alloy_primitives::keccak256;
     use alloy_trie::Nibbles;
-    use bloch_l2_evm::{generate_batch_witness, hydrate_and_verify, verify_batch, ChainSpec, SparseTrieView, WitnessError};
+    use bloch_l2_evm::{
+        generate_batch_witness, hydrate_and_verify, verify_batch, ChainSpec, SparseTrieView, WitnessError,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -487,7 +589,10 @@ mod c08 {
         let mut stripped = w.clone();
         stripped.proof.retain(|p, _| p.is_empty() || !bob_path.starts_with(p));
         assert!(stripped.proof.len() < w.proof.len());
-        assert!(hydrate_and_verify(&stripped).is_err(), "bob can no longer be proven absent");
+        assert!(
+            hydrate_and_verify(&stripped).is_err(),
+            "bob can no longer be proven absent"
+        );
 
         // Direct: a change key under an opaque frontier is an error.
         let view = SparseTrieView::from_proof(w.prev_state_root, &w.proof).unwrap();
@@ -498,9 +603,15 @@ mod c08 {
         }
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
         changes.insert(hidden, None);
-        assert!(matches!(view.apply(&changes), Err(WitnessError::KeyInOpaqueSubtree { .. })));
+        assert!(matches!(
+            view.apply(&changes),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
         changes.insert(hidden, Some(vec![0xc0]));
-        assert!(matches!(view.apply(&changes), Err(WitnessError::KeyInOpaqueSubtree { .. })));
+        assert!(matches!(
+            view.apply(&changes),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
     }
 }
 
@@ -509,7 +620,9 @@ mod c08 {
 mod c09 {
     use super::common::*;
     use alloy_primitives::B256;
-    use bloch_l2_evm::{compute_keccak_mpt_state_root, execute_block, generate_batch_witness, verify_batch, ChainSpec, VerifyError};
+    use bloch_l2_evm::{
+        compute_keccak_mpt_state_root, execute_block, generate_batch_witness, verify_batch, ChainSpec, VerifyError,
+    };
 
     #[test]
     fn c09_guest_post_root_must_not_depend_on_host_supplied_changes() {
@@ -521,12 +634,18 @@ mod c09 {
         let _: &[bloch_l2_evm::WitnessAccount] = &w.pre_accounts;
         let mut full = pre.clone();
         execute_block(&spec, &mut full, batch.clone()).unwrap();
-        assert_eq!(verify_batch(&spec, &w, &batch).unwrap().new_state_root, compute_keccak_mpt_state_root(&full));
+        assert_eq!(
+            verify_batch(&spec, &w, &batch).unwrap().new_state_root,
+            compute_keccak_mpt_state_root(&full)
+        );
 
         // A forged claim is rejected because the guest derives its own root.
         let mut claim = w.clone();
         claim.new_state_root = B256::repeat_byte(0x42);
-        assert!(matches!(verify_batch(&spec, &claim, &batch), Err(VerifyError::ClaimedRootMismatch { .. })));
+        assert!(matches!(
+            verify_batch(&spec, &claim, &batch),
+            Err(VerifyError::ClaimedRootMismatch { .. })
+        ));
     }
 }
 
@@ -560,7 +679,7 @@ mod c10 {
         assert_eq!(st.deposit_cursor(), dep.position());
         // The ledger stays two slots (total, cursor) regardless of how many
         // deposits were minted; the burn slot is only written when the EVM burns.
-        let ledger = &st.db.cache.accounts[&spec.supply_ledger];
+        let ledger = &st.db().cache.accounts[&spec.supply_ledger];
         assert_eq!(ledger.storage.len(), 2);
 
         // The cursor is committed: same balances, different positions -> different roots.
@@ -579,7 +698,9 @@ mod c12 {
     use super::common::*;
     use alloy_primitives::{address, B256, U256};
     use alloy_trie::Nibbles;
-    use bloch_l2_evm::{generate_batch_witness, hydrate_and_verify, BatchWitness, ChainSpec, VerifyError, WitnessAccount, WitnessError};
+    use bloch_l2_evm::{
+        generate_batch_witness, hydrate_and_verify, BatchWitness, ChainSpec, VerifyError, WitnessAccount, WitnessError,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -609,7 +730,10 @@ mod c12 {
             pre_accounts: vec![],
             absent_accounts: vec![],
         };
-        assert!(matches!(hydrate_and_verify(&empty), Err(VerifyError::Witness(WitnessError::RootMismatch { .. }))));
+        assert!(matches!(
+            hydrate_and_verify(&empty),
+            Err(VerifyError::Witness(WitnessError::RootMismatch { .. }))
+        ));
     }
 }
 
@@ -651,8 +775,14 @@ mod c11 {
             .build()
             .expect("tx");
         let out = exec_next(&spec, &mut state, vec![], vec![tx]).expect("block");
-        assert!(out.tx_outcomes[0].success, "the selfdestruct-to-self CREATE is a valid, successful tx");
-        assert!(state.account(&ALICE.create(0)).is_none(), "EIP-6780: account created in-tx is destroyed");
+        assert!(
+            out.tx_outcomes[0].success,
+            "the selfdestruct-to-self CREATE is a valid, successful tx"
+        );
+        assert!(
+            state.account(&ALICE.create(0)).is_none(),
+            "EIP-6780: account created in-tx is destroyed"
+        );
 
         // The burn is measured, reported and committed.
         assert_eq!(out.tx_outcomes[0].burned_wei, value);
@@ -661,17 +791,34 @@ mod c11 {
         let minted = state.total_minted_wei();
         let native = state.total_native_wei();
         assert_eq!(native, minted - state.total_burned_wei(), "native == minted - burned");
-        assert_eq!(minted - native, value, "exactly the self-destructed value vanished, nothing else");
+        assert_eq!(
+            minted - native,
+            value,
+            "exactly the self-destructed value vanished, nothing else"
+        );
         let root = compute_keccak_mpt_state_root(&state);
-        state.db.insert_account_storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, U256::ZERO).unwrap();
-        assert_ne!(compute_keccak_mpt_state_root(&state), root, "the burn total is part of the state root");
+        state
+            .db_mut()
+            .insert_account_storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, U256::ZERO)
+            .unwrap();
+        assert_ne!(
+            compute_keccak_mpt_state_root(&state),
+            root,
+            "the burn total is part of the state root"
+        );
 
         // A block without burns reports zero and keeps the total.
-        state.db.insert_account_storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, value).unwrap();
+        state
+            .db_mut()
+            .insert_account_storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, value)
+            .unwrap();
         let out = exec_next(&spec, &mut state, vec![], vec![transfer(ALICE, BOB, 1, wei(1), 21_000)]).unwrap();
         assert_eq!(out.burned_wei, U256::ZERO);
         assert_eq!(state.total_burned_wei(), value);
-        assert_eq!(state.total_native_wei(), state.total_minted_wei() - state.total_burned_wei());
+        assert_eq!(
+            state.total_native_wei(),
+            state.total_minted_wei() - state.total_burned_wei()
+        );
     }
 }
 
@@ -696,31 +843,64 @@ mod c13 {
         // A first block must carry the initial base fee.
         {
             let mut s = state.clone();
-            let ctx = BlockContext { number: 0, timestamp: 1_000, base_fee_per_gas: 7, ..Default::default() };
-            let err = execute_block(&spec, &mut s, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::InvalidBaseFee { expected, got: 7 } if expected == spec.initial_base_fee));
+            let ctx = BlockContext {
+                number: 0,
+                timestamp: 1_000,
+                base_fee_per_gas: 7,
+                ..Default::default()
+            };
+            let err = execute_block(
+                &spec,
+                &mut s,
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![],
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, BlockExecutionError::InvalidBaseFee { expected, got: 7 } if expected == spec.initial_base_fee)
+            );
         }
 
-        // Genesis: block 0, timestamp 1000, base fee = initial_base_fee, gas_used 0.
+        // Genesis: block 0, timestamp 1000, base fee = initial_base_fee; its one
+        // deposit is metered gas.
         let genesis = execute_block(
             &spec,
             &mut state,
             BlockInput {
-                context: BlockContext { number: 0, timestamp: 1_000, base_fee_per_gas: spec.initial_base_fee, ..Default::default() },
+                context: BlockContext {
+                    number: 0,
+                    timestamp: 1_000,
+                    base_fee_per_gas: spec.initial_base_fee,
+                    ..Default::default()
+                },
                 deposits: vec![deposit(ALICE, 10 * SATS_PER_BLCH)],
                 txs: vec![],
             },
         )
         .expect("genesis executes");
         let head = state.head().expect("head record committed");
-        assert_eq!((head.number, head.timestamp, head.base_fee_per_gas, head.gas_used), (0, 1_000, spec.initial_base_fee, 0));
+        assert_eq!(
+            (head.number, head.timestamp, head.base_fee_per_gas, head.gas_used),
+            (0, 1_000, spec.initial_base_fee, spec.deposit_gas)
+        );
         assert_eq!(head.deposits_hash, genesis.deposits_hash);
 
-        let expected_bf = spec.next_base_fee(spec.initial_base_fee, 0);
+        let expected_bf = spec.next_base_fee(spec.initial_base_fee, genesis.gas_used);
         assert_ne!(expected_bf, spec.initial_base_fee, "an empty block moves the base fee");
-        let good = BlockContext { number: 1, timestamp: 1_002, base_fee_per_gas: expected_bf, ..Default::default() };
+        let good = BlockContext {
+            number: 1,
+            timestamp: 1_002,
+            base_fee_per_gas: expected_bf,
+            ..Default::default()
+        };
         let derived = BlockContext::next(&spec, &state);
-        assert_eq!((derived.number, derived.base_fee_per_gas), (good.number, good.base_fee_per_gas));
+        assert_eq!(
+            (derived.number, derived.base_fee_per_gas),
+            (good.number, good.base_fee_per_gas)
+        );
         let tx = |nonce: u64| {
             TxEnv::builder()
                 .caller(ALICE)
@@ -738,8 +918,20 @@ mod c13 {
         for bad_bf in [0u64, spec.initial_base_fee, 5 * GWEI as u64] {
             let mut s = state.clone();
             let before = fingerprint(&s);
-            let ctx = BlockContext { base_fee_per_gas: bad_bf, ..good.clone() };
-            let err = execute_block(&spec, &mut s, BlockInput { context: ctx, deposits: vec![], txs: vec![tx(0)] }).unwrap_err();
+            let ctx = BlockContext {
+                base_fee_per_gas: bad_bf,
+                ..good.clone()
+            };
+            let err = execute_block(
+                &spec,
+                &mut s,
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![tx(0)],
+                },
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, BlockExecutionError::InvalidBaseFee { expected, got } if expected == expected_bf && got == bad_bf),
                 "base fee {bad_bf} != next_base_fee {expected_bf} must be rejected, got {err}"
@@ -748,8 +940,20 @@ mod c13 {
         }
         for bad_number in [0u64, 2, 7] {
             let mut s = state.clone();
-            let ctx = BlockContext { number: bad_number, ..good.clone() };
-            let err = execute_block(&spec, &mut s, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).unwrap_err();
+            let ctx = BlockContext {
+                number: bad_number,
+                ..good.clone()
+            };
+            let err = execute_block(
+                &spec,
+                &mut s,
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![],
+                },
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, BlockExecutionError::InvalidBlockNumber { expected: 1, got } if got == bad_number),
                 "block number {bad_number} after parent 0 must be rejected, got {err}"
@@ -757,24 +961,74 @@ mod c13 {
         }
         {
             let mut s = state.clone();
-            let ctx = BlockContext { timestamp: 999, ..good.clone() };
-            let err = execute_block(&spec, &mut s, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::InvalidTimestamp { parent: 1_000, got: 999 }), "{err}");
+            let ctx = BlockContext {
+                timestamp: 999,
+                ..good.clone()
+            };
+            let err = execute_block(
+                &spec,
+                &mut s,
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![],
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    BlockExecutionError::InvalidTimestamp {
+                        parent: 1_000,
+                        got: 999
+                    }
+                ),
+                "{err}"
+            );
             // Equal timestamps are allowed (2s blocks may share a second).
-            let ctx = BlockContext { timestamp: 1_000, ..good.clone() };
-            execute_block(&spec, &mut s, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).expect("equal timestamp is valid");
+            let ctx = BlockContext {
+                timestamp: 1_000,
+                ..good.clone()
+            };
+            execute_block(
+                &spec,
+                &mut s,
+                BlockInput {
+                    context: ctx,
+                    deposits: vec![],
+                    txs: vec![],
+                },
+            )
+            .expect("equal timestamp is valid");
         }
-        let out = execute_block(&spec, &mut state, BlockInput { context: good, deposits: vec![], txs: vec![tx(0)] })
-            .expect("conforming header executes");
+        let out = execute_block(
+            &spec,
+            &mut state,
+            BlockInput {
+                context: good,
+                deposits: vec![],
+                txs: vec![tx(0)],
+            },
+        )
+        .expect("conforming header executes");
         assert_eq!(out.base_fee_per_gas, expected_bf);
         assert_eq!(out.base_fee_routed_wei, U256::from(expected_bf) * U256::from(21_000u64));
-        assert_eq!(state.balance_of(&spec.base_fee_vault), U256::from(expected_bf) * U256::from(21_000u64));
-        assert_eq!(out.header.parent_hash, genesis.block_hash, "header links to the committed parent");
+        assert_eq!(
+            state.balance_of(&spec.base_fee_vault),
+            U256::from(expected_bf) * U256::from(21_000u64)
+        );
+        assert_eq!(
+            out.header.parent_hash, genesis.block_hash,
+            "header links to the committed parent"
+        );
         assert_ne!(out.block_hash, B256::ZERO);
         let head = state.head().unwrap();
         assert_eq!((head.number, head.timestamp, head.gas_used), (1, 1_002, 21_000));
         // The next base fee now follows the gas actually used.
-        assert_eq!(BlockContext::next(&spec, &state).base_fee_per_gas, spec.next_base_fee(expected_bf, 21_000));
+        assert_eq!(
+            BlockContext::next(&spec, &state).base_fee_per_gas,
+            spec.next_base_fee(expected_bf, 21_000)
+        );
     }
 }
 
@@ -818,15 +1072,30 @@ mod c15 {
         );
         assert_eq!(fingerprint(&state), before);
         assert_eq!(state.balance_of(&BOB), U256::ZERO, "no value may move on a rejected tx");
-        assert_eq!(state.nonce_of(&ALICE), 0, "sender nonce must not advance on a rejected tx");
+        assert_eq!(
+            state.nonce_of(&ALICE),
+            0,
+            "sender nonce must not advance on a rejected tx"
+        );
 
         // A transaction for another chain is rejected at the same boundary.
         let err = exec_next(&spec, &mut state, vec![], vec![legacy(Some(1))]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got: Some(1) }), "{err}");
+        assert!(
+            matches!(
+                err,
+                BlockExecutionError::ChainIdMismatch {
+                    tx_index: 0,
+                    got: Some(1)
+                }
+            ),
+            "{err}"
+        );
         let mut foreign_1559 = transfer(ALICE, BOB, 0, U256::ZERO, 21_000);
         foreign_1559.chain_id = Some(spec.chain_id + 1);
         let err = exec_next(&spec, &mut state, vec![], vec![foreign_1559]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got: Some(c) } if c == spec.chain_id + 1));
+        assert!(
+            matches!(err, BlockExecutionError::ChainIdMismatch { tx_index: 0, got: Some(c) } if c == spec.chain_id + 1)
+        );
         assert_eq!(fingerprint(&state), before);
 
         let out = exec_next(&spec, &mut state, vec![], vec![legacy(Some(spec.chain_id))])
@@ -858,9 +1127,15 @@ mod c16 {
             let code = Bytecode::new_raw(Bytes::from_static(&[
                 0x60, 0x00, 0x40, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
             ]));
-            s.db.insert_account_info(
+            s.db_mut().insert_account_info(
                 PROBE,
-                AccountInfo { balance: U256::ZERO, nonce: 1, code_hash: code.hash_slow(), code: Some(code), ..Default::default() },
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 1,
+                    code_hash: code.hash_slow(),
+                    code: Some(code),
+                    ..Default::default()
+                },
             );
             // The chain's first block is number 0 here.
             let out0 = execute_block(&spec, &mut s, block(0, deposits, vec![])).unwrap();
@@ -886,7 +1161,10 @@ mod c16 {
         }
 
         let (mut a, hash0_a) = chain(vec![deposit(ALICE, 10 * SATS_PER_BLCH)]);
-        let (mut b, hash0_b) = chain(vec![deposit(ALICE, 10 * SATS_PER_BLCH), deposit(Address::from([0x99; 20]), 5)]);
+        let (mut b, hash0_b) = chain(vec![
+            deposit(ALICE, 10 * SATS_PER_BLCH),
+            deposit(Address::from([0x99; 20]), 5),
+        ]);
         assert_ne!(
             bloch_l2_evm::compute_keccak_mpt_state_root(&a),
             bloch_l2_evm::compute_keccak_mpt_state_root(&b),
@@ -897,21 +1175,39 @@ mod c16 {
         let head_a = a.head().unwrap();
         assert_eq!(
             hash0_a,
-            L2Header::from_head(ChainSpec::testnet().chain_id, &head_a, bloch_l2_evm::compute_keccak_mpt_state_root(&a)).hash()
+            L2Header::from_head(
+                ChainSpec::testnet().chain_id,
+                &head_a,
+                bloch_l2_evm::compute_keccak_mpt_state_root(&a)
+            )
+            .hash()
         );
 
         let ha = blockhash0_at_block1(&mut a);
         let hb = blockhash0_at_block1(&mut b);
 
         let placeholder = keccak256(b"0");
-        assert_ne!(ha, placeholder, "BLOCKHASH(0) must not be revm EmptyDB's keccak256(\"0\") placeholder");
-        assert_ne!(hb, placeholder, "BLOCKHASH(0) must not be revm EmptyDB's keccak256(\"0\") placeholder");
-        assert_ne!(ha, hb, "BLOCKHASH(0) must differ between two chains whose block 0 differs");
+        assert_ne!(
+            ha, placeholder,
+            "BLOCKHASH(0) must not be revm EmptyDB's keccak256(\"0\") placeholder"
+        );
+        assert_ne!(
+            hb, placeholder,
+            "BLOCKHASH(0) must not be revm EmptyDB's keccak256(\"0\") placeholder"
+        );
+        assert_ne!(
+            ha, hb,
+            "BLOCKHASH(0) must differ between two chains whose block 0 differs"
+        );
         assert_eq!(ha, hash0_a, "BLOCKHASH(0) is the hash of the executed block 0");
         assert_eq!(hb, hash0_b);
         assert_eq!(a.block_hash(0), Some(hash0_a), "the ring buffer commits the hash");
-        assert_eq!(a.head().unwrap().parent_hash, hash0_a, "block 1's record links to block 0");
-        assert_ne!(a.db.cache.block_hashes.get(&U256::ZERO), Some(&placeholder));
+        assert_eq!(
+            a.head().unwrap().parent_hash,
+            hash0_a,
+            "block 1's record links to block 0"
+        );
+        assert_ne!(a.db().cache.block_hashes.get(&U256::ZERO), Some(&placeholder));
     }
 }
 
@@ -936,8 +1232,14 @@ mod c17 {
         let spec = ChainSpec::testnet();
         let mut state = L2State::genesis(&spec);
 
-        let acct = state.account(&BEACON_ROOTS_ADDRESS).expect("EIP-4788 beacon-roots predeploy must exist at genesis");
-        assert_eq!(acct.code_hash, keccak256(BEACON_ROOTS_CODE), "canonical EIP-4788 bytecode");
+        let acct = state
+            .account(&BEACON_ROOTS_ADDRESS)
+            .expect("EIP-4788 beacon-roots predeploy must exist at genesis");
+        assert_eq!(
+            acct.code_hash,
+            keccak256(BEACON_ROOTS_CODE),
+            "canonical EIP-4788 bytecode"
+        );
         assert_eq!(acct.nonce, 1);
 
         let get = |nonce: u64, ts: u64| {
@@ -958,7 +1260,12 @@ mod c17 {
             &spec,
             &mut state,
             BlockInput {
-                context: BlockContext { number: 1, timestamp: T, anchor_root: anchor, ..BlockContext::default() },
+                context: BlockContext {
+                    number: 1,
+                    timestamp: T,
+                    anchor_root: anchor,
+                    ..BlockContext::default()
+                },
                 deposits: vec![deposit(ALICE, 10 * SATS_PER_BLCH)],
                 txs: vec![get(0, T), get(1, T + 1)],
             },
@@ -966,15 +1273,30 @@ mod c17 {
         .expect("block executes");
 
         let same_ts = &out.tx_outcomes[0];
-        assert!(same_ts.success, "get(block.timestamp) must succeed after the EIP-4788 system call");
-        assert_eq!(same_ts.result.output().map(|b| b.as_ref()), Some(anchor.as_slice()), "get() returns the anchor root");
+        assert!(
+            same_ts.success,
+            "get(block.timestamp) must succeed after the EIP-4788 system call"
+        );
+        assert_eq!(
+            same_ts.result.output().map(|b| b.as_ref()),
+            Some(anchor.as_slice()),
+            "get() returns the anchor root"
+        );
         let other_ts = &out.tx_outcomes[1];
         assert!(!other_ts.success, "get(unknown ts) must revert per EIP-4788");
 
-        let slots = &state.db.cache.accounts[&BEACON_ROOTS_ADDRESS].storage;
+        let slots = &state.db().cache.accounts[&BEACON_ROOTS_ADDRESS].storage;
         let ts_slot = U256::from(T % 8191);
-        assert_eq!(slots.get(&ts_slot).copied().unwrap_or_default(), U256::from(T), "timestamps[ts % 8191] == ts");
-        assert_eq!(slots.get(&(ts_slot + U256::from(8191u64))).copied().unwrap_or_default(), U256::from_be_bytes(anchor.0), "roots[ts % 8191] == anchor");
+        assert_eq!(
+            slots.get(&ts_slot).copied().unwrap_or_default(),
+            U256::from(T),
+            "timestamps[ts % 8191] == ts"
+        );
+        assert_eq!(
+            slots.get(&(ts_slot + U256::from(8191u64))).copied().unwrap_or_default(),
+            U256::from_be_bytes(anchor.0),
+            "roots[ts % 8191] == anchor"
+        );
         assert_eq!(out.header.anchor_root, anchor);
         assert_eq!(state.head().unwrap().anchor_root, anchor);
 
@@ -983,7 +1305,10 @@ mod c17 {
         let mut lazy = L2State::new();
         assert!(lazy.account(&BEACON_ROOTS_ADDRESS).is_none());
         exec_next(&spec, &mut lazy, vec![], vec![]).unwrap();
-        assert_eq!(lazy.account(&BEACON_ROOTS_ADDRESS).unwrap().code_hash, keccak256(BEACON_ROOTS_CODE));
+        assert_eq!(
+            lazy.account(&BEACON_ROOTS_ADDRESS).unwrap().code_hash,
+            keccak256(BEACON_ROOTS_CODE)
+        );
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
     }
 }
@@ -1004,9 +1329,19 @@ mod c18 {
         let mut a = L2State::new();
         exec_next(&spec, &mut a, vec![deposit(ALICE, 5 * BLCH)], vec![]).unwrap();
         let root = compute_keccak_mpt_state_root(&a);
-        a.db.insert_account_storage(SUPPLY_LEDGER, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, U256::from(1u64)).unwrap();
-        assert_ne!(compute_keccak_mpt_state_root(&a), root, "ledger total is part of the root");
-        assert_eq!(a.total_minted_wei(), U256::from(1u64), "ledger is read from committed storage");
+        a.db_mut()
+            .insert_account_storage(SUPPLY_LEDGER, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, U256::from(1u64))
+            .unwrap();
+        assert_ne!(
+            compute_keccak_mpt_state_root(&a),
+            root,
+            "ledger total is part of the root"
+        );
+        assert_eq!(
+            a.total_minted_wei(),
+            U256::from(1u64),
+            "ledger is read from committed storage"
+        );
 
         // In the stateless path the ledger account is hydrated and the guest's
         // deposit accounting matches the host's.
@@ -1014,8 +1349,15 @@ mod c18 {
         let host_total = pre.total_minted_wei();
         let batch = next(&pre, vec![deposit(BOB, 2 * BLCH)], vec![]);
         let (w, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).unwrap();
-        let ledger = w.pre_accounts.iter().find(|a| a.address == spec.supply_ledger).expect("ledger hydrated");
-        assert!(ledger.storage.iter().any(|(k, v)| *k == SUPPLY_LEDGER_TOTAL_MINTED_SLOT && *v == host_total));
+        let ledger = w
+            .pre_accounts
+            .iter()
+            .find(|a| a.address == spec.supply_ledger)
+            .expect("ledger hydrated");
+        assert!(ledger
+            .storage
+            .iter()
+            .any(|(k, v)| *k == SUPPLY_LEDGER_TOTAL_MINTED_SLOT && *v == host_total));
         let verified = verify_batch(&spec, &w, &batch).unwrap();
         assert_eq!(verified.minted_wei, outcome.minted_wei);
         assert_eq!(verified.minted_wei, wei(2));
@@ -1034,14 +1376,24 @@ mod c19 {
         let mut st = L2State::new();
         for sats in [spec.max_l1_sats + 1, u64::MAX] {
             let err = exec_next(&spec, &mut st, vec![deposit(ALICE, sats)], vec![]).unwrap_err();
-            assert!(matches!(err, BlockExecutionError::Deposit(DepositError::ExceedsL1Supply { .. })), "{err}");
+            assert!(
+                matches!(err, BlockExecutionError::Deposit(DepositError::ExceedsL1Supply { .. })),
+                "{err}"
+            );
         }
         assert_eq!(fingerprint(&st), fingerprint(&L2State::new()));
         exec_next(&spec, &mut st, vec![deposit(ALICE, spec.max_l1_sats)], vec![]).unwrap();
         let err = exec_next(&spec, &mut st, vec![deposit(BOB, 1)], vec![]).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::Deposit(DepositError::CumulativeSupplyExceeded { .. })));
+        assert!(matches!(
+            err,
+            BlockExecutionError::Deposit(DepositError::CumulativeSupplyExceeded { .. })
+        ));
         let d = deposit(BOB, 7);
-        assert_eq!(d.mint_wei(), bloch_l2_evm::sats_to_wei(7), "credit is derived from l1_sats");
+        assert_eq!(
+            d.mint_wei(),
+            bloch_l2_evm::sats_to_wei(7),
+            "credit is derived from l1_sats"
+        );
     }
 }
 
@@ -1062,9 +1414,21 @@ mod c20 {
             runtime.extend_from_slice(&[0x60, i, 0x60, i, 0x55]);
         }
         runtime.push(0x00);
-        let out = exec_next(&spec, &mut pre, vec![], vec![create(alice, 0, deployer(&runtime), 400_000)]).unwrap();
+        let out = exec_next(
+            &spec,
+            &mut pre,
+            vec![],
+            vec![create(alice, 0, deployer(&runtime), 400_000)],
+        )
+        .unwrap();
         let contract = out.tx_outcomes[0].created_address.unwrap();
-        exec_next(&spec, &mut pre, vec![], vec![call_data(alice, contract, 1, Bytes::new(), 400_000)]).unwrap();
+        exec_next(
+            &spec,
+            &mut pre,
+            vec![],
+            vec![call_data(alice, contract, 1, Bytes::new(), 400_000)],
+        )
+        .unwrap();
 
         let batch = next(&pre, vec![], vec![call_data(alice, contract, 2, Bytes::new(), 400_000)]);
         let (w1, _) = generate_batch_witness(&pre, &spec, batch.clone()).unwrap();
@@ -1094,14 +1458,20 @@ mod c21 {
         [0x00u8].as_slice().encode(&mut payload);
         child.encode(&mut payload);
         let mut rlp = Vec::new();
-        alloy_rlp::Header { list: true, payload_length: payload.len() }.encode(&mut rlp);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut rlp);
         rlp.extend(payload);
         let root = keccak256(&rlp);
         let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
         proof.insert(Nibbles::default(), rlp.into());
         assert_eq!(
             stateless_new_root(root, &proof, &BTreeMap::new()),
-            Err(WitnessError::EmptyExtensionKey { path: Nibbles::default() })
+            Err(WitnessError::EmptyExtensionKey {
+                path: Nibbles::default()
+            })
         );
     }
 }
@@ -1118,7 +1488,11 @@ mod c22 {
     fn list(items: &[Vec<u8>]) -> Vec<u8> {
         let payload: Vec<u8> = items.iter().flatten().copied().collect();
         let mut out = Vec::new();
-        alloy_rlp::Header { list: true, payload_length: payload.len() }.encode(&mut out);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut out);
         out.extend(payload);
         out
     }
@@ -1126,7 +1500,10 @@ mod c22 {
     #[test]
     fn stateless_new_root_rejects_over_capacity_proof_without_panicking() {
         // (a) root = extension with a 64-nibble key whose child is a branch.
-        let branch_children: Vec<Vec<u8>> = (0..16).map(|_| alloy_rlp::encode(&[] as &[u8])).chain([alloy_rlp::encode(&[] as &[u8])]).collect();
+        let branch_children: Vec<Vec<u8>> = (0..16)
+            .map(|_| alloy_rlp::encode(&[] as &[u8]))
+            .chain([alloy_rlp::encode(&[] as &[u8])])
+            .collect();
         let branch = list(&branch_children);
         let mut ext_items = Vec::new();
         let key = Nibbles::from_nibbles(vec![1u8; 64]);
@@ -1157,7 +1534,10 @@ mod c22 {
         ));
 
         // (c) compact key longer than 33 bytes: rejected before alloy-trie decodes.
-        let node = list(&[alloy_rlp::encode([0x20u8; 34].as_slice()), alloy_rlp::encode([0x01u8].as_slice())]);
+        let node = list(&[
+            alloy_rlp::encode([0x20u8; 34].as_slice()),
+            alloy_rlp::encode([0x01u8].as_slice()),
+        ]);
         let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
         proof.insert(Nibbles::default(), node.clone().into());
         assert!(matches!(
@@ -1174,7 +1554,9 @@ mod c23 {
     use super::common::*;
     use alloy_primitives::{keccak256, Bytes, U256};
     use alloy_trie::Nibbles;
-    use bloch_l2_evm::{generate_batch_witness, hydrate_and_verify, stateless_new_root, ChainSpec, VerifyError, WitnessError};
+    use bloch_l2_evm::{
+        generate_batch_witness, hydrate_and_verify, stateless_new_root, ChainSpec, VerifyError, WitnessError,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -1211,12 +1593,18 @@ mod c23 {
         // EIP-7702 magic prefix in a pre-account's code: an error, not a panic.
         let mut bad_code = w.clone();
         bad_code.pre_accounts[0].code = vec![0xef, 0x01, 0x00];
-        assert!(matches!(hydrate_and_verify(&bad_code), Err(VerifyError::InvalidCode(_))));
+        assert!(matches!(
+            hydrate_and_verify(&bad_code),
+            Err(VerifyError::InvalidCode(_))
+        ));
 
         // Zero-valued / unsorted storage entries are rejected.
         let mut bad_storage = w.clone();
         bad_storage.pre_accounts[0].storage = vec![(U256::from(1u64), U256::ZERO)];
-        assert!(matches!(hydrate_and_verify(&bad_storage), Err(VerifyError::InvalidStorage(..))));
+        assert!(matches!(
+            hydrate_and_verify(&bad_storage),
+            Err(VerifyError::InvalidStorage(..))
+        ));
     }
 }
 
@@ -1293,33 +1681,43 @@ mod c25 {
             .unwrap();
         let before = st.balance_of(&spec.sequencer_fee_vault);
         let out = exec_next(&spec, &mut st, vec![], vec![legacy]).unwrap();
-        assert_eq!(out.priority_fee_routed_wei, st.balance_of(&spec.sequencer_fee_vault) - before);
+        assert_eq!(
+            out.priority_fee_routed_wei,
+            st.balance_of(&spec.sequencer_fee_vault) - before
+        );
         assert_eq!(
             out.priority_fee_routed_wei,
             U256::from(3 * GWEI - out.base_fee_per_gas as u128) * U256::from(21_000u64),
             "legacy tip = gas_price - block base fee"
         );
         let before = st.balance_of(&spec.sequencer_fee_vault);
-        let out = exec_next(&spec, &mut st, vec![], vec![transfer(ALICE, BOB, 1, U256::ZERO, 21_000)]).unwrap();
-        assert_eq!(out.priority_fee_routed_wei, st.balance_of(&spec.sequencer_fee_vault) - before);
+        let out = exec_next(
+            &spec,
+            &mut st,
+            vec![],
+            vec![transfer(ALICE, BOB, 1, U256::ZERO, 21_000)],
+        )
+        .unwrap();
+        assert_eq!(
+            out.priority_fee_routed_wei,
+            st.balance_of(&spec.sequencer_fee_vault) - before
+        );
         assert_eq!(st.total_native_wei(), st.total_minted_wei());
     }
 }
 
-/// C26 [low] — L2State account views report EIP-161-empty (touched-empty) accounts as existing while the committed state root excludes them; touched-empty accounts and zero-valued storage slots are never pruned
+/// C26 [low, FIXED] — one EIP-161 existence predicate is shared by the views,
+/// the state root, the witness and the pruning: touched-empty accounts are
+/// reported absent and never persist in the live state, and zero-valued slots
+/// are pruned when a block is applied.
 mod c26 {
-    #![allow(unused_imports, dead_code, unused_variables, unused_mut, non_snake_case)]
     use super::common::*;
     use alloy_primitives::{address, Address, Bytes, TxKind, U256};
-    use bloch_l2_evm::{execute_block, sats_to_wei, BlockContext, BlockInput, ChainSpec, L2State};
+    use bloch_l2_evm::{compute_keccak_mpt_state_root, ChainSpec, L2State};
     use revm::context::TxEnv;
     use revm::database::AccountState;
 
-    /// C26: touched-empty (EIP-161-empty) accounts must not be reported as existing by the
-    /// account views, must not be counted by `total_native_wei`, and must not persist in the
-    /// live state after a block — exactly as the committed state root already treats them.
     #[test]
-    #[ignore = "AUDIT C26 (low): fails until the finding is fixed"]
     fn c26_touched_empty_accounts_do_not_exist_in_views_and_are_pruned() {
         const GHOST: Address = address!("0000000000000000000000000000000000060057");
         const ECRECOVER: Address = address!("0000000000000000000000000000000000000001");
@@ -1341,134 +1739,231 @@ mod c26 {
         };
 
         let mut state = L2State::new();
-        // A 0-sat deposit is exact but must not materialise BOB. (Fixed.)
+        // A 0-sat deposit is exact but must not materialise BOB.
         state.deposit_mint(&spec, &deposit(BOB, 0)).unwrap();
-        assert!(state.account(&BOB).is_none(), "0-sat deposit must not create an account");
+        assert!(
+            state.account(&BOB).is_none(),
+            "0-sat deposit must not create an account"
+        );
 
         // Zero-value CALLs to a fresh address and to a precompile (EIP-161 touches).
-        let out = exec_next(&spec, &mut state, vec![deposit(ALICE, 1_000_000_000)], vec![call(GHOST, 0, 21_000), call(ECRECOVER, 1, 100_000)])
+        let out = exec_next(
+            &spec,
+            &mut state,
+            vec![deposit(ALICE, 1_000_000_000)],
+            vec![call(GHOST, 0, 21_000), call(ECRECOVER, 1, 100_000)],
+        )
         .unwrap();
         assert!(out.tx_outcomes.iter().all(|t| t.success));
 
-        assert!(state.account(&GHOST).is_none(), "touched-empty account reported as existing");
-        assert!(state.account(&ECRECOVER).is_none(), "touched precompile reported as existing");
+        assert!(
+            state.account(&GHOST).is_none(),
+            "touched-empty account reported as existing"
+        );
+        assert!(
+            state.account(&ECRECOVER).is_none(),
+            "touched precompile reported as existing"
+        );
         assert!(state.account(&BOB).is_none());
         assert_eq!(state.balance_of(&GHOST), U256::ZERO);
         assert_eq!(state.nonce_of(&GHOST), 0);
 
         for a in [GHOST, ECRECOVER, BOB] {
             let persisted = state
-                .db
+                .db()
                 .cache
                 .accounts
                 .get(&a)
                 .map_or(false, |acc| acc.account_state != AccountState::NotExisting);
             assert!(!persisted, "touched-empty account {a} persists in the live state");
         }
-        for (addr, acc) in &state.db.cache.accounts {
-            if let Some(view) = state.account(addr) {
-                assert!(
-                    view.nonce != 0 || !view.balance.is_zero() || view.code_hash != revm::primitives::KECCAK_EMPTY,
-                    "view reports EIP-161-empty account {addr} as existing (state={:?})",
-                    acc.account_state
-                );
-            }
+        for (addr, acc) in &state.db().cache.accounts {
+            let view = state
+                .account(addr)
+                .unwrap_or_else(|| panic!("no ghost entries survive a block: {addr}"));
+            assert!(
+                view.nonce != 0 || !view.balance.is_zero() || view.code_hash != revm::primitives::KECCAK_EMPTY,
+                "view reports EIP-161-empty account {addr} as existing (state={:?})",
+                acc.account_state
+            );
         }
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
+
+        // Zero-valued slots: a contract that writes slot 1 to 1 and back to 0 in
+        // one transaction, then only reads it — neither write-to-zero nor
+        // read-only slots are kept, and the live state equals what the root sees.
+        // runtime: PUSH1 1 PUSH1 1 SSTORE PUSH1 0 PUSH1 1 SSTORE PUSH1 1 SLOAD POP STOP
+        let runtime = [
+            0x60, 0x01, 0x60, 0x01, 0x55, 0x60, 0x00, 0x60, 0x01, 0x55, 0x60, 0x01, 0x54, 0x50, 0x00,
+        ];
+        let out = exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![create(ALICE, 2, deployer(&runtime), 200_000)],
+        )
+        .unwrap();
+        let contract = out.tx_outcomes[0].created_address.unwrap();
+        exec_next(
+            &spec,
+            &mut state,
+            vec![],
+            vec![call_data(ALICE, contract, 3, Bytes::new(), 100_000)],
+        )
+        .unwrap();
+        let slots = &state.db().cache.accounts[&contract].storage;
+        assert!(
+            !slots.contains_key(&U256::from(1u64)),
+            "a slot written back to zero is pruned"
+        );
+        for acc in state.db().cache.accounts.values() {
+            assert!(
+                acc.storage.values().all(|v| !v.is_zero()),
+                "no zero-valued slot survives a block"
+            );
+        }
+        assert_eq!(state.state_root(), compute_keccak_mpt_state_root(&state));
     }
 }
 
-/// C27 [low] — State root is rebuilt from scratch over the entire state on every block (and execute_block now also clones the state for atomicity)
+/// C27 [low, FIXED] — sealing a block costs O(what it touched), not O(state):
+/// the block runs on an overlay of the state (nothing is cloned) and the
+/// keccak-MPT root is maintained incrementally (account trie + per-account
+/// storage tries), so an empty block against an 8×-larger untouched state
+/// takes about the same time. Witness generation runs the batch once, never
+/// clones the pre-state and takes its proof from the same cached trie.
 mod c27 {
-    #![allow(unused_imports, dead_code, unused_variables, unused_mut, non_snake_case)]
-    use std::time::Instant;
     use alloy_primitives::{Address, U256};
     use bloch_l2_evm::scale::SATS_PER_BLCH;
-    use bloch_l2_evm::{execute_block, sats_to_wei, BlockContext, BlockInput, ChainSpec, DepositMint, DepositProvenance, L2State};
+    use bloch_l2_evm::{
+        compute_keccak_mpt_state_root, execute_block, BlockContext, BlockInput, ChainSpec, DepositMint,
+        DepositProvenance, L2State,
+    };
+    use std::time::Instant;
 
-    /// Fix-tracking (C27): sealing a block that touches nothing must NOT cost time
-    /// proportional to the total state size. Threshold is deliberately loose
-    /// (10x over a 160x size difference) to tolerate timing noise. Run in --release.
+    fn deposit(to: Address, sats: u64) -> DepositMint {
+        // Strictly increasing positions: addr(i) has i in its last 8 bytes
+        // (+1: position (0,0,0) is the "nothing consumed" cursor sentinel).
+        let mut h = [0u8; 8];
+        h.copy_from_slice(&to.as_slice()[12..20]);
+        DepositMint {
+            recipient: to,
+            provenance: DepositProvenance::BridgedBlch {
+                l1_height: u64::from_be_bytes(h) + 1,
+                l1_tx_index: 0,
+                l1_txid: [1; 32],
+                l1_vout: 0,
+                l1_sats: sats,
+            },
+        }
+    }
+    fn addr(i: u64) -> Address {
+        let mut b = [0u8; 20];
+        b[0] = 0xAA;
+        b[12..].copy_from_slice(&i.to_be_bytes());
+        Address::from(b)
+    }
+    /// `n_accounts` funded accounts plus one contract with `n_slots` slots,
+    /// commitment warm.
+    fn state_with(spec: &ChainSpec, n_accounts: u64, n_slots: u64) -> L2State {
+        let mut s = L2State::new();
+        for i in 0..n_accounts {
+            s.deposit_mint(spec, &deposit(addr(i), SATS_PER_BLCH)).unwrap();
+        }
+        let c = Address::from([0xCC; 20]);
+        s.deposit_mint(spec, &deposit(c, SATS_PER_BLCH)).unwrap();
+        // Storage planted directly invalidates the cached commitment: the next
+        // block rebuilds it once, from scratch (the cold path).
+        for k in 0..n_slots {
+            s.db_mut()
+                .insert_account_storage(c, U256::from(k), U256::from(k + 1))
+                .unwrap();
+        }
+        assert!(!s.is_warm() || n_slots == 0);
+        let ctx = BlockContext::next(spec, &s);
+        execute_block(
+            spec,
+            &mut s,
+            BlockInput {
+                context: ctx,
+                deposits: vec![],
+                txs: vec![],
+            },
+        )
+        .unwrap();
+        assert!(s.is_warm());
+        s
+    }
+    /// Median of five empty blocks, in seconds.
+    fn empty_block_secs(spec: &ChainSpec, s: &mut L2State) -> f64 {
+        let mut ts: Vec<f64> = (0..5)
+            .map(|_| {
+                let ctx = BlockContext::next(spec, s);
+                let t = Instant::now();
+                execute_block(
+                    spec,
+                    s,
+                    BlockInput {
+                        context: ctx,
+                        deposits: vec![],
+                        txs: vec![],
+                    },
+                )
+                .unwrap();
+                t.elapsed().as_secs_f64()
+            })
+            .collect();
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ts[2]
+    }
+    fn check(spec: &ChainSpec, small: (u64, u64), big: (u64, u64), factor: f64) {
+        let mut s = state_with(spec, small.0, small.1);
+        let mut b = state_with(spec, big.0, big.1);
+        let t_small = empty_block_secs(spec, &mut s);
+        let t_big = empty_block_secs(spec, &mut b);
+        assert!(
+            t_big < factor * t_small.max(2e-4),
+            "empty block against {:?} took {:.3} ms vs {:.3} ms against {:?} (x{:.1})",
+            big,
+            t_big * 1e3,
+            t_small * 1e3,
+            small,
+            t_big / t_small
+        );
+        // The incremental root is the real root.
+        assert_eq!(b.state_root(), compute_keccak_mpt_state_root(&b));
+        assert_eq!(s.state_root(), compute_keccak_mpt_state_root(&s));
+    }
+
     #[test]
-    #[ignore = "C27: per-block cost is O(total state)"]
-    fn c27_empty_block_time_must_not_scale_with_total_state_size() {
-        fn deposit(to: Address, sats: u64) -> DepositMint {
-            // Strictly increasing positions: addr(i) has i in its last 8 bytes
-            // (+1: position (0,0,0) is the "nothing consumed" cursor sentinel).
-            let mut h = [0u8; 8];
-            h.copy_from_slice(&to.as_slice()[12..20]);
-            DepositMint {
-                recipient: to,
-                provenance: DepositProvenance::BridgedBlch {
-                    l1_height: u64::from_be_bytes(h) + 1,
-                    l1_tx_index: 0,
-                    l1_txid: [1; 32],
-                    l1_vout: 0,
-                    l1_sats: sats,
-                },
-            }
-        }
-        fn addr(i: u64) -> Address {
-            let mut b = [0u8; 20];
-            b[0] = 0xAA;
-            b[12..].copy_from_slice(&i.to_be_bytes());
-            Address::from(b)
-        }
-        fn state_with(spec: &ChainSpec, n_accounts: u64, n_slots: u64) -> L2State {
-            let mut s = L2State::new();
-            let deposits = (0..n_accounts).map(|i| deposit(addr(i), SATS_PER_BLCH)).collect();
-            execute_block(spec, &mut s, BlockInput { context: BlockContext { number: 1, ..Default::default() }, deposits, txs: vec![] }).unwrap();
-            let c = Address::from([0xCC; 20]);
-            s.deposit_mint(spec, &deposit(c, SATS_PER_BLCH)).unwrap();
-            for k in 0..n_slots {
-                s.db.insert_account_storage(c, U256::from(k), U256::from(k + 1)).unwrap();
-            }
-            s
-        }
-        fn empty_block_secs(spec: &ChainSpec, s: &mut L2State) -> f64 {
-            let mut ts: Vec<f64> = (0..5)
-                .map(|i| {
-                    let _ = i;
-                    let ctx = BlockContext::next(spec, s);
-                    let t = Instant::now();
-                    execute_block(spec, s, BlockInput { context: ctx, deposits: vec![], txs: vec![] }).unwrap();
-                    t.elapsed().as_secs_f64()
-                })
-                .collect();
-            ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            ts[2]
-        }
-
+    fn c27_empty_block_time_does_not_scale_with_state_size() {
+        // 8× the state (accounts, then slots of an untouched contract) must not
+        // cost more than 4× per empty block; a from-scratch root costs ~8×.
         let spec = ChainSpec::testnet();
-        let mut small = state_with(&spec, 1_000, 0);
-        let mut big = state_with(&spec, 160_000, 0);
-        let t_small = empty_block_secs(&spec, &mut small);
-        let t_big = empty_block_secs(&spec, &mut big);
-        assert!(
-            t_big < 10.0 * t_small.max(1e-4),
-            "empty block against 160k accounts took {:.2} ms vs {:.2} ms against 1k accounts (x{:.1})",
-            t_big * 1e3, t_small * 1e3, t_big / t_small
-        );
-        let mut small = state_with(&spec, 10, 1_000);
-        let mut big = state_with(&spec, 10, 160_000);
-        let t_small = empty_block_secs(&spec, &mut small);
-        let t_big = empty_block_secs(&spec, &mut big);
-        assert!(
-            t_big < 10.0 * t_small.max(1e-4),
-            "empty block with an untouched 160k-slot contract took {:.2} ms vs {:.2} ms with 1k slots (x{:.1})",
-            t_big * 1e3, t_small * 1e3, t_big / t_small
-        );
+        check(&spec, (1_000, 0), (8_000, 0), 4.0);
+        check(&spec, (10, 1_000), (10, 8_000), 4.0);
+    }
+
+    /// The audit's own sizes (160 000 accounts / slots, 10× threshold over
+    /// 160× the state). Run with `--release`.
+    #[test]
+    #[ignore = "benchmark at the audit's sizes (160k): run with --release"]
+    fn c27_benchmark_at_audit_sizes() {
+        let spec = ChainSpec::testnet();
+        check(&spec, (1_000, 0), (160_000, 0), 10.0);
+        check(&spec, (10, 1_000), (10, 160_000), 10.0);
     }
 }
 
-/// C28 [low] — ChainSpec::gas_target / next_base_fee divide by the pub knobs without a zero check
+/// C28 [low, FIXED] — `ChainSpec::validate` rejects every degenerate knob and
+/// the executor refuses to run under an invalid spec; the fee helpers are total.
 mod c28 {
-    #![allow(unused_imports, dead_code, unused_variables, unused_mut, non_snake_case)]
-    use bloch_l2_evm::ChainSpec;
+    use super::common::*;
+    use alloy_primitives::U256;
+    use bloch_l2_evm::{BlockExecutionError, ChainSpec, ChainSpecError, L2State};
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
-    #[ignore = "AUDIT C28 (low): fails until the finding is fixed"]
     fn c28_chainspec_fee_helpers_are_total_for_zero_knobs() {
         let parent_bf = 1_000_000_000u64;
 
@@ -1478,31 +1973,78 @@ mod c28 {
         assert!(gt.is_ok(), "gas_target() must not panic for elasticity 0");
         for used in [0u64, 1, s.gas_limit / 2, s.gas_limit] {
             let r = catch_unwind(AssertUnwindSafe(|| s.next_base_fee(parent_bf, used)));
-            assert_eq!(r.ok(), Some(parent_bf), "next_base_fee must not panic for elasticity 0 (gas_used={used})");
+            assert_eq!(
+                r.ok(),
+                Some(parent_bf),
+                "next_base_fee must not panic for elasticity 0 (gas_used={used})"
+            );
         }
+        assert_eq!(s.validate(), Err(ChainSpecError::ZeroElasticity));
 
         let mut s = ChainSpec::testnet();
         s.base_fee_denominator = 0;
-        for used in [0u64, s.gas_target() - 1, s.gas_target(), s.gas_target() + 1, s.gas_limit] {
+        for used in [
+            0u64,
+            s.gas_target() - 1,
+            s.gas_target(),
+            s.gas_target() + 1,
+            s.gas_limit,
+        ] {
             let r = catch_unwind(AssertUnwindSafe(|| s.next_base_fee(parent_bf, used)));
-            assert_eq!(r.ok(), Some(parent_bf), "next_base_fee must not panic for denominator 0 (gas_used={used})");
+            assert_eq!(
+                r.ok(),
+                Some(parent_bf),
+                "next_base_fee must not panic for denominator 0 (gas_used={used})"
+            );
         }
+        assert_eq!(s.validate(), Err(ChainSpecError::ZeroDenominator));
 
         let mut s = ChainSpec::testnet();
         s.gas_limit = 1;
         s.base_fee_elasticity = 2;
         assert_eq!(s.next_base_fee(parent_bf, 0), parent_bf);
         assert_eq!(s.next_base_fee(parent_bf, 1), parent_bf);
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn c28_executor_refuses_an_invalid_chain_spec_before_touching_state() {
+        let mut st = L2State::new();
+        let before = fingerprint(&st);
+        let mut bad = ChainSpec::testnet();
+        bad.base_fee_elasticity = 0;
+        let err = exec_next(&bad, &mut st, vec![deposit(ALICE, 1)], vec![]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BlockExecutionError::InvalidChainSpec(ChainSpecError::ZeroElasticity)
+            ),
+            "{err}"
+        );
+        assert_eq!(fingerprint(&st), before);
+        // A block reward is a misconfiguration, never a payment.
+        let mut reward = ChainSpec::testnet();
+        reward.block_reward = U256::from(1u64);
+        let err = exec_next(&reward, &mut st, vec![], vec![]).unwrap_err();
+        assert!(matches!(
+            err,
+            BlockExecutionError::InvalidChainSpec(ChainSpecError::NonZeroBlockReward)
+        ));
+        assert_eq!(fingerprint(&st), before);
+        ChainSpec::testnet().validate().unwrap();
     }
 }
 
-/// C29 [low, partially FIXED] — a zero-sat deposit no longer materializes the
-/// recipient account. (Deposit metering per block remains open.)
+/// C29 [low, FIXED] — a zero-sat deposit does not materialize the recipient,
+/// and deposits are metered: each consumes `deposit_gas` of the block budget
+/// (fee-less), so a block carries at most `gas_limit / deposit_gas` of them,
+/// a full deposit block leaves no room for transactions, and deposit load
+/// moves the EIP-1559 base fee like user load.
 mod c29 {
     use super::common::*;
     use alloy_primitives::U256;
-    use bloch_l2_evm::{compute_keccak_mpt_state_root, ChainSpec, L2State};
     use alloy_trie::EMPTY_ROOT_HASH;
+    use bloch_l2_evm::{compute_keccak_mpt_state_root, BlockContext, BlockExecutionError, ChainSpec, L2State};
 
     #[test]
     fn zero_sat_deposit_does_not_create_an_account() {
@@ -1510,15 +2052,77 @@ mod c29 {
         let mut st = L2State::new();
         let out = exec_next(&spec, &mut st, (0..50).map(|_| deposit(BOB, 0)).collect(), vec![]).unwrap();
         assert_eq!(out.minted_wei, U256::ZERO);
-        assert!(st.account(&BOB).is_none(), "zero credit must not materialize an account");
-        assert!(!st.db.cache.accounts.contains_key(&BOB));
+        assert_eq!(
+            out.gas_used,
+            50 * spec.deposit_gas,
+            "even zero-sat deposits are metered"
+        );
+        assert!(
+            st.account(&BOB).is_none(),
+            "zero credit must not materialize an account"
+        );
+        assert!(!st.db().cache.accounts.contains_key(&BOB));
         // Only the ledger (total + cursor) and the two block-level system
         // accounts (EIP-4788 predeploy, head record) exist.
-        assert_eq!(st.db.cache.accounts.len(), 3);
-        for a in [spec.supply_ledger, spec.block_info, bloch_l2_evm::chainspec::BEACON_ROOTS_ADDRESS] {
+        assert_eq!(st.db().cache.accounts.len(), 3);
+        for a in [
+            spec.supply_ledger,
+            spec.block_info,
+            bloch_l2_evm::chainspec::BEACON_ROOTS_ADDRESS,
+        ] {
             assert!(st.account(&a).is_some(), "{a} exists");
         }
-        assert_ne!(compute_keccak_mpt_state_root(&st), EMPTY_ROOT_HASH, "the advanced cursor is committed");
+        assert_ne!(
+            compute_keccak_mpt_state_root(&st),
+            EMPTY_ROOT_HASH,
+            "the advanced cursor is committed"
+        );
+    }
+
+    #[test]
+    fn c29_deposits_are_metered_by_block_gas() {
+        let spec = ChainSpec::testnet();
+        let max = spec.max_deposits_per_block();
+        assert_eq!(max, 30_000_000 / 21_000);
+        let mut st = L2State::new();
+
+        // One deposit too many is rejected at the input boundary, state untouched.
+        let before = fingerprint(&st);
+        let err = exec_next(&spec, &mut st, (0..=max).map(|_| deposit(ALICE, 1)).collect(), vec![]).unwrap_err();
+        assert!(
+            matches!(err, BlockExecutionError::DepositGasExceedsBlock { deposits, max_deposits }
+                if deposits as u64 == max + 1 && max_deposits == max),
+            "{err}"
+        );
+        assert_eq!(fingerprint(&st), before);
+
+        // Exactly the maximum fills the block.
+        let out = exec_next(&spec, &mut st, (0..max).map(|_| deposit(ALICE, 1)).collect(), vec![]).unwrap();
+        assert_eq!(out.gas_used, max * spec.deposit_gas);
+        assert_eq!(out.minted_wei, bloch_l2_evm::sats_to_wei(max));
+        assert!(out.gas_used <= spec.gas_limit && out.gas_used + spec.deposit_gas > spec.gas_limit);
+
+        // A full deposit block leaves no gas for a transaction.
+        let err = exec_next(
+            &spec,
+            &mut st,
+            (0..max).map(|_| deposit(ALICE, 1)).collect(),
+            vec![transfer(ALICE, BOB, 0, U256::ZERO, 21_000)],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BlockExecutionError::BlockGasLimitExceeded { tx_index: 0 }),
+            "{err}"
+        );
+
+        // The metered gas is what the head record and EIP-1559 see.
+        let head = st.head().unwrap();
+        assert_eq!(head.gas_used, max * spec.deposit_gas);
+        assert!(
+            BlockContext::next(&spec, &st).base_fee_per_gas > spec.initial_base_fee,
+            "deposit load raises the base fee"
+        );
+        assert_eq!(st.total_native_wei(), st.total_minted_wei());
     }
 }
 
@@ -1534,13 +2138,18 @@ mod c30 {
             .current_dir(root)
             .status()
             .expect("run cargo");
-        assert!(status.success(), "cargo test --no-default-features --lib --no-run must compile");
+        assert!(
+            status.success(),
+            "cargo test --no-default-features --lib --no-run must compile"
+        );
     }
 }
 
-/// C31 [low] — Determinism contract is enforced only by the committed Cargo.lock
+/// C31 [low, FIXED] — the determinism contract is in the manifest, not only
+/// in the lockfile: every consensus-relevant crate is an exact `=` pin matching
+/// `Cargo.lock`, `rust-version` is declared and `rust-toolchain.toml` pins the
+/// exact compiler (CI builds `--locked`, see `.github/workflows/ci.yml`).
 mod c31 {
-    #![allow(unused_imports, dead_code, unused_variables, unused_mut, non_snake_case)]
     use std::fs;
     use std::path::Path;
 
@@ -1562,21 +2171,29 @@ mod c31 {
     }
 
     #[test]
-    #[ignore = "C31: consensus-relevant crates are caret ranges pinned only by Cargo.lock"]
     fn consensus_relevant_crates_are_pinned_exactly_and_match_the_lock() {
         let root = Path::new(MANIFEST_DIR);
         let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
         let lock = fs::read_to_string(root.join("Cargo.lock")).unwrap();
         for dep in ["revm", "alloy-primitives", "alloy-trie", "alloy-rlp"] {
             let line = manifest_line(&manifest, dep);
-            let req = line.split('"').nth(1).unwrap_or_else(|| panic!("no version string on `{line}`"));
-            assert!(req.starts_with('='), "{dep}: Cargo.toml requirement `{req}` is a caret range, not an exact `=` pin");
-            assert_eq!(&req[1..], locked_version(&lock, dep), "{dep}: exact pin does not match the committed Cargo.lock");
+            let req = line
+                .split('"')
+                .nth(1)
+                .unwrap_or_else(|| panic!("no version string on `{line}`"));
+            assert!(
+                req.starts_with('='),
+                "{dep}: Cargo.toml requirement `{req}` is a caret range, not an exact `=` pin"
+            );
+            assert_eq!(
+                &req[1..],
+                locked_version(&lock, dep),
+                "{dep}: exact pin does not match the committed Cargo.lock"
+            );
         }
     }
 
     #[test]
-    #[ignore = "C31: no rust-version / rust-toolchain.toml pin"]
     fn toolchain_is_pinned_for_reproducible_builds() {
         let root = Path::new(MANIFEST_DIR);
         let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
@@ -1585,9 +2202,15 @@ mod c31 {
             "Cargo.toml has no `rust-version` (revm 41.0.0 requires rustc >= 1.91.0)"
         );
         let toolchain = root.join("rust-toolchain.toml");
-        assert!(toolchain.exists(), "no committed rust-toolchain.toml (SP1 vkey depends on the exact compiler)");
+        assert!(
+            toolchain.exists(),
+            "no committed rust-toolchain.toml (SP1 vkey depends on the exact compiler)"
+        );
         let tc = fs::read_to_string(&toolchain).unwrap();
-        let channel = tc.lines().find(|l| l.trim_start().starts_with("channel")).expect("channel = ... in rust-toolchain.toml");
+        let channel = tc
+            .lines()
+            .find(|l| l.trim_start().starts_with("channel"))
+            .expect("channel = ... in rust-toolchain.toml");
         assert!(
             !channel.contains("\"stable\"") && !channel.contains("\"nightly\"") && !channel.contains("\"beta\""),
             "rust-toolchain.toml channel must be a fixed version, not a moving channel: {channel}"

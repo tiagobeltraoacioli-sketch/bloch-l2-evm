@@ -9,15 +9,15 @@
 | **Toolchain** | rustc 1.94.1 / cargo 1.94.1; `revm 41.0.0`, `alloy-trie 0.9.5`, `alloy-primitives 1.6.1`, `alloy-rlp 0.3.16`, `ruint 1.19.0`, `nybbles 0.4.8` (conforme `Cargo.lock`, 292 pacotes) |
 | **Baseline** | `cargo test --all-features`: 40 testes, 40 aprovados (o README afirma 22) |
 | **Anexo executável** | `tests/audit_regressions.rs` — um módulo por achado; os achados corrigidos têm testes ativos, os ainda abertos ficam `#[ignore]` (`cargo test --test audit_regressions -- --ignored` lista-os) |
-| **Status** | **Adendo (mesma data):** os itens **P0 e P1** da seção 8 foram corrigidos; ver §0 abaixo |
+| **Status** | **Adendo (mesma data):** os itens **P0, P1 e P2** da seção 8 foram corrigidos; ver §0 abaixo |
 
 > **Posicionamento.** O próprio crate se declara *scaffold, não auditado, não é um L2 funcional* e diz que tudo é *testnet / valor zero*. Esta auditoria avalia o código **contra o que ele afirma garantir** (emissão zero, "nunca queima", raiz de estado keccak‑MPT correta, caminho de prova stateless "correct‑or‑error") **e contra o que uma função de transição de estado (STF) de L2 real precisa garantir** (atomicidade, solidez das provas, paridade de consenso com Ethereum Cancun, robustez contra entradas maliciosas). Limitações *documentadas* pelo crate continuam sendo achados quando representam lacunas de solidez para o desenho pretendido; o relatório indica quando esse é o caso. A ausência dos componentes explicitamente *stubbed* (nó Reth, RPC `eth_*`, txpool, guest SP1) **não** é tratada como achado.
 
 ---
 
-## 0. Adendo — correções P0 e P1 aplicadas
+## 0. Adendo — correções P0, P1 e P2 aplicadas
 
-Após a entrega do relatório, os itens **P0** da seção 8 foram implementados no mesmo branch (commit seguinte ao relatório), seguidos dos itens **P1** (§0.2). Resumo do que mudou e de como foi verificado:
+Após a entrega do relatório, os itens **P0** da seção 8 foram implementados no mesmo branch (commit seguinte ao relatório), seguidos dos itens **P1** (§0.2) e **P2** (§0.3). Resumo do que mudou e de como foi verificado:
 
 ### 0.1 P0
 
@@ -52,9 +52,29 @@ Os itens **P1** da seção 8 (5 e 6; o item 7 já havia sido absorvido pelo P0) 
 
 **Estado da verificação após P0 + P1:** `cargo test` → 57 testes unitários + 27 regressões ativas aprovados, 5 regressões ignoradas (achados abertos); `cargo test --test audit_regressions -- --ignored` → 5 falhas (C26, C27, C28, C31), como esperado; `cargo test --no-default-features` → 57 aprovados; `cargo clippy --all-targets` sem avisos; `cargo doc` sem avisos.
 
-**Permanecem abertos** (P2 da seção 8): C26 (views/poda), C27 (custo O(estado) por bloco — **agravado** pela cópia de trabalho da atomicidade, aceito conscientemente até a raiz incremental), C28 (divisão por zero em knobs), C29 (medição de depósitos — a parte "0 sats não materializa conta" está corrigida), C31 (pins exatos/toolchain), além dos itens informativos.
+**Permaneciam abertos após o P1** (P2 da seção 8, corrigidos em §0.3): C26 (views/poda), C27 (custo O(estado) por bloco — agravado pela cópia de trabalho da atomicidade), C28 (divisão por zero em knobs), C29 (medição de depósitos), C31 (pins exatos/toolchain), além dos itens informativos.
 
-**Confirmado pelo projeto (após o P1):** `max_l1_sats` = **100 bilhões de BLCH** = 10^19 sats (cabe em `u64`, não em `i64`; a L1 precisa representar montantes em 64 bits sem sinal) → teto da oferta do L2 de 10^29 wei (`chainspec::MAX_L1_SATS`). O L2 não tem teto próprio: a oferta nativa é BLCH bridgeado com emissão zero, logo é limitada exatamente pelo teto da L1. **Ainda exigem confirmação do projeto:** os endereços das contas de sistema `SUPPLY_LEDGER` (`0x4200…0100`) e `BLOCK_INFO` (`0x4200…0101`); a semântica do valor EIP‑4788 (`anchor_root` = hash do bloco‑âncora Bloch) e a derivação de `prevrandao` a partir dele, que dependem do leitor de âncora (componente do nó).
+**Confirmado pelo projeto (após o P1):** `max_l1_sats` = **100 bilhões de BLCH** = 10^19 sats (cabe em `u64`, não em `i64`; a L1 precisa representar montantes em 64 bits sem sinal) → teto da oferta do L2 de 10^29 wei (`chainspec::MAX_L1_SATS`). O L2 não tem teto próprio: a oferta nativa é BLCH bridgeado com emissão zero, logo é limitada exatamente pelo teto da L1.
+
+### 0.3 P2
+
+Os itens **P2** da seção 8 (8 e 9) foram implementados em seguida, junto com os informativos I01, I02, I05, I06, I08, I09 e I10.
+
+| Achado | Correção | Verificação |
+|---|---|---|
+| **C27** | **Raiz incremental**: novo módulo `mpt` — trie de Merkle‑Patricia keccak em memória, com o hash de cada nó em cache e invalidação só nos caminhos alterados; a codificação é delegada aos codificadores de nó do próprio `alloy-trie`, logo raízes **e multiproofs** são byte‑idênticos aos do `HashBuilder`/`ProofRetainer` (afirmado por testes randomizados contra a referência from‑scratch, inclusive filhos inline e vizinhos de chave). `L2State` guarda um `StateTrie` (trie de contas + uma trie de storage por conta) e o mantém em O(contas tocadas × profundidade) por bloco. **Execução em overlay**: `execute_block` roda o bloco num `CacheDB<&InMemoryDB>` que só contém o que o bloco leu/escreveu e faz o merge no sucesso — nada é clonado, a atomicidade é preservada. `generate_batch_witness` faz **uma** execução (o overlay é ao mesmo tempo o conjunto de leitura e o pós‑estado dos tocados), tira o multiproof da trie em cache (O(alvos × profundidade); um passe from‑scratch só com cache frio), deriva a raiz pós‑estado pela mesma atualização esparsa do guest e não clona o pré‑estado; vizinhos de chave só para inserções/remoções (I06). | `mpt::tests::*` (paridade de raiz, proof e vizinhos com `alloy-trie`), `state::tests::views_and_root_share_one_existence_predicate_and_ghosts_are_pruned`, `c27` (bloco vazio contra 8× mais estado custa ≤ 4×; benchmark nos 160 k da auditoria `#[ignore]`, `--release`) |
+| **C26** | `L2State` **selado**: `db` privado, `db()` para leitura e `db_mut()` que invalida o cache (uma raiz obsoleta nunca é servida); um único predicado de existência EIP‑161 (`account_exists`) compartilhado por views, raiz, witness e poda; o merge do overlay remove contas vazias/destruídas e slots de valor zero, e leituras de endereços ausentes não deixam rastro no estado vivo. | `c26`, `state::tests::*` |
+| **C28** | `ChainSpecError` + `ChainSpec::validate` (chain id, gas limit, elasticidade, denominador, reward zero, `deposit_gas`, colisão entre endereços de sistema), chamado por `validate_block_input` (`BlockExecutionError::InvalidChainSpec`) antes de tocar o estado; `gas_target`/`next_base_fee` totais (knob zero → base fee inalterado). | `chainspec::tests::*`, `c28` |
+| **C29** | **Medição de depósitos**: `ChainSpec::deposit_gas` (21 000) por depósito, cobrado do orçamento de gás do bloco sem taxa e contado em `gas_used` (a regra EIP‑1559 vê a carga de depósitos como vê a de usuários — precedente OP‑Stack); `DepositGasExceedsBlock` na validação pura; máximo `gas_limit / deposit_gas` = 1 428 por bloco; o transbordo fica para a derivação, em ordem canônica. O crédito zero já não materializava conta. | `c29`, `executor::tests::*` |
+| **C31 / C30** | Pins exatos `=` para `revm`, `alloy-primitives`, `alloy-trie` e `alloy-rlp` (iguais ao `Cargo.lock`); `rust-version`; `rust-toolchain.toml` com canal fixo `1.94.1`; **todas** as dependências com `default-features = false` e features reexpostas (`std`, `serde`) — a árvore inteira (revm, alloy) compila e testa em `no_std` + `alloc` com `--no-default-features`; revm sem `secp256k1` (ecrecover pelo `k256` puro), sem `blst`/`tracer`, com `c-kzg` (precompilado 0x0a de Cancun) — o único delta documentado para o guest é `c-kzg` → `kzg-rs`; `deny.toml` (bans de backends nativos, fontes, duplicatas, licenças) e CI (`.github/workflows/ci.yml`: fmt, clippy `-D warnings` em std/serde/no_std, testes nas três configurações, `--locked`, doc, deny, audit). | `c31`, `c30`, CI |
+| **I01, I02** | Aritmética `checked_*`/`expect` uniforme no executor (nenhum operador wrapping de `ruint` em acumuladores); `block_reward` validado pelo `ChainSpec` (erro duro, antes de qualquer mutação). | `c28` |
+| **I05, I08** | `Cargo.toml` (cabeçalho e descrição), `README`, `lib.rs` e `stubs.rs` atualizados para o que existe; `.cargo/audit.toml` com caminhos e justificativas corretos (duas entradas só‑lockfile nunca compiladas, uma proc‑macro) e espelhado em `deny.toml`. | — |
+| **I09** | `BatchWitness`/`WitnessAccount` com `serde` (feature `serde` → `alloy-trie/serde` → `nybbles/serde`, chaves `Nibbles` como hex): formato de fio host→guest com teste de ida e volta em `serde_json`; o snapshot de `L2State` idem (o cache da raiz é dado derivado, não serializado, reconstruído sob demanda). | `proving::tests::batch_witness_round_trips_through_serde` (`--features serde`) |
+| **I10** | `rustfmt.toml` (120 colunas), `cargo fmt` aplicado a todo o crate, `clippy --all-targets` limpo nas três configurações, CI completo. | CI |
+
+**Estado da verificação após P0 + P1 + P2:** `cargo test` → 68 testes unitários + 34 regressões ativas aprovados, 1 ignorada (benchmark C27 a 160 k, `--release`); `cargo test --features serde` → 69 unitários; `cargo test --no-default-features` → tudo aprovado com a árvore inteira em `no_std`; `clippy --all-targets -D warnings` limpo em std, `--all-features` e `--no-default-features`; `cargo fmt --check` limpo; `cargo doc` sem avisos. `cargo deny` e `cargo audit` **não puderam ser executados neste ambiente** (sem rede/ferramentas); ficam a cargo do CI.
+
+**Permanecem abertos:** nenhum achado C01–C31. Dos informativos: I03 (o helper por tx é `validate_block_input`), I04 (tipo selado — feito) e I07 (nota de parâmetros do EIP‑1559 — decisão de desenho, não bug). **Ainda exigem confirmação do projeto:** os endereços das contas de sistema `SUPPLY_LEDGER` (`0x4200…0100`) e `BLOCK_INFO` (`0x4200…0101`); a semântica do valor EIP‑4788 (`anchor_root` = hash do bloco‑âncora Bloch) e a derivação de `prevrandao` a partir dele, que dependem do leitor de âncora (componente do nó).
 
 ---
 
@@ -135,12 +155,12 @@ Todo o código do repositório: `src/lib.rs`, `src/chainspec.rs`, `src/scale.rs`
 | C23 | Baixo | Pânicos em witness malformado (`expect`, asserções de decode/HashBuilder, `Bytecode::new_raw`) | `stateroot.rs:155-247`, `proving.rs:182` | Reproduzido → **Corrigido (§0)** |
 | C24 | Baixo | Nós inline (<32 bytes) ignorados: raiz errada em silêncio fora da trie de contas | `stateroot.rs:224-226, 241-243` | Reproduzido → **Corrigido (§0)** |
 | C25 | Baixo | Preço efetivo recalculado sem `tx_type`; `priority_fee_routed_wei` subnotifica | `executor.rs:232-239, 266` | Reproduzido → **Corrigido (§0)** |
-| C26 | Baixo | Views reportam contas vazias como existentes; contas fantasma e slots zero nunca podados | `state.rs:143-198` | Reproduzido |
-| C27 | Baixo | Raiz recomputada do zero a cada bloco; witness clona o estado e reconstrói a trie ~5× | `stateroot.rs:85-115`, `proving.rs:75-166` | Reproduzido |
-| C28 | Baixo | Divisão por zero em `gas_target`/`next_base_fee` com knobs públicos zerados | `chainspec.rs:85-113` | Reproduzido |
-| C29 | Baixo | Depósitos gratuitos e ilimitados; depósito de 0 sats cria conta permanente | `executor.rs:178-184`, `state.rs:185-198` | Reproduzido → **Parcialmente corrigido (§0)** |
+| C26 | Baixo | Views reportam contas vazias como existentes; contas fantasma e slots zero nunca podados | `state.rs:143-198` | Reproduzido → **Corrigido (§0.3)** |
+| C27 | Baixo | Raiz recomputada do zero a cada bloco; witness clona o estado e reconstrói a trie ~5× | `stateroot.rs:85-115`, `proving.rs:75-166` | Reproduzido → **Corrigido (§0.3)** |
+| C28 | Baixo | Divisão por zero em `gas_target`/`next_base_fee` com knobs públicos zerados | `chainspec.rs:85-113` | Reproduzido → **Corrigido (§0.3)** |
+| C29 | Baixo | Depósitos gratuitos e ilimitados; depósito de 0 sats cria conta permanente | `executor.rs:178-184`, `state.rs:185-198` | Reproduzido → **Corrigido (§0 parcial, §0.3)** |
 | C30 | Baixo | `cargo test --no-default-features` não compila; no_std nominal nas dependências | `lib.rs:54-61`, `Cargo.toml:28-50` | Reproduzido → **Corrigido (§0)** |
-| C31 | Baixo | Determinismo só pelo `Cargo.lock`: ranges caret, sem pin de toolchain, backends C/asm | `Cargo.toml:28-39` | Reproduzido |
+| C31 | Baixo | Determinismo só pelo `Cargo.lock`: ranges caret, sem pin de toolchain, backends C/asm | `Cargo.toml:28-39` | Reproduzido → **Corrigido (§0.3)** |
 
 ---
 
@@ -522,7 +542,7 @@ O arquivo `tests/audit_regressions.rs` cobre os achados C01–C13, C15–C31 (C1
 6. Corrigir as afirmações "nunca queima" e rastrear `total_burned_wei` (C11).
 7. Robustez do walker: `Result`, limites de 64 nibbles, rejeição de extensão vazia, pré‑validação antes de `TrieNode::decode`, `new_raw_checked`, filhos inline (C21, C22, C23, C24).
 
-**P2 — qualidade e operação**
+**P2 — qualidade e operação** — ✅ **aplicado, ver §0.3**
 
 8. Predicado único de existência e poda pós‑commit ou `State`/`BundleState` (C26); medição de depósitos e no‑op para zero wei (C29); raiz incremental e witness sem clone (C27); `ChainSpec` validado (C28); witness canônico (C20).
 9. Toolchain e build: no_std testado, dependências com `default-features = false`, pins exatos, `rust-toolchain.toml`, `--locked` em CI, `cargo deny`, CI completo (C30, C31, I10); atualizar toda a documentação obsoleta (I05, I08, I09) e a política de overflow (I01, I02).
@@ -533,12 +553,11 @@ O arquivo `tests/audit_regressions.rs` cobre os achados C01–C13, C15–C31 (C1
 
 ### 9.1 Testes de regressão (`tests/audit_regressions.rs`)
 
-Um módulo por achado (`c01`…`c31`, exceto `c14`). Após as correções P0 e P1 (§0), os módulos dos achados corrigidos têm testes **ativos** que afirmam o comportamento correto contra a nova API e passam; os módulos dos achados ainda abertos continuam marcados `#[ignore = "..."]`, afirmam o comportamento esperado após a correção e falham hoje. Ao corrigir um achado, remova o `#[ignore]` do módulo.
+Um módulo por achado (`c01`…`c31`, exceto `c14`). Após as correções P0, P1 e P2 (§0), **todos** os módulos têm testes **ativos** que afirmam o comportamento correto contra a nova API e passam; o único teste `#[ignore]` é o benchmark do C27 nos tamanhos da auditoria (160 k), a executar em `--release`.
 
 ```sh
-cargo test                                          # unitários + regressões ativas, verde
-cargo test --test audit_regressions -- --ignored    # achados ainda abertos (esperado: falhas)
-cargo test --test audit_regressions c27 -- --ignored
+cargo test                                                         # unitários + todas as regressões, verde
+cargo test --release --test audit_regressions -- --ignored c27    # benchmark C27 (160k)
 ```
 
 ### 9.2 Provas de conceito

@@ -21,12 +21,17 @@
 //!   [`SparseTrieView::apply`] over it, which refuses changes the proof does not
 //!   cover.
 //!
-//! The host generator records the batch's full **read set** with a recording
-//! overlay, emits it (existing accounts with their complete non-zero storage,
-//! plus the absent addresses), builds the multiproof over that set, and finally
-//! runs the exact guest procedure on its own witness: generation is
-//! *correct-or-error* because the witness is accepted only if the guest
-//! reproduces the host's outcome and post-state root.
+//! The host generator runs the batch **once**, on a recording overlay of the
+//! pre-state: the overlay's accounts are exactly the read/write set (existing
+//! accounts are emitted with their complete non-zero storage, the rest as
+//! absent addresses) and, merged over the pre-state, the post-state of every
+//! touched account. The multiproof comes from the state's cached incremental
+//! commitment (O(targets × depth); one from-scratch pass only when the cache is
+//! cold), the post-state root is derived through the same sparse-trie update
+//! the guest performs, and finally the exact guest procedure runs on the
+//! witness: generation is *correct-or-error* because the witness is accepted
+//! only if the guest reproduces the host's outcome and post-state root. The
+//! pre-state is never cloned (audit finding C27).
 
 use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
@@ -43,14 +48,16 @@ use revm::DatabaseRef;
 
 use crate::chainspec::ChainSpec;
 use crate::executor::{
-    deposits_hash, execute_block, run_block, BlockExecutionError, BlockInput, ExecutionOutcome, L2Header, TxOutcome,
+    deposits_hash, run_block, BlockExecutionError, BlockInput, ExecutionOutcome, L2Header, TxOutcome,
 };
-use crate::state::L2State;
-use crate::stateroot::{account_leaves, account_leaves_of, compute_keccak_mpt_state_root, sorted_unique_keys, SparseTrieView, WitnessError};
+use crate::state::{account_exists, merge_account, L2State};
+use crate::stateroot::{account_key, account_leaf, account_leaves, account_leaves_of, SparseTrieView, WitnessError};
 
 /// Everything a guest needs to re-derive a batch's post-state root without the
-/// full state. All vectors are sorted (canonical form).
+/// full state. All vectors are sorted (canonical form). With the `serde`
+/// feature this is the host→guest wire format (round-trip tested).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BatchWitness {
     /// keccak-MPT state root before the batch.
     pub prev_state_root: B256,
@@ -75,6 +82,7 @@ pub struct BatchWitness {
 /// need to round-trip to the guest). Storage is sorted by slot and holds only
 /// non-zero values.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessAccount {
     /// Account address (trie-key preimage).
     pub address: Address,
@@ -221,7 +229,9 @@ impl core::fmt::Display for VerifyError {
             VerifyError::InvalidStorage(a, s) => write!(f, "pre-account {a}: invalid storage entry for slot {s}"),
             VerifyError::InvalidCode(a) => write!(f, "pre-account {a}: invalid bytecode"),
             VerifyError::AccountNotProven(a) => write!(f, "pre-account {a} does not open against prev_state_root"),
-            VerifyError::AccountNotProvenAbsent(a) => write!(f, "address {a} is not proven absent from prev_state_root"),
+            VerifyError::AccountNotProvenAbsent(a) => {
+                write!(f, "address {a} is not proven absent from prev_state_root")
+            }
             VerifyError::Execution(e) => write!(f, "re-execution failed: {e}"),
             VerifyError::ClaimedRootMismatch { claimed, derived } => {
                 write!(f, "derived post-state root {derived} != claimed {claimed}")
@@ -260,7 +270,9 @@ pub fn hydrate_and_verify(witness: &BatchWitness) -> Result<HydratedPreState, Ve
         }
     }
 
-    let mut state: GuestState = CacheDB::new(WitnessBacking { absent: witness.absent_accounts.iter().copied().collect() });
+    let mut state: GuestState = CacheDB::new(WitnessBacking {
+        absent: witness.absent_accounts.iter().copied().collect(),
+    });
     let mut address_of_key: BTreeMap<B256, Address> = BTreeMap::new();
     for wa in &witness.pre_accounts {
         if wa.nonce == 0 && wa.balance.is_zero() && wa.code.is_empty() {
@@ -274,7 +286,13 @@ pub fn hydrate_and_verify(witness: &BatchWitness) -> Result<HydratedPreState, Ve
         let code_hash = code.as_ref().map(|c| c.hash_slow()).unwrap_or(KECCAK_EMPTY);
         state.insert_account_info(
             wa.address,
-            AccountInfo { balance: wa.balance, nonce: wa.nonce, code_hash, code, ..Default::default() },
+            AccountInfo {
+                balance: wa.balance,
+                nonce: wa.nonce,
+                code_hash,
+                code,
+                ..Default::default()
+            },
         );
         let mut last_slot: Option<U256> = None;
         for (slot, val) in &wa.storage {
@@ -319,7 +337,11 @@ pub fn hydrate_and_verify(witness: &BatchWitness) -> Result<HydratedPreState, Ve
         }
     }
 
-    Ok(HydratedPreState { state, view, pre_leaves })
+    Ok(HydratedPreState {
+        state,
+        view,
+        pre_leaves,
+    })
 }
 
 /// What the guest attests to after verifying a batch.
@@ -353,13 +375,18 @@ pub struct VerifiedBatch {
 /// set from the proven pre-leaves and the re-executed post-leaves, and compute
 /// the post-state root statelessly. Fails if the derived root differs from the
 /// host's claim.
-pub fn verify_batch(spec: &ChainSpec, witness: &BatchWitness, input: &BlockInput) -> Result<VerifiedBatch, VerifyError> {
+pub fn verify_batch(
+    spec: &ChainSpec,
+    witness: &BatchWitness,
+    input: &BlockInput,
+) -> Result<VerifiedBatch, VerifyError> {
     let hydrated = hydrate_and_verify(witness)?;
-    let (db, run) =
-        run_block(spec, hydrated.state, witness.prev_state_root, input).map_err(VerifyError::Execution)?;
+    let (db, run) = run_block(spec, hydrated.state, witness.prev_state_root, input).map_err(VerifyError::Execution)?;
 
-    let post_leaves: BTreeMap<Nibbles, Vec<u8>> =
-        account_leaves_of(&db).into_iter().map(|(k, v)| (Nibbles::unpack(k), v)).collect();
+    let post_leaves: BTreeMap<Nibbles, Vec<u8>> = account_leaves_of(&db)
+        .into_iter()
+        .map(|(k, v)| (Nibbles::unpack(k), v))
+        .collect();
     let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
     for (k, v) in &post_leaves {
         if hydrated.pre_leaves.get(k) != Some(v) {
@@ -373,7 +400,10 @@ pub fn verify_batch(spec: &ChainSpec, witness: &BatchWitness, input: &BlockInput
     }
     let derived = hydrated.view.apply(&changes)?;
     if derived != witness.new_state_root {
-        return Err(VerifyError::ClaimedRootMismatch { claimed: witness.new_state_root, derived });
+        return Err(VerifyError::ClaimedRootMismatch {
+            claimed: witness.new_state_root,
+            derived,
+        });
     }
     let header = run.header(spec, input, derived);
     Ok(VerifiedBatch {
@@ -414,115 +444,150 @@ impl core::fmt::Display for GenerateError {
 
 impl core::error::Error for GenerateError {}
 
-/// Whether a pre-state account is in the state trie (exists and is not EIP-161
-/// empty).
-fn in_trie(acc: &DbAccount) -> bool {
-    acc.account_state != AccountState::NotExisting
-        && !(acc.info.nonce == 0
-            && acc.info.balance.is_zero()
-            && (acc.info.code_hash == KECCAK_EMPTY || acc.info.code_hash == B256::ZERO))
+/// The witness form of an existing pre-state account.
+fn witness_account(pre: &L2State, address: Address, acc: &DbAccount) -> WitnessAccount {
+    let code_hash = if acc.info.code_hash == B256::ZERO {
+        KECCAK_EMPTY
+    } else {
+        acc.info.code_hash
+    };
+    let code = if code_hash == KECCAK_EMPTY {
+        Vec::new()
+    } else {
+        acc.info
+            .code
+            .as_ref()
+            .or_else(|| pre.db().cache.contracts.get(&code_hash))
+            .map(|c| c.original_bytes().to_vec())
+            .unwrap_or_default()
+    };
+    let mut storage: Vec<(U256, U256)> = acc
+        .storage
+        .iter()
+        .filter(|(_, v)| !v.is_zero())
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    storage.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    WitnessAccount {
+        address,
+        balance: acc.info.balance,
+        nonce: acc.info.nonce,
+        code,
+        storage,
+    }
 }
 
 /// Generate (and self-verify) the witness for executing `input` against `pre`.
 ///
-/// 1. Executes the batch for real (atomic, on a copy) to obtain the post-state
-///    and outcome.
-/// 2. Re-runs it on a recording overlay of `pre` to capture the exact set of
-///    accounts revm and the protocol accounting read or wrote; existing ones
-///    become `pre_accounts` (with complete non-zero storage and code), the rest
-///    `absent_accounts`.
-/// 3. Builds a multiproof against `prev_state_root` targeting every read key,
-///    every changed key and its key-order neighbours (so a leaf split or branch
-///    collapse exposes the sibling it restructures).
+/// 1. Runs the batch once on a recording overlay of `pre`: afterwards the
+///    overlay holds exactly the accounts revm and the protocol accounting read
+///    or wrote; existing ones become `pre_accounts` (with complete non-zero
+///    storage and code), the rest `absent_accounts`, and each entry merged
+///    over `pre` is that account's post-state leaf.
+/// 2. Builds the multiproof against `prev_state_root` from the state's cached
+///    commitment, targeting every touched key plus the key-order neighbours of
+///    every inserted or removed key (a leaf split or branch collapse exposes
+///    the sibling it restructures); a cold cache falls back to one
+///    from-scratch pass.
+/// 3. Derives the post-state root through the sparse-trie update the guest
+///    performs, and builds the outcome from the run.
 /// 4. Runs [`verify_batch`] on the result and refuses to return a witness the
 ///    guest would reject or that does not reproduce the host's outcome.
+///
+/// `pre` is never cloned or mutated.
 pub fn generate_batch_witness(
     pre: &L2State,
     spec: &ChainSpec,
     input: BlockInput,
 ) -> Result<(BatchWitness, ExecutionOutcome), GenerateError> {
-    let prev_state_root = compute_keccak_mpt_state_root(pre);
+    let prev_state_root = pre.state_root();
 
-    // 1. The real run.
-    let mut post = pre.clone();
-    let outcome = execute_block(spec, &mut post, input.clone()).map_err(GenerateError::Execution)?;
-    let new_state_root = outcome.state_root;
+    // 1. The single recording run.
+    let (probe, run) =
+        run_block(spec, CacheDB::new(pre.db()), prev_state_root, &input).map_err(GenerateError::Execution)?;
+    let CacheDB { cache: probe, .. } = probe;
 
-    // 2. The recording run: every account the batch loads lands in the overlay.
-    let (probe, _) =
-        run_block(spec, CacheDB::new(&pre.db), prev_state_root, &input).map_err(GenerateError::Execution)?;
     let mut pre_accounts: Vec<WitnessAccount> = Vec::new();
     let mut absent_accounts: Vec<Address> = Vec::new();
-    for addr in probe.cache.accounts.keys() {
-        match pre.db.cache.accounts.get(addr).filter(|acc| in_trie(acc)) {
-            Some(acc) => {
-                let code_hash = if acc.info.code_hash == B256::ZERO { KECCAK_EMPTY } else { acc.info.code_hash };
-                let code = if code_hash == KECCAK_EMPTY {
-                    Vec::new()
-                } else {
-                    acc.info
-                        .code
-                        .as_ref()
-                        .or_else(|| pre.db.cache.contracts.get(&code_hash))
-                        .map(|c| c.original_bytes().to_vec())
-                        .unwrap_or_default()
-                };
-                let mut storage: Vec<(U256, U256)> =
-                    acc.storage.iter().filter(|(_, v)| !v.is_zero()).map(|(k, v)| (*k, *v)).collect();
-                storage.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                pre_accounts.push(WitnessAccount { address: *addr, balance: acc.info.balance, nonce: acc.info.nonce, code, storage });
-            }
+    let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+    // Keys inserted or removed: the only changes that restructure the trie.
+    let mut restructured: Vec<Nibbles> = Vec::new();
+    for (addr, overlay) in probe.accounts.iter() {
+        let base = pre.db().cache.accounts.get(addr).filter(|acc| account_exists(acc));
+        match base {
+            Some(acc) => pre_accounts.push(witness_account(pre, *addr, acc)),
             None => absent_accounts.push(*addr),
+        }
+        let pre_leaf = base.map(account_leaf);
+        let post_leaf = merge_account(base, overlay).map(|m| account_leaf(&m));
+        if pre_leaf != post_leaf {
+            let key = account_key(addr);
+            if pre_leaf.is_none() || post_leaf.is_none() {
+                restructured.push(key);
+            }
+            changes.insert(key, post_leaf);
         }
     }
     pre_accounts.sort_unstable_by(|a, b| a.address.cmp(&b.address));
     absent_accounts.sort_unstable();
 
-    // 3. Proof targets: read set ∪ changed keys ∪ neighbours of changed keys.
-    let pre_leaves: BTreeMap<B256, Vec<u8>> = account_leaves(pre).into_iter().collect();
-    let post_leaves: BTreeMap<B256, Vec<u8>> = account_leaves(&post).into_iter().collect();
-    let mut changed: BTreeSet<B256> = BTreeSet::new();
-    for (k, v) in &post_leaves {
-        if pre_leaves.get(k) != Some(v) {
-            changed.insert(*k);
-        }
-    }
-    for k in pre_leaves.keys() {
-        if !post_leaves.contains_key(k) {
-            changed.insert(*k);
-        }
-    }
-    let all_keys = sorted_unique_keys(pre_leaves.keys().chain(post_leaves.keys()).copied());
-    let mut targets: BTreeSet<Nibbles> = changed.iter().map(Nibbles::unpack).collect();
-    for (i, k) in all_keys.iter().enumerate() {
-        if changed.contains(k) {
-            if i > 0 {
-                targets.insert(Nibbles::unpack(all_keys[i - 1]));
+    // 2. Proof targets: read set ∪ changed keys ∪ neighbours of restructuring keys.
+    let mut targets: BTreeSet<Nibbles> = pre_accounts
+        .iter()
+        .map(|a| account_key(&a.address))
+        .chain(absent_accounts.iter().map(account_key))
+        .chain(changes.keys().copied())
+        .collect();
+    let proof: BTreeMap<Nibbles, Bytes> = match pre.warm_commitment() {
+        Some(trie) => {
+            for key in &restructured {
+                let (before, after) = trie.neighbours(key);
+                targets.extend(before);
+                targets.extend(after);
             }
-            if i + 1 < all_keys.len() {
-                targets.insert(Nibbles::unpack(all_keys[i + 1]));
-            }
+            trie.proof(targets.iter().copied())
+                .expect("a warm commitment encodes every node")
         }
-    }
-    for wa in &pre_accounts {
-        targets.insert(Nibbles::unpack(keccak256(wa.address)));
-    }
-    for a in &absent_accounts {
-        targets.insert(Nibbles::unpack(keccak256(a)));
-    }
+        None => {
+            // Cold commitment: one from-scratch pass over the pre-state.
+            let mut leaves: Vec<(B256, Vec<u8>)> = account_leaves(pre);
+            leaves.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            let keys: Vec<B256> = leaves.iter().map(|(k, _)| *k).collect();
+            for key in &restructured {
+                let kb = B256::from_slice(&key.pack());
+                let i = keys.partition_point(|k| *k < kb);
+                if i > 0 {
+                    targets.insert(Nibbles::unpack(keys[i - 1]));
+                }
+                let next = if keys.get(i) == Some(&kb) { i + 1 } else { i };
+                if let Some(k) = keys.get(next) {
+                    targets.insert(Nibbles::unpack(k));
+                }
+            }
+            let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter(targets));
+            for (k, v) in &leaves {
+                hb.add_leaf(Nibbles::unpack(k), v);
+            }
+            if hb.root() != prev_state_root {
+                return Err(GenerateError::RetainedRootMismatch);
+            }
+            hb.take_proof_nodes().into_nodes_sorted().into_iter().collect()
+        }
+    };
 
-    let mut leaves: Vec<(B256, Vec<u8>)> = pre_leaves.into_iter().collect();
-    leaves.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter(targets));
-    for (k, v) in &leaves {
-        hb.add_leaf(Nibbles::unpack(k), v);
-    }
-    if hb.root() != prev_state_root {
-        return Err(GenerateError::RetainedRootMismatch);
-    }
-    let proof: BTreeMap<Nibbles, Bytes> = hb.take_proof_nodes().into_nodes_sorted().into_iter().collect();
-
-    let witness = BatchWitness { prev_state_root, new_state_root, proof, pre_accounts, absent_accounts };
+    // 3. The post-state root, derived exactly as the guest derives it (the
+    //    guest still re-derives its own change set and compares).
+    let new_state_root = SparseTrieView::from_proof(prev_state_root, &proof)
+        .and_then(|view| view.apply(&changes))
+        .map_err(|e| GenerateError::SelfCheck(VerifyError::Witness(e)))?;
+    let witness = BatchWitness {
+        prev_state_root,
+        new_state_root,
+        proof,
+        pre_accounts,
+        absent_accounts,
+    };
+    let outcome = run.into_outcome(spec, &input, new_state_root);
 
     // 4. Self-check: the guest procedure must accept the witness and reproduce
     //    the host's outcome exactly.
@@ -548,9 +613,10 @@ pub fn generate_batch_witness(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::BlockContext;
+    use crate::executor::{execute_block, BlockContext};
     use crate::scale::{sats_to_wei, SATS_PER_BLCH};
     use crate::state::{DepositMint, DepositProvenance};
+    use crate::stateroot::compute_keccak_mpt_state_root;
     use alloy_primitives::{address, bytes, Address, TxKind};
     use core::sync::atomic::{AtomicU32, Ordering};
     use revm::context::TxEnv;
@@ -583,7 +649,11 @@ mod tests {
         execute_block(
             spec,
             &mut pre,
-            BlockInput { context, deposits: (1..=n).map(|i| deposit(addr(i), 5 * SATS_PER_BLCH)).collect(), txs: vec![] },
+            BlockInput {
+                context,
+                deposits: (1..=n).map(|i| deposit(addr(i), 5 * SATS_PER_BLCH)).collect(),
+                txs: vec![],
+            },
         )
         .unwrap();
         pre
@@ -594,7 +664,15 @@ mod tests {
         BlockContext::next(spec, state)
     }
 
-    fn tx(spec: &ChainSpec, from: Address, kind: TxKind, value: U256, data: Bytes, nonce: u64, gas_limit: u64) -> TxEnv {
+    fn tx(
+        spec: &ChainSpec,
+        from: Address,
+        kind: TxKind,
+        value: U256,
+        data: Bytes,
+        nonce: u64,
+        gas_limit: u64,
+    ) -> TxEnv {
         TxEnv::builder()
             .caller(from)
             .kind(kind)
@@ -613,7 +691,15 @@ mod tests {
         BlockInput {
             context: next(spec, pre),
             deposits: vec![],
-            txs: vec![tx(spec, from, TxKind::Call(to), sats_to_wei(SATS_PER_BLCH), Bytes::new(), 0, 21_000)],
+            txs: vec![tx(
+                spec,
+                from,
+                TxKind::Call(to),
+                sats_to_wei(SATS_PER_BLCH),
+                Bytes::new(),
+                0,
+                21_000,
+            )],
         }
     }
 
@@ -627,7 +713,8 @@ mod tests {
         let bob = address!("00000000000000000000000000000000000000bb"); // a NEW recipient (insert)
         let batch = transfer_batch(&spec, &pre, alice, bob);
 
-        let (witness, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).expect("witness generates and self-verifies");
+        let (witness, outcome) =
+            generate_batch_witness(&pre, &spec, batch.clone()).expect("witness generates and self-verifies");
         assert!(outcome.tx_outcomes[0].success);
         assert_ne!(witness.new_state_root, witness.prev_state_root);
 
@@ -665,14 +752,21 @@ mod tests {
         let batch = transfer_batch(&spec, &pre, alice, bob);
         let (w, _) = generate_batch_witness(&pre, &spec, batch.clone()).unwrap();
         let hydrated: Vec<Address> = w.pre_accounts.iter().map(|a| a.address).collect();
-        assert_eq!(hydrated.len(), 4, "sender, recipient and the two block-level system accounts pre-exist");
+        assert_eq!(
+            hydrated.len(),
+            4,
+            "sender, recipient and the two block-level system accounts pre-exist"
+        );
         assert!(hydrated.contains(&alice) && hydrated.contains(&bob));
         verify_batch(&spec, &w, &batch).expect("honest witness verifies");
 
         // (a) A tampered pre-account balance does not open.
         let mut bad = w.clone();
         bad.pre_accounts[0].balance += U256::from(1u64);
-        assert!(matches!(hydrate_and_verify(&bad), Err(VerifyError::AccountNotProven(_))));
+        assert!(matches!(
+            hydrate_and_verify(&bad),
+            Err(VerifyError::AccountNotProven(_))
+        ));
 
         // (b) Omitting an existing, touched account: it is neither hydrated nor
         //     proven absent, so the guest's read fails instead of reading zero.
@@ -693,7 +787,10 @@ mod tests {
         //     honest: the guest derives its own root.
         let mut claim = w.clone();
         claim.new_state_root = B256::repeat_byte(0x42);
-        assert!(matches!(verify_batch(&spec, &claim, &batch), Err(VerifyError::ClaimedRootMismatch { .. })));
+        assert!(matches!(
+            verify_batch(&spec, &claim, &batch),
+            Err(VerifyError::ClaimedRootMismatch { .. })
+        ));
 
         // (d) An injected node at an opaque frontier path breaks authentication.
         let view = SparseTrieView::from_proof(w.prev_state_root, &w.proof).unwrap();
@@ -731,7 +828,10 @@ mod tests {
         // (g) Duplicate addresses are rejected.
         let mut dup = w.clone();
         dup.pre_accounts.push(dup.pre_accounts[0].clone());
-        assert!(matches!(hydrate_and_verify(&dup), Err(VerifyError::DuplicateAccount(_))));
+        assert!(matches!(
+            hydrate_and_verify(&dup),
+            Err(VerifyError::DuplicateAccount(_))
+        ));
 
         // (h) An empty witness only opens the empty root.
         let empty = BatchWitness {
@@ -756,9 +856,9 @@ mod tests {
         let mut pre = funded_pre_state(&spec, 60);
         let alice = addr(1);
         let d = addr(9); // read-only BALANCE target
-        // Contract C: runtime  PUSH1 0 SLOAD  ADDRESS-independent BALANCE(D) store:
-        //   runtime: 73<D> 31 60 00 55  60 00 54 00
-        //   = PUSH20 D, BALANCE, PUSH1 0, SSTORE, PUSH1 0, SLOAD, STOP
+                         // Contract C: runtime  PUSH1 0 SLOAD  ADDRESS-independent BALANCE(D) store:
+                         //   runtime: 73<D> 31 60 00 55  60 00 54 00
+                         //   = PUSH20 D, BALANCE, PUSH1 0, SSTORE, PUSH1 0, SLOAD, STOP
         let mut runtime = vec![0x73u8];
         runtime.extend_from_slice(d.as_slice());
         runtime.extend_from_slice(&[0x31, 0x60, 0x00, 0x55, 0x60, 0x00, 0x54, 0x00]);
@@ -770,7 +870,15 @@ mod tests {
         let deploy = BlockInput {
             context: next(&spec, &pre),
             deposits: vec![],
-            txs: vec![tx(&spec, alice, TxKind::Create, U256::ZERO, initcode.into(), 0, 200_000)],
+            txs: vec![tx(
+                &spec,
+                alice,
+                TxKind::Create,
+                U256::ZERO,
+                initcode.into(),
+                0,
+                200_000,
+            )],
         };
         let out = execute_block(&spec, &mut pre, deploy).unwrap();
         let contract = out.tx_outcomes[0].created_address.expect("deployed");
@@ -781,7 +889,15 @@ mod tests {
         let batch = BlockInput {
             context: next(&spec, &pre),
             deposits: vec![],
-            txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 1, 100_000)],
+            txs: vec![tx(
+                &spec,
+                alice,
+                TxKind::Call(contract),
+                U256::ZERO,
+                Bytes::new(),
+                1,
+                100_000,
+            )],
         };
         let (w, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).expect("generates");
         assert!(outcome.tx_outcomes[0].success);
@@ -793,7 +909,10 @@ mod tests {
         let mut full = pre.clone();
         execute_block(&spec, &mut full, batch.clone()).unwrap();
         assert_eq!(verified.new_state_root, compute_keccak_mpt_state_root(&full));
-        assert_eq!(full.db.cache.accounts[&contract].storage[&U256::ZERO], sats_to_wei(5 * SATS_PER_BLCH));
+        assert_eq!(
+            full.db().cache.accounts[&contract].storage[&U256::ZERO],
+            sats_to_wei(5 * SATS_PER_BLCH)
+        );
 
         // A second batch that only SLOADs the (now non-zero) slot: the contract
         // is read-only again and still covered.
@@ -805,17 +924,36 @@ mod tests {
             BlockInput {
                 context: ctx2,
                 deposits: vec![],
-                txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 2, 100_000)],
+                txs: vec![tx(
+                    &spec,
+                    alice,
+                    TxKind::Call(contract),
+                    U256::ZERO,
+                    Bytes::new(),
+                    2,
+                    100_000,
+                )],
             },
         );
         assert!(out2.is_ok());
         let batch3 = BlockInput {
             context: next(&spec, &full),
             deposits: vec![],
-            txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 2, 100_000)],
+            txs: vec![tx(
+                &spec,
+                alice,
+                TxKind::Call(contract),
+                U256::ZERO,
+                Bytes::new(),
+                2,
+                100_000,
+            )],
         };
         let (w3, _) = generate_batch_witness(&full, &spec, batch3.clone()).expect("generates");
-        assert!(w3.pre_accounts.iter().any(|a| a.address == contract && a.storage.len() == 1));
+        assert!(w3
+            .pre_accounts
+            .iter()
+            .any(|a| a.address == contract && a.storage.len() == 1));
         verify_batch(&spec, &w3, &batch3).expect("guest verifies");
     }
 
@@ -827,9 +965,16 @@ mod tests {
         let spec = ChainSpec::testnet();
         let pre = funded_pre_state(&spec, 4);
         let dep = deposit(address!("00000000000000000000000000000000000000cc"), 3 * SATS_PER_BLCH);
-        let batch = BlockInput { context: next(&spec, &pre), deposits: vec![dep], txs: vec![] };
+        let batch = BlockInput {
+            context: next(&spec, &pre),
+            deposits: vec![dep],
+            txs: vec![],
+        };
         let (w, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).expect("generates");
-        assert!(w.pre_accounts.iter().any(|a| a.address == spec.supply_ledger), "ledger is hydrated");
+        assert!(
+            w.pre_accounts.iter().any(|a| a.address == spec.supply_ledger),
+            "ledger is hydrated"
+        );
         assert_eq!(outcome.minted_wei, sats_to_wei(3 * SATS_PER_BLCH));
         let verified = verify_batch(&spec, &w, &batch).expect("guest verifies");
         assert_eq!(verified.minted_wei, outcome.minted_wei);
@@ -839,16 +984,54 @@ mod tests {
         // execute it, and a guest handed the previous witness rejects it too.
         let mut post = pre.clone();
         execute_block(&spec, &mut post, batch.clone()).unwrap();
-        let replay = BlockInput { context: next(&spec, &post), deposits: vec![dep], txs: vec![] };
-        assert!(matches!(generate_batch_witness(&post, &spec, replay.clone()), Err(GenerateError::Execution(_))));
+        let replay = BlockInput {
+            context: next(&spec, &post),
+            deposits: vec![dep],
+            txs: vec![],
+        };
+        assert!(matches!(
+            generate_batch_witness(&post, &spec, replay.clone()),
+            Err(GenerateError::Execution(_))
+        ));
 
         // First deposit ever on an empty chain: ledger absent, then created.
         let empty = L2State::new();
-        let first = BlockInput { context: next(&spec, &empty), deposits: vec![deposit(addr(1), 1)], txs: vec![] };
+        let first = BlockInput {
+            context: next(&spec, &empty),
+            deposits: vec![deposit(addr(1), 1)],
+            txs: vec![],
+        };
         let (w0, _) = generate_batch_witness(&empty, &spec, first.clone()).expect("generates from empty");
         assert!(w0.proof.is_empty() || w0.proof.len() == 1);
         assert!(w0.absent_accounts.contains(&spec.supply_ledger));
         verify_batch(&spec, &w0, &first).expect("guest verifies genesis deposit");
+    }
+
+    /// I09: with the `serde` feature the witness is the host→guest wire format
+    /// and round-trips byte-for-byte (Nibbles keys serialize as hex strings, so
+    /// JSON maps work too).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn batch_witness_round_trips_through_serde() {
+        let spec = ChainSpec::testnet();
+        let pre = funded_pre_state(&spec, 6);
+        let batch = transfer_batch(&spec, &pre, addr(1), addr(4));
+        let (w, _) = generate_batch_witness(&pre, &spec, batch.clone()).unwrap();
+        let json = serde_json::to_string(&w).expect("serializes");
+        let back: BatchWitness = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, w, "byte-for-byte round trip");
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            json,
+            "canonical: re-serialization is identical"
+        );
+        verify_batch(&spec, &back, &batch).expect("the deserialized witness verifies");
+        // The full state snapshot round-trips too (the commitment cache is
+        // derived data, rebuilt on demand).
+        let snap = serde_json::to_string(&pre).unwrap();
+        let restored: L2State = serde_json::from_str(&snap).unwrap();
+        assert!(!restored.is_warm());
+        assert_eq!(restored.state_root(), pre.state_root());
     }
 
     #[test]
@@ -857,7 +1040,8 @@ mod tests {
         let mut pre = funded_pre_state(&spec, 14);
         // A contract with several storage slots so per-account storage order matters.
         let alice = addr(1);
-        let store8: Bytes = bytes!("600160015560026002556003600355600460045560056005556006600655600760075560086008556000600055");
+        let store8: Bytes =
+            bytes!("600160015560026002556003600355600460045560056005556006600655600760075560086008556000600055");
         let mut runtime = store8.to_vec();
         runtime.push(0x00);
         let len = runtime.len() as u8;
@@ -870,7 +1054,15 @@ mod tests {
             BlockInput {
                 context: ctx1,
                 deposits: vec![],
-                txs: vec![tx(&spec, alice, TxKind::Create, U256::ZERO, initcode.into(), 0, 400_000)],
+                txs: vec![tx(
+                    &spec,
+                    alice,
+                    TxKind::Create,
+                    U256::ZERO,
+                    initcode.into(),
+                    0,
+                    400_000,
+                )],
             },
         )
         .unwrap();
@@ -885,7 +1077,15 @@ mod tests {
             BlockInput {
                 context: ctx2,
                 deposits: vec![],
-                txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 1, 400_000)],
+                txs: vec![tx(
+                    &spec,
+                    alice,
+                    TxKind::Call(contract),
+                    U256::ZERO,
+                    Bytes::new(),
+                    1,
+                    400_000,
+                )],
             },
         )
         .unwrap();
@@ -894,7 +1094,15 @@ mod tests {
         let batch = BlockInput {
             context: next(&spec, &pre),
             deposits: vec![],
-            txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 2, 400_000)],
+            txs: vec![tx(
+                &spec,
+                alice,
+                TxKind::Call(contract),
+                U256::ZERO,
+                Bytes::new(),
+                2,
+                400_000,
+            )],
         };
         let (w1, _) = generate_batch_witness(&pre, &spec, batch.clone()).unwrap();
         let (w2, _) = generate_batch_witness(&pre.clone(), &spec, batch).unwrap();
@@ -913,6 +1121,9 @@ mod tests {
         let c = w1.pre_accounts.iter().find(|a| a.address == contract).unwrap();
         assert_eq!(c.storage.len(), 8);
         assert!(c.storage.windows(2).all(|p| p[0].0 < p[1].0), "storage sorted by slot");
-        assert!(w1.pre_accounts.windows(2).all(|p| p[0].address < p[1].address), "accounts sorted");
+        assert!(
+            w1.pre_accounts.windows(2).all(|p| p[0].address < p[1].address),
+            "accounts sorted"
+        );
     }
 }

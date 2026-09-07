@@ -23,18 +23,21 @@
 //! is trusted by structure alone. Every malformed or incomplete input is a
 //! [`WitnessError`], never a panic.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use alloy_primitives::Address;
 use alloy_primitives::{keccak256, Bytes, B256, U256};
 use alloy_rlp::{Decodable, Encodable, Header};
 use alloy_trie::nodes::{RlpNode, TrieNode};
 use alloy_trie::{HashBuilder, Nibbles, EMPTY_ROOT_HASH};
-use revm::database::{AccountState, CacheDB};
+use revm::database::{CacheDB, DbAccount, InMemoryDB};
 use revm::primitives::KECCAK_EMPTY;
+use revm::state::AccountInfo;
 
-use crate::state::L2State;
+use crate::mpt::Mpt;
+use crate::state::{account_exists, L2State};
 
 /// Number of nibbles in a keccak-hashed trie key (32 bytes).
 pub const KEY_NIBBLES: usize = 64;
@@ -46,10 +49,13 @@ const MAX_COMPACT_KEY_BYTES: usize = 33;
 /// RLP-encode one account as Ethereum does: a list `[nonce, balance,
 /// storageRoot, codeHash]`. `nonce`/`balance` use minimal big-endian (RLP integer
 /// form); the two roots are fixed 32-byte strings.
-fn encode_account(nonce: u64, balance: U256, storage_root: B256, code_hash: B256, out: &mut Vec<u8>) {
-    let payload_len =
-        nonce.length() + balance.length() + storage_root.length() + code_hash.length();
-    Header { list: true, payload_length: payload_len }.encode(out);
+pub(crate) fn encode_account(nonce: u64, balance: U256, storage_root: B256, code_hash: B256, out: &mut Vec<u8>) {
+    let payload_len = nonce.length() + balance.length() + storage_root.length() + code_hash.length();
+    Header {
+        list: true,
+        payload_length: payload_len,
+    }
+    .encode(out);
     nonce.encode(out);
     balance.encode(out);
     storage_root.encode(out);
@@ -101,13 +107,156 @@ fn storage_root<'a>(slots: impl Iterator<Item = (&'a U256, &'a U256)>) -> B256 {
 /// live account and slot); a partially cached database would yield a root over
 /// partial state.
 pub fn compute_keccak_mpt_state_root(state: &L2State) -> B256 {
-    trie_root(account_leaves(state))
+    trie_root(account_leaves_of(state.db()))
+}
+
+/// Normalize the two spellings of "no code" to [`KECCAK_EMPTY`].
+fn code_hash_of(info: &AccountInfo) -> B256 {
+    if info.code_hash == B256::ZERO {
+        KECCAK_EMPTY
+    } else {
+        info.code_hash
+    }
+}
+
+/// The account-trie leaf (RLP) of an existing cached account, storage root
+/// computed from scratch over its storage.
+pub(crate) fn account_leaf(acc: &DbAccount) -> Vec<u8> {
+    let mut value = Vec::new();
+    encode_account(
+        acc.info.nonce,
+        acc.info.balance,
+        storage_root(acc.storage.iter()),
+        code_hash_of(&acc.info),
+        &mut value,
+    );
+    value
+}
+
+/// Trie key of an account: `keccak256(address)` as nibbles.
+pub(crate) fn account_key(address: &Address) -> Nibbles {
+    Nibbles::unpack(keccak256(address))
+}
+
+fn slot_key(slot: &U256) -> Nibbles {
+    Nibbles::unpack(keccak256(slot.to_be_bytes::<32>()))
+}
+
+/// The **incremental** commitment over an [`L2State`]: the account trie plus
+/// one storage trie per account with storage, all [`Mpt`]s that re-hash only
+/// what changed. Built once from the database (O(state)), then kept in step
+/// by [`L2State::apply_overlay`] at O(touched accounts × depth) per block —
+/// audit finding C27. Its root is always equal to
+/// [`compute_keccak_mpt_state_root`] (asserted by the tests on every block).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StateTrie {
+    accounts: Mpt,
+    storage: BTreeMap<Address, Mpt>,
+}
+
+impl StateTrie {
+    /// Build from every existing account in the database.
+    pub(crate) fn build(db: &InMemoryDB) -> Self {
+        let mut trie = Self::default();
+        for (address, acc) in db.cache.accounts.iter().filter(|(_, acc)| account_exists(acc)) {
+            trie.set_account(*address, acc);
+        }
+        trie.accounts.root();
+        trie
+    }
+
+    fn set_leaf(&mut self, address: Address, info: &AccountInfo, storage_root: B256) {
+        let mut value = Vec::new();
+        encode_account(info.nonce, info.balance, storage_root, code_hash_of(info), &mut value);
+        self.accounts.insert(account_key(&address), value);
+    }
+
+    fn storage_root_of(&mut self, address: Address) -> B256 {
+        match self.storage.get_mut(&address) {
+            None => EMPTY_ROOT_HASH,
+            Some(t) if t.is_empty() => {
+                self.storage.remove(&address);
+                EMPTY_ROOT_HASH
+            }
+            Some(t) => t.root(),
+        }
+    }
+
+    /// Remove an account (and its storage trie) from the commitment.
+    pub(crate) fn remove_account(&mut self, address: Address) {
+        self.accounts.remove(&account_key(&address));
+        self.storage.remove(&address);
+    }
+
+    /// Set an existing account from its complete cached form (info + full
+    /// storage), rebuilding its storage trie.
+    pub(crate) fn set_account(&mut self, address: Address, acc: &DbAccount) {
+        self.storage.remove(&address);
+        if acc.storage.values().any(|v| !v.is_zero()) {
+            let mut t = Mpt::new();
+            for (slot, value) in acc.storage.iter().filter(|(_, v)| !v.is_zero()) {
+                t.insert(slot_key(slot), alloy_rlp::encode(value));
+            }
+            self.storage.insert(address, t);
+        }
+        let root = self.storage_root_of(address);
+        self.set_leaf(address, &acc.info, root);
+    }
+
+    /// Update an existing account's info and apply storage deltas (a zero
+    /// value deletes the slot); untouched slots are not re-hashed.
+    pub(crate) fn update_account(&mut self, address: Address, info: &AccountInfo, delta: &[(U256, U256)]) {
+        if !delta.is_empty() {
+            let t = self.storage.entry(address).or_default();
+            for (slot, value) in delta {
+                if value.is_zero() {
+                    t.remove(&slot_key(slot));
+                } else {
+                    t.insert(slot_key(slot), alloy_rlp::encode(value));
+                }
+            }
+        }
+        let root = self.storage_root_of(address);
+        self.set_leaf(address, info, root);
+    }
+
+    /// The state root, re-hashing only changed paths.
+    pub(crate) fn root(&mut self) -> B256 {
+        self.accounts.root()
+    }
+
+    /// The state root without hashing, if warm.
+    pub(crate) fn root_cached(&self) -> Option<B256> {
+        self.accounts.root_cached()
+    }
+
+    /// Every account-trie leaf `(keccak(address), rlp)` in key order.
+    pub(crate) fn account_leaves(&self) -> Vec<(B256, Vec<u8>)> {
+        self.accounts
+            .leaves()
+            .into_iter()
+            .map(|(k, v)| (B256::from_slice(&k.pack()), v.to_vec()))
+            .collect()
+    }
+
+    /// The account-trie multiproof for `targets` (warm trie only).
+    pub(crate) fn proof(&self, targets: impl IntoIterator<Item = Nibbles>) -> Option<BTreeMap<Nibbles, Bytes>> {
+        self.accounts.proof(targets)
+    }
+
+    /// Key-order neighbours of an account-trie key.
+    pub(crate) fn neighbours(&self, key: &Nibbles) -> (Option<Nibbles>, Option<Nibbles>) {
+        (self.accounts.predecessor(key), self.accounts.successor(key))
+    }
 }
 
 /// The `(keccak256(address), rlp(account))` leaf set of the state trie — the
 /// same leaves [`compute_keccak_mpt_state_root`] hashes. Unsorted.
 pub(crate) fn account_leaves(state: &L2State) -> Vec<(B256, Vec<u8>)> {
-    account_leaves_of(&state.db)
+    match state.warm_commitment() {
+        Some(trie) => trie.account_leaves(),
+        None => account_leaves_of(state.db()),
+    }
 }
 
 /// [`account_leaves`] over any `CacheDB` whose cache is complete for the
@@ -117,20 +266,10 @@ pub(crate) fn account_leaves_of<ExtDB>(db: &CacheDB<ExtDB>) -> Vec<(B256, Vec<u8
     db.cache
         .accounts
         .iter()
-        .filter(|(_, acc)| acc.account_state != AccountState::NotExisting)
-        .filter_map(|(address, acc)| {
-            let info = acc.info()?;
-            let code_hash = if info.code_hash == B256::ZERO { KECCAK_EMPTY } else { info.code_hash };
-            // EIP-161: an account with nonce 0, balance 0, and empty code is not
-            // in the state trie.
-            if info.nonce == 0 && info.balance.is_zero() && code_hash == KECCAK_EMPTY {
-                return None;
-            }
-            let s_root = storage_root(acc.storage.iter());
-            let mut value = Vec::new();
-            encode_account(info.nonce, info.balance, s_root, code_hash, &mut value);
-            Some((keccak256(address), value))
-        })
+        // EIP-161: an account with nonce 0, balance 0, and empty code is not
+        // in the state trie (the crate's single existence predicate).
+        .filter(|(_, acc)| account_exists(acc))
+        .map(|(address, acc)| (keccak256(address), account_leaf(acc)))
         .collect()
 }
 
@@ -268,7 +407,10 @@ impl SparseTrieView {
         let root = proof.get(&root_path).ok_or(WitnessError::MissingRootNode)?;
         let got = keccak256(root);
         if got != state_root {
-            return Err(WitnessError::RootMismatch { expected: state_root, got });
+            return Err(WitnessError::RootMismatch {
+                expected: state_root,
+                got,
+            });
         }
         view.walk(root_path, root, proof)?;
         Ok(view)
@@ -300,7 +442,10 @@ impl SparseTrieView {
             return Ok(true);
         }
         if let Some((frontier, _)) = self.frontier.iter().find(|(p, _)| key.starts_with(p)) {
-            return Err(WitnessError::KeyInOpaqueSubtree { key: *key, frontier: *frontier });
+            return Err(WitnessError::KeyInOpaqueSubtree {
+                key: *key,
+                frontier: *frontier,
+            });
         }
         Ok(false)
     }
@@ -322,9 +467,9 @@ impl SparseTrieView {
         let mut out: Vec<Emit> = Vec::with_capacity(self.leaves.len() + self.frontier.len() + changes.len());
         for (k, cur) in &self.leaves {
             match changes.get(k) {
-                Some(None) => {}                                     // delete
+                Some(None) => {}                                      // delete
                 Some(Some(v)) => out.push(Emit::Leaf(*k, v.clone())), // update
-                None => out.push(Emit::Leaf(*k, cur.clone())),       // unchanged
+                None => out.push(Emit::Leaf(*k, cur.clone())),        // unchanged
             }
         }
         for (k, change) in changes {
@@ -493,12 +638,6 @@ pub fn stateless_new_root(
     SparseTrieView::from_proof(prev_state_root, proof)?.apply(changes)
 }
 
-/// Deduplicated, sorted keys — a small helper for witness builders.
-pub(crate) fn sorted_unique_keys(keys: impl IntoIterator<Item = B256>) -> Vec<B256> {
-    let set: BTreeSet<B256> = keys.into_iter().collect();
-    set.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,9 +648,15 @@ mod tests {
     /// Fund an account directly (these tests are about trie mechanics, not the
     /// deposit path, so they bypass the supply ledger).
     fn fund(state: &mut L2State, to: Address, wei: u64) {
-        let mut info = state.db.cache.accounts.get(&to).map(|a| a.info.clone()).unwrap_or_default();
+        let mut info = state
+            .db()
+            .cache
+            .accounts
+            .get(&to)
+            .map(|a| a.info.clone())
+            .unwrap_or_default();
         info.balance += U256::from(wei);
-        state.db.insert_account_info(to, info);
+        state.db_mut().insert_account_info(to, info);
     }
 
     fn leaves_sorted(state: &L2State) -> Vec<(B256, Vec<u8>)> {
@@ -533,7 +678,11 @@ mod tests {
 
     fn leaf_of(state: &L2State, addr: Address) -> Vec<u8> {
         let key = keccak256(addr);
-        account_leaves(state).into_iter().find(|(k, _)| *k == key).expect("leaf").1
+        account_leaves(state)
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .expect("leaf")
+            .1
     }
 
     #[test]
@@ -594,8 +743,11 @@ mod tests {
         // code) must NOT appear in the state trie: the root stays the
         // canonical empty root even though the account is present in the cache.
         let mut empty = L2State::new();
-        empty.db.insert_account_info(who, AccountInfo::default());
-        assert!(empty.db.cache.accounts.contains_key(&who), "the empty account is present in the DB cache");
+        empty.db_mut().insert_account_info(who, AccountInfo::default());
+        assert!(
+            empty.db().cache.accounts.contains_key(&who),
+            "the empty account is present in the DB cache"
+        );
         assert_eq!(
             compute_keccak_mpt_state_root(&empty),
             EMPTY_ROOT_HASH,
@@ -605,12 +757,24 @@ mod tests {
         // Nonce alone (nonce 1, balance 0, empty code) makes the account
         // non-empty, so it IS in the trie and moves the root.
         let mut with_nonce = L2State::new();
-        with_nonce.db.insert_account_info(who, AccountInfo { nonce: 1, ..Default::default() });
+        with_nonce.db_mut().insert_account_info(
+            who,
+            AccountInfo {
+                nonce: 1,
+                ..Default::default()
+            },
+        );
         assert_ne!(compute_keccak_mpt_state_root(&with_nonce), EMPTY_ROOT_HASH);
 
         // Balance alone likewise makes it non-empty.
         let mut with_balance = L2State::new();
-        with_balance.db.insert_account_info(who, AccountInfo { balance: U256::from(1u64), ..Default::default() });
+        with_balance.db_mut().insert_account_info(
+            who,
+            AccountInfo {
+                balance: U256::from(1u64),
+                ..Default::default()
+            },
+        );
         assert_ne!(compute_keccak_mpt_state_root(&with_balance), EMPTY_ROOT_HASH);
     }
 
@@ -625,7 +789,7 @@ mod tests {
         let mut with_ghost = L2State::new();
         fund(&mut with_ghost, funded, 9);
         // A touched-but-empty account alongside the funded one.
-        with_ghost.db.insert_account_info(ghost, AccountInfo::default());
+        with_ghost.db_mut().insert_account_info(ghost, AccountInfo::default());
 
         assert_eq!(
             compute_keccak_mpt_state_root(&only_funded),
@@ -667,14 +831,23 @@ mod tests {
             Err(WitnessError::RootMismatch { .. })
         ));
         let mut tampered = proof.clone();
-        let (deepest, bytes) = tampered.iter().max_by_key(|(p, _)| p.len()).map(|(p, b)| (*p, b.clone())).unwrap();
+        let (deepest, bytes) = tampered
+            .iter()
+            .max_by_key(|(p, _)| p.len())
+            .map(|(p, b)| (*p, b.clone()))
+            .unwrap();
         let mut b = bytes.to_vec();
         let last = b.len() - 1;
         b[last] ^= 0xFF;
         tampered.insert(deepest, b.into());
         let err = SparseTrieView::from_proof(prev_root, &tampered).unwrap_err();
         assert!(
-            matches!(err, WitnessError::RootMismatch { .. } | WitnessError::UnanchoredNode { .. } | WitnessError::MalformedNode { .. }),
+            matches!(
+                err,
+                WitnessError::RootMismatch { .. }
+                    | WitnessError::UnanchoredNode { .. }
+                    | WitnessError::MalformedNode { .. }
+            ),
             "tampered node must be rejected, got {err:?}"
         );
     }
@@ -710,7 +883,10 @@ mod tests {
             changes.insert(Nibbles::unpack(keccak256(a)), Some(leaf_of(&new_state, *a)));
         }
         let got = stateless_new_root(prev_root, &proof, &changes).expect("complete witness");
-        assert_eq!(got, expected, "general sparse stateless root update must match the full rebuild");
+        assert_eq!(
+            got, expected,
+            "general sparse stateless root update must match the full rebuild"
+        );
         assert_ne!(got, prev_root, "the update moved the root");
     }
 
@@ -737,7 +913,11 @@ mod tests {
 
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
         changes.insert(new_key, Some(leaf_of(&new_state, new_addr)));
-        assert_eq!(stateless_new_root(prev_root, &proof, &changes), Ok(expected), "insert must match full rebuild");
+        assert_eq!(
+            stateless_new_root(prev_root, &proof, &changes),
+            Ok(expected),
+            "insert must match full rebuild"
+        );
     }
 
     /// DELETE — removing an account collapses a branch (a 2-leaf branch
@@ -754,7 +934,7 @@ mod tests {
 
         // DELETE: zero the account (EIP-161 empty ⇒ excluded from the trie).
         let mut new_state = state.clone();
-        new_state.db.insert_account_info(del, AccountInfo::default());
+        new_state.db_mut().insert_account_info(del, AccountInfo::default());
         let expected = compute_keccak_mpt_state_root(&new_state);
         assert_ne!(expected, prev_root);
 
@@ -764,7 +944,11 @@ mod tests {
 
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
         changes.insert(del_key, None);
-        assert_eq!(stateless_new_root(prev_root, &proof, &changes), Ok(expected), "delete-with-collapse must match full rebuild");
+        assert_eq!(
+            stateless_new_root(prev_root, &proof, &changes),
+            Ok(expected),
+            "delete-with-collapse must match full rebuild"
+        );
     }
 
     /// First insert into an EMPTY trie: the proof is empty (or the single
@@ -778,7 +962,10 @@ mod tests {
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
         changes.insert(Nibbles::unpack(keccak256(who)), Some(leaf_of(&new_state, who)));
         let empty_proof = BTreeMap::new();
-        assert_eq!(stateless_new_root(EMPTY_ROOT_HASH, &empty_proof, &changes), Ok(expected));
+        assert_eq!(
+            stateless_new_root(EMPTY_ROOT_HASH, &empty_proof, &changes),
+            Ok(expected)
+        );
         // Deleting the only account returns to the empty root.
         let (root, proof) = multiproof(&new_state, [Nibbles::unpack(keccak256(who))]);
         assert_eq!(root, expected);
@@ -824,7 +1011,11 @@ mod tests {
 
         // Rewriting an exposed leaf's bytes breaks the chain up to the root.
         let mut tampered = proof.clone();
-        let (deepest, bytes) = tampered.iter().max_by_key(|(p, _)| p.len()).map(|(p, b)| (*p, b.clone())).unwrap();
+        let (deepest, bytes) = tampered
+            .iter()
+            .max_by_key(|(p, _)| p.len())
+            .map(|(p, b)| (*p, b.clone()))
+            .unwrap();
         let mut b = bytes.to_vec();
         let last = b.len() - 1;
         b[last] ^= 0x01;
@@ -855,10 +1046,19 @@ mod tests {
         }
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
         changes.insert(hidden, None);
-        assert!(matches!(view.apply(&changes), Err(WitnessError::KeyInOpaqueSubtree { .. })));
+        assert!(matches!(
+            view.apply(&changes),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
         changes.insert(hidden, Some(vec![0xc0]));
-        assert!(matches!(view.apply(&changes), Err(WitnessError::KeyInOpaqueSubtree { .. })));
-        assert!(matches!(view.contains_key(&hidden), Err(WitnessError::KeyInOpaqueSubtree { .. })));
+        assert!(matches!(
+            view.apply(&changes),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
+        assert!(matches!(
+            view.contains_key(&hidden),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
 
         // Deleting a provably absent key is a witness inconsistency.
         let absent = Nibbles::unpack(keccak256(address!("00000000000000000000000000000000deadbeef")));
@@ -866,7 +1066,10 @@ mod tests {
         match view.contains_key(&absent) {
             Ok(false) => {
                 changes.insert(absent, None);
-                assert_eq!(view.apply(&changes), Err(WitnessError::DeleteOfAbsentKey { key: absent }));
+                assert_eq!(
+                    view.apply(&changes),
+                    Err(WitnessError::DeleteOfAbsentKey { key: absent })
+                );
             }
             other => {
                 // The key happens to fall under an opaque sibling; that is the
@@ -897,14 +1100,20 @@ mod tests {
         [0x00u8].as_slice().encode(&mut payload);
         child.encode(&mut payload);
         let mut rlp = Vec::new();
-        Header { list: true, payload_length: payload.len() }.encode(&mut rlp);
+        Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut rlp);
         rlp.extend(payload);
         let root = keccak256(&rlp);
         let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
         proof.insert(Nibbles::default(), rlp.into());
         assert_eq!(
             SparseTrieView::from_proof(root, &proof).unwrap_err(),
-            WitnessError::EmptyExtensionKey { path: Nibbles::default() }
+            WitnessError::EmptyExtensionKey {
+                path: Nibbles::default()
+            }
         );
 
         // Over-long compact key (34 bytes) in a leaf: rejected before decode.
@@ -912,7 +1121,11 @@ mod tests {
         [0x20u8; 34].as_slice().encode(&mut payload);
         [0x01u8].as_slice().encode(&mut payload);
         let mut rlp = Vec::new();
-        Header { list: true, payload_length: payload.len() }.encode(&mut rlp);
+        Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut rlp);
         rlp.extend(payload);
         let root = keccak256(&rlp);
         let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
@@ -934,7 +1147,11 @@ mod tests {
             [].as_slice().encode(&mut branch_payload);
         }
         let mut branch_rlp = Vec::new();
-        Header { list: true, payload_length: branch_payload.len() }.encode(&mut branch_rlp);
+        Header {
+            list: true,
+            payload_length: branch_payload.len(),
+        }
+        .encode(&mut branch_rlp);
         branch_rlp.extend(branch_payload);
         let root = keccak256(&branch_rlp);
         let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();

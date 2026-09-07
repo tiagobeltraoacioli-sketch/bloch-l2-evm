@@ -1,15 +1,17 @@
 # cargo-audit configuration — bloch-l2-evm (SCAFFOLD, testnet / zero-value).
 #
-# Run locally with:  cd l2/bloch-l2-evm && cargo audit
+# Run locally with:  cargo audit          (from the repository root)
+# CI runs it on every push (.github/workflows/ci.yml); deny.toml carries the
+# same ignore list for `cargo deny check advisories`.
 #
 # Every advisory ignored below is TRANSITIVE, reached only through the
-# design-pinned `revm =41.0.0` dependency tree (see l2/bloch-l2-evm/Cargo.toml:
-# revm is pinned to ONE exact version because the sequencer/node and the SP1
-# guest MUST re-execute byte-identical code — any bump is a deliberate,
-# documented "program upgrade" that also changes the SP1 program vkey, NOT a
-# routine `cargo update`). None of these can be fixed here without breaking that
-# byte-identical-revm invariant, and none is reachable from any code this crate
-# executes at value. They are re-reviewed on every intentional revm bump.
+# design-pinned `revm =41.0.0` dependency tree. revm is pinned to ONE exact
+# version because the sequencer/node and the SP1 guest MUST re-execute
+# byte-identical code — any bump is a deliberate, documented "program upgrade"
+# that also changes the SP1 program vkey, NOT a routine `cargo update`. None of
+# these can be fixed here without breaking that invariant, and none is reachable
+# from any code this crate executes at value. They are re-reviewed on every
+# intentional revm bump (audit finding I08 corrected the dependency paths).
 #
 # This crate is an UNAUDITED scaffold with no live chain and no value at risk
 # (see the crate header). Do NOT copy these ignores into any consensus-critical
@@ -17,16 +19,19 @@
 
 [advisories]
 ignore = [
-    # tracing-subscriber 0.2.25 (via ark-relations -> ark-bn254 ->
-    # revm-precompile). "Logging user input may poison logs with ANSI escape
-    # sequences." This scaffold does not log untrusted user input, and the
-    # vulnerable crate is a build-only transitive of a revm precompile. Upgrade
-    # path (>=0.3.20) is owned by the pinned revm tree, not by this crate.
+    # tracing-subscriber 0.2.x: "logging user input may poison logs with ANSI
+    # escape sequences". A LOCKFILE-ONLY entry: it is reached through the
+    # arkworks crates' optional features, is never selected by this crate's
+    # feature set and is never compiled (`cargo tree -i tracing-subscriber`
+    # prints nothing). Harmless; listed only so `cargo audit` is quiet about
+    # the lockfile.
     "RUSTSEC-2025-0055",
-    # derivative 2.2.0 — UNMAINTAINED (not a vulnerability). Transitive via
-    # ark-ff -> ruint -> alloy-primitives/alloy-trie inside the revm tree.
+    # derivative 2.2.0 — UNMAINTAINED (not a vulnerability). LOCKFILE-ONLY,
+    # same situation as above (optional feature of the arkworks crates, never
+    # compiled here).
     "RUSTSEC-2024-0388",
-    # paste 1.x — UNMAINTAINED (not a vulnerability). Transitive proc-macro of
-    # the revm/alloy tree.
+    # paste 1.x — UNMAINTAINED (not a vulnerability). A proc-macro compiled
+    # as a build-time dependency of `alloy-primitives`; it generates code at
+    # compile time and is not linked into the program.
     "RUSTSEC-2024-0436",
 ]
