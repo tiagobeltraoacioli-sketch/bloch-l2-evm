@@ -8,6 +8,8 @@
 use alloy_primitives::{address, Address, U256};
 use revm::primitives::hardfork::SpecId;
 
+use crate::scale::SATS_PER_BLCH;
+
 /// OP-Stack-convention predeploy address for the sequencer fee vault
 /// (priority fees land here; it is also the block's COINBASE, per the design:
 /// "COINBASE returns the fee-vault address").
@@ -15,9 +17,31 @@ pub const SEQUENCER_FEE_VAULT: Address = address!("42000000000000000000000000000
 
 /// OP-Stack-convention predeploy address for the base-fee vault. The EIP-1559
 /// basefee is routed here instead of being destroyed — bridged BLCH is
-/// **never burned**, so the L1 escrow always balances and no party operates a
-/// BLCH supply-reduction mechanism.
+/// **never burned by the protocol**, so the L1 escrow always balances and no
+/// party operates a BLCH supply-reduction mechanism. (The EVM itself can still
+/// destroy value via EIP-6780 SELFDESTRUCT-to-self in the creating
+/// transaction; see the audit report, finding C11.)
 pub const BASE_FEE_VAULT: Address = address!("4200000000000000000000000000000000000019");
+
+/// System account holding the **committed supply ledger**: the cumulative
+/// bridged-BLCH wei ever minted (storage slot 0) and one marker slot per
+/// consumed L1 escrow outpoint (see [`crate::state::consumed_deposit_slot`]).
+///
+/// It is a plain storage-bearing account with `nonce = 1` and no code, created
+/// lazily by the first deposit, so it is a leaf of the keccak-MPT state root:
+/// the ledger and the set of consumed deposits are therefore part of every
+/// state commitment, carried by the batch witness like any other account, and
+/// re-checked by a stateless guest. The address is outside the OP-Stack
+/// predeploy byte range (`0x4200…00xx`).
+pub const SUPPLY_LEDGER: Address = address!("4200000000000000000000000000000000000100");
+
+/// Placeholder hard cap on the L1 supply, in sats, used to bound deposits:
+/// 21 000 000 BLCH. **Pending the design document** (absent from this
+/// repository) this MUST be replaced by the Bloch L1's actual hard cap; a cap
+/// that is too high weakens the bound, a cap that is too low rejects
+/// legitimate deposits. It is a `ChainSpec` knob so it can be corrected without
+/// touching the executor.
+pub const MAX_L1_SATS_PLACEHOLDER: u64 = 21_000_000 * SATS_PER_BLCH;
 
 /// Genesis / consensus-parameter knobs for the Bloch EVM L2, mirroring
 /// `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1's ChainSpec.
@@ -55,6 +79,12 @@ pub struct ChainSpec {
     /// Where priority fees are routed; also the block beneficiary /
     /// COINBASE.
     pub sequencer_fee_vault: Address,
+    /// The committed supply-ledger system account (see [`SUPPLY_LEDGER`]).
+    pub supply_ledger: Address,
+    /// Hard cap on the L1 supply in sats: no single deposit may claim more,
+    /// and the cumulative minted supply may never exceed it. See
+    /// [`MAX_L1_SATS_PLACEHOLDER`].
+    pub max_l1_sats: u64,
 }
 
 impl ChainSpec {
@@ -71,6 +101,8 @@ impl ChainSpec {
             block_reward: U256::ZERO,
             base_fee_vault: BASE_FEE_VAULT,
             sequencer_fee_vault: SEQUENCER_FEE_VAULT,
+            supply_ledger: SUPPLY_LEDGER,
+            max_l1_sats: MAX_L1_SATS_PLACEHOLDER,
         }
     }
 
@@ -136,6 +168,9 @@ mod tests {
         assert_eq!(spec.gas_target(), 15_000_000);
         assert_eq!(spec.coinbase(), SEQUENCER_FEE_VAULT);
         assert_ne!(spec.base_fee_vault, spec.sequencer_fee_vault);
+        assert_ne!(spec.supply_ledger, spec.base_fee_vault);
+        assert_ne!(spec.supply_ledger, spec.sequencer_fee_vault);
+        assert_eq!(spec.max_l1_sats, 21_000_000 * SATS_PER_BLCH);
     }
 
     #[test]

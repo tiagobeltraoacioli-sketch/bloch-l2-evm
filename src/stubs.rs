@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Honest stubs for the large integrations this scaffold does NOT contain.
 //!
-//! **SCAFFOLD, UNAUDITED, not a working L2.** Every function here panics with
+//! **SCAFFOLD, not a working L2.** Every function here panics with
 //! `todo!()`/`unimplemented!()`. They exist to pin the intended surface from
 //! BLOCH-L2-EVM-DESIGN §1 and to make it impossible to mistake this crate for
 //! a node, an RPC server, a mempool, or a prover.
@@ -35,8 +35,10 @@ pub mod rpc {
 /// Transaction pool — **STUBBED**.
 ///
 /// The design uses Reth's mainnet-grade txpool. This scaffold executes
-/// pre-ordered `TxEnv`s only; there is no mempool, no gossip, no replacement
-/// rules, no signature recovery.
+/// pre-ordered `TxEnv`s only (verifier semantics: a block with an invalid
+/// transaction is invalid); there is no mempool, no gossip, no replacement
+/// rules, no signature recovery, and no block-builder that skips invalid
+/// candidates.
 pub mod txpool {
     /// Submit a raw RLP transaction to the pool.
     pub fn submit_raw_transaction(_rlp_bytes: &[u8]) -> ! {
@@ -50,7 +52,10 @@ pub mod txpool {
 /// The design's NATIVE target is a Reth-SDK node (reth-node-builder with a
 /// single-sequencer consensus stub, custom ChainSpec, reth-rpc, revm as the
 /// executor — the op-reth pattern). That is a multi-month integration and a
-/// heavy dependency; it is deliberately absent from this scaffold.
+/// heavy dependency; it is deliberately absent from this scaffold. It is also
+/// where header validation against the parent (base-fee rule, monotonic
+/// number/timestamp), real block hashes for `BLOCKHASH` and the EIP-4788
+/// system call must be wired (audit findings C13, C16, C17).
 pub mod node {
     /// Build and launch the L2 full node / sequencer.
     pub fn launch_reth_node() -> ! {
@@ -63,24 +68,21 @@ pub mod node {
 /// SP1 guest (riscv32im) build target — **STUBBED**.
 ///
 /// The design's GUEST target compiles this same execution logic for
-/// riscv32im/no_std inside an SP1 program (the RSP pattern): verify an
-/// ExecutionWitness against the pre-state root, re-execute with the SAME
-/// pinned revm, commit public values, prove with FRI core proofs only (no
-/// Groth16/Plonk wrap — the repo's post-quantum rule). No `#![no_std]`
-/// support, no witness types, and no guest crate exist here.
+/// riscv32im/no_std inside an SP1 program (the RSP pattern): verify a batch
+/// witness against the pre-state root, re-execute with the SAME pinned revm,
+/// commit public values, prove with FRI core proofs only (no Groth16/Plonk
+/// wrap — the repo's post-quantum rule). The procedure the guest must run
+/// exists and is tested on the host — [`crate::proving::verify_batch`] over a
+/// [`crate::proving::BatchWitness`] produced by
+/// [`crate::proving::generate_batch_witness`] — but no `sp1_zkvm` entrypoint,
+/// no public-values encoding and no guest crate (with revm/alloy switched to
+/// their no_std features) exist here.
 pub mod sp1_guest {
     /// Re-execute a batch inside the zkVM guest.
     pub fn guest_main() -> ! {
-        // SCAFFOLD: sp1_zkvm entrypoint + ExecutionWitness verification +
-        // byte-identical revm re-execution (riscv32im build target).
+        // SCAFFOLD: sp1_zkvm entrypoint reading (ChainSpec, BlockInput,
+        // BatchWitness), calling crate::proving::verify_batch, committing
+        // (prev_state_root, new_state_root, deposits_hash) as public values.
         todo!("SCAFFOLD: the SP1 guest (riscv32im) target is not implemented in this scaffold")
-    }
-
-    /// Generate the host-side ExecutionWitness (touched MPT nodes, bytecodes,
-    /// ancestor headers) for stateless guest re-execution.
-    pub fn generate_execution_witness() -> ! {
-        // SCAFFOLD: RSP-style witness recording requires the MPT layer
-        // (crate::stateroot), itself stubbed.
-        todo!("SCAFFOLD: ExecutionWitness generation requires the keccak-MPT state layer")
     }
 }

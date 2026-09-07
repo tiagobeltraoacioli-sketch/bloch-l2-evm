@@ -8,9 +8,33 @@
 | **Método** | leitura integral por 10 lentes independentes, provas de conceito executadas, deduplicação, reprodução independente de cada achado e painel adversarial de céticos (60 agentes de verificação), verificação factual dos itens informativos |
 | **Toolchain** | rustc 1.94.1 / cargo 1.94.1; `revm 41.0.0`, `alloy-trie 0.9.5`, `alloy-primitives 1.6.1`, `alloy-rlp 0.3.16`, `ruint 1.19.0`, `nybbles 0.4.8` (conforme `Cargo.lock`, 292 pacotes) |
 | **Baseline** | `cargo test --all-features`: 40 testes, 40 aprovados (o README afirma 22) |
-| **Anexo executável** | `tests/audit_regressions.rs` — um teste de regressão por achado, marcado `#[ignore]`; `cargo test --test audit_regressions -- --ignored` lista os achados ainda abertos |
+| **Anexo executável** | `tests/audit_regressions.rs` — um módulo por achado; os achados corrigidos têm testes ativos, os ainda abertos ficam `#[ignore]` (`cargo test --test audit_regressions -- --ignored` lista-os) |
+| **Status** | **Adendo (mesma data):** os itens P0 da seção 8 foram corrigidos; ver §0 abaixo |
 
 > **Posicionamento.** O próprio crate se declara *scaffold, não auditado, não é um L2 funcional* e diz que tudo é *testnet / valor zero*. Esta auditoria avalia o código **contra o que ele afirma garantir** (emissão zero, "nunca queima", raiz de estado keccak‑MPT correta, caminho de prova stateless "correct‑or‑error") **e contra o que uma função de transição de estado (STF) de L2 real precisa garantir** (atomicidade, solidez das provas, paridade de consenso com Ethereum Cancun, robustez contra entradas maliciosas). Limitações *documentadas* pelo crate continuam sendo achados quando representam lacunas de solidez para o desenho pretendido; o relatório indica quando esse é o caso. A ausência dos componentes explicitamente *stubbed* (nó Reth, RPC `eth_*`, txpool, guest SP1) **não** é tratada como achado.
+
+---
+
+## 0. Adendo — correções P0 aplicadas
+
+Após a entrega do relatório, os itens **P0** da seção 8 foram implementados no mesmo branch (commit seguinte ao relatório). Resumo do que mudou e de como foi verificado:
+
+| Achado | Correção | Verificação |
+|---|---|---|
+| **C01** | `execute_block` valida a entrada inteira antes de tocar o estado, aplica o bloco a uma **cópia de trabalho** e só substitui `state` em `Ok`; em qualquer `Err` o estado do chamador é byte‑idêntico ao pré‑bloco. O `mem::take` sem restauração foi eliminado (`run_block` consome e devolve o banco). | `executor::tests::evm_errors_leave_state_unchanged`, `block_gas_limit_exceeded_is_rejected_without_touching_state`; `tests/audit_regressions.rs::c01` |
+| **C02** | Depósitos passam pela mesma cópia atômica: um bloco rejeitado não deixa nenhum mint aplicado nem contado; duplicatas dentro do bloco são `DuplicateDeposit` na validação pura. | `blob_transactions_are_rejected_at_the_sequencer_without_touching_state`; `c02` |
+| **C03 / C25** | Whitelist de tipos `{0,1,2}` (`SUPPORTED_TX_TYPES`), `UnsupportedTxType` para os demais, `InconsistentTxEnv` para envs cujo tipo não bate com os campos; o roteamento usa `Transaction::effective_gas_price` do próprio revm e credita `min(effective, basefee) × gas`. | `unsupported_tx_types_are_rejected_and_never_inflate_supply`; `c03`, `c25` |
+| **C10 / C18 / C19** | Livro de emissão **comprometido no estado**: conta de sistema `SUPPLY_LEDGER` (`0x4200…0100`, nonce 1, sem código) com slot 0 = total mintado e um slot‑marcador por outpoint consumido; `DepositError::Replay` para outpoint repetido; `mint_wei` removido de `DepositMint` (crédito derivado de `l1_sats`); teto `ChainSpec::max_l1_sats` por depósito e cumulativo (**placeholder de 21 M BLCH** até o documento de desenho); `ExecutionOutcome::deposits_hash` compromete a lista de depósitos; fronteira de confiança documentada. | `state::tests::*`, `deposit_outpoint_mints_at_most_once`, `deposits_above_the_l1_cap_are_rejected`; `c10`, `c18`, `c19` |
+| **C04 / C08 / C21 / C22 / C23 / C24** | `SparseTrieView::from_proof(prev_state_root, proof)` autentica a raiz (`keccak == prev_state_root`) e **cada nó descido** contra a referência do pai; filhos embutidos (< 32 B) são decodificados no lugar; extensão de chave vazia, caminhos > 64 nibbles, chaves compactas > 33 bytes e RLP inválido são `WitnessError`; `stateless_new_root(prev_state_root, proof, changes) -> Result` recusa mudança dentro de sub‑árvore opaca e remoção de chave ausente. Nenhum `expect`/pânico no caminho do witness. | `stateroot::tests::unanchored_or_injected_proof_nodes_are_rejected`, `changes_inside_opaque_subtrees_…`, `malformed_nodes_are_errors_not_panics`, `inline_children_are_handled`; `c04`, `c08`, `c21`–`c24` |
+| **C05 / C06 / C07 / C09 / C12** | Novo `BatchWitness { prev_state_root, new_state_root, proof, pre_accounts, absent_accounts }` (sem `changes`, tudo ordenado). `hydrate_and_verify(&witness)` rejeita duplicatas, contas EIP‑161 vazias, storage zero/desordenado e código inválido, exige que cada conta hidratada seja **folha exposta** com o RLP exato e que cada endereço ausente seja **comprovadamente ausente**. O guest executa sobre `CacheDB<WitnessBacking>`, que **falha** em qualquer leitura fora do witness. `verify_batch` reexecuta, **deriva o conjunto de mudanças** e calcula a raiz; a raiz reivindicada pelo host é comparada, nunca confiada. O host grava o conjunto de leitura completo com um overlay de gravação e só devolve um witness que o próprio `verify_batch` aceita e que reproduz o resultado. | `proving::tests::*` (transferências, contas só lidas, SLOAD de slot vazio, depósitos no guest, witness adulterado); `c05`, `c06`, `c07`, `c09`, `c12` |
+| **C14** | Papel de verificador documentado em `execute_block`/`BlockInput::txs` e rejeição tornada não destrutiva (a API de *builder* continua fora do escopo). | — |
+| **C20, C29 (parcial), C30** | Efeitos colaterais: witness canônico (vetores ordenados); crédito de zero wei não materializa conta; `cargo test --no-default-features` compila (`#[macro_use] extern crate std` só em testes). | `witness_is_canonical_across_independent_generations`; `c20`, `c29`, `c30` |
+
+**Estado da verificação após as correções:** `cargo test` → 53 testes unitários + 22 regressões ativas aprovados, 10 regressões ignoradas (achados abertos); `cargo test --test audit_regressions -- --ignored` → 10 falhas (C11, C13, C15, C16, C17, C26, C27, C28, C31), como esperado; `cargo test --no-default-features` → 53 aprovados; `cargo clippy --lib` sem avisos.
+
+**Permanecem abertos** (P1/P2 da seção 8): C11 (queima EIP‑6780 não rastreada), C13 (cabeçalho não validado), C15 (legadas pré‑EIP‑155), C16 (`BLOCKHASH`), C17 (EIP‑4788), C26 (views/poda), C27 (custo O(estado) por bloco — **agravado** pela cópia de trabalho da atomicidade, aceito conscientemente até a raiz incremental), C28 (divisão por zero em knobs), C29 (medição de depósitos), C31 (pins exatos/toolchain), além dos itens informativos.
+
+**Decisões que exigem confirmação do projeto:** o valor de `max_l1_sats` (placeholder de 21 M BLCH), o endereço do `SUPPLY_LEDGER` (`0x4200…0100`) e a escolha de um *conjunto* de outpoints consumidos (em vez de um cursor monotônico) como regra de unicidade.
 
 ---
 
@@ -66,36 +90,36 @@ Todo o código do repositório: `src/lib.rs`, `src/chainspec.rs`, `src/scale.rs`
 
 | ID | Sev. | Título curto | Local | Status |
 |---|---|---|---|---|
-| C01 | Crítico | `execute_block` apaga todo o estado em erro de tx; livro de emissão segue contando | `executor.rs:196, 229-231, 241-246, 279` | Reproduzido |
-| C04 | Crítico | `stateless_new_root` não ancora o proof a `prev_state_root`; nós injetados forjam a nova raiz | `stateroot.rs:153-205, 210-247` | Reproduzido |
-| C02 | Alto | Depósitos aplicados antes das validações; bloco rejeitado deixa mints e a retentativa minta em dobro | `executor.rs:179-191` | Reproduzido |
-| C03 | Alto | `tx_type ≥ 5` contorna validação de taxa; executor credita basefee que ninguém pagou (inflação) | `executor.rs:186-190, 255-263` | Reproduzido |
-| C05 | Alto | `hydrate_and_verify` não prova completude; conta pré‑existente omitida → guest diverge e deriva raiz falsa | `proving.rs:175-208` | Reproduzido |
-| C06 | Alto | Contas apenas lidas ficam fora do witness; guest diverge com autoverificação do host passando | `proving.rs:141-166` | Reproduzido |
-| C07 | Alto | Witness honesto rejeitado quando uma chamada faz SLOAD de slot vazio (liveness da prova) | `proving.rs:87-118, 151` | Reproduzido |
-| C08 | Alto | Sub‑árvore opaca descartada em silêncio quando uma mudança cai dentro dela | `stateroot.rs:186-190` | Reproduzido |
-| C09 | Alto | Raiz do guest controlada pelo host: `changes` é entrada confiada; sem derivação guest‑side pública | `proving.rs:28-47, 343-350` | Reproduzido |
-| C10 | Alto | Sem proteção de replay de depósitos: mesmo outpoint minta repetidamente | `state.rs:117-132` | Reproduzido |
-| C12 | Alto | Contas EIP‑161 vazias com storage hidratadas sem verificação; vazam para a raiz pós‑estado | `proving.rs:181-206`, `stateroot.rs:106-109` | Reproduzido |
+| C01 | Crítico | `execute_block` apaga todo o estado em erro de tx; livro de emissão segue contando | `executor.rs:196, 229-231, 241-246, 279` | Reproduzido → **Corrigido (§0)** |
+| C04 | Crítico | `stateless_new_root` não ancora o proof a `prev_state_root`; nós injetados forjam a nova raiz | `stateroot.rs:153-205, 210-247` | Reproduzido → **Corrigido (§0)** |
+| C02 | Alto | Depósitos aplicados antes das validações; bloco rejeitado deixa mints e a retentativa minta em dobro | `executor.rs:179-191` | Reproduzido → **Corrigido (§0)** |
+| C03 | Alto | `tx_type ≥ 5` contorna validação de taxa; executor credita basefee que ninguém pagou (inflação) | `executor.rs:186-190, 255-263` | Reproduzido → **Corrigido (§0)** |
+| C05 | Alto | `hydrate_and_verify` não prova completude; conta pré‑existente omitida → guest diverge e deriva raiz falsa | `proving.rs:175-208` | Reproduzido → **Corrigido (§0)** |
+| C06 | Alto | Contas apenas lidas ficam fora do witness; guest diverge com autoverificação do host passando | `proving.rs:141-166` | Reproduzido → **Corrigido (§0)** |
+| C07 | Alto | Witness honesto rejeitado quando uma chamada faz SLOAD de slot vazio (liveness da prova) | `proving.rs:87-118, 151` | Reproduzido → **Corrigido (§0)** |
+| C08 | Alto | Sub‑árvore opaca descartada em silêncio quando uma mudança cai dentro dela | `stateroot.rs:186-190` | Reproduzido → **Corrigido (§0)** |
+| C09 | Alto | Raiz do guest controlada pelo host: `changes` é entrada confiada; sem derivação guest‑side pública | `proving.rs:28-47, 343-350` | Reproduzido → **Corrigido (§0)** |
+| C10 | Alto | Sem proteção de replay de depósitos: mesmo outpoint minta repetidamente | `state.rs:117-132` | Reproduzido → **Corrigido (§0)** |
+| C12 | Alto | Contas EIP‑161 vazias com storage hidratadas sem verificação; vazam para a raiz pós‑estado | `proving.rs:181-206`, `stateroot.rs:106-109` | Reproduzido → **Corrigido (§0)** |
 | C11 | Médio | EIP‑6780 `SELFDESTRUCT` para si queima BLCH; "nunca queima" é falso | `state.rs:7-13, 139-153` | Reproduzido |
 | C13 | Médio | Ambiente de bloco confiado ao chamador; base fee nunca validada | `executor.rs:197, 205-219` | Reproduzido |
 | C15 | Médio | Transações legadas pré‑EIP‑155 (`chain_id = None`) aceitas | `executor.rs:186-192, 199-204` | Reproduzido |
 | C16 | Médio | `BLOCKHASH` devolve placeholder `keccak256(número decimal)` | `executor.rs:196-220` | Reproduzido |
 | C17 | Médio | Chamada de sistema EIP‑4788 e predeploy ausentes em Cancun | `executor.rs:178-274` | Reproduzido |
-| C18 | Médio | `total_minted_wei` não comprometido na raiz; dessincroniza no guest; forjável | `state.rs:99-105` | Reproduzido |
-| C19 | Médio | `l1_sats` é alegação não autenticada; `mint_wei` redundante; sem teto | `state.rs:117-132` | Reproduzido |
-| C21 | Médio | Recursão infinita (abort) em extensão de chave vazia no proof | `stateroot.rs:220-227` | Reproduzido |
-| C22 | Médio | Ultrapassagem da capacidade de 64 nibbles: pânico em debug, UB em release | `stateroot.rs:217-238` | Reproduzido |
+| C18 | Médio | `total_minted_wei` não comprometido na raiz; dessincroniza no guest; forjável | `state.rs:99-105` | Reproduzido → **Corrigido (§0)** |
+| C19 | Médio | `l1_sats` é alegação não autenticada; `mint_wei` redundante; sem teto | `state.rs:117-132` | Reproduzido → **Corrigido (§0)** |
+| C21 | Médio | Recursão infinita (abort) em extensão de chave vazia no proof | `stateroot.rs:220-227` | Reproduzido → **Corrigido (§0)** |
+| C22 | Médio | Ultrapassagem da capacidade de 64 nibbles: pânico em debug, UB em release | `stateroot.rs:217-238` | Reproduzido → **Corrigido (§0)** |
 | C14 | Baixo | Semântica "verificador" (tx inválida invalida o bloco) não documentada; sem API de builder | `executor.rs:228-246` | Parcial (rebaixado) |
-| C20 | Baixo | Ordem do witness não canônica (HashMap com seed aleatória) | `proving.rs:146-166` | Reproduzido (rebaixado) |
-| C23 | Baixo | Pânicos em witness malformado (`expect`, asserções de decode/HashBuilder, `Bytecode::new_raw`) | `stateroot.rs:155-247`, `proving.rs:182` | Reproduzido |
-| C24 | Baixo | Nós inline (<32 bytes) ignorados: raiz errada em silêncio fora da trie de contas | `stateroot.rs:224-226, 241-243` | Reproduzido |
-| C25 | Baixo | Preço efetivo recalculado sem `tx_type`; `priority_fee_routed_wei` subnotifica | `executor.rs:232-239, 266` | Reproduzido |
+| C20 | Baixo | Ordem do witness não canônica (HashMap com seed aleatória) | `proving.rs:146-166` | Reproduzido → **Corrigido (§0)** |
+| C23 | Baixo | Pânicos em witness malformado (`expect`, asserções de decode/HashBuilder, `Bytecode::new_raw`) | `stateroot.rs:155-247`, `proving.rs:182` | Reproduzido → **Corrigido (§0)** |
+| C24 | Baixo | Nós inline (<32 bytes) ignorados: raiz errada em silêncio fora da trie de contas | `stateroot.rs:224-226, 241-243` | Reproduzido → **Corrigido (§0)** |
+| C25 | Baixo | Preço efetivo recalculado sem `tx_type`; `priority_fee_routed_wei` subnotifica | `executor.rs:232-239, 266` | Reproduzido → **Corrigido (§0)** |
 | C26 | Baixo | Views reportam contas vazias como existentes; contas fantasma e slots zero nunca podados | `state.rs:143-198` | Reproduzido |
 | C27 | Baixo | Raiz recomputada do zero a cada bloco; witness clona o estado e reconstrói a trie ~5× | `stateroot.rs:85-115`, `proving.rs:75-166` | Reproduzido |
 | C28 | Baixo | Divisão por zero em `gas_target`/`next_base_fee` com knobs públicos zerados | `chainspec.rs:85-113` | Reproduzido |
-| C29 | Baixo | Depósitos gratuitos e ilimitados; depósito de 0 sats cria conta permanente | `executor.rs:178-184`, `state.rs:185-198` | Reproduzido |
-| C30 | Baixo | `cargo test --no-default-features` não compila; no_std nominal nas dependências | `lib.rs:54-61`, `Cargo.toml:28-50` | Reproduzido |
+| C29 | Baixo | Depósitos gratuitos e ilimitados; depósito de 0 sats cria conta permanente | `executor.rs:178-184`, `state.rs:185-198` | Reproduzido → **Parcialmente corrigido (§0)** |
+| C30 | Baixo | `cargo test --no-default-features` não compila; no_std nominal nas dependências | `lib.rs:54-61`, `Cargo.toml:28-50` | Reproduzido → **Corrigido (§0)** |
 | C31 | Baixo | Determinismo só pelo `Cargo.lock`: ranges caret, sem pin de toolchain, backends C/asm | `Cargo.toml:28-39` | Reproduzido |
 
 ---
@@ -465,7 +489,7 @@ O arquivo `tests/audit_regressions.rs` cobre os achados C01–C13, C15–C31 (C1
 
 ## 8. Roteiro de correção recomendado
 
-**P0 — antes de qualquer ancoragem, mesmo em testnet**
+**P0 — antes de qualquer ancoragem, mesmo em testnet** — ✅ **aplicado, ver §0**
 
 1. Atomicidade de `execute_block` (C01, C02, C14): validação pura antes de mutar; execução em cópia/camada bufferizada; escrita de volta só em `Ok`; testes de todo caminho de erro.
 2. Whitelist de tipos de transação `{0,1,2}` e roteamento derivado do que o revm cobrou, com checagem de conservação por tx (C03, C25).
@@ -489,12 +513,12 @@ O arquivo `tests/audit_regressions.rs` cobre os achados C01–C13, C15–C31 (C1
 
 ### 9.1 Testes de regressão (`tests/audit_regressions.rs`)
 
-Um módulo por achado (`c01`…`c31`, exceto `c14`), 32 testes ao todo, cada um afirmando o comportamento **correto** e, portanto, falhando hoje; todos marcados `#[ignore = "AUDIT Cnn (...)"]` para que `cargo test` continue verde. Ao corrigir um achado, remova o `#[ignore]` do módulo: o teste passa a proteger a correção. Estado verificado nesta auditoria: `cargo test` → 40 aprovados, 32 ignorados; `cargo test --test audit_regressions -- --ignored` → 0 aprovados, 32 falhos (todos os achados abertos). O teste de C21 executa a chamada vulnerável em um processo filho, porque o estouro de pilha aborta o processo e não pode ser capturado pelo harness; após a correção (assinatura `Result`), ajuste a chamada no módulo `c21`.
+Um módulo por achado (`c01`…`c31`, exceto `c14`). Após as correções P0 (§0), os módulos dos achados corrigidos têm testes **ativos** que afirmam o comportamento correto contra a nova API e passam; os módulos dos achados ainda abertos continuam marcados `#[ignore = "..."]`, afirmam o comportamento esperado após a correção e falham hoje. Ao corrigir um achado, remova o `#[ignore]` do módulo.
 
 ```sh
-cargo test                                          # suíte original, 40 testes, verde
+cargo test                                          # unitários + regressões ativas, verde
 cargo test --test audit_regressions -- --ignored    # achados ainda abertos (esperado: falhas)
-cargo test --test audit_regressions c04 -- --ignored
+cargo test --test audit_regressions c16 -- --ignored
 ```
 
 ### 9.2 Provas de conceito

@@ -2,23 +2,40 @@
 //! L2 account/state layer over revm's `CacheDB`/`InMemoryDB`.
 //!
 //! **SCAFFOLD, UNAUDITED, not a working L2.** In-memory only: the real node
-//! persists state behind a keccak-256 MPT (see [`crate::stateroot`], stubbed).
+//! persists state behind a keccak-256 MPT (see [`crate::stateroot`]).
 //!
 //! Supply rule (BLOCH-L2-EVM-DESIGN §1): the native gas token is an L2
 //! representation of **bridged BLCH** with **zero issuance** — balances enter
-//! only via deposit mints (crediting exactly what was escrowed on L1, scaled
-//! by [`crate::scale::ATOM_SCALE`]) and leave only via withdrawals (bridge
+//! only via deposit mints (crediting exactly the escrowed L1 sats scaled by
+//! [`crate::scale::ATOM_SCALE`]) and leave only via withdrawals (bridge
 //! component, not this crate). Block reward is zero and fees are routed to
-//! vaults, never burned, so `total native supply == total minted` holds
-//! across execution.
+//! vaults, so **the protocol never burns**; the EVM itself can still destroy
+//! native value through EIP-6780 (`SELFDESTRUCT` to self in the creating
+//! transaction), so `total_native_wei <= total_minted_wei` is the invariant the
+//! executor maintains, with equality whenever no such burn happened.
+//!
+//! The supply ledger — cumulative minted wei and the set of consumed L1 escrow
+//! outpoints — lives in the storage of the [`crate::chainspec::SUPPLY_LEDGER`]
+//! system account, so it is **committed in the state root**, carried by batch
+//! witnesses and re-checked by a stateless guest. A deposit whose outpoint was
+//! already consumed is rejected ([`DepositError::Replay`]); a deposit claiming
+//! more than the L1 hard cap, or pushing the cumulative supply past it, is
+//! rejected as well.
+//!
+//! **Trust boundary.** The STF cannot itself observe the Bloch L1: it trusts
+//! the derivation layer to hand it deposits that were really escrowed in a
+//! finalized L1 block. What it *does* enforce is exact scaling, uniqueness of
+//! each outpoint, and the supply cap, all against committed state.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{keccak256, Address, B256, U256};
 use revm::database::{AccountState, CacheDB, DbAccount, InMemoryDB};
 use revm::primitives::KECCAK_EMPTY;
+use revm::{Database, DatabaseRef};
 
-use crate::scale::{sats_to_wei, ScaleError};
+use crate::chainspec::{ChainSpec, SUPPLY_LEDGER};
+use crate::scale::sats_to_wei;
 
-/// Where a deposit mint's value provably came from.
+/// Where a deposit mint's value came from, as reported by the derivation layer.
 ///
 /// Deliberately a single-variant enum: **bridged BLCH is the only provenance
 /// that can ever mint on this L2**. There is no admin mint, no reward mint,
@@ -39,51 +56,109 @@ pub enum DepositProvenance {
 }
 
 /// A deposit system-transaction's mint effect, applied at block start.
+///
+/// The credited amount is **derived** from the provenance
+/// (`sats_to_wei(l1_sats)`, see [`DepositMint::mint_wei`]); there is no
+/// separate caller-supplied amount to keep consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepositMint {
     /// L2 recipient credited with the minted wei.
     pub recipient: Address,
-    /// Amount to credit, in L2 wei. MUST equal `sats_to_wei(l1_sats)` of the
-    /// provenance exactly — enforced by [`L2State::deposit_mint`].
-    pub mint_wei: U256,
     /// Where the value came from (bridged BLCH only).
     pub provenance: DepositProvenance,
+}
+
+impl DepositMint {
+    /// Escrowed L1 sats carried by the provenance.
+    pub fn l1_sats(&self) -> u64 {
+        let DepositProvenance::BridgedBlch { l1_sats, .. } = self.provenance;
+        l1_sats
+    }
+
+    /// The exact wei this deposit mints: `sats_to_wei(l1_sats)`.
+    pub fn mint_wei(&self) -> U256 {
+        sats_to_wei(self.l1_sats())
+    }
+
+    /// The L1 escrow outpoint `(l1_txid, l1_vout)` that uniquely identifies
+    /// this deposit and may be minted at most once.
+    pub fn outpoint(&self) -> ([u8; 32], u32) {
+        let DepositProvenance::BridgedBlch { l1_txid, l1_vout, .. } = self.provenance;
+        (l1_txid, l1_vout)
+    }
+}
+
+/// Storage slot of the supply-ledger account holding the cumulative minted wei.
+pub const SUPPLY_LEDGER_TOTAL_MINTED_SLOT: U256 = U256::ZERO;
+
+/// Storage slot of the supply-ledger account that marks an L1 escrow outpoint
+/// as consumed (value `1` once minted): `keccak256(0x01 ‖ l1_txid ‖ l1_vout_be)`.
+pub fn consumed_deposit_slot(l1_txid: &[u8; 32], l1_vout: u32) -> U256 {
+    let mut preimage = [0u8; 37];
+    preimage[0] = 0x01;
+    preimage[1..33].copy_from_slice(l1_txid);
+    preimage[33..37].copy_from_slice(&l1_vout.to_be_bytes());
+    U256::from_be_bytes(keccak256(preimage).0)
 }
 
 /// Errors from applying a deposit mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositError {
-    /// `mint_wei` is not exactly `l1_sats * ATOM_SCALE` — the bridge rule is
-    /// exact scaling, never rounding, never minting more than escrowed.
-    MintMismatch {
-        /// The wei the deposit claimed.
-        claimed_wei: U256,
-        /// The wei the L1 escrow actually supports.
-        escrowed_wei: U256,
+    /// The L1 escrow outpoint was already minted on this L2.
+    Replay {
+        /// L1 escrow transaction id.
+        l1_txid: [u8; 32],
+        /// Output index within that transaction.
+        l1_vout: u32,
     },
-    /// The claimed wei does not correspond to a representable sat amount.
-    Scale(ScaleError),
+    /// The deposit claims more sats than the L1 can ever hold.
+    ExceedsL1Supply {
+        /// The claimed sats.
+        l1_sats: u64,
+        /// The configured L1 hard cap (`ChainSpec::max_l1_sats`).
+        max_l1_sats: u64,
+    },
+    /// Minting this deposit would push the cumulative L2 supply past the L1
+    /// hard cap.
+    CumulativeSupplyExceeded {
+        /// The cumulative minted wei after this deposit.
+        total_after_wei: U256,
+        /// The cap in wei (`sats_to_wei(max_l1_sats)`).
+        cap_wei: U256,
+    },
 }
 
 impl core::fmt::Display for DepositError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            DepositError::MintMismatch {
-                claimed_wei,
-                escrowed_wei,
-            } => write!(
+            DepositError::Replay { l1_txid, l1_vout } => {
+                write!(f, "deposit outpoint {}:{l1_vout} was already minted", B256::from(*l1_txid))
+            }
+            DepositError::ExceedsL1Supply { l1_sats, max_l1_sats } => {
+                write!(f, "deposit claims {l1_sats} sats, above the L1 hard cap of {max_l1_sats} sats")
+            }
+            DepositError::CumulativeSupplyExceeded { total_after_wei, cap_wei } => write!(
                 f,
-                "deposit mint {claimed_wei} wei != escrowed {escrowed_wei} wei (exact 10^10 scaling required)"
+                "cumulative minted supply {total_after_wei} wei would exceed the L1 cap {cap_wei} wei"
             ),
-            DepositError::Scale(e) => write!(f, "deposit scale error: {e}"),
         }
     }
 }
 
 impl core::error::Error for DepositError {}
 
+/// Error from applying a deposit against a generic (possibly fallible) database.
+#[derive(Debug)]
+pub(crate) enum DepositApplyError<E> {
+    /// The deposit itself is invalid.
+    Deposit(DepositError),
+    /// The backing database failed (e.g. a stateless guest reading an account
+    /// the witness does not cover).
+    Db(E),
+}
+
 /// Read-only view of one L2 account (standard Ethereum account model; the
-/// storage root is part of the stubbed MPT layer, not this in-memory view).
+/// storage root is computed by [`crate::stateroot`], not held in this view).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L2Account {
     /// Native (bridged-BLCH) balance in wei.
@@ -94,14 +169,13 @@ pub struct L2Account {
     pub code_hash: B256,
 }
 
-/// The L2 execution state: revm's in-memory `CacheDB` plus the zero-issuance
-/// supply ledger (total wei ever minted by deposits).
+/// The L2 execution state: revm's in-memory `CacheDB`. The zero-issuance
+/// supply ledger is part of it, as storage of the [`SUPPLY_LEDGER`] account.
 #[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct L2State {
     /// The underlying revm database the EVM executes against.
     pub db: InMemoryDB,
-    total_minted_wei: U256,
 }
 
 impl L2State {
@@ -111,35 +185,41 @@ impl L2State {
         Self::default()
     }
 
-    /// Apply one deposit mint: credit **exactly** `mint_wei` to the
-    /// recipient, after checking it equals the escrowed L1 sats scaled by
-    /// `ATOM_SCALE` exactly. This is the ONLY way native balance is created.
-    pub fn deposit_mint(&mut self, deposit: &DepositMint) -> Result<(), DepositError> {
-        let DepositProvenance::BridgedBlch { l1_sats, .. } = deposit.provenance;
-        let escrowed_wei = sats_to_wei(l1_sats);
-        if deposit.mint_wei != escrowed_wei {
-            return Err(DepositError::MintMismatch {
-                claimed_wei: deposit.mint_wei,
-                escrowed_wei,
-            });
+    /// Apply one deposit mint directly to this state (block-level callers use
+    /// [`crate::executor::execute_block`], which is atomic and validates the
+    /// whole block first). Credits **exactly** `sats_to_wei(l1_sats)` to the
+    /// recipient after checking the L1 cap, the cumulative cap and that the
+    /// outpoint was never minted; records the outpoint and the new total in
+    /// the committed ledger. Returns the credited wei.
+    pub fn deposit_mint(&mut self, spec: &ChainSpec, deposit: &DepositMint) -> Result<U256, DepositError> {
+        match apply_deposit(&mut self.db, spec, deposit) {
+            Ok(wei) => Ok(wei),
+            Err(DepositApplyError::Deposit(e)) => Err(e),
+            Err(DepositApplyError::Db(never)) => match never {},
         }
-        credit_balance(&mut self.db, deposit.recipient, deposit.mint_wei);
-        self.total_minted_wei = self
-            .total_minted_wei
-            .checked_add(deposit.mint_wei)
-            .expect("total minted wei cannot overflow U256");
-        Ok(())
     }
 
-    /// Total wei ever minted by deposits (the L2's entire authorized supply;
-    /// zero issuance means nothing else creates native balance).
+    /// Total wei ever minted by deposits (the L2's entire authorized supply),
+    /// read from the committed ledger at the default [`SUPPLY_LEDGER`] address.
     pub fn total_minted_wei(&self) -> U256 {
-        self.total_minted_wei
+        self.total_minted_wei_at(SUPPLY_LEDGER)
     }
 
-    /// Sum of every live account's native balance. With zero issuance,
-    /// vault-routed (never burned) fees, and no withdrawals processed, this
-    /// equals [`Self::total_minted_wei`] — asserted by the executor tests.
+    /// [`Self::total_minted_wei`] for a custom ledger address
+    /// (`ChainSpec::supply_ledger`).
+    pub fn total_minted_wei_at(&self, ledger: Address) -> U256 {
+        ledger_slot(&self.db, ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT)
+    }
+
+    /// Whether the L1 escrow outpoint was already minted (default ledger).
+    pub fn is_deposit_consumed(&self, l1_txid: &[u8; 32], l1_vout: u32) -> bool {
+        !ledger_slot(&self.db, SUPPLY_LEDGER, consumed_deposit_slot(l1_txid, l1_vout)).is_zero()
+    }
+
+    /// Sum of every live account's native balance. With zero issuance and
+    /// vault-routed fees this equals [`Self::total_minted_wei`] unless the EVM
+    /// destroyed value via EIP-6780 (then it is strictly smaller) — asserted by
+    /// the executor tests.
     pub fn total_native_wei(&self) -> U256 {
         self.db
             .cache
@@ -178,40 +258,118 @@ impl L2State {
     }
 }
 
+/// Read a ledger slot straight from a complete (EmptyDB-backed) cache.
+fn ledger_slot(db: &InMemoryDB, ledger: Address, slot: U256) -> U256 {
+    db.cache
+        .accounts
+        .get(&ledger)
+        .filter(|acc| acc.account_state != AccountState::NotExisting)
+        .and_then(|acc| acc.storage.get(&slot).copied())
+        .unwrap_or(U256::ZERO)
+}
+
 /// Credit `amount_wei` to `address` in the raw database (deposit mints and
 /// vault fee routing — protocol-level accounting outside EVM opcode
 /// semantics, the OP-Stack precedent). Must only be called between
-/// transactions / at block boundaries, never mid-execution.
-pub(crate) fn credit_balance(db: &mut CacheDB<revm::database::EmptyDB>, address: Address, amount_wei: U256) {
-    let account = db
-        .load_account(address)
-        .expect("EmptyDB-backed CacheDB is infallible");
+/// transactions / at block boundaries, never mid-execution. A zero credit is a
+/// no-op and never materializes an account (EIP-161 semantics).
+pub(crate) fn credit_balance<ExtDB: DatabaseRef>(
+    db: &mut CacheDB<ExtDB>,
+    address: Address,
+    amount_wei: U256,
+) -> Result<(), ExtDB::Error> {
+    if amount_wei.is_zero() {
+        return Ok(());
+    }
+    let account = db.load_account(address)?;
     account.info.balance = account
         .info
         .balance
         .checked_add(amount_wei)
         .expect("balance cannot overflow U256");
     if account.account_state == AccountState::NotExisting {
-        // Mirror CacheDB::insert_account_info: the account now exists.
-        account.account_state = AccountState::None;
+        // A brand-new account has no storage anywhere: mark it StorageCleared so
+        // slot reads never consult the backing database.
+        account.account_state = AccountState::StorageCleared;
     }
+    Ok(())
+}
+
+/// Apply one deposit against any `CacheDB`: cap checks, replay check against
+/// the committed ledger, ledger update, recipient credit. All ledger reads go
+/// through the [`Database`] trait so a recording or stateless backing observes
+/// them. Returns the credited wei. On `Err` nothing has been written.
+pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
+    db: &mut CacheDB<ExtDB>,
+    spec: &ChainSpec,
+    deposit: &DepositMint,
+) -> Result<U256, DepositApplyError<ExtDB::Error>> {
+    let (l1_txid, l1_vout) = deposit.outpoint();
+    let l1_sats = deposit.l1_sats();
+    if l1_sats > spec.max_l1_sats {
+        return Err(DepositApplyError::Deposit(DepositError::ExceedsL1Supply {
+            l1_sats,
+            max_l1_sats: spec.max_l1_sats,
+        }));
+    }
+    let wei = sats_to_wei(l1_sats);
+    let ledger = spec.supply_ledger;
+
+    // Load (and record) the ledger account, then read the two slots we depend on.
+    db.basic(ledger).map_err(DepositApplyError::Db)?;
+    let marker_slot = consumed_deposit_slot(&l1_txid, l1_vout);
+    if !db.storage(ledger, marker_slot).map_err(DepositApplyError::Db)?.is_zero() {
+        return Err(DepositApplyError::Deposit(DepositError::Replay { l1_txid, l1_vout }));
+    }
+    let total = db
+        .storage(ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT)
+        .map_err(DepositApplyError::Db)?;
+    let total_after = total.checked_add(wei).expect("total minted wei cannot overflow U256");
+    let cap_wei = sats_to_wei(spec.max_l1_sats);
+    if total_after > cap_wei {
+        return Err(DepositApplyError::Deposit(DepositError::CumulativeSupplyExceeded {
+            total_after_wei: total_after,
+            cap_wei,
+        }));
+    }
+
+    // Materialize the ledger as a non-empty (nonce 1, code-less) system account
+    // so EIP-161 never drops it — and its storage — from the state trie.
+    {
+        let acc = db.load_account(ledger).map_err(DepositApplyError::Db)?;
+        if acc.account_state == AccountState::NotExisting {
+            acc.account_state = AccountState::StorageCleared;
+        }
+        if acc.info.nonce == 0 {
+            acc.info.nonce = 1;
+        }
+    }
+    db.insert_account_storage(ledger, marker_slot, U256::from(1u64))
+        .map_err(DepositApplyError::Db)?;
+    db.insert_account_storage(ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, total_after)
+        .map_err(DepositApplyError::Db)?;
+    credit_balance(db, deposit.recipient, wei).map_err(DepositApplyError::Db)?;
+    Ok(wei)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::address;
+    use core::sync::atomic::{AtomicU32, Ordering};
 
     const ALICE: Address = address!("00000000000000000000000000000000000a11ce");
     const BOB: Address = address!("0000000000000000000000000000000000000b0b");
 
+    static NEXT_VOUT: AtomicU32 = AtomicU32::new(0);
+
+    /// A deposit with a fresh, unique L1 outpoint.
     fn blch_deposit(recipient: Address, l1_sats: u64) -> DepositMint {
         DepositMint {
             recipient,
-            mint_wei: sats_to_wei(l1_sats),
             provenance: DepositProvenance::BridgedBlch {
                 l1_txid: [0x42; 32],
-                l1_vout: 0,
+                l1_vout: NEXT_VOUT.fetch_add(1, Ordering::Relaxed),
                 l1_sats,
             },
         }
@@ -219,12 +377,13 @@ mod tests {
 
     #[test]
     fn deposit_mints_exactly_and_supply_equals_sum_of_mints() {
+        let spec = ChainSpec::testnet();
         let mut state = L2State::new();
         // 1.5 BLCH to alice, 0.00000001 BLCH (1 sat) to bob.
-        state.deposit_mint(&blch_deposit(ALICE, 150_000_000)).unwrap();
-        state.deposit_mint(&blch_deposit(BOB, 1)).unwrap();
-        // A second deposit to the same recipient accumulates.
-        state.deposit_mint(&blch_deposit(ALICE, 50_000_000)).unwrap();
+        state.deposit_mint(&spec, &blch_deposit(ALICE, 150_000_000)).unwrap();
+        state.deposit_mint(&spec, &blch_deposit(BOB, 1)).unwrap();
+        // A second deposit (distinct outpoint) to the same recipient accumulates.
+        state.deposit_mint(&spec, &blch_deposit(ALICE, 50_000_000)).unwrap();
 
         assert_eq!(state.balance_of(&ALICE), sats_to_wei(200_000_000));
         assert_eq!(state.balance_of(&BOB), sats_to_wei(1));
@@ -236,19 +395,62 @@ mod tests {
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
         // Nonces untouched by mints.
         assert_eq!(state.nonce_of(&ALICE), 0);
+        // The ledger is a real, non-empty account (nonce 1, no code).
+        let ledger = state.account(&SUPPLY_LEDGER).expect("ledger exists");
+        assert_eq!(ledger.nonce, 1);
+        assert_eq!(ledger.code_hash, KECCAK_EMPTY);
     }
 
     #[test]
-    fn inexact_mint_is_rejected() {
+    fn replayed_outpoint_is_rejected_and_is_a_noop() {
+        let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        let mut bad = blch_deposit(ALICE, 100);
-        bad.mint_wei += U256::from(1); // one wei more than escrowed
-        let err = state.deposit_mint(&bad).unwrap_err();
-        assert!(matches!(err, DepositError::MintMismatch { .. }));
-        // Nothing was credited or counted.
-        assert_eq!(state.balance_of(&ALICE), U256::ZERO);
+        let dep = blch_deposit(ALICE, 100);
+        state.deposit_mint(&spec, &dep).unwrap();
+        let (txid, vout) = dep.outpoint();
+        assert!(state.is_deposit_consumed(&txid, vout));
+
+        let before_root = crate::compute_keccak_mpt_state_root(&state);
+        let err = state.deposit_mint(&spec, &dep).unwrap_err();
+        assert_eq!(err, DepositError::Replay { l1_txid: txid, l1_vout: vout });
+        // Same outpoint with a different recipient / amount is still a replay.
+        let mut other = dep;
+        other.recipient = BOB;
+        other.provenance = DepositProvenance::BridgedBlch { l1_txid: txid, l1_vout: vout, l1_sats: 5 };
+        assert!(matches!(state.deposit_mint(&spec, &other), Err(DepositError::Replay { .. })));
+        assert_eq!(state.balance_of(&ALICE), sats_to_wei(100));
+        assert_eq!(state.balance_of(&BOB), U256::ZERO);
+        assert_eq!(state.total_minted_wei(), sats_to_wei(100));
+        assert_eq!(crate::compute_keccak_mpt_state_root(&state), before_root, "rejected deposit is a no-op");
+    }
+
+    #[test]
+    fn deposit_above_l1_cap_is_rejected() {
+        let spec = ChainSpec::testnet();
+        let mut state = L2State::new();
+        let err = state.deposit_mint(&spec, &blch_deposit(ALICE, spec.max_l1_sats + 1)).unwrap_err();
+        assert!(matches!(err, DepositError::ExceedsL1Supply { .. }));
         assert_eq!(state.total_minted_wei(), U256::ZERO);
-        assert_eq!(state.total_native_wei(), U256::ZERO);
+        assert!(state.account(&SUPPLY_LEDGER).is_none(), "nothing written");
+        // u64::MAX sats is far above any possible L1 supply and is rejected too.
+        assert!(matches!(
+            state.deposit_mint(&spec, &blch_deposit(ALICE, u64::MAX)),
+            Err(DepositError::ExceedsL1Supply { .. })
+        ));
+    }
+
+    #[test]
+    fn cumulative_supply_cannot_exceed_l1_cap() {
+        let spec = ChainSpec::testnet();
+        let mut state = L2State::new();
+        // Exactly the cap is fine (the whole L1 supply bridged).
+        state.deposit_mint(&spec, &blch_deposit(ALICE, spec.max_l1_sats)).unwrap();
+        assert_eq!(state.total_minted_wei(), sats_to_wei(spec.max_l1_sats));
+        // One more sat is not.
+        let err = state.deposit_mint(&spec, &blch_deposit(BOB, 1)).unwrap_err();
+        assert!(matches!(err, DepositError::CumulativeSupplyExceeded { .. }));
+        assert_eq!(state.balance_of(&BOB), U256::ZERO);
+        assert_eq!(state.total_minted_wei(), sats_to_wei(spec.max_l1_sats));
     }
 
     #[test]
@@ -257,56 +459,45 @@ mod tests {
         assert_eq!(state.balance_of(&ALICE), U256::ZERO);
         assert_eq!(state.nonce_of(&ALICE), 0);
         assert!(state.account(&ALICE).is_none());
-    }
-
-    #[test]
-    fn mint_must_match_provenance_escrow_not_an_arbitrary_claim() {
-        // The escrowed wei is derived from the provenance's `l1_sats`, never
-        // from the caller-supplied `mint_wei`. A deposit claiming 200 sats'
-        // worth of wei but whose provenance escrowed only 100 sats is rejected,
-        // and the error reports the provenance-derived escrow — not the claim.
-        let mut state = L2State::new();
-        let mint = DepositMint {
-            recipient: ALICE,
-            mint_wei: sats_to_wei(200),
-            provenance: DepositProvenance::BridgedBlch {
-                l1_txid: [0x11; 32],
-                l1_vout: 3,
-                l1_sats: 100,
-            },
-        };
-        let err = state.deposit_mint(&mint).unwrap_err();
-        assert_eq!(
-            err,
-            DepositError::MintMismatch {
-                claimed_wei: sats_to_wei(200),
-                escrowed_wei: sats_to_wei(100),
-            }
-        );
-        // Nothing was credited or counted — a mismatched deposit is a no-op.
-        assert_eq!(state.balance_of(&ALICE), U256::ZERO);
         assert_eq!(state.total_minted_wei(), U256::ZERO);
     }
 
     #[test]
-    fn zero_sat_deposit_is_exact_and_mints_nothing() {
-        // A zero-value bridged deposit is exact (0 == 0) and adds nothing to
-        // supply — the scaling rule is lossless even at the zero boundary, and
-        // bridged BLCH remains the only provenance.
+    fn zero_sat_deposit_is_exact_mints_nothing_and_creates_no_recipient() {
+        // A zero-value bridged deposit is exact (0 == 0), consumes its outpoint,
+        // adds nothing to supply, and — per EIP-161 — does not materialize the
+        // recipient account.
+        let spec = ChainSpec::testnet();
         let mut state = L2State::new();
-        state.deposit_mint(&blch_deposit(ALICE, 0)).unwrap();
+        let dep = blch_deposit(ALICE, 0);
+        assert_eq!(state.deposit_mint(&spec, &dep).unwrap(), U256::ZERO);
         assert_eq!(state.balance_of(&ALICE), U256::ZERO);
+        assert!(state.account(&ALICE).is_none());
         assert_eq!(state.total_minted_wei(), U256::ZERO);
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
+        let (txid, vout) = dep.outpoint();
+        assert!(state.is_deposit_consumed(&txid, vout));
     }
 
     #[test]
-    fn max_sat_deposit_scales_without_overflow() {
-        // u64::MAX sats is the largest escrow L1 can represent; it mints the
-        // exact wei with no overflow (u64::MAX * 10^10 fits far inside U256).
-        let mut state = L2State::new();
-        state.deposit_mint(&blch_deposit(ALICE, u64::MAX)).unwrap();
-        assert_eq!(state.balance_of(&ALICE), sats_to_wei(u64::MAX));
-        assert_eq!(state.total_minted_wei(), sats_to_wei(u64::MAX));
+    fn ledger_is_committed_in_the_state_root() {
+        // Two states with identical account balances but different mint
+        // histories (different consumed outpoints) must hash differently, and a
+        // ledger edit alone must move the root.
+        let spec = ChainSpec::testnet();
+        let mut a = L2State::new();
+        a.deposit_mint(&spec, &blch_deposit(ALICE, 7)).unwrap();
+        let mut b = L2State::new();
+        b.deposit_mint(&spec, &blch_deposit(ALICE, 7)).unwrap(); // different vout
+        assert_eq!(a.balance_of(&ALICE), b.balance_of(&ALICE));
+        assert_ne!(
+            crate::compute_keccak_mpt_state_root(&a),
+            crate::compute_keccak_mpt_state_root(&b),
+            "consumed-outpoint set is part of the commitment"
+        );
+        let root_a = crate::compute_keccak_mpt_state_root(&a);
+        a.db.insert_account_storage(SUPPLY_LEDGER, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, U256::from(1u64))
+            .unwrap();
+        assert_ne!(crate::compute_keccak_mpt_state_root(&a), root_a, "ledger total is committed");
     }
 }
