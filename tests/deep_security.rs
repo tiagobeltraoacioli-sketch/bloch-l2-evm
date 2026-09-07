@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_trie::nodes::LeafNode;
-use alloy_trie::Nibbles;
+use alloy_trie::{HashBuilder, Nibbles};
 use bloch_l2_evm::state::{BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_NUMBER_SLOT};
 use bloch_l2_evm::{
-    execute_block, stateless_new_root, validate_block_input, BlockContext, BlockInput, ChainSpec, L2State, Mpt,
-    SparseTrieView,
+    execute_block, generate_batch_witness, stateless_new_root, validate_block_input, verify_batch, BlockContext,
+    BlockInput, ChainSpec, DepositMint, DepositProvenance, L2State, Mpt, SparseTrieView,
 };
 use revm::context::TxEnv;
 use revm::context_interface::transaction::{AccessListItem, Authorization, RecoveredAuthority, RecoveredAuthorization};
@@ -107,6 +107,40 @@ fn nonzero_even_compact_padding_is_rejected() {
         alloy_rlp::encode([1u8].as_slice()),
     ]);
     assert!(opens(bytes).is_err());
+}
+
+#[test]
+fn malformed_node_corpus_never_panics() {
+    for len in 0..=70 {
+        for first in 0u8..=255 {
+            let mut bytes = vec![0x80; len];
+            if let Some(byte) = bytes.first_mut() {
+                *byte = first;
+            }
+            let _ = opens(bytes);
+        }
+    }
+    let canonical = alloy_rlp::encode(LeafNode::new(key(0x11), vec![1]));
+    let view = opens(canonical.clone()).unwrap();
+    assert_eq!(view.apply(&BTreeMap::new()).unwrap(), keccak256(canonical));
+}
+
+#[test]
+fn noncanonical_branch_and_extension_shapes_are_rejected() {
+    // A branch must have at least two children.
+    let mut children = vec![alloy_rlp::encode(B256::repeat_byte(1))];
+    children.extend((0..16).map(|_| vec![0x80]));
+    assert!(opens(list(&children)).is_err());
+
+    // An extension must terminate at a branch, not an inline leaf.
+    let inline_leaf = alloy_rlp::encode(LeafNode::new(Nibbles::from_nibbles([1]), vec![1]));
+    let prefix = Nibbles::from_nibbles(vec![1; 63]);
+    let compact = alloy_trie::nodes::encode_path_leaf(&prefix, false);
+    let extension = list(&[alloy_rlp::encode(compact.as_slice()), inline_leaf]);
+    assert!(opens(extension).is_err());
+
+    // Reject an oversized list before the dependency allocates its items.
+    assert!(opens(list(&vec![vec![0x80]; 100])).is_err());
 }
 
 #[test]
@@ -211,4 +245,108 @@ fn terminal_block_number_does_not_panic_or_wrap() {
     };
     assert!(execute_block(&spec, &mut state, input).is_err());
     assert_eq!(state.state_root(), before);
+}
+
+#[test]
+fn every_accepted_sparse_deletion_matches_an_independent_full_rebuild() {
+    let mut accepted = 0;
+    let mut incomplete = 0;
+    // Root branches, deep extensions, and inline children near the key limit.
+    for shared in [0, 1, 31, 62, 63] {
+        for value_len in [1, 31, 32, 40] {
+            let keys: Vec<Nibbles> = (0..4)
+                .map(|i| {
+                    let mut path = vec![0; 64];
+                    path[shared] = i;
+                    Nibbles::from_nibbles(path)
+                })
+                .collect();
+            let mut trie = Mpt::new();
+            for (i, k) in keys.iter().enumerate() {
+                trie.insert(*k, vec![i as u8 + 1; value_len]);
+            }
+            let root = trie.root();
+            for exposed in 1u8..16 {
+                let proof = trie
+                    .proof(keys.iter().enumerate().filter_map(|(i, k)| ((exposed >> i) & 1 == 1).then_some(*k)))
+                    .unwrap();
+                for deleted in 0u8..16 {
+                    if deleted & !exposed != 0 {
+                        continue;
+                    }
+                    let changes: BTreeMap<_, _> = keys
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, k)| ((deleted >> i) & 1 == 1).then_some((*k, None)))
+                        .collect();
+                    match stateless_new_root(root, &proof, &changes) {
+                        Ok(derived) => {
+                            let mut reference = HashBuilder::default();
+                            for (i, k) in keys.iter().enumerate() {
+                                if (deleted >> i) & 1 == 0 {
+                                    reference.add_leaf(*k, &vec![i as u8 + 1; value_len]);
+                                }
+                            }
+                            assert_eq!(derived, reference.root());
+                            accepted += 1;
+                        }
+                        Err(bloch_l2_evm::WitnessError::OpaqueChildNeedsExpansion { .. }) => incomplete += 1,
+                        Err(e) => panic!("unexpected rejection: {e}"),
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted > 1_000);
+    assert!(incomplete > 0);
+}
+
+#[test]
+fn canonical_proofs_survive_insertions_and_updates_with_an_opaque_sibling() {
+    let mut trie = Mpt::new();
+    trie.insert(key(0x11), vec![1; 40]);
+    trie.insert(key(0x22), vec![2; 40]);
+    let root = trie.root();
+    let proof = trie.proof([key(0x11), key(0x33)]).unwrap();
+    let changes = BTreeMap::from([(key(0x11), Some(vec![9; 40])), (key(0x33), Some(vec![3; 40]))]);
+    let derived = stateless_new_root(root, &proof, &changes).unwrap();
+    let mut reference = HashBuilder::default();
+    reference.add_leaf(key(0x11), &[9; 40]);
+    reference.add_leaf(key(0x22), &[2; 40]);
+    reference.add_leaf(key(0x33), &[3; 40]);
+    assert_eq!(derived, reference.root());
+}
+
+#[test]
+fn multi_block_witnesses_match_full_execution_with_custom_system_accounts() {
+    let mut spec = ChainSpec::testnet();
+    spec.block_info = address!("4200000000000000000000000000000000000201");
+    spec.supply_ledger = address!("4200000000000000000000000000000000000200");
+    let mut state = L2State::new();
+    for height in 1..=8 {
+        let input = BlockInput {
+            context: BlockContext::next(&spec, &state),
+            deposits: vec![DepositMint {
+                recipient: Address::repeat_byte(0xaa),
+                provenance: DepositProvenance::BridgedBlch {
+                    l1_height: height,
+                    l1_tx_index: 0,
+                    l1_txid: [height as u8; 32],
+                    l1_vout: 0,
+                    l1_sats: 1,
+                },
+            }],
+            txs: vec![],
+        };
+        let before = state.state_root();
+        let (witness, host) = generate_batch_witness(&state, &spec, input.clone()).unwrap();
+        assert_eq!(state.state_root(), before);
+        let guest = verify_batch(&spec, &witness, &input).unwrap();
+        let full = execute_block(&spec, &mut state, input).unwrap();
+        assert_eq!(host.state_root, full.state_root);
+        assert_eq!(guest.new_state_root, full.state_root);
+        assert_eq!(guest.block_hash, full.block_hash);
+        assert_eq!(full.block_number, height);
+        assert_eq!(state.total_native_wei(), state.total_minted_wei_at(spec.supply_ledger));
+    }
 }

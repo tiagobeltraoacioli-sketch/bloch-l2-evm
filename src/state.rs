@@ -581,7 +581,13 @@ impl L2State {
     /// The committed head-block record at the default [`BLOCK_INFO`] address
     /// (`None` before any block executed).
     pub fn head(&self) -> Option<HeadRecord> {
-        let slot = |s: U256| ledger_slot(&self.db, BLOCK_INFO, s);
+        self.head_at(BLOCK_INFO)
+    }
+
+    /// The committed head at a custom block-info address. Execution helpers
+    /// must use `ChainSpec::block_info`, matching the executor's read/write path.
+    pub fn head_at(&self, block_info: Address) -> Option<HeadRecord> {
+        let slot = |s: U256| ledger_slot(&self.db, block_info, s);
         if slot(BLOCK_INFO_FLAG_SLOT).is_zero() {
             return None;
         }
