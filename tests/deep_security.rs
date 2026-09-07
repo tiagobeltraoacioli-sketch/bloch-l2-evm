@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
-use alloy_rlp::Encodable;
 use alloy_trie::nodes::LeafNode;
 use alloy_trie::Nibbles;
 use bloch_l2_evm::state::{BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_NUMBER_SLOT};
