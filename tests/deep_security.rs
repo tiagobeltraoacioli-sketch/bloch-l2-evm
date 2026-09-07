@@ -13,9 +13,7 @@ use bloch_l2_evm::{
     SparseTrieView,
 };
 use revm::context::TxEnv;
-use revm::context_interface::transaction::{
-    AccessListItem, Authorization, RecoveredAuthority, RecoveredAuthorization,
-};
+use revm::context_interface::transaction::{AccessListItem, Authorization, RecoveredAuthority, RecoveredAuthorization};
 use revm::primitives::hardfork::SpecId;
 use revm::state::AccountInfo;
 
@@ -86,7 +84,10 @@ fn odd_compact_path_of_33_bytes_is_rejected_before_decoding() {
     for flag in [0x10, 0x30] {
         let mut compact = vec![0; 33];
         compact[0] = flag;
-        let bytes = list(&[alloy_rlp::encode(compact.as_slice()), alloy_rlp::encode([1u8].as_slice())]);
+        let bytes = list(&[
+            alloy_rlp::encode(compact.as_slice()),
+            alloy_rlp::encode([1u8].as_slice()),
+        ]);
         assert!(opens(bytes).is_err());
     }
 }
@@ -102,7 +103,10 @@ fn trailing_rlp_bytes_are_rejected() {
 fn nonzero_even_compact_padding_is_rejected() {
     let mut compact = vec![0x11; 33];
     compact[0] = 0x21;
-    let bytes = list(&[alloy_rlp::encode(compact.as_slice()), alloy_rlp::encode([1u8].as_slice())]);
+    let bytes = list(&[
+        alloy_rlp::encode(compact.as_slice()),
+        alloy_rlp::encode([1u8].as_slice()),
+    ]);
     assert!(opens(bytes).is_err());
 }
 
