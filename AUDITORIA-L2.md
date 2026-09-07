@@ -9,15 +9,17 @@
 | **Toolchain** | rustc 1.94.1 / cargo 1.94.1; `revm 41.0.0`, `alloy-trie 0.9.5`, `alloy-primitives 1.6.1`, `alloy-rlp 0.3.16`, `ruint 1.19.0`, `nybbles 0.4.8` (conforme `Cargo.lock`, 292 pacotes) |
 | **Baseline** | `cargo test --all-features`: 40 testes, 40 aprovados (o README afirma 22) |
 | **Anexo executável** | `tests/audit_regressions.rs` — um módulo por achado; os achados corrigidos têm testes ativos, os ainda abertos ficam `#[ignore]` (`cargo test --test audit_regressions -- --ignored` lista-os) |
-| **Status** | **Adendo (mesma data):** os itens P0 da seção 8 foram corrigidos; ver §0 abaixo |
+| **Status** | **Adendo (mesma data):** os itens **P0 e P1** da seção 8 foram corrigidos; ver §0 abaixo |
 
 > **Posicionamento.** O próprio crate se declara *scaffold, não auditado, não é um L2 funcional* e diz que tudo é *testnet / valor zero*. Esta auditoria avalia o código **contra o que ele afirma garantir** (emissão zero, "nunca queima", raiz de estado keccak‑MPT correta, caminho de prova stateless "correct‑or‑error") **e contra o que uma função de transição de estado (STF) de L2 real precisa garantir** (atomicidade, solidez das provas, paridade de consenso com Ethereum Cancun, robustez contra entradas maliciosas). Limitações *documentadas* pelo crate continuam sendo achados quando representam lacunas de solidez para o desenho pretendido; o relatório indica quando esse é o caso. A ausência dos componentes explicitamente *stubbed* (nó Reth, RPC `eth_*`, txpool, guest SP1) **não** é tratada como achado.
 
 ---
 
-## 0. Adendo — correções P0 aplicadas
+## 0. Adendo — correções P0 e P1 aplicadas
 
-Após a entrega do relatório, os itens **P0** da seção 8 foram implementados no mesmo branch (commit seguinte ao relatório). Resumo do que mudou e de como foi verificado:
+Após a entrega do relatório, os itens **P0** da seção 8 foram implementados no mesmo branch (commit seguinte ao relatório), seguidos dos itens **P1** (§0.2). Resumo do que mudou e de como foi verificado:
+
+### 0.1 P0
 
 | Achado | Correção | Verificação |
 |---|---|---|
@@ -30,11 +32,29 @@ Após a entrega do relatório, os itens **P0** da seção 8 foram implementados 
 | **C14** | Papel de verificador documentado em `execute_block`/`BlockInput::txs` e rejeição tornada não destrutiva (a API de *builder* continua fora do escopo). | — |
 | **C20, C29 (parcial), C30** | Efeitos colaterais: witness canônico (vetores ordenados); crédito de zero wei não materializa conta; `cargo test --no-default-features` compila (`#[macro_use] extern crate std` só em testes). | `witness_is_canonical_across_independent_generations`; `c20`, `c29`, `c30` |
 
-**Estado da verificação após as correções:** `cargo test` → 53 testes unitários + 22 regressões ativas aprovados, 10 regressões ignoradas (achados abertos); `cargo test --test audit_regressions -- --ignored` → 10 falhas (C11, C13, C15, C16, C17, C26, C27, C28, C31), como esperado; `cargo test --no-default-features` → 53 aprovados; `cargo clippy --lib` sem avisos.
+**Estado da verificação após as correções P0:** `cargo test` → 53 testes unitários + 22 regressões ativas aprovados, 10 regressões ignoradas (achados abertos); `cargo test --test audit_regressions -- --ignored` → 10 falhas (C11, C13, C15, C16, C17, C26, C27, C28, C31), como esperado; `cargo test --no-default-features` → 53 aprovados; `cargo clippy --lib` sem avisos.
 
-**Permanecem abertos** (P1/P2 da seção 8): C11 (queima EIP‑6780 não rastreada), C13 (cabeçalho não validado), C15 (legadas pré‑EIP‑155), C16 (`BLOCKHASH`), C17 (EIP‑4788), C26 (views/poda), C27 (custo O(estado) por bloco — **agravado** pela cópia de trabalho da atomicidade, aceito conscientemente até a raiz incremental), C28 (divisão por zero em knobs), C29 (medição de depósitos), C31 (pins exatos/toolchain), além dos itens informativos.
+**Decisão tomada a pedido do projeto ("melhor técnica"):** a unicidade de depósitos usa um **cursor monotônico de posição na L1**, não um conjunto de outpoints consumidos — ledger e witness em O(1), replay impossível por construção; o preço é exigir que a derivação apresente os depósitos em ordem canônica (o que ela já faz por construção ao ler a L1 em ordem) e que um depósito pulado pela derivação não possa ser incluído depois (comportamento idêntico ao OP‑Stack).
 
-**Decisão tomada a pedido do projeto ("melhor técnica"):** a unicidade de depósitos usa um **cursor monotônico de posição na L1**, não um conjunto de outpoints consumidos — ledger e witness em O(1), replay impossível por construção; o preço é exigir que a derivação apresente os depósitos em ordem canônica (o que ela já faz por construção ao ler a L1 em ordem) e que um depósito pulado pela derivação não possa ser incluído depois (comportamento idêntico ao OP‑Stack). **Ainda exigem confirmação:** o valor de `max_l1_sats` (placeholder de 21 M BLCH) e o endereço do `SUPPLY_LEDGER` (`0x4200…0100`).
+### 0.2 P1
+
+Os itens **P1** da seção 8 (5 e 6; o item 7 já havia sido absorvido pelo P0) foram implementados em seguida. O princípio comum: **tudo o que a STF passa a impor é lido de, e escrito em, estado comprometido na raiz** (contas de sistema sem código, nonce 1), de modo que o guest stateless reexecuta as mesmas regras a partir do witness sem nenhuma entrada pública adicional além do `BlockInput`.
+
+| Achado | Correção | Verificação |
+|---|---|---|
+| **C13** | Nova conta de sistema **`BLOCK_INFO`** (`0x4200…0101`) guarda o **registro do cabeçalho da cabeça** (`HeadRecord`: número, timestamp, base fee, gás usado, prevrandao, anchor root, hash pai, hash dos depósitos — slots `0..=8`). Antes de qualquer mutação, `execute_block` exige `number == head + 1`, `timestamp >= head.timestamp` e `base_fee == ChainSpec::next_base_fee(head.base_fee, head.gas_used)`; o primeiro bloco de uma cadeia (sem cabeça) deve trazer `initial_base_fee`. Novas variantes `InvalidBlockNumber`, `InvalidTimestamp`, `InvalidBaseFee`. `BlockContext::next(spec, state)` deriva o contexto conforme às regras; `BlockContext` ganhou `anchor_root`. O registro é atualizado ao final do bloco. O teste `zero_basefee_routes_nothing_to_the_base_fee_vault`, que abençoava base fee 0, foi removido. | `executor::tests::block_header_is_validated_against_the_head`; `c13` |
+| **C16** | Definido o **hash de bloco L2**: `L2Header { chain_id, number, timestamp, base_fee_per_gas, gas_used, prevrandao, anchor_root, parent_hash, deposits_hash, state_root }` com `hash() = keccak256` da concatenação de largura fixa (`ExecutionOutcome::{header, block_hash}`). No início de cada bloco o executor reconstrói o cabeçalho da cabeça a partir do `HeadRecord` + `prev_state_root` e grava seu hash no **ring buffer de 256 entradas** de `BLOCK_INFO` (slot `0x100 + n % 256`, estilo EIP‑2935); a janela `[N‑256, N)` do `BLOCKHASH` é preenchida em `db.cache.block_hashes` a partir do ring (zero para blocos anteriores à cadeia), de modo que o fallback `keccak256(número decimal)` do `EmptyDB` **nunca é alcançável**; no guest, `WitnessBacking::block_hash_ref` agora **erra** (`UnwitnessedBlockHash`) em vez de devolver o placeholder. `L2State::block_hash(n)` lê o ring. | `executor::tests::blockhash_serves_committed_l2_block_hashes`, `deposits_hash_and_header_hash_are_canonical`; `c16` |
+| **C17** | Decisão (a) — paridade Ecotone: o predeploy EIP‑4788 (`0x000F…Beac02`, bytecode canônico de 97 bytes em `chainspec::BEACON_ROOTS_CODE`) é instalado por `L2State::genesis` e, de forma preguiçosa e idempotente, pelo executor no primeiro bloco; a cada bloco `SystemCallCommitEvm::system_call_commit` do próprio revm executa a chamada de sistema **antes dos depósitos e da primeira tx**, gravando `timestamps[ts % 8191] = ts` e `roots[ts % 8191] = anchor_root`. O valor de 32 bytes é o **hash do bloco‑âncora Bloch** (`BlockContext::anchor_root`, zero até existir o leitor de âncora — decisão de desenho a confirmar). Falha da chamada → `SystemCall`. | `executor::tests::eip4788_system_call_stores_the_anchor_root`; `c17` |
+| **C15** | Regra explícita na fronteira (`validate_block_input`): `tx.chain_id != Some(spec.chain_id)` → `BlockExecutionError::ChainIdMismatch { tx_index, got }`, cobrindo legadas não protegidas (`None`) e transações de outras cadeias para todos os tipos. | `executor::tests::unprotected_or_foreign_chain_id_transactions_are_rejected`; `c15`, `c01` |
+| **C11** | Afirmação corrigida em toda a documentação ("o **protocolo** nunca queima; a EVM pode destruir valor via EIP‑6780") e **queima rastreada**: por transação, o executor executa com `transact` (sem commit), soma os saldos pré/pós de todas as contas tocadas (`0` para contas autodestruídas), faz o commit e exige `perda = basefee_cobrado × gás + queimado` (`Conservation` se a conta não fecha — inalcançável com os tipos suportados, mas um hard stop em vez de um ledger errado). `TxOutcome::burned_wei`, `ExecutionOutcome::burned_wei`, e o total acumulado no **slot 2** do `SUPPLY_LEDGER` (`L2State::total_burned_wei`). Invariante agora afirmada nos testes: `total_native == total_minted − total_burned`. | `executor::tests::eip6780_burn_is_accounted_in_the_ledger`; `c11` |
+
+**Efeitos no caminho de prova.** `run_block` recebe `prev_state_root` (o host o calcula, o guest o toma do witness autenticado); `VerifiedBatch` ganhou `header`, `block_hash` e `burned_wei`, e a autoverificação do host compara também esses campos. Como as contas `BLOCK_INFO` e `0x000F…Beac02` são tocadas em todo bloco, elas passam a integrar todo witness (duas contas, O(1)).
+
+**Estado da verificação após P0 + P1:** `cargo test` → 57 testes unitários + 27 regressões ativas aprovados, 5 regressões ignoradas (achados abertos); `cargo test --test audit_regressions -- --ignored` → 5 falhas (C26, C27, C28, C31), como esperado; `cargo test --no-default-features` → 57 aprovados; `cargo clippy --all-targets` sem avisos; `cargo doc` sem avisos.
+
+**Permanecem abertos** (P2 da seção 8): C26 (views/poda), C27 (custo O(estado) por bloco — **agravado** pela cópia de trabalho da atomicidade, aceito conscientemente até a raiz incremental), C28 (divisão por zero em knobs), C29 (medição de depósitos — a parte "0 sats não materializa conta" está corrigida), C31 (pins exatos/toolchain), além dos itens informativos.
+
+**Ainda exigem confirmação do projeto:** o valor de `max_l1_sats` (placeholder de 21 M BLCH); os endereços das contas de sistema `SUPPLY_LEDGER` (`0x4200…0100`) e `BLOCK_INFO` (`0x4200…0101`); a semântica do valor EIP‑4788 (`anchor_root` = hash do bloco‑âncora Bloch) e a derivação de `prevrandao` a partir dele, que dependem do leitor de âncora (componente do nó).
 
 ---
 
@@ -101,11 +121,11 @@ Todo o código do repositório: `src/lib.rs`, `src/chainspec.rs`, `src/scale.rs`
 | C09 | Alto | Raiz do guest controlada pelo host: `changes` é entrada confiada; sem derivação guest‑side pública | `proving.rs:28-47, 343-350` | Reproduzido → **Corrigido (§0)** |
 | C10 | Alto | Sem proteção de replay de depósitos: mesmo outpoint minta repetidamente | `state.rs:117-132` | Reproduzido → **Corrigido (§0)** |
 | C12 | Alto | Contas EIP‑161 vazias com storage hidratadas sem verificação; vazam para a raiz pós‑estado | `proving.rs:181-206`, `stateroot.rs:106-109` | Reproduzido → **Corrigido (§0)** |
-| C11 | Médio | EIP‑6780 `SELFDESTRUCT` para si queima BLCH; "nunca queima" é falso | `state.rs:7-13, 139-153` | Reproduzido |
-| C13 | Médio | Ambiente de bloco confiado ao chamador; base fee nunca validada | `executor.rs:197, 205-219` | Reproduzido |
-| C15 | Médio | Transações legadas pré‑EIP‑155 (`chain_id = None`) aceitas | `executor.rs:186-192, 199-204` | Reproduzido |
-| C16 | Médio | `BLOCKHASH` devolve placeholder `keccak256(número decimal)` | `executor.rs:196-220` | Reproduzido |
-| C17 | Médio | Chamada de sistema EIP‑4788 e predeploy ausentes em Cancun | `executor.rs:178-274` | Reproduzido |
+| C11 | Médio | EIP‑6780 `SELFDESTRUCT` para si queima BLCH; "nunca queima" é falso | `state.rs:7-13, 139-153` | Reproduzido → **Corrigido (§0.2)** |
+| C13 | Médio | Ambiente de bloco confiado ao chamador; base fee nunca validada | `executor.rs:197, 205-219` | Reproduzido → **Corrigido (§0.2)** |
+| C15 | Médio | Transações legadas pré‑EIP‑155 (`chain_id = None`) aceitas | `executor.rs:186-192, 199-204` | Reproduzido → **Corrigido (§0.2)** |
+| C16 | Médio | `BLOCKHASH` devolve placeholder `keccak256(número decimal)` | `executor.rs:196-220` | Reproduzido → **Corrigido (§0.2)** |
+| C17 | Médio | Chamada de sistema EIP‑4788 e predeploy ausentes em Cancun | `executor.rs:178-274` | Reproduzido → **Corrigido (§0.2)** |
 | C18 | Médio | `total_minted_wei` não comprometido na raiz; dessincroniza no guest; forjável | `state.rs:99-105` | Reproduzido → **Corrigido (§0)** |
 | C19 | Médio | `l1_sats` é alegação não autenticada; `mint_wei` redundante; sem teto | `state.rs:117-132` | Reproduzido → **Corrigido (§0)** |
 | C21 | Médio | Recursão infinita (abort) em extensão de chave vazia no proof | `stateroot.rs:220-227` | Reproduzido → **Corrigido (§0)** |
@@ -496,7 +516,7 @@ O arquivo `tests/audit_regressions.rs` cobre os achados C01–C13, C15–C31 (C1
 3. Proteção de replay de depósitos comprometida no estado (C10), remoção de `mint_wei`, teto `MAX_L1_SATS`, tipo de entrada autenticado (C19), livro de emissão em predeploy (C18).
 4. **Redesenho do caminho de prova** antes de escrever o guest: `stateless_new_root(prev_state_root, proof, changes) -> Result` com ancoragem da raiz e encadeamento `keccak(filho) == referência` a cada descida (C04), erro em mudança dentro de sub‑árvore opaca ou remoção de chave não exposta (C08); banco rastreador no host e no guest com falha em *miss* e provas de exclusão para todo endereço tocado (C05, C06, C07); rejeição de contas vazias/duplicadas e checagem independente da raiz do proof em `hydrate_and_verify` (C12); API `verify_batch` que deriva `changes` no guest e nunca lê o do host (C09); alvos do proof = conjunto hidratado; autoverificação do host que hidrata e reexecuta. Considerar `reth-trie-sparse`.
 
-**P1 — antes do testnet público**
+**P1 — antes do testnet público** — ✅ **aplicado, ver §0.2**
 
 5. Validação de cabeçalho na STF e cabeçalho nas entradas públicas do guest (C13); EIP‑155 obrigatório (C15); decisão sobre EIP‑4788 (C17); hashes de bloco reais para `BLOCKHASH` e no witness (C16).
 6. Corrigir as afirmações "nunca queima" e rastrear `total_burned_wei` (C11).
@@ -513,12 +533,12 @@ O arquivo `tests/audit_regressions.rs` cobre os achados C01–C13, C15–C31 (C1
 
 ### 9.1 Testes de regressão (`tests/audit_regressions.rs`)
 
-Um módulo por achado (`c01`…`c31`, exceto `c14`). Após as correções P0 (§0), os módulos dos achados corrigidos têm testes **ativos** que afirmam o comportamento correto contra a nova API e passam; os módulos dos achados ainda abertos continuam marcados `#[ignore = "..."]`, afirmam o comportamento esperado após a correção e falham hoje. Ao corrigir um achado, remova o `#[ignore]` do módulo.
+Um módulo por achado (`c01`…`c31`, exceto `c14`). Após as correções P0 e P1 (§0), os módulos dos achados corrigidos têm testes **ativos** que afirmam o comportamento correto contra a nova API e passam; os módulos dos achados ainda abertos continuam marcados `#[ignore = "..."]`, afirmam o comportamento esperado após a correção e falham hoje. Ao corrigir um achado, remova o `#[ignore]` do módulo.
 
 ```sh
 cargo test                                          # unitários + regressões ativas, verde
 cargo test --test audit_regressions -- --ignored    # achados ainda abertos (esperado: falhas)
-cargo test --test audit_regressions c16 -- --ignored
+cargo test --test audit_regressions c27 -- --ignored
 ```
 
 ### 9.2 Provas de conceito

@@ -29,14 +29,21 @@
 //!   escrow-derived wei; provenance is bridged BLCH **only**; deposits must
 //!   strictly advance a cursor of canonical L1 positions, so each escrow
 //!   output mints at most once; the L1 cap bounds every deposit and the
-//!   cumulative supply) and a two-slot supply ledger **committed in the state
-//!   root** as the storage of a system account.
+//!   cumulative supply), a three-slot supply ledger (minted, cursor, burned)
+//!   and the head-block record **committed in the state root** as the storage
+//!   of system accounts.
 //! * [`executor::execute_block`] — runs **UNMODIFIED** revm at
 //!   `SpecId::CANCUN`, **atomically** (the caller's state is untouched on any
-//!   error), accepts only transaction types 0/1/2, applies deposit mints at
+//!   error). It validates the header against the committed head record
+//!   (number, timestamp, EIP-1559 base fee), serves `BLOCKHASH` from a
+//!   committed 256-entry ring of real L2 block hashes, runs the EIP-4788
+//!   system call (storing the Bloch anchor root), accepts only
+//!   EIP-155-protected transactions of types 0/1/2, applies deposit mints at
 //!   block start, routes the basefee part of what revm charged to the
 //!   `BaseFeeVault` and the priority fee to the `SequencerFeeVault` — the
-//!   protocol never burns bridged BLCH.
+//!   protocol never burns bridged BLCH — and records what the EVM itself
+//!   destroyed (EIP-6780) in the ledger, so
+//!   `total_native == total_minted - total_burned` always holds.
 //! * [`stateroot::compute_keccak_mpt_state_root`] — the **real** keccak-256
 //!   hexary Merkle-Patricia state root (account trie + per-account storage
 //!   tries, empty accounts excluded per EIP-161) via `alloy-trie`, wired into
@@ -88,14 +95,16 @@ pub mod stubs;
 pub use chainspec::ChainSpec;
 pub use executor::{
     deposits_hash, execute_block, validate_block_input, BlockContext, BlockExecutionError, BlockInput,
-    ExecutionOutcome, TxOutcome, SUPPORTED_TX_TYPES,
+    ExecutionOutcome, L2Header, TxOutcome, SUPPORTED_TX_TYPES,
 };
 pub use proving::{
     generate_batch_witness, hydrate_and_verify, verify_batch, BatchWitness, GenerateError, GuestState,
     HydratedPreState, VerifiedBatch, VerifyError, WitnessAccessError, WitnessAccount, WitnessBacking,
 };
 pub use scale::{sats_to_wei, wei_to_sats, ATOM_SCALE};
-pub use state::{DepositError, DepositMint, DepositPosition, DepositProvenance, L2Account, L2State};
+pub use state::{
+    DepositError, DepositMint, DepositPosition, DepositProvenance, HeadRecord, L2Account, L2State,
+};
 pub use stateroot::{compute_keccak_mpt_state_root, stateless_new_root, SparseTrieView, WitnessError};
 
 /// The exact revm version this scaffold is pinned to (also pinned as `=41.0.0`

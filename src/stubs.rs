@@ -52,10 +52,13 @@ pub mod txpool {
 /// The design's NATIVE target is a Reth-SDK node (reth-node-builder with a
 /// single-sequencer consensus stub, custom ChainSpec, reth-rpc, revm as the
 /// executor — the op-reth pattern). That is a multi-month integration and a
-/// heavy dependency; it is deliberately absent from this scaffold. It is also
-/// where header validation against the parent (base-fee rule, monotonic
-/// number/timestamp), real block hashes for `BLOCKHASH` and the EIP-4788
-/// system call must be wired (audit findings C13, C16, C17).
+/// heavy dependency; it is deliberately absent from this scaffold. The STF
+/// core already enforces the consensus rules a node must feed it (header
+/// validity against the committed head, `BLOCKHASH` from the committed ring,
+/// the EIP-4788 system call — audit findings C13, C16, C17); the node's own
+/// duties are the anchor reader (Bloch anchor root / prevrandao derivation),
+/// the timestamp drift bound against the anchor, signature recovery and
+/// receipts.
 pub mod node {
     /// Build and launch the L2 full node / sequencer.
     pub fn launch_reth_node() -> ! {

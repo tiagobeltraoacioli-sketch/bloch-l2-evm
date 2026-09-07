@@ -42,7 +42,9 @@ use revm::state::{AccountInfo, Bytecode};
 use revm::DatabaseRef;
 
 use crate::chainspec::ChainSpec;
-use crate::executor::{deposits_hash, execute_block, run_block, BlockExecutionError, BlockInput, ExecutionOutcome, TxOutcome};
+use crate::executor::{
+    deposits_hash, execute_block, run_block, BlockExecutionError, BlockInput, ExecutionOutcome, L2Header, TxOutcome,
+};
 use crate::state::L2State;
 use crate::stateroot::{account_leaves, account_leaves_of, compute_keccak_mpt_state_root, sorted_unique_keys, SparseTrieView, WitnessError};
 
@@ -96,6 +98,10 @@ pub enum WitnessAccessError {
     UnwitnessedCode(B256),
     /// A storage slot of a non-hydrated account was read.
     UnwitnessedStorage(Address, U256),
+    /// A block hash outside the executor-filled `BLOCKHASH` window was
+    /// requested (the executor serves the window from the committed ring, so
+    /// this is unreachable for a valid block).
+    UnwitnessedBlockHash(u64),
 }
 
 impl core::fmt::Display for WitnessAccessError {
@@ -105,6 +111,9 @@ impl core::fmt::Display for WitnessAccessError {
             WitnessAccessError::UnwitnessedCode(h) => write!(f, "code {h} is not covered by the witness"),
             WitnessAccessError::UnwitnessedStorage(a, s) => {
                 write!(f, "storage slot {s} of {a} is not covered by the witness")
+            }
+            WitnessAccessError::UnwitnessedBlockHash(n) => {
+                write!(f, "block hash of block {n} is not covered by the witness")
             }
         }
     }
@@ -146,9 +155,11 @@ impl DatabaseRef for WitnessBacking {
     }
 
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
-        // Parity with the host's `EmptyDB` placeholder (no L2 block hashes are
-        // supplied to the EVM yet — audit finding C16).
-        Ok(keccak256(number.to_string().as_bytes()))
+        // The executor fills the whole `BLOCKHASH` window of the `CacheDB`
+        // layer from the committed ring buffer before any transaction runs, so
+        // a read that reaches this layer is outside the window: fail, never
+        // serve a placeholder.
+        Err(WitnessAccessError::UnwitnessedBlockHash(number))
     }
 }
 
@@ -326,8 +337,15 @@ pub struct VerifiedBatch {
     pub base_fee_routed_wei: U256,
     /// Wei routed to the `SequencerFeeVault`.
     pub priority_fee_routed_wei: U256,
+    /// Wei the EVM destroyed (EIP-6780), accounted in the ledger.
+    pub burned_wei: U256,
     /// Per-transaction outcomes.
     pub tx_outcomes: Vec<TxOutcome>,
+    /// The block header the guest derived (its `state_root` is
+    /// `new_state_root`, its `parent_hash` comes from the committed head).
+    pub header: L2Header,
+    /// `header.hash()` — the L2 block hash the guest attests to.
+    pub block_hash: B256,
 }
 
 /// The complete guest procedure: hydrate and verify the pre-state, re-execute
@@ -337,7 +355,8 @@ pub struct VerifiedBatch {
 /// host's claim.
 pub fn verify_batch(spec: &ChainSpec, witness: &BatchWitness, input: &BlockInput) -> Result<VerifiedBatch, VerifyError> {
     let hydrated = hydrate_and_verify(witness)?;
-    let (db, run) = run_block(spec, hydrated.state, input).map_err(VerifyError::Execution)?;
+    let (db, run) =
+        run_block(spec, hydrated.state, witness.prev_state_root, input).map_err(VerifyError::Execution)?;
 
     let post_leaves: BTreeMap<Nibbles, Vec<u8>> =
         account_leaves_of(&db).into_iter().map(|(k, v)| (Nibbles::unpack(k), v)).collect();
@@ -356,6 +375,7 @@ pub fn verify_batch(spec: &ChainSpec, witness: &BatchWitness, input: &BlockInput
     if derived != witness.new_state_root {
         return Err(VerifyError::ClaimedRootMismatch { claimed: witness.new_state_root, derived });
     }
+    let header = run.header(spec, input, derived);
     Ok(VerifiedBatch {
         new_state_root: derived,
         deposits_hash: deposits_hash(&input.deposits),
@@ -363,7 +383,10 @@ pub fn verify_batch(spec: &ChainSpec, witness: &BatchWitness, input: &BlockInput
         minted_wei: run.minted_wei,
         base_fee_routed_wei: run.base_fee_routed_wei,
         priority_fee_routed_wei: run.priority_fee_routed_wei,
+        burned_wei: run.burned_wei,
         tx_outcomes: run.tx_outcomes,
+        block_hash: header.hash(),
+        header,
     })
 }
 
@@ -426,7 +449,8 @@ pub fn generate_batch_witness(
     let new_state_root = outcome.state_root;
 
     // 2. The recording run: every account the batch loads lands in the overlay.
-    let (probe, _) = run_block(spec, CacheDB::new(&pre.db), &input).map_err(GenerateError::Execution)?;
+    let (probe, _) =
+        run_block(spec, CacheDB::new(&pre.db), prev_state_root, &input).map_err(GenerateError::Execution)?;
     let mut pre_accounts: Vec<WitnessAccount> = Vec::new();
     let mut absent_accounts: Vec<Address> = Vec::new();
     for addr in probe.cache.accounts.keys() {
@@ -507,12 +531,13 @@ pub fn generate_batch_witness(
         && verified.minted_wei == outcome.minted_wei
         && verified.base_fee_routed_wei == outcome.base_fee_routed_wei
         && verified.priority_fee_routed_wei == outcome.priority_fee_routed_wei
+        && verified.burned_wei == outcome.burned_wei
+        && verified.header == outcome.header
+        && verified.block_hash == outcome.block_hash
         && verified.tx_outcomes.len() == outcome.tx_outcomes.len()
-        && verified
-            .tx_outcomes
-            .iter()
-            .zip(&outcome.tx_outcomes)
-            .all(|(g, h)| g.success == h.success && g.gas_used == h.gas_used && g.result == h.result);
+        && verified.tx_outcomes.iter().zip(&outcome.tx_outcomes).all(|(g, h)| {
+            g.success == h.success && g.gas_used == h.gas_used && g.burned_wei == h.burned_wei && g.result == h.result
+        });
     if !same_outcome {
         return Err(GenerateError::SelfCheck(VerifyError::OutcomeMismatch));
     }
@@ -554,17 +579,19 @@ mod tests {
     /// Pre-state with `n` funded accounts 0x..01 ..= 0x..n (5 BLCH each).
     fn funded_pre_state(spec: &ChainSpec, n: u8) -> L2State {
         let mut pre = L2State::new();
+        let context = BlockContext::next(spec, &pre);
         execute_block(
             spec,
             &mut pre,
-            BlockInput {
-                context: BlockContext { number: 0, ..Default::default() },
-                deposits: (1..=n).map(|i| deposit(addr(i), 5 * SATS_PER_BLCH)).collect(),
-                txs: vec![],
-            },
+            BlockInput { context, deposits: (1..=n).map(|i| deposit(addr(i), 5 * SATS_PER_BLCH)).collect(), txs: vec![] },
         )
         .unwrap();
         pre
+    }
+
+    /// The rule-conforming context for the block after `state`'s head.
+    fn next(spec: &ChainSpec, state: &L2State) -> BlockContext {
+        BlockContext::next(spec, state)
     }
 
     fn tx(spec: &ChainSpec, from: Address, kind: TxKind, value: U256, data: Bytes, nonce: u64, gas_limit: u64) -> TxEnv {
@@ -582,9 +609,9 @@ mod tests {
             .unwrap()
     }
 
-    fn transfer_batch(spec: &ChainSpec, from: Address, to: Address) -> BlockInput {
+    fn transfer_batch(spec: &ChainSpec, pre: &L2State, from: Address, to: Address) -> BlockInput {
         BlockInput {
-            context: BlockContext { number: 1, ..Default::default() },
+            context: next(spec, pre),
             deposits: vec![],
             txs: vec![tx(spec, from, TxKind::Call(to), sats_to_wei(SATS_PER_BLCH), Bytes::new(), 0, 21_000)],
         }
@@ -598,15 +625,20 @@ mod tests {
         let pre = funded_pre_state(&spec, 8);
         let alice = addr(1);
         let bob = address!("00000000000000000000000000000000000000bb"); // a NEW recipient (insert)
-        let batch = transfer_batch(&spec, alice, bob);
+        let batch = transfer_batch(&spec, &pre, alice, bob);
 
         let (witness, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).expect("witness generates and self-verifies");
         assert!(outcome.tx_outcomes[0].success);
         assert_ne!(witness.new_state_root, witness.prev_state_root);
 
-        // The witness is sparse: only Alice pre-existed among the touched
-        // accounts; Bob and the two vaults are absent (created in-block).
-        assert_eq!(witness.pre_accounts.iter().map(|a| a.address).collect::<Vec<_>>(), vec![alice]);
+        // The witness is sparse: among the touched accounts only Alice and the
+        // two system accounts every block touches (EIP-4788 predeploy, head
+        // record) pre-existed; Bob and the two vaults are absent (created
+        // in-block).
+        assert_eq!(
+            witness.pre_accounts.iter().map(|a| a.address).collect::<Vec<_>>(),
+            vec![alice, crate::chainspec::BEACON_ROOTS_ADDRESS, spec.block_info]
+        );
         assert_eq!(witness.absent_accounts.len(), 3);
         assert!(witness.absent_accounts.contains(&bob));
         assert!(witness.absent_accounts.contains(&spec.base_fee_vault));
@@ -630,9 +662,11 @@ mod tests {
         let pre = funded_pre_state(&spec, 8);
         let alice = addr(1);
         let bob = addr(7); // an EXISTING recipient
-        let batch = transfer_batch(&spec, alice, bob);
+        let batch = transfer_batch(&spec, &pre, alice, bob);
         let (w, _) = generate_batch_witness(&pre, &spec, batch.clone()).unwrap();
-        assert_eq!(w.pre_accounts.len(), 2, "sender and recipient pre-exist");
+        let hydrated: Vec<Address> = w.pre_accounts.iter().map(|a| a.address).collect();
+        assert_eq!(hydrated.len(), 4, "sender, recipient and the two block-level system accounts pre-exist");
+        assert!(hydrated.contains(&alice) && hydrated.contains(&bob));
         verify_batch(&spec, &w, &batch).expect("honest witness verifies");
 
         // (a) A tampered pre-account balance does not open.
@@ -734,7 +768,7 @@ mod tests {
         let mut initcode = vec![0x60, len, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, len, 0x60, 0x00, 0xf3];
         initcode.extend_from_slice(&runtime);
         let deploy = BlockInput {
-            context: BlockContext { number: 1, ..Default::default() },
+            context: next(&spec, &pre),
             deposits: vec![],
             txs: vec![tx(&spec, alice, TxKind::Create, U256::ZERO, initcode.into(), 0, 200_000)],
         };
@@ -745,7 +779,7 @@ mod tests {
         // Batch: call C (zero value). C reads D's balance (read-only account),
         // stores it, then SLOADs slot 0 back.
         let batch = BlockInput {
-            context: BlockContext { number: 2, ..Default::default() },
+            context: next(&spec, &pre),
             deposits: vec![],
             txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 1, 100_000)],
         };
@@ -764,18 +798,19 @@ mod tests {
         // A second batch that only SLOADs the (now non-zero) slot: the contract
         // is read-only again and still covered.
         let mut pre2 = full.clone();
+        let ctx2 = next(&spec, &pre2);
         let out2 = execute_block(
             &spec,
             &mut pre2,
             BlockInput {
-                context: BlockContext { number: 3, ..Default::default() },
+                context: ctx2,
                 deposits: vec![],
                 txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 2, 100_000)],
             },
         );
         assert!(out2.is_ok());
         let batch3 = BlockInput {
-            context: BlockContext { number: 3, ..Default::default() },
+            context: next(&spec, &full),
             deposits: vec![],
             txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 2, 100_000)],
         };
@@ -792,7 +827,7 @@ mod tests {
         let spec = ChainSpec::testnet();
         let pre = funded_pre_state(&spec, 4);
         let dep = deposit(address!("00000000000000000000000000000000000000cc"), 3 * SATS_PER_BLCH);
-        let batch = BlockInput { context: BlockContext { number: 1, ..Default::default() }, deposits: vec![dep], txs: vec![] };
+        let batch = BlockInput { context: next(&spec, &pre), deposits: vec![dep], txs: vec![] };
         let (w, outcome) = generate_batch_witness(&pre, &spec, batch.clone()).expect("generates");
         assert!(w.pre_accounts.iter().any(|a| a.address == spec.supply_ledger), "ledger is hydrated");
         assert_eq!(outcome.minted_wei, sats_to_wei(3 * SATS_PER_BLCH));
@@ -804,12 +839,12 @@ mod tests {
         // execute it, and a guest handed the previous witness rejects it too.
         let mut post = pre.clone();
         execute_block(&spec, &mut post, batch.clone()).unwrap();
-        let replay = BlockInput { context: BlockContext { number: 2, ..Default::default() }, deposits: vec![dep], txs: vec![] };
+        let replay = BlockInput { context: next(&spec, &post), deposits: vec![dep], txs: vec![] };
         assert!(matches!(generate_batch_witness(&post, &spec, replay.clone()), Err(GenerateError::Execution(_))));
 
         // First deposit ever on an empty chain: ledger absent, then created.
         let empty = L2State::new();
-        let first = BlockInput { context: BlockContext { number: 0, ..Default::default() }, deposits: vec![deposit(addr(1), 1)], txs: vec![] };
+        let first = BlockInput { context: next(&spec, &empty), deposits: vec![deposit(addr(1), 1)], txs: vec![] };
         let (w0, _) = generate_batch_witness(&empty, &spec, first.clone()).expect("generates from empty");
         assert!(w0.proof.is_empty() || w0.proof.len() == 1);
         assert!(w0.absent_accounts.contains(&spec.supply_ledger));
@@ -828,11 +863,12 @@ mod tests {
         let len = runtime.len() as u8;
         let mut initcode = vec![0x60, len, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, len, 0x60, 0x00, 0xf3];
         initcode.extend_from_slice(&runtime);
+        let ctx1 = next(&spec, &pre);
         let out = execute_block(
             &spec,
             &mut pre,
             BlockInput {
-                context: BlockContext { number: 1, ..Default::default() },
+                context: ctx1,
                 deposits: vec![],
                 txs: vec![tx(&spec, alice, TxKind::Create, U256::ZERO, initcode.into(), 0, 400_000)],
             },
@@ -842,11 +878,12 @@ mod tests {
         assert!(out.tx_outcomes[0].success);
         // Populate the 8 slots BEFORE the batch under test, so they are
         // pre-state storage the witness must carry.
+        let ctx2 = next(&spec, &pre);
         let fill = execute_block(
             &spec,
             &mut pre,
             BlockInput {
-                context: BlockContext { number: 2, ..Default::default() },
+                context: ctx2,
                 deposits: vec![],
                 txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 1, 400_000)],
             },
@@ -855,7 +892,7 @@ mod tests {
         assert!(fill.tx_outcomes[0].success);
 
         let batch = BlockInput {
-            context: BlockContext { number: 3, ..Default::default() },
+            context: next(&spec, &pre),
             deposits: vec![],
             txs: vec![tx(&spec, alice, TxKind::Call(contract), U256::ZERO, Bytes::new(), 2, 400_000)],
         };

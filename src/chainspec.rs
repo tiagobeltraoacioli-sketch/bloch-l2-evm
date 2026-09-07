@@ -5,7 +5,7 @@
 //! zero-value parameters; chain id 700771 is a placeholder pending
 //! ethereum-lists/chains registration.
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, hex, Address, U256};
 use revm::primitives::hardfork::SpecId;
 
 use crate::scale::SATS_PER_BLCH;
@@ -35,6 +35,28 @@ pub const BASE_FEE_VAULT: Address = address!("4200000000000000000000000000000000
 /// re-checked by a stateless guest. The address is outside the OP-Stack
 /// predeploy byte range (`0x4200…00xx`).
 pub const SUPPLY_LEDGER: Address = address!("4200000000000000000000000000000000000100");
+
+/// System account holding the **committed block-header record** of the head
+/// block (number, timestamp, base fee, gas used, prevrandao, anchor root,
+/// parent hash, deposits hash — slots `0..=8`, see `crate::state::BLOCK_INFO_*`)
+/// and a 256-entry **ring buffer of L2 block hashes** (slot `0x100 + n % 256`
+/// holds the hash of block `n`, EIP-2935 style). The executor validates every
+/// block against the record (EIP-1559 rule, number, timestamp), writes the
+/// parent's hash into the ring at block start and serves `BLOCKHASH` from it,
+/// so header validity and block hashes are part of the state commitment and
+/// re-checked by a stateless guest. Nonce 1, no code, created lazily.
+pub const BLOCK_INFO: Address = address!("4200000000000000000000000000000000000101");
+
+/// EIP-4788 beacon-roots contract address (Cancun). On this L2 the 32-byte
+/// value written at each block start is the **Bloch anchor block hash**
+/// ([`crate::executor::BlockContext::anchor_root`]) — the L1 value the design
+/// exposes to contracts, in the slot Ethereum uses for the beacon root.
+pub const BEACON_ROOTS_ADDRESS: Address = address!("000F3df6D732807Ef1319fB7B8bB8522d0Beac02");
+
+/// Canonical EIP-4788 beacon-roots contract bytecode. Installed by the STF as a
+/// system account (nonce 1) the first time a block executes, and by
+/// [`crate::state::L2State::genesis`].
+pub const BEACON_ROOTS_CODE: &[u8] = &hex!("3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500");
 
 /// Placeholder hard cap on the L1 supply, in sats, used to bound deposits:
 /// 21 000 000 BLCH. **Pending the design document** (absent from this
@@ -82,6 +104,8 @@ pub struct ChainSpec {
     pub sequencer_fee_vault: Address,
     /// The committed supply-ledger system account (see [`SUPPLY_LEDGER`]).
     pub supply_ledger: Address,
+    /// The committed block-info system account (see [`BLOCK_INFO`]).
+    pub block_info: Address,
     /// Hard cap on the L1 supply in sats: no single deposit may claim more,
     /// and the cumulative minted supply may never exceed it. See
     /// [`MAX_L1_SATS_PLACEHOLDER`].
@@ -103,6 +127,7 @@ impl ChainSpec {
             base_fee_vault: BASE_FEE_VAULT,
             sequencer_fee_vault: SEQUENCER_FEE_VAULT,
             supply_ledger: SUPPLY_LEDGER,
+            block_info: BLOCK_INFO,
             max_l1_sats: MAX_L1_SATS_PLACEHOLDER,
         }
     }
@@ -171,6 +196,8 @@ mod tests {
         assert_ne!(spec.base_fee_vault, spec.sequencer_fee_vault);
         assert_ne!(spec.supply_ledger, spec.base_fee_vault);
         assert_ne!(spec.supply_ledger, spec.sequencer_fee_vault);
+        assert_ne!(spec.block_info, spec.supply_ledger);
+        assert_eq!(BEACON_ROOTS_CODE.len(), 97, "canonical EIP-4788 bytecode");
         assert_eq!(spec.max_l1_sats, 21_000_000 * SATS_PER_BLCH);
     }
 

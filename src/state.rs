@@ -11,13 +11,17 @@
 //! component, not this crate). Block reward is zero and fees are routed to
 //! vaults, so **the protocol never burns**; the EVM itself can still destroy
 //! native value through EIP-6780 (`SELFDESTRUCT` to self in the creating
-//! transaction), so `total_native_wei <= total_minted_wei` is the invariant the
-//! executor maintains, with equality whenever no such burn happened.
+//! transaction). The executor measures that per transaction and accumulates it
+//! in the ledger, so `total_native_wei == total_minted_wei - total_burned_wei`
+//! is the invariant it maintains.
 //!
-//! The supply ledger — cumulative minted wei and the **deposit cursor** — lives
-//! in the storage of the [`crate::chainspec::SUPPLY_LEDGER`] system account, so
-//! it is **committed in the state root**, carried by batch witnesses (two
-//! slots, whatever the chain's history) and re-checked by a stateless guest.
+//! The supply ledger — cumulative minted wei, the **deposit cursor** and the
+//! cumulative wei burned by the EVM — lives in the storage of the
+//! [`crate::chainspec::SUPPLY_LEDGER`] system account (three slots, whatever
+//! the chain's history), and the **head block record** plus a 256-entry ring of
+//! L2 block hashes live in [`crate::chainspec::BLOCK_INFO`] ([`HeadRecord`],
+//! `BLOCK_INFO_*_SLOT`, [`block_hash_slot`]). Both are **committed in the state
+//! root**, carried by batch witnesses and re-checked by a stateless guest.
 //!
 //! **Replay protection is a monotonic cursor over canonical L1 positions**
 //! (the OP-Stack / Arbitrum inbox model): every escrow output has a unique
@@ -36,12 +40,13 @@
 //! scaling, canonical order (hence uniqueness), and the supply cap, all against
 //! committed state.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use revm::database::{AccountState, CacheDB, DbAccount, InMemoryDB};
 use revm::primitives::KECCAK_EMPTY;
+use revm::state::Bytecode;
 use revm::{Database, DatabaseRef};
 
-use crate::chainspec::{ChainSpec, SUPPLY_LEDGER};
+use crate::chainspec::{ChainSpec, BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE, BLOCK_INFO, SUPPLY_LEDGER};
 use crate::scale::sats_to_wei;
 
 /// Where a deposit mint's value came from, as reported by the derivation layer.
@@ -154,6 +159,68 @@ pub const SUPPLY_LEDGER_TOTAL_MINTED_SLOT: U256 = U256::ZERO;
 /// ([`DepositPosition::NONE`] when no deposit was ever minted).
 pub const SUPPLY_LEDGER_CURSOR_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
+/// Storage slot of the supply-ledger account holding the cumulative wei the
+/// EVM destroyed (EIP-6780 `SELFDESTRUCT` to self in the creating transaction),
+/// as measured by the executor per transaction.
+pub const SUPPLY_LEDGER_BURNED_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+
+/// `BLOCK_INFO` slot: non-zero once any block has executed (a head exists).
+pub const BLOCK_INFO_FLAG_SLOT: U256 = U256::ZERO;
+/// `BLOCK_INFO` slot: head block number.
+pub const BLOCK_INFO_NUMBER_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block timestamp.
+pub const BLOCK_INFO_TIMESTAMP_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block base fee per gas.
+pub const BLOCK_INFO_BASE_FEE_SLOT: U256 = U256::from_limbs([3, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block gas used.
+pub const BLOCK_INFO_GAS_USED_SLOT: U256 = U256::from_limbs([4, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block PREVRANDAO.
+pub const BLOCK_INFO_PREVRANDAO_SLOT: U256 = U256::from_limbs([5, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block Bloch anchor root.
+pub const BLOCK_INFO_ANCHOR_ROOT_SLOT: U256 = U256::from_limbs([6, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block's parent hash.
+pub const BLOCK_INFO_PARENT_HASH_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+/// `BLOCK_INFO` slot: head block's deposits hash.
+pub const BLOCK_INFO_DEPOSITS_HASH_SLOT: U256 = U256::from_limbs([8, 0, 0, 0]);
+
+/// Size of the committed L2 block-hash ring buffer (the `BLOCKHASH` window).
+pub const BLOCK_HASH_HISTORY: u64 = 256;
+
+/// `BLOCK_INFO` slot holding the hash of L2 block `number`
+/// (`0x100 + number % 256`, EIP-2935 style; valid only for the last 256
+/// blocks before the head).
+pub fn block_hash_slot(number: u64) -> U256 {
+    U256::from(0x100u64 + number % BLOCK_HASH_HISTORY)
+}
+
+/// The committed record of the head (last executed) block, as read from the
+/// [`BLOCK_INFO`] account. Together with the state root it is committed in, it
+/// reconstructs the head's [`crate::executor::L2Header`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadRecord {
+    /// Head block number.
+    pub number: u64,
+    /// Head block timestamp.
+    pub timestamp: u64,
+    /// Head block base fee per gas.
+    pub base_fee_per_gas: u64,
+    /// Gas used by the head block.
+    pub gas_used: u64,
+    /// Head block PREVRANDAO.
+    pub prevrandao: B256,
+    /// Head block Bloch anchor root.
+    pub anchor_root: B256,
+    /// Hash of the head block's parent.
+    pub parent_hash: B256,
+    /// Commitment to the head block's deposit list.
+    pub deposits_hash: B256,
+}
+
+/// The canonical EIP-4788 beacon-roots contract as revm bytecode.
+pub fn beacon_roots_bytecode() -> Bytecode {
+    Bytecode::new_raw(Bytes::from_static(BEACON_ROOTS_CODE))
+}
+
 /// Errors from applying a deposit mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositError {
@@ -240,6 +307,18 @@ impl L2State {
         Self::default()
     }
 
+    /// The genesis state this scaffold can produce: empty, with the EIP-4788
+    /// beacon-roots predeploy installed (the executor installs it lazily
+    /// anyway, so [`Self::new`] behaves identically after the first block).
+    /// Genesis alloc / the vault contracts are out of scope for this scaffold.
+    pub fn genesis(_spec: &ChainSpec) -> Self {
+        let mut state = Self::default();
+        match ensure_system_account(&mut state.db, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())) {
+            Ok(()) => state,
+            Err(never) => match never {},
+        }
+    }
+
     /// Apply one deposit mint directly to this state (block-level callers use
     /// [`crate::executor::execute_block`], which is atomic and validates the
     /// whole block first). Credits **exactly** `sats_to_wei(l1_sats)` to the
@@ -266,6 +345,44 @@ impl L2State {
         ledger_slot(&self.db, ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT)
     }
 
+    /// Total wei the EVM destroyed (EIP-6780), read from the committed ledger
+    /// at the default [`SUPPLY_LEDGER`] address.
+    pub fn total_burned_wei(&self) -> U256 {
+        ledger_slot(&self.db, SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT)
+    }
+
+    /// The committed head-block record at the default [`BLOCK_INFO`] address
+    /// (`None` before any block executed).
+    pub fn head(&self) -> Option<HeadRecord> {
+        let slot = |s: U256| ledger_slot(&self.db, BLOCK_INFO, s);
+        if slot(BLOCK_INFO_FLAG_SLOT).is_zero() {
+            return None;
+        }
+        let word = |s: U256| slot(s).as_limbs()[0];
+        Some(HeadRecord {
+            number: word(BLOCK_INFO_NUMBER_SLOT),
+            timestamp: word(BLOCK_INFO_TIMESTAMP_SLOT),
+            base_fee_per_gas: word(BLOCK_INFO_BASE_FEE_SLOT),
+            gas_used: word(BLOCK_INFO_GAS_USED_SLOT),
+            prevrandao: B256::from(slot(BLOCK_INFO_PREVRANDAO_SLOT)),
+            anchor_root: B256::from(slot(BLOCK_INFO_ANCHOR_ROOT_SLOT)),
+            parent_hash: B256::from(slot(BLOCK_INFO_PARENT_HASH_SLOT)),
+            deposits_hash: B256::from(slot(BLOCK_INFO_DEPOSITS_HASH_SLOT)),
+        })
+    }
+
+    /// The committed hash of L2 block `number`, if it is one of the 256 blocks
+    /// before the head (the `BLOCKHASH` window; the head's own hash is only
+    /// committed when the next block executes).
+    pub fn block_hash(&self, number: u64) -> Option<B256> {
+        let head = self.head()?;
+        if number >= head.number || head.number - number > BLOCK_HASH_HISTORY {
+            return None;
+        }
+        let v = ledger_slot(&self.db, BLOCK_INFO, block_hash_slot(number));
+        (!v.is_zero()).then(|| B256::from(v))
+    }
+
     /// The deposit cursor: position of the last consumed deposit (default ledger).
     pub fn deposit_cursor(&self) -> DepositPosition {
         DepositPosition::from_packed(ledger_slot(&self.db, SUPPLY_LEDGER, SUPPLY_LEDGER_CURSOR_SLOT))
@@ -277,9 +394,9 @@ impl L2State {
         position <= self.deposit_cursor()
     }
 
-    /// Sum of every live account's native balance. With zero issuance and
-    /// vault-routed fees this equals [`Self::total_minted_wei`] unless the EVM
-    /// destroyed value via EIP-6780 (then it is strictly smaller) — asserted by
+    /// Sum of every live account's native balance. With zero issuance,
+    /// vault-routed fees and the executor's burn accounting this equals
+    /// [`Self::total_minted_wei`]` - `[`Self::total_burned_wei`] — asserted by
     /// the executor tests.
     pub fn total_native_wei(&self) -> U256 {
         self.db
@@ -327,6 +444,58 @@ fn ledger_slot(db: &InMemoryDB, ledger: Address, slot: U256) -> U256 {
         .filter(|acc| acc.account_state != AccountState::NotExisting)
         .and_then(|acc| acc.storage.get(&slot).copied())
         .unwrap_or(U256::ZERO)
+}
+
+/// Materialize `address` as a **system account**: non-empty (nonce 1) so
+/// EIP-161 never drops it — and its storage — from the state trie, with `code`
+/// installed if given and the account has none yet. Existing balances, nonces
+/// and code are never overwritten. Idempotent.
+pub(crate) fn ensure_system_account<ExtDB: DatabaseRef>(
+    db: &mut CacheDB<ExtDB>,
+    address: Address,
+    code: Option<&Bytecode>,
+) -> Result<(), ExtDB::Error> {
+    let code_hash = code.map(|c| c.hash_slow());
+    let acc = db.load_account(address)?;
+    if acc.account_state == AccountState::NotExisting {
+        // A brand-new account has no storage anywhere: mark it StorageCleared
+        // so slot reads never consult the backing database.
+        acc.account_state = AccountState::StorageCleared;
+    }
+    if acc.info.nonce == 0 {
+        acc.info.nonce = 1;
+    }
+    let mut install = false;
+    if let (Some(c), Some(h)) = (code, code_hash) {
+        if acc.info.code_hash == KECCAK_EMPTY || acc.info.code_hash == B256::ZERO {
+            acc.info.code_hash = h;
+            acc.info.code = Some(c.clone());
+            install = true;
+        }
+    }
+    if install {
+        if let (Some(c), Some(h)) = (code, code_hash) {
+            db.cache.contracts.entry(h).or_insert_with(|| c.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Add `amount` to storage `slot` of the system account `account` (reads go
+/// through the [`Database`] trait so recording / stateless backings observe
+/// them). Returns the new value.
+pub(crate) fn ledger_add<ExtDB: DatabaseRef>(
+    db: &mut CacheDB<ExtDB>,
+    account: Address,
+    slot: U256,
+    amount: U256,
+) -> Result<U256, ExtDB::Error> {
+    db.basic(account)?;
+    let current = db.storage(account, slot)?;
+    let next = current.checked_add(amount).expect("ledger slot cannot overflow U256");
+    ensure_system_account(db, account, None)?;
+    db.insert_account_storage(account, slot, next)?;
+    Ok(next)
 }
 
 /// Credit `amount_wei` to `address` in the raw database (deposit mints and
@@ -396,15 +565,7 @@ pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
 
     // Materialize the ledger as a non-empty (nonce 1, code-less) system account
     // so EIP-161 never drops it — and its storage — from the state trie.
-    {
-        let acc = db.load_account(ledger).map_err(DepositApplyError::Db)?;
-        if acc.account_state == AccountState::NotExisting {
-            acc.account_state = AccountState::StorageCleared;
-        }
-        if acc.info.nonce == 0 {
-            acc.info.nonce = 1;
-        }
-    }
+    ensure_system_account(db, ledger, None).map_err(DepositApplyError::Db)?;
     db.insert_account_storage(ledger, SUPPLY_LEDGER_CURSOR_SLOT, position.packed())
         .map_err(DepositApplyError::Db)?;
     db.insert_account_storage(ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, total_after)
@@ -456,6 +617,9 @@ mod tests {
             sats_to_wei(200_000_000) + sats_to_wei(1)
         );
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
+        assert_eq!(state.total_burned_wei(), U256::ZERO);
+        assert!(state.head().is_none(), "no block executed yet");
+        assert!(state.block_hash(0).is_none());
         // Nonces untouched by mints.
         assert_eq!(state.nonce_of(&ALICE), 0);
         // The ledger is a real, non-empty account (nonce 1, no code).
@@ -535,6 +699,31 @@ mod tests {
         assert!(matches!(err, DepositError::CumulativeSupplyExceeded { .. }));
         assert_eq!(state.balance_of(&BOB), U256::ZERO);
         assert_eq!(state.total_minted_wei(), sats_to_wei(spec.max_l1_sats));
+    }
+
+    #[test]
+    fn genesis_installs_the_beacon_roots_predeploy_idempotently() {
+        let spec = ChainSpec::testnet();
+        let state = L2State::genesis(&spec);
+        let acc = state.account(&BEACON_ROOTS_ADDRESS).expect("predeploy exists");
+        assert_eq!(acc.nonce, 1);
+        assert_eq!(acc.code_hash, beacon_roots_bytecode().hash_slow());
+        assert_eq!(state.total_native_wei(), U256::ZERO);
+        // Re-ensuring never changes anything (root-stable).
+        let root = crate::compute_keccak_mpt_state_root(&state);
+        let mut again = state.clone();
+        ensure_system_account(&mut again.db, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())).unwrap();
+        assert_eq!(crate::compute_keccak_mpt_state_root(&again), root);
+        // System accounts without code stay code-less; a non-zero nonce is kept.
+        let mut s2 = L2State::new();
+        s2.db.insert_account_info(ALICE, revm::state::AccountInfo { nonce: 7, ..Default::default() });
+        ensure_system_account(&mut s2.db, ALICE, None).unwrap();
+        assert_eq!(s2.nonce_of(&ALICE), 7);
+        assert_eq!(s2.account(&ALICE).unwrap().code_hash, KECCAK_EMPTY);
+        // ledger_add accumulates.
+        assert_eq!(ledger_add(&mut s2.db, SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT, U256::from(5u64)).unwrap(), U256::from(5u64));
+        assert_eq!(ledger_add(&mut s2.db, SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT, U256::from(6u64)).unwrap(), U256::from(11u64));
+        assert_eq!(s2.total_burned_wei(), U256::from(11u64));
     }
 
     #[test]
