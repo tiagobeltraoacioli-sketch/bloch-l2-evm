@@ -1,0 +1,32 @@
+# cargo-audit configuration — bloch-l2-evm (SCAFFOLD, testnet / zero-value).
+#
+# Run locally with:  cd l2/bloch-l2-evm && cargo audit
+#
+# Every advisory ignored below is TRANSITIVE, reached only through the
+# design-pinned `revm =41.0.0` dependency tree (see l2/bloch-l2-evm/Cargo.toml:
+# revm is pinned to ONE exact version because the sequencer/node and the SP1
+# guest MUST re-execute byte-identical code — any bump is a deliberate,
+# documented "program upgrade" that also changes the SP1 program vkey, NOT a
+# routine `cargo update`). None of these can be fixed here without breaking that
+# byte-identical-revm invariant, and none is reachable from any code this crate
+# executes at value. They are re-reviewed on every intentional revm bump.
+#
+# This crate is an UNAUDITED scaffold with no live chain and no value at risk
+# (see the crate header). Do NOT copy these ignores into any consensus-critical
+# L1 crate — there, advisories must be fixed, not ignored.
+
+[advisories]
+ignore = [
+    # tracing-subscriber 0.2.25 (via ark-relations -> ark-bn254 ->
+    # revm-precompile). "Logging user input may poison logs with ANSI escape
+    # sequences." This scaffold does not log untrusted user input, and the
+    # vulnerable crate is a build-only transitive of a revm precompile. Upgrade
+    # path (>=0.3.20) is owned by the pinned revm tree, not by this crate.
+    "RUSTSEC-2025-0055",
+    # derivative 2.2.0 — UNMAINTAINED (not a vulnerability). Transitive via
+    # ark-ff -> ruint -> alloy-primitives/alloy-trie inside the revm tree.
+    "RUSTSEC-2024-0388",
+    # paste 1.x — UNMAINTAINED (not a vulnerability). Transitive proc-macro of
+    # the revm/alloy tree.
+    "RUSTSEC-2024-0436",
+]
