@@ -441,7 +441,9 @@ fn cancun_prefunded_creation_cannot_hide_a_sibling_needed_after_selfdestruct() {
         .chain(witness.absent_accounts.iter().map(|a| Nibbles::unpack(keccak256(a))))
         .collect();
     let before = witness.proof.len();
-    witness.proof.retain(|path, _| required.iter().any(|key| key.starts_with(path)));
+    witness
+        .proof
+        .retain(|path, _| required.iter().any(|key| key.starts_with(path)));
     assert!(witness.proof.len() < before);
     // Every account needed by execution is still authenticated. The missing
     // disclosure is required specifically for canonical trie restructuring.
