@@ -26,10 +26,11 @@
 //!   (18 decimals, L2) helpers with `ATOM_SCALE = 10^10`.
 //! * [`state::L2State`] — an account/state layer over revm's
 //!   `CacheDB`/`InMemoryDB` with deposit-mint (credits **exactly** the
-//!   escrow-derived wei; provenance is bridged BLCH **only**; each L1 outpoint
-//!   mints at most once; the L1 cap bounds every deposit and the cumulative
-//!   supply) and a supply ledger **committed in the state root** as the
-//!   storage of a system account.
+//!   escrow-derived wei; provenance is bridged BLCH **only**; deposits must
+//!   strictly advance a cursor of canonical L1 positions, so each escrow
+//!   output mints at most once; the L1 cap bounds every deposit and the
+//!   cumulative supply) and a two-slot supply ledger **committed in the state
+//!   root** as the storage of a system account.
 //! * [`executor::execute_block`] — runs **UNMODIFIED** revm at
 //!   `SpecId::CANCUN`, **atomically** (the caller's state is untouched on any
 //!   error), accepts only transaction types 0/1/2, applies deposit mints at
@@ -94,7 +95,7 @@ pub use proving::{
     HydratedPreState, VerifiedBatch, VerifyError, WitnessAccessError, WitnessAccount, WitnessBacking,
 };
 pub use scale::{sats_to_wei, wei_to_sats, ATOM_SCALE};
-pub use state::{DepositError, DepositMint, DepositProvenance, L2Account, L2State};
+pub use state::{DepositError, DepositMint, DepositPosition, DepositProvenance, L2Account, L2State};
 pub use stateroot::{compute_keccak_mpt_state_root, stateless_new_root, SparseTrieView, WitnessError};
 
 /// The exact revm version this scaffold is pinned to (also pinned as `=41.0.0`

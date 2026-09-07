@@ -5,7 +5,8 @@
 //! core only: no consensus, no txpool, no RPC. Per BLOCH-L2-EVM-DESIGN §1:
 //!
 //! * deposit mints (bridged BLCH only) are applied at block start, against the
-//!   committed supply ledger (exact scaling, one mint per L1 outpoint, L1 cap);
+//!   committed supply ledger (exact scaling, strictly increasing L1 position —
+//!   the replay cursor — and the L1 cap);
 //! * the EVM itself is unmodified revm at the pinned CANCUN hardfork;
 //! * COINBASE / block beneficiary is the sequencer fee vault, so priority
 //!   fees are paid there by revm's own (unmodified) beneficiary payment;
@@ -27,7 +28,6 @@
 //! A separate block-*builder* entry point (skip invalid candidates, stop at the
 //! gas limit) is not part of this scaffold.
 
-use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
 
@@ -69,12 +69,15 @@ pub struct BlockInput {
     /// Block environment.
     pub context: BlockContext,
     /// Deposit system-transactions, applied (minted) at block start, before
-    /// any user transaction — they cannot be dropped once anchored.
+    /// any user transaction — they cannot be dropped once anchored. They MUST
+    /// be in strictly increasing canonical L1 position order
+    /// ([`DepositMint::position`]), and all after the ledger's cursor.
     ///
     /// **Trust boundary:** the derivation layer must only hand over deposits
-    /// that were really escrowed in a finalized Bloch block; the STF enforces
-    /// exact scaling, one mint per outpoint (committed ledger) and the L1 cap,
-    /// and commits the list via [`ExecutionOutcome::deposits_hash`].
+    /// that were really escrowed at the stated positions in finalized Bloch
+    /// blocks; the STF enforces exact scaling, canonical order (hence one mint
+    /// per escrow output, via the committed cursor) and the L1 cap, and
+    /// commits the list via [`ExecutionOutcome::deposits_hash`].
     pub deposits: Vec<DepositMint>,
     /// User transactions in sequencer order. `TxEnv` is revm's transaction
     /// environment; signature recovery / RLP decoding belong to the (stubbed)
@@ -138,13 +141,14 @@ pub struct ExecutionOutcome {
 /// **unchanged** on every variant.
 #[derive(Debug)]
 pub enum BlockExecutionError {
-    /// A deposit mint violated the ledger rules (replay, L1 cap).
+    /// A deposit mint violated the ledger rules (cursor, L1 cap).
     Deposit(DepositError),
-    /// The same L1 escrow outpoint appears twice in the block.
-    DuplicateDeposit {
-        /// Index of the first occurrence.
+    /// The block's deposits are not in strictly increasing L1 position order
+    /// (a duplicate, or an out-of-order derivation).
+    DepositsOutOfOrder {
+        /// Index of the deposit that precedes the offending one.
         first_index: usize,
-        /// Index of the duplicate.
+        /// Index of the deposit whose position is not after the previous one.
         second_index: usize,
     },
     /// A type-3 (EIP-4844 blob) transaction was submitted; the sequencer
@@ -203,8 +207,8 @@ impl core::fmt::Display for BlockExecutionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             BlockExecutionError::Deposit(e) => write!(f, "deposit failed: {e}"),
-            BlockExecutionError::DuplicateDeposit { first_index, second_index } => {
-                write!(f, "deposits {first_index} and {second_index} share the same L1 outpoint")
+            BlockExecutionError::DepositsOutOfOrder { first_index, second_index } => {
+                write!(f, "deposit {second_index} is not after deposit {first_index} in L1 position order")
             }
             BlockExecutionError::BlobTxRejected { tx_index } => {
                 write!(f, "tx {tx_index}: blob (type-3) transactions are rejected at the sequencer")
@@ -251,14 +255,18 @@ const BLOB_TX_TYPE: u8 = 3;
 pub const SUPPORTED_TX_TYPES: [u8; 3] = [0, 1, 2];
 
 /// Commitment to a block's deposit list: `keccak256` over the concatenation of
-/// `recipient ‖ l1_txid ‖ l1_vout (BE u32) ‖ l1_sats (BE u64)` for each deposit
-/// in order (`keccak256("")` for no deposits). Binds a proof over the block to
-/// the exact L1-derived deposits it minted.
+/// `recipient ‖ l1_height (BE u64) ‖ l1_tx_index (BE u32) ‖ l1_txid ‖
+/// l1_vout (BE u32) ‖ l1_sats (BE u64)` for each deposit in order
+/// (`keccak256("")` for no deposits). Binds a proof over the block to the exact
+/// L1-derived deposits it minted.
 pub fn deposits_hash(deposits: &[DepositMint]) -> B256 {
-    let mut buf = Vec::with_capacity(deposits.len() * 64);
+    let mut buf = Vec::with_capacity(deposits.len() * 76);
     for d in deposits {
+        let pos = d.position();
         let (txid, vout) = d.outpoint();
         buf.extend_from_slice(d.recipient.as_slice());
+        buf.extend_from_slice(&pos.l1_height.to_be_bytes());
+        buf.extend_from_slice(&pos.l1_tx_index.to_be_bytes());
         buf.extend_from_slice(&txid);
         buf.extend_from_slice(&vout.to_be_bytes());
         buf.extend_from_slice(&d.l1_sats().to_be_bytes());
@@ -268,25 +276,22 @@ pub fn deposits_hash(deposits: &[DepositMint]) -> B256 {
 
 /// Pure, state-independent validation of a [`BlockInput`] against the
 /// [`ChainSpec`]: it depends on nothing but the input, so it runs before any
-/// state is touched. Checks every deposit's L1 cap and intra-block uniqueness,
-/// and every transaction's type, blob fields, `TxEnv` consistency and gas
-/// limit. Stateful rules (deposit replay against the ledger, cumulative cap,
-/// revm's own validation) are enforced during execution on the working copy.
+/// state is touched. Checks every deposit's L1 cap and the strictly increasing
+/// L1 position order of the deposit list (which also excludes duplicates), and
+/// every transaction's type, blob fields, `TxEnv` consistency and gas limit.
+/// Stateful rules (the deposit cursor, the cumulative cap, revm's own
+/// validation) are enforced during execution on the working copy.
 pub fn validate_block_input(spec: &ChainSpec, input: &BlockInput) -> Result<(), BlockExecutionError> {
     if spec.block_reward != U256::ZERO {
         return Err(BlockExecutionError::NonZeroBlockReward);
     }
-    let mut seen: BTreeSet<([u8; 32], u32)> = BTreeSet::new();
-    let mut first_index_of: alloc::collections::BTreeMap<([u8; 32], u32), usize> = Default::default();
     for (i, d) in input.deposits.iter().enumerate() {
         if d.l1_sats() > spec.max_l1_sats {
             return Err(DepositError::ExceedsL1Supply { l1_sats: d.l1_sats(), max_l1_sats: spec.max_l1_sats }.into());
         }
-        let op = d.outpoint();
-        if !seen.insert(op) {
-            return Err(BlockExecutionError::DuplicateDeposit { first_index: first_index_of[&op], second_index: i });
+        if i > 0 && d.position() <= input.deposits[i - 1].position() {
+            return Err(BlockExecutionError::DepositsOutOfOrder { first_index: i - 1, second_index: i });
         }
-        first_index_of.insert(op, i);
     }
     for (i, tx) in input.txs.iter().enumerate() {
         if tx.tx_type == BLOB_TX_TYPE || !tx.blob_hashes.is_empty() || tx.max_fee_per_blob_gas != 0 {
@@ -337,7 +342,7 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
 
     // 1. Deposit mints at block start (before any user tx). This is the ONLY
     //    place native balance is created; provenance is bridged BLCH only and
-    //    every outpoint mints at most once (committed ledger).
+    //    positions must advance the committed cursor (one mint per escrow).
     let mut minted_wei = U256::ZERO;
     for deposit in &input.deposits {
         let wei = apply_deposit(&mut db, spec, deposit).map_err(|e| match e {
@@ -482,15 +487,17 @@ mod tests {
 
     const GWEI: u128 = 1_000_000_000;
 
-    static NEXT_VOUT: AtomicU32 = AtomicU32::new(0);
+    static NEXT_HEIGHT: AtomicU32 = AtomicU32::new(1);
 
-    /// A deposit with a fresh, unique L1 outpoint.
+    /// A deposit at a fresh, strictly increasing L1 position.
     fn deposit(recipient: Address, l1_sats: u64) -> DepositMint {
         DepositMint {
             recipient,
             provenance: DepositProvenance::BridgedBlch {
+                l1_height: NEXT_HEIGHT.fetch_add(1, Ordering::Relaxed) as u64,
+                l1_tx_index: 0,
                 l1_txid: [7; 32],
-                l1_vout: NEXT_VOUT.fetch_add(1, Ordering::Relaxed),
+                l1_vout: 0,
                 l1_sats,
             },
         }
@@ -1097,18 +1104,33 @@ mod tests {
         )
         .unwrap();
         let after_dep = fingerprint(&state);
+        let fresh = deposit(ALICE, 1);
+        // [replayed, fresh] is in position order, so it reaches the ledger check
+        // and fails there; [fresh, replayed] is rejected by pure validation.
         let err = execute_block(
             &spec,
             &mut state,
             BlockInput {
                 context: BlockContext { number: 4, ..Default::default() },
-                deposits: vec![deposit(ALICE, 1), dep],
+                deposits: vec![dep, fresh],
                 txs: vec![],
             },
         )
         .unwrap_err();
-        assert!(matches!(err, BlockExecutionError::Deposit(DepositError::Replay { .. })));
-        assert_eq!(fingerprint(&state), after_dep, "the first deposit of the failed block is rolled back too");
+        assert!(matches!(err, BlockExecutionError::Deposit(DepositError::OutOfOrder { .. })), "{err}");
+        assert_eq!(fingerprint(&state), after_dep);
+        let err = execute_block(
+            &spec,
+            &mut state,
+            BlockInput {
+                context: BlockContext { number: 4, ..Default::default() },
+                deposits: vec![fresh, dep],
+                txs: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 }));
+        assert_eq!(fingerprint(&state), after_dep, "the fresh deposit of the failed block is rolled back too");
 
         // The state is still fully usable afterwards.
         execute_block(
@@ -1125,8 +1147,8 @@ mod tests {
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
     }
 
-    /// C10 regression: the same L1 outpoint cannot mint twice, within a block
-    /// or across blocks.
+    /// C10 regression: the same L1 escrow cannot mint twice, within a block or
+    /// across blocks, and deposits must advance the committed cursor.
     #[test]
     fn deposit_outpoint_mints_at_most_once() {
         let spec = ChainSpec::testnet();
@@ -1139,11 +1161,12 @@ mod tests {
             BlockInput { context: BlockContext::default(), deposits: vec![dep, dep], txs: vec![] },
         )
         .unwrap_err();
-        assert!(matches!(err, BlockExecutionError::DuplicateDeposit { first_index: 0, second_index: 1 }));
+        assert!(matches!(err, BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 }));
         assert_eq!(state.total_minted_wei(), U256::ZERO);
 
         execute_block(&spec, &mut state, BlockInput { context: BlockContext::default(), deposits: vec![dep], txs: vec![] })
             .unwrap();
+        assert_eq!(state.deposit_cursor(), dep.position());
         let before = fingerprint(&state);
         for n in 2..5u64 {
             let err = execute_block(
@@ -1152,11 +1175,27 @@ mod tests {
                 BlockInput { context: BlockContext { number: n, ..Default::default() }, deposits: vec![dep], txs: vec![] },
             )
             .unwrap_err();
-            assert!(matches!(err, BlockExecutionError::Deposit(DepositError::Replay { .. })));
+            assert!(matches!(err, BlockExecutionError::Deposit(DepositError::OutOfOrder { .. })));
             assert_eq!(fingerprint(&state), before);
         }
+        // Two deposits in the same L1 block: tx index / vout order is enforced.
+        let a = DepositMint {
+            recipient: BOB,
+            provenance: DepositProvenance::BridgedBlch { l1_height: 1_000_000, l1_tx_index: 3, l1_txid: [1; 32], l1_vout: 1, l1_sats: 5 },
+        };
+        let b = DepositMint {
+            recipient: BOB,
+            provenance: DepositProvenance::BridgedBlch { l1_height: 1_000_000, l1_tx_index: 3, l1_txid: [1; 32], l1_vout: 0, l1_sats: 5 },
+        };
+        assert!(matches!(
+            execute_block(&spec, &mut state, BlockInput { context: BlockContext { number: 5, ..Default::default() }, deposits: vec![a, b], txs: vec![] }),
+            Err(BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 })
+        ));
+        execute_block(&spec, &mut state, BlockInput { context: BlockContext { number: 5, ..Default::default() }, deposits: vec![b, a], txs: vec![] }).unwrap();
+        assert_eq!(state.deposit_cursor(), a.position());
         assert_eq!(state.balance_of(&ALICE), sats_to_wei(crate::scale::SATS_PER_BLCH));
-        assert_eq!(state.total_minted_wei(), sats_to_wei(crate::scale::SATS_PER_BLCH));
+        assert_eq!(state.balance_of(&BOB), sats_to_wei(10));
+        assert_eq!(state.total_minted_wei(), sats_to_wei(crate::scale::SATS_PER_BLCH + 10));
     }
 
     /// C03 regression: only types 0/1/2 reach revm; a zero-priced custom type

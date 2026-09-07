@@ -530,14 +530,16 @@ mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
     use revm::context::TxEnv;
 
-    static NEXT_VOUT: AtomicU32 = AtomicU32::new(0);
+    static NEXT_HEIGHT: AtomicU32 = AtomicU32::new(1);
 
     fn deposit(to: Address, sats: u64) -> DepositMint {
         DepositMint {
             recipient: to,
             provenance: DepositProvenance::BridgedBlch {
+                l1_height: NEXT_HEIGHT.fetch_add(1, Ordering::Relaxed) as u64,
+                l1_tx_index: 0,
                 l1_txid: [0u8; 32],
-                l1_vout: NEXT_VOUT.fetch_add(1, Ordering::Relaxed),
+                l1_vout: 0,
                 l1_sats: sats,
             },
         }
@@ -782,9 +784,9 @@ mod tests {
         verify_batch(&spec, &w3, &batch3).expect("guest verifies");
     }
 
-    /// Deposits go through the committed ledger inside the guest too: the
-    /// ledger account is part of the witness, and a replay is rejected by the
-    /// guest exactly as by the host.
+    /// Deposits go through the committed ledger (total + cursor) inside the
+    /// guest too: the ledger account is part of the witness, and a replay is
+    /// rejected by the guest exactly as by the host.
     #[test]
     fn deposits_and_ledger_are_provable_and_replay_is_rejected_in_the_guest() {
         let spec = ChainSpec::testnet();

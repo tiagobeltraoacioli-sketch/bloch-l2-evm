@@ -24,13 +24,14 @@ pub const SEQUENCER_FEE_VAULT: Address = address!("42000000000000000000000000000
 pub const BASE_FEE_VAULT: Address = address!("4200000000000000000000000000000000000019");
 
 /// System account holding the **committed supply ledger**: the cumulative
-/// bridged-BLCH wei ever minted (storage slot 0) and one marker slot per
-/// consumed L1 escrow outpoint (see [`crate::state::consumed_deposit_slot`]).
+/// bridged-BLCH wei ever minted (storage slot 0) and the **deposit cursor**
+/// (slot 1) — the canonical L1 position of the last consumed escrow output
+/// (see [`crate::state::DepositPosition`]).
 ///
 /// It is a plain storage-bearing account with `nonce = 1` and no code, created
 /// lazily by the first deposit, so it is a leaf of the keccak-MPT state root:
-/// the ledger and the set of consumed deposits are therefore part of every
-/// state commitment, carried by the batch witness like any other account, and
+/// the ledger is part of every state commitment, carried by the batch witness
+/// like any other account (two slots, whatever the chain's history), and
 /// re-checked by a stateless guest. The address is outside the OP-Stack
 /// predeploy byte range (`0x4200…00xx`).
 pub const SUPPLY_LEDGER: Address = address!("4200000000000000000000000000000000000100");

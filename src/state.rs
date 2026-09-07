@@ -14,20 +14,29 @@
 //! transaction), so `total_native_wei <= total_minted_wei` is the invariant the
 //! executor maintains, with equality whenever no such burn happened.
 //!
-//! The supply ledger — cumulative minted wei and the set of consumed L1 escrow
-//! outpoints — lives in the storage of the [`crate::chainspec::SUPPLY_LEDGER`]
-//! system account, so it is **committed in the state root**, carried by batch
-//! witnesses and re-checked by a stateless guest. A deposit whose outpoint was
-//! already consumed is rejected ([`DepositError::Replay`]); a deposit claiming
-//! more than the L1 hard cap, or pushing the cumulative supply past it, is
-//! rejected as well.
+//! The supply ledger — cumulative minted wei and the **deposit cursor** — lives
+//! in the storage of the [`crate::chainspec::SUPPLY_LEDGER`] system account, so
+//! it is **committed in the state root**, carried by batch witnesses (two
+//! slots, whatever the chain's history) and re-checked by a stateless guest.
+//!
+//! **Replay protection is a monotonic cursor over canonical L1 positions**
+//! (the OP-Stack / Arbitrum inbox model): every escrow output has a unique
+//! [`DepositPosition`] `(l1_height, l1_tx_index, l1_vout)`, the derivation layer
+//! must present deposits in strictly increasing position order, and the STF
+//! accepts a deposit only if its position is strictly after the cursor, then
+//! advances the cursor. A replayed, duplicated or out-of-order deposit is
+//! [`DepositError::OutOfOrder`]. Compared with a set of consumed outpoints this
+//! keeps state and witness size O(1) instead of O(total deposits). A deposit
+//! claiming more than the L1 hard cap, or pushing the cumulative supply past
+//! it, is rejected as well.
 //!
 //! **Trust boundary.** The STF cannot itself observe the Bloch L1: it trusts
-//! the derivation layer to hand it deposits that were really escrowed in a
-//! finalized L1 block. What it *does* enforce is exact scaling, uniqueness of
-//! each outpoint, and the supply cap, all against committed state.
+//! the derivation layer to hand it deposits that were really escrowed at the
+//! stated positions in finalized L1 blocks. What it *does* enforce is exact
+//! scaling, canonical order (hence uniqueness), and the supply cap, all against
+//! committed state.
 
-use alloy_primitives::{keccak256, Address, B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use revm::database::{AccountState, CacheDB, DbAccount, InMemoryDB};
 use revm::primitives::KECCAK_EMPTY;
 use revm::{Database, DatabaseRef};
@@ -46,6 +55,10 @@ pub enum DepositProvenance {
     /// BLCH escrowed on the Bloch L1 (the deposit system-transaction's
     /// source, OP-style type-0x7E envelope in the full design).
     BridgedBlch {
+        /// Height of the Bloch block containing the escrow transaction.
+        l1_height: u64,
+        /// Index of the escrow transaction within that block.
+        l1_tx_index: u32,
         /// L1 escrow transaction id.
         l1_txid: [u8; 32],
         /// Output index of the escrow within that transaction.
@@ -80,36 +93,78 @@ impl DepositMint {
         sats_to_wei(self.l1_sats())
     }
 
-    /// The L1 escrow outpoint `(l1_txid, l1_vout)` that uniquely identifies
-    /// this deposit and may be minted at most once.
+    /// The L1 escrow outpoint `(l1_txid, l1_vout)` (auditability; the
+    /// uniqueness rule is the [`DepositPosition`]).
     pub fn outpoint(&self) -> ([u8; 32], u32) {
         let DepositProvenance::BridgedBlch { l1_txid, l1_vout, .. } = self.provenance;
         (l1_txid, l1_vout)
+    }
+
+    /// The canonical L1 position of this deposit's escrow output.
+    pub fn position(&self) -> DepositPosition {
+        let DepositProvenance::BridgedBlch { l1_height, l1_tx_index, l1_vout, .. } = self.provenance;
+        DepositPosition { l1_height, l1_tx_index, l1_vout }
+    }
+}
+
+/// Canonical position of an escrow output on the Bloch L1 — the order in which
+/// the derivation layer must present deposits and the STF's replay cursor.
+/// Ordering is lexicographic `(l1_height, l1_tx_index, l1_vout)`, identical to
+/// the numeric order of [`Self::packed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DepositPosition {
+    /// Height of the Bloch block containing the escrow transaction.
+    pub l1_height: u64,
+    /// Index of the escrow transaction within that block.
+    pub l1_tx_index: u32,
+    /// Output index within that transaction.
+    pub l1_vout: u32,
+}
+
+impl DepositPosition {
+    /// The cursor value before any deposit: nothing consumed. A real escrow
+    /// output can never sit at `(0, 0, 0)` (the L1 genesis coinbase), so this
+    /// sentinel excludes no valid deposit.
+    pub const NONE: Self = Self { l1_height: 0, l1_tx_index: 0, l1_vout: 0 };
+
+    /// Storage encoding: `height << 64 | tx_index << 32 | vout` (128 bits), so
+    /// numeric comparison equals positional order.
+    pub fn packed(&self) -> U256 {
+        (U256::from(self.l1_height) << 64) | (U256::from(self.l1_tx_index) << 32) | U256::from(self.l1_vout)
+    }
+
+    /// Inverse of [`Self::packed`] (upper 128 bits ignored).
+    pub fn from_packed(v: U256) -> Self {
+        let limbs = v.as_limbs();
+        Self { l1_height: limbs[1], l1_tx_index: (limbs[0] >> 32) as u32, l1_vout: limbs[0] as u32 }
+    }
+}
+
+impl core::fmt::Display for DepositPosition {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}:{}:{}", self.l1_height, self.l1_tx_index, self.l1_vout)
     }
 }
 
 /// Storage slot of the supply-ledger account holding the cumulative minted wei.
 pub const SUPPLY_LEDGER_TOTAL_MINTED_SLOT: U256 = U256::ZERO;
 
-/// Storage slot of the supply-ledger account that marks an L1 escrow outpoint
-/// as consumed (value `1` once minted): `keccak256(0x01 ‖ l1_txid ‖ l1_vout_be)`.
-pub fn consumed_deposit_slot(l1_txid: &[u8; 32], l1_vout: u32) -> U256 {
-    let mut preimage = [0u8; 37];
-    preimage[0] = 0x01;
-    preimage[1..33].copy_from_slice(l1_txid);
-    preimage[33..37].copy_from_slice(&l1_vout.to_be_bytes());
-    U256::from_be_bytes(keccak256(preimage).0)
-}
+/// Storage slot of the supply-ledger account holding the deposit cursor: the
+/// [`DepositPosition::packed`] position of the last consumed deposit
+/// ([`DepositPosition::NONE`] when no deposit was ever minted).
+pub const SUPPLY_LEDGER_CURSOR_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 /// Errors from applying a deposit mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositError {
-    /// The L1 escrow outpoint was already minted on this L2.
-    Replay {
-        /// L1 escrow transaction id.
-        l1_txid: [u8; 32],
-        /// Output index within that transaction.
-        l1_vout: u32,
+    /// The deposit's L1 position is not strictly after the ledger cursor: it
+    /// was already minted (replay), is duplicated, or the derivation layer
+    /// presented deposits out of canonical order.
+    OutOfOrder {
+        /// The offending deposit's position.
+        position: DepositPosition,
+        /// The ledger cursor (last consumed position).
+        cursor: DepositPosition,
     },
     /// The deposit claims more sats than the L1 can ever hold.
     ExceedsL1Supply {
@@ -131,8 +186,8 @@ pub enum DepositError {
 impl core::fmt::Display for DepositError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            DepositError::Replay { l1_txid, l1_vout } => {
-                write!(f, "deposit outpoint {}:{l1_vout} was already minted", B256::from(*l1_txid))
+            DepositError::OutOfOrder { position, cursor } => {
+                write!(f, "deposit at L1 position {position} is not after the ledger cursor {cursor} (replay or out of order)")
             }
             DepositError::ExceedsL1Supply { l1_sats, max_l1_sats } => {
                 write!(f, "deposit claims {l1_sats} sats, above the L1 hard cap of {max_l1_sats} sats")
@@ -189,8 +244,8 @@ impl L2State {
     /// [`crate::executor::execute_block`], which is atomic and validates the
     /// whole block first). Credits **exactly** `sats_to_wei(l1_sats)` to the
     /// recipient after checking the L1 cap, the cumulative cap and that the
-    /// outpoint was never minted; records the outpoint and the new total in
-    /// the committed ledger. Returns the credited wei.
+    /// deposit's position is strictly after the cursor; advances the cursor
+    /// and the total in the committed ledger. Returns the credited wei.
     pub fn deposit_mint(&mut self, spec: &ChainSpec, deposit: &DepositMint) -> Result<U256, DepositError> {
         match apply_deposit(&mut self.db, spec, deposit) {
             Ok(wei) => Ok(wei),
@@ -211,9 +266,15 @@ impl L2State {
         ledger_slot(&self.db, ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT)
     }
 
-    /// Whether the L1 escrow outpoint was already minted (default ledger).
-    pub fn is_deposit_consumed(&self, l1_txid: &[u8; 32], l1_vout: u32) -> bool {
-        !ledger_slot(&self.db, SUPPLY_LEDGER, consumed_deposit_slot(l1_txid, l1_vout)).is_zero()
+    /// The deposit cursor: position of the last consumed deposit (default ledger).
+    pub fn deposit_cursor(&self) -> DepositPosition {
+        DepositPosition::from_packed(ledger_slot(&self.db, SUPPLY_LEDGER, SUPPLY_LEDGER_CURSOR_SLOT))
+    }
+
+    /// Whether a deposit at `position` can no longer be minted (it is at or
+    /// before the cursor — default ledger).
+    pub fn is_deposit_consumed(&self, position: DepositPosition) -> bool {
+        position <= self.deposit_cursor()
     }
 
     /// Sum of every live account's native balance. With zero issuance and
@@ -295,7 +356,7 @@ pub(crate) fn credit_balance<ExtDB: DatabaseRef>(
     Ok(())
 }
 
-/// Apply one deposit against any `CacheDB`: cap checks, replay check against
+/// Apply one deposit against any `CacheDB`: cap checks, cursor check against
 /// the committed ledger, ledger update, recipient credit. All ledger reads go
 /// through the [`Database`] trait so a recording or stateless backing observes
 /// them. Returns the credited wei. On `Err` nothing has been written.
@@ -304,7 +365,7 @@ pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
     spec: &ChainSpec,
     deposit: &DepositMint,
 ) -> Result<U256, DepositApplyError<ExtDB::Error>> {
-    let (l1_txid, l1_vout) = deposit.outpoint();
+    let position = deposit.position();
     let l1_sats = deposit.l1_sats();
     if l1_sats > spec.max_l1_sats {
         return Err(DepositApplyError::Deposit(DepositError::ExceedsL1Supply {
@@ -317,9 +378,9 @@ pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
 
     // Load (and record) the ledger account, then read the two slots we depend on.
     db.basic(ledger).map_err(DepositApplyError::Db)?;
-    let marker_slot = consumed_deposit_slot(&l1_txid, l1_vout);
-    if !db.storage(ledger, marker_slot).map_err(DepositApplyError::Db)?.is_zero() {
-        return Err(DepositApplyError::Deposit(DepositError::Replay { l1_txid, l1_vout }));
+    let cursor = DepositPosition::from_packed(db.storage(ledger, SUPPLY_LEDGER_CURSOR_SLOT).map_err(DepositApplyError::Db)?);
+    if position <= cursor {
+        return Err(DepositApplyError::Deposit(DepositError::OutOfOrder { position, cursor }));
     }
     let total = db
         .storage(ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT)
@@ -344,7 +405,7 @@ pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
             acc.info.nonce = 1;
         }
     }
-    db.insert_account_storage(ledger, marker_slot, U256::from(1u64))
+    db.insert_account_storage(ledger, SUPPLY_LEDGER_CURSOR_SLOT, position.packed())
         .map_err(DepositApplyError::Db)?;
     db.insert_account_storage(ledger, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, total_after)
         .map_err(DepositApplyError::Db)?;
@@ -361,15 +422,17 @@ mod tests {
     const ALICE: Address = address!("00000000000000000000000000000000000a11ce");
     const BOB: Address = address!("0000000000000000000000000000000000000b0b");
 
-    static NEXT_VOUT: AtomicU32 = AtomicU32::new(0);
+    static NEXT_HEIGHT: AtomicU32 = AtomicU32::new(1);
 
-    /// A deposit with a fresh, unique L1 outpoint.
+    /// A deposit at a fresh, strictly increasing L1 position.
     fn blch_deposit(recipient: Address, l1_sats: u64) -> DepositMint {
         DepositMint {
             recipient,
             provenance: DepositProvenance::BridgedBlch {
+                l1_height: NEXT_HEIGHT.fetch_add(1, Ordering::Relaxed) as u64,
+                l1_tx_index: 0,
                 l1_txid: [0x42; 32],
-                l1_vout: NEXT_VOUT.fetch_add(1, Ordering::Relaxed),
+                l1_vout: 0,
                 l1_sats,
             },
         }
@@ -402,26 +465,47 @@ mod tests {
     }
 
     #[test]
-    fn replayed_outpoint_is_rejected_and_is_a_noop() {
+    fn replayed_or_out_of_order_deposit_is_rejected_and_is_a_noop() {
         let spec = ChainSpec::testnet();
         let mut state = L2State::new();
+        assert_eq!(state.deposit_cursor(), DepositPosition::NONE);
         let dep = blch_deposit(ALICE, 100);
         state.deposit_mint(&spec, &dep).unwrap();
-        let (txid, vout) = dep.outpoint();
-        assert!(state.is_deposit_consumed(&txid, vout));
+        assert_eq!(state.deposit_cursor(), dep.position());
+        assert!(state.is_deposit_consumed(dep.position()));
 
         let before_root = crate::compute_keccak_mpt_state_root(&state);
+        // Replay of the very same deposit.
         let err = state.deposit_mint(&spec, &dep).unwrap_err();
-        assert_eq!(err, DepositError::Replay { l1_txid: txid, l1_vout: vout });
-        // Same outpoint with a different recipient / amount is still a replay.
+        assert_eq!(err, DepositError::OutOfOrder { position: dep.position(), cursor: dep.position() });
+        // Same position with a different recipient / amount is still rejected.
         let mut other = dep;
         other.recipient = BOB;
-        other.provenance = DepositProvenance::BridgedBlch { l1_txid: txid, l1_vout: vout, l1_sats: 5 };
-        assert!(matches!(state.deposit_mint(&spec, &other), Err(DepositError::Replay { .. })));
+        let DepositProvenance::BridgedBlch { l1_height, l1_tx_index, l1_vout, .. } = dep.provenance;
+        other.provenance = DepositProvenance::BridgedBlch { l1_height, l1_tx_index, l1_txid: [9; 32], l1_vout, l1_sats: 5 };
+        assert!(matches!(state.deposit_mint(&spec, &other), Err(DepositError::OutOfOrder { .. })));
+        // An earlier position (out-of-order derivation) is rejected too.
+        let earlier = DepositMint {
+            recipient: BOB,
+            provenance: DepositProvenance::BridgedBlch { l1_height: 0, l1_tx_index: 1, l1_txid: [1; 32], l1_vout: 0, l1_sats: 5 },
+        };
+        assert!(earlier.position() < dep.position());
+        assert!(matches!(state.deposit_mint(&spec, &earlier), Err(DepositError::OutOfOrder { .. })));
         assert_eq!(state.balance_of(&ALICE), sats_to_wei(100));
         assert_eq!(state.balance_of(&BOB), U256::ZERO);
         assert_eq!(state.total_minted_wei(), sats_to_wei(100));
+        assert_eq!(state.deposit_cursor(), dep.position());
         assert_eq!(crate::compute_keccak_mpt_state_root(&state), before_root, "rejected deposit is a no-op");
+
+        // Positions order lexicographically and round-trip through the packing.
+        let a = DepositPosition { l1_height: 5, l1_tx_index: 7, l1_vout: 9 };
+        let b = DepositPosition { l1_height: 5, l1_tx_index: 8, l1_vout: 0 };
+        let c = DepositPosition { l1_height: 6, l1_tx_index: 0, l1_vout: 0 };
+        assert!(a < b && b < c);
+        assert!(a.packed() < b.packed() && b.packed() < c.packed());
+        for p in [a, b, c, DepositPosition::NONE, DepositPosition { l1_height: u64::MAX, l1_tx_index: u32::MAX, l1_vout: u32::MAX }] {
+            assert_eq!(DepositPosition::from_packed(p.packed()), p);
+        }
     }
 
     #[test]
@@ -475,14 +559,13 @@ mod tests {
         assert!(state.account(&ALICE).is_none());
         assert_eq!(state.total_minted_wei(), U256::ZERO);
         assert_eq!(state.total_native_wei(), state.total_minted_wei());
-        let (txid, vout) = dep.outpoint();
-        assert!(state.is_deposit_consumed(&txid, vout));
+        assert!(state.is_deposit_consumed(dep.position()));
     }
 
     #[test]
     fn ledger_is_committed_in_the_state_root() {
         // Two states with identical account balances but different mint
-        // histories (different consumed outpoints) must hash differently, and a
+        // histories (different cursor positions) must hash differently, and a
         // ledger edit alone must move the root.
         let spec = ChainSpec::testnet();
         let mut a = L2State::new();
@@ -493,7 +576,7 @@ mod tests {
         assert_ne!(
             crate::compute_keccak_mpt_state_root(&a),
             crate::compute_keccak_mpt_state_root(&b),
-            "consumed-outpoint set is part of the commitment"
+            "the deposit cursor is part of the commitment"
         );
         let root_a = crate::compute_keccak_mpt_state_root(&a);
         a.db.insert_account_storage(SUPPLY_LEDGER, SUPPLY_LEDGER_TOTAL_MINTED_SLOT, U256::from(1u64))

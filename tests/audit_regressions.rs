@@ -30,15 +30,17 @@ mod common {
     pub const GWEI: u128 = 1_000_000_000;
     pub const BLCH: u64 = SATS_PER_BLCH;
 
-    static NEXT_VOUT: AtomicU32 = AtomicU32::new(1);
+    static NEXT_HEIGHT: AtomicU32 = AtomicU32::new(1);
 
-    /// A deposit with a process-unique L1 outpoint.
+    /// A deposit at a process-unique, strictly increasing L1 position.
     pub fn deposit(recipient: Address, l1_sats: u64) -> DepositMint {
         DepositMint {
             recipient,
             provenance: DepositProvenance::BridgedBlch {
+                l1_height: NEXT_HEIGHT.fetch_add(1, Ordering::Relaxed) as u64,
+                l1_tx_index: 0,
                 l1_txid: [0xAB; 32],
-                l1_vout: NEXT_VOUT.fetch_add(1, Ordering::Relaxed),
+                l1_vout: 0,
                 l1_sats,
             },
         }
@@ -236,11 +238,11 @@ mod c02 {
         assert_eq!(st.balance_of(&BOB), wei(3));
         assert_eq!(st.total_minted_wei(), wei(3));
 
-        // A duplicate outpoint inside one block applies nothing at all.
+        // A duplicate (or out-of-order) deposit inside one block applies nothing at all.
         let after = fingerprint(&st);
         let d2 = deposit(ALICE, BLCH);
         let err = execute_block(&spec, &mut st, block(2, vec![d2, d2], vec![])).unwrap_err();
-        assert!(matches!(err, BlockExecutionError::DuplicateDeposit { first_index: 0, second_index: 1 }));
+        assert!(matches!(err, BlockExecutionError::DepositsOutOfOrder { first_index: 0, second_index: 1 }));
         assert_eq!(fingerprint(&st), after);
         assert_eq!(st.balance_of(&ALICE), U256::ZERO);
 
@@ -509,8 +511,9 @@ mod c09 {
     }
 }
 
-/// C10 [high, FIXED] — every L1 outpoint mints at most once, and the consumed
-/// set is committed in the state root.
+/// C10 [high, FIXED] — every L1 escrow mints at most once: deposits must
+/// strictly advance a cursor of canonical L1 positions that is committed in
+/// the state root (O(1) ledger, O(1) witness).
 mod c10 {
     use super::common::*;
     use bloch_l2_evm::{compute_keccak_mpt_state_root, execute_block, BlockExecutionError, ChainSpec, DepositError, L2State};
@@ -522,22 +525,25 @@ mod c10 {
         let dep = deposit(ALICE, BLCH);
         assert!(matches!(
             execute_block(&spec, &mut st, block(1, vec![dep, dep], vec![])),
-            Err(BlockExecutionError::DuplicateDeposit { .. })
+            Err(BlockExecutionError::DepositsOutOfOrder { .. })
         ));
         execute_block(&spec, &mut st, block(1, vec![dep], vec![])).unwrap();
         let root = compute_keccak_mpt_state_root(&st);
         for n in 2..5 {
             assert!(matches!(
                 execute_block(&spec, &mut st, block(n, vec![dep], vec![])),
-                Err(BlockExecutionError::Deposit(DepositError::Replay { .. }))
+                Err(BlockExecutionError::Deposit(DepositError::OutOfOrder { .. }))
             ));
             assert_eq!(compute_keccak_mpt_state_root(&st), root);
         }
         assert_eq!(st.balance_of(&ALICE), wei(1));
-        let (txid, vout) = dep.outpoint();
-        assert!(st.is_deposit_consumed(&txid, vout));
+        assert!(st.is_deposit_consumed(dep.position()));
+        assert_eq!(st.deposit_cursor(), dep.position());
+        // The ledger stays two slots regardless of how many deposits were minted.
+        let ledger = &st.db.cache.accounts[&spec.supply_ledger];
+        assert_eq!(ledger.storage.len(), 2);
 
-        // The consumed set is committed: same balances, different outpoints -> different roots.
+        // The cursor is committed: same balances, different positions -> different roots.
         let mut a = L2State::new();
         execute_block(&spec, &mut a, block(1, vec![deposit(ALICE, BLCH)], vec![])).unwrap();
         let mut b = L2State::new();
@@ -1295,11 +1301,18 @@ mod c27 {
     #[ignore = "C27: per-block cost is O(total state)"]
     fn c27_empty_block_time_must_not_scale_with_total_state_size() {
         fn deposit(to: Address, sats: u64) -> DepositMint {
-            let mut vout = [0u8; 4];
-            vout.copy_from_slice(&to.as_slice()[16..20]);
+            // Strictly increasing positions: addr(i) has i in its last 8 bytes.
+            let mut h = [0u8; 8];
+            h.copy_from_slice(&to.as_slice()[12..20]);
             DepositMint {
                 recipient: to,
-                provenance: DepositProvenance::BridgedBlch { l1_txid: [1; 32], l1_vout: u32::from_be_bytes(vout), l1_sats: sats },
+                provenance: DepositProvenance::BridgedBlch {
+                    l1_height: u64::from_be_bytes(h),
+                    l1_tx_index: 0,
+                    l1_txid: [1; 32],
+                    l1_vout: 0,
+                    l1_sats: sats,
+                },
             }
         }
         fn addr(i: u64) -> Address {
@@ -1404,9 +1417,9 @@ mod c29 {
         assert_eq!(out.minted_wei, U256::ZERO);
         assert!(st.account(&BOB).is_none(), "zero credit must not materialize an account");
         assert!(!st.db.cache.accounts.contains_key(&BOB));
-        // Only the ledger (consumed outpoints) exists.
+        // Only the ledger (total + cursor) exists.
         assert_eq!(st.db.cache.accounts.len(), 1);
-        assert_ne!(compute_keccak_mpt_state_root(&st), EMPTY_ROOT_HASH, "the consumed outpoints are committed");
+        assert_ne!(compute_keccak_mpt_state_root(&st), EMPTY_ROOT_HASH, "the advanced cursor is committed");
     }
 }
 

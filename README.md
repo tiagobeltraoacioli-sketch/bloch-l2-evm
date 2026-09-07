@@ -51,11 +51,15 @@ destroy value; see audit finding C11).
 * **`L2State`** (`src/state.rs`) — an account/state layer over revm's
   `CacheDB`/`InMemoryDB` with **deposit-mint**: credits *exactly*
   `sats_to_wei(l1_sats)`; provenance is a single-variant enum (**bridged BLCH
-  only** — no admin mint, no reward, no other asset); **each L1 escrow
-  outpoint mints at most once**; every deposit and the cumulative supply are
-  bounded by the L1 cap. The ledger (total minted wei + consumed outpoints)
-  is the storage of the `SUPPLY_LEDGER` system account, so it is **committed
-  in the state root** and carried by batch witnesses.
+  only** — no admin mint, no reward, no other asset); deposits must
+  **strictly advance a cursor of canonical L1 positions**
+  `(l1_height, l1_tx_index, l1_vout)` — the OP-Stack/Arbitrum inbox model —
+  so each escrow output mints at most once and replays, duplicates and
+  out-of-order derivation are rejected; every deposit and the cumulative
+  supply are bounded by the L1 cap. The ledger (total minted wei + cursor)
+  is two storage slots of the `SUPPLY_LEDGER` system account, so it is
+  **committed in the state root** and carried by batch witnesses at O(1)
+  size whatever the chain's history.
 * **`execute_block`** (`src/executor.rs`) — runs **UNMODIFIED revm** at
   `SpecId::CANCUN`, **atomically**: the block is validated, applied to a
   working copy, and the caller's state is replaced only on success (on any
