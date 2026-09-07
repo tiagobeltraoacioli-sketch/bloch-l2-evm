@@ -8,8 +8,9 @@ use alloy_trie::nodes::LeafNode;
 use alloy_trie::{HashBuilder, Nibbles};
 use bloch_l2_evm::state::{BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_NUMBER_SLOT};
 use bloch_l2_evm::{
-    execute_block, generate_batch_witness, stateless_new_root, validate_block_input, verify_batch, BlockContext,
-    BlockInput, ChainSpec, DepositMint, DepositProvenance, L2State, Mpt, SparseTrieView,
+    execute_block, generate_batch_witness, hydrate_and_verify, stateless_new_root, validate_block_input, verify_batch,
+    BlockContext, BlockInput, ChainSpec, DepositMint, DepositProvenance, L2State, Mpt, SparseTrieView, VerifyError,
+    WitnessError,
 };
 use revm::context::TxEnv;
 use revm::context_interface::transaction::{AccessListItem, Authorization, RecoveredAuthority, RecoveredAuthorization};
@@ -268,7 +269,11 @@ fn every_accepted_sparse_deletion_matches_an_independent_full_rebuild() {
             let root = trie.root();
             for exposed in 1u8..16 {
                 let proof = trie
-                    .proof(keys.iter().enumerate().filter_map(|(i, k)| ((exposed >> i) & 1 == 1).then_some(*k)))
+                    .proof(
+                        keys.iter()
+                            .enumerate()
+                            .filter_map(|(i, k)| ((exposed >> i) & 1 == 1).then_some(*k)),
+                    )
                     .unwrap();
                 for deleted in 0u8..16 {
                     if deleted & !exposed != 0 {
@@ -349,4 +354,100 @@ fn multi_block_witnesses_match_full_execution_with_custom_system_accounts() {
         assert_eq!(full.block_number, height);
         assert_eq!(state.total_native_wei(), state.total_minted_wei_at(spec.supply_ledger));
     }
+}
+
+#[test]
+fn cancun_prefunded_creation_cannot_hide_a_sibling_needed_after_selfdestruct() {
+    let spec = ChainSpec::testnet();
+    let sender = Address::repeat_byte(0xaa);
+    let contract = sender.create(0);
+    let contract_key = Nibbles::unpack(keccak256(contract));
+    let other_reads = [
+        sender,
+        spec.block_info,
+        spec.supply_ledger,
+        spec.base_fee_vault,
+        spec.sequencer_fee_vault,
+        bloch_l2_evm::chainspec::BEACON_ROOTS_ADDRESS,
+        address!("fffffffffffffffffffffffffffffffffffffffe"),
+    ];
+    let shared = other_reads
+        .iter()
+        .map(|a| contract_key.common_prefix_length(&Nibbles::unpack(keccak256(a))))
+        .max()
+        .unwrap()
+        + 1;
+    // Isolate a sibling under a branch that no other execution read reaches.
+    let sibling = (1u32..200_000)
+        .map(|i| {
+            let mut bytes = [0; 20];
+            bytes[16..].copy_from_slice(&i.to_be_bytes());
+            Address::from(bytes)
+        })
+        .find(|a| contract_key.common_prefix_length(&Nibbles::unpack(keccak256(a))) >= shared)
+        .expect("deterministic sibling search");
+    let mut state = L2State::new();
+    let deposits = [(sender, 100_000_000), (contract, 7), (sibling, 9)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (recipient, l1_sats))| DepositMint {
+            recipient,
+            provenance: DepositProvenance::BridgedBlch {
+                l1_height: 1,
+                l1_tx_index: i as u32,
+                l1_txid: [i as u8; 32],
+                l1_vout: 0,
+                l1_sats,
+            },
+        })
+        .collect();
+    execute_block(
+        &spec,
+        &mut state,
+        BlockInput {
+            deposits,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(state.account(&contract).is_some());
+    let tx = TxEnv::builder()
+        .caller(sender)
+        .create()
+        .data(Bytes::from_static(&[0x30, 0xff])) // ADDRESS; SELFDESTRUCT
+        .gas_limit(100_000)
+        .max_fee_per_gas(2_000_000_000)
+        .gas_priority_fee(Some(0))
+        .chain_id(Some(spec.chain_id))
+        .build()
+        .unwrap();
+    let input = BlockInput {
+        context: BlockContext::next(&spec, &state),
+        txs: vec![tx],
+        ..Default::default()
+    };
+    let (mut witness, host) = generate_batch_witness(&state, &spec, input.clone()).unwrap();
+    let full = execute_block(&spec, &mut state, input.clone()).unwrap();
+    assert!(full.tx_outcomes[0].success);
+    assert!(state.account(&contract).is_none());
+    assert_eq!(host.state_root, full.state_root);
+    assert_eq!(full.burned_wei, bloch_l2_evm::sats_to_wei(7));
+    assert!(!witness.pre_accounts.iter().any(|a| a.address == sibling));
+
+    let required: Vec<Nibbles> = witness
+        .pre_accounts
+        .iter()
+        .map(|a| Nibbles::unpack(keccak256(a.address)))
+        .chain(witness.absent_accounts.iter().map(|a| Nibbles::unpack(keccak256(a))))
+        .collect();
+    let before = witness.proof.len();
+    witness.proof.retain(|path, _| required.iter().any(|key| key.starts_with(path)));
+    assert!(witness.proof.len() < before);
+    // Every account needed by execution is still authenticated. The missing
+    // disclosure is required specifically for canonical trie restructuring.
+    hydrate_and_verify(&witness).unwrap();
+    assert!(matches!(
+        verify_batch(&spec, &witness, &input),
+        Err(VerifyError::Witness(WitnessError::OpaqueChildNeedsExpansion { .. }))
+    ));
 }

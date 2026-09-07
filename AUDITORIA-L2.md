@@ -1,6 +1,11 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # Auditoria profunda — `bloch-l2-evm` (camada de execução do Bloch EVM L2)
 
+> **Revisão posterior:** [SECURITY-AUDIT-2026-09-07.md](SECURITY-AUDIT-2026-09-07.md)
+> registra novos achados após estas correções. As garantias sobre depósitos
+> continuam condicionadas à derivação autenticada da L1; teto e cursor não
+> provam a existência do escrow. Este relatório permanece como histórico.
+
 | | |
 |---|---|
 | **Alvo** | crate `bloch-l2-evm` v`0.0.0-scaffold`, commit `4f0882e` (branch `main`), 2.665 linhas de Rust em `src/` |

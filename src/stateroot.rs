@@ -376,7 +376,10 @@ impl core::fmt::Display for WitnessError {
                 write!(f, "delete of key {key:?} which the proof proves absent")
             }
             WitnessError::OpaqueChildNeedsExpansion { path } => {
-                write!(f, "opaque child at {path:?} must be exposed before its parent can collapse")
+                write!(
+                    f,
+                    "opaque child at {path:?} must be exposed before its parent can collapse"
+                )
             }
         }
     }
@@ -517,7 +520,11 @@ impl SparseTrieView {
             let parent = path.slice(..path.len() - 1);
             let left = i.checked_sub(1).and_then(|j| out.get(j));
             let right = out.get(i + 1);
-            if !left.into_iter().chain(right).any(|other| other.path().starts_with(&parent)) {
+            if !left
+                .into_iter()
+                .chain(right)
+                .any(|other| other.path().starts_with(&parent))
+            {
                 return Err(WitnessError::OpaqueChildNeedsExpansion { path: *path });
             }
         }

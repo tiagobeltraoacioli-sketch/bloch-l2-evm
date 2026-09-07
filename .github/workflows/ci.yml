@@ -33,9 +33,10 @@ jobs:
       - run: cargo test --locked --features serde
       - run: cargo build --locked --no-default-features
       - run: cargo test --locked --no-default-features
+      # Capacity and overflow guards must also hold with release optimizations.
+      - run: cargo test --locked --release --test deep_security
       - run: cargo doc --locked --no-deps
-      # Open audit findings and benchmarks are `#[ignore]`d and EXPECTED to
-      # fail; they are listed, never gated on:
+      # List the pre-existing ignored performance benchmark for discoverability.
       - run: cargo test --locked --test audit_regressions -- --ignored --list
 
   deny:

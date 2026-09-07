@@ -9,6 +9,9 @@
 //! is made anywhere in this crate. An internal deep audit exists
 //! (`AUDITORIA-L2.md`); its P0, P1 and P2 findings are addressed and its
 //! regression tests live in `tests/audit_regressions.rs`.
+//! A second-pass review (`SECURITY-AUDIT-2026-09-07.md`) adds adversarial
+//! regressions in `tests/deep_security.rs` and documents the remaining
+//! transaction authentication, L1 derivation and proving-system boundaries.
 //!
 //! > **The reorg gate (from the design, read first).** An L2 inherits its
 //! > L1's finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited —
