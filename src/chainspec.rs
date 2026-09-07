@@ -5,8 +5,19 @@
 //! zero-value parameters; chain id 700771 is a placeholder pending
 //! ethereum-lists/chains registration.
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, hex, Address, U256};
 use revm::primitives::hardfork::SpecId;
+
+use crate::scale::SATS_PER_BLCH;
+
+/// Gas charged to the block budget for each deposit system-transaction
+/// (the cost of a plain value transfer). Deposits pay no fee — the L1 escrow
+/// paid on the L1 — but they consume block capacity like any transaction, so a
+/// block carries at most `gas_limit / deposit_gas` of them and heavy deposit
+/// traffic moves the EIP-1559 base fee exactly like user traffic does (the
+/// OP-Stack precedent). Overflow is carried by the derivation layer into the
+/// following blocks, in canonical order.
+pub const DEPOSIT_GAS: u64 = 21_000;
 
 /// OP-Stack-convention predeploy address for the sequencer fee vault
 /// (priority fees land here; it is also the block's COINBASE, per the design:
@@ -15,9 +26,55 @@ pub const SEQUENCER_FEE_VAULT: Address = address!("42000000000000000000000000000
 
 /// OP-Stack-convention predeploy address for the base-fee vault. The EIP-1559
 /// basefee is routed here instead of being destroyed — bridged BLCH is
-/// **never burned**, so the L1 escrow always balances and no party operates a
-/// BLCH supply-reduction mechanism.
+/// **never burned by the protocol**, so the L1 escrow always balances and no
+/// party operates a BLCH supply-reduction mechanism. (The EVM itself can still
+/// destroy value via EIP-6780 SELFDESTRUCT-to-self in the creating
+/// transaction; see the audit report, finding C11.)
 pub const BASE_FEE_VAULT: Address = address!("4200000000000000000000000000000000000019");
+
+/// System account holding the **committed supply ledger**: the cumulative
+/// bridged-BLCH wei ever minted (storage slot 0) and the **deposit cursor**
+/// (slot 1) — the canonical L1 position of the last consumed escrow output
+/// (see [`crate::state::DepositPosition`]).
+///
+/// It is a plain storage-bearing account with `nonce = 1` and no code, created
+/// lazily by the first deposit, so it is a leaf of the keccak-MPT state root:
+/// the ledger is part of every state commitment, carried by the batch witness
+/// like any other account (two slots, whatever the chain's history), and
+/// re-checked by a stateless guest. The address is outside the OP-Stack
+/// predeploy byte range (`0x4200…00xx`).
+pub const SUPPLY_LEDGER: Address = address!("4200000000000000000000000000000000000100");
+
+/// System account holding the **committed block-header record** of the head
+/// block (number, timestamp, base fee, gas used, prevrandao, anchor root,
+/// parent hash, deposits hash — slots `0..=8`, see `crate::state::BLOCK_INFO_*`)
+/// and a 256-entry **ring buffer of L2 block hashes** (slot `0x100 + n % 256`
+/// holds the hash of block `n`, EIP-2935 style). The executor validates every
+/// block against the record (EIP-1559 rule, number, timestamp), writes the
+/// parent's hash into the ring at block start and serves `BLOCKHASH` from it,
+/// so header validity and block hashes are part of the state commitment and
+/// re-checked by a stateless guest. Nonce 1, no code, created lazily.
+pub const BLOCK_INFO: Address = address!("4200000000000000000000000000000000000101");
+
+/// EIP-4788 beacon-roots contract address (Cancun). On this L2 the 32-byte
+/// value written at each block start is the **Bloch anchor block hash**
+/// ([`crate::executor::BlockContext::anchor_root`]) — the L1 value the design
+/// exposes to contracts, in the slot Ethereum uses for the beacon root.
+pub const BEACON_ROOTS_ADDRESS: Address = address!("000F3df6D732807Ef1319fB7B8bB8522d0Beac02");
+
+/// Canonical EIP-4788 beacon-roots contract bytecode. Installed by the STF as a
+/// system account (nonce 1) the first time a block executes, and by
+/// [`crate::state::L2State::genesis`].
+pub const BEACON_ROOTS_CODE: &[u8] = &hex!("3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500");
+
+/// Hard cap on the Bloch L1 supply, in sats, used to bound deposits:
+/// **100 000 000 000 BLCH** (confirmed by the project) = 10^19 sats at 8
+/// decimals = 10^29 wei on the L2. The L2 has no cap of its own: its native
+/// supply is bridged BLCH with zero issuance, so this is also the maximum the
+/// supply ledger can ever reach. 10^19 fits `u64` (max ≈ 1.8 × 10^19) but
+/// **not** `i64`, so the L1's amount type must be unsigned 64-bit or wider.
+/// A `ChainSpec` knob so a future L1 change never touches the executor.
+pub const MAX_L1_SATS: u64 = 100_000_000_000 * SATS_PER_BLCH;
 
 /// Genesis / consensus-parameter knobs for the Bloch EVM L2, mirroring
 /// `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1's ChainSpec.
@@ -55,7 +112,62 @@ pub struct ChainSpec {
     /// Where priority fees are routed; also the block beneficiary /
     /// COINBASE.
     pub sequencer_fee_vault: Address,
+    /// The committed supply-ledger system account (see [`SUPPLY_LEDGER`]).
+    pub supply_ledger: Address,
+    /// The committed block-info system account (see [`BLOCK_INFO`]).
+    pub block_info: Address,
+    /// Hard cap on the L1 supply in sats: no single deposit may claim more,
+    /// and the cumulative minted supply may never exceed it. See
+    /// [`MAX_L1_SATS`].
+    pub max_l1_sats: u64,
+    /// Block gas charged per deposit (see [`DEPOSIT_GAS`]); bounds the number
+    /// of deposits per block to `gas_limit / deposit_gas`.
+    pub deposit_gas: u64,
 }
+
+/// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
+/// run a block under an invalid spec ([`ChainSpec::validate`]), so no knob can
+/// reach a division by zero or a silent misconfiguration at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainSpecError {
+    /// `chain_id` is zero (no EIP-155 domain).
+    ZeroChainId,
+    /// `gas_limit` is zero.
+    ZeroGasLimit,
+    /// `base_fee_elasticity` is zero (the gas target would be undefined).
+    ZeroElasticity,
+    /// `gas_limit < base_fee_elasticity` (the gas target would be zero).
+    GasLimitBelowElasticity,
+    /// `base_fee_denominator` is zero.
+    ZeroDenominator,
+    /// `block_reward` is not zero: the L2 never issues.
+    NonZeroBlockReward,
+    /// `deposit_gas` is zero (deposits would be unmetered).
+    ZeroDepositGas,
+    /// `deposit_gas > gas_limit` (no deposit could ever be included).
+    DepositGasAboveGasLimit,
+    /// Two system addresses (vaults, ledger, block info, EIP-4788 predeploy)
+    /// coincide.
+    SystemAddressCollision(Address),
+}
+
+impl core::fmt::Display for ChainSpecError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ChainSpecError::ZeroChainId => write!(f, "chain_id must not be zero"),
+            ChainSpecError::ZeroGasLimit => write!(f, "gas_limit must not be zero"),
+            ChainSpecError::ZeroElasticity => write!(f, "base_fee_elasticity must not be zero"),
+            ChainSpecError::GasLimitBelowElasticity => write!(f, "gas_limit must be at least base_fee_elasticity"),
+            ChainSpecError::ZeroDenominator => write!(f, "base_fee_denominator must not be zero"),
+            ChainSpecError::NonZeroBlockReward => write!(f, "block_reward must be zero (the L2 never issues)"),
+            ChainSpecError::ZeroDepositGas => write!(f, "deposit_gas must not be zero"),
+            ChainSpecError::DepositGasAboveGasLimit => write!(f, "deposit_gas must not exceed gas_limit"),
+            ChainSpecError::SystemAddressCollision(a) => write!(f, "system address {a} is used twice"),
+        }
+    }
+}
+
+impl core::error::Error for ChainSpecError {}
 
 impl ChainSpec {
     /// The testnet / zero-value parameter set from the design.
@@ -71,7 +183,60 @@ impl ChainSpec {
             block_reward: U256::ZERO,
             base_fee_vault: BASE_FEE_VAULT,
             sequencer_fee_vault: SEQUENCER_FEE_VAULT,
+            supply_ledger: SUPPLY_LEDGER,
+            block_info: BLOCK_INFO,
+            max_l1_sats: MAX_L1_SATS,
+            deposit_gas: DEPOSIT_GAS,
         }
+    }
+
+    /// Check every knob for consistency. The executor calls this before any
+    /// block (`BlockExecutionError::InvalidChainSpec`), so an invalid spec can
+    /// never execute a block, divide by zero or pay a block reward.
+    pub fn validate(&self) -> Result<(), ChainSpecError> {
+        if self.chain_id == 0 {
+            return Err(ChainSpecError::ZeroChainId);
+        }
+        if self.gas_limit == 0 {
+            return Err(ChainSpecError::ZeroGasLimit);
+        }
+        if self.base_fee_elasticity == 0 {
+            return Err(ChainSpecError::ZeroElasticity);
+        }
+        if self.gas_limit < self.base_fee_elasticity {
+            return Err(ChainSpecError::GasLimitBelowElasticity);
+        }
+        if self.base_fee_denominator == 0 {
+            return Err(ChainSpecError::ZeroDenominator);
+        }
+        if self.block_reward != U256::ZERO {
+            return Err(ChainSpecError::NonZeroBlockReward);
+        }
+        if self.deposit_gas == 0 {
+            return Err(ChainSpecError::ZeroDepositGas);
+        }
+        if self.deposit_gas > self.gas_limit {
+            return Err(ChainSpecError::DepositGasAboveGasLimit);
+        }
+        let system = [
+            self.base_fee_vault,
+            self.sequencer_fee_vault,
+            self.supply_ledger,
+            self.block_info,
+            BEACON_ROOTS_ADDRESS,
+        ];
+        for (i, a) in system.iter().enumerate() {
+            if system[..i].contains(a) {
+                return Err(ChainSpecError::SystemAddressCollision(*a));
+            }
+        }
+        Ok(())
+    }
+
+    /// The most deposits one block can carry: `gas_limit / deposit_gas`
+    /// (zero for an invalid spec with `deposit_gas == 0`).
+    pub fn max_deposits_per_block(&self) -> u64 {
+        self.gas_limit.checked_div(self.deposit_gas).unwrap_or(0)
     }
 
     /// The address the COINBASE opcode observes (the design routes it to the
@@ -81,18 +246,21 @@ impl ChainSpec {
         self.sequencer_fee_vault
     }
 
-    /// EIP-1559 gas target per block (`gas_limit / elasticity`).
+    /// EIP-1559 gas target per block (`gas_limit / elasticity`). Total: zero
+    /// for the (invalid, see [`Self::validate`]) elasticity 0.
     pub fn gas_target(&self) -> u64 {
-        self.gas_limit / self.base_fee_elasticity
+        self.gas_limit.checked_div(self.base_fee_elasticity).unwrap_or(0)
     }
 
     /// EIP-1559 next-base-fee computation with this chain's elasticity /
     /// denominator knobs. Pure integer math (u128 internally, no overflow for
     /// any realistic base fee), byte-identical to the Ethereum formula with
-    /// retuned constants.
+    /// retuned constants. Total: with a zero gas target or denominator (an
+    /// invalid spec, see [`Self::validate`]) the base fee is left unchanged
+    /// rather than dividing by zero.
     pub fn next_base_fee(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
         let target = self.gas_target();
-        if target == 0 {
+        if target == 0 || self.base_fee_denominator == 0 {
             return parent_base_fee;
         }
         let parent = parent_base_fee as u128;
@@ -136,6 +304,103 @@ mod tests {
         assert_eq!(spec.gas_target(), 15_000_000);
         assert_eq!(spec.coinbase(), SEQUENCER_FEE_VAULT);
         assert_ne!(spec.base_fee_vault, spec.sequencer_fee_vault);
+        assert_ne!(spec.supply_ledger, spec.base_fee_vault);
+        assert_ne!(spec.supply_ledger, spec.sequencer_fee_vault);
+        assert_ne!(spec.block_info, spec.supply_ledger);
+        assert_eq!(BEACON_ROOTS_CODE.len(), 97, "canonical EIP-4788 bytecode");
+        assert_eq!(spec.max_l1_sats, 100_000_000_000 * SATS_PER_BLCH);
+        assert_eq!(spec.deposit_gas, 21_000);
+        assert_eq!(spec.max_deposits_per_block(), 30_000_000 / 21_000);
+        spec.validate().expect("the testnet spec is valid");
+    }
+
+    type Case = (fn(&mut ChainSpec), ChainSpecError);
+
+    #[test]
+    fn validate_rejects_every_degenerate_knob() {
+        let base = ChainSpec::testnet();
+        let cases: [Case; 9] = [
+            (|s| s.chain_id = 0, ChainSpecError::ZeroChainId),
+            (|s| s.gas_limit = 0, ChainSpecError::ZeroGasLimit),
+            (|s| s.base_fee_elasticity = 0, ChainSpecError::ZeroElasticity),
+            (
+                |s| {
+                    s.gas_limit = 1;
+                    s.base_fee_elasticity = 2;
+                    s.deposit_gas = 1;
+                },
+                ChainSpecError::GasLimitBelowElasticity,
+            ),
+            (|s| s.base_fee_denominator = 0, ChainSpecError::ZeroDenominator),
+            (
+                |s| s.block_reward = U256::from(1u64),
+                ChainSpecError::NonZeroBlockReward,
+            ),
+            (|s| s.deposit_gas = 0, ChainSpecError::ZeroDepositGas),
+            (
+                |s| s.deposit_gas = s.gas_limit + 1,
+                ChainSpecError::DepositGasAboveGasLimit,
+            ),
+            (
+                |s| s.block_info = s.supply_ledger,
+                ChainSpecError::SystemAddressCollision(SUPPLY_LEDGER),
+            ),
+        ];
+        for (mutate, expected) in cases {
+            let mut s = base.clone();
+            mutate(&mut s);
+            assert_eq!(s.validate(), Err(expected));
+        }
+        let mut s = base.clone();
+        s.base_fee_vault = BEACON_ROOTS_ADDRESS;
+        assert_eq!(
+            s.validate(),
+            Err(ChainSpecError::SystemAddressCollision(BEACON_ROOTS_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn fee_helpers_are_total_for_zero_knobs() {
+        let parent = 1_000_000_000u64;
+        let mut s = ChainSpec::testnet();
+        s.base_fee_elasticity = 0;
+        assert_eq!(s.gas_target(), 0);
+        for used in [0u64, 1, s.gas_limit / 2, s.gas_limit] {
+            assert_eq!(s.next_base_fee(parent, used), parent);
+        }
+        let mut s = ChainSpec::testnet();
+        s.base_fee_denominator = 0;
+        for used in [
+            0u64,
+            s.gas_target() - 1,
+            s.gas_target(),
+            s.gas_target() + 1,
+            s.gas_limit,
+        ] {
+            assert_eq!(s.next_base_fee(parent, used), parent);
+        }
+        let mut s = ChainSpec::testnet();
+        s.gas_limit = 1;
+        s.base_fee_elasticity = 2;
+        assert_eq!(s.next_base_fee(parent, 0), parent);
+        assert_eq!(s.next_base_fee(parent, 1), parent);
+        let mut s = ChainSpec::testnet();
+        s.deposit_gas = 0;
+        assert_eq!(s.max_deposits_per_block(), 0);
+    }
+
+    #[test]
+    fn l1_cap_is_100_billion_blch_and_fits_the_amount_types() {
+        assert_eq!(MAX_L1_SATS, 10_000_000_000_000_000_000u64, "10^19 sats");
+        assert!(MAX_L1_SATS > i64::MAX as u64, "needs unsigned 64-bit sats on the L1");
+        // 10^29 wei: the most the L2 supply ledger can ever hold.
+        let cap_wei = crate::scale::sats_to_wei(MAX_L1_SATS);
+        assert_eq!(cap_wei, U256::from(10u128.pow(29)));
+        assert_eq!(
+            cap_wei,
+            U256::from(100_000_000_000u64) * U256::from(10u64).pow(U256::from(18)),
+            "100 billion × 10^18 wei"
+        );
     }
 
     #[test]

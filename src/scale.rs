@@ -70,10 +70,7 @@ mod tests {
     #[test]
     fn one_blch_is_1e18_wei() {
         assert_eq!(sats_to_wei(SATS_PER_BLCH), WEI_PER_BLCH);
-        assert_eq!(
-            sats_to_wei(SATS_PER_BLCH),
-            U256::from(10u64).pow(U256::from(18))
-        );
+        assert_eq!(sats_to_wei(SATS_PER_BLCH), U256::from(10u64).pow(U256::from(18)));
     }
 
     #[test]

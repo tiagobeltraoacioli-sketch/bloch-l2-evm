@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! State-root commitment — keccak-256 hexary Merkle-Patricia trie.
+//! State-root commitment — keccak-256 hexary Merkle-Patricia trie — and the
+//! **authenticated** sparse-trie view used by the stateless proving path.
 //!
 //! The design (BLOCH-L2-EVM-DESIGN §1) commits state as a **standard Ethereum
 //! keccak-256 hexary Merkle-Patricia trie root** (account trie + per-account
@@ -15,27 +16,46 @@
 //! independent; **empty accounts (EIP-161: nonce 0, balance 0, empty code) are
 //! excluded** from the trie exactly as on Ethereum. Still **SCAFFOLD/UNAUDITED** —
 //! this is the state-root primitive, not a node.
+//!
+//! [`SparseTrieView`] walks a multiproof **only after** checking that its root
+//! node hashes to the expected state root and that every descended child node
+//! hashes to the reference stored in its parent, so nothing a prover supplies
+//! is trusted by structure alone. Every malformed or incomplete input is a
+//! [`WitnessError`], never a panic.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use alloy_primitives::Address;
 use alloy_primitives::{keccak256, Bytes, B256, U256};
 use alloy_rlp::{Decodable, Encodable, Header};
-use alloy_trie::nodes::TrieNode;
+use alloy_trie::nodes::{RlpNode, TrieNode};
 use alloy_trie::{HashBuilder, Nibbles, EMPTY_ROOT_HASH};
-use revm::database::AccountState;
+use revm::database::{CacheDB, DbAccount, InMemoryDB};
 use revm::primitives::KECCAK_EMPTY;
+use revm::state::AccountInfo;
 
-use crate::state::L2State;
+use crate::mpt::Mpt;
+use crate::state::{account_exists, L2State};
+
+/// Number of nibbles in a keccak-hashed trie key (32 bytes).
+pub const KEY_NIBBLES: usize = 64;
+
+/// Longest compact-encoded path a leaf or extension node may carry
+/// (32 key bytes + 1 flag byte).
+const MAX_COMPACT_KEY_BYTES: usize = 33;
 
 /// RLP-encode one account as Ethereum does: a list `[nonce, balance,
 /// storageRoot, codeHash]`. `nonce`/`balance` use minimal big-endian (RLP integer
 /// form); the two roots are fixed 32-byte strings.
-fn encode_account(nonce: u64, balance: U256, storage_root: B256, code_hash: B256, out: &mut Vec<u8>) {
-    let payload_len =
-        nonce.length() + balance.length() + storage_root.length() + code_hash.length();
-    Header { list: true, payload_length: payload_len }.encode(out);
+pub(crate) fn encode_account(nonce: u64, balance: U256, storage_root: B256, code_hash: B256, out: &mut Vec<u8>) {
+    let payload_len = nonce.length() + balance.length() + storage_root.length() + code_hash.length();
+    Header {
+        list: true,
+        payload_length: payload_len,
+    }
+    .encode(out);
     nonce.encode(out);
     balance.encode(out);
     storage_root.encode(out);
@@ -82,41 +102,504 @@ fn storage_root<'a>(slots: impl Iterator<Item = (&'a U256, &'a U256)>) -> B256 {
 /// codeHash)`, where `storageRoot` is that account's own storage-trie root.
 /// Empty accounts (EIP-161) and non-existing accounts are excluded, matching
 /// Ethereum's state trie.
+///
+/// Requires a **complete** cache (the `EmptyDB`-backed [`L2State`] holds every
+/// live account and slot); a partially cached database would yield a root over
+/// partial state.
 pub fn compute_keccak_mpt_state_root(state: &L2State) -> B256 {
-    trie_root(account_leaves(state))
+    trie_root(account_leaves_of(state.db()))
+}
+
+/// Normalize the two spellings of "no code" to [`KECCAK_EMPTY`].
+fn code_hash_of(info: &AccountInfo) -> B256 {
+    if info.code_hash == B256::ZERO {
+        KECCAK_EMPTY
+    } else {
+        info.code_hash
+    }
+}
+
+/// The account-trie leaf (RLP) of an existing cached account, storage root
+/// computed from scratch over its storage.
+pub(crate) fn account_leaf(acc: &DbAccount) -> Vec<u8> {
+    let mut value = Vec::new();
+    encode_account(
+        acc.info.nonce,
+        acc.info.balance,
+        storage_root(acc.storage.iter()),
+        code_hash_of(&acc.info),
+        &mut value,
+    );
+    value
+}
+
+/// Trie key of an account: `keccak256(address)` as nibbles.
+pub(crate) fn account_key(address: &Address) -> Nibbles {
+    Nibbles::unpack(keccak256(address))
+}
+
+fn slot_key(slot: &U256) -> Nibbles {
+    Nibbles::unpack(keccak256(slot.to_be_bytes::<32>()))
+}
+
+/// The **incremental** commitment over an [`L2State`]: the account trie plus
+/// one storage trie per account with storage, all [`Mpt`]s that re-hash only
+/// what changed. Built once from the database (O(state)), then kept in step
+/// by [`L2State::apply_overlay`] at O(touched accounts × depth) per block —
+/// audit finding C27. Its root is always equal to
+/// [`compute_keccak_mpt_state_root`] (asserted by the tests on every block).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StateTrie {
+    accounts: Mpt,
+    storage: BTreeMap<Address, Mpt>,
+}
+
+impl StateTrie {
+    /// Build from every existing account in the database.
+    pub(crate) fn build(db: &InMemoryDB) -> Self {
+        let mut trie = Self::default();
+        for (address, acc) in db.cache.accounts.iter().filter(|(_, acc)| account_exists(acc)) {
+            trie.set_account(*address, acc);
+        }
+        trie.accounts.root();
+        trie
+    }
+
+    fn set_leaf(&mut self, address: Address, info: &AccountInfo, storage_root: B256) {
+        let mut value = Vec::new();
+        encode_account(info.nonce, info.balance, storage_root, code_hash_of(info), &mut value);
+        self.accounts.insert(account_key(&address), value);
+    }
+
+    fn storage_root_of(&mut self, address: Address) -> B256 {
+        match self.storage.get_mut(&address) {
+            None => EMPTY_ROOT_HASH,
+            Some(t) if t.is_empty() => {
+                self.storage.remove(&address);
+                EMPTY_ROOT_HASH
+            }
+            Some(t) => t.root(),
+        }
+    }
+
+    /// Remove an account (and its storage trie) from the commitment.
+    pub(crate) fn remove_account(&mut self, address: Address) {
+        self.accounts.remove(&account_key(&address));
+        self.storage.remove(&address);
+    }
+
+    /// Set an existing account from its complete cached form (info + full
+    /// storage), rebuilding its storage trie.
+    pub(crate) fn set_account(&mut self, address: Address, acc: &DbAccount) {
+        self.storage.remove(&address);
+        if acc.storage.values().any(|v| !v.is_zero()) {
+            let mut t = Mpt::new();
+            for (slot, value) in acc.storage.iter().filter(|(_, v)| !v.is_zero()) {
+                t.insert(slot_key(slot), alloy_rlp::encode(value));
+            }
+            self.storage.insert(address, t);
+        }
+        let root = self.storage_root_of(address);
+        self.set_leaf(address, &acc.info, root);
+    }
+
+    /// Update an existing account's info and apply storage deltas (a zero
+    /// value deletes the slot); untouched slots are not re-hashed.
+    pub(crate) fn update_account(&mut self, address: Address, info: &AccountInfo, delta: &[(U256, U256)]) {
+        if !delta.is_empty() {
+            let t = self.storage.entry(address).or_default();
+            for (slot, value) in delta {
+                if value.is_zero() {
+                    t.remove(&slot_key(slot));
+                } else {
+                    t.insert(slot_key(slot), alloy_rlp::encode(value));
+                }
+            }
+        }
+        let root = self.storage_root_of(address);
+        self.set_leaf(address, info, root);
+    }
+
+    /// The state root, re-hashing only changed paths.
+    pub(crate) fn root(&mut self) -> B256 {
+        self.accounts.root()
+    }
+
+    /// The state root without hashing, if warm.
+    pub(crate) fn root_cached(&self) -> Option<B256> {
+        self.accounts.root_cached()
+    }
+
+    /// Every account-trie leaf `(keccak(address), rlp)` in key order.
+    pub(crate) fn account_leaves(&self) -> Vec<(B256, Vec<u8>)> {
+        self.accounts
+            .leaves()
+            .into_iter()
+            .map(|(k, v)| (B256::from_slice(&k.pack()), v.to_vec()))
+            .collect()
+    }
+
+    /// The account-trie multiproof for `targets` (warm trie only).
+    pub(crate) fn proof(&self, targets: impl IntoIterator<Item = Nibbles>) -> Option<BTreeMap<Nibbles, Bytes>> {
+        self.accounts.proof(targets)
+    }
+
+    /// Key-order neighbours of an account-trie key.
+    pub(crate) fn neighbours(&self, key: &Nibbles) -> (Option<Nibbles>, Option<Nibbles>) {
+        (self.accounts.predecessor(key), self.accounts.successor(key))
+    }
 }
 
 /// The `(keccak256(address), rlp(account))` leaf set of the state trie — the
-/// same leaves [`compute_keccak_mpt_state_root`] hashes, exposed so the
-/// stateless-proving path (witness generation / verification) can build the
-/// trie with a proof retainer over the same inputs. Unsorted (the trie builder
-/// sorts by hashed key).
+/// same leaves [`compute_keccak_mpt_state_root`] hashes. Unsorted.
 pub(crate) fn account_leaves(state: &L2State) -> Vec<(B256, Vec<u8>)> {
-    state
-        .db
-        .cache
+    match state.warm_commitment() {
+        Some(trie) => trie.account_leaves(),
+        None => account_leaves_of(state.db()),
+    }
+}
+
+/// [`account_leaves`] over any `CacheDB` whose cache is complete for the
+/// accounts it holds (the stateless guest's hydrated state qualifies: every
+/// hydrated account carries its full non-zero storage).
+pub(crate) fn account_leaves_of<ExtDB>(db: &CacheDB<ExtDB>) -> Vec<(B256, Vec<u8>)> {
+    db.cache
         .accounts
         .iter()
-        .filter(|(_, acc)| acc.account_state != AccountState::NotExisting)
-        .filter_map(|(address, acc)| {
-            let info = acc.info()?;
-            let code_hash = if info.code_hash == B256::ZERO { KECCAK_EMPTY } else { info.code_hash };
-            // EIP-161: an account with nonce 0, balance 0, and empty code is not
-            // in the state trie.
-            if info.nonce == 0 && info.balance.is_zero() && code_hash == KECCAK_EMPTY {
-                return None;
-            }
-            let s_root = storage_root(acc.storage.iter());
-            let mut value = Vec::new();
-            encode_account(info.nonce, info.balance, s_root, code_hash, &mut value);
-            Some((keccak256(address), value))
-        })
+        // EIP-161: an account with nonce 0, balance 0, and empty code is not
+        // in the state trie (the crate's single existence predicate).
+        .filter(|(_, acc)| account_exists(acc))
+        .map(|(address, acc)| (keccak256(address), account_leaf(acc)))
         .collect()
 }
 
-// The stateless state-root updater below is the SP1-guest building block
-// (BLOCH-L2-PROVER-SCOPE.md P0.3), used by the host witness generator
-// [`crate::proving::generate_batch_witness`].
+/// Why a multiproof / change set cannot be turned into a state root.
+///
+/// Every variant is a **reject the witness** outcome for a verifier or guest;
+/// none of them is reachable from an honest, complete witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WitnessError {
+    /// The proof is empty but the expected root is not the empty-trie root.
+    EmptyProofForNonEmptyRoot {
+        /// The state root the proof was supposed to open.
+        expected: B256,
+    },
+    /// The proof has nodes but none at the root path.
+    MissingRootNode,
+    /// The root node does not hash to the expected state root.
+    RootMismatch {
+        /// The state root the proof was supposed to open.
+        expected: B256,
+        /// `keccak256` of the supplied root node.
+        got: B256,
+    },
+    /// A node present in the proof does not hash to (or, for an embedded node,
+    /// equal) the reference stored in its parent.
+    UnanchoredNode {
+        /// Trie path of the offending node.
+        path: Nibbles,
+    },
+    /// A node's RLP is not a valid trie node (or carries an over-long key).
+    MalformedNode {
+        /// Trie path of the offending node.
+        path: Nibbles,
+    },
+    /// An extension node with an empty key (would not advance the walk).
+    EmptyExtensionKey {
+        /// Trie path of the offending node.
+        path: Nibbles,
+    },
+    /// A path would exceed the 64-nibble key length.
+    PathTooLong {
+        /// Trie path at which the overflow was detected.
+        path: Nibbles,
+    },
+    /// Two leaves claim the same full key.
+    DuplicateLeaf {
+        /// The duplicated key.
+        key: Nibbles,
+    },
+    /// A change key is not exactly 64 nibbles long.
+    InvalidKeyLength {
+        /// The offending key.
+        key: Nibbles,
+    },
+    /// A change (or lookup) key lies inside a subtree the proof left opaque, so
+    /// the proof cannot say whether the key exists — the witness is incomplete.
+    KeyInOpaqueSubtree {
+        /// The offending key.
+        key: Nibbles,
+        /// The opaque subtree's path.
+        frontier: Nibbles,
+    },
+    /// A delete targets a key the proof proves absent.
+    DeleteOfAbsentKey {
+        /// The offending key.
+        key: Nibbles,
+    },
+}
+
+impl core::fmt::Display for WitnessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            WitnessError::EmptyProofForNonEmptyRoot { expected } => {
+                write!(f, "empty proof cannot open non-empty state root {expected}")
+            }
+            WitnessError::MissingRootNode => write!(f, "proof has no node at the root path"),
+            WitnessError::RootMismatch { expected, got } => {
+                write!(f, "proof root node hashes to {got}, expected state root {expected}")
+            }
+            WitnessError::UnanchoredNode { path } => {
+                write!(f, "proof node at {path:?} does not match its parent's reference")
+            }
+            WitnessError::MalformedNode { path } => write!(f, "malformed trie node at {path:?}"),
+            WitnessError::EmptyExtensionKey { path } => {
+                write!(f, "extension node with empty key at {path:?}")
+            }
+            WitnessError::PathTooLong { path } => write!(f, "trie path exceeds 64 nibbles at {path:?}"),
+            WitnessError::DuplicateLeaf { key } => write!(f, "duplicate leaf for key {key:?}"),
+            WitnessError::InvalidKeyLength { key } => {
+                write!(f, "change key {key:?} is not 64 nibbles long")
+            }
+            WitnessError::KeyInOpaqueSubtree { key, frontier } => write!(
+                f,
+                "key {key:?} lies inside opaque subtree {frontier:?}: witness incomplete"
+            ),
+            WitnessError::DeleteOfAbsentKey { key } => {
+                write!(f, "delete of key {key:?} which the proof proves absent")
+            }
+        }
+    }
+}
+
+impl core::error::Error for WitnessError {}
+
+/// An **authenticated** sparse view of a Merkle-Patricia trie, reconstructed
+/// from a multiproof that was checked against a known root: the exposed leaves
+/// (full key → current RLP value) and the opaque frontier (subtree path → hash)
+/// of everything the proof did not expose.
+///
+/// Because every node was hash-linked to its parent down from the root, a key
+/// is either an exposed leaf, provably absent (its position is exposed and
+/// empty), or hidden inside an opaque subtree — in which case the view refuses
+/// to answer ([`WitnessError::KeyInOpaqueSubtree`]) instead of guessing.
+#[derive(Debug, Clone, Default)]
+pub struct SparseTrieView {
+    leaves: BTreeMap<Nibbles, Vec<u8>>,
+    frontier: Vec<(Nibbles, B256)>,
+}
+
+impl SparseTrieView {
+    /// Build the view from `proof` (trie path → node RLP), verifying that the
+    /// node at the root path hashes to `state_root` and that every descended
+    /// child matches the reference held by its parent. Embedded (< 32-byte)
+    /// children are decoded in place. An empty proof is accepted only for the
+    /// empty-trie root.
+    pub fn from_proof(state_root: B256, proof: &BTreeMap<Nibbles, Bytes>) -> Result<Self, WitnessError> {
+        let mut view = Self::default();
+        if proof.is_empty() {
+            if state_root == EMPTY_ROOT_HASH {
+                return Ok(view);
+            }
+            return Err(WitnessError::EmptyProofForNonEmptyRoot { expected: state_root });
+        }
+        let root_path = Nibbles::default();
+        let root = proof.get(&root_path).ok_or(WitnessError::MissingRootNode)?;
+        let got = keccak256(root);
+        if got != state_root {
+            return Err(WitnessError::RootMismatch {
+                expected: state_root,
+                got,
+            });
+        }
+        view.walk(root_path, root, proof)?;
+        Ok(view)
+    }
+
+    /// The current RLP value of an exposed leaf.
+    pub fn leaf(&self, key: &Nibbles) -> Option<&Vec<u8>> {
+        self.leaves.get(key)
+    }
+
+    /// Exposed leaves, ordered by key.
+    pub fn leaves(&self) -> &BTreeMap<Nibbles, Vec<u8>> {
+        &self.leaves
+    }
+
+    /// Opaque subtrees `(path, hash)` the proof did not expose.
+    pub fn frontier(&self) -> &[(Nibbles, B256)] {
+        &self.frontier
+    }
+
+    /// Whether `key` exists in the trie: `Ok(true)` if it is an exposed leaf,
+    /// `Ok(false)` if the proof proves it absent, `Err` if it lies inside an
+    /// opaque subtree (the proof cannot tell).
+    pub fn contains_key(&self, key: &Nibbles) -> Result<bool, WitnessError> {
+        if key.len() != KEY_NIBBLES {
+            return Err(WitnessError::InvalidKeyLength { key: *key });
+        }
+        if self.leaves.contains_key(key) {
+            return Ok(true);
+        }
+        if let Some((frontier, _)) = self.frontier.iter().find(|(p, _)| key.starts_with(p)) {
+            return Err(WitnessError::KeyInOpaqueSubtree {
+                key: *key,
+                frontier: *frontier,
+            });
+        }
+        Ok(false)
+    }
+
+    /// Apply a change set (full key → `Some(new_rlp)` to set, `None` to delete)
+    /// and return the resulting root. Untouched exposed leaves keep the value
+    /// read from the proof; opaque subtrees enter as hashes. Fails if any change
+    /// key is malformed, lands inside an opaque subtree, or deletes a key the
+    /// proof proves absent.
+    pub fn apply(&self, changes: &BTreeMap<Nibbles, Option<Vec<u8>>>) -> Result<B256, WitnessError> {
+        // Validate the change set against the authenticated shape first.
+        for (key, change) in changes {
+            let exists = self.contains_key(key)?;
+            if !exists && change.is_none() {
+                return Err(WitnessError::DeleteOfAbsentKey { key: *key });
+            }
+        }
+
+        let mut out: Vec<Emit> = Vec::with_capacity(self.leaves.len() + self.frontier.len() + changes.len());
+        for (k, cur) in &self.leaves {
+            match changes.get(k) {
+                Some(None) => {}                                      // delete
+                Some(Some(v)) => out.push(Emit::Leaf(*k, v.clone())), // update
+                None => out.push(Emit::Leaf(*k, cur.clone())),        // unchanged
+            }
+        }
+        for (k, change) in changes {
+            if let Some(v) = change {
+                if !self.leaves.contains_key(k) {
+                    out.push(Emit::Leaf(*k, v.clone())); // insert into exposed free space
+                }
+            }
+        }
+        for (path, hash) in &self.frontier {
+            out.push(Emit::Branch(*path, *hash));
+        }
+        if out.is_empty() {
+            return Ok(EMPTY_ROOT_HASH);
+        }
+        // HashBuilder consumes keys in nibble-lexicographic order. No emitted path
+        // is a prefix of another: leaves are 64 nibbles, frontier paths are
+        // shorter, and no leaf or change lies under a frontier (checked above).
+        out.sort_by_key(|e| e.path().to_vec());
+        let mut hb = HashBuilder::default();
+        for e in &out {
+            match e {
+                Emit::Leaf(k, v) => hb.add_leaf(*k, v),
+                Emit::Branch(p, h) => hb.add_branch(*p, *h, false),
+            }
+        }
+        Ok(hb.root())
+    }
+
+    /// Walk an authenticated node at `path`, recording exposed leaves and the
+    /// opaque frontier. Every recursion strictly extends the path, so depth is
+    /// bounded by [`KEY_NIBBLES`].
+    fn walk(&mut self, path: Nibbles, bytes: &[u8], proof: &BTreeMap<Nibbles, Bytes>) -> Result<(), WitnessError> {
+        match decode_node(&path, bytes)? {
+            TrieNode::EmptyRoot => Ok(()),
+            TrieNode::Leaf(leaf) => {
+                if path.len() + leaf.key.len() != KEY_NIBBLES {
+                    return Err(WitnessError::PathTooLong { path });
+                }
+                let full = path.join(&leaf.key);
+                if self.leaves.insert(full, leaf.value).is_some() {
+                    return Err(WitnessError::DuplicateLeaf { key: full });
+                }
+                Ok(())
+            }
+            TrieNode::Extension(ext) => {
+                if ext.key.is_empty() {
+                    return Err(WitnessError::EmptyExtensionKey { path });
+                }
+                // An extension's child is a branch, which needs at least one more
+                // nibble below it, so the child path must stay below 64.
+                if path.len() + ext.key.len() >= KEY_NIBBLES {
+                    return Err(WitnessError::PathTooLong { path });
+                }
+                let cp = path.join(&ext.key);
+                self.descend(cp, &ext.child, proof)
+            }
+            TrieNode::Branch(branch) => {
+                if path.len() >= KEY_NIBBLES {
+                    return Err(WitnessError::PathTooLong { path });
+                }
+                let mut rank = 0usize;
+                for nibble in 0u8..16 {
+                    if !branch.state_mask.is_bit_set(nibble) {
+                        continue;
+                    }
+                    let child = branch.stack.get(rank).ok_or(WitnessError::MalformedNode { path })?;
+                    rank += 1;
+                    let mut cp = path;
+                    cp.push(nibble);
+                    self.descend(cp, child, proof)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolve a child reference at `cp`: a hash reference is followed only if the
+    /// proof supplies a node that hashes to it (else it becomes opaque
+    /// frontier); an embedded node is decoded in place (and must equal any copy
+    /// the proof carries at that path).
+    fn descend(&mut self, cp: Nibbles, child: &RlpNode, proof: &BTreeMap<Nibbles, Bytes>) -> Result<(), WitnessError> {
+        match child.as_hash() {
+            Some(h) => match proof.get(&cp) {
+                Some(bytes) => {
+                    if keccak256(bytes) != h {
+                        return Err(WitnessError::UnanchoredNode { path: cp });
+                    }
+                    self.walk(cp, bytes, proof)
+                }
+                None => {
+                    self.frontier.push((cp, h));
+                    Ok(())
+                }
+            },
+            None => {
+                let inline: &[u8] = child.as_slice();
+                if let Some(bytes) = proof.get(&cp) {
+                    if bytes.as_ref() != inline {
+                        return Err(WitnessError::UnanchoredNode { path: cp });
+                    }
+                }
+                self.walk(cp, inline, proof)
+            }
+        }
+    }
+}
+
+/// Decode a trie node, rejecting over-long compact keys **before** alloy-trie's
+/// decoder (which asserts on them) sees the bytes.
+fn decode_node(path: &Nibbles, bytes: &[u8]) -> Result<TrieNode, WitnessError> {
+    let malformed = || WitnessError::MalformedNode { path: *path };
+    let mut probe = bytes;
+    let header = Header::decode(&mut probe).map_err(|_| malformed())?;
+    if header.list {
+        if header.payload_length > probe.len() {
+            return Err(malformed());
+        }
+        let mut first = &probe[..header.payload_length];
+        if !first.is_empty() {
+            let item = Header::decode(&mut first).map_err(|_| malformed())?;
+            // Leaf / extension nodes: the first item is the compact key (a string).
+            if !item.list && item.payload_length > MAX_COMPACT_KEY_BYTES {
+                return Err(malformed());
+            }
+        }
+    }
+    let mut buf = bytes;
+    TrieNode::decode(&mut buf).map_err(|_| malformed())
+}
 
 /// One reconstruction step fed to `HashBuilder`, sorted by trie path.
 enum Emit {
@@ -134,133 +617,72 @@ impl Emit {
     }
 }
 
-/// STATELESS state-root UPDATE — the SP1-guest's step 3(e), general over
-/// arbitrary trie shape AND over insert / update / delete.
+/// STATELESS state-root UPDATE — the SP1-guest's "compute `new_state_root`"
+/// step, general over arbitrary trie shape and over insert / update / delete.
 ///
-/// Inputs: (a) `proof` — a multiproof (path → node RLP, from a `ProofRetainer`)
-/// exposing every node the change set can restructure; (b) `changes` — full key
-/// → `Some(new_rlp)` to set (update an existing key OR insert a new one) or
-/// `None` to delete. Returns the post-state root. **Untouched account values are
-/// never used**: they enter as opaque subtree hashes; the CURRENT value of an
-/// exposed-but-unchanged leaf (e.g. the surviving sibling of a delete that
-/// collapses a branch) is read from the proof itself.
+/// `proof` is a multiproof (path → node RLP, from a `ProofRetainer`) that must
+/// open `prev_state_root`; `changes` maps full keys to `Some(new_rlp)` (update
+/// an existing key or insert a new one) or `None` (delete). Untouched account
+/// values are never needed: they enter as opaque subtree hashes, and the
+/// current value of an exposed-but-unchanged leaf is read from the proof.
 ///
-/// Contract: the witness must EXPOSE every leaf that a change can restructure —
-/// the sibling of a delete-collapse and the leaf an insert splits — by having
-/// the `ProofRetainer` target those keys too. A change landing inside a subtree
-/// that stayed opaque is a witness-incompleteness (it is not emitted, so the
-/// root would diverge — the STF's witness generator must prevent it).
+/// The proof is authenticated node by node (see [`SparseTrieView::from_proof`])
+/// and the change set must be fully covered by it: a change inside an opaque
+/// subtree or a delete of an absent key is an error, never a silently wrong
+/// root.
 pub fn stateless_new_root(
+    prev_state_root: B256,
     proof: &BTreeMap<Nibbles, Bytes>,
     changes: &BTreeMap<Nibbles, Option<Vec<u8>>>,
-) -> B256 {
-    // Walk the proof: collect exposed leaves (key, current value) + the opaque
-    // frontier (subtree path, hash).
-    let mut leaves: Vec<(Nibbles, Vec<u8>)> = Vec::new();
-    let mut frontier: Vec<(Nibbles, B256)> = Vec::new();
-    if proof.contains_key(&Nibbles::default()) {
-        collect_sparse(Nibbles::default(), proof, &mut leaves, &mut frontier);
-    }
-    let exposed: BTreeSet<&Nibbles> = leaves.iter().map(|(k, _)| k).collect();
-
-    let mut out: Vec<Emit> = Vec::new();
-    // Exposed leaves: apply the change (delete = drop; update = new value;
-    // unchanged = keep the proof's current value).
-    for (k, cur) in &leaves {
-        match changes.get(k) {
-            Some(None) => {}                                             // delete
-            Some(Some(v)) => out.push(Emit::Leaf(k.clone(), v.clone())), // update
-            None => out.push(Emit::Leaf(k.clone(), cur.clone())),        // unchanged
-        }
-    }
-    // Inserts: change keys that did not exist as exposed leaves.
-    for (k, chg) in changes {
-        if let Some(v) = chg {
-            if !exposed.contains(k) {
-                out.push(Emit::Leaf(k.clone(), v.clone()));
-            }
-        }
-    }
-    // Opaque untouched subtrees — but only those NO change reaches into (a
-    // change inside an opaque subtree means the witness was incomplete).
-    for (path, hash) in &frontier {
-        if !changes.keys().any(|ck| ck.starts_with(path)) {
-            out.push(Emit::Branch(path.clone(), *hash));
-        }
-    }
-
-    if out.is_empty() {
-        return EMPTY_ROOT_HASH;
-    }
-    // HashBuilder consumes keys in nibble-lexicographic order.
-    out.sort_by(|a, b| a.path().to_vec().cmp(&b.path().to_vec()));
-    let mut hb = HashBuilder::default();
-    for e in &out {
-        match e {
-            Emit::Leaf(k, v) => hb.add_leaf(k.clone(), v),
-            Emit::Branch(p, h) => hb.add_branch(p.clone(), *h, false),
-        }
-    }
-    hb.root()
-}
-
-/// Walk the proof from `path`: recurse into every child whose node is present
-/// in the proof (exposed), and record each other child as an opaque frontier
-/// subtree. Exposed leaves are recorded with their CURRENT value.
-fn collect_sparse(
-    path: Nibbles,
-    proof: &BTreeMap<Nibbles, Bytes>,
-    leaves: &mut Vec<(Nibbles, Vec<u8>)>,
-    frontier: &mut Vec<(Nibbles, B256)>,
-) {
-    let bytes = proof.get(&path).expect("proof node missing at an exposed path");
-    match TrieNode::decode(&mut bytes.as_ref()).expect("valid trie node RLP") {
-        TrieNode::EmptyRoot => {}
-        TrieNode::Leaf(leaf) => leaves.push((path.join(&leaf.key), leaf.value)),
-        TrieNode::Extension(ext) => {
-            let cp = path.join(&ext.key);
-            if proof.contains_key(&cp) {
-                collect_sparse(cp, proof, leaves, frontier);
-            } else if let Some(h) = ext.child.as_hash() {
-                frontier.push((cp, h));
-            }
-        }
-        TrieNode::Branch(branch) => {
-            let mask = branch.state_mask.get();
-            let mut rank = 0usize;
-            for nibble in 0u8..16 {
-                if (mask >> nibble) & 1 == 0 {
-                    continue;
-                }
-                let child = &branch.stack[rank];
-                rank += 1;
-                let mut cp = path.clone();
-                cp.push(nibble);
-                if proof.contains_key(&cp) {
-                    collect_sparse(cp, proof, leaves, frontier); // exposed
-                } else if let Some(h) = child.as_hash() {
-                    frontier.push((cp, h)); // opaque sibling (account trie ≥32B)
-                }
-            }
-        }
-    }
+) -> Result<B256, WitnessError> {
+    SparseTrieView::from_proof(prev_state_root, proof)?.apply(changes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scale::sats_to_wei;
-    use crate::state::{DepositMint, DepositProvenance, L2State};
     use alloy_primitives::{address, Address};
+    use alloy_trie::proof::ProofRetainer;
+    use revm::state::AccountInfo;
 
-    fn deposit(state: &mut L2State, to: Address, sats: u64) {
-        state
-            .deposit_mint(&DepositMint {
-                recipient: to,
-                mint_wei: sats_to_wei(sats),
-                provenance: DepositProvenance::BridgedBlch { l1_txid: [0u8; 32], l1_vout: 0, l1_sats: sats },
-            })
-            .expect("deposit");
+    /// Fund an account directly (these tests are about trie mechanics, not the
+    /// deposit path, so they bypass the supply ledger).
+    fn fund(state: &mut L2State, to: Address, wei: u64) {
+        let mut info = state
+            .db()
+            .cache
+            .accounts
+            .get(&to)
+            .map(|a| a.info.clone())
+            .unwrap_or_default();
+        info.balance += U256::from(wei);
+        state.db_mut().insert_account_info(to, info);
+    }
+
+    fn leaves_sorted(state: &L2State) -> Vec<(B256, Vec<u8>)> {
+        let mut leaves = account_leaves(state);
+        leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
+        leaves
+    }
+
+    /// Multiproof of `targets` against `state`'s account trie.
+    fn multiproof(state: &L2State, targets: impl IntoIterator<Item = Nibbles>) -> (B256, BTreeMap<Nibbles, Bytes>) {
+        let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter(targets));
+        for (k, v) in &leaves_sorted(state) {
+            hb.add_leaf(Nibbles::unpack(k), v);
+        }
+        let root = hb.root();
+        let proof = hb.take_proof_nodes().into_nodes_sorted().into_iter().collect();
+        (root, proof)
+    }
+
+    fn leaf_of(state: &L2State, addr: Address) -> Vec<u8> {
+        let key = keccak256(addr);
+        account_leaves(state)
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .expect("leaf")
+            .1
     }
 
     #[test]
@@ -278,7 +700,7 @@ mod tests {
     #[test]
     fn one_funded_account_yields_a_nonempty_deterministic_root() {
         let mut a = L2State::new();
-        deposit(&mut a, address!("00000000000000000000000000000000000000aa"), 5);
+        fund(&mut a, address!("00000000000000000000000000000000000000aa"), 5);
         let r1 = compute_keccak_mpt_state_root(&a);
         assert_ne!(r1, EMPTY_ROOT_HASH, "a funded account must change the root");
         assert_ne!(r1, B256::ZERO, "a real MPT root is never all-zeroes");
@@ -290,11 +712,11 @@ mod tests {
         let x = address!("00000000000000000000000000000000000000aa");
         let y = address!("00000000000000000000000000000000000000bb");
         let mut a = L2State::new();
-        deposit(&mut a, x, 3);
-        deposit(&mut a, y, 7);
+        fund(&mut a, x, 3);
+        fund(&mut a, y, 7);
         let mut b = L2State::new();
-        deposit(&mut b, y, 7);
-        deposit(&mut b, x, 3);
+        fund(&mut b, y, 7);
+        fund(&mut b, x, 3);
         assert_eq!(
             compute_keccak_mpt_state_root(&a),
             compute_keccak_mpt_state_root(&b),
@@ -306,15 +728,14 @@ mod tests {
     fn different_balances_give_different_roots() {
         let who = address!("00000000000000000000000000000000000000aa");
         let mut a = L2State::new();
-        deposit(&mut a, who, 1);
+        fund(&mut a, who, 1);
         let mut b = L2State::new();
-        deposit(&mut b, who, 2);
+        fund(&mut b, who, 2);
         assert_ne!(compute_keccak_mpt_state_root(&a), compute_keccak_mpt_state_root(&b));
     }
 
     #[test]
     fn eip161_empty_account_is_excluded_but_nonempty_is_included() {
-        use revm::state::AccountInfo;
         let who = address!("00000000000000000000000000000000000000aa");
 
         // An account that EXISTS in the DB (account_state = None, not
@@ -322,9 +743,9 @@ mod tests {
         // code) must NOT appear in the state trie: the root stays the
         // canonical empty root even though the account is present in the cache.
         let mut empty = L2State::new();
-        empty.db.insert_account_info(who, AccountInfo::default());
+        empty.db_mut().insert_account_info(who, AccountInfo::default());
         assert!(
-            empty.db.cache.accounts.contains_key(&who),
+            empty.db().cache.accounts.contains_key(&who),
             "the empty account is present in the DB cache"
         );
         assert_eq!(
@@ -336,41 +757,39 @@ mod tests {
         // Nonce alone (nonce 1, balance 0, empty code) makes the account
         // non-empty, so it IS in the trie and moves the root.
         let mut with_nonce = L2State::new();
-        with_nonce
-            .db
-            .insert_account_info(who, AccountInfo { nonce: 1, ..Default::default() });
-        assert_ne!(
-            compute_keccak_mpt_state_root(&with_nonce),
-            EMPTY_ROOT_HASH,
-            "a nonce-1 account is not EIP-161-empty and belongs in the trie"
+        with_nonce.db_mut().insert_account_info(
+            who,
+            AccountInfo {
+                nonce: 1,
+                ..Default::default()
+            },
         );
+        assert_ne!(compute_keccak_mpt_state_root(&with_nonce), EMPTY_ROOT_HASH);
 
         // Balance alone likewise makes it non-empty.
         let mut with_balance = L2State::new();
-        with_balance.db.insert_account_info(
+        with_balance.db_mut().insert_account_info(
             who,
-            AccountInfo { balance: U256::from(1u64), ..Default::default() },
+            AccountInfo {
+                balance: U256::from(1u64),
+                ..Default::default()
+            },
         );
-        assert_ne!(
-            compute_keccak_mpt_state_root(&with_balance),
-            EMPTY_ROOT_HASH,
-            "a positive-balance account is not EIP-161-empty and belongs in the trie"
-        );
+        assert_ne!(compute_keccak_mpt_state_root(&with_balance), EMPTY_ROOT_HASH);
     }
 
     #[test]
     fn eip161_empty_accounts_are_invisible_to_the_root() {
-        use revm::state::AccountInfo;
         let funded = address!("00000000000000000000000000000000000000aa");
         let ghost = address!("00000000000000000000000000000000000000bb");
 
         let mut only_funded = L2State::new();
-        deposit(&mut only_funded, funded, 9);
+        fund(&mut only_funded, funded, 9);
 
         let mut with_ghost = L2State::new();
-        deposit(&mut with_ghost, funded, 9);
+        fund(&mut with_ghost, funded, 9);
         // A touched-but-empty account alongside the funded one.
-        with_ghost.db.insert_account_info(ghost, AccountInfo::default());
+        with_ghost.db_mut().insert_account_info(ghost, AccountInfo::default());
 
         assert_eq!(
             compute_keccak_mpt_state_root(&only_funded),
@@ -379,27 +798,11 @@ mod tests {
         );
     }
 
-
-    /// P0.3 de-risking spike (real-prover scope, `BLOCH-L2-PROVER-SCOPE.md`).
-    ///
-    /// The stateless (SP1-guest) proving path has two trie steps: **(a) verify
-    /// the ExecutionWitness opens against `prev_state_root`** and **(b)
-    /// recompute the new root from touched leaves + witness sibling nodes.**
-    ///
-    /// This proves **(a)** end-to-end on the REAL account trie using
-    /// `alloy-trie` 0.9's `ProofRetainer` + `verify_proof`: a multiproof for a
-    /// touched account both (i) verifies its real value against the state root
-    /// and (ii) is tamper-evident. Step (b) — the sparse-trie root update — is
-    /// the remaining P0.3 engineering; the primitive it needs
-    /// (`HashBuilder::add_branch` for opaque untouched subtrees) is confirmed
-    /// present in this same library, and the reference assembly is
-    /// `reth-trie-sparse`.
+    /// Stateless witness verification (guest step 3(a)) on the REAL account
+    /// trie: a multiproof for a touched account opens against the state root
+    /// via the authenticated [`SparseTrieView`], and is tamper-evident.
     #[test]
     fn p0_3_stateless_witness_verifies_touched_account_against_prev_state_root() {
-        use alloy_primitives::Bytes;
-        use alloy_trie::proof::{verify_proof, ProofRetainer};
-
-        // Pre-state with several accounts.
         let addrs = [
             address!("00000000000000000000000000000000000000a1"),
             address!("00000000000000000000000000000000000000b2"),
@@ -408,188 +811,78 @@ mod tests {
         ];
         let mut state = L2State::new();
         for (i, a) in addrs.iter().enumerate() {
-            deposit(&mut state, *a, (i as u64 + 1) * 100);
+            fund(&mut state, *a, (i as u64 + 1) * 100);
         }
         let prev_root = compute_keccak_mpt_state_root(&state);
-
-        // Rebuild the SAME trie with a proof retainer over ONE touched account,
-        // exactly as a host-side witness generator would.
-        let touched_key = keccak256(addrs[1]);
-        let target = Nibbles::unpack(touched_key);
-        let mut leaves = account_leaves(&state);
-        leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-
-        let mut hb =
-            HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter([target.clone()]));
-        let mut touched_value: Option<Vec<u8>> = None;
-        for (k, v) in &leaves {
-            hb.add_leaf(Nibbles::unpack(k), v);
-            if *k == touched_key {
-                touched_value = Some(v.clone());
-            }
-        }
-        let root = hb.root();
+        let touched_key = Nibbles::unpack(keccak256(addrs[1]));
+        let (root, proof) = multiproof(&state, [touched_key]);
         assert_eq!(root, prev_root, "the retained build reproduces the state root");
 
-        let proof_nodes = hb.take_proof_nodes();
-        let proof: Vec<Bytes> =
-            proof_nodes.matching_nodes_sorted(&target).into_iter().map(|(_, n)| n).collect();
+        // (a.i) The witness OPENS: the touched account's real value is exposed.
+        let view = SparseTrieView::from_proof(prev_root, &proof).expect("anchored proof");
+        assert_eq!(view.leaf(&touched_key), Some(&leaf_of(&state, addrs[1])));
+        assert_eq!(view.contains_key(&touched_key), Ok(true));
 
-        // (a.i) The witness OPENS: the touched account's real value verifies
-        //       against prev_state_root — the guest's witness-verification step.
-        verify_proof(prev_root, target.clone(), touched_value.clone(), proof.iter())
-            .expect("touched account must open against prev_state_root");
-
-        // (a.ii) Tamper-evident: a wrong value for the same key must NOT verify.
-        let mut tampered = touched_value.expect("touched value present");
-        let last = tampered.len() - 1;
-        tampered[last] ^= 0xFF;
+        // (a.ii) Tamper-evident: a wrong root, or a modified node, is rejected.
+        let mut wrong = prev_root;
+        wrong.0[0] ^= 0xFF;
+        assert!(matches!(
+            SparseTrieView::from_proof(wrong, &proof),
+            Err(WitnessError::RootMismatch { .. })
+        ));
+        let mut tampered = proof.clone();
+        let (deepest, bytes) = tampered
+            .iter()
+            .max_by_key(|(p, _)| p.len())
+            .map(|(p, b)| (*p, b.clone()))
+            .unwrap();
+        let mut b = bytes.to_vec();
+        let last = b.len() - 1;
+        b[last] ^= 0xFF;
+        tampered.insert(deepest, b.into());
+        let err = SparseTrieView::from_proof(prev_root, &tampered).unwrap_err();
         assert!(
-            verify_proof(prev_root, target, Some(tampered), proof.iter()).is_err(),
-            "a tampered account value must fail verification against prev_state_root"
+            matches!(
+                err,
+                WitnessError::RootMismatch { .. }
+                    | WitnessError::UnanchoredNode { .. }
+                    | WitnessError::MalformedNode { .. }
+            ),
+            "tampered node must be rejected, got {err:?}"
         );
     }
 
-    /// P0.3b de-risking spike — **stateless state-root UPDATE**.
-    ///
-    /// Recomputes the post-state root from ONLY (i) the touched account's NEW
-    /// leaf value and (ii) the untouched accounts' subtree hashes carried in
-    /// the witness — never touching the untouched account VALUES. This is the
-    /// second guest trie step (3(e), "compute `new_state_root`") done
-    /// statelessly, via `HashBuilder::add_branch` for the opaque untouched
-    /// subtrees.
-    ///
-    /// Scope of this spike: a **flat** account trie (keys diverge at the first
-    /// nibble → one leaf per account at a 1-nibble path), which isolates the
-    /// mechanism. The general case (shared prefixes / extension nodes) walks
-    /// the same primitive over a decoded sparse trie — the `reth-trie-sparse`
-    /// assembly noted in the scope; this proves the core update is sound.
-    #[test]
-    fn p0_3b_stateless_root_update_from_touched_leaf_and_untouched_subtree_hashes() {
-        use alloy_trie::proof::ProofRetainer;
-
-        // Three accounts whose keccak-hashed keys diverge at the FIRST nibble
-        // (1, 3, 4 respectively — verified), so the state trie is flat.
-        let addrs = [
-            address!("0000000000000000000000000000000000000001"),
-            address!("0000000000000000000000000000000000000018"),
-            address!("0000000000000000000000000000000000000005"),
-        ];
-        let mut state = L2State::new();
-        for (i, a) in addrs.iter().enumerate() {
-            deposit(&mut state, *a, (i as u64 + 1) * 100);
-        }
-        let prev_root = compute_keccak_mpt_state_root(&state);
-
-        // Host witness: full multiproof of all leaves against prev_root.
-        let mut leaves = account_leaves(&state);
-        leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-        let targets: Vec<Nibbles> = leaves.iter().map(|(k, _)| Nibbles::unpack(k)).collect();
-        let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter(targets));
-        for (k, v) in &leaves {
-            hb.add_leaf(Nibbles::unpack(k), v);
-        }
-        assert_eq!(hb.root(), prev_root);
-        let nodes = hb.take_proof_nodes().nodes_sorted(); // (path, bytes)
-
-        // Flat-trie precondition + witness map: first nibble -> (leaf path, leaf
-        // node hash). Every non-root proof node sits at a 1-nibble path.
-        use std::collections::BTreeMap;
-        let mut subtree: BTreeMap<u8, (Nibbles, B256)> = BTreeMap::new();
-        for (path, bytes) in &nodes {
-            if path.len() == 1 {
-                subtree.insert(path.first().expect("len 1"), (path.clone(), keccak256(bytes)));
-            }
-        }
-        assert_eq!(subtree.len(), addrs.len(), "flat trie: one 1-nibble leaf per account");
-
-        // The touched account changes (a further deposit bumps its balance).
-        let touched_key = keccak256(addrs[1]);
-        let mut new_state = state.clone();
-        deposit(&mut new_state, addrs[1], 50);
-        let expected_new_root = compute_keccak_mpt_state_root(&new_state);
-        let mut new_leaves = account_leaves(&new_state);
-        new_leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-        let new_touched_value =
-            new_leaves.iter().find(|(k, _)| *k == touched_key).expect("touched leaf").1.clone();
-
-        // STATELESS recompute: touched account via add_leaf(NEW value); every
-        // untouched account via add_branch(its subtree hash) — its VALUE is
-        // never used. Fed in sorted (first-nibble) order.
-        let mut hb2 = HashBuilder::default();
-        for (k, _v) in &leaves {
-            let nk = Nibbles::unpack(k);
-            if *k == touched_key {
-                hb2.add_leaf(nk, &new_touched_value);
-            } else {
-                let first = nk.first().expect("nonempty key");
-                let (path, hash) = subtree.get(&first).expect("untouched subtree in witness");
-                hb2.add_branch(path.clone(), *hash, false);
-            }
-        }
-        let stateless_new_root = hb2.root();
-
-        assert_eq!(
-            stateless_new_root, expected_new_root,
-            "new root recomputed from the touched leaf + untouched SUBTREE HASHES only \
-             (untouched account values never used)"
-        );
-        assert_ne!(stateless_new_root, prev_root, "the update actually moved the root");
-    }
-
-    /// P0.3b GENERAL case — stateless root update over an arbitrary (non-flat)
-    /// trie with nested branches / extension nodes, via the multiproof walk in
-    /// [`stateless_new_root`]. Proves the flat-case mechanism generalizes.
+    /// Stateless root update over a nested (non-flat) trie: 40 accounts, 3
+    /// touched, only the touched keys exposed.
     #[test]
     fn p0_3b_general_stateless_root_update_over_nested_branches() {
-        use alloy_trie::proof::ProofRetainer;
-
-        // 40 accounts → keccak-keyed trie develops nested branches (first-nibble
-        // collisions force depth-2+ structure), exercising the general walk.
         let mut state = L2State::new();
         let mut addrs = Vec::new();
         for i in 0u8..40 {
             let mut b = [0u8; 20];
             b[19] = i;
             let a = Address::from(b);
-            deposit(&mut state, a, (i as u64 + 1) * 10);
+            fund(&mut state, a, (i as u64 + 1) * 10);
             addrs.push(a);
         }
         let prev_root = compute_keccak_mpt_state_root(&state);
 
-        // Touch 3 accounts (bump balances via further deposits).
         let touched_addrs = [addrs[3], addrs[17], addrs[29]];
         let mut new_state = state.clone();
         for a in &touched_addrs {
-            deposit(&mut new_state, *a, 500);
+            fund(&mut new_state, *a, 500);
         }
         let expected = compute_keccak_mpt_state_root(&new_state);
 
-        // Witness: multiproof of ONLY the touched keys against prev_root.
-        let touched_keys: Vec<Nibbles> =
-            touched_addrs.iter().map(|a| Nibbles::unpack(keccak256(a))).collect();
-        let mut leaves = account_leaves(&state);
-        leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-        let mut hb =
-            HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter(touched_keys));
-        for (k, v) in &leaves {
-            hb.add_leaf(Nibbles::unpack(k), v);
-        }
-        assert_eq!(hb.root(), prev_root);
-        let proof: BTreeMap<Nibbles, Bytes> =
-            hb.take_proof_nodes().into_nodes_sorted().into_iter().collect();
+        let touched_keys: Vec<Nibbles> = touched_addrs.iter().map(|a| Nibbles::unpack(keccak256(a))).collect();
+        let (root, proof) = multiproof(&state, touched_keys);
+        assert_eq!(root, prev_root);
 
-        // changes map: full key -> Some(NEW rlp value) (updates).
-        let mut new_leaves = account_leaves(&new_state);
-        new_leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
         for a in &touched_addrs {
-            let key = keccak256(a);
-            let val = new_leaves.iter().find(|(k, _)| *k == key).expect("touched leaf").1.clone();
-            changes.insert(Nibbles::unpack(key), Some(val));
+            changes.insert(Nibbles::unpack(keccak256(a)), Some(leaf_of(&new_state, *a)));
         }
-
-        let got = stateless_new_root(&proof, &changes);
+        let got = stateless_new_root(prev_root, &proof, &changes).expect("complete witness");
         assert_eq!(
             got, expected,
             "general sparse stateless root update must match the full rebuild"
@@ -597,92 +890,325 @@ mod tests {
         assert_ne!(got, prev_root, "the update moved the root");
     }
 
-    /// P0.3b INSERT — a new account splits the trie (here: a single-leaf root
-    /// becomes a 2-leaf branch). The witness exposes the leaf the insert splits
-    /// (a non-inclusion proof of the new key), and `stateless_new_root` rebuilds
-    /// the new shape from it.
+    /// INSERT — a new account splits the trie (a single-leaf root becomes a
+    /// 2-leaf branch). The witness exposes the leaf the insert splits (a
+    /// non-inclusion proof of the new key).
     #[test]
     fn p0_3b_stateless_insert_new_account() {
-        use alloy_trie::proof::ProofRetainer;
-
-        let existing = address!("0000000000000000000000000000000000000001"); // nibble 1
-        let new_addr = address!("0000000000000000000000000000000000000018"); // nibble 3
+        let existing = address!("0000000000000000000000000000000000000001");
+        let new_addr = address!("0000000000000000000000000000000000000018");
         let mut state = L2State::new();
-        deposit(&mut state, existing, 100);
+        fund(&mut state, existing, 100);
         let prev_root = compute_keccak_mpt_state_root(&state);
 
         let mut new_state = state.clone();
-        deposit(&mut new_state, new_addr, 250); // INSERT
+        fund(&mut new_state, new_addr, 250); // INSERT
         let expected = compute_keccak_mpt_state_root(&new_state);
 
-        // Witness: non-inclusion proof of the new key (exposes the root leaf it
-        // would split).
-        let new_key = keccak256(new_addr);
-        let mut hb = HashBuilder::default()
-            .with_proof_retainer(ProofRetainer::from_iter([Nibbles::unpack(new_key)]));
-        let mut leaves = account_leaves(&state);
-        leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-        for (k, v) in &leaves {
-            hb.add_leaf(Nibbles::unpack(k), v);
-        }
-        assert_eq!(hb.root(), prev_root);
-        let proof: BTreeMap<Nibbles, Bytes> =
-            hb.take_proof_nodes().into_nodes_sorted().into_iter().collect();
+        let new_key = Nibbles::unpack(keccak256(new_addr));
+        let (root, proof) = multiproof(&state, [new_key]);
+        assert_eq!(root, prev_root);
+        let view = SparseTrieView::from_proof(prev_root, &proof).unwrap();
+        assert_eq!(view.contains_key(&new_key), Ok(false), "non-inclusion is provable");
 
-        let mut new_leaves = account_leaves(&new_state);
-        new_leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-        let val = new_leaves.iter().find(|(k, _)| *k == new_key).unwrap().1.clone();
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
-        changes.insert(Nibbles::unpack(new_key), Some(val));
-
-        assert_eq!(stateless_new_root(&proof, &changes), expected, "insert must match full rebuild");
+        changes.insert(new_key, Some(leaf_of(&new_state, new_addr)));
+        assert_eq!(
+            stateless_new_root(prev_root, &proof, &changes),
+            Ok(expected),
+            "insert must match full rebuild"
+        );
     }
 
-    /// P0.3b DELETE — removing an account collapses a branch (here: a 2-leaf
-    /// branch collapses to a single leaf). The witness exposes BOTH the deleted
-    /// key and its surviving sibling; `stateless_new_root` reads the sibling's
-    /// current value from the proof and re-collapses correctly.
+    /// DELETE — removing an account collapses a branch (a 2-leaf branch
+    /// collapses to a single leaf). The witness exposes BOTH the deleted key
+    /// and its surviving sibling.
     #[test]
     fn p0_3b_stateless_delete_account_collapses_branch() {
-        use alloy_trie::proof::ProofRetainer;
-        use revm::state::AccountInfo;
-
-        let del = address!("0000000000000000000000000000000000000001"); // nibble 1
-        let keep = address!("0000000000000000000000000000000000000018"); // nibble 3
+        let del = address!("0000000000000000000000000000000000000001");
+        let keep = address!("0000000000000000000000000000000000000018");
         let mut state = L2State::new();
-        deposit(&mut state, del, 100);
-        deposit(&mut state, keep, 200);
+        fund(&mut state, del, 100);
+        fund(&mut state, keep, 200);
         let prev_root = compute_keccak_mpt_state_root(&state);
 
         // DELETE: zero the account (EIP-161 empty ⇒ excluded from the trie).
         let mut new_state = state.clone();
-        new_state.db.insert_account_info(del, AccountInfo::default());
+        new_state.db_mut().insert_account_info(del, AccountInfo::default());
         let expected = compute_keccak_mpt_state_root(&new_state);
         assert_ne!(expected, prev_root);
 
-        // Witness exposes both the deleted key and its surviving sibling.
-        let del_key = keccak256(del);
-        let keep_key = keccak256(keep);
-        let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter([
-            Nibbles::unpack(del_key),
-            Nibbles::unpack(keep_key),
-        ]));
-        let mut leaves = account_leaves(&state);
-        leaves.sort_unstable_by(|x, y| x.0.cmp(&y.0));
-        for (k, v) in &leaves {
-            hb.add_leaf(Nibbles::unpack(k), v);
-        }
-        assert_eq!(hb.root(), prev_root);
-        let proof: BTreeMap<Nibbles, Bytes> =
-            hb.take_proof_nodes().into_nodes_sorted().into_iter().collect();
+        let del_key = Nibbles::unpack(keccak256(del));
+        let (root, proof) = multiproof(&state, [del_key, Nibbles::unpack(keccak256(keep))]);
+        assert_eq!(root, prev_root);
 
         let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
-        changes.insert(Nibbles::unpack(del_key), None); // delete
-
+        changes.insert(del_key, None);
         assert_eq!(
-            stateless_new_root(&proof, &changes),
-            expected,
+            stateless_new_root(prev_root, &proof, &changes),
+            Ok(expected),
             "delete-with-collapse must match full rebuild"
         );
+    }
+
+    /// First insert into an EMPTY trie: the proof is empty (or the single
+    /// empty-root node) and the update is the trie of that one leaf.
+    #[test]
+    fn stateless_insert_into_empty_trie() {
+        let who = address!("00000000000000000000000000000000000000aa");
+        let mut new_state = L2State::new();
+        fund(&mut new_state, who, 1);
+        let expected = compute_keccak_mpt_state_root(&new_state);
+        let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        changes.insert(Nibbles::unpack(keccak256(who)), Some(leaf_of(&new_state, who)));
+        let empty_proof = BTreeMap::new();
+        assert_eq!(
+            stateless_new_root(EMPTY_ROOT_HASH, &empty_proof, &changes),
+            Ok(expected)
+        );
+        // Deleting the only account returns to the empty root.
+        let (root, proof) = multiproof(&new_state, [Nibbles::unpack(keccak256(who))]);
+        assert_eq!(root, expected);
+        let mut del: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        del.insert(Nibbles::unpack(keccak256(who)), None);
+        assert_eq!(stateless_new_root(expected, &proof, &del), Ok(EMPTY_ROOT_HASH));
+    }
+
+    #[test]
+    fn unanchored_or_injected_proof_nodes_are_rejected() {
+        let mut state = L2State::new();
+        let mut addrs = Vec::new();
+        for i in 0u8..20 {
+            let mut b = [0u8; 20];
+            b[19] = i;
+            fund(&mut state, Address::from(b), (i as u64 + 1) * 10);
+            addrs.push(Address::from(b));
+        }
+        let prev_root = compute_keccak_mpt_state_root(&state);
+        let target = Nibbles::unpack(keccak256(addrs[5]));
+        let (root, proof) = multiproof(&state, [target]);
+        assert_eq!(root, prev_root);
+        let view = SparseTrieView::from_proof(prev_root, &proof).unwrap();
+        assert!(!view.frontier().is_empty(), "20 accounts leave opaque siblings");
+
+        // An empty proof cannot open a non-empty root.
+        assert!(matches!(
+            SparseTrieView::from_proof(prev_root, &BTreeMap::new()),
+            Err(WitnessError::EmptyProofForNonEmptyRoot { .. })
+        ));
+
+        // Inject a fabricated leaf at an opaque frontier path: the parent's hash
+        // reference does not match, so the node is rejected instead of trusted.
+        let (frontier_path, _) = view.frontier()[0];
+        let mut injected = proof.clone();
+        let rest = Nibbles::from_nibbles(vec![0u8; KEY_NIBBLES - frontier_path.len()]);
+        let fake = alloy_trie::nodes::LeafNode::new(rest, vec![0xc0]);
+        injected.insert(frontier_path, alloy_rlp::encode(&fake).into());
+        assert_eq!(
+            SparseTrieView::from_proof(prev_root, &injected).unwrap_err(),
+            WitnessError::UnanchoredNode { path: frontier_path }
+        );
+
+        // Rewriting an exposed leaf's bytes breaks the chain up to the root.
+        let mut tampered = proof.clone();
+        let (deepest, bytes) = tampered
+            .iter()
+            .max_by_key(|(p, _)| p.len())
+            .map(|(p, b)| (*p, b.clone()))
+            .unwrap();
+        let mut b = bytes.to_vec();
+        let last = b.len() - 1;
+        b[last] ^= 0x01;
+        tampered.insert(deepest, b.into());
+        assert!(SparseTrieView::from_proof(prev_root, &tampered).is_err());
+    }
+
+    #[test]
+    fn changes_inside_opaque_subtrees_and_deletes_of_absent_keys_are_errors() {
+        let mut state = L2State::new();
+        let mut addrs = Vec::new();
+        for i in 0u8..20 {
+            let mut b = [0u8; 20];
+            b[19] = i;
+            fund(&mut state, Address::from(b), (i as u64 + 1) * 10);
+            addrs.push(Address::from(b));
+        }
+        let prev_root = compute_keccak_mpt_state_root(&state);
+        let target = Nibbles::unpack(keccak256(addrs[5]));
+        let (_, proof) = multiproof(&state, [target]);
+        let view = SparseTrieView::from_proof(prev_root, &proof).unwrap();
+        let (frontier_path, _) = view.frontier()[0];
+
+        // A key under the opaque subtree: cannot be inserted, updated or deleted.
+        let mut hidden = frontier_path;
+        while hidden.len() < KEY_NIBBLES {
+            hidden.push(0);
+        }
+        let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        changes.insert(hidden, None);
+        assert!(matches!(
+            view.apply(&changes),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
+        changes.insert(hidden, Some(vec![0xc0]));
+        assert!(matches!(
+            view.apply(&changes),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
+        assert!(matches!(
+            view.contains_key(&hidden),
+            Err(WitnessError::KeyInOpaqueSubtree { .. })
+        ));
+
+        // Deleting a provably absent key is a witness inconsistency.
+        let absent = Nibbles::unpack(keccak256(address!("00000000000000000000000000000000deadbeef")));
+        let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        match view.contains_key(&absent) {
+            Ok(false) => {
+                changes.insert(absent, None);
+                assert_eq!(
+                    view.apply(&changes),
+                    Err(WitnessError::DeleteOfAbsentKey { key: absent })
+                );
+            }
+            other => {
+                // The key happens to fall under an opaque sibling; that is the
+                // other error, equally a rejection.
+                assert!(matches!(other, Err(WitnessError::KeyInOpaqueSubtree { .. })));
+            }
+        }
+
+        // Malformed keys are rejected before anything is hashed.
+        let mut short: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        short.insert(Nibbles::from_nibbles([1, 2, 3]), Some(vec![0xc0]));
+        assert!(matches!(view.apply(&short), Err(WitnessError::InvalidKeyLength { .. })));
+    }
+
+    #[test]
+    fn malformed_nodes_are_errors_not_panics() {
+        // Garbage at the root: hash mismatch (never decoded).
+        let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
+        proof.insert(Nibbles::default(), Bytes::from_static(&[0xde, 0xad]));
+        assert!(matches!(
+            SparseTrieView::from_proof(keccak256([0xde, 0xad]), &proof),
+            Err(WitnessError::MalformedNode { .. })
+        ));
+
+        // Zero-length extension key (compact 0x00): rejected, no recursion.
+        let child = B256::repeat_byte(0x44);
+        let mut payload = Vec::new();
+        [0x00u8].as_slice().encode(&mut payload);
+        child.encode(&mut payload);
+        let mut rlp = Vec::new();
+        Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut rlp);
+        rlp.extend(payload);
+        let root = keccak256(&rlp);
+        let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
+        proof.insert(Nibbles::default(), rlp.into());
+        assert_eq!(
+            SparseTrieView::from_proof(root, &proof).unwrap_err(),
+            WitnessError::EmptyExtensionKey {
+                path: Nibbles::default()
+            }
+        );
+
+        // Over-long compact key (34 bytes) in a leaf: rejected before decode.
+        let mut payload = Vec::new();
+        [0x20u8; 34].as_slice().encode(&mut payload);
+        [0x01u8].as_slice().encode(&mut payload);
+        let mut rlp = Vec::new();
+        Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut rlp);
+        rlp.extend(payload);
+        let root = keccak256(&rlp);
+        let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
+        proof.insert(Nibbles::default(), rlp.into());
+        assert!(matches!(
+            SparseTrieView::from_proof(root, &proof),
+            Err(WitnessError::MalformedNode { .. })
+        ));
+
+        // A leaf whose key would make the full path longer than 64 nibbles.
+        let long_leaf = alloy_trie::nodes::LeafNode::new(Nibbles::from_nibbles(vec![1u8; 64]), vec![0x01]);
+        let mut branch_payload = Vec::new();
+        let leaf_rlp = alloy_rlp::encode(&long_leaf);
+        let leaf_hash = keccak256(&leaf_rlp);
+        // Branch with one child (nibble 0) referencing the leaf by hash, 16 empty
+        // slots otherwise + empty value.
+        leaf_hash.encode(&mut branch_payload);
+        for _ in 1..17 {
+            [].as_slice().encode(&mut branch_payload);
+        }
+        let mut branch_rlp = Vec::new();
+        Header {
+            list: true,
+            payload_length: branch_payload.len(),
+        }
+        .encode(&mut branch_rlp);
+        branch_rlp.extend(branch_payload);
+        let root = keccak256(&branch_rlp);
+        let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
+        proof.insert(Nibbles::default(), branch_rlp.into());
+        proof.insert(Nibbles::from_nibbles([0]), leaf_rlp.into());
+        assert!(matches!(
+            SparseTrieView::from_proof(root, &proof),
+            Err(WitnessError::PathTooLong { .. })
+        ));
+    }
+
+    /// Inline (< 32-byte) children — the shape storage tries take with small
+    /// values — are decoded in place, so the update matches a full rebuild.
+    #[test]
+    fn inline_children_are_handled() {
+        // Three leaves sharing a 63-nibble prefix and differing in the last
+        // nibble: extension -> branch -> three 0-nibble-key leaves with 1-byte
+        // values, each leaf RLP well under 32 bytes, so the branch embeds them
+        // inline (and the branch itself is embedded in the extension).
+        let keys: Vec<Nibbles> = (0u8..3)
+            .map(|i| {
+                let mut k = vec![0u8; 63];
+                k.push(i);
+                Nibbles::from_nibbles(k)
+            })
+            .collect();
+        let values: Vec<Vec<u8>> = (0u8..3).map(|i| vec![i + 1]).collect();
+        let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::from_iter([keys[0]]));
+        for (k, v) in keys.iter().zip(&values) {
+            hb.add_leaf(*k, v);
+        }
+        let prev_root = hb.root();
+        let proof: BTreeMap<Nibbles, Bytes> = hb.take_proof_nodes().into_nodes_sorted().into_iter().collect();
+        assert!(
+            proof.values().any(|node| node.len() < 32) || proof.len() < 3,
+            "test premise: small nodes are embedded, not separately hashed"
+        );
+
+        // Expected: update leaf 0, keep the two inline siblings.
+        let mut hb2 = HashBuilder::default();
+        let new_v0 = vec![0x7f];
+        hb2.add_leaf(keys[0], &new_v0);
+        hb2.add_leaf(keys[1], &values[1]);
+        hb2.add_leaf(keys[2], &values[2]);
+        let expected = hb2.root();
+
+        let view = SparseTrieView::from_proof(prev_root, &proof).unwrap();
+        assert_eq!(view.leaves().len(), 3, "inline siblings are exposed, not dropped");
+        let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        changes.insert(keys[0], Some(new_v0));
+        assert_eq!(view.apply(&changes), Ok(expected));
+        // Deleting one inline leaf collapses correctly too.
+        let mut hb3 = HashBuilder::default();
+        hb3.add_leaf(keys[1], &values[1]);
+        hb3.add_leaf(keys[2], &values[2]);
+        let mut del: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+        del.insert(keys[0], None);
+        assert_eq!(view.apply(&del), Ok(hb3.root()));
     }
 }
