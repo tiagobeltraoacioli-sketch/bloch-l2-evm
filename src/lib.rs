@@ -11,7 +11,8 @@
 //! regression tests live in `tests/audit_regressions.rs`.
 //! A second-pass review (`SECURITY-AUDIT-2026-09-07.md`) adds adversarial
 //! regressions in `tests/deep_security.rs` and documents the remaining
-//! transaction authentication, L1 derivation and proving-system boundaries.
+//! L1 derivation and proving-system boundaries. [`transactions`] adds the
+//! authenticated L2 ECDSA ingress; native Bloch L1 remains PQ-only.
 //!
 //! > **The reorg gate (from the design, read first).** An L2 inherits its
 //! > L1's finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited —
@@ -69,11 +70,15 @@
 //!   re-execute with reads outside the witness failing, derive the change set,
 //!   compute the post-state root statelessly).
 //!
+//! * [`transactions`] — canonical EIP-155/2930/1559 decoding, low-S ECDSA
+//!   recovery, signed host execution and signed guest verification. Always use
+//!   these entry points for network input; raw `TxEnv` callers remain trusted.
+//!
 //! ## What is honestly STUBBED (`todo!()` / `unimplemented!()`, `// SCAFFOLD:`)
 //! * the `eth_*` JSON-RPC surface, the txpool, and the Reth-SDK node
 //!   embedding ([`stubs`]).
 //! * the SP1 guest (riscv32im) build target ([`stubs::sp1_guest`]) — the
-//!   procedure it must run is [`proving::verify_batch`].
+//!   procedure it must run is [`transactions::verify_signed_batch`].
 //!
 //! The L2 is an **owned Postern product** that anchors to the ownerless Bloch
 //! base as ordinary transactions; the base gains no operator and needs no
@@ -104,6 +109,7 @@ pub mod scale;
 pub mod state;
 pub mod stateroot;
 pub mod stubs;
+pub mod transactions;
 
 pub use chainspec::{ChainSpec, ChainSpecError};
 pub use executor::{
@@ -118,6 +124,10 @@ pub use proving::{
 pub use scale::{sats_to_wei, wei_to_sats, ATOM_SCALE};
 pub use state::{DepositError, DepositMint, DepositPosition, DepositProvenance, HeadRecord, L2Account, L2State};
 pub use stateroot::{compute_keccak_mpt_state_root, stateless_new_root, SparseTrieView, WitnessError};
+pub use transactions::{
+    decode_signed_transaction, execute_signed_block, generate_signed_batch_witness, verify_signed_batch,
+    AuthenticatedTransaction, SignedBlockInput, SignedInputError, TransactionAuthError,
+};
 
 /// The exact revm version this scaffold is pinned to (also pinned as `=41.0.0`
 /// in `Cargo.toml` and recorded in `README.md`). Any bump is a documented

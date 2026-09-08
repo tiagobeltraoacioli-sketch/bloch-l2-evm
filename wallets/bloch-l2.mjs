@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// EIP-1193 adapter: pass a user-selected MetaMask/EIP-6963/other EVM provider.
+// This is a client integration, not an RPC server or an L1 signature adapter.
+
+export const BLOCH_L2_SECURITY = Object.freeze({
+  layer: "L2",
+  authorization: "ECDSA-secp256k1",
+  postQuantumAccounts: false,
+  notice: "Bloch L2 uses ECDSA accounts. These accounts are not post-quantum; native Bloch L1 requires PQ signatures.",
+});
+export const BLOCH_L2_TESTNET_CHAIN_ID = 700771n; // Placeholder, not a registered/public network.
+
+const address = /^0x[0-9a-fA-F]{40}$/;
+const quantity = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
+const data = /^0x(?:[0-9a-fA-F]{2})*$/;
+
+function chainHex(value) {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) throw new TypeError("Unsafe chain ID");
+  if (!["string", "number", "bigint"].includes(typeof value)) throw new TypeError("Invalid chain ID");
+  const id = BigInt(value);
+  if (id <= 0n || id > 0xffffffffffffffffn) throw new RangeError("Chain ID must be a positive u64");
+  return `0x${id.toString(16)}`;
+}
+
+function checkedRpcUrl(value) {
+  const url = new URL(value);
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) || url.username || url.password || url.hash) {
+    throw new TypeError("RPC must use HTTPS (HTTP is allowed for localhost), without credentials or fragments");
+  }
+  return url.href;
+}
+
+/**
+ * Construct a reusable L2 client. The application displays `security.notice`
+ * when offering this network and supplies its actual configured RPC endpoint.
+ * No endpoint is guessed and no secret key is requested or stored here.
+ */
+export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTNET_CHAIN_ID } = {}) {
+  if (typeof provider?.request !== "function") throw new TypeError("An EIP-1193 provider is required");
+  const id = chainHex(chainId);
+  const rpc = checkedRpcUrl(rpcUrl);
+  const network = Object.freeze({
+    chainId: id,
+    chainName: "Bloch L2 (ECDSA)",
+    nativeCurrency: Object.freeze({ name: "Bridged BLCH", symbol: "BLCH", decimals: 18 }),
+    rpcUrls: Object.freeze([rpc]),
+  });
+
+  async function assertNetwork() {
+    const current = await provider.request({ method: "eth_chainId" });
+    if (typeof current !== "string" || !quantity.test(current) || chainHex(current) !== id) {
+      throw new Error("Wallet is not connected to the configured Bloch L2");
+    }
+  }
+
+  async function connect() {
+    try {
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
+    } catch (error) {
+      if (error?.code !== 4902) throw error; // Includes user rejection: do not retry it.
+      await provider.request({ method: "wallet_addEthereumChain", params: [{
+        ...network, nativeCurrency: { ...network.nativeCurrency }, rpcUrls: [...network.rpcUrls],
+      }] });
+      // EIP-3085 does not guarantee that adding a chain also selects it.
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
+    }
+    await assertNetwork();
+    const accounts = await provider.request({ method: "eth_requestAccounts" });
+    if (!Array.isArray(accounts) || !accounts.length || accounts.some(account => typeof account !== "string" || !address.test(account))) {
+      throw new Error("Wallet did not return valid Ethereum accounts");
+    }
+    await assertNetwork(); // The user may change chains while approving accounts.
+    return Object.freeze({ accounts: Object.freeze([...accounts]), chainId: id, security: BLOCH_L2_SECURITY });
+  }
+
+  async function sendTransaction(transaction) {
+    if (!transaction || typeof transaction !== "object" || Array.isArray(transaction)) throw new TypeError("Transaction object required");
+    const allowed = new Set(["from", "to", "value", "data", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "nonce", "type", "chainId", "accessList"]);
+    for (const field of Object.keys(transaction)) {
+      if (!allowed.has(field)) throw new TypeError(`Unsupported Cancun transaction field: ${field}`);
+    }
+    // Snapshot caller input before awaiting the provider (including access lists).
+    const tx = { ...transaction };
+    if (!address.test(tx.from)) throw new TypeError("Explicit Ethereum from address required");
+    if (tx.to !== undefined && !address.test(tx.to)) throw new TypeError("Invalid destination address");
+    if (tx.chainId !== undefined && chainHex(tx.chainId) !== id) throw new Error("Transaction targets another chain");
+    if (tx.type !== undefined && !["0x0", "0x1", "0x2"].includes(tx.type)) throw new TypeError("Only transaction types 0, 1 and 2 are supported");
+    if (tx.data !== undefined && (typeof tx.data !== "string" || !data.test(tx.data))) throw new TypeError("Invalid transaction data");
+    for (const field of ["value", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "nonce"]) {
+      if (tx[field] !== undefined && (typeof tx[field] !== "string" || !quantity.test(tx[field]))) throw new TypeError(`Invalid hex quantity: ${field}`);
+    }
+    if (tx.accessList !== undefined) {
+      if (!Array.isArray(tx.accessList)) throw new TypeError("Invalid access list");
+      tx.accessList = tx.accessList.map(item => {
+        if (!item || !address.test(item.address) || !Array.isArray(item.storageKeys) || item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
+          throw new TypeError("Invalid access list entry");
+        }
+        return { address: item.address, storageKeys: [...item.storageKeys] };
+      });
+    }
+    tx.chainId = id; // The signing request carries the configured replay domain.
+    await assertNetwork();
+    const accounts = await provider.request({ method: "eth_accounts" });
+    if (!Array.isArray(accounts) || !accounts.some(account => typeof account === "string" && account.toLowerCase() === tx.from.toLowerCase())) {
+      throw new Error("Transaction sender is not an authorized wallet account");
+    }
+    await assertNetwork();
+    return provider.request({ method: "eth_sendTransaction", params: [tx] });
+  }
+
+  return Object.freeze({ network, security: BLOCH_L2_SECURITY, connect, sendTransaction });
+}

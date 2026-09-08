@@ -375,6 +375,10 @@ pub struct VerifiedBatch {
 /// set from the proven pre-leaves and the re-executed post-leaves, and compute
 /// the post-state root statelessly. Fails if the derived root differs from the
 /// host's claim.
+///
+/// This low-level interface trusts decoded transaction callers. For node/guest
+/// input use [`crate::transactions::verify_signed_batch`], which repeats recovery
+/// from the original signed bytes before invoking this procedure.
 pub fn verify_batch(
     spec: &ChainSpec,
     witness: &BatchWitness,

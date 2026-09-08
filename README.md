@@ -16,8 +16,11 @@
 The [second-pass security audit](SECURITY-AUDIT-2026-09-07.md) documents
 additional fixes for sparse-proof completeness, canonical decoding, the Cancun
 hardfork boundary, transaction-field consistency, and configured head access.
-It also records the remaining transaction/L1 authentication and proof-system
-integration requirements. Regressions live in `tests/deep_security.rs`.
+It also records the remaining L1 authentication and proof-system integration
+requirements. The [L2 wallet boundary](WALLET-COMPATIBILITY.md) now authenticates
+original signed Ethereum bytes in host execution and guest verification; native
+Bloch L1 authorization remains PQ-only. The included EIP-1193 client adapter is
+ready to integrate with an application; the RPC/Reth node itself remains stubbed. Regressions live in `tests/deep_security.rs`.
 
 > **The reorg gate (from the design, read first).** An L2 inherits its L1's
 > finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited — a Bloch
@@ -40,10 +43,11 @@ running total, so `total_native == total_minted - total_burned` always holds
 | dependency | pin | why |
 |---|---|---|
 | `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The design requires ONE pinned revm so the native node and the future SP1 guest re-execute byte-identical code; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled (ecrecover uses the pure-Rust `k256`), nor `blst`/`tracer`. The guest's one feature delta is `c-kzg` → `kzg-rs`. |
+| `alloy-consensus` / `alloy-eips` | **`=2.2.0`** / **`=2.2.0`** (exact) | Signed Ethereum envelopes and k256 sender recovery, exclusively at the L2 authorization boundary. |
 | `alloy-primitives` | **`=1.6.1`** (exact) | `Address`/`U256`/`B256` are one type family across the crate. |
 | `alloy-trie` / `alloy-rlp` | **`=0.9.5`** / **`=0.3.16`** (exact) | Trie node encoders, `HashBuilder`, proofs and RLP: consensus-relevant, pinned like revm. |
 | `ruint` | **`=1.20.0`** (exact) | The U256 implementation. A documented program upgrade over the audited 1.19.0 (RUSTSEC-2026-0220, shift overflow flags); revm bounds every EVM shift to < 256, so no executed semantics changed. |
-| toolchain | **`1.94.1`** (`rust-toolchain.toml`), `rust-version = 1.91.0` | The SP1 vkey depends on the exact compiler; a moving channel is not acceptable. |
+| toolchain | **`1.94.1`** (`rust-toolchain.toml`), `rust-version = 1.94.1` | The SP1 vkey depends on the exact compiler; a moving channel is not acceptable. |
 | hardfork | `SpecId::CANCUN` | Cancun at genesis per the design; Prague only via a coordinated, height-gated upgrade. |
 
 `Cargo.lock` is committed and CI builds `--locked` (determinism contract,
@@ -52,6 +56,13 @@ set chosen explicitly in `Cargo.toml`; `cargo deny` (`deny.toml`) bans native
 backends and unknown sources.
 
 ## What is REAL and tested (`cargo test`)
+
+* **Signed wallet ingress** (`src/transactions.rs`) — bounded canonical decoding
+  of protected legacy/EIP-2930/EIP-1559 transactions, chain-ID enforcement and
+  low-S ECDSA recovery using pinned Alloy/k256. `execute_signed_block` and
+  `verify_signed_batch` recover callers from the original bytes. A portable
+  [EIP-1193 wallet adapter](wallets/bloch-l2.mjs) provides network selection and
+  wallet signing requests; `node --test wallets/bloch-l2.test.mjs` tests it.
 
 * **`ChainSpec`** (`src/chainspec.rs`) — the design's genesis knobs:
   `chain_id = 700771` (testnet placeholder pending ethereum-lists/chains
@@ -145,13 +156,13 @@ backends and unknown sources.
   — the design mandates Reth's stack precisely so this surface is *not*
   hand-rolled.
 * the SP1 guest (riscv32im) build target (`src/stubs.rs::sp1_guest`) — the
-  procedure it must run is `proving::verify_batch`; the dependency-level
+  procedure it must run is `transactions::verify_signed_batch`; the dependency-level
   no_std wiring is the SP1 toolchain stage.
 * genesis alloc / vault predeploy bytecode (the vault addresses exist as
   plain balance-holding accounts here, not deployed Solidity vaults), the
   anchor reader (the Bloch anchor root and `prevrandao` are inputs the node
-  must derive; the STF commits them), signature recovery / RLP decoding and
-  receipts (transactions are not yet committed in the block header).
+  must derive; the STF commits them), RPC/pool wiring of the signed transaction
+  boundary and receipts (transactions are not yet committed in the block header).
 
 ## Layout / build
 

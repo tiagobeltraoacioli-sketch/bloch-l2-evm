@@ -69,6 +69,7 @@ use crate::state::{
 /// `prevrandao` and `anchor_root` come from the (stubbed) anchor reader and are
 /// committed in the block header but not derived here.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockContext {
     /// L2 block number (must be `head.number + 1`; any value for a chain's
     /// first block).
@@ -135,8 +136,9 @@ pub struct BlockInput {
     /// commits the list via [`ExecutionOutcome::deposits_hash`].
     pub deposits: Vec<DepositMint>,
     /// User transactions in sequencer order. `TxEnv` is revm's transaction
-    /// environment; signature recovery / RLP decoding belong to the (stubbed)
-    /// node layer, not this scaffold. A block with an invalid transaction is
+    /// environment and its caller is TRUSTED at this low-level interface. Network
+    /// and guest inputs must use [`crate::transactions::SignedBlockInput`] and
+    /// the signed execution/verification entry points. A block with an invalid transaction is
     /// an invalid block (verifier semantics, see the module docs).
     pub txs: Vec<TxEnv>,
 }
