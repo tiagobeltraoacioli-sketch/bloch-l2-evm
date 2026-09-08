@@ -1,6 +1,7 @@
 # Auditoria de segurança — segunda revisão do Bloch L2 EVM
 
-Data: 7 de setembro de 2026. Base analisada: `c0ee0d7db11cced43098e19afbc9f405d97fefa2`.
+Revisão realizada em 7–8 de setembro de 2026 (UTC).
+Base analisada: `c0ee0d7db11cced43098e19afbc9f405d97fefa2`.
 Correções propostas na [PR #2](https://github.com/tiagobeltraoacioli-sketch/bloch-l2-evm/pull/2).
 
 ## Parecer
@@ -211,6 +212,32 @@ e o simples compromisso em uma L1 não modifica essa autenticação. A futura
 prova SP1 precisa de avaliação própria do programa, backend, parâmetros e
 verificador. Nenhuma dessas propriedades é certificada nesta auditoria.
 
+As verificações de dependências usam as exceções já presentes no projeto:
+`cargo audit` ignora `RUSTSEC-2025-0055`, `RUSTSEC-2024-0388` e
+`RUSTSEC-2024-0436`; `cargo deny` ignora `RUSTSEC-2024-0436`. Esta PR não
+adiciona exceções. O sucesso desses comandos significa ausência de erros
+segundo essa política configurada, não ausência universal de riscos na
+árvore de dependências. O scan observado analisou 292 dependências do
+lockfile. Não foi realizada uma nova auditoria criptográfica dessas crates.
+
+### Critérios concretos para a próxima etapa
+
+1. Ligar o remetente aos bytes assinados dentro do statement verificado.
+   Validar assinaturas apenas no host não protege contra um host adversarial.
+2. Especificar a derivação da inbox da L1 e demonstrar inclusão, completude,
+   ordenação e comportamento em reorg com fixtures adversariais.
+3. Definir uma codificação versionada dos valores públicos e um verificador
+   que fixe programa, configuração, raiz anterior aceita, dados do lote e
+   âncoras. Exercitar troca de configuração, replay e substituição do lote.
+4. Compilar e executar o guest real, incluindo o backend KZG escolhido,
+   com testes diferenciais host/guest. `no_std` testado em x86_64 não é
+   evidência de execução bem-sucedida no alvo RISC-V.
+5. Implementar persistência atômica e recuperação de falhas para contas,
+   raiz, cabeça e cursor; testar interrupção de escrita e rollback de reorg.
+6. Medir custos com contratos de armazenamento grande, estabelecer limites
+   de witness/transporte e executar EEST e fuzzing contínuo antes de avaliar
+   a liberação para valor real.
+
 ## Compatibilidade e custo das correções
 
 Não há nova dependência nem alteração do lockfile, do hardfork efetivamente
@@ -265,9 +292,27 @@ cargo audit
 cargo deny check bans sources advisories licenses
 ```
 
-O resultado da matriz após as correções será registrado aqui após o término
-do CI. O teste de release foi adicionado ao workflow para manter a proteção
-contra regressões que diferem entre builds com e sem otimizações.
+O [CI após as correções](https://github.com/tiagobeltraoacioli-sketch/bloch-l2-evm/actions/runs/34171748477)
+passou integralmente no commit `02b66388d69bb0baf98093e41714b6b6571c6a1e`:
+
+| Verificação | Resultado observado |
+|---|---|
+| Build, fmt e Clippy, incluindo todos os targets/features | Aprovados |
+| Testes padrão | 68 unitários + 34 da auditoria anterior + 16 novos = 118 aprovados |
+| Testes com `serde` | 69 + 34 + 16 = 119 aprovados |
+| Build e testes sem features padrão | Build aprovado; 118 testes aprovados |
+| Novas regressões em `release` | 16 aprovadas |
+| Documentação Rust | Aprovada |
+| `cargo audit` e `cargo deny` | Aprovados sob a política de exceções descrita acima |
+
+O benchmark de desempenho preexistente permaneceu ignorado em todas as
+configurações; não foi usado como evidência de desempenho desta revisão.
+O caso Cancun de conta previamente financiada passou nas quatro execuções
+da nova suíte. O commit final de documentação apenas registra a evidência
+e esclarece comentários, sem alterar comportamento executável.
+
+O teste de release foi adicionado ao workflow para manter a proteção contra
+regressões que diferem entre builds com e sem otimizações.
 
 ## Fontes primárias consultadas
 

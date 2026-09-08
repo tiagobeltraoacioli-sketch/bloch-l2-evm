@@ -411,7 +411,8 @@ impl SparseTrieView {
     /// node at the root path hashes to `state_root` and that every descended
     /// child matches the reference held by its parent. Embedded (< 32-byte)
     /// children are decoded in place. An empty proof is accepted only for the
-    /// empty-trie root.
+    /// empty-trie root. The caller must authenticate `state_root` as a root of
+    /// a canonical fixed-key trie; opaque subtrees cannot be inspected here.
     pub fn from_proof(state_root: B256, proof: &BTreeMap<Nibbles, Bytes>) -> Result<Self, WitnessError> {
         let mut view = Self::default();
         if proof.is_empty() {
@@ -504,14 +505,14 @@ impl SparseTrieView {
             return Ok(EMPTY_ROOT_HASH);
         }
         // HashBuilder consumes keys in nibble-lexicographic order. No emitted path
-        // is a prefix of another: leaves are 64 nibbles, frontier paths are
-        // shorter, and no leaf or change lies under a frontier (checked above).
+        // is a prefix of another: leaves are 64 nibbles and no leaf or change
+        // lies under a frontier (checked above).
         out.sort_by_key(|e| e.path().to_vec());
         // Adjacent items have the longest common prefix with a sorted key.
         // Require a surviving sibling under each opaque child's old parent.
         // Without one, HashBuilder would wrap the unchanged hash in an
         // extension instead of merging the hidden leaf/extension's path.
-        // This check is linear after sorting; it never scans all pairs.
+        // Only adjacent items are inspected; there is no all-pairs scan.
         for (i, item) in out.iter().enumerate() {
             let path = item.path();
             if !self.branch_children.contains(path) {
