@@ -130,6 +130,9 @@ pub struct ChainSpec {
 /// reach a division by zero or a silent misconfiguration at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainSpecError {
+    /// The execution rules are audited and wired only for Cancun. Other
+    /// hardforks require an explicit protocol upgrade, not a runtime knob.
+    UnsupportedHardfork(SpecId),
     /// `chain_id` is zero (no EIP-155 domain).
     ZeroChainId,
     /// `gas_limit` is zero.
@@ -154,6 +157,7 @@ pub enum ChainSpecError {
 impl core::fmt::Display for ChainSpecError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            ChainSpecError::UnsupportedHardfork(fork) => write!(f, "unsupported hardfork {fork:?}; expected CANCUN"),
             ChainSpecError::ZeroChainId => write!(f, "chain_id must not be zero"),
             ChainSpecError::ZeroGasLimit => write!(f, "gas_limit must not be zero"),
             ChainSpecError::ZeroElasticity => write!(f, "base_fee_elasticity must not be zero"),
@@ -194,6 +198,9 @@ impl ChainSpec {
     /// block (`BlockExecutionError::InvalidChainSpec`), so an invalid spec can
     /// never execute a block, divide by zero or pay a block reward.
     pub fn validate(&self) -> Result<(), ChainSpecError> {
+        if self.spec_id != SpecId::CANCUN {
+            return Err(ChainSpecError::UnsupportedHardfork(self.spec_id));
+        }
         if self.chain_id == 0 {
             return Err(ChainSpecError::ZeroChainId);
         }

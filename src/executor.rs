@@ -94,12 +94,14 @@ impl BlockContext {
     /// The rule-conforming context for the block after `state`'s head:
     /// `number + 1`, the head's timestamp (non-decreasing), the EIP-1559 base
     /// fee derived from the head, zero prevrandao / anchor root. Before any
-    /// block: [`BlockContext::default`] (number 1, initial base fee). Callers
-    /// override timestamp / randomness / anchor as needed.
+    /// block: [`BlockContext::default`] (number 1, initial base fee). Reads the
+    /// configured `spec.block_info` account. At `u64::MAX` the number saturates
+    /// and execution rejects the exhausted chain. Callers override timestamp /
+    /// randomness / anchor as needed.
     pub fn next(spec: &ChainSpec, state: &L2State) -> Self {
-        match state.head() {
+        match state.head_at(spec.block_info) {
             Some(h) => Self {
-                number: h.number + 1,
+                number: h.number.saturating_add(1),
                 timestamp: h.timestamp,
                 base_fee_per_gas: spec.next_base_fee(h.base_fee_per_gas, h.gas_used),
                 prevrandao: B256::ZERO,
@@ -318,7 +320,9 @@ pub enum BlockExecutionError {
         tx_type: u8,
     },
     /// The `TxEnv`'s fields are inconsistent with its `tx_type` (a legacy /
-    /// EIP-2930 env carrying a priority fee, or an EIP-1559 env without one).
+    /// EIP-2930 env carrying a priority fee, an EIP-1559 env without one,
+    /// legacy env carrying an access list, or any supported env carrying
+    /// EIP-7702 authorizations).
     InconsistentTxEnv {
         /// Index of the offending transaction within the block.
         tx_index: usize,
@@ -537,7 +541,10 @@ pub fn validate_block_input(spec: &ChainSpec, input: &BlockInput) -> Result<(), 
             });
         }
         let is_1559 = tx.tx_type == 2;
-        if is_1559 != tx.gas_priority_fee.is_some() {
+        if is_1559 != tx.gas_priority_fee.is_some()
+            || (tx.tx_type == 0 && !tx.access_list.0.is_empty())
+            || !tx.authorization_list.is_empty()
+        {
             return Err(BlockExecutionError::InconsistentTxEnv { tx_index: i });
         }
         if tx.chain_id != Some(spec.chain_id) {

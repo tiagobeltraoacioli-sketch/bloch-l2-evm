@@ -1522,8 +1522,11 @@ mod c22 {
         // (b) a leaf whose key joins to 65 nibbles under a 1-nibble path.
         let leaf = LeafNode::new(Nibbles::from_nibbles(vec![2u8; 64]), vec![0x01]);
         let leaf_rlp = alloy_rlp::encode(&leaf);
-        let mut children: Vec<Vec<u8>> = vec![alloy_rlp::encode(keccak256(&leaf_rlp))];
-        children.extend((0..16).map(|_| alloy_rlp::encode(&[] as &[u8])));
+        let mut children: Vec<Vec<u8>> = vec![
+            alloy_rlp::encode(keccak256(&leaf_rlp)),
+            alloy_rlp::encode(B256::repeat_byte(0x77)),
+        ];
+        children.extend((0..15).map(|_| alloy_rlp::encode(&[] as &[u8])));
         let branch = list(&children);
         let mut proof: BTreeMap<Nibbles, Bytes> = BTreeMap::new();
         proof.insert(Nibbles::default(), branch.clone().into());

@@ -23,7 +23,7 @@
 //! is trusted by structure alone. Every malformed or incomplete input is a
 //! [`WitnessError`], never a panic.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -337,6 +337,13 @@ pub enum WitnessError {
         /// The offending key.
         key: Nibbles,
     },
+    /// A deletion collapses the parent of an opaque child. Its node must be
+    /// disclosed so its compact path can be merged, rather than treating an
+    /// unknown leaf or extension as a branch hash.
+    OpaqueChildNeedsExpansion {
+        /// Position of the child that the proof must expose.
+        path: Nibbles,
+    },
 }
 
 impl core::fmt::Display for WitnessError {
@@ -368,6 +375,12 @@ impl core::fmt::Display for WitnessError {
             WitnessError::DeleteOfAbsentKey { key } => {
                 write!(f, "delete of key {key:?} which the proof proves absent")
             }
+            WitnessError::OpaqueChildNeedsExpansion { path } => {
+                write!(
+                    f,
+                    "opaque child at {path:?} must be exposed before its parent can collapse"
+                )
+            }
         }
     }
 }
@@ -387,6 +400,10 @@ impl core::error::Error for WitnessError {}
 pub struct SparseTrieView {
     leaves: BTreeMap<Nibbles, Vec<u8>>,
     frontier: Vec<(Nibbles, B256)>,
+    // An opaque child of a branch might be a leaf or extension. Its hash is
+    // reusable only while that parent remains a branch. Children reached via
+    // an extension already have a mergeable prefix outside the opaque node.
+    branch_children: BTreeSet<Nibbles>,
 }
 
 impl SparseTrieView {
@@ -394,7 +411,8 @@ impl SparseTrieView {
     /// node at the root path hashes to `state_root` and that every descended
     /// child matches the reference held by its parent. Embedded (< 32-byte)
     /// children are decoded in place. An empty proof is accepted only for the
-    /// empty-trie root.
+    /// empty-trie root. The caller must authenticate `state_root` as a root of
+    /// a canonical fixed-key trie; opaque subtrees cannot be inspected here.
     pub fn from_proof(state_root: B256, proof: &BTreeMap<Nibbles, Bytes>) -> Result<Self, WitnessError> {
         let mut view = Self::default();
         if proof.is_empty() {
@@ -412,7 +430,7 @@ impl SparseTrieView {
                 got,
             });
         }
-        view.walk(root_path, root, proof)?;
+        view.walk(root_path, root, proof, false)?;
         Ok(view)
     }
 
@@ -453,8 +471,9 @@ impl SparseTrieView {
     /// Apply a change set (full key → `Some(new_rlp)` to set, `None` to delete)
     /// and return the resulting root. Untouched exposed leaves keep the value
     /// read from the proof; opaque subtrees enter as hashes. Fails if any change
-    /// key is malformed, lands inside an opaque subtree, or deletes a key the
-    /// proof proves absent.
+    /// key is malformed, lands inside an opaque subtree, deletes a key the
+    /// proof proves absent, or collapses the parent of an opaque child whose
+    /// compact path is needed to compute the canonical root.
     pub fn apply(&self, changes: &BTreeMap<Nibbles, Option<Vec<u8>>>) -> Result<B256, WitnessError> {
         // Validate the change set against the authenticated shape first.
         for (key, change) in changes {
@@ -486,9 +505,30 @@ impl SparseTrieView {
             return Ok(EMPTY_ROOT_HASH);
         }
         // HashBuilder consumes keys in nibble-lexicographic order. No emitted path
-        // is a prefix of another: leaves are 64 nibbles, frontier paths are
-        // shorter, and no leaf or change lies under a frontier (checked above).
+        // is a prefix of another: leaves are 64 nibbles and no leaf or change
+        // lies under a frontier (checked above).
         out.sort_by_key(|e| e.path().to_vec());
+        // Adjacent items have the longest common prefix with a sorted key.
+        // Require a surviving sibling under each opaque child's old parent.
+        // Without one, HashBuilder would wrap the unchanged hash in an
+        // extension instead of merging the hidden leaf/extension's path.
+        // Only adjacent items are inspected; there is no all-pairs scan.
+        for (i, item) in out.iter().enumerate() {
+            let path = item.path();
+            if !self.branch_children.contains(path) {
+                continue;
+            }
+            let parent = path.slice(..path.len() - 1);
+            let left = i.checked_sub(1).and_then(|j| out.get(j));
+            let right = out.get(i + 1);
+            if !left
+                .into_iter()
+                .chain(right)
+                .any(|other| other.path().starts_with(&parent))
+            {
+                return Err(WitnessError::OpaqueChildNeedsExpansion { path: *path });
+            }
+        }
         let mut hb = HashBuilder::default();
         for e in &out {
             match e {
@@ -502,9 +542,20 @@ impl SparseTrieView {
     /// Walk an authenticated node at `path`, recording exposed leaves and the
     /// opaque frontier. Every recursion strictly extends the path, so depth is
     /// bounded by [`KEY_NIBBLES`].
-    fn walk(&mut self, path: Nibbles, bytes: &[u8], proof: &BTreeMap<Nibbles, Bytes>) -> Result<(), WitnessError> {
-        match decode_node(&path, bytes)? {
-            TrieNode::EmptyRoot => Ok(()),
+    fn walk(
+        &mut self,
+        path: Nibbles,
+        bytes: &[u8],
+        proof: &BTreeMap<Nibbles, Bytes>,
+        expected_branch: bool,
+    ) -> Result<(), WitnessError> {
+        let node = decode_node(&path, bytes)?;
+        if expected_branch && !matches!(node, TrieNode::Branch(_)) {
+            return Err(WitnessError::MalformedNode { path });
+        }
+        match node {
+            TrieNode::EmptyRoot if path.is_empty() => Ok(()),
+            TrieNode::EmptyRoot => Err(WitnessError::MalformedNode { path }),
             TrieNode::Leaf(leaf) => {
                 if path.len() + leaf.key.len() != KEY_NIBBLES {
                     return Err(WitnessError::PathTooLong { path });
@@ -525,11 +576,14 @@ impl SparseTrieView {
                     return Err(WitnessError::PathTooLong { path });
                 }
                 let cp = path.join(&ext.key);
-                self.descend(cp, &ext.child, proof)
+                self.descend(cp, &ext.child, proof, true)
             }
             TrieNode::Branch(branch) => {
                 if path.len() >= KEY_NIBBLES {
                     return Err(WitnessError::PathTooLong { path });
+                }
+                if branch.stack.len() < 2 {
+                    return Err(WitnessError::MalformedNode { path });
                 }
                 let mut rank = 0usize;
                 for nibble in 0u8..16 {
@@ -540,7 +594,7 @@ impl SparseTrieView {
                     rank += 1;
                     let mut cp = path;
                     cp.push(nibble);
-                    self.descend(cp, child, proof)?;
+                    self.descend(cp, child, proof, false)?;
                 }
                 Ok(())
             }
@@ -551,54 +605,99 @@ impl SparseTrieView {
     /// proof supplies a node that hashes to it (else it becomes opaque
     /// frontier); an embedded node is decoded in place (and must equal any copy
     /// the proof carries at that path).
-    fn descend(&mut self, cp: Nibbles, child: &RlpNode, proof: &BTreeMap<Nibbles, Bytes>) -> Result<(), WitnessError> {
+    fn descend(
+        &mut self,
+        cp: Nibbles,
+        child: &RlpNode,
+        proof: &BTreeMap<Nibbles, Bytes>,
+        expected_branch: bool,
+    ) -> Result<(), WitnessError> {
         match child.as_hash() {
             Some(h) => match proof.get(&cp) {
                 Some(bytes) => {
                     if keccak256(bytes) != h {
                         return Err(WitnessError::UnanchoredNode { path: cp });
                     }
-                    self.walk(cp, bytes, proof)
+                    if bytes.len() < 32 {
+                        return Err(WitnessError::MalformedNode { path: cp });
+                    }
+                    self.walk(cp, bytes, proof, expected_branch)
                 }
                 None => {
                     self.frontier.push((cp, h));
+                    if !expected_branch {
+                        self.branch_children.insert(cp);
+                    }
                     Ok(())
                 }
             },
             None => {
                 let inline: &[u8] = child.as_slice();
+                if inline.len() >= 32 {
+                    return Err(WitnessError::MalformedNode { path: cp });
+                }
                 if let Some(bytes) = proof.get(&cp) {
                     if bytes.as_ref() != inline {
                         return Err(WitnessError::UnanchoredNode { path: cp });
                     }
                 }
-                self.walk(cp, inline, proof)
+                self.walk(cp, inline, proof, expected_branch)
             }
         }
     }
 }
 
-/// Decode a trie node, rejecting over-long compact keys **before** alloy-trie's
-/// decoder (which asserts on them) sees the bytes.
+/// Decode exactly one canonical trie node. Bound list arity and compact-path
+/// length before alloy-trie's allocating decoder and fixed-capacity Nibbles
+/// operations see the bytes. In particular, 33 bytes with an odd flag encode
+/// 65 nibbles, despite fitting the maximum compact-key byte count.
 fn decode_node(path: &Nibbles, bytes: &[u8]) -> Result<TrieNode, WitnessError> {
     let malformed = || WitnessError::MalformedNode { path: *path };
     let mut probe = bytes;
     let header = Header::decode(&mut probe).map_err(|_| malformed())?;
+    if header.payload_length != probe.len() {
+        return Err(malformed());
+    }
     if header.list {
-        if header.payload_length > probe.len() {
-            return Err(malformed());
-        }
-        let mut first = &probe[..header.payload_length];
-        if !first.is_empty() {
-            let item = Header::decode(&mut first).map_err(|_| malformed())?;
-            // Leaf / extension nodes: the first item is the compact key (a string).
-            if !item.list && item.payload_length > MAX_COMPACT_KEY_BYTES {
+        let mut items = probe;
+        let mut count = 0;
+        let mut compact = None;
+        while !items.is_empty() {
+            let item = Header::decode(&mut items).map_err(|_| malformed())?;
+            if item.payload_length > items.len() {
+                return Err(malformed());
+            }
+            if count == 0 && !item.list {
+                compact = Some(&items[..item.payload_length]);
+            }
+            items = &items[item.payload_length..];
+            count += 1;
+            if count > 17 {
                 return Err(malformed());
             }
         }
+        if count == 2 {
+            let compact = compact.ok_or_else(malformed)?;
+            let first = *compact.first().ok_or_else(malformed)?;
+            let flag = first >> 4;
+            let odd = usize::from(flag & 1);
+            if flag > 3
+                || (odd == 0 && first & 0x0f != 0)
+                || compact.len() > MAX_COMPACT_KEY_BYTES
+                || (compact.len() - 1) * 2 + odd > KEY_NIBBLES
+            {
+                return Err(malformed());
+            }
+        } else if count != 17 {
+            return Err(malformed());
+        }
     }
     let mut buf = bytes;
-    TrieNode::decode(&mut buf).map_err(|_| malformed())
+    let node = TrieNode::decode(&mut buf).map_err(|_| malformed())?;
+    if !buf.is_empty() {
+        return Err(malformed());
+    }
+    Ok(node)
 }
 
 /// One reconstruction step fed to `HashBuilder`, sorted by trie path.
@@ -1140,10 +1239,11 @@ mod tests {
         let mut branch_payload = Vec::new();
         let leaf_rlp = alloy_rlp::encode(&long_leaf);
         let leaf_hash = keccak256(&leaf_rlp);
-        // Branch with one child (nibble 0) referencing the leaf by hash, 16 empty
-        // slots otherwise + empty value.
+        // Branch with two children, so path overflow is tested independently
+        // of the canonical rule rejecting unary branches.
         leaf_hash.encode(&mut branch_payload);
-        for _ in 1..17 {
+        B256::repeat_byte(0x77).encode(&mut branch_payload);
+        for _ in 2..17 {
             [].as_slice().encode(&mut branch_payload);
         }
         let mut branch_rlp = Vec::new();

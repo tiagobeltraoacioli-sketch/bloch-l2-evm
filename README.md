@@ -13,6 +13,12 @@
 > [`tests/audit_regressions.rs`](tests/audit_regressions.rs); its P0, P1 and
 > P2 findings are fixed and every finding has a live regression test.
 
+The [second-pass security audit](SECURITY-AUDIT-2026-09-07.md) documents
+additional fixes for sparse-proof completeness, canonical decoding, the Cancun
+hardfork boundary, transaction-field consistency, and configured head access.
+It also records the remaining transaction/L1 authentication and proof-system
+integration requirements. Regressions live in `tests/deep_security.rs`.
+
 > **The reorg gate (from the design, read first).** An L2 inherits its L1's
 > finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited — a Bloch
 > reorg can unwind L2 state anchored to reorged blocks. Real value is gated on
