@@ -1,3 +1,11 @@
+<!-- Amendment 2026-09-08: the historical audit below is preserved. -->
+> **Atualização — 2026-09-08:** B01 recebeu uma interface implementada em
+> `src/transactions.rs`: envelopes Ethereum canônicos, recuperação ECDSA e
+> autenticação repetida em `verify_signed_batch`. A API antiga com `TxEnv`
+> permanece de baixo nível e confiada. A integração obrigatória dessa interface
+> no futuro nó/guest, os compromissos públicos de B03 e a derivação L1 de B02
+> continuam pendentes. Ver [contrato de integração](WALLET-COMPATIBILITY.md).
+
 # Auditoria de segurança — segunda revisão do Bloch L2 EVM
 
 Revisão realizada em 7–8 de setembro de 2026 (UTC).

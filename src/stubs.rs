@@ -35,10 +35,9 @@ pub mod rpc {
 /// Transaction pool — **STUBBED**.
 ///
 /// The design uses Reth's mainnet-grade txpool. This scaffold executes
-/// pre-ordered `TxEnv`s only (verifier semantics: a block with an invalid
-/// transaction is invalid); there is no mempool, no gossip, no replacement
-/// rules, no signature recovery, and no block-builder that skips invalid
-/// candidates.
+/// pre-ordered signed envelopes through [`crate::transactions`] (a block with an
+/// invalid transaction is invalid). Recovery and canonical decoding exist;
+/// mempool, gossip, replacement rules and candidate selection remain absent.
 pub mod txpool {
     /// Submit a raw RLP transaction to the pool.
     pub fn submit_raw_transaction(_rlp_bytes: &[u8]) -> ! {
@@ -57,8 +56,8 @@ pub mod txpool {
 /// validity against the committed head, `BLOCKHASH` from the committed ring,
 /// the EIP-4788 system call — audit findings C13, C16, C17); the node's own
 /// duties are the anchor reader (Bloch anchor root / prevrandao derivation),
-/// the timestamp drift bound against the anchor, signature recovery and
-/// receipts.
+/// the timestamp drift bound against the anchor, receipts and wiring the signed
+/// transaction boundary into RPC, pool, execution and proving.
 pub mod node {
     /// Build and launch the L2 full node / sequencer.
     pub fn launch_reth_node() -> ! {
@@ -75,9 +74,9 @@ pub mod node {
 /// witness against the pre-state root, re-execute with the SAME pinned revm,
 /// commit public values, prove with FRI core proofs only (no Groth16/Plonk
 /// wrap — the repo's post-quantum rule). The procedure the guest must run
-/// exists and is tested on the host — [`crate::proving::verify_batch`] over a
+/// exists and is tested on the host — [`crate::transactions::verify_signed_batch`] over a
 /// [`crate::proving::BatchWitness`] produced by
-/// [`crate::proving::generate_batch_witness`] — and the whole crate, revm and
+/// [`crate::transactions::generate_signed_batch_witness`] — and the whole crate, revm and
 /// alloy tree included, builds and tests in `no_std` + `alloc` with
 /// `--no-default-features`; the witness has a `serde` wire format. What does
 /// not exist here: the `sp1_zkvm` entrypoint, the public-values encoding, the
@@ -86,9 +85,10 @@ pub mod node {
 pub mod sp1_guest {
     /// Re-execute a batch inside the zkVM guest.
     pub fn guest_main() -> ! {
-        // SCAFFOLD: sp1_zkvm entrypoint reading (ChainSpec, BlockInput,
-        // BatchWitness), calling crate::proving::verify_batch, committing
-        // (prev_state_root, new_state_root, deposits_hash) as public values.
+        // SCAFFOLD: sp1_zkvm entrypoint reading (ChainSpec, SignedBlockInput,
+        // BatchWitness), calling crate::transactions::verify_signed_batch, committing
+        // accepted pre-root, chain/program identity, transaction commitment,
+        // finalized L1 derivation, new_state_root and deposits_hash as public values.
         todo!("SCAFFOLD: the SP1 guest (riscv32im) target is not implemented in this scaffold")
     }
 }

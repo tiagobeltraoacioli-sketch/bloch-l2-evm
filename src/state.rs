@@ -59,6 +59,7 @@ use crate::stateroot::{compute_keccak_mpt_state_root, StateTrie};
 /// no other asset. Adding a variant here would violate the design's zero-
 /// issuance / not-a-security posture and must not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DepositProvenance {
     /// BLCH escrowed on the Bloch L1 (the deposit system-transaction's
     /// source, OP-style type-0x7E envelope in the full design).
@@ -82,6 +83,7 @@ pub enum DepositProvenance {
 /// (`sats_to_wei(l1_sats)`, see [`DepositMint::mint_wei`]); there is no
 /// separate caller-supplied amount to keep consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DepositMint {
     /// L2 recipient credited with the minted wei.
     pub recipient: Address,

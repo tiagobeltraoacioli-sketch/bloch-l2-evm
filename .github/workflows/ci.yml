@@ -34,10 +34,20 @@ jobs:
       - run: cargo build --locked --no-default-features
       - run: cargo test --locked --no-default-features
       # Capacity and overflow guards must also hold with release optimizations.
-      - run: cargo test --locked --release --test deep_security
+      - run: cargo test --locked --release --test deep_security --test signed_transactions
       - run: cargo doc --locked --no-deps
       # List the pre-existing ignored performance benchmark for discoverability.
       - run: cargo test --locked --test audit_regressions -- --ignored --list
+
+  wallets:
+    name: EIP-1193 wallet adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test wallets/bloch-l2.test.mjs
 
   deny:
     name: cargo deny (bans · sources · advisories · licenses)
