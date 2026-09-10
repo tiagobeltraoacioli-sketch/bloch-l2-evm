@@ -1,6 +1,12 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # bloch-l2-evm
 
+The [Genesis-4 source adapter](GENESIS4-SOURCE.md) now binds native EVM
+execution and signed witness replay to a host-accepted Bloch source block.
+It has been exercised against a real mainnet source checkpoint, with a
+zero-value test batch. This is source-data integration, not activated L2
+settlement, a live bridge or a replacement for the node/RPC work below.
+
 > **SCAFFOLD, not a working L2.** This crate is a first-iteration,
 > compiling skeleton of the execution layer described in
 > `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1 (design documents live in the
