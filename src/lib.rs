@@ -103,6 +103,7 @@ extern crate std;
 
 pub mod chainspec;
 pub mod executor;
+pub mod genesis4;
 pub mod mpt;
 pub mod proving;
 pub mod scale;
