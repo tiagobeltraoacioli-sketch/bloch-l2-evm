@@ -1,4 +1,4 @@
-const UPSTREAM = 'https://l2rpc.posternlabs.com';
+const UPSTREAMS = { legacy: 'https://l2rpc.posternlabs.com', dex: 'http://45.76.138.60.nip.io/rpc' };
 const hash = (v) => typeof v === 'string' && /^0x[0-9a-fA-F]{64}$/.test(v);
 const address = (v) => typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v);
 const block = (v) => v === 'latest' || (typeof v === 'string' && /^0x[0-9a-fA-F]{1,16}$/.test(v));
@@ -33,14 +33,15 @@ export async function onRequest({ request }) {
       text += decoder.decode(value, { stream: true });
     }
     text += decoder.decode();
-    const { method, params } = JSON.parse(text);
+    const { method, params, network = 'dex' } = JSON.parse(text);
+    if (!Object.hasOwn(UPSTREAMS, network)) return response({ error: 'Unknown network' }, 400);
     if (!Object.hasOwn(validators, method) || !Array.isArray(params) || !validators[method](params)) {
       return response({ error: 'Unsupported read-only request' }, 400);
     }
     stage = 'upstream';
     const controller = new AbortController();
     timeout = setTimeout(() => controller.abort(), 10000);
-    const upstream = await fetch(UPSTREAM, {
+    const upstream = await fetch(UPSTREAMS[network], {
       method: 'POST', redirect: 'manual',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),

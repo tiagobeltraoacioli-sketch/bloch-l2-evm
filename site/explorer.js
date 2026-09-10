@@ -1,7 +1,10 @@
 const $ = (id) => document.getElementById(id);
 let generation = 0;
+let identityGeneration = 0;
+let network = new URLSearchParams(location.search).get('network') === 'legacy' ? 'legacy' : 'dex';
+$('network').value = network;
 async function rpc(method, params = []) {
-  const res = await fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method, params }), signal: AbortSignal.timeout(15000) });
+  const res = await fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method, params, network }), signal: AbortSignal.timeout(15000) });
   const data = await res.json();
   if (!res.ok || data.error) throw new Error(data.error || 'RPC unavailable');
   return data.result;
@@ -11,12 +14,17 @@ function quantity(value) {
   return BigInt(value).toString();
 }
 async function identity() {
+  const current = ++identityGeneration;
+  const selected = network;
+  $('network-status').classList.remove('error');
+  $('network-status').textContent = 'Checking RPC identity…';
   try {
     const [chain, client] = await Promise.all([rpc('eth_chainId'), rpc('web3_clientVersion')]);
+    if (current !== identityGeneration) return;
     const id = quantity(chain);
     if (typeof client !== 'string') throw new Error('Invalid client identity');
-    $('network-status').textContent = `Connected RPC · Chain ID ${id} · ${client} · ${id === '8400' ? 'Legacy devnet — not the new L2 release' : 'Unexpected identity — verify the network before interpreting results'}`;
-  } catch { $('network-status').textContent = 'RPC identity unavailable. Results cannot currently be verified against a connected network.'; $('network-status').classList.add('error'); }
+    $('network-status').textContent = `Connected RPC · Chain ID ${id} · ${client} · ${id === (selected === 'dex' ? '84001' : '8400') ? (selected === 'dex' ? 'DEX testnet · Anvil · no Bloch L1 settlement' : 'Legacy devnet — not the new L2 release') : 'Unexpected identity — verify the network before interpreting results'}`;
+  } catch { if (current !== identityGeneration) return; $('network-status').textContent = 'RPC identity unavailable. Results cannot currently be verified against a connected network.'; $('network-status').classList.add('error'); }
 }
 function card(title, value) {
   const article = document.createElement('article'); article.className = 'result-card';
@@ -54,3 +62,9 @@ async function search(value) {
 $('search-form').addEventListener('submit', (event) => { event.preventDefault(); void search($('query').value.trim()); });
 $('refresh').addEventListener('click', () => { void identity(); void search('latest'); });
 void identity(); void search('latest');
+
+$('network').addEventListener('change', () => {
+  network = $('network').value;
+  const url = new URL(location.href); url.searchParams.set('network', network); history.replaceState(null, '', url);
+  $('query').value = ''; void identity(); void search('latest');
+});
