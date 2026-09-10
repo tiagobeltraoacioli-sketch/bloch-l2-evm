@@ -19,6 +19,8 @@ const response = (data, status = 200) => new Response(JSON.stringify(data), {
 export async function onRequest({ request }) {
   if (request.method !== 'POST') return response({ error: 'POST required' }, 405);
   if (Number(request.headers.get('content-length') || 0) > 2048) return response({ error: 'Request too large' }, 413);
+  let stage = 'request';
+  let timeout;
   try {
     if (!request.body) return response({ error: 'Request body required' }, 400);
     const input = request.body.getReader();
@@ -35,16 +37,17 @@ export async function onRequest({ request }) {
     if (!Object.hasOwn(validators, method) || !Array.isArray(params) || !validators[method](params)) {
       return response({ error: 'Unsupported read-only request' }, 400);
     }
+    stage = 'upstream';
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    timeout = setTimeout(() => controller.abort(), 10000);
     const upstream = await fetch(UPSTREAM, {
-      method: 'POST', redirect: 'error',
+      method: 'POST', redirect: 'manual',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
     if (!upstream.ok || !upstream.body) return response({ error: 'Upstream unavailable' }, 502);
+    stage = 'response';
     const reader = upstream.body.getReader();
     const chunks = []; let length = 0;
     while (true) {
@@ -60,5 +63,5 @@ export async function onRequest({ request }) {
     if (data.error) return response({ error: 'This query is unavailable on the connected RPC.' }, 502);
     if (!Object.hasOwn(data, 'result')) return response({ error: 'Invalid upstream response' }, 502);
     return response({ result: data.result });
-  } catch { return response({ error: 'RPC unavailable or invalid request. Try again shortly.' }, 502); }
+  } catch (error) { console.error('rpc failure', stage, error.name, error.message); return response({ error: `RPC unavailable (${stage}). Try again shortly.` }, 502); } finally { if (timeout !== undefined) clearTimeout(timeout); }
 }
