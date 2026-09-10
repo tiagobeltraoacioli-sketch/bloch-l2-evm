@@ -35,12 +35,15 @@ export async function onRequest({ request }) {
     if (!Object.hasOwn(validators, method) || !Array.isArray(params) || !validators[method](params)) {
       return response({ error: 'Unsupported read-only request' }, 400);
     }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
     const upstream = await fetch(UPSTREAM, {
       method: 'POST', redirect: 'error',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-      signal: AbortSignal.timeout(10000),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     if (!upstream.ok || !upstream.body) return response({ error: 'Upstream unavailable' }, 502);
     const reader = upstream.body.getReader();
     const chunks = []; let length = 0;
