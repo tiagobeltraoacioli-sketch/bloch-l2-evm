@@ -285,3 +285,131 @@ fn batch_preflights_total_work_before_any_authentication() {
     );
     assert_eq!(ledger.commitment(), root);
 }
+
+#[cfg(unix)]
+mod persistence {
+    use super::*;
+    use bloch_native_escrow_pq::lock_store::{LockStore, StoreError};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            Self(std::env::temp_dir().join(format!(
+                    "bloch-lock-store-{}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                )))
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn replay_restores_change_inbox_and_double_spend_protection() {
+        let temp = Temp::new();
+        let (baseline, first) = setup();
+        let mut store = LockStore::create(&temp.0, baseline).unwrap();
+        let floor = store.mark().unwrap();
+        assert!(matches!(
+            LockStore::open(&temp.0, setup().0, floor),
+            Err(StoreError::Locked)
+        ));
+        let second = chained(&first);
+        store.submit_batch(&[request(&first, &sign(&first))]).unwrap();
+        let older = store.mark().unwrap();
+        store.submit_batch(&[request(&second, &sign(&second))]).unwrap();
+        let latest = store.mark().unwrap();
+        let root = store.escrow().unwrap().commitment();
+        drop(store);
+        fs::write(temp.0.join(".pending-incomplete"), b"incomplete").unwrap();
+        let mut reopened = LockStore::open(&temp.0, setup().0, older).unwrap();
+        assert_eq!(reopened.mark().unwrap(), latest);
+        assert_eq!(reopened.escrow().unwrap().commitment(), root);
+        assert!(reopened.escrow().unwrap().conserved());
+        assert!(reopened.escrow().unwrap().inbox().proof(1).is_some());
+        assert!(matches!(
+            reopened.submit_batch(&[request(&first, &sign(&first))]),
+            Err(StoreError::Authorization(Error::Transition(EscrowError::Replay)))
+        ));
+        assert_eq!(reopened.mark().unwrap(), latest);
+        drop(reopened);
+        fs::remove_file(temp.0.join("00000000000000000002.locks")).unwrap();
+        assert!(matches!(
+            LockStore::open(&temp.0, setup().0, latest),
+            Err(StoreError::Rollback)
+        ));
+    }
+    #[test]
+    fn corrupted_signature_is_reverified_and_wrong_baseline_is_rejected() {
+        let temp = Temp::new();
+        let (baseline, first) = setup();
+        let mut store = LockStore::create(&temp.0, baseline).unwrap();
+        let floor = store.mark().unwrap();
+        store.submit_batch(&[request(&first, &sign(&first))]).unwrap();
+        drop(store);
+        let mut wrong = setup().0;
+        wrong.submit(&first, &keys().0, &sign(&first)).unwrap();
+        assert!(matches!(
+            LockStore::open(&temp.0, wrong, floor),
+            Err(StoreError::Baseline)
+        ));
+        let path = temp.0.join("00000000000000000001.locks");
+        let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let byte = json["locks"][0]["signature"][4].as_u64().unwrap();
+        json["locks"][0]["signature"][4] = (byte ^ 1).into();
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(matches!(
+            LockStore::open(&temp.0, setup().0, floor),
+            Err(StoreError::Authorization(Error::Signature))
+        ));
+    }
+    #[test]
+    fn publication_failure_poisons_writer_and_never_overwrites_existing_record() {
+        let temp = Temp::new();
+        let (baseline, first) = setup();
+        let mut store = LockStore::create(&temp.0, baseline).unwrap();
+        let floor = store.mark().unwrap();
+        let path = temp.0.join("00000000000000000001.locks");
+        fs::write(&path, b"collision").unwrap();
+        assert!(matches!(
+            store.submit_batch(&[request(&first, &sign(&first))]),
+            Err(StoreError::CommitUncertain(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"collision");
+        assert!(matches!(store.mark(), Err(StoreError::Poisoned)));
+        assert!(matches!(store.escrow(), Err(StoreError::Poisoned)));
+        assert!(matches!(store.submit_batch(&[]), Err(StoreError::Poisoned)));
+        drop(store);
+        fs::remove_file(path).unwrap();
+        let reopened = LockStore::open(&temp.0, setup().0, floor).unwrap();
+        assert_eq!(reopened.mark().unwrap(), floor);
+    }
+    #[test]
+    fn invalid_later_lock_leaves_disk_and_memory_unchanged() {
+        let temp = Temp::new();
+        let (baseline, first) = setup();
+        let mut store = LockStore::create(&temp.0, baseline).unwrap();
+        let floor = store.mark().unwrap();
+        assert!(store
+            .submit_batch(&[request(&first, &sign(&first)), request(&first, &sign(&first))])
+            .is_err());
+        assert_eq!(store.mark().unwrap(), floor);
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 2);
+        drop(store);
+        assert_eq!(
+            LockStore::open(&temp.0, setup().0, floor).unwrap().mark().unwrap(),
+            floor
+        );
+    }
+}

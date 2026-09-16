@@ -9,6 +9,10 @@ weak-subjectivity envelopes with real hybrid signatures, fixed Phase-A/Phase-B
 quorum policies, freshness checks and exact header binding. It does not replace
 trusted signer distribution or prove FFG history independently.
 
+The Unix [lock store](LOCK-STORE.md) persists signed batches with exclusive writer
+locking, replay verification and independently retained rollback floors. It wraps
+the in-memory facade below without introducing native consensus activation.
+
 ## Authorization and state transition
 
 `PqEscrow::submit` accepts an escrow intent, public key and signature. It requires
@@ -83,7 +87,7 @@ aggregate input/signature/count limits before authentication.
 ## Remaining boundaries
 
 Initial coins are trusted local genesis allocations. This adapter does not
-authenticate a live UTXO snapshot, persist state, define a consensus wire format,
+authenticate a live UTXO snapshot, define a consensus wire format,
 calculate live transaction fees or activate new rules on validators. Funding
 authorization alone does not establish finalized deposit inclusion or authorize
 an EVM mint. Withdrawals remain unconditionally disabled until verified execution,

@@ -761,6 +761,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "bitvec"
@@ -770,6 +773,7 @@ checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
 dependencies = [
  "funty",
  "radium",
+ "serde",
  "tap",
  "wyz",
 ]
@@ -836,6 +840,8 @@ dependencies = [
  "bloch-crypto",
  "bloch-l2-evm",
  "bloch-pos-committee",
+ "serde",
+ "serde_json",
  "sha3 0.11.0",
 ]
 
@@ -1361,6 +1367,9 @@ name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "elliptic-curve"
@@ -1883,6 +1892,9 @@ name = "nonmax"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "num"
@@ -2969,6 +2981,9 @@ name = "smallvec"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "spki"

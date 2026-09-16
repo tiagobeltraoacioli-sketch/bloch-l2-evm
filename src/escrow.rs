@@ -11,6 +11,7 @@ use sha3::{Digest, Sha3_256};
 
 /// Native output identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Outpoint {
     /// Native transaction ID.
     pub txid: B256,
@@ -27,6 +28,7 @@ pub struct Coin {
 }
 /// Explicit native lock intent; not an assigned mainnet transaction wire tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LockIntent {
     /// Genesis/network identity.
     pub network: B256,

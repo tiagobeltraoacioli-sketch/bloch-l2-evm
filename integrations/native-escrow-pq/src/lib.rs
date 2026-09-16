@@ -8,6 +8,8 @@ use sha3::{Digest, Sha3_256};
 pub mod checkpoint;
 #[cfg(unix)]
 pub mod checkpoint_store;
+#[cfg(unix)]
+pub mod lock_store;
 
 /// Authentication or state-transition rejection. All errors preserve ledger state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,11 @@ impl PqEscrow {
     /// All request limits are checked before cloning or signature verification.
     /// This local operation does not persist state or establish L1 finality.
     pub fn submit_batch(&mut self, requests: &[SignedLock<'_>]) -> Result<Vec<LockedDeposit>, AuthorizationError> {
+        let (candidate, records) = self.prepare_batch(requests)?;
+        self.ledger = candidate.ledger;
+        Ok(records)
+    }
+    fn prepare_batch(&self, requests: &[SignedLock<'_>]) -> Result<(Self, Vec<LockedDeposit>), AuthorizationError> {
         if requests.is_empty()
             || requests.len() > MAX_LOCK_BATCH
             || requests
@@ -62,8 +69,7 @@ impl PqEscrow {
             .iter()
             .map(|r| candidate.submit(r.intent, r.public_key, r.signature))
             .collect::<Result<Vec<_>, _>>()?;
-        self.ledger = candidate.ledger;
-        Ok(records)
+        Ok((candidate, records))
     }
     /// Create a local ledger from trusted genesis allocations, not an RPC balance.
     pub fn new(
