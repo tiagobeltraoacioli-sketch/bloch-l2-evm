@@ -440,3 +440,135 @@ fn committed_state_survives_process_exit_without_destructors() {
     assert_eq!(journal.next_deposit(), 1);
     assert_eq!(journal.state_root(), f.witness.new_state_root);
 }
+
+fn cli_setup(temp: &Temp, f: &Fixture) {
+    fs::create_dir(&temp.0).unwrap();
+    fs::create_dir(temp.0.join("trust")).unwrap();
+    let config = serde_json::json!({ "version": 1, "profile": "bloch-evm-cancun-local-v1",
+        "network": B256::repeat_byte(1), "module": B256::repeat_byte(2), "runtime": B256::repeat_byte(3),
+        "expected_domain": f.domain.id(), "witness_limit": 16777216 });
+    write_json(temp.0.join("config.json"), &config);
+    let head = JournalHead::genesis(f.domain.id());
+    write_json(
+        temp.0.join("head.json"),
+        &serde_json::json!({"blocks": head.blocks, "digest": head.digest}),
+    );
+    write_json(
+        temp.0.join("proposal.json"),
+        &serde_json::json!({"version": 1,
+        "proofs": f.proofs, "input": f.input, "witness": f.witness}),
+    );
+    let t = &f.trusted;
+    let locations: Vec<_> = t
+        .locations
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "sequence": l.sequence, "intent": l.intent, "height": l.position.l1_height,
+                "transaction_index": l.position.l1_tx_index, "output_index": l.position.l1_vout,
+                "transaction": l.transaction,
+            })
+        })
+        .collect();
+    write_json(
+        temp.0.join("trust/00000000000000000001.json"),
+        &serde_json::json!({
+            "version": 1, "height": t.execution.height, "block": t.execution.block,
+            "domain": t.execution.domain, "input": t.execution.input, "inbox_root": t.inbox_root,
+            "count": t.count, "locations": locations,
+        }),
+    );
+}
+fn write_json(path: PathBuf, value: &serde_json::Value) {
+    fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+}
+fn cli(temp: &Temp, command: &str) -> std::process::Output {
+    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_bloch-domain"));
+    process
+        .arg(command)
+        .arg(temp.0.join("config.json"))
+        .arg(temp.0.join("journal"));
+    if command != "init" {
+        process.arg(temp.0.join("head.json")).arg(temp.0.join("trust"));
+    }
+    if command == "apply" {
+        process.arg(temp.0.join("proposal.json"));
+    }
+    process.output().unwrap()
+}
+
+#[test]
+fn cli_initializes_applies_recovers_and_refuses_duplicate_credit() {
+    let f = fixture();
+    let temp = Temp::new();
+    cli_setup(&temp, &f);
+    assert!(cli(&temp, "init").status.success());
+    let output = cli(&temp, "apply");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let applied: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(applied["next_deposit"], 1);
+    assert_eq!(
+        applied["state_root"],
+        serde_json::to_value(f.witness.new_state_root).unwrap()
+    );
+    write_json(temp.0.join("head.json"), &applied["head"]);
+    let recovered = cli(&temp, "status");
+    assert!(recovered.status.success());
+    let recovered: serde_json::Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(recovered["head"], applied["head"]);
+    assert_eq!(recovered["next_deposit"], 1);
+    assert_eq!(cli(&temp, "apply").status.code(), Some(1));
+    assert!(!temp.0.join("journal/00000000000000000002.blj").exists());
+    fs::remove_file(temp.0.join("trust/00000000000000000001.json")).unwrap();
+    assert_eq!(cli(&temp, "status").status.code(), Some(1));
+}
+
+#[test]
+fn cli_never_takes_trusted_context_from_the_proposal() {
+    let f = fixture();
+    let temp = Temp::new();
+    cli_setup(&temp, &f);
+    assert!(cli(&temp, "init").status.success());
+    let path = temp.0.join("proposal.json");
+    let mut proposal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    proposal["trusted"] = serde_json::json!({"finalized": true});
+    write_json(path.clone(), &proposal);
+    assert_eq!(cli(&temp, "apply").status.code(), Some(1));
+    proposal.as_object_mut().unwrap().remove("trusted");
+    write_json(path, &proposal);
+    let trust_path = temp.0.join("trust/00000000000000000001.json");
+    let mut trust: serde_json::Value = serde_json::from_slice(&fs::read(&trust_path).unwrap()).unwrap();
+    trust["input"] = serde_json::to_value(B256::ZERO).unwrap();
+    write_json(trust_path.clone(), &trust);
+    assert_eq!(cli(&temp, "apply").status.code(), Some(1));
+    fs::remove_file(trust_path).unwrap();
+    assert_eq!(cli(&temp, "apply").status.code(), Some(1));
+    assert!(!temp.0.join("journal/00000000000000000001.blj").exists());
+}
+
+#[test]
+fn cli_rejects_wrong_identity_symlinks_and_oversized_inputs() {
+    let f = fixture();
+    let temp = Temp::new();
+    cli_setup(&temp, &f);
+    let config_path = temp.0.join("config.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["expected_domain"] = serde_json::to_value(B256::ZERO).unwrap();
+    write_json(config_path.clone(), &config);
+    assert_eq!(cli(&temp, "init").status.code(), Some(1));
+    assert!(!temp.0.join("journal").exists());
+    config["expected_domain"] = serde_json::to_value(f.domain.id()).unwrap();
+    write_json(config_path, &config);
+    assert!(cli(&temp, "init").status.success());
+    let proposal = temp.0.join("proposal.json");
+    fs::rename(&proposal, temp.0.join("real-proposal.json")).unwrap();
+    std::os::unix::fs::symlink(temp.0.join("real-proposal.json"), &proposal).unwrap();
+    assert_eq!(cli(&temp, "apply").status.code(), Some(1));
+    fs::remove_file(&proposal).unwrap();
+    fs::File::create(proposal)
+        .unwrap()
+        .set_len(bloch_escrow_journal::MAX_RECORD_BYTES as u64 + 1)
+        .unwrap();
+    assert_eq!(cli(&temp, "apply").status.code(), Some(1));
+    assert!(!temp.0.join("journal/00000000000000000001.blj").exists());
+}

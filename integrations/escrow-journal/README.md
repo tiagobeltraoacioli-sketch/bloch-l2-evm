@@ -4,6 +4,9 @@ This Unix host library persists the inputs needed to recover `EscrowEvmDomain`
 by verified replay. It is separate from the portable/no_std execution core.
 It does not deploy a service, activate a bridge or authenticate L1 finality.
 
+The [local operator CLI](CLI.md) provides bounded `init`, `status` and `apply`
+commands with separate operator-supplied L1 derivation files.
+
 ## Commit and recovery
 
 1. Create a new directory with mode 0700 and files with mode 0600, subject to
