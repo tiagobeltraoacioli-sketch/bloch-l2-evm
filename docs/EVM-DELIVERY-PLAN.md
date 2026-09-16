@@ -147,3 +147,11 @@ the canonical provider and authenticated pool. A real-provider JSON-RPC fixture
 targets raw signed admission, receipts/log metadata, block identity and state reads.
 The developer-node gate still requires execution-query qualification, transport,
 wallet tools and restart tests; handler construction alone does not close it.
+
+Latest/historical call and gas-estimate tests now cover BLOCKHASH context, explicit
+overrides, access-list inspection and transient writes. Historical RPC testing
+also exposed missing genesis history indices; genesis preparation now supplies
+the allocation reverts that full persistence needs, with independent portable-core
+checks across reopen and unwind. Previously initialized databases are not migrated
+automatically. Authenticated pending derivation, broader simulation/tracing,
+transport and the launched developer workflow remain open.

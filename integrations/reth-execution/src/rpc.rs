@@ -40,13 +40,47 @@ impl PendingEnvBuilder<BlochEvmConfig> for NoDerivedPending {
     }
 }
 
+/// Components forwarded to Reth with an RPC-specific clone of the EVM config.
+/// The caller's original configuration and canonical executor remain unchanged.
+#[derive(Clone, Debug)]
+pub struct BlochRpcComponents<N> {
+    inner: N,
+    evm: BlochEvmConfig,
+}
+
+impl<N> RpcNodeCore for BlochRpcComponents<N>
+where
+    N: RpcNodeCore<Primitives = BlochNodePrimitives, Evm = BlochEvmConfig>,
+{
+    type Primitives = BlochNodePrimitives;
+    type Provider = N::Provider;
+    type Pool = N::Pool;
+    type Network = N::Network;
+    type Evm = BlochEvmConfig;
+
+    fn provider(&self) -> &Self::Provider {
+        self.inner.provider()
+    }
+    fn pool(&self) -> &Self::Pool {
+        self.inner.pool()
+    }
+    fn network(&self) -> &Self::Network {
+        self.inner.network()
+    }
+    fn evm_config(&self) -> &Self::Evm {
+        &self.evm
+    }
+}
+
 /// Construct upstream Reth handlers over initialized Bloch components.
 ///
 /// Must run inside a Tokio runtime. The caller owns canonical maintenance and
 /// transport lifecycle; this does not launch networking, fork choice or Engine API.
 /// Pending environments are unavailable until authenticated derivation is wired.
-/// Execution RPC methods still require separate Bloch environment qualification.
-pub fn build_eth_api<N>(components: N, runtime: Runtime) -> EthApi<N, BlochRpcConverter>
+/// Call/estimate BLOCKHASH uses provider ancestry and explicit RPC overrides;
+/// canonical execution retains its shared-kernel frozen history. Broader
+/// simulation/tracing and wallet workflows require separate qualification.
+pub fn build_eth_api<N>(components: N, runtime: Runtime) -> EthApi<BlochRpcComponents<N>, BlochRpcConverter>
 where
     N: RpcNodeCore<
         Primitives = BlochNodePrimitives,
@@ -55,6 +89,10 @@ where
     >,
 {
     let converter = rpc_converter(components.provider().chain_spec());
+    let components = BlochRpcComponents {
+        evm: components.evm_config().clone().for_rpc(),
+        inner: components,
+    };
     EthApiBuilder::new_with_components(components)
         .with_rpc_converter(converter)
         .with_pending_env_builder(NoDerivedPending)

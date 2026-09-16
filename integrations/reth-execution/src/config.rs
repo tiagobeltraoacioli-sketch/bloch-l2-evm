@@ -5,14 +5,14 @@ use crate::{
     BlochRethBlockExecutorFactory,
 };
 use alloy_eips::eip2718::Encodable2718;
-use alloy_evm::{block::BlockExecutionError, EvmEnv};
+use alloy_evm::{block::BlockExecutionError, Database, EvmEnv, EvmFactory};
 use alloy_primitives::{Address, B256, U256};
 use bloch_l2_evm::{
     node_execution::node_head_on_database, node_primitives::NodeBodyV2, BlockContext, ChainSpec, DepositMint,
 };
 use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
-    ConfigureEvm,
+    ConfigureEvm, EvmFor, InspectorFor,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use reth_revm::{
@@ -45,6 +45,7 @@ pub struct BlochEvmConfig {
     domain: B256,
     factory: BlochRethBlockExecutorFactory,
     assembler: BlochNodeBlockAssembler,
+    rpc_block_hashes: bool,
 }
 impl BlochEvmConfig {
     /// Bind execution to a trusted specification and nonzero V2 domain.
@@ -54,7 +55,14 @@ impl BlochEvmConfig {
             domain,
             factory: BlochRethBlockExecutorFactory::new(spec, domain),
             assembler: BlochNodeBlockAssembler::new(spec, domain),
+            rpc_block_hashes: false,
         }
+    }
+    /// Only RPC construction enables provider ancestry and explicit block overrides.
+    /// Canonical block executors still install their shared-kernel snapshot.
+    pub(crate) fn for_rpc(mut self) -> Self {
+        self.rpc_block_hashes = true;
+        self
     }
     fn next_context(
         &self,
@@ -113,6 +121,24 @@ impl ConfigureEvm for BlochEvmConfig {
     type NextBlockEnvCtx = BlochNextBlockEnvCtx;
     type BlockExecutorFactory = BlochRethBlockExecutorFactory;
     type BlockAssembler = BlochNodeBlockAssembler;
+    fn evm_with_env<DB: Database>(&self, db: DB, env: EvmEnv) -> EvmFor<Self, DB> {
+        let mut evm = self.evm_factory().create_evm(db, env);
+        if self.rpc_block_hashes {
+            evm.use_rpc_block_hashes();
+        }
+        evm
+    }
+    fn evm_with_env_and_inspector<DB, I>(&self, db: DB, env: EvmEnv, inspector: I) -> EvmFor<Self, DB, I>
+    where
+        DB: Database,
+        I: InspectorFor<Self, DB>,
+    {
+        let mut evm = self.evm_factory().create_evm_with_inspector(db, env, inspector);
+        if self.rpc_block_hashes {
+            evm.use_rpc_block_hashes();
+        }
+        evm
+    }
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
         &self.factory
     }

@@ -225,3 +225,12 @@ commitments alongside standard user transaction and receipt envelopes. Its local
 JSON-RPC fixture submits signed transactions, persists selected deploy/call blocks
 and queries canonical receipts and state. HTTP/WebSocket launch, wallet workflow,
 RPC execution environment qualification and restart orchestration remain open.
+
+Call/estimate qualification now covers latest/historical BLOCKHASH, explicit RPC
+hash overrides, transient state writes and inspector-assisted access-list creation.
+RPC uses an EVM configuration clone whose block-hash fallback reads provider
+ancestry; canonical executors still install the shared-kernel frozen window.
+Historical-state testing additionally corrected genesis allocation history:
+`prepare_genesis` now includes account/slot reverts so full persistence indexes
+allocations unchanged by later blocks. An independent portable-core comparison
+covers all genesis accounts/storage/code, historical roots, reopen and unwind.

@@ -487,12 +487,27 @@ and the deposit commitment, but does not transport the complete deposit body.
 `NoDerivedPending` returns an explicit error when Reth attempts to synthesize a
 pending environment without authenticated derivation inputs. It does not invent
 an L1 anchor or deposits. A provider-supplied actual pending block remains governed
-by the provider's own trust boundary. Execution queries (`eth_call`, gas estimation,
-simulation and tracing) require separate qualification against Bloch's environment
-and committed `BLOCKHASH` semantics before a public endpoint is launched.
-In particular, latest-state calls currently read the post-block history ring,
-while canonical block execution freezes its original history snapshot; adversarial
-ring writes and RPC `blockHashes` overrides need dedicated handling and tests.
+by the provider's own trust boundary. Pending calls/estimates therefore need a real
+authenticated pending derivation; qualifying latest/historical queries does not
+provide one.
+
+RPC construction clones the EVM configuration into `BlochRpcComponents`. Calls,
+estimation and inspector-assisted access-list construction obtain `BLOCKHASH`
+from the selected provider ancestry and Reth's explicit `blockHash` overrides.
+State overrides of the block-info account do not change this block context.
+The opcode's current/future/256-block window rules still apply. Canonical execution
+continues to install the shared kernel's frozen history window, which takes
+precedence over either fallback; its default configuration remains unchanged.
+
+`tests/rpc_blockhash.rs` compares successful signed execution with real RPC calls
+and estimates at latest/historical blocks, exercises explicit hash overrides,
+rejects current/future hash lookup even with overrides, and checks that RPC storage
+writes remain transient. It also covers the inspector hook through
+`eth_createAccessList`. Reth's simulation policies remain in effect: for example,
+`eth_call` lowers the environment base fee to zero when transaction gas price is
+zero. These queries do not authenticate signed consensus transactions or apply
+deposit prefixes. Broader simulation, tracing and wallet workflow qualification
+remain open.
 
 `tests/node_rpc.rs` exercises JSON requests through the upstream module over real
 MDBX/RocksDB storage and the pool: signed admission, deployment/call selection,
@@ -501,3 +516,18 @@ block identity. Its `NoopNetwork` is explicitly a local test component, not P2P.
 The fixture executes selected blocks through the canonical Bloch executor; it is
 not yet a wallet-connected, autonomously producing node. HTTP/WebSocket transport,
 restart orchestration and end-to-end wallet tooling remain to be delivered.
+
+## Genesis history initialization
+
+`prepare_genesis` includes the absent pre-genesis accounts and zero pre-genesis
+slot values in its revert data. Full persistence uses those records to initialize
+history indices, including allocations never modified in later blocks. Without
+them the latest state was correct but historical account/slot reads could report
+genesis data as absent. `tests/genesis_history.rs` compares every allocated account,
+slot, bytecode and historical root with the portable kernel across reopen and
+canonical unwind.
+
+This fixes newly initialized databases. Existing databases created by the earlier
+helper do not acquire missing history indices merely by upgrading the library;
+they require a separately verified repair or replay into a fresh database while
+preserving the original. No automatic migration is implemented here.

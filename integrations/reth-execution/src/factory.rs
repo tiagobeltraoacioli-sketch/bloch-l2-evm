@@ -23,6 +23,9 @@ pub struct BlochEvm<DB: Database, I> {
     inspect: bool,
 }
 impl<DB: Database, I> BlochEvm<DB, I> {
+    pub(crate) fn use_rpc_block_hashes(&mut self) {
+        self.inner.ctx.rpc_block_hashes = true;
+    }
     pub(crate) fn block_info(&self) -> Address {
         self.inner.ctx.block_info
     }
@@ -124,6 +127,7 @@ impl BlochEvmFactory {
                 .with_db(db),
             block_info: self.block_info,
             block_hashes: None,
+            rpc_block_hashes: false,
         };
         let precompiles = PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(spec)));
         BlochEvm {

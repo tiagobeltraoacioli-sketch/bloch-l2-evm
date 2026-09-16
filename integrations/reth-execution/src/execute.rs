@@ -95,6 +95,9 @@ pub fn validate_and_execute_block(
 ///
 /// Persist with Reth `save_blocks(..., SaveBlocksMode::Full)` so even the empty
 /// genesis establishes receipt/static-file boundaries and pipeline checkpoints.
+/// The returned genesis reverts also initialize allocation history indices.
+/// Existing databases initialized without those indices need separate repair
+/// or replay; this constructor does not migrate an initialized database.
 /// The caller must also ensure the chain database has no existing block history;
 /// an empty state root alone does not prove an uninitialized database.
 pub fn prepare_genesis(
@@ -123,7 +126,10 @@ pub fn prepare_genesis(
                     ..Default::default()
                 },
             )
-            .contract(code_hash, code);
+            .contract(code_hash, code)
+            // Full persistence derives history indices from the reverts. The
+            // allocation starts on empty state, so its prior account is absent.
+            .revert_account_info(0, *address, Some(None));
         builder.set_state_storage(
             *address,
             allocation
@@ -131,6 +137,16 @@ pub fn prepare_genesis(
                 .iter()
                 .flatten()
                 .map(|(key, value)| (U256::from_be_bytes(key.0), (U256::ZERO, U256::from_be_bytes(value.0))))
+                .collect(),
+        );
+        builder.set_revert_storage(
+            0,
+            *address,
+            allocation
+                .storage
+                .iter()
+                .flatten()
+                .map(|(key, _)| (U256::from_be_bytes(key.0), U256::ZERO))
                 .collect(),
         );
     }

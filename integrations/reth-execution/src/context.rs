@@ -21,6 +21,7 @@ pub struct BlochContext<DB: Database> {
     pub(crate) inner: EthEvmContext<DB>,
     pub(crate) block_info: Address,
     pub(crate) block_hashes: Option<Vec<(u64, B256)>>,
+    pub(crate) rpc_block_hashes: bool,
 }
 impl<DB: Database> ContextTr for BlochContext<DB> {
     type Block = BlockEnv;
@@ -82,6 +83,12 @@ impl<DB: Database> Host for BlochContext<DB> {
         // Raw database reads must not warm the block-info account or its slots.
         let address = self.block_info;
         let result = (|| {
+            // RPC queries use selected-chain ancestry and Reth's explicit
+            // block-context overrides. Storage overrides do not redefine it.
+            // Canonical execution's installed snapshot always takes precedence.
+            if self.rpc_block_hashes {
+                return self.inner.db_mut().block_hash(number);
+            }
             if self.inner.db_mut().storage(address, BLOCK_INFO_FLAG_SLOT)?.is_zero() {
                 return Ok(B256::ZERO);
             }
