@@ -73,9 +73,8 @@ fn fixture(count: u64) -> Fixture {
     }
 }
 fn batch(f: &Fixture) -> (TrustedEscrowBatch, Vec<InboxProof>, SignedBlockInput, BatchWitness) {
-    let start = f.domain.next_deposit();
-    let end = (start + 2).min(f.inbox.len() as u64);
-    let proofs: Vec<_> = (start..end).map(|i| f.inbox.proof(i).unwrap()).collect();
+    let range = f.domain.required_deposit_range(f.inbox.len() as u64).unwrap();
+    let proofs = f.inbox.proofs(range).unwrap();
     // Synthetic, explicitly host-trusted L1 positions: not inbox positions/slots.
     let locations: Vec<_> = proofs
         .iter()
@@ -305,4 +304,23 @@ fn larger_snapshot_at_new_anchor_resumes_from_consumed_prefix() {
         .verify_and_advance(&trusted, &proofs, &input, &witness)
         .is_err());
     assert_eq!(cursor(&f), before);
+}
+
+#[test]
+fn deposit_range_preview_matches_execution_and_never_advances_cursors() {
+    let mut f = fixture(3);
+    assert_eq!(f.domain.required_deposit_range(0), Ok(0..0));
+    assert_eq!(f.domain.required_deposit_range(3), Ok(0..2));
+    assert_eq!(f.domain.required_deposit_range(u64::MAX), Ok(0..2));
+    assert_eq!(f.domain.next_deposit(), 0);
+    let (trusted, proofs, input, witness) = batch(&f);
+    let receipt = f
+        .domain
+        .verify_and_advance(&trusted, &proofs, &input, &witness)
+        .unwrap();
+    assert_eq!(receipt.start..receipt.end, 0..2);
+    assert_eq!(f.domain.required_deposit_range(3), Ok(2..3));
+    assert_eq!(f.domain.required_deposit_range(2), Err(Error::Snapshot));
+    assert_eq!(f.domain.required_deposit_range(1), Err(Error::Snapshot));
+    assert_eq!(f.domain.next_deposit(), 2);
 }

@@ -54,6 +54,15 @@ pub struct InboxSnapshot {
     root: B256,
 }
 impl InboxSnapshot {
+    /// Generate an exact contiguous range using cached levels. Empty ranges are
+    /// valid at or before the snapshot end; no truncation or cursor advance occurs.
+    /// Bound matches the execution layer's maximum deposits per block.
+    pub fn proofs(&self, range: core::ops::Range<u64>) -> Option<Vec<InboxProof>> {
+        if range.start > range.end || range.end > self.records.len() as u64 || range.end - range.start > 4096 {
+            return None;
+        }
+        range.map(|sequence| self.proof(sequence)).collect()
+    }
     pub(crate) fn new(network: B256, domain: B256, mut records: Vec<LockedDeposit>) -> Self {
         records.sort_unstable_by_key(|d| d.sequence);
         let mut levels = Vec::new();

@@ -176,3 +176,19 @@ fn cached_snapshots_preserve_existing_commitments_and_odd_paths() {
         }
     }
 }
+
+#[test]
+fn contiguous_proof_batches_are_exact_and_bounded() {
+    let snapshot = ledger(17).inbox();
+    let proofs = snapshot.proofs(3..17).unwrap();
+    assert_eq!(proofs.len(), 14);
+    for (index, proof) in proofs.iter().enumerate() {
+        assert_eq!(*proof, snapshot.proof(index as u64 + 3).unwrap());
+        assert!(proof.verify(B256::repeat_byte(1), B256::repeat_byte(2), snapshot.root()));
+    }
+    assert!(snapshot.proofs(17..17).unwrap().is_empty());
+    assert!(snapshot.proofs(18..18).is_none());
+    assert!(snapshot.proofs(core::ops::Range { start: 5, end: 4 }).is_none());
+    assert!(snapshot.proofs(0..u64::MAX).is_none());
+    assert!(ledger(0).inbox().proofs(0..0).unwrap().is_empty());
+}

@@ -133,6 +133,16 @@ impl EscrowEvmDomain {
         self.next_deposit
     }
 
+    /// Preview the exact mandatory prefix using the verifier's gas-derived limit.
+    /// This does not authenticate a snapshot/root or reserve/consume deposits.
+    pub fn required_deposit_range(&self, count: u64) -> Result<core::ops::Range<u64>, EscrowExecutionError> {
+        if count < self.next_deposit || self.snapshot.is_some_and(|(_, _, _, prior)| count < prior) {
+            return Err(EscrowExecutionError::Snapshot);
+        }
+        let take = (count - self.next_deposit).min(self.batch_limit);
+        Ok(self.next_deposit..self.next_deposit + take)
+    }
+
     /// Consume exactly the available prefix up to the gas-derived/4096 limit.
     /// All validation precedes EVM mutation; no fallible step follows that mutation.
     pub fn verify_and_advance(
@@ -154,13 +164,14 @@ impl EscrowEvmDomain {
                 return Err(EscrowExecutionError::Snapshot);
             }
         }
-        let take = (trusted.count - self.next_deposit).min(self.batch_limit);
+        let range = self.required_deposit_range(trusted.count)?;
+        let take = range.end - range.start;
         if proofs.len() as u64 != take || input.deposits.len() as u64 != take || trusted.locations.len() as u64 != take
         {
             return Err(EscrowExecutionError::Sequence);
         }
         // Sum cannot overflow: take <= count - next_deposit.
-        let end = self.next_deposit + take;
+        let end = range.end;
         for (offset, ((proof, location), mint)) in
             proofs.iter().zip(&trusted.locations).zip(&input.deposits).enumerate()
         {

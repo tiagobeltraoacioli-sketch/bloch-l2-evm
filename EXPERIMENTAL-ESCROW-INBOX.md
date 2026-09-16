@@ -82,3 +82,20 @@ tests pin roots and odd-tail paths captured from the previous implementation,
 while existing tests cover every position in even/odd trees, mutation rejection
 and snapshot independence after new deposits. Cached roots remain local escrow
 commitments and do not establish native finality or mint permission.
+
+## Exact execution-prefix preparation
+
+A producer can call `domain.required_deposit_range(snapshot.len() as u64)` and
+pass the result to `snapshot.proofs(range)`. The domain uses the same mandatory
+prefix rule as `verify_and_advance`: start at its next unconsumed deposit and take
+up to the gas-derived limit (maximum 4,096). Shrinking known counts are rejected.
+The snapshot returns the exact ordered set of independent inclusion proofs, with
+no silent truncation; reversed, out-of-bounds or over-4,096 ranges are refused.
+An empty range at the snapshot end is valid.
+
+Both calls are read-only and allocate no reservation or consumption cursor.
+This removes duplicated producer chunk arithmetic, not the trust boundary:
+the verifier still requires independently authenticated root/count, real L1
+locations and valid execution. A preview of a count alone never authenticates
+the corresponding snapshot. These are ordinary proofs sharing a cached tree,
+not a compressed Merkle multiproof.
