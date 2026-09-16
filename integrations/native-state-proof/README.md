@@ -21,6 +21,11 @@ an arbitrary RPC state root as a replacement for that provenance. The checkpoint
 itself is still externally authenticated; this integration does not verify FFG
 votes, validator-set evolution or weak-subjectivity bootstrap.
 
+The [hybrid checkpoint adapter](../native-escrow-pq/CHECKPOINTS.md) can now supply
+that anchor after checking a native envelope against independently trusted
+signers and the exact checkpoint header. This replaces unchecked signer claims
+with real signature verification, while retaining weak-subjectivity trust.
+
 `verify_utxo` uses the official `eutxo_leaf` codec to authenticate the native
 transaction ID, output index, exact u64 value and script hash. It proves that
 the output belongs to the committed unspent set **at the observed block**.

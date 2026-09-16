@@ -5,6 +5,8 @@ use alloy_primitives::B256;
 use bloch_l2_evm::escrow::{Coin, EscrowError, EscrowLedger, LockIntent, LockedDeposit, Outpoint};
 use sha3::{Digest, Sha3_256};
 
+pub mod checkpoint;
+
 /// Authentication or state-transition rejection. All errors preserve ledger state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationError {

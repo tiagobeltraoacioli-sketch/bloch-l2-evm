@@ -4,6 +4,11 @@ Experimental local integration, not a deployed Genesis-4 transaction or bridge.
 This separate AGPL-3.0-or-later crate uses the official `bloch-crypto` verifier;
 it does not add its dependencies to the portable EVM crate's default build.
 
+The separate [checkpoint module](CHECKPOINTS.md) now authenticates native
+weak-subjectivity envelopes with real hybrid signatures, fixed Phase-A/Phase-B
+quorum policies, freshness checks and exact header binding. It does not replace
+trusted signer distribution or prove FFG history independently.
+
 ## Authorization and state transition
 
 `PqEscrow::submit` accepts an escrow intent, public key and signature. It requires
