@@ -18,6 +18,8 @@ alloy-rlp = "=0.3.16"
 reth-primitives-traits = { version = "=0.5.2", features = ["serde", "reth-codec"] }
 reth-codecs = "=0.5.2"
 serde = "1.0"
+futures-util = "0.3"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
 alloy-genesis = "=2.1.1"
 alloy-rpc-types-engine = "=2.1.1"
 # Development checkout: verify the exact revision recorded in README.md.
@@ -34,6 +36,7 @@ reth-node-types = { path = "../../../reth-bloch-integration/crates/node/types" }
 reth-chain-state = { path = "../../../reth-bloch-integration/crates/chain-state" }
 reth-consensus = { path = "../../../reth-bloch-integration/crates/consensus/consensus" }
 reth-transaction-pool = { path = "../../../reth-bloch-integration/crates/transaction-pool" }
+reth-tasks = { path = "../../../reth-bloch-integration/crates/tasks" }
 reth-execution-types = { path = "../../../reth-bloch-integration/crates/evm/execution-types" }
 reth-trie-common = { path = "../../../reth-bloch-integration/crates/trie/common" }
 

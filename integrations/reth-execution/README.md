@@ -431,6 +431,35 @@ so pool rejection does not necessarily imply a consensus-invalid transaction.
 nonce, authenticates forged caches, selects deploy/call transactions, executes
 and fully persists them, removes mined transactions and readmits them after
 canonical unwind. It also rejects insufficient balances and already-mined nonces.
-The fixture coordinates the provider head, pending base fee, changed accounts and
-pool notifications explicitly. A continuously running maintenance/reorg service,
-pool persistence policy, RPC ingress and a launched developer node remain open.
+That fixture coordinates provider head and pool updates explicitly. The automatic
+maintenance path below replaces those manual pool updates with canonical broadcasts.
+Pool persistence policy, RPC ingress and a launched developer node remain open.
+
+## Automatic pool maintenance
+
+`pool_maintenance(provider, pool, runtime, config)` subscribes immediately to the
+real `BlockchainProvider` canonical stream and returns `Result` containing the Bloch maintenance future
+for the actual Reth pool. Its algorithm is adapted from the pinned Reth maintainer;
+the attribution and MIT license are retained in `third-party/RETH-LICENSE-MIT`.
+Construct it before publishing events, spawn it promptly and supervise it for
+the node lifetime; the upstream broadcast buffer is bounded. The caller commits
+the canonical transition and updates canonical/persisted provider markers before
+publishing a complete notification with block execution outcomes.
+Zero account-reload batch size or zero transaction lifetime returns
+`MaintenanceConfigError` before subscribing. Failed account reads retry on a
+100 ms timer; the adapter omits upstream maintenance metrics.
+
+The task derives changed accounts and mined hashes from those outcomes, updates the
+validator/head/base fee, removes included transactions and revalidates transactions
+removed by a reorganization. The base fee uses Bloch's chain-spec implementation,
+including deposit gas. A reorg must have a nonempty replacement chain: the pinned
+upstream task assumes one and does not support an empty replacement notification.
+
+The adaptation fixes a reproduced race in the pinned upstream maintainer:
+an asynchronous account reload begun at the old head could arrive after a reorg
+and incorrectly evict newly reinserted transactions. Reloads are bound to their
+head hash; stale results are discarded and their addresses queued for a fresh
+read. Unsupported blob-conversion and blob-maintenance paths are not included.
+
+This is pool maintenance, not a fork-choice or storage coordinator. Startup/crash
+repair, pool backup/restart policy, RPC and the launched developer node remain open.

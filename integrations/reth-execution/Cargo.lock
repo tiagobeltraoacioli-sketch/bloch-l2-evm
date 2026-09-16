@@ -1227,6 +1227,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-engine",
  "bloch-l2-evm",
+ "futures-util",
  "k256",
  "reth-chain-state",
  "reth-chainspec",

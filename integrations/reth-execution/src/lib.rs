@@ -21,8 +21,10 @@ pub use consensus::BlochConsensus;
 pub mod execute;
 pub use chainspec::BlochChainSpec;
 pub use execute::{execute_next_block, prepare_genesis, validate_and_execute_block};
+pub mod maintenance;
 pub mod payload;
 pub mod pool;
+pub use maintenance::{pool_maintenance, MaintenanceConfigError};
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
 pub use pool::{pooled_from_raw, BlochPoolError, BlochTransactionValidator};
 /// Complete type selection for a provider; does not launch a node or Engine API.

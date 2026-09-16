@@ -133,7 +133,11 @@ headers/bodies/receipts; received-block import additionally checks externally
 expected derivation inputs and re-executes to verify the full header/state root.
 The actual Reth pool now authenticates canonical signed bytes before upstream
 state-dependent admission. Real-provider tests cover queued nonces, selection,
-contract deployment/call, mined removal and reorg readmission. Domain
-initialization, fork choice, launched import/payload services, pool maintenance/RPC and
+contract deployment/call, mined removal and reorg readmission. Automatic pool
+maintenance now consumes canonical provider notifications, retains unmined
+transactions and reinserts displaced transactions after reorgs. A local adaptation
+of the pinned Reth maintainer rejects account reloads from an obsolete head;
+unit and real-provider regression tests cover the stale-reload race. Domain
+initialization, fork choice, launched import/payload services, RPC and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.
