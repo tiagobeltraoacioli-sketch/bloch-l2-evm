@@ -10,7 +10,7 @@ activation and movement of real funds are outside the currently authorized work.
 | --- | --- | --- |
 | Signed contract execution | `developer_contract` executes signed deploy/call with storage, gas, nonce, root agreement and adversarial assertions | Local example gate exercised; wider conformance remains under compatibility below |
 | Reproducible local operator workflow | `tools/developer-rehearsal.py` generates synthetic escrow/deploy/call proposals and drives separate `bloch-domain` processes | Local two-block recovery/replay/tamper gate exercised; this recovers commitments/cursors, not a queryable node database |
-| Developer node and wallet workflow | EIP-1193 adapter; actual Reth execution, storage, validation, pool maintenance and JSON-RPC handlers; no launched RPC/node | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
+| Developer node and wallet workflow | EIP-1193 adapter; actual Reth execution, storage, validation, pool maintenance, JSON-RPC handlers and loopback HTTP helper; complete node orchestration remains open | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
 | Proof backend | Host witness verifier; SP1 entrypoint and prover are stubs | Reproducible pinned guest/prover/verifier build, real accepted and rejected proofs binding all public inputs, measured proving cost and documented cryptographic assumptions |
@@ -154,4 +154,10 @@ also exposed missing genesis history indices; genesis preparation now supplies
 the allocation reverts that full persistence needs, with independent portable-core
 checks across reopen and unwind. Previously initialized databases are not migrated
 automatically. Authenticated pending derivation, broader simulation/tracing,
-transport and the launched developer workflow remain open.
+WebSocket transport and the launched developer workflow remain open.
+
+The HTTP helper now serves the upstream EthApi module using Reth's server builder
+on IPv4 loopback. A real-client test covers persisted genesis chain ID, V2 block
+identity, storage and listener release on shutdown. Canonical coordination,
+restart orchestration and wallet deployment over a running developer node remain
+separate requirements; the HTTP helper alone does not close the node gate.

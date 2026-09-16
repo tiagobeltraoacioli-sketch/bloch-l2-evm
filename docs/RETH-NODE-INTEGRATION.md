@@ -223,8 +223,13 @@ The host also constructs upstream Reth `EthApi` handlers over the real provider
 and pool. The custom RPC header preserves V2 identity and exposes domain/deposit
 commitments alongside standard user transaction and receipt envelopes. Its local
 JSON-RPC fixture submits signed transactions, persists selected deploy/call blocks
-and queries canonical receipts and state. HTTP/WebSocket launch, wallet workflow,
+and queries canonical receipts and state. Complete node/WebSocket launch, wallet workflow,
 RPC execution environment qualification and restart orchestration remain open.
+
+`start_http_rpc` now launches the upstream module on IPv4 loopback using Reth's
+server builder. A separate real HTTP client fixture checks genesis identity,
+chain ID, storage and listener release after shutdown. It does not yet run the
+deployment/receipt workflow through a standalone, restartable developer node.
 
 Call/estimate qualification now covers latest/historical BLOCKHASH, explicit RPC
 hash overrides, transient state writes and inspector-assisted access-list creation.

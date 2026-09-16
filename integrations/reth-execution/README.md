@@ -4,8 +4,8 @@ This host integration uses the real `reth_revm::database::StateProviderDatabase`
 to run Bloch's signed whole-block executor against an `EvmStateProvider`. Reth's
 `StateProvider` has an upstream blanket implementation of that interface.
 It includes custom execution/validation, canonical storage and pool admission
-components and upstream Reth RPC handler construction. It does not yet launch a
-developer node, RPC endpoint or proof backend.
+components, upstream Reth RPC handlers and loopback HTTP transport. It does not yet
+launch a complete developer node or proof backend.
 
 ## Reproduce
 
@@ -514,8 +514,21 @@ MDBX/RocksDB storage and the pool: signed admission, deployment/call selection,
 canonical persistence, receipts/log metadata, balance/nonce/code/storage and V2
 block identity. Its `NoopNetwork` is explicitly a local test component, not P2P.
 The fixture executes selected blocks through the canonical Bloch executor; it is
-not yet a wallet-connected, autonomously producing node. HTTP/WebSocket transport,
+not yet a wallet-connected, autonomously producing node. WebSocket transport,
 restart orchestration and end-to-end wallet tooling remain to be delivered.
+
+`start_http_rpc(api.into_rpc().remove_context(), port).await` serves the same
+upstream module through `reth_rpc_builder::RpcServerConfig` on IPv4 loopback.
+Port zero selects an available port; retain the returned `RpcServerHandle` and
+read `http_url()` for the endpoint. `stop()` requests asynchronous shutdown.
+The caller owns provider initialization, canonical updates, pool maintenance and
+task supervision. This helper does not start P2P or an Engine API.
+
+`tests/rpc_transport.rs` uses an actual HTTP client against persisted Bloch
+genesis to check chain ID, V2 block identity/domain and storage. It also waits for
+the listening socket to become available after shutdown. This transport test is
+separate from the in-process deployment/receipt fixture above; it does not qualify
+a complete wallet workflow or persistent node restart.
 
 ## Genesis history initialization
 

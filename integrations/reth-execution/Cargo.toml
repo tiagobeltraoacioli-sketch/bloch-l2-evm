@@ -26,6 +26,8 @@ alloy-rpc-types-eth = { version = "=2.1.1", features = ["serde"] }
 alloy-network-primitives = "=2.1.1"
 alloy-serde = "=2.2.0"
 reth-rpc = { path = "../../../reth-bloch-integration/crates/rpc/rpc" }
+reth-rpc-builder = { path = "../../../reth-bloch-integration/crates/rpc/rpc-builder" }
+jsonrpsee = { version = "=0.26.0", features = ["server"] }
 reth-rpc-convert = { path = "../../../reth-bloch-integration/crates/rpc/rpc-convert" }
 reth-rpc-eth-api = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-api" }
 reth-rpc-eth-types = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-types" }
@@ -48,6 +50,7 @@ reth-execution-types = { path = "../../../reth-bloch-integration/crates/evm/exec
 reth-trie-common = { path = "../../../reth-bloch-integration/crates/trie/common" }
 
 [dev-dependencies]
+jsonrpsee = { version = "=0.26.0", features = ["http-client"] }
 reth-network-api = { path = "../../../reth-bloch-integration/crates/net/network-api" }
 tokio = { version = "1", features = ["rt", "macros"] }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }

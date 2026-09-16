@@ -2,7 +2,7 @@
 //! Bloch execution through Reth state providers and the Alloy EVM factory.
 //!
 //! Includes custom primitives, provider types, deposit-body storage, pool
-//! maintenance and RPC handlers. Node/RPC launch, crash recovery and finality
+//! maintenance, RPC handlers and HTTP transport. Node orchestration, crash recovery and finality
 //! remain separate integration work.
 //! The provider snapshot and roots are trusted host inputs. Signed Ethereum
 //! bytes are authenticated by the existing Bloch kernel, not a sender cache.
@@ -26,11 +26,13 @@ pub mod maintenance;
 pub mod payload;
 pub mod pool;
 pub mod rpc;
+pub mod rpc_transport;
 pub mod rpc_types;
 pub use maintenance::{pool_maintenance, MaintenanceConfigError};
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
 pub use pool::{pooled_from_raw, BlochPoolError, BlochTransactionValidator};
 pub use rpc::{build_eth_api, rpc_converter, BlochRpcComponents, BlochRpcConverter, NoDerivedPending};
+pub use rpc_transport::start_http_rpc;
 pub use rpc_types::{BlochHeaderConverter, BlochRpcHeader, BlochRpcTypes};
 /// Complete type selection for a provider; does not launch a node or Engine API.
 #[derive(Clone, Debug, Default)]
