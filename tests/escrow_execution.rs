@@ -324,3 +324,50 @@ fn deposit_range_preview_matches_execution_and_never_advances_cursors() {
     assert_eq!(f.domain.required_deposit_range(1), Err(Error::Snapshot));
     assert_eq!(f.domain.next_deposit(), 2);
 }
+
+#[test]
+fn execution_uses_range_verification_and_rejects_late_failure_atomically() {
+    use bloch_l2_evm::escrow_inbox::verify_proof_range;
+    let mut f = fixture(3);
+    let (trusted, proofs, input, witness) = batch(&f);
+    let before = cursor(&f);
+    for mode in 0..4 {
+        let mut changed = proofs.clone();
+        match mode {
+            0 => changed[1].count += 1,
+            1 => changed[1].deposit.amount += 1,
+            2 => changed[1].siblings = vec![B256::ZERO; 65],
+            _ => changed[1].siblings.clear(),
+        }
+        assert!(verify_proof_range(
+            B256::repeat_byte(1),
+            f.domain.id(),
+            trusted.inbox_root,
+            trusted.count,
+            0..2,
+            &changed
+        )
+        .is_none());
+        assert_eq!(
+            f.domain.verify_and_advance(&trusted, &changed, &input, &witness),
+            Err(Error::Inclusion)
+        );
+        assert_eq!(cursor(&f), before);
+    }
+    let summary = verify_proof_range(
+        B256::repeat_byte(1),
+        f.domain.id(),
+        trusted.inbox_root,
+        trusted.count,
+        0..2,
+        &proofs,
+    )
+    .unwrap();
+    let receipt = f
+        .domain
+        .verify_and_advance(&trusted, &proofs, &input, &witness)
+        .unwrap();
+    assert_eq!(receipt.start..receipt.end, summary.range());
+    assert_eq!(receipt.inbox_root, summary.root());
+    assert_eq!(receipt.inbox_count, summary.count());
+}

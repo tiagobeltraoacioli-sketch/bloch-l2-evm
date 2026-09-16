@@ -116,3 +116,11 @@ must enforce input bounds before allocation; this API bounds already decoded
 proofs. The expected root must be authenticated independently of the exported
 JSON, not simply copied from it. This summary proves membership only, does not
 consume deposits, and cannot replace L1 provenance, finality or EVM verification.
+
+The execution domain also uses `verify_proof_range` for every nonempty mandatory
+prefix, sharing count, range and path validation with consumers. It first checks
+sequence alignment, then verifies the complete inclusion range before validating
+L1 locations and exact mint fields or invoking EVM execution. A failure in a later
+proof leaves both execution and deposit cursors unchanged. Empty mandatory
+prefixes remain valid execution inputs, but do not create a verified membership
+summary or remove the requirement for host-authenticated snapshot context.

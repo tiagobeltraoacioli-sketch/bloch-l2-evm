@@ -3,7 +3,7 @@
 //! Trusted host inputs below are NOT independently verified L1 certificates.
 use crate::{
     domain::{DomainError, EvmDomain, ExecutionReceipt, TrustedL1Batch},
-    escrow_inbox::InboxProof,
+    escrow_inbox::{verify_proof_range, InboxProof},
     BatchWitness, ChainSpec, DepositMint, DepositPosition, DepositProvenance, SignedBlockInput,
 };
 use alloc::vec::Vec;
@@ -172,16 +172,27 @@ impl EscrowEvmDomain {
         }
         // Sum cannot overflow: take <= count - next_deposit.
         let end = range.end;
-        for (offset, ((proof, location), mint)) in
-            proofs.iter().zip(&trusted.locations).zip(&input.deposits).enumerate()
-        {
+        for (offset, (proof, location)) in proofs.iter().zip(&trusted.locations).enumerate() {
             let sequence = self.next_deposit + offset as u64;
             if proof.deposit.sequence != sequence || location.sequence != sequence {
                 return Err(EscrowExecutionError::Sequence);
             }
-            if proof.count != trusted.count
-                || !proof.verify(self.network, self.id(), trusted.inbox_root)
-                || location.intent != proof.deposit.id
+        }
+        // Empty execution blocks remain valid when the mandatory prefix is empty.
+        // They establish no membership; their snapshot still comes from the host.
+        if take != 0 {
+            verify_proof_range(
+                self.network,
+                self.id(),
+                trusted.inbox_root,
+                trusted.count,
+                range,
+                proofs,
+            )
+            .ok_or(EscrowExecutionError::Inclusion)?;
+        }
+        for ((proof, location), mint) in proofs.iter().zip(&trusted.locations).zip(&input.deposits) {
+            if location.intent != proof.deposit.id
                 || location.transaction == B256::ZERO
                 || location.position.l1_height > trusted.execution.height
             {
