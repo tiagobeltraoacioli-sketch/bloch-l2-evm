@@ -7,8 +7,8 @@
 
 use alloy_primitives::B256;
 use bloch_l2_evm::{
-    execute_signed_block_on_database, BlockExecutionError, ChainSpec, DatabaseBlockExecution, SignedBlockInput,
-    SignedInputError,
+    execute_signed_block_on_database, BlockContext, BlockExecutionError, ChainSpec, DatabaseBlockExecution,
+    DepositMint, SignedBlockBuilder, SignedBlockInput, SignedInputError,
 };
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
@@ -29,4 +29,27 @@ pub fn execute_on_provider<P: EvmStateProvider>(
     input: &SignedBlockInput,
 ) -> Result<DatabaseBlockExecution<StateProviderDatabase<P>>, SignedInputError<BlockExecutionError>> {
     execute_signed_block_on_database(spec, StateProviderDatabase::new(provider), previous_root, input)
+}
+
+/// Begin incremental signed construction against a consistent Reth snapshot.
+///
+/// Each candidate is authenticated from signed bytes and may be skipped without
+/// publishing its state or accounting changes. The caller authenticates L1
+/// context/deposits and supplies the snapshot's trusted root, just as for
+/// [`execute_on_provider`]. Finishing yields an execution usable with
+/// [`execution_bundle`]; it does not calculate a root or persist the block.
+pub fn begin_on_provider<P: EvmStateProvider>(
+    spec: &ChainSpec,
+    provider: P,
+    previous_root: B256,
+    context: BlockContext,
+    deposits: Vec<DepositMint>,
+) -> Result<SignedBlockBuilder<StateProviderDatabase<P>>, SignedInputError<BlockExecutionError>> {
+    SignedBlockBuilder::new(
+        spec,
+        StateProviderDatabase::new(provider),
+        previous_root,
+        context,
+        deposits,
+    )
 }

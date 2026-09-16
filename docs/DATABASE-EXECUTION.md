@@ -40,5 +40,42 @@ tests check both forward and restored roots. A separate real-storage test checks
 Reth trie calculation, commit/abort and orderly close/reopen against signed
 execution. These storage operations are test-harness plumbing, not a node
 service; canonical unwind and crash recovery remain unqualified. Neither layer implements
-incremental block building, a transaction pool or RPC. The API does not change
+a transaction pool or RPC. The API does not change
 the existing header hash, domain identity or portable dependency/toolchain pins.
+
+## Incremental signed construction
+
+`SignedBlockBuilder::new(spec, database, previous_root, context, deposits)`
+begins a block over an immutable host snapshot. It validates the header and runs
+system/deposit transitions once. `try_push(raw)` authenticates original signed
+bytes and includes a valid candidate. `try_push_with_condition(raw, include)`
+lets the caller inspect its outcome and decline inclusion. Reverted EVM
+transactions are valid candidates and pay gas if included.
+
+Every candidate executes in a fresh sparse overlay over the accepted state.
+Conservation and fee-vault reads/credits complete before that overlay is merged.
+An error or declined inclusion preserves nonce, storage, gas, fees and burn
+accounting. Merge retains untouched slots and deletion/clear markers; it does
+not clone the entire block cache or re-execute the accepted transaction prefix.
+The EVM context is rebuilt per candidate; no throughput claim is made here.
+
+`finish()` performs final ledger/head writes and returns the exact accepted
+`SignedBlockInput` plus `DatabaseBlockExecution`. Compute and persist its root
+through the same host boundary as whole-block execution. Finishing does not
+authenticate a root, and dropping the builder never writes the backing store.
+
+The whole-block verifier now uses this same incremental kernel, while retaining
+whole-input preflight and failing the entire block on any invalid transaction.
+The builder instead allows selection to continue after a rejected candidate.
+Its lifetime decoding budgets count rejected and skipped candidates too: at
+most `MAX_SIGNED_TRANSACTIONS` decoding attempts and `MAX_SIGNED_BLOCK_BYTES`
+candidate bytes, after per-transaction size preflight. Exhaustion stops further
+decoding but still permits finishing the accepted block. Pool scheduling and
+network rate limiting are separate host responsibilities.
+
+`tests/incremental_builder.rs` checks selection, skips, reverted execution,
+invalid nonce, gas-budget recovery, self-destruction and bounded authentication
+work against whole-block execution. Executor units cover sparse merge flags
+and a late provider failure during fee-vault credit. The real Reth persistence
+test uses `begin_on_provider`, skips and then includes the same signed candidates,
+and checks independently calculated/persisted roots and orderly reopening.

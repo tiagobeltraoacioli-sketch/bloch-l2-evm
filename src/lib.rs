@@ -136,8 +136,8 @@ pub use state::{DepositError, DepositMint, DepositPosition, DepositProvenance, H
 pub use stateroot::{compute_keccak_mpt_state_root, stateless_new_root, SparseTrieView, WitnessError};
 pub use transactions::{
     decode_signed_transaction, execute_signed_block, execute_signed_block_on_database, generate_signed_batch_witness,
-    verify_signed_batch, AuthenticatedTransaction, DatabaseBlockExecution, SignedBlockInput, SignedInputError,
-    TransactionAuthError,
+    verify_signed_batch, AuthenticatedTransaction, DatabaseBlockExecution, SignedBlockBuilder, SignedBlockInput,
+    SignedInputError, TransactionAuthError,
 };
 
 /// The exact revm version this scaffold is pinned to (also pinned as `=41.0.0`

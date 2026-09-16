@@ -6,7 +6,7 @@ use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use bloch_l2_evm::{
     execute_signed_block, BlockContext, ChainSpec, DepositMint, DepositProvenance, L2State, SignedBlockInput,
 };
-use bloch_reth_execution::{execute_on_provider, execution_bundle};
+use bloch_reth_execution::{begin_on_provider, execute_on_provider, execution_bundle};
 use k256::ecdsa::SigningKey;
 use reth_db::{mdbx::DatabaseArguments, test_utils::TempDatabase};
 use reth_provider::{
@@ -391,7 +391,22 @@ fn real_reth_storage_commits_roots_reopens_and_discards_uncommitted_writes() {
                 vec![]
             },
         };
-        let pending = execute_on_provider(&spec, factory.latest().unwrap(), reference.commit_root(), &input).unwrap();
+        let mut builder = begin_on_provider(
+            &spec,
+            factory.latest().unwrap(),
+            reference.commit_root(),
+            input.context.clone(),
+            input.deposits.clone(),
+        )
+        .unwrap();
+        assert!(builder
+            .try_push_with_condition(&input.transactions[0], |_| false)
+            .unwrap()
+            .is_none());
+        assert!(builder.input().transactions.is_empty());
+        builder.try_push(&input.transactions[0]).unwrap();
+        let (accepted, pending) = builder.finish().unwrap();
+        assert_eq!(accepted.transactions, input.transactions);
         let bundle = execution_bundle(&pending).unwrap();
         let hashed = factory.hashed_post_state(&bundle);
         let reth_root = pending.overlay().db.0.state_root(hashed).unwrap();

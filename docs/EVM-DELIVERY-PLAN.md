@@ -81,8 +81,10 @@ uncommitted writer abort and orderly close/reopen. Those operations remain test
 harness plumbing. A deleted account's unread storage is also restored solely
 from persisted changesets after reopening, recovering the original root. This
 does not prune history or unwind block metadata. The remaining canonical unwind,
-crash recovery, the node storage service and
-incremental block execution/building remain open. Preserve the core's fixed-width header
+crash recovery and the node storage service remain open. Incremental signed
+construction now shares the core kernel with whole-block verification and runs
+through the real Reth provider in storage tests. SDK executor-factory/payload
+builder wiring is still required. Preserve the core's fixed-width header
 hash and committed `BLOCKHASH` ring. Vanilla Ethereum RLP headers have different
 identities. The current header also lacks transaction/receipt-root commitments;
 adding them requires a versioned execution-domain upgrade, not extra uncommitted

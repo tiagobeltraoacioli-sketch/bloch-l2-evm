@@ -54,6 +54,15 @@ the successful read/change cache without writing the provider. On execution
 failure no candidate is returned. The backing provider can perform internal
 read caching, but the execution adapter does not call a storage commit method.
 
+`begin_on_provider(spec, provider, previous_root, context, deposits)` returns
+the core's `SignedBlockBuilder` over that same reader. It supports authenticated
+incremental candidate selection with conditional inclusion, then returns the
+accepted signed input and execution overlay. Its protocol prefix runs once;
+each candidate stages state/accounting before publication. See
+[the incremental API](../../docs/DATABASE-EXECUTION.md#incremental-signed-construction)
+for attempt budgets and host trust requirements. This is not yet a Reth SDK
+executor factory or payload builder.
+
 The caller must hold a consistent pre-state snapshot and supply its correct root,
 derive/authenticate deposits and L1 context independently, calculate the complete
 post-state MPT root, then atomically persist the matching overlay. Passing that
@@ -127,7 +136,8 @@ EVM conformance or equivalence of every dependency/compiler configuration.
 `tests/persistence.rs` uses upstream's provider factory with actual MDBX,
 RocksDB and static-file handles. It seeds the Bloch genesis state without
 inserting an Ethereum genesis/header. Synthetic deposits fund signed contract
-deployment, a call storing `42`, and a call clearing the slot. For each block,
+deployment, a call storing `42`, and a call clearing the slot. Incremental
+construction skips each signed candidate once before including it. For each block,
 Reth's trie independently calculates the same root as portable core execution;
 the writer persists plain/hashed state, bytecode, changesets and trie updates.
 Fresh snapshots expose the expected balances, nonces and storage.

@@ -33,23 +33,20 @@ custom node primitives and block/next-block context. The pinned Alloy executor
 also exposes transaction execution before conditional commitment. Bloch's
 current whole-block entry point cannot simply be substituted for that interface.
 
-Extract an incremental implementation from the shared core kernel, then retain
-whole-block execution as a consumer of it. The same implementation must perform
-header validation, committed `BLOCKHASH` history, EIP-4788, ordered deposits,
-fee-vault credits, burn accounting and final head writes. Do not duplicate these
-rules in a host-only Ethereum executor. A rejected candidate must leave nonce,
-storage, gas, receipts, fees and supply unchanged; a reverted EVM transaction is
-instead included and pays gas. Compare whole-block and incremental execution on
-the existing signed fixtures before wiring payload selection.
+The shared core now provides `SignedBlockBuilder`; whole-block verification uses
+the same incremental kernel. Header validation, committed `BLOCKHASH` history,
+EIP-4788 and deposits execute once, followed by sparse candidate execution and
+final ledger/head writes. A candidate's fee and conservation checks run inside
+its disposable overlay before publication. Tests cover rejection/skip atomicity,
+late fee-vault provider failure, sparse storage merging and agreement with
+whole-block execution; the real Reth storage test also uses this builder.
 
-The current whole-block kernel can discard its entire overlay after a late
-accounting error. It commits each revm transaction result before checking
-conservation and crediting the base-fee vault; that ordering is safe only under
-the enclosing all-or-nothing block boundary. The incremental API must validate
-and prepare all effects before publishing a candidate, including provider reads
-needed by fee accounting. Do not copy that commit ordering into Reth's
-infallible `commit_transaction` method or continue a builder after a partially
-applied accounting failure.
+This is not yet the SDK `BlockExecutorFactory` implementation. Adapt its
+transaction-result/conditional-commit interface without trusting recovered
+sender caches or duplicating Bloch rules. The existing callback provides a
+single execute-and-conditionally-commit operation; Reth's separately exposed
+execute/commit methods also require protection against stale or foreign
+candidate results. The assembler and custom primitives remain unimplemented.
 
 Pool recovery is not an authentication boundary. Admission and execution must
 retain canonical signed bytes; reauthenticate them rather than trusting a
