@@ -233,6 +233,10 @@ impl EscrowLedger {
     pub fn lock_count(&self) -> u64 {
         self.sequence
     }
+    /// Ordered inclusion snapshot; its root is not a finalized L1 commitment.
+    pub fn inbox(&self) -> crate::escrow_inbox::InboxSnapshot {
+        crate::escrow_inbox::InboxSnapshot::new(self.network, self.domain, self.deposits.values().cloned().collect())
+    }
     /// Fail closed until real withdrawal verification and nullifiers are implemented.
     pub fn release(&mut self) -> Result<(), EscrowError> {
         Err(EscrowError::ReleaseUnavailable)

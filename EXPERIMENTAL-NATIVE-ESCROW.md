@@ -79,6 +79,10 @@ signature, bridge-proof or mainnet settlement qualification.
 
 ## Integration still required
 
+The [ordered inbox inclusion primitive](EXPERIMENTAL-ESCROW-INBOX.md) provides
+local Merkle paths for accepted locks. Its separate root still needs consensus
+authentication; membership alone does not authorize a deposit mint.
+
 Port the reviewed transition into the native consensus state with the existing
 PQ verifier, state-root commitments and transaction gas/fee calculation. Specify
 canonical codec and inbox identity, activation and durable recovery. Authenticate

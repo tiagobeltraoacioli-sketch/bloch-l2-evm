@@ -44,6 +44,10 @@ fn real_hybrid_authorization_locks_exact_value() {
     let signature = sign(&intent);
     let record = ledger.submit(&intent, &keys().0, &signature).unwrap();
     assert_eq!(record.amount, 600);
+    let inbox = ledger.inbox();
+    let proof = inbox.proof(record.sequence).unwrap();
+    assert_eq!(proof.deposit, record);
+    assert!(proof.verify(intent.network, intent.domain, inbox.root()));
     assert_eq!(ledger.locked_sat(), 600);
     assert!(ledger.conserved());
     assert!(ledger.coin(intent.inputs[0]).is_none());

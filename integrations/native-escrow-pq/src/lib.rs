@@ -80,6 +80,10 @@ impl PqEscrow {
     pub fn conserved(&self) -> bool {
         self.ledger.conserved()
     }
+    /// Snapshot of authenticated local locks; external finality is still required.
+    pub fn inbox(&self) -> bloch_l2_evm::escrow_inbox::InboxSnapshot {
+        self.ledger.inbox()
+    }
     /// No withdrawal-proof backend is installed; funds cannot be released here.
     pub fn release(&mut self) -> Result<(), EscrowError> {
         self.ledger.release()
