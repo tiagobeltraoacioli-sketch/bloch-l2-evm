@@ -1,5 +1,5 @@
 //! Offline Genesis-4 body verification against a separately trusted checkpoint.
-//! Usage: verify_l1_body BODY.json TRUSTED_BLOCK_ID TRUSTED_SLOT
+//! Usage: verify_l1_body BODY.json TRUSTED_BLOCK_ID TRUSTED_SLOT [OBSERVE_SCRIPT_HASH]
 use alloy_primitives::{Bytes, B256};
 use bloch_l2_evm::l1::{authenticate_body, FinalizedCheckpoint};
 use serde_json::Value;
@@ -18,8 +18,8 @@ fn decode(value: &Value) -> Result<Bytes, String> {
 }
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 {
-        return Err("Usage: verify_l1_body BODY.json TRUSTED_BLOCK_ID TRUSTED_SLOT".into());
+    if args.len() != 4 && args.len() != 5 {
+        return Err("Usage: verify_l1_body BODY.json TRUSTED_BLOCK_ID TRUSTED_SLOT [OBSERVE_SCRIPT_HASH]".into());
     }
     let checkpoint = FinalizedCheckpoint {
         block: B256::from_str(&args[2]).map_err(|_| "Invalid trusted block ID")?,
@@ -46,6 +46,40 @@ fn run() -> Result<(), String> {
     let transactions = transactions.iter().map(decode).collect::<Result<Vec<_>, _>>()?;
     let body = authenticate_body(checkpoint, &headers, &transactions)
         .map_err(|error| format!("Authentication failed: {error:?}"))?;
+    if let Some(script) = args.get(4) {
+        use bloch_l2_evm::l1_transfer::{observe_transfer, TransferObservationError};
+        let script = B256::from_str(script).map_err(|_| "Invalid native script hash")?;
+        let mut outputs = Vec::new();
+        let mut unsupported = 0usize;
+        for i in 0..body.transactions().len() {
+            let tx = match observe_transfer(&body, i) {
+                Ok(tx) => tx,
+                Err(TransferObservationError::Unsupported) => {
+                    unsupported += 1;
+                    continue;
+                }
+                Err(error) => return Err(format!("Transfer {i} rejected: {error:?}")),
+            };
+            for (vout, output) in tx.outputs().iter().enumerate() {
+                if output.script_hash == script {
+                    outputs.push(serde_json::json!({
+                        "txid": tx.txid().to_string(), "vout": vout,
+                        "value_sat": output.value_sat.to_string(), "transaction_index": i,
+                    }));
+                }
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode": "read_only_transfer_observation", "block": body.block().to_string(),
+                "slot": body.slot(), "script_hash": script.to_string(), "outputs": outputs,
+                "unsupported_transactions": unsupported,
+                "scope": "Historical transfer outputs only; no unspentness, escrow, finality or mint authorization",
+            })
+        );
+        return Ok(());
+    }
     println!("Authenticated block: {}", body.block());
     println!("Slot: {} (not block height)", body.slot());
     println!("Transactions: {}", body.transactions().len());

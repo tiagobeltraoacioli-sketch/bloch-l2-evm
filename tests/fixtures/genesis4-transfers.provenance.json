@@ -1,0 +1,6 @@
+{
+  "consensus_commit": "5af78a04a27dcb2c2253c32134fca888a8a965f9",
+  "transition_sha256": "a4569f8801726a5b50fe93c13a2291abb131930bea9292dc46f8b59cf07b150a",
+  "fixture_sha256": "f9b763a112b57e7ec22d30531c6e07e8c821ce2b9e5e16abd299145573f677b2",
+  "note": "Synthetic codec/commitment vectors; placeholder witnesses and values are not valid mainnet transfers."
+}

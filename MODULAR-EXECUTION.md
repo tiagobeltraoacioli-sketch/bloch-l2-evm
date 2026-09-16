@@ -150,3 +150,11 @@ intermediate headers and input work limits.
 Validation after the Genesis-4 increment: 143 tests passed, one pre-existing test
 ignored; no-default-features compilation passed. The offline CLI accepted the
 five-transaction consensus fixture and rejected an incorrect checkpoint slot.
+
+## Native transfer observation increment
+
+`l1_transfer` now decodes authenticated Genesis-4 transfers, preserves output
+indices and derives consensus txids. The offline body verifier can emit script
+payment observations. These are not mint authorizations.
+See [GENESIS4-BRIDGE-DERIVATION.md](GENESIS4-BRIDGE-DERIVATION.md) for the discovered
+legacy-envelope incompatibility and required native escrow rules.
