@@ -38,6 +38,15 @@ destroy value; the executor measures that per transaction and commits the
 running total, so `total_native == total_minted - total_burned` always holds
 (audit finding C11).
 
+## Local modular execution boundary
+
+`domain::EvmDomain` now binds network/module/runtime identity, immutable execution
+parameters, ordered inputs and sequential state roots to actual signed EVM
+re-execution. Run `cargo run --locked --example modular_evm` for a zero-value local
+demonstration. This is not an on-chain verifier, proof backend or working rollup.
+See [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) for the trust boundary, tested
+behavior and remaining L1 integration.
+
 ## Version pins (normative for this scaffold)
 
 | dependency | pin | why |
