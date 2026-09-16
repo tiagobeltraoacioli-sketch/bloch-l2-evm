@@ -16,6 +16,7 @@ pub mod block;
 pub mod config;
 pub mod node_factory;
 pub mod primitives;
+pub mod storage;
 pub use block::{
     BlochBlockExecutionCtx, BlochBlockExecutor, BlochBlockExecutorFactory, BlochBlockFinish,
     BlochNodeBlockExecutorFactory, BlochNodeBlockFinish, BlochTxResult,
@@ -25,6 +26,7 @@ pub use node_factory::{BlochRethBlockExecutor, BlochRethBlockExecutorFactory, Bl
 pub use primitives::{
     BlochNodeBlock, BlochNodeBody, BlochNodeHeader, BlochNodePrimitives, BlochRethReceipt, BlochRethTransaction,
 };
+pub use storage::{BlochChainStorage, BlochTables, BlochV2Deposits, StoredBlochDeposits};
 
 pub mod context;
 pub mod factory;

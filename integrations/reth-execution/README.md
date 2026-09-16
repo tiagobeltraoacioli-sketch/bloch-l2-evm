@@ -98,7 +98,7 @@ block unwind and crash recovery remain unqualified.
 The existing V1 header retains its fixed-width identity. The separate V2 path now
 provides committed transaction/receipt roots, full Reth primitive adapters,
 configuration and assembly. A complete node still needs authenticated domain
-initialization, durable deposit-body storage and canonical recovery, custom import
+initialization, complete provider wiring and canonical recovery, custom import
 consensus, payload/node/pool/RPC wiring and authenticated deposit derivation.
 Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
@@ -276,7 +276,8 @@ the end-to-end developer workflow remain open.
 `BlochNodePrimitives` supplies tagged V2 headers, bodies and blocks. Header sealing
 uses the existing V2 golden hash. Internal serde uses bounded canonical RLP bytes;
 header Compact storage uses the same tagged RLP. The infallible Compact interface
-panics on corrupt database bytes, while network and serde decoding return errors.
+panics on corrupt input; the database Decompress implementation is fallible and
+rejects malformed/trailing bytes, as do network and serde decoding.
 These are internal representations, not an Ethereum JSON-RPC response schema.
 
 Reth's compactable signed transaction is `EthereumTxEnvelope<TxEip4844>` and its
@@ -293,8 +294,32 @@ signed execution and State bundle, with a fixture provider for original state.
 `tests/node_primitives.rs` qualifies canonical bytes, sealing, bounded decoding,
 serde, Compact and receipt conversions.
 
-Custom `BlockBodyReader`/`BlockBodyWriter` integration remains necessary to persist
-deposits alongside the separately stored transactions. The Ethereum body projection
-omits those deposits and must never replace the canonical Bloch body in storage.
+`BlochChainStorage` now supplies custom `BlockBodyReader`/`BlockBodyWriter`
+integration to persist deposits alongside the separately stored transactions.
+The Ethereum body projection omits those deposits and must never replace the
+canonical Bloch body in storage.
 Full import consensus, durable canonical unwind and launched developer workflows
 remain unqualified.
+
+## Durable V2 body storage
+
+Initialize the database with `reth_db::mdbx::init_db_for::<_, BlochTables>` before
+sharing it; this registers the standard Reth tables and `BlochV2Deposits` together.
+Reopen using the same table set. `BlochChainStorage` implements the actual provider
+chain-storage trait and stores deposits in the surrounding Reth transaction.
+Signed transactions remain the responsibility of Reth's transaction storage.
+
+Records are bounded canonical deposits-only body encodings, keyed by height.
+An empty deposit list is written explicitly. Missing/corrupt rows are errors;
+reads reconstruct the body and compare transaction/deposit roots with the header.
+Duplicate heights or conflicting existing deposits fail before body writes;
+identical records are idempotent. Replacing a different body requires prior unwind.
+These checks do not establish L1 provenance or replace consensus validation.
+
+`remove_block_bodies_above` deletes only deposit rows and propagates decode/cursor
+errors. Abort the entire database transaction on a write/removal error. It does not
+remove headers, transaction indices, receipts or execution state by itself.
+`tests/node_storage.rs` uses actual MDBX and close/reopen to qualify persisted V2
+headers/transactions/deposits, reconstructed body commitments, dropped writers/removals,
+committed removals and corrupt records. Full canonical unwind, process-crash
+recovery and a launched ProviderFactory/node remain subsequent integration work.

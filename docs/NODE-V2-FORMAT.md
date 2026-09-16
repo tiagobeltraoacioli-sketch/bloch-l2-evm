@@ -56,8 +56,9 @@ The block is `[BLOCH:EVM:BLOCK:2, header, body]`. The outer bound includes both
 bounded nested containers and framing. RLP is the implemented wire codec;
 the host adapters additionally implement Reth primitive traits and bounded internal
 serde. Header `Compact` storage is exactly the tagged header RLP, without a second
-hash or field layout. The infallible upstream Compact reader panics on corrupt
-storage; network/serde decoders return errors and preserve input on failure.
+hash or field layout. The infallible upstream Compact reader panics on corrupt input. The database
+`Decompress` implementation instead returns an error on malformed or trailing
+bytes; network/serde decoders also return errors.
 
 ## Commitments and validation
 
@@ -163,7 +164,7 @@ representation types do not enable blob transactions on Bloch.
 Internal serde serializes bounded canonical RLP bytes, not Ethereum JSON objects.
 Decode checks the byte cap and rejects trailing content. The header uses the
 existing golden vector across RLP, sealing, serde and Compact. Custom RPC response
-conversion and durable deposit-body storage still require their own integration.
+conversion remains separate from the durable body storage described below.
 
 `BlochEvmConfig` implements pinned Reth `ConfigureEvm`: environments use trusted
 specification/domain and canonical Bloch fields; incoming contexts use the explicit
@@ -180,10 +181,33 @@ and reject inconsistent environment, metadata, body and execution output. The
 assembler trusts the supplied root; imported-block post-execution validation is
 still a separate consensus gate.
 
+## Durable body records
+
+`BlochChainStorage` implements Reth's chain storage and body reader/writer traits.
+`BlochTables` registers standard Reth tables plus `BlochV2Deposits`, keyed by block
+number. Its value is canonical V2 body RLP with an empty transaction list and a
+strict deposits-only byte/count bound. Every available body has a record, including
+an explicit empty deposit list. Missing or corrupt records are errors.
+
+The reader combines persisted deposits with the transactions prefetched by Reth,
+checks transaction/deposit roots against the supplied header, and reconstructs the
+canonical body. Storage checks do not authenticate signatures, L1 provenance or
+header consensus; those remain admission/execution/consensus responsibilities.
+The writer preflights duplicate heights and conflicts before mutations. Identical
+replay is idempotent; replacing different deposits requires explicit prior unwind.
+
+`remove_block_bodies_above` removes only deposit rows above the requested height,
+propagating cursor and decode errors. It does not silently interpret corruption as
+successful removal. The caller must abort the surrounding database transaction on
+any failure. Real MDBX tests qualify close/reopen, reconstructing the body from persisted
+headers, signed transactions and deposits, transaction rollback, commitment
+mismatches and committed body removal. This is
+not a complete canonical state/header/receipt unwind or process-crash qualification.
+
 ## Remaining integration
 
-Required next steps are authenticated execution-domain initialization, durable
-custom body/deposit storage, node wiring, custom consensus and receipt/RPC semantics,
+Required next steps are authenticated execution-domain initialization, full
+provider/node wiring, custom consensus and receipt/RPC semantics,
 durable canonical unwind, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

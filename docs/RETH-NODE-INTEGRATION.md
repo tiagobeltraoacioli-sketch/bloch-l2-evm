@@ -159,8 +159,21 @@ write is permitted. Focused tests exercise real signed execution with revm State
 Reth configuration traits, bundle assembly and adverse inputs. They are not an
 end-to-end launched node or a replacement for import consensus validation.
 
-Reth's chain-specific `BlockBodyReader`/`BlockBodyWriter` must preserve deposits
-in durable custom storage alongside the separately stored signed transactions.
+Reth's chain-specific `BlockBodyReader`/`BlockBodyWriter` now preserve deposits
+through `BlochChainStorage` and a separately registered `BlochV2Deposits` table,
+alongside the separately stored signed transactions.
 `into_ethereum_body` is only a lossy RPC projection. The upstream EthStorage
 implementation is for Ethereum bodies and cannot serve the Bloch body format.
-Canonical unwind, restart and crash recovery must include this extra body data.
+Real MDBX tests cover commit, orderly reopen, aborted writes/removals and body-only
+removal. Canonical unwind and crash recovery must still coordinate this extra body
+data with headers, transaction indices, receipts, trie updates and state.
+
+`BlochTables` includes the standard Reth table set; initialize/reopen with
+`reth_db::mdbx::init_db_for::<_, BlochTables>` before sharing the database. The
+header implements fallible database decompression of its canonical tagged RLP.
+Missing deposit rows, corrupt records, duplicate batch heights and conflicting
+existing deposits are errors; an explicit empty row is distinct from absence.
+Body reads verify transaction/deposit commitments against the supplied header.
+The adapter implements actual `reth_provider::providers::ChainStorage`, but a
+complete ProviderFactory instantiation still requires the custom EthChainSpec and
+payload/node types, static files/RocksDB configuration and canonical integration.

@@ -150,6 +150,18 @@ impl reth_codecs::Compact for BlochNodeHeader {
     }
 }
 
+impl reth_codecs::Compress for BlochNodeHeader {
+    type Compressed = Vec<u8>;
+    fn compress_to_buf<B: BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+        self.encode(buf);
+    }
+}
+impl reth_codecs::Decompress for BlochNodeHeader {
+    fn decompress(bytes: &[u8]) -> Result<Self, reth_codecs::DecompressError> {
+        serde_rlp::decode_exact(bytes).map_err(reth_codecs::DecompressError::new)
+    }
+}
+
 /// Immutable dual view: exact V2 signed bytes plus parsed Reth transactions.
 /// Construction checks bounds and canonical envelope syntax; execution still
 /// authenticates signatures, chain IDs and the supported transaction types.

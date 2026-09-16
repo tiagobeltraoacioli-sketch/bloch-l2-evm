@@ -10,7 +10,7 @@ use bloch_l2_evm::{
 };
 use bloch_reth_execution::{BlochNodeBlock, BlochNodeBody, BlochNodeHeader, BlochNodePrimitives, BlochRethTransaction};
 use k256::ecdsa::SigningKey;
-use reth_codecs::Compact;
+use reth_codecs::{Compact, Compress, Decompress};
 use reth_primitives_traits::{Block, BlockBody, NodePrimitives};
 
 fn raw() -> Bytes {
@@ -71,6 +71,8 @@ fn reth_traits_sealing_compact_and_serde_preserve_golden_identity() {
     let mut compact = vec![];
     let size = header.to_compact(&mut compact);
     assert_eq!(compact, alloy_rlp::encode(&header.0));
+    assert_eq!(header.clone().compress(), compact);
+    assert_eq!(BlochNodeHeader::decompress(&compact).unwrap(), header);
     compact.push(0xaa);
     let (decoded, tail) = BlochNodeHeader::from_compact(&compact, size);
     assert_eq!(decoded, header);
@@ -154,6 +156,8 @@ fn serde_rejects_trailing_or_oversized_header_bytes_and_compact_detects_corrupti
     assert!(serde_json::from_value::<BlochNodeHeader>(serde_json::json!(vec![0u8; 1034])).is_err());
     assert!(std::panic::catch_unwind(|| BlochNodeHeader::from_compact(&[0xc0], 1)).is_err());
     assert!(std::panic::catch_unwind(|| BlochNodeHeader::from_compact(&[], 1)).is_err());
+    assert!(BlochNodeHeader::decompress(&[0xc0]).is_err());
+    assert!(BlochNodeHeader::decompress(&encoded).is_err());
 }
 
 #[test]

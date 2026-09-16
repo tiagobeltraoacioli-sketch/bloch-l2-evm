@@ -120,7 +120,9 @@ SDK factory now runs staged finalization and accepted-candidate construction on
 the actual supplied EVM, retaining exact signed bytes and checking derived receipts
 before final writes. The host now implements full Reth primitive traits, bounded
 internal serde, header Compact, ConfigureEvm and an assembler that checks metadata
-already committed by execution. Node storage must still durably preserve deposit
-bodies and canonical metadata; domain initialization, consensus, pool/RPC and
+already committed by execution. The chain storage adapter now persists bounded
+deposit records, verifies reconstructed body commitments and supports transactional
+body removal in real MDBX reopen tests. Full provider/node wiring and coordinated
+canonical recovery remain required; domain initialization, consensus, pool/RPC and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.

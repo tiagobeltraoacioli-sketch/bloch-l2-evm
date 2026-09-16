@@ -1201,14 +1201,18 @@ dependencies = [
  "k256",
  "reth-codecs",
  "reth-db",
+ "reth-db-api",
  "reth-evm",
  "reth-primitives-traits",
  "reth-provider",
+ "reth-prune-types",
  "reth-revm",
+ "reth-storage-api",
  "reth-storage-errors",
  "reth-tasks",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
