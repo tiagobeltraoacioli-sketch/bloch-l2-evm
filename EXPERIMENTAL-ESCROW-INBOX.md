@@ -124,3 +124,10 @@ L1 locations and exact mint fields or invoking EVM execution. A failure in a lat
 proof leaves both execution and deposit cursors unchanged. Empty mandatory
 prefixes remain valid execution inputs, but do not create a verified membership
 summary or remove the requirement for host-authenticated snapshot context.
+
+With the `serde` feature, `InboxProof` now limits sibling lists to 64 during
+deserialization, using the shared no_std-compatible `serde_bounded::vector`
+helper. An excess element is rejected before decoding its contents. Valid proof
+serialization is unchanged; successful decoding is still not inclusion
+verification. The durable lock decoder also uses this shared implementation,
+keeping its existing field limits and strict intent decoding.

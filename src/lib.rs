@@ -113,6 +113,8 @@ pub mod l1_transfer;
 pub mod mpt;
 pub mod proving;
 pub mod scale;
+#[cfg(feature = "serde")]
+pub mod serde_bounded;
 pub mod state;
 pub mod stateroot;
 pub mod stubs;

@@ -188,6 +188,10 @@ pub struct InboxProof {
     /// Exact snapshot count, authenticated by the root wrapper.
     pub count: u64,
     /// Bottom-up path; no sibling is supplied for an odd promoted node.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::serde_bounded::vector::<_, _, 64>")
+    )]
     pub siblings: Vec<B256>,
 }
 impl InboxProof {

@@ -82,6 +82,7 @@ struct Record {
     domain: B256,
     number: u64,
     previous: B256,
+    #[serde(deserialize_with = "bloch_l2_evm::serde_bounded::vector::<_, _, 4096>")]
     proofs: Vec<InboxProof>,
     input: SignedBlockInput,
     witness: BatchWitness,

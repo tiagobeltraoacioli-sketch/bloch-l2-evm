@@ -146,3 +146,11 @@ heap amplification, callback cost, EVM execution time, pending-file scan time or
 future commits; it is neither a disk quota nor automatic compaction. Tests cover
 exact and insufficient boundaries, cumulative bytes over multiple records,
 rejection before derivation and successful retry with a sufficient budget.
+
+Proof decoding uses the shared `serde_bounded::vector` implementation: committed
+records and CLI proposals accept at most 4,096 inbox proofs, each with at most
+64 Merkle siblings; CLI trusted-origin files accept at most 4,096 locations.
+Excess elements are rejected before decoding their nested contents. Valid
+serialization is unchanged. This also protects callers that deserialize
+`InboxProof` directly. Existing record-byte, witness and execution limits remain
+necessary: these list bounds are not a global decoded-memory bound.

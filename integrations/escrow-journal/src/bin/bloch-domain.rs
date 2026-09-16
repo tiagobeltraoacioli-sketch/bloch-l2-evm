@@ -81,6 +81,7 @@ struct HeadFile {
 #[serde(deny_unknown_fields)]
 struct Proposal {
     version: u32,
+    #[serde(deserialize_with = "bloch_l2_evm::serde_bounded::vector::<_, _, 4096>")]
     proofs: Vec<InboxProof>,
     input: SignedBlockInput,
     witness: BatchWitness,
@@ -105,6 +106,7 @@ struct TrustedFile {
     input: B256,
     inbox_root: B256,
     count: u64,
+    #[serde(deserialize_with = "bloch_l2_evm::serde_bounded::vector::<_, _, 4096>")]
     locations: Vec<Location>,
 }
 impl TrustedFile {

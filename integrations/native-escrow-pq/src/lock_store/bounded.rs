@@ -2,49 +2,8 @@
 //! Enforce allocation bounds while decoding, before authentication or replay.
 use alloy_primitives::{Address, B256};
 use bloch_l2_evm::escrow::{LockIntent, Outpoint};
-use serde::{
-    de::{self, DeserializeSeed, SeqAccess, Visitor},
-    Deserialize, Deserializer,
-};
-use std::{fmt, marker::PhantomData};
-
-pub(super) fn vector<'de, D, T, const N: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct Bounded<T, const N: usize>(PhantomData<T>);
-    // Reject the first excess element without deserializing it. In particular,
-    // an excess lock must not allocate its nested public key/signature/inputs.
-    struct Reject;
-    impl<'de> DeserializeSeed<'de> for Reject {
-        type Value = ();
-        fn deserialize<D: Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
-            Err(de::Error::custom("sequence exceeds allocation limit"))
-        }
-    }
-    impl<'de, T: Deserialize<'de>, const N: usize> Visitor<'de> for Bounded<T, N> {
-        type Value = Vec<T>;
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            write!(f, "a sequence with at most {N} entries")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
-            if seq.size_hint().is_some_and(|size| size > N) {
-                return Err(de::Error::custom("sequence exceeds allocation limit"));
-            }
-            let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(N));
-            while items.len() < N {
-                match seq.next_element()? {
-                    Some(value) => items.push(value),
-                    None => return Ok(items),
-                }
-            }
-            seq.next_element_seed(Reject)?;
-            Ok(items)
-        }
-    }
-    deserializer.deserialize_seq(Bounded::<T, N>(PhantomData))
-}
+pub(super) use bloch_l2_evm::serde_bounded::vector;
+use serde::{Deserialize, Deserializer};
 
 // Keep the on-disk intent shape, but bound inputs before constructing LockIntent.
 // Strict decoding also rejects misspelled fields rather than silently ignoring them.

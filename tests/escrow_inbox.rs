@@ -226,3 +226,27 @@ fn proof_range_verification_binds_external_expectations_and_exact_sequence() {
     assert!(verify_proof_range(network, domain, snapshot.root(), u64::MAX, 0..u64::MAX, &[]).is_none());
     assert_eq!(verify(&proofs).unwrap(), observed); // membership never consumes
 }
+
+#[cfg(feature = "serde")]
+#[test]
+fn decoding_rejects_excess_merkle_siblings_before_parsing_excess_content() {
+    use bloch_l2_evm::escrow_inbox::InboxProof;
+    let original = ledger(5).inbox().proof(2).unwrap();
+    let encoded = serde_json::to_vec(&original).unwrap();
+    assert_eq!(serde_json::from_slice::<InboxProof>(&encoded).unwrap(), original);
+    let mut value = serde_json::to_value(&original).unwrap();
+    value["siblings"] = serde_json::json!(vec![B256::ZERO; 64]);
+    assert_eq!(
+        serde_json::from_value::<InboxProof>(value.clone())
+            .unwrap()
+            .siblings
+            .len(),
+        64
+    );
+    value["siblings"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"not_a_hash": []}));
+    let error = serde_json::from_slice::<InboxProof>(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+    assert!(error.to_string().contains("allocation limit"));
+}
