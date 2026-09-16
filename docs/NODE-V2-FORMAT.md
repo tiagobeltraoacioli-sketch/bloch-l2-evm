@@ -84,20 +84,45 @@ The header golden encoding is independently generated in
 Tests bind every header field, exercise stream boundaries and malformed inputs,
 check body golden vectors and trie roots, and reject commitment/gas mutations.
 
+## Explicit V2 execution and state
+
+`node_execution::genesis_v2(spec, timestamp)` creates zero-issuance block-zero
+metadata before calculating the genesis root. Slot 0 at `spec.block_info` is
+exactly 2. Slots 1–8 retain the V1 field order; slot 9 stores user gas, slot 10
+parent state root, slots 11–12 transaction and receipt roots, and slots 13–20
+the bloom's eight big-endian words. The history ring remains at 0x100–0x1ff.
+V2 reads reject missing/wrong version flags and integers wider than u64.
+V1 decoding and hashing rules remain unchanged.
+
+Genesis has initial base fee, zero gas, empty transaction/receipt tries and an
+empty parent state root. Its first child uses `next_base_fee(initial_base_fee, 0)`.
+Use `node_head(spec, domain, &state)` to reconstruct its V2 header; V1
+`L2Header` helpers do not define the V2 identity. Domain is supplied by trusted
+configuration and is not stored in genesis. Domain
+initialization must bind the resulting genesis root without introducing a cycle.
+The execution API does not authenticate an arbitrary caller-supplied domain.
+
+`execute_node_block` authenticates bounded signed bytes and uses the shared
+transaction kernel, deposit rules, system call, fee routing and burn accounting.
+It reconstructs the V2 parent from committed metadata and the previous root,
+then freezes the BLOCKHASH window before executing system calls and transactions.
+Typed receipts come from actual execution. Transaction/receipt roots, user gas
+and bloom are committed in head storage before calculating the post-state root.
+Any execution failure discards the overlay without publishing partial changes.
+Neither a block's own hash nor its own post-state root is stored in that state.
+
+`generate_node_batch_witness` records a sparse execution and self-checks it with
+`verify_node_batch`. These explicit V2 entry points share proof hydration and
+root reconstruction with V1, but execute the V2 header policy. The verifier
+reauthenticates signed bytes, rejects reads outside the witness and recomputes
+the root containing the V2 metadata. This is a verifier procedure, not an SP1
+proof implementation; callers must authenticate L1 deposit provenance.
+
 ## Remaining integration
 
-V2 finalization must calculate transaction/receipt commitments and store the
-metadata needed to reconstruct this exact header **before** calculating the
-post-state root. The assembler receives an already-calculated root and cannot
-repair missing commitments afterwards. Neither the current block hash nor its
-post-state root may be stored inside that same post-state, which would create a
-hash cycle. Domain identity can come from authenticated configuration; persisting
-an identity that itself commits the genesis root inside genesis state would also
-create a cycle and must be avoided.
-
-Required next steps are a V2 genesis/head layout and execution-domain identity,
-portable and witness lifecycle integration, Reth primitive/Compact traits,
-configuration and assembler, custom consensus and receipt/RPC semantics, durable
-canonical unwind, and the full signed developer workflow. V1 identities and
-production consensus remain unchanged. Format changes require distinct version
-and domain commitments rather than silently reinterpreting existing blocks.
+Required next steps are authenticated execution-domain initialization, the V2
+supplied-EVM/staged lifecycle and incremental builder, Reth primitive/Compact
+traits, configuration and assembler, custom consensus and receipt/RPC semantics,
+durable canonical unwind, and the full signed developer workflow. V1 identities
+and production consensus remain unchanged. Format changes require distinct
+version and domain commitments rather than silently reinterpreting existing blocks.

@@ -111,9 +111,10 @@ No current domain or production consensus is activated by this integration.
 
 The independent [V2 node format](NODE-V2-FORMAT.md) now defines tagged RLP
 header/body/block primitives, parent-state-root linkage and signed-body/receipt
-consistency checks. Its codecs are bounded and preserve V1 identities. V2 head
-storage, genesis/domain initialization and portable/witness execution still need
-implementation before the assembler can use these commitments.
+consistency checks. Its codecs are bounded and preserve V1 identities. Explicit
+V2 genesis/head storage and signed portable/witness execution now commit actual
+transaction/receipt roots before computing the state root. Authenticated domain
+initialization and V2 supplied-EVM lifecycle/assembler wiring remain required.
 In particular, Bloch block gas currently includes deposit gas, while deposits
 are not Ethereum signed transactions. The new format must specify deposit body
 representation, receipt indexing and cumulative gas semantics together. Do not

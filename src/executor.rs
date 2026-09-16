@@ -278,6 +278,11 @@ pub struct ExecutionOutcome {
 /// **unchanged** on every variant.
 #[derive(Debug)]
 pub enum BlockExecutionError {
+    /// The separately configured V2 committed header state is malformed.
+    HeaderState {
+        /// Description of the invalid metadata.
+        detail: String,
+    },
     /// A deposit mint violated the ledger rules (cursor, L1 cap).
     Deposit(DepositError),
     /// The block's deposits are not in strictly increasing L1 position order
@@ -401,6 +406,7 @@ pub enum BlockExecutionError {
 impl core::fmt::Display for BlockExecutionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            BlockExecutionError::HeaderState { detail } => write!(f, "invalid header state: {detail}"),
             BlockExecutionError::Deposit(e) => write!(f, "deposit failed: {e}"),
             BlockExecutionError::DepositsOutOfOrder {
                 first_index,
@@ -987,10 +993,22 @@ pub(crate) struct BlockSession<DB> {
 impl<DB: DatabaseRef> BlockSession<DB> {
     pub(crate) fn begin(
         spec: &ChainSpec,
-        mut db: CacheDB<DB>,
+        db: CacheDB<DB>,
         previous_root: B256,
         context: &BlockContext,
         deposits: &[DepositMint],
+    ) -> Result<Self, BlockExecutionError> {
+        Self::begin_with_header(spec, db, context, deposits, |db| {
+            apply_header_rules(spec, db, previous_root, context)
+        })
+    }
+
+    pub(crate) fn begin_with_header(
+        spec: &ChainSpec,
+        mut db: CacheDB<DB>,
+        context: &BlockContext,
+        deposits: &[DepositMint],
+        prepare_header: impl FnOnce(&mut CacheDB<DB>) -> Result<B256, BlockExecutionError>,
     ) -> Result<Self, BlockExecutionError> {
         let input = BlockInput {
             context: context.clone(),
@@ -998,7 +1016,7 @@ impl<DB: DatabaseRef> BlockSession<DB> {
             txs: Vec::new(),
         };
         validate_block_input(spec, &input)?;
-        let parent_hash = apply_header_rules(spec, &mut db, previous_root, context)?;
+        let parent_hash = prepare_header(&mut db)?;
         let mut evm = block_context(spec, context, db).build_mainnet();
         // 3. EIP-4788 system call: store this block's anchor root under its
         //    timestamp in the canonical beacon-roots predeploy (materialized if
@@ -1081,6 +1099,16 @@ impl<DB: DatabaseRef> BlockSession<DB> {
 
         Ok((db, self.run))
     }
+
+    pub(crate) fn finish_with_header<T>(
+        self,
+        write_header: impl FnOnce(&mut CacheDB<DB>, &BlockRun) -> Result<T, BlockExecutionError>,
+    ) -> Result<(CacheDB<DB>, BlockRun, T), BlockExecutionError> {
+        let mut db = self.db;
+        finish_burns(&mut db, &self.spec, &self.run)?;
+        let header = write_header(&mut db, &self.run)?;
+        Ok((db, self.run, header))
+    }
 }
 
 fn apply_deposits<DB: DatabaseRef>(
@@ -1105,9 +1133,7 @@ fn finish_protocol<DB: DatabaseRef>(
     context: &BlockContext,
     run: &BlockRun,
 ) -> Result<(), BlockExecutionError> {
-    if !run.burned_wei.is_zero() {
-        ledger_add(db, spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, run.burned_wei).map_err(db_error)?;
-    }
+    finish_burns(db, spec, run)?;
     write_head(
         db,
         spec.block_info,
@@ -1123,6 +1149,17 @@ fn finish_protocol<DB: DatabaseRef>(
         },
     )
     .map_err(db_error)?;
+    Ok(())
+}
+
+fn finish_burns<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+    run: &BlockRun,
+) -> Result<(), BlockExecutionError> {
+    if !run.burned_wei.is_zero() {
+        ledger_add(db, spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, run.burned_wei).map_err(db_error)?;
+    }
     Ok(())
 }
 
