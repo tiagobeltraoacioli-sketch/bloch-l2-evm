@@ -118,11 +118,35 @@ reauthenticates signed bytes, rejects reads outside the witness and recomputes
 the root containing the V2 metadata. This is a verifier procedure, not an SP1
 proof implementation; callers must authenticate L1 deposit provenance.
 
+## Supplied-EVM lifecycle
+
+`executor::lifecycle::prepare_node_block_start` selects the same V2 parent policy
+for a caller-owned provisional database. The pending system-call phase exports
+the frozen BLOCKHASH window. Candidate preparation and fee accounting reuse the
+same `ActiveBlock` as V1. `prepare_node_finish` authenticates the accepted body,
+checks deposit commitment and transaction count, builds receipts from committed
+execution results, and stages burn-ledger/head changes together. The caller must
+retain the exact signed bytes corresponding to those results; this low-level API
+is a trusted backend interface. Using the wrong version's finalizer is rejected.
+
+`PreparedNodeBlockFinish` exposes derived receipts before its read-free commit.
+`FinishedNodeBlock::finalize(root)` attaches an independently calculated root.
+Dropping prepared changes publishes nothing; after any failure following an
+already committed phase, discard the entire provisional block database.
+
+The host `BlochNodeBlockExecutorFactory` binds a trusted domain and connects these
+phases to the actual supplied Alloy EVM and inspector. It retains canonical signed
+bytes only for accepted candidates and verifies SDK receipts against core receipts
+before publishing final metadata. `finish_node` preserves the V2 root-pending
+outcome; the SDK trait's `finish` executes the same writes and returns its normal
+EVM/block result. The candidate budgets, lease/generation guards, environment
+checks and immutable BLOCKHASH window are shared with the V1 factory.
+
 ## Remaining integration
 
-Required next steps are authenticated execution-domain initialization, the V2
-supplied-EVM/staged lifecycle and incremental builder, Reth primitive/Compact
-traits, configuration and assembler, custom consensus and receipt/RPC semantics,
+Required next steps are authenticated execution-domain initialization, Reth
+primitive/Compact traits, configuration and assembler, custom consensus and
+receipt/RPC semantics,
 durable canonical unwind, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

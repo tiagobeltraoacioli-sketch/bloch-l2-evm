@@ -14,7 +14,8 @@ use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
 pub mod block;
 pub use block::{
-    BlochBlockExecutionCtx, BlochBlockExecutor, BlochBlockExecutorFactory, BlochBlockFinish, BlochTxResult,
+    BlochBlockExecutionCtx, BlochBlockExecutor, BlochBlockExecutorFactory, BlochBlockFinish,
+    BlochNodeBlockExecutorFactory, BlochNodeBlockFinish, BlochTxResult,
 };
 
 pub mod context;

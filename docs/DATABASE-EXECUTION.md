@@ -169,3 +169,21 @@ checks with an Arc session identity and checked generation. Results are Send and
 accepted commits invalidate outstanding results. A rejected commit poisons the
 executor so its finalization cannot silently succeed. Direct callers of the low
 level core API must provide equivalent protection themselves.
+
+## Explicit V2 lifecycle
+
+`prepare_node_block_start(spec, domain, db, previous_root, input)` selects V2
+header reconstruction and returns the same staged system-call/deposit/candidate
+phases. Its `ActiveBlock` must be finalized with `prepare_node_finish(db, body)`;
+V1 and V2 finalizers reject each other's active blocks before any final writes.
+The accepted signed body is authenticated again, and its deposit commitment and
+transaction count must match the run. Low-level backend callers remain responsible
+for pairing the exact signed bytes with the committed execution results.
+
+The finish preparation derives receipts and commits their roots, transaction root,
+user gas and bloom in the V2 head before a post-state root is calculated. Both burn
+accounting and head writes are staged together. `PreparedNodeBlockFinish::receipts`
+allows the SDK adapter to compare its accumulated receipts before committing;
+commit performs no database reads. `FinishedNodeBlock::finalize(root)` trusts the
+caller's independently calculated root. Tests cover late head-read failure after
+burn preparation, wrong final body, cross-version finalization and read-free commit.

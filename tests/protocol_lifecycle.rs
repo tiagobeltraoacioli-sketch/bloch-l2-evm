@@ -312,3 +312,173 @@ fn replayed_deposit_cursor_preserves_existing_supply_and_balances() {
         supply
     );
 }
+
+#[test]
+fn v2_preparation_is_read_complete_and_cannot_use_v1_finalization() {
+    use bloch_l2_evm::{
+        executor::lifecycle::prepare_node_block_start, node_execution::genesis_v2, node_primitives::NodeBodyV2,
+    };
+    let spec = ChainSpec::testnet();
+    let genesis = genesis_v2(&spec, 0).unwrap();
+    let mut db = db();
+    db.inner = genesis.db().clone();
+    let input = BlockInput {
+        context: BlockContext::next(&spec, &genesis),
+        deposits: vec![],
+        txs: vec![],
+    };
+    let before = root(&db);
+    let domain = B256::repeat_byte(7);
+    drop(prepare_node_block_start(&spec, domain, &mut db, before, &input).unwrap());
+    assert_eq!(db.commits, 0);
+    assert_eq!(root(&db), before);
+    db.fail = Some(BEACON_ROOTS_ADDRESS);
+    assert!(prepare_node_block_start(&spec, domain, &mut db, before, &input).is_err());
+    assert_eq!(db.commits, 0);
+    assert_eq!(root(&db), before);
+    db.fail = None;
+    assert!(prepare_node_block_start(&spec, B256::ZERO, &mut db, before, &input).is_err());
+    assert_eq!(db.commits, 0);
+
+    let pending = prepare_node_block_start(&spec, domain, &mut db, before, &input)
+        .unwrap()
+        .commit(&mut db);
+    let result = system(&mut db, &spec, &input);
+    let active = pending.complete(result, &mut db).unwrap();
+    let commits = db.commits;
+    let before_finish = root(&db);
+    assert!(matches!(
+        active.prepare_finish(&mut db),
+        Err(BlockExecutionError::HeaderState { .. })
+    ));
+    assert_eq!(db.commits, commits);
+    assert_eq!(root(&db), before_finish);
+
+    let mut v1 = MutableOnly {
+        inner: InMemoryDB::default(),
+        commits: 0,
+        fail: None,
+        reads: vec![],
+    };
+    let v1_input = BlockInput {
+        context: BlockContext::default(),
+        deposits: vec![],
+        txs: vec![],
+    };
+    let v1_root = root(&v1);
+    let pending = prepare_block_start(&spec, &mut v1, v1_root, &v1_input)
+        .unwrap()
+        .commit(&mut v1);
+    let result = system(&mut v1, &spec, &v1_input);
+    let active = pending.complete(result, &mut v1).unwrap();
+    let commits = v1.commits;
+    let before_finish = root(&v1);
+    assert!(active.prepare_node_finish(&mut v1, &NodeBodyV2::default()).is_err());
+    assert_eq!(v1.commits, commits);
+    assert_eq!(root(&v1), before_finish);
+}
+
+#[test]
+fn v2_late_head_failure_never_publishes_burn_and_commit_never_reads() {
+    use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+    use alloy_eips::eip2718::Encodable2718;
+    use alloy_primitives::Signature;
+    use bloch_l2_evm::{
+        decode_signed_transaction,
+        executor::lifecycle::prepare_node_block_start,
+        node_execution::{execute_node_block, genesis_v2},
+        node_primitives::NodeBodyV2,
+    };
+    use k256::ecdsa::SigningKey;
+    let spec = ChainSpec::testnet();
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let sender = Address::from_public_key(key.verifying_key());
+    let domain = B256::repeat_byte(7);
+    let signed = TxEip1559 {
+        chain_id: spec.chain_id,
+        nonce: 0,
+        gas_limit: 200_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 100_000_000,
+        to: TxKind::Create,
+        value: U256::from(123),
+        input: Bytes::from_static(&[0x30, 0xff]),
+        ..Default::default()
+    };
+    let signature: Signature = key
+        .sign_prehash_recoverable(signed.signature_hash().as_slice())
+        .unwrap()
+        .into();
+    let raw: Bytes = TxEnvelope::from(signed.into_signed(signature)).encoded_2718().into();
+    let tx = decode_signed_transaction(&spec, &raw).unwrap().environment().clone();
+    let genesis = genesis_v2(&spec, 0).unwrap();
+    let input = BlockInput {
+        context: BlockContext::next(&spec, &genesis),
+        deposits: vec![deposit(sender, 1, 100_000_000)],
+        txs: vec![tx.clone()],
+    };
+    let body = NodeBodyV2 {
+        deposits: input.deposits.clone(),
+        transactions: vec![raw],
+    };
+    let mut expected_state = genesis.clone();
+    let expected = execute_node_block(&spec, domain, &mut expected_state, &input.context, &body).unwrap();
+    // Exercise a late database failure, a mismatched final body, and success.
+    for mode in 0..3 {
+        let mut db = MutableOnly {
+            inner: genesis.db().clone(),
+            commits: 0,
+            fail: None,
+            reads: vec![],
+        };
+        let previous_root = root(&db);
+        let pending = prepare_node_block_start(&spec, domain, &mut db, previous_root, &input)
+            .unwrap()
+            .commit(&mut db);
+        for &(number, hash) in pending.block_hashes() {
+            db.inner.cache.block_hashes.insert(U256::from(number), hash);
+        }
+        let result = system(&mut db, &spec, &input);
+        let mut active = pending.complete(result, &mut db).unwrap();
+        let result = context(&mut db, &spec, &input)
+            .build_mainnet()
+            .transact(tx.clone())
+            .unwrap();
+        let prepared = active.prepare_transaction(&tx, result, &mut db).unwrap();
+        assert_eq!(prepared.outcome().burned_wei, U256::from(123));
+        prepared.commit(&mut db);
+        let commits = db.commits;
+        let before_finish = root(&db);
+        db.reads.clear();
+        if mode == 0 {
+            db.fail = Some(spec.block_info);
+            assert!(active.prepare_node_finish(&mut db, &body).is_err());
+            assert!(db.reads.contains(&spec.supply_ledger));
+            assert_eq!(db.commits, commits);
+            assert_eq!(root(&db), before_finish);
+            assert_eq!(
+                db.inner.storage(spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT).unwrap(),
+                U256::ZERO
+            );
+        } else if mode == 1 {
+            let mut wrong_body = body.clone();
+            wrong_body.deposits.clear();
+            assert!(active.prepare_node_finish(&mut db, &wrong_body).is_err());
+            assert!(db.reads.is_empty());
+            assert_eq!(db.commits, commits);
+            assert_eq!(root(&db), before_finish);
+        } else {
+            let prepared = active.prepare_node_finish(&mut db, &body).unwrap();
+            assert_eq!(prepared.receipts(), expected.receipts);
+            assert_eq!(db.commits, commits);
+            assert_eq!(root(&db), before_finish);
+            db.reads.clear();
+            db.fail = Some(spec.block_info);
+            let finished = prepared.commit(&mut db);
+            assert!(db.reads.is_empty());
+            let actual = finished.finalize(root(&db));
+            assert_eq!(actual.header, expected.header);
+            assert_eq!(actual.receipts, expected.receipts);
+        }
+    }
+}

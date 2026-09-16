@@ -114,7 +114,11 @@ header/body/block primitives, parent-state-root linkage and signed-body/receipt
 consistency checks. Its codecs are bounded and preserve V1 identities. Explicit
 V2 genesis/head storage and signed portable/witness execution now commit actual
 transaction/receipt roots before computing the state root. Authenticated domain
-initialization and V2 supplied-EVM lifecycle/assembler wiring remain required.
+initialization and assembler wiring remain required. The explicit
+`BlochNodeBlockExecutorFactory` now uses the same staged V2 header policy on the
+supplied EVM. It retains only accepted signed bytes and compares SDK receipts
+with core-derived receipts before committing metadata. `finish_node` preserves
+the resulting `FinishedNodeBlock` for independent root calculation.
 In particular, Bloch block gas currently includes deposit gas, while deposits
 are not Ethereum signed transactions. The new format must specify deposit body
 representation, receipt indexing and cumulative gas semantics together. Do not

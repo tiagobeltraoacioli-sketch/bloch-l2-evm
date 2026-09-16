@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Explicit V2 genesis and committed header metadata, separate from V1 state.
-mod head;
+pub(crate) mod head;
 
 pub use head::{genesis_v2, HeadRecordV2};
 
@@ -62,7 +62,7 @@ pub fn node_head(spec: &ChainSpec, domain: B256, state: &L2State) -> Result<Node
     Ok(header)
 }
 
-fn prepare_parent<DB: DatabaseRef>(
+pub(crate) fn prepare_parent<DB: DatabaseRef>(
     spec: &ChainSpec,
     domain: B256,
     db: &mut CacheDB<DB>,
@@ -130,13 +130,13 @@ pub fn execute_node_block(
     Ok(pending.finalize(spec, domain, state.commit_root()))
 }
 
-struct PendingOutcome {
-    record: HeadRecordV2,
-    receipts: Vec<ReceiptEnvelope>,
-    transactions: Vec<TxOutcome>,
+pub(crate) struct PendingOutcome {
+    pub(crate) record: HeadRecordV2,
+    pub(crate) receipts: Vec<ReceiptEnvelope>,
+    pub(crate) transactions: Vec<TxOutcome>,
 }
 impl PendingOutcome {
-    fn finalize(self, spec: &ChainSpec, domain: B256, root: B256) -> NodeExecutionOutcome {
+    pub(crate) fn finalize(self, spec: &ChainSpec, domain: B256, root: B256) -> NodeExecutionOutcome {
         NodeExecutionOutcome {
             header: self.record.header(spec, domain, root),
             receipts: self.receipts,
@@ -157,11 +157,44 @@ fn run_node_block<DB: DatabaseRef>(
     let mut session = BlockSession::begin_with_header(spec, db, context, &body.deposits, |db| {
         prepare_parent(spec, domain, db, previous_root, context)
     })?;
-    let mut receipts = Vec::with_capacity(input.txs.len());
-    let mut cumulative = 0u64;
     for tx in &input.txs {
-        let outcome = session.try_transaction(tx, |_| true)?.expect("accepted transaction");
-        cumulative += outcome.gas_used;
+        session.try_transaction(tx, |_| true)?;
+    }
+    let (db, run, (record, receipts)) = session.finish_with_header(|db, run| {
+        let (record, receipts) = outcome_record(context, previous_root, run, body, &input.txs)?;
+        head::write_head_v2(db, spec.block_info, &record)?;
+        Ok((record, receipts))
+    })?;
+    Ok((
+        db,
+        PendingOutcome {
+            record,
+            receipts,
+            transactions: run.tx_outcomes,
+        },
+    ))
+}
+
+pub(crate) fn outcome_record(
+    context: &BlockContext,
+    previous_root: B256,
+    run: &crate::executor::BlockRun,
+    body: &NodeBodyV2,
+    txs: &[revm::context::TxEnv],
+) -> Result<(HeadRecordV2, Vec<ReceiptEnvelope>), BlockExecutionError> {
+    if txs.len() != run.tx_outcomes.len() || body.deposits_hash() != run.deposits_hash {
+        return Err(BlockExecutionError::HeaderState {
+            detail: "V2 final body differs from executed deposits or transaction count".into(),
+        });
+    }
+    let mut receipts = Vec::with_capacity(txs.len());
+    let mut cumulative = 0u64;
+    for (tx, outcome) in txs.iter().zip(&run.tx_outcomes) {
+        cumulative = cumulative
+            .checked_add(outcome.gas_used)
+            .ok_or_else(|| BlockExecutionError::HeaderState {
+                detail: "V2 receipt gas overflow".into(),
+            })?;
         let receipt = Receipt {
             status: Eip658Value::Eip658(outcome.success),
             cumulative_gas_used: cumulative,
@@ -172,39 +205,32 @@ fn run_node_block<DB: DatabaseRef>(
             0 => ReceiptEnvelope::Legacy(receipt),
             1 => ReceiptEnvelope::Eip2930(receipt),
             2 => ReceiptEnvelope::Eip1559(receipt),
-            _ => unreachable!("authenticated supported transaction"),
+            _ => {
+                return Err(BlockExecutionError::HeaderState {
+                    detail: "unsupported V2 receipt type".into(),
+                })
+            }
         });
     }
     let logs_bloom: Bloom = receipts.iter().flat_map(|receipt| receipt.logs().iter()).collect();
-    let (db, run, record) = session.finish_with_header(|db, run| {
-        let record = HeadRecordV2 {
-            base: HeadRecord {
-                number: context.number,
-                timestamp: context.timestamp,
-                base_fee_per_gas: context.base_fee_per_gas,
-                gas_used: run.gas_used,
-                prevrandao: context.prevrandao,
-                anchor_root: context.anchor_root,
-                parent_hash: run.parent_hash,
-                deposits_hash: run.deposits_hash,
-            },
-            user_gas_used: cumulative,
-            parent_state_root: previous_root,
-            transactions_root: body.transactions_root(),
-            receipts_root: calculate_receipt_root(&receipts),
-            logs_bloom,
-        };
-        head::write_head_v2(db, spec.block_info, &record)?;
-        Ok(record)
-    })?;
-    Ok((
-        db,
-        PendingOutcome {
-            record,
-            receipts,
-            transactions: run.tx_outcomes,
+    let record = HeadRecordV2 {
+        base: HeadRecord {
+            number: context.number,
+            timestamp: context.timestamp,
+            base_fee_per_gas: context.base_fee_per_gas,
+            gas_used: run.gas_used,
+            prevrandao: context.prevrandao,
+            anchor_root: context.anchor_root,
+            parent_hash: run.parent_hash,
+            deposits_hash: run.deposits_hash,
         },
-    ))
+        user_gas_used: cumulative,
+        parent_state_root: previous_root,
+        transactions_root: body.transactions_root(),
+        receipts_root: calculate_receipt_root(&receipts),
+        logs_bloom,
+    };
+    Ok((record, receipts))
 }
 
 /// V2 witness generation or authenticated re-execution failed.

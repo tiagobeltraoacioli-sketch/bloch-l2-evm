@@ -7,7 +7,15 @@
 //! signed transactions and system-call results, authenticated deposits/anchors,
 //! and the independently calculated roots. These are trusted backend interfaces.
 use super::*;
+use crate::node_execution::{NodeExecutionError, NodeExecutionOutcome, PendingOutcome};
+use crate::node_primitives::NodeBodyV2;
 use crate::protocol_overlay::{stage_protocol, PreparedProtocolChanges};
+
+#[derive(Clone, Copy)]
+enum HeaderPolicy {
+    V1,
+    Node { domain: B256, previous_root: B256 },
+}
 
 /// Header/ring and beacon-account changes, not yet committed.
 #[must_use = "commit to begin the system-call phase, or drop to discard"]
@@ -30,6 +38,7 @@ pub struct ActiveBlock {
     spec: ChainSpec,
     context: BlockContext,
     run: BlockRun,
+    header_policy: HeaderPolicy,
 }
 
 /// A prepared candidate borrowing its originating block's accounting.
@@ -51,6 +60,21 @@ pub struct PreparedBlockFinish {
 #[must_use = "compute the post-state root and finalize the outcome"]
 pub struct FinishedBlock(ActiveBlock);
 
+/// Read-complete V2 ledger/head writes and actual user receipts.
+#[must_use = "commit V2 final effects or discard the provisional block"]
+pub struct PreparedNodeBlockFinish {
+    changes: PreparedProtocolChanges,
+    finished: FinishedNodeBlock,
+}
+
+/// Committed V2 metadata awaiting the independently calculated state root.
+#[must_use = "calculate the post-state root and finalize the V2 outcome"]
+pub struct FinishedNodeBlock {
+    spec: ChainSpec,
+    domain: B256,
+    pending: PendingOutcome,
+}
+
 /// Validate the complete supplied input and prepare the header/beacon prefix.
 ///
 /// No writes occur on error or when the returned value is dropped. Commit to
@@ -63,9 +87,48 @@ pub fn prepare_block_start<DB: Database>(
     previous_root: B256,
     input: &BlockInput,
 ) -> Result<PreparedBlockStart, BlockExecutionError> {
+    prepare_start(spec, db, previous_root, input, HeaderPolicy::V1)
+}
+
+/// Prepare the explicit V2 header/beacon prefix on a provisional database.
+/// Domain and previous root must be trusted. As with the V1 backend interface,
+/// callers authenticate signed transactions and L1 provenance independently.
+pub fn prepare_node_block_start<DB: Database>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: &mut DB,
+    previous_root: B256,
+    input: &BlockInput,
+) -> Result<PreparedBlockStart, BlockExecutionError> {
+    if input.deposits.len() > crate::node_primitives::MAX_NODE_DEPOSITS {
+        return Err(BlockExecutionError::HeaderState {
+            detail: "V2 deposit count limit exceeded".into(),
+        });
+    }
+    prepare_start(
+        spec,
+        db,
+        previous_root,
+        input,
+        HeaderPolicy::Node { domain, previous_root },
+    )
+}
+
+fn prepare_start<DB: Database>(
+    spec: &ChainSpec,
+    db: &mut DB,
+    previous_root: B256,
+    input: &BlockInput,
+    header_policy: HeaderPolicy,
+) -> Result<PreparedBlockStart, BlockExecutionError> {
     validate_block_input(spec, input)?;
     let (changes, (parent_hash, block_hashes)) = stage_protocol(db, |overlay| {
-        let parent_hash = apply_header_rules(spec, overlay, previous_root, &input.context)?;
+        let parent_hash = match header_policy {
+            HeaderPolicy::V1 => apply_header_rules(spec, overlay, previous_root, &input.context)?,
+            HeaderPolicy::Node { domain, previous_root } => {
+                crate::node_execution::prepare_parent(spec, domain, overlay, previous_root, &input.context)?
+            }
+        };
         let start = input.context.number.saturating_sub(BLOCK_HASH_HISTORY);
         let block_hashes = (start..input.context.number)
             .map(|number| (number, overlay.cache.block_hashes[&U256::from(number)]))
@@ -77,6 +140,7 @@ pub fn prepare_block_start<DB: Database>(
         changes,
         next: PendingSystemCall {
             active: ActiveBlock {
+                header_policy,
                 spec: spec.clone(),
                 context: input.context.clone(),
                 run: BlockRun {
@@ -209,10 +273,71 @@ impl ActiveBlock {
 
     /// Prepare the burned-supply ledger and committed head together.
     pub fn prepare_finish<DB: Database>(self, db: &mut DB) -> Result<PreparedBlockFinish, BlockExecutionError> {
+        if !matches!(self.header_policy, HeaderPolicy::V1) {
+            return Err(BlockExecutionError::HeaderState {
+                detail: "V2 block requires V2 finalization".into(),
+            });
+        }
         let (changes, ()) = stage_protocol(db, |overlay| {
             finish_protocol(overlay, &self.spec, &self.context, &self.run)
         })?;
         Ok(PreparedBlockFinish { changes, block: self })
+    }
+
+    /// Authenticate the exact accepted body and prepare V2 metadata before root
+    /// calculation. This is a trusted backend interface: the caller must retain
+    /// the exact signed bytes corresponding to each committed EVM result.
+    /// Dropped or skipped candidates must not appear in `body`.
+    pub fn prepare_node_finish<DB: Database>(
+        self,
+        db: &mut DB,
+        body: &NodeBodyV2,
+    ) -> Result<PreparedNodeBlockFinish, NodeExecutionError> {
+        let HeaderPolicy::Node { domain, previous_root } = self.header_policy else {
+            return Err(BlockExecutionError::HeaderState {
+                detail: "V1 block cannot use V2 finalization".into(),
+            }
+            .into());
+        };
+        let input = body.authenticated_input(&self.spec).map_err(NodeExecutionError::Body)?;
+        let (record, receipts) =
+            crate::node_execution::outcome_record(&self.context, previous_root, &self.run, body, &input.txs)?;
+        let (changes, ()) = stage_protocol(db, |overlay| {
+            finish_burns(overlay, &self.spec, &self.run)?;
+            crate::node_execution::head::write_head_v2(overlay, self.spec.block_info, &record)
+        })?;
+        Ok(PreparedNodeBlockFinish {
+            changes,
+            finished: FinishedNodeBlock {
+                spec: self.spec,
+                domain,
+                pending: PendingOutcome {
+                    record,
+                    receipts,
+                    transactions: self.run.tx_outcomes,
+                },
+            },
+        })
+    }
+}
+
+impl PreparedNodeBlockFinish {
+    /// Receipts derived from committed execution results, before publishing writes.
+    pub fn receipts(&self) -> &[alloy_consensus::ReceiptEnvelope] {
+        &self.finished.pending.receipts
+    }
+
+    /// Commit to the unchanged provisional database used for preparation.
+    pub fn commit(self, db: &mut impl DatabaseCommit) -> FinishedNodeBlock {
+        self.changes.commit(db);
+        self.finished
+    }
+}
+impl FinishedNodeBlock {
+    /// Attach the independently calculated full post-state root. This trusted
+    /// method neither calculates nor authenticates the supplied root.
+    pub fn finalize(self, state_root: B256) -> NodeExecutionOutcome {
+        self.pending.finalize(&self.spec, self.domain, state_root)
     }
 }
 

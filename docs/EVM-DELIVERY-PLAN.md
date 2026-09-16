@@ -115,6 +115,8 @@ consistency validation. Golden vectors and malformed-input tests preserve its
 wire identity; actual SDK user receipts pass the new consistency checks.
 The explicit V2 execution path now includes zero-issuance genesis/head storage,
 actual typed receipts committed before the post-state root, parent reconstruction,
-and signed host/witness re-execution using the shared kernel. Domain initialization,
-V2 supplied-EVM lifecycle/incremental construction and Reth primitive traits remain
-open; no existing V1 execution or production consensus has changed.
+and signed host/witness re-execution using the shared kernel. The explicit V2
+SDK factory now runs staged finalization and accepted-candidate construction on
+the actual supplied EVM, retaining exact signed bytes and checking derived receipts
+before final writes. Domain initialization and Reth primitive/assembler integration
+remain open; no existing V1 execution or production consensus has changed.

@@ -242,7 +242,31 @@ candidates, stale/foreign/mutable-access tokens, environment rejection,
 canonical precompiles and a contract mutating the block-info ring during a block.
 `tests/block_executor_bounds.rs` checks rejected/skipped candidate budgets,
 oversized preflight, and disabled validation or wrong block-info configuration
-without original-database reads. The factory still requires custom node
-primitives, committed transaction/receipt
-roots, assembler, consensus, pool and RPC integration. Existing production/domain
-formats are unchanged and no live chain is activated.
+without original-database reads. The factory still requires custom Reth node
+primitives, assembler, consensus, pool and RPC integration. Existing production/
+domain formats are unchanged and no live chain is activated.
+
+## Explicit V2 SDK factory
+
+`BlochNodeBlockExecutorFactory::new(&spec, trusted_domain)` uses the V2 genesis/head
+format through the same supplied-EVM executor. Provide the same
+`BlochBlockExecutionCtx`; V1 genesis and a zero domain fail before prefix writes.
+Candidates retain their canonical signed bytes, which enter the final body only
+on a successful checked commit. Skipping or rejecting a candidate cannot add it
+to the committed transaction root.
+
+`finish_node` prepares V2 head metadata from the accepted body and actual results,
+compares core-derived receipts with the SDK receipts, then commits the read-complete
+final changes. It returns the supplied EVM, SDK result and `FinishedNodeBlock`.
+Calculate the full post-state root and pass it to `finalize(root)` to obtain the
+actual `NodeExecutionOutcome`. The generic SDK `finish` selects the correct version
+and returns its standard result; it does not invent a root. Calling the wrong
+version-specific finalizer is rejected.
+
+`tests/node_block_executor.rs` compares supplied-EVM execution against portable,
+recorded and stateless V2 results across signed deployment, logs, reverts and
+BLOCKHASH. It exercises accepted/skipped candidates, stale tokens and invalid
+prefixes. A separate test drives the generic trait's finish over actual revm
+`State`, materializes its plain bundle changes, and reconstructs the matching V2
+root/head. Trusted domain initialization, custom Reth primitives and assembler,
+node storage/consensus, pool/RPC and the end-to-end developer workflow remain open.

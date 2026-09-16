@@ -19,7 +19,10 @@ use alloy_primitives::{Bytes, B256, U256};
 use bloch_l2_evm::{
     chainspec::BEACON_ROOTS_ADDRESS,
     decode_signed_transaction,
-    executor::lifecycle::{prepare_block_start, ActiveBlock, FinishedBlock},
+    executor::lifecycle::{
+        prepare_block_start, prepare_node_block_start, ActiveBlock, FinishedBlock, FinishedNodeBlock,
+    },
+    node_primitives::NodeBodyV2,
     transactions::{MAX_RAW_TRANSACTION_BYTES, MAX_SIGNED_BLOCK_BYTES, MAX_SIGNED_TRANSACTIONS},
     BlockContext, BlockInput, ChainSpec, DepositMint, PreparedTransaction,
 };
@@ -50,6 +53,7 @@ pub struct BlochBlockExecutionCtx {
 pub struct BlochTxResult {
     prepared: PreparedTransaction,
     tx_type: TxType,
+    raw: Bytes,
     session: Arc<()>,
     generation: u64,
 }
@@ -66,6 +70,13 @@ impl TxResult for BlochTxResult {
 /// The supplied EVM, SDK receipt/gas result, and root-pending Bloch outcome.
 pub type BlochBlockFinish<DB, I> = (BlochEvm<DB, I>, BlockExecutionResult<ReceiptEnvelope>, FinishedBlock);
 
+/// The supplied EVM, SDK result, and root-pending V2 outcome.
+pub type BlochNodeBlockFinish<DB, I> = (
+    BlochEvm<DB, I>,
+    BlockExecutionResult<ReceiptEnvelope>,
+    FinishedNodeBlock,
+);
+
 /// Block executor retaining the actual supplied EVM, database and inspector.
 /// Any lifecycle failure requires discarding its provisional database.
 pub struct BlochBlockExecutor<DB: StateDB, I: Inspector<BlochContext<DB>>> {
@@ -73,6 +84,8 @@ pub struct BlochBlockExecutor<DB: StateDB, I: Inspector<BlochContext<DB>>> {
     spec: ChainSpec,
     context: BlochBlockExecutionCtx,
     active: Option<ActiveBlock>,
+    node_domain: Option<B256>,
+    accepted_transactions: Vec<Bytes>,
     block_hashes: Vec<(u64, B256)>,
     receipts: Vec<ReceiptEnvelope>,
     user_gas: u64,
@@ -157,12 +170,18 @@ impl<DB: StateDB, I: Inspector<BlochContext<DB>>> BlochBlockExecutor<DB, I> {
         self.generation = next_generation;
         self.user_gas = cumulative;
         self.receipts.push(receipt);
+        if self.node_domain.is_some() {
+            self.accepted_transactions.push(output.raw);
+        }
         Ok(GasOutput::new(gas))
     }
     /// Commit final protocol effects and retain the core root-pending result.
     /// The caller calculates the complete post-state root before finalizing it.
     pub fn finish_bloch(mut self) -> Result<BlochBlockFinish<DB, I>, BlockExecutionError> {
         self.ready()?;
+        if self.node_domain.is_some() {
+            return Err(BlockExecutionError::msg("V2 executor requires finish_node"));
+        }
         self.validate_environment()?;
         let active = self
             .active
@@ -173,6 +192,40 @@ impl<DB: StateDB, I: Inspector<BlochContext<DB>>> BlochBlockExecutor<DB, I> {
             .prepare_finish(self.evm.db_mut())
             .map_err(BlockExecutionError::other)?
             .commit(self.evm.db_mut());
+        let result = BlockExecutionResult {
+            receipts: self.receipts,
+            requests: Default::default(),
+            gas_used,
+            blob_gas_used: 0,
+        };
+        Ok((self.evm, result, finished))
+    }
+    /// Commit V2 metadata and retain the actual root-pending V2 result.
+    /// The caller independently computes the complete post-state root.
+    pub fn finish_node(mut self) -> Result<BlochNodeBlockFinish<DB, I>, BlockExecutionError> {
+        self.ready()?;
+        if self.node_domain.is_none() {
+            return Err(BlockExecutionError::msg("V1 executor requires finish_bloch"));
+        }
+        self.validate_environment()?;
+        let active = self
+            .active
+            .take()
+            .ok_or_else(|| BlockExecutionError::msg("block pre-execution has not completed"))?;
+        let gas_used = active.gas_used();
+        let body = NodeBodyV2 {
+            deposits: self.context.deposits,
+            transactions: self.accepted_transactions,
+        };
+        let prepared = active
+            .prepare_node_finish(self.evm.db_mut(), &body)
+            .map_err(BlockExecutionError::other)?;
+        if prepared.receipts() != self.receipts {
+            return Err(BlockExecutionError::msg(
+                "SDK receipts disagree with shared V2 execution",
+            ));
+        }
+        let finished = prepared.commit(self.evm.db_mut());
         let result = BlockExecutionResult {
             receipts: self.receipts,
             requests: Default::default(),
@@ -202,9 +255,18 @@ impl<DB: StateDB, I: Inspector<BlochContext<DB>>> BlockExecutor for BlochBlockEx
             deposits: self.context.deposits.clone(),
             txs: Vec::new(),
         };
-        let pending = prepare_block_start(&self.spec, self.evm.db_mut(), self.context.previous_root, &input)
-            .map_err(BlockExecutionError::other)?
-            .commit(self.evm.db_mut());
+        let prepared = match self.node_domain {
+            Some(domain) => prepare_node_block_start(
+                &self.spec,
+                domain,
+                self.evm.db_mut(),
+                self.context.previous_root,
+                &input,
+            ),
+            None => prepare_block_start(&self.spec, self.evm.db_mut(), self.context.previous_root, &input),
+        }
+        .map_err(BlockExecutionError::other)?;
+        let pending = prepared.commit(self.evm.db_mut());
         // Shared preparation captures the same pre-system-call window as the
         // portable executor. Contract writes cannot change BLOCKHASH mid-block.
         self.block_hashes = pending.block_hashes().to_vec();
@@ -269,6 +331,7 @@ impl<DB: StateDB, I: Inspector<BlochContext<DB>>> BlockExecutor for BlochBlockEx
         Ok(BlochTxResult {
             prepared,
             tx_type: envelope.tx_type(),
+            raw: raw.into(),
             session: Arc::clone(&self.session),
             generation: self.generation,
         })
@@ -278,7 +341,11 @@ impl<DB: StateDB, I: Inspector<BlochContext<DB>>> BlockExecutor for BlochBlockEx
         self.checked_commit_transaction(output).unwrap_or_default()
     }
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        self.finish_bloch().map(|(evm, result, _pending_root)| (evm, result))
+        if self.node_domain.is_some() {
+            self.finish_node().map(|(evm, result, _pending_root)| (evm, result))
+        } else {
+            self.finish_bloch().map(|(evm, result, _pending_root)| (evm, result))
+        }
     }
     fn evm_mut(&mut self) -> &mut Self::Evm {
         self.invalidate();
@@ -328,6 +395,8 @@ impl BlockExecutorFactory for BlochBlockExecutorFactory {
             spec: self.spec.clone(),
             context,
             active: None,
+            node_domain: None,
+            accepted_transactions: Vec::new(),
             block_hashes: Vec::new(),
             receipts: Vec::new(),
             user_gas: 0,
@@ -337,5 +406,42 @@ impl BlockExecutorFactory for BlochBlockExecutorFactory {
             attempted_bytes: 0,
             poisoned: None,
         }
+    }
+}
+
+/// Explicit V2 standalone factory. Domain identity must come from trusted configuration.
+/// This does not implement node consensus, custom Reth primitives, or RPC.
+#[derive(Clone, Debug)]
+pub struct BlochNodeBlockExecutorFactory {
+    inner: BlochBlockExecutorFactory,
+    domain: B256,
+}
+impl BlochNodeBlockExecutorFactory {
+    /// Bind this factory to a trusted V2 domain; zero is rejected before prefix writes.
+    pub fn new(spec: &ChainSpec, domain: B256) -> Self {
+        Self {
+            inner: BlochBlockExecutorFactory::new(spec),
+            domain,
+        }
+    }
+}
+impl BlockExecutorFactory for BlochNodeBlockExecutorFactory {
+    type EvmFactory = BlochEvmFactory;
+    type TxExecutionResult = BlochTxResult;
+    type ExecutionCtx<'a> = BlochBlockExecutionCtx;
+    type Transaction = TxEnvelope;
+    type Receipt = ReceiptEnvelope;
+    type Executor<'a, DB: StateDB, I: Inspector<BlochContext<DB>>> = BlochBlockExecutor<DB, I>;
+    fn evm_factory(&self) -> &BlochEvmFactory {
+        self.inner.evm_factory()
+    }
+    fn create_executor<DB: StateDB, I: Inspector<BlochContext<DB>>>(
+        &self,
+        evm: BlochEvm<DB, I>,
+        context: BlochBlockExecutionCtx,
+    ) -> BlochBlockExecutor<DB, I> {
+        let mut executor = self.inner.create_executor(evm, context);
+        executor.node_domain = Some(self.domain);
+        executor
     }
 }
