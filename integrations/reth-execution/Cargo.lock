@@ -1196,14 +1196,19 @@ dependencies = [
  "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
+ "alloy-rlp",
  "bloch-l2-evm",
  "k256",
+ "reth-codecs",
  "reth-db",
+ "reth-evm",
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
  "reth-storage-errors",
  "reth-tasks",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

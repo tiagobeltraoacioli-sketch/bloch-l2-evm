@@ -95,12 +95,12 @@ block unwind and crash recovery remain unqualified.
 
 ## Remaining node work
 
-The current Bloch header uses its existing fixed-width hash, not Ethereum RLP.
-It also lacks signed-transaction and receipt-root commitments. A complete node
-needs custom block/header primitives and a versioned protocol upgrade for those
-commitments, together with the appropriate Reth assembler, receipts, incremental
-payload builder, pool/RPC wiring and authenticated deposit derivation. Launching
-a vanilla Ethereum Reth node would not satisfy these requirements.
+The existing V1 header retains its fixed-width identity. The separate V2 path now
+provides committed transaction/receipt roots, full Reth primitive adapters,
+configuration and assembly. A complete node still needs authenticated domain
+initialization, durable deposit-body storage and canonical recovery, custom import
+consensus, payload/node/pool/RPC wiring and authenticated deposit derivation.
+Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
 ## Validation scope
 
@@ -242,8 +242,8 @@ candidates, stale/foreign/mutable-access tokens, environment rejection,
 canonical precompiles and a contract mutating the block-info ring during a block.
 `tests/block_executor_bounds.rs` checks rejected/skipped candidate budgets,
 oversized preflight, and disabled validation or wrong block-info configuration
-without original-database reads. The factory still requires custom Reth node
-primitives, assembler, consensus, pool and RPC integration. Existing production/
+without original-database reads. Full node storage, consensus, pool and RPC
+integration remain open. Existing production/
 domain formats are unchanged and no live chain is activated.
 
 ## Explicit V2 SDK factory
@@ -268,5 +268,33 @@ recorded and stateless V2 results across signed deployment, logs, reverts and
 BLOCKHASH. It exercises accepted/skipped candidates, stale tokens and invalid
 prefixes. A separate test drives the generic trait's finish over actual revm
 `State`, materializes its plain bundle changes, and reconstructs the matching V2
-root/head. Trusted domain initialization, custom Reth primitives and assembler,
-node storage/consensus, pool/RPC and the end-to-end developer workflow remain open.
+root/head. Trusted domain initialization, node storage/consensus, pool/RPC and
+the end-to-end developer workflow remain open.
+
+## Full Reth primitive/configuration adapters
+
+`BlochNodePrimitives` supplies tagged V2 headers, bodies and blocks. Header sealing
+uses the existing V2 golden hash. Internal serde uses bounded canonical RLP bytes;
+header Compact storage uses the same tagged RLP. The infallible Compact interface
+panics on corrupt database bytes, while network and serde decoding return errors.
+These are internal representations, not an Ethereum JSON-RPC response schema.
+
+Reth's compactable signed transaction is `EthereumTxEnvelope<TxEip4844>` and its
+receipt is `EthereumReceipt`. `BlochRethBlockExecutorFactory` adapts these through
+the existing V2 executor, preserving supported signed bytes, typed receipt roots
+and session/generation checks. It does not enable blob transactions or sidecars.
+
+`BlochEvmConfig` implements actual `ConfigureEvm` with `BlochNextBlockEnvCtx`
+attributes. `BlochNodeBlockAssembler` reconstructs the head already committed in
+the bundle over original provider storage, verifies parent/body/receipts/context,
+and attaches the independently calculated root. It does not modify state after
+root calculation. `tests/node_config.rs` exercises these interfaces against a real
+signed execution and State bundle, with a fixture provider for original state.
+`tests/node_primitives.rs` qualifies canonical bytes, sealing, bounded decoding,
+serde, Compact and receipt conversions.
+
+Custom `BlockBodyReader`/`BlockBodyWriter` integration remains necessary to persist
+deposits alongside the separately stored transactions. The Ethereum body projection
+omits those deposits and must never replace the canonical Bloch body in storage.
+Full import consensus, durable canonical unwind and launched developer workflows
+remain unqualified.

@@ -118,5 +118,9 @@ actual typed receipts committed before the post-state root, parent reconstructio
 and signed host/witness re-execution using the shared kernel. The explicit V2
 SDK factory now runs staged finalization and accepted-candidate construction on
 the actual supplied EVM, retaining exact signed bytes and checking derived receipts
-before final writes. Domain initialization and Reth primitive/assembler integration
-remain open; no existing V1 execution or production consensus has changed.
+before final writes. The host now implements full Reth primitive traits, bounded
+internal serde, header Compact, ConfigureEvm and an assembler that checks metadata
+already committed by execution. Node storage must still durably preserve deposit
+bodies and canonical metadata; domain initialization, consensus, pool/RPC and
+end-to-end node operation remain open. No existing V1 execution or production
+consensus has changed.

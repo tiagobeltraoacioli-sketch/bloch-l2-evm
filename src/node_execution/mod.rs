@@ -52,8 +52,19 @@ pub struct NodeExecutionOutcome {
 /// Reconstruct the V2 head from committed state and trusted configuration.
 /// Use this for V2 identity rather than the V1 `L2Header` helpers.
 pub fn node_head(spec: &ChainSpec, domain: B256, state: &L2State) -> Result<NodeHeaderV2, BlockExecutionError> {
-    let mut db = CacheDB::new(state.db());
-    let header = head::read_head_v2(&mut db, spec.block_info)?.header(spec, domain, state.state_root());
+    node_head_on_database(spec, domain, state.db(), state.state_root())
+}
+
+/// Read the V2 committed head through a provider or authenticated witness.
+/// The caller supplies the independently calculated root of that exact database.
+pub fn node_head_on_database<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: DB,
+    state_root: B256,
+) -> Result<NodeHeaderV2, BlockExecutionError> {
+    let mut db = CacheDB::new(db);
+    let header = head::read_head_v2(&mut db, spec.block_info)?.header(spec, domain, state_root);
     header
         .validate_configuration(spec, domain)
         .map_err(|error| BlockExecutionError::HeaderState {

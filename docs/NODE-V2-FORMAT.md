@@ -54,7 +54,10 @@ also apply. Declared lengths and counts are checked before copying entries.
 
 The block is `[BLOCH:EVM:BLOCK:2, header, body]`. The outer bound includes both
 bounded nested containers and framing. RLP is the implemented wire codec;
-serde/Compact and Reth primitive traits still require separate qualification.
+the host adapters additionally implement Reth primitive traits and bounded internal
+serde. Header `Compact` storage is exactly the tagged header RLP, without a second
+hash or field layout. The infallible upstream Compact reader panics on corrupt
+storage; network/serde decoders return errors and preserve input on failure.
 
 ## Commitments and validation
 
@@ -142,11 +145,45 @@ outcome; the SDK trait's `finish` executes the same writes and returns its norma
 EVM/block result. The candidate budgets, lease/generation guards, environment
 checks and immutable BLOCKHASH window are shared with the V1 factory.
 
+## Reth primitive and assembler boundary
+
+The host exports `BlochNodeHeader`, `BlochNodeBody`, `BlochNodeBlock` and
+`BlochNodePrimitives`. Their encodings match the portable V2 codecs byte-for-byte;
+sealing invokes the V2 hash. The body retains immutable original signed bytes
+alongside parsed transactions. Its Ethereum RPC projection omits deposits and
+must never be used for storage or hashing. A deposit-only header is not empty.
+
+Reth full-node traits require `EthereumTxEnvelope<TxEip4844>` and
+`EthereumReceipt`, rather than the standalone executor's sidecar-capable
+`TxEnvelope` and `ReceiptEnvelope`. `BlochRethBlockExecutorFactory` adapts these
+representations through the same signed authentication and owned-token checks.
+Supported transaction bytes and typed receipt roots remain identical. These
+representation types do not enable blob transactions on Bloch.
+
+Internal serde serializes bounded canonical RLP bytes, not Ethereum JSON objects.
+Decode checks the byte cap and rejects trailing content. The header uses the
+existing golden vector across RLP, sealing, serde and Compact. Custom RPC response
+conversion and durable deposit-body storage still require their own integration.
+
+`BlochEvmConfig` implements pinned Reth `ConfigureEvm`: environments use trusted
+specification/domain and canonical Bloch fields; incoming contexts use the explicit
+parent state root and authenticate body commitments. Next-block attributes carry
+host-authenticated timestamp, randomness, anchor and deposits. This does not
+independently authenticate L1 provenance or import consensus.
+
+`BlochNodeBlockAssembler` reads the final head through the execution bundle over
+the original provider, including storage wipe/deletion semantics. It compares that
+committed header against parent, environment, accepted body, receipts and total
+gas, then attaches the builder's independently calculated root. It never writes
+metadata after root calculation. Tests assemble an actual signed execution bundle
+and reject inconsistent environment, metadata, body and execution output. The
+assembler trusts the supplied root; imported-block post-execution validation is
+still a separate consensus gate.
+
 ## Remaining integration
 
-Required next steps are authenticated execution-domain initialization, Reth
-primitive/Compact traits, configuration and assembler, custom consensus and
-receipt/RPC semantics,
+Required next steps are authenticated execution-domain initialization, durable
+custom body/deposit storage, node wiring, custom consensus and receipt/RPC semantics,
 durable canonical unwind, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

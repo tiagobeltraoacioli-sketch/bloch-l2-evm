@@ -49,7 +49,8 @@ Owned results are bound to an executor identity and database generation; commits
 and mutable EVM access invalidate older candidates. The checked commit method
 returns an error on misuse. The SDK's infallible commit poisons the executor and
 returns zero gas; all later execution/finalization then fails. No invalid result
-publishes state or a receipt. The assembler and custom primitives remain absent.
+publishes state or a receipt. The explicit V2 primitive/configuration/assembler
+adapters are described below; full node wiring remains open.
 
 The SDK requires `EvmFactory::Evm<DB, I>` to expose that exact database and
 inspector, and `StateDB` requires mutable `Database + DatabaseCommit`, not
@@ -114,7 +115,7 @@ header/body/block primitives, parent-state-root linkage and signed-body/receipt
 consistency checks. Its codecs are bounded and preserve V1 identities. Explicit
 V2 genesis/head storage and signed portable/witness execution now commit actual
 transaction/receipt roots before computing the state root. Authenticated domain
-initialization and assembler wiring remain required. The explicit
+initialization and node storage/consensus wiring remain required. The explicit
 `BlochNodeBlockExecutorFactory` now uses the same staged V2 header policy on the
 supplied EVM. It retains only accepted signed bytes and compares SDK receipts
 with core-derived receipts before committing metadata. `finish_node` preserves
@@ -140,3 +141,26 @@ transactions, preserve state after rejected payloads, and exercise reorg/unwind.
 The native derivation and proof gates in [the delivery plan](EVM-DELIVERY-PLAN.md)
 remain separate requirements. Compiling or launching upstream's `custom-evm`
 example does not close any Bloch-specific node gate.
+
+## Actual V2 Reth configuration and assembly
+
+`BlochNodePrimitives` implements the pinned full-node trait with custom tagged
+header/body/block adapters, compact header storage, and the upstream compactable
+transaction/receipt representations. Internal serde is a bounded RLP byte transport,
+not the eventual Ethereum JSON-RPC schema. Sealing preserves the portable V2 hash.
+`BlochRethBlockExecutorFactory` converts these node representations through the
+existing V2 executor; signature authentication and commit leases remain shared.
+
+`BlochEvmConfig` implements `ConfigureEvm` and supplies canonical block/next-block
+environments plus authenticated-body contexts. Its assembler reads the committed
+head from bundle-over-provider storage and checks parent/body/receipts/context.
+The root arrives independently calculated by the builder. No post-root metadata
+write is permitted. Focused tests exercise real signed execution with revm State,
+Reth configuration traits, bundle assembly and adverse inputs. They are not an
+end-to-end launched node or a replacement for import consensus validation.
+
+Reth's chain-specific `BlockBodyReader`/`BlockBodyWriter` must preserve deposits
+in durable custom storage alongside the separately stored signed transactions.
+`into_ethereum_body` is only a lossy RPC projection. The upstream EthStorage
+implementation is for Ethereum bodies and cannot serve the Bloch body format.
+Canonical unwind, restart and crash recovery must include this extra body data.

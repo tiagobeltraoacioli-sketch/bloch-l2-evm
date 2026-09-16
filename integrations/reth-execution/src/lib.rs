@@ -13,9 +13,17 @@ use bloch_l2_evm::{
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
 pub mod block;
+pub mod config;
+pub mod node_factory;
+pub mod primitives;
 pub use block::{
     BlochBlockExecutionCtx, BlochBlockExecutor, BlochBlockExecutorFactory, BlochBlockFinish,
     BlochNodeBlockExecutorFactory, BlochNodeBlockFinish, BlochTxResult,
+};
+pub use config::{BlochEvmConfig, BlochNextBlockEnvCtx, BlochNodeBlockAssembler};
+pub use node_factory::{BlochRethBlockExecutor, BlochRethBlockExecutorFactory, BlochRethBlockFinish};
+pub use primitives::{
+    BlochNodeBlock, BlochNodeBody, BlochNodeHeader, BlochNodePrimitives, BlochRethReceipt, BlochRethTransaction,
 };
 
 pub mod context;
