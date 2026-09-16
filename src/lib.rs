@@ -97,6 +97,8 @@
 extern crate alloc;
 #[cfg(feature = "experimental-escrow")]
 pub mod escrow_inbox;
+#[cfg(feature = "experimental-escrow")]
+pub mod escrow_execution;
 // The test harness itself links std; make it available to test code in the
 // no_std configuration too, so `cargo test --no-default-features` compiles.
 #[cfg(test)]

@@ -49,6 +49,11 @@ must bound decoding before allocation. Withdrawal authorization remains disabled
 
 ## Validation
 
+The [execution facade](EXPERIMENTAL-ESCROW-EXECUTION.md) now checks mandatory
+contiguous inclusion and advances its local consumption cursor only after EVM
+verification. It still requires host-authenticated L1 roots and source mappings;
+the standalone membership API remains repeatable.
+
 Four new tests exercise every position in trees of 0, 1, 2, 3, 5, 17, 32 and 65
 records, all deposit fields, root/network/domain/count changes, malformed paths,
 extreme counts and snapshot isolation. The real hybrid PQ funding test also
