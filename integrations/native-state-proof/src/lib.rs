@@ -9,6 +9,9 @@ use bloch_pos_committee::{
 };
 use sha3::{Digest, Sha3_256};
 
+#[cfg(unix)]
+pub mod checkpoint_reader;
+
 /// Proof rejection before returning an authenticated observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateProofError {

@@ -26,6 +26,41 @@ that anchor after checking a native envelope against independently trusted
 signers and the exact checkpoint header. This replaces unchecked signer claims
 with real signature verification, while retaining weak-subjectivity trust.
 
+## Persisted checkpoint reader (Unix)
+
+`checkpoint_reader::read_utxo` and `read_evm_commitment` compose the complete
+read-only path rather than requiring callers to assemble its trust boundary:
+
+```text
+CheckpointStore + caller-supplied current epoch
+  → recheck real ML-DSA-65 + Falcon-1024 signatures and WS freshness
+  → authenticate the exact checkpoint header and complete transaction body
+  → verify native state inclusion using the official consensus implementation
+  → CheckpointObservation<T>
+```
+
+The reader accepts exactly one header, which must be the latest stored signed
+checkpoint block. It does not accept an ancestor's state as the checkpoint's
+state. The observation exposes the typed state, checkpoint epoch, epoch at which
+freshness was checked, signed digest and signer-arrangement review flag. Its
+fields are private. Reads do not advance or mutate the checkpoint store.
+
+Before cryptographic work, requests must have a 304-byte header, exactly 256
+siblings, at most 4,096 transactions and at most 16 MiB of transaction bytes.
+Transport decoders must independently enforce these bounds before allocating.
+Empty, poisoned, future or stale stores cannot supply observations. Store
+recovery and rollback protection are documented in
+[CHECKPOINT-STORE.md](../native-escrow-pq/CHECKPOINT-STORE.md); callers must retain
+an independent minimum checkpoint mark when reopening to detect acknowledged
+history loss.
+
+The current epoch and signer policy remain trusted inputs. A checkpoint within
+the 2,016-epoch weak-subjectivity window can still lag the network head; that
+window is not a deposit-crediting freshness policy. The result proves state at
+the named checkpoint, not present unspentness, independently verified FFG,
+agreement between independent operators or permission to mint. Revalidate for
+each decision and apply the application's separate freshness/finality policy.
+
 `verify_utxo` uses the official `eutxo_leaf` codec to authenticate the native
 transaction ID, output index, exact u64 value and script hash. It proves that
 the output belongs to the committed unspent set **at the observed block**.
@@ -91,9 +126,13 @@ git -C ../bloch-validator-payout rev-parse HEAD
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-state-proof/Cargo.toml
 ```
 
-Seven integration tests use the official full consensus state builder and native
+Twelve integration tests use the official full consensus state builder and native
 header codec with synthetic states/checkpoints. They cover exact UTXO values
 including u64::MAX, every UTXO/EVM field, malformed/reversed/corrupted paths,
 cross-component and cross-state substitution, historical inclusion after a spend
-and a zero EVM commitment. These are state-proof correctness tests, not live
+and a zero EVM commitment. Five end-to-end cases additionally use disposable real
+hybrid signing keys and a persisted/reopened checkpoint store: successful typed
+reads and provenance, empty/stale/future rejection, pre-spend state substitution
+after a newer checkpoint, body/value tampering and early request bounds.
+These are state-proof correctness tests, not live
 network finality or protocol-activation evidence. No wallet or network is used.

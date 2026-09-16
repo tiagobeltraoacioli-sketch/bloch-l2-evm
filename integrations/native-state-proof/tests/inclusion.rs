@@ -226,3 +226,236 @@ fn zero_evm_commitment_is_observable_without_claiming_execution() {
     let observed = verify_evm_commitment(&body(tree.root()), entry, &proof.siblings).unwrap();
     assert_eq!(observed.value().gas_used, 0);
 }
+
+#[cfg(unix)]
+mod checkpoint_pipeline {
+    use super::*;
+    use bloch_native_escrow_pq::{
+        checkpoint::{CheckpointError, CheckpointPolicy, Phase},
+        checkpoint_store::{CheckpointStore, StoreError},
+    };
+    use bloch_native_state_proof::checkpoint_reader::{read_evm_commitment, read_utxo, ReadError};
+    use bloch_pos_committee::ws::{self, CheckpointEnvelope, Signer, SignerSet, WeakSubjectivityCheckpoint};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            OnceLock,
+        },
+    };
+    fn keys() -> &'static Vec<(Vec<u8>, Vec<u8>)> {
+        static KEYS: OnceLock<Vec<(Vec<u8>, Vec<u8>)>> = OnceLock::new();
+        KEYS.get_or_init(|| (0..3).map(|_| bloch_crypto::crypto::generate_keypair()).collect())
+    }
+    fn policy() -> CheckpointPolicy {
+        CheckpointPolicy::new(
+            7,
+            [9; 32],
+            SignerSet {
+                id: 1,
+                threshold: 2,
+                min_external: 1,
+                adopted_epoch: 0,
+                signers: keys()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, key)| Signer {
+                        pubkey: key.0[4..].try_into().unwrap(),
+                        external: i == 2,
+                    })
+                    .collect(),
+            },
+            Phase::A,
+        )
+        .unwrap()
+    }
+    fn signed(root: [u8; 32], epoch: u64, parent: [u8; 32]) -> (CheckpointEnvelope, Vec<u8>) {
+        let mut header = vec![0; 304];
+        header[..4].copy_from_slice(&0xb10c_0005u32.to_le_bytes());
+        header[4..36].copy_from_slice(&parent);
+        header[36..68].copy_from_slice(&root);
+        header[68..100].copy_from_slice(&body_root(&[]));
+        header[100..108].copy_from_slice(&(epoch * 120).to_le_bytes());
+        let native = BlockHeaderV4::canonical_deserialize(&header).unwrap();
+        let cp = WeakSubjectivityCheckpoint {
+            version: ws::WS_FORMAT_VERSION,
+            network_id: 7,
+            genesis_root: [9; 32],
+            epoch,
+            block_root: *BlockId::of(&native).as_bytes(),
+            state_root: root,
+            validator_set_root: [12; 32],
+            issued_at: 1,
+            signer_set_id: 1,
+        };
+        let signatures = [0u8, 2]
+            .into_iter()
+            .map(|i| {
+                let signature = bloch_crypto::crypto::sign(&keys()[i as usize].1, &cp.ws_digest()).unwrap();
+                (i, signature[4..].to_vec())
+            })
+            .collect();
+        (
+            CheckpointEnvelope {
+                checkpoint: cp,
+                signatures,
+            },
+            header,
+        )
+    }
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let name = format!(
+                "bloch-state-reader-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            Self(std::env::temp_dir().join(name))
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn persisted_real_pq_checkpoint_authenticates_utxo_and_evm_state() {
+        let outputs = entries();
+        let tree = tree(&outputs, evm());
+        let (env, header) = signed(tree.root(), 100, [0; 32]);
+        let temp = Temp::new();
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let mark = store.accept(&env, &header, 100).unwrap();
+        drop(store);
+        let store = CheckpointStore::open(&temp.0, policy(), Some(mark)).unwrap();
+        let proof = tree.prove(&eutxo_leaf(&outputs[0]).0).unwrap();
+        let observed = read_utxo(&store, 101, &header, &[], &outputs[0], &proof.siblings).unwrap();
+        assert_eq!(observed.state().value(), &outputs[0]);
+        assert_eq!(observed.state().block(), observed.state().checkpoint().block);
+        assert_eq!(observed.checkpoint_epoch(), 100);
+        assert_eq!(observed.checked_at_epoch(), 101);
+        assert_eq!(observed.signed_digest(), mark.digest);
+        assert!(!observed.arrangement_review_due());
+        let proof = tree.prove(&evm_commitment_key()).unwrap();
+        assert_eq!(
+            *read_evm_commitment(&store, 101, &header, &[], evm(), &proof.siblings)
+                .unwrap()
+                .state()
+                .value(),
+            evm()
+        );
+        assert_eq!(store.mark(), Some(mark));
+    }
+    #[test]
+    fn stale_future_and_empty_stores_never_return_state_observations() {
+        let outputs = entries();
+        let tree = tree(&outputs, evm());
+        let temp = Temp::new();
+        let (env, header) = signed(tree.root(), 100, [0; 32]);
+        let proof = tree.prove(&eutxo_leaf(&outputs[0]).0).unwrap();
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        assert!(matches!(
+            read_utxo(&store, 100, &header, &[], &outputs[0], &proof.siblings),
+            Err(ReadError::Checkpoint(StoreError::Empty))
+        ));
+        store.accept(&env, &header, 100).unwrap();
+        assert!(matches!(
+            read_utxo(&store, 99, &header, &[], &outputs[0], &proof.siblings),
+            Err(ReadError::Checkpoint(StoreError::Verify(CheckpointError::Future)))
+        ));
+        assert!(matches!(
+            read_utxo(
+                &store,
+                100 + ws::WS_PERIOD_EPOCHS,
+                &header,
+                &[],
+                &outputs[0],
+                &proof.siblings
+            ),
+            Err(ReadError::Checkpoint(StoreError::Verify(CheckpointError::Stale)))
+        ));
+    }
+    #[test]
+    fn old_header_and_pre_spend_proof_cannot_substitute_for_new_checkpoint_state() {
+        let outputs = entries();
+        let mut tree = tree(&outputs, evm());
+        let temp = Temp::new();
+        let (old, old_header) = signed(tree.root(), 100, [0; 32]);
+        let proof = tree.prove(&eutxo_leaf(&outputs[0]).0).unwrap();
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        store.accept(&old, &old_header, 100).unwrap();
+        assert!(read_utxo(&store, 100, &old_header, &[], &outputs[0], &proof.siblings).is_ok());
+        tree.remove(&eutxo_leaf(&outputs[0]).0);
+        let (new, new_header) = signed(tree.root(), 101, old.checkpoint.block_root);
+        store.accept(&new, &new_header, 101).unwrap();
+        assert!(matches!(
+            read_utxo(&store, 101, &old_header, &[], &outputs[0], &proof.siblings),
+            Err(ReadError::Body(_))
+        ));
+        assert!(matches!(
+            read_utxo(&store, 101, &new_header, &[], &outputs[0], &proof.siblings),
+            Err(ReadError::State(_))
+        ));
+    }
+    #[test]
+    fn tampered_body_and_leaf_fail_without_mutating_checkpoint() {
+        let outputs = entries();
+        let tree = tree(&outputs, evm());
+        let temp = Temp::new();
+        let (env, header) = signed(tree.root(), 100, [0; 32]);
+        let proof = tree.prove(&eutxo_leaf(&outputs[0]).0).unwrap();
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let mark = store.accept(&env, &header, 100).unwrap();
+        assert!(matches!(
+            read_utxo(
+                &store,
+                100,
+                &header,
+                &[Bytes::from_static(&[1])],
+                &outputs[0],
+                &proof.siblings
+            ),
+            Err(ReadError::Body(_))
+        ));
+        let mut changed = outputs[0].clone();
+        changed.value -= 1;
+        assert!(matches!(
+            read_utxo(&store, 100, &header, &[], &changed, &proof.siblings),
+            Err(ReadError::State(_))
+        ));
+        assert_eq!(store.mark(), Some(mark));
+    }
+    #[test]
+    fn request_limits_are_checked_before_checkpoint_verification() {
+        let temp = Temp::new();
+        let store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let entry = entries().remove(0);
+        assert!(matches!(
+            read_utxo(&store, 100, &[], &[], &entry, &[]),
+            Err(ReadError::Limit)
+        ));
+        assert!(matches!(
+            read_utxo(
+                &store,
+                100,
+                &[0; 304],
+                &vec![Bytes::new(); 4097],
+                &entry,
+                &[[0; 32]; 256]
+            ),
+            Err(ReadError::Limit)
+        ));
+        assert!(matches!(
+            read_utxo(&store, 100, &[0; 304], &[], &entry, &[[0; 32]; 257]),
+            Err(ReadError::Limit)
+        ));
+    }
+}
