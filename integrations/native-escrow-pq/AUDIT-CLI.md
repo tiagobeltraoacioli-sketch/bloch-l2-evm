@@ -44,7 +44,35 @@ Output includes the recovered mark, state commitment, inbox root/count, conserve
 accounting status and `locked_sat` as a decimal string (avoiding loss of u128
 precision in consumers). `native_finality_verified` is always false: a successful
 local audit does not prove L1 finality, native backing, mainnet supply or mint
-permission. No addresses or funding keys are enumerated in the report.
+permission. The default summary does not enumerate addresses or funding keys.
+
+## Export inclusion proofs
+
+Append `--proofs START END` to export the exact half-open inbox interval
+`[START, END)`, capped at 4,096 deposits. Both values must be unsigned decimal
+u64 integers. Reversed ranges, overflow, excess count or positions beyond the
+recovered inbox are rejected without success JSON; no silent truncation occurs.
+An empty interval at the inbox end is valid.
+
+```sh
+integrations/native-escrow-pq/target/debug/bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON --proofs 0 2
+```
+
+The normal report gains `proof_batch: {start, end, proofs}`. Each proof uses the
+existing `InboxProof` serialization and includes the deposit identity, domain,
+recipient, amount, sequence, total count and siblings. Export therefore reveals
+recipient and amount metadata. It contains no private keys or funding signatures.
+The proofs, root and recovered mark come from one immutable snapshot under the
+same exclusive recovery lock, avoiding a separate status/read race. The command
+does not reserve or consume deposits and never updates the minimum file.
+
+A consumer must compare the result to an independently authenticated root; a
+proof and root returned together do not establish trust. Use the execution
+domain's `required_deposit_range` to select the next mandatory interval; this
+CLI has no EVM cursor and accepts any valid bounded interval. Native finality,
+actual L1 source locations and execution verification are still required for
+crediting. Tests round-trip exported proofs into the verifier, compare their
+mark/root with the recovered state and exercise invalid and empty ranges.
 
 Exit status is 0 for successful output, 1 for rejected input or recovery, and 3
 for output failure. A failed output may follow successful recovery synchronization;

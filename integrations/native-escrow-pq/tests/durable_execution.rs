@@ -229,6 +229,46 @@ fn recovered_pq_locks_feed_durable_evm_without_recredit_after_restart() {
     assert_eq!(report["inbox"]["count"], 2);
     assert_eq!(report["native_finality_verified"], false);
     assert_eq!(report["mark"]["digest"], serde_json::to_value(mark.digest).unwrap());
+    let export = |start: &str, end: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_bloch-escrow-audit"))
+            .arg(&config_path)
+            .arg(&escrow_path)
+            .arg(&minimum_path)
+            .args(["--proofs", start, end])
+            .output()
+            .unwrap()
+    };
+    let output = export("0", "2");
+    assert!(output.status.success());
+    let exported: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exported["mark"], report["mark"]);
+    assert_eq!(exported["inbox"], report["inbox"]);
+    let decoded: Vec<bloch_l2_evm::escrow_inbox::InboxProof> =
+        serde_json::from_value(exported["proof_batch"]["proofs"].clone()).unwrap();
+    assert_eq!(decoded, proofs);
+    for proof in &decoded {
+        assert!(proof.verify(network, domain_id, snapshot.root()));
+        assert!(!proof.verify(network, domain_id, B256::ZERO));
+    }
+    assert_eq!(exported["proof_batch"]["start"], 0);
+    assert_eq!(exported["proof_batch"]["end"], 2);
+    let empty = export("2", "2");
+    assert!(empty.status.success());
+    let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert!(empty["proof_batch"]["proofs"].as_array().unwrap().is_empty());
+    for (start, end) in [
+        ("2", "1"),
+        ("0", "3"),
+        ("3", "3"),
+        ("0", "4097"),
+        ("-1", "2"),
+        ("+1", "2"),
+        ("0", "18446744073709551616"),
+    ] {
+        let output = export(start, end);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
     let mut wrong = config.clone();
     wrong["allocations"][0]["value"] = 1001.into();
     fs::write(&config_path, serde_json::to_vec(&wrong).unwrap()).unwrap();

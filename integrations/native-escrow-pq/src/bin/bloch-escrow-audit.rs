@@ -54,6 +54,26 @@ mod unix {
         serde_json::from_slice(&bytes).map_err(|_| "input JSON rejected".into())
     }
     fn audit(args: &[std::ffi::OsString]) -> Result<serde_json::Value, String> {
+        let range = if args.len() == 7 {
+            if args[4] != "--proofs" {
+                return Err("unknown option".into());
+            }
+            let parse = |arg: &std::ffi::OsString| -> Result<u64, String> {
+                let text = arg.to_str().ok_or("invalid sequence")?;
+                if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("sequence must be an unsigned decimal integer".into());
+                }
+                text.parse().map_err(|_| "sequence overflow".into())
+            };
+            let start = parse(&args[5])?;
+            let end = parse(&args[6])?;
+            if end < start || end - start > 4096 {
+                return Err("proof range rejected".into());
+            }
+            Some(start..end)
+        } else {
+            None
+        };
         let config: Baseline = read(Path::new(&args[1]), 1024 * 1024)?;
         let minimum: Minimum = read(Path::new(&args[3]), 4096)?;
         if config.version != 1
@@ -101,7 +121,7 @@ mod unix {
             return Err("conservation check failed".into());
         }
         let inbox = escrow.inbox();
-        Ok(serde_json::json!({
+        let mut report = serde_json::json!({
             "version": 1, "profile": "bloch-local-escrow-v1",
             "network": config.network, "domain": config.domain,
             "baseline_commitment": config.expected_commitment,
@@ -111,17 +131,26 @@ mod unix {
             "locked_sat": escrow.locked_sat().to_string(),
             "conserved": true,
             "native_finality_verified": false
-        }))
+        });
+        if let Some(range) = range {
+            let proofs = inbox
+                .proofs(range.clone())
+                .ok_or("proof range exceeds recovered inbox")?;
+            report["proof_batch"] = serde_json::json!({
+                "start": range.start, "end": range.end, "proofs": proofs
+            });
+        }
+        Ok(report)
     }
     pub fn run() -> i32 {
         let args: Vec<_> = std::env::args_os().collect();
         if args.len() == 2 && args[1] == "--help" {
-            return match writeln!(io::stdout().lock(), "Usage: bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON\nReplays local signed history. No native finality claim.") {
+            return match writeln!(io::stdout().lock(), "Usage: bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON [--proofs START END]\nReplays local signed history. Proof range is [START, END). No native finality claim.") {
                 Ok(()) => 0, Err(_) => 3,
             };
         }
-        if args.len() != 4 {
-            eprintln!("Usage: bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON");
+        if args.len() != 4 && args.len() != 7 {
+            eprintln!("Usage: bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON [--proofs START END]");
             return 1;
         }
         match audit(&args) {
