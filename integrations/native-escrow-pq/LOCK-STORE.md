@@ -116,3 +116,18 @@ This matrix tests process failure on the host filesystem, not hardware power los
 In particular, rename-before-directory-sync may recover differently after power
 loss. The pending filename includes process ID, time and a counter to reduce
 collisions with retained files across process-ID reuse; creation is still exclusive.
+
+## Recovery resource budgets
+
+`open_with_limits` takes `RecoveryLimits { batches, bytes }`, checked over all
+committed record files before any JSON decoding, signature verification or replay.
+Actual reads are additionally capped against the remaining byte budget. Baseline,
+lock and pending files are excluded from that total. Exceeding a limit returns
+`StoreError::Limit`, releases the lock and leaves history unchanged. Exact limits
+are accepted, and a zero budget can recover an empty journal. The existing `open`
+retains the original format ceilings through default limits.
+
+These are recovery-only budgets, not write quotas, decoded-memory limits or time
+limits. Future successful commits can require a larger recovery budget. Tests
+cover cumulative bytes over two signed batches, exact boundaries, zero budgets,
+unchanged files after rejection and refusal before malformed JSON is decoded.

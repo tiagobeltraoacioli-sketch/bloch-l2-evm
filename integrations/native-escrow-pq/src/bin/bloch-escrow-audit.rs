@@ -5,7 +5,7 @@ mod unix {
     use alloy_primitives::B256;
     use bloch_l2_evm::escrow::{Coin, Outpoint};
     use bloch_native_escrow_pq::{
-        lock_store::{LockMark, LockStore},
+        lock_store::{LockMark, LockStore, RecoveryLimits},
         PqEscrow,
     };
     use serde::Deserialize;
@@ -32,6 +32,14 @@ mod unix {
         expected_commitment: B256,
         #[serde(deserialize_with = "bloch_l2_evm::serde_bounded::vector::<_, _, 4096>")]
         allocations: Vec<Allocation>,
+        #[serde(default)]
+        recovery: Option<RecoveryConfig>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RecoveryConfig {
+        max_batches: u64,
+        max_bytes: u64,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -107,13 +115,21 @@ mod unix {
         if baseline.commitment() != config.expected_commitment {
             return Err("baseline commitment mismatch".into());
         }
-        let store = LockStore::open(
+        let limits = config
+            .recovery
+            .as_ref()
+            .map_or_else(RecoveryLimits::default, |r| RecoveryLimits {
+                batches: r.max_batches,
+                bytes: r.max_bytes,
+            });
+        let store = LockStore::open_with_limits(
             Path::new(&args[2]),
             baseline,
             LockMark {
                 batches: minimum.batches,
                 digest: minimum.digest,
             },
+            limits,
         )
         .map_err(|e| format!("history recovery rejected: {e:?}"))?;
         let mark = store.mark().map_err(|_| "history unavailable")?;

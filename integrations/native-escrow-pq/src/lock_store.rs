@@ -14,6 +14,21 @@ use std::{
 };
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BATCHES: u64 = 10_000;
+/// Recovery budgets for committed batches and their serialized file bytes.
+/// Does not bound decoded heap size, directory scans or cryptographic time.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryLimits {
+    pub batches: u64,
+    pub bytes: u64,
+}
+impl Default for RecoveryLimits {
+    fn default() -> Self {
+        Self {
+            batches: MAX_BATCHES,
+            bytes: MAX_BATCHES * MAX_BYTES as u64,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockMark {
     pub batches: u64,
@@ -92,14 +107,35 @@ impl LockStore {
     /// Minimum must be retained outside this directory. No local-only mechanism
     /// can detect replacement with an older valid prefix without such a floor.
     pub fn open(path: impl AsRef<Path>, baseline: PqEscrow, minimum: LockMark) -> Result<Self, StoreError> {
-        Self::open_with_sync(path, baseline, minimum, |directory| File::open(directory)?.sync_all())
+        Self::open_with_limits(path, baseline, minimum, RecoveryLimits::default())
+    }
+    /// Refuse over-budget history before replay; never truncate or return partial state.
+    pub fn open_with_limits(
+        path: impl AsRef<Path>,
+        baseline: PqEscrow,
+        minimum: LockMark,
+        limits: RecoveryLimits,
+    ) -> Result<Self, StoreError> {
+        Self::recover(path, baseline, minimum, limits, |directory| {
+            File::open(directory)?.sync_all()
+        })
+    }
+    #[cfg(test)]
+    fn open_with_sync(
+        path: impl AsRef<Path>,
+        baseline: PqEscrow,
+        minimum: LockMark,
+        sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<Self, StoreError> {
+        Self::recover(path, baseline, minimum, RecoveryLimits::default(), sync_directory)
     }
     // Private recovery boundary: no recovered handle may escape before the
     // directory sync completes, including after a rename with a lost acknowledgment.
-    fn open_with_sync(
+    fn recover(
         path: impl AsRef<Path>,
         mut baseline: PqEscrow,
         minimum: LockMark,
+        limits: RecoveryLimits,
         sync_directory: impl FnOnce(&Path) -> io::Result<()>,
     ) -> Result<Self, StoreError> {
         if !fs::symlink_metadata(path.as_ref())?.file_type().is_dir() {
@@ -114,12 +150,23 @@ impl LockStore {
             return Err(StoreError::Baseline);
         }
         let mut names = Vec::new();
+        let mut total_bytes = 0u64;
         for entry in fs::read_dir(&directory)? {
             let name = entry?.file_name().into_string().map_err(|_| StoreError::Format)?;
             if name == "LOCK" || name == "BASELINE" || name.starts_with(".pending-") {
                 continue;
             }
-            if names.len() >= MAX_BATCHES as usize {
+            if names.len() as u64 >= MAX_BATCHES.min(limits.batches) {
+                return Err(StoreError::Limit);
+            }
+            let path = directory.join(&name);
+            regular(&path)?;
+            let size = fs::metadata(&path)?.len();
+            if size > MAX_BYTES as u64 {
+                return Err(StoreError::Limit);
+            }
+            total_bytes = total_bytes.checked_add(size).ok_or(StoreError::Limit)?;
+            if total_bytes > limits.bytes {
                 return Err(StoreError::Limit);
             }
             names.push(name);
@@ -127,11 +174,13 @@ impl LockStore {
         names.sort();
         let mut mark = LockMark { batches: 0, digest };
         let mut found = mark == minimum;
+        let mut remaining = limits.bytes;
         for (index, filename) in names.iter().enumerate() {
             if *filename != name(index as u64 + 1) {
                 return Err(StoreError::Format);
             }
-            let bytes = read(&directory.join(filename))?;
+            let bytes = read_bounded(&directory.join(filename), remaining.min(MAX_BYTES as u64) as usize)?;
+            remaining -= bytes.len() as u64;
             let record: Record = serde_json::from_slice(&bytes).map_err(|_| StoreError::Format)?;
             if record.version != 1 || record.previous != mark.digest {
                 return Err(StoreError::Format);
@@ -243,14 +292,17 @@ fn regular(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 fn read(path: &Path) -> Result<Vec<u8>, StoreError> {
+    read_bounded(path, MAX_BYTES)
+}
+fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, StoreError> {
     regular(path)?;
     let file = File::open(path)?;
-    if file.metadata()?.len() > MAX_BYTES as u64 {
+    if file.metadata()?.len() > limit as u64 {
         return Err(StoreError::Limit);
     }
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_BYTES {
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
         return Err(StoreError::Limit);
     }
     Ok(bytes)

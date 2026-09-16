@@ -284,3 +284,70 @@ fn recovery_rejects_bad_history_and_missing_floor_before_sync() {
         Err(StoreError::Format)
     ));
 }
+
+#[test]
+fn recovery_budget_covers_cumulative_bytes_and_rejects_before_decoding() {
+    let locks = fixture();
+    let temp = Temp::new();
+    let path = temp.0.join("journal");
+    let mut store = LockStore::create(&path, baseline(&locks)).unwrap();
+    store.submit_batch(&requests(&locks[..1])).unwrap();
+    store.submit_batch(&requests(&locks[1..])).unwrap();
+    let mark = store.mark().unwrap();
+    let root = store.escrow().unwrap().commitment();
+    drop(store);
+    let a = fs::read(path.join(name(1))).unwrap();
+    let b = fs::read(path.join(name(2))).unwrap();
+    let total = (a.len() + b.len()) as u64;
+    for limits in [
+        RecoveryLimits {
+            batches: 1,
+            bytes: total,
+        },
+        RecoveryLimits {
+            batches: 2,
+            bytes: total - 1,
+        },
+    ] {
+        assert!(matches!(
+            LockStore::open_with_limits(&path, baseline(&locks), mark, limits),
+            Err(StoreError::Limit)
+        ));
+        assert_eq!(fs::read(path.join(name(1))).unwrap(), a);
+        assert_eq!(fs::read(path.join(name(2))).unwrap(), b);
+    }
+    let store = LockStore::open_with_limits(
+        &path,
+        baseline(&locks),
+        mark,
+        RecoveryLimits {
+            batches: 2,
+            bytes: total,
+        },
+    )
+    .unwrap();
+    assert_eq!(store.escrow().unwrap().commitment(), root);
+    drop(store);
+    // Invalid JSON below a too-small total budget must never reach decoding/PQ.
+    fs::write(path.join(name(1)), b"not-json").unwrap();
+    assert!(matches!(
+        LockStore::open_with_limits(&path, baseline(&locks), mark, RecoveryLimits { batches: 2, bytes: 0 }),
+        Err(StoreError::Limit)
+    ));
+}
+
+#[test]
+fn zero_recovery_budget_accepts_empty_escrow() {
+    let locks = fixture();
+    let temp = Temp::new();
+    let path = temp.0.join("journal");
+    drop(LockStore::create(&path, baseline(&locks)).unwrap());
+    let store = LockStore::open_with_limits(
+        &path,
+        baseline(&locks),
+        floor(&locks),
+        RecoveryLimits { batches: 0, bytes: 0 },
+    )
+    .unwrap();
+    assert_eq!(store.mark().unwrap(), floor(&locks));
+}

@@ -24,6 +24,15 @@ BASELINE_JSON is a strict object with these fields:
 | `capacity` | Original ledger capacity, 1–10,000 |
 | `expected_commitment` | Independently pinned initial `PqEscrow::commitment()` |
 | `allocations` | At most 4,096 `{outpoint: {txid, vout}, value, owner}` objects |
+| `recovery` | Optional `{ "max_batches": u64, "max_bytes": u64 }` |
+
+Both recovery fields are required if the object is supplied; omission or `null`
+retains the library's existing format ceilings. The budget covers all committed
+batch files and is checked before replay for both summary and proof export.
+Over-budget history returns exit 1 with no success JSON; exact budgets succeed.
+These limits do not change the baseline commitment and are not write quotas or
+decoded-memory/time limits. Retrying with a sufficient budget does not require
+changing the journal or its independently retained minimum mark.
 
 B256 values use 32-byte hex encoding; allocation values are exact native satoshis
 (u64). Duplicate outpoints, zero amounts and zero owners are rejected by the

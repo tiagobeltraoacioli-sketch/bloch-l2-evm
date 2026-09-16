@@ -279,6 +279,26 @@ fn recovered_pq_locks_feed_durable_evm_without_recredit_after_restart() {
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
     }
+    let size = fs::metadata(escrow_path.join("00000000000000000001.locks"))
+        .unwrap()
+        .len();
+    for limits in [
+        serde_json::json!({"max_batches": 0, "max_bytes": size}),
+        serde_json::json!({"max_batches": 1, "max_bytes": size - 1}),
+    ] {
+        let mut limited = config.clone();
+        limited["recovery"] = limits;
+        fs::write(&config_path, serde_json::to_vec(&limited).unwrap()).unwrap();
+        let output = audit();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Limit"));
+        assert_eq!(export("0", "2").status.code(), Some(1));
+    }
+    let mut limited = config.clone();
+    limited["recovery"] = serde_json::json!({"max_batches": 1, "max_bytes": size});
+    fs::write(&config_path, serde_json::to_vec(&limited).unwrap()).unwrap();
+    assert!(audit().status.success());
     let mut wrong = config.clone();
     wrong["allocations"][0]["value"] = 1001.into();
     fs::write(&config_path, serde_json::to_vec(&wrong).unwrap()).unwrap();
