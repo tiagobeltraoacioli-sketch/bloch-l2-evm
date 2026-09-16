@@ -67,7 +67,13 @@ The prototype permits at most one million records and does not compact history.
 ## Operational limits
 
 Use a local filesystem and a private directory with trusted parent directories.
-The OS lock is advisory: all writers must cooperate. Checks reject ordinary
+The OS lock is advisory: all writers must cooperate. Dropping a journal explicitly
+unlocks its private file descriptor before closing it, including poisoned writers.
+This prevents an unrelated child temporarily retaining the open file description
+between fork and exec from extending the writer's lock lifetime. Using an
+inherited journal from a forked child is unsupported. A deterministic regression
+retains a duplicate descriptor across healthy/poisoned writer destruction and
+checks immediate reopen and continued exclusion by the new writer. Checks reject ordinary
 symlinks, but this is not a filesystem sandbox against an attacker concurrently
 replacing directory entries, parents or the lock inode. Durability relies on the
 filesystem/device honoring `sync_all` and atomic same-directory rename. The tests

@@ -109,6 +109,14 @@ pub struct Journal {
     limits: RecoveryLimits,
     poisoned: bool,
 }
+impl Drop for Journal {
+    fn drop(&mut self) {
+        // Closing this descriptor alone can leave the lock alive while a forked
+        // subprocess holds a duplicate before exec. End ownership explicitly;
+        // the private descriptor is still closed by File's destructor afterward.
+        let _ = self._lock.unlock();
+    }
+}
 impl Journal {
     /// Create a new private directory. Existing paths are never overwritten.
     pub fn create(path: impl AsRef<Path>, domain: EscrowEvmDomain) -> Result<Self, JournalError> {

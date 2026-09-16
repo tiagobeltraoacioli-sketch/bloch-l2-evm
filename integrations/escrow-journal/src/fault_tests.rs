@@ -166,6 +166,41 @@ fn check_recovery(path: &Path, f: &Fixture, committed: bool) {
 }
 
 #[test]
+fn dropping_writer_releases_lock_even_with_a_duplicated_descriptor() {
+    for poison in [false, true] {
+        let f = fixture();
+        let temp = Temp::new();
+        let mut journal = Journal::create(&temp.0, f.domain.clone()).unwrap();
+        let head = journal.head();
+        // A fork during another thread's subprocess launch can temporarily retain
+        // the same open file description. Duplicate it without timing or a fork.
+        let retained_descriptor = journal._lock.try_clone().unwrap();
+        if poison {
+            assert!(matches!(
+                journal.commit_with_publisher(&f.trusted, &f.proofs, &f.input, &f.witness, |_, _, _| {
+                    Err(io::Error::other("injected publication failure"))
+                }),
+                Err(JournalError::CommitUncertain(_))
+            ));
+        }
+        assert!(matches!(
+            Journal::open(&temp.0, f.domain.clone(), head, |_| unreachable!()),
+            Err(JournalError::Locked)
+        ));
+        drop(journal);
+        let mut reopened = Journal::open(&temp.0, f.domain.clone(), head, |_| unreachable!()).unwrap();
+        // Closing an old duplicate must not release the new writer's lock.
+        drop(retained_descriptor);
+        assert!(matches!(
+            Journal::open(&temp.0, f.domain, head, |_| unreachable!()),
+            Err(JournalError::Locked)
+        ));
+        reopened.commit(&f.trusted, &f.proofs, &f.input, &f.witness).unwrap();
+        assert_eq!(reopened.next_deposit(), 1);
+    }
+}
+
+#[test]
 fn io_error_at_each_publication_boundary_preserves_memory_and_requires_recovery() {
     for (index, stop) in STAGES.into_iter().enumerate() {
         let f = fixture();
