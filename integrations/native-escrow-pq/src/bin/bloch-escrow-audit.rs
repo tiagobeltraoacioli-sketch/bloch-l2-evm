@@ -30,6 +30,7 @@ mod unix {
         domain: B256,
         capacity: usize,
         expected_commitment: B256,
+        #[serde(deserialize_with = "bloch_l2_evm::serde_bounded::vector::<_, _, 4096>")]
         allocations: Vec<Allocation>,
     }
     #[derive(Deserialize)]
@@ -141,6 +142,63 @@ mod unix {
             });
         }
         Ok(report)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn config(count: usize) -> serde_json::Value {
+            serde_json::json!({
+                "version": 1, "profile": "bloch-local-escrow-v1",
+                "network": B256::repeat_byte(1), "domain": B256::repeat_byte(2),
+                "capacity": 10000, "expected_commitment": B256::repeat_byte(3),
+                "allocations": (0..count).map(|i| serde_json::json!({
+                    "outpoint": {"txid": B256::repeat_byte(4), "vout": i},
+                    "value": 1, "owner": B256::repeat_byte(5)
+                })).collect::<Vec<_>>()
+            })
+        }
+        #[test]
+        fn allocation_decode_accepts_exact_limit_and_rejects_excess_before_nested_content() {
+            let mut value = config(4096);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(bytes.len() <= 1024 * 1024);
+            assert_eq!(
+                serde_json::from_slice::<Baseline>(&bytes).unwrap().allocations.len(),
+                4096
+            );
+            value["allocations"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"malformed": []}));
+            let error = serde_json::from_slice::<Baseline>(&serde_json::to_vec(&value).unwrap())
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("allocation limit"));
+        }
+        #[test]
+        fn duplicate_baseline_coins_still_fail_after_bounded_decoding() {
+            let mut value = config(1);
+            let duplicate = value["allocations"][0].clone();
+            value["allocations"].as_array_mut().unwrap().push(duplicate);
+            let config: Baseline = serde_json::from_value(value).unwrap();
+            assert!(PqEscrow::new(
+                config.network,
+                config.domain,
+                config
+                    .allocations
+                    .into_iter()
+                    .map(|a| (
+                        a.outpoint,
+                        Coin {
+                            value: a.value,
+                            owner: a.owner
+                        }
+                    ))
+                    .collect(),
+                config.capacity
+            )
+            .is_err());
+        }
     }
     pub fn run() -> i32 {
         let args: Vec<_> = std::env::args_os().collect();

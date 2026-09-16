@@ -29,8 +29,9 @@ B256 values use 32-byte hex encoding; allocation values are exact native satoshi
 (u64). Duplicate outpoints, zero amounts and zero owners are rejected by the
 ledger constructor. This CLI profile supports a fresh allocation baseline, not
 an already-mutated ledger. It is deliberately narrower than the library API.
-The baseline file is capped at 1 MiB before decoding. Configuration limits are
-checked before constructing the ledger; they are local tooling limits, not
+The baseline file is capped at 1 MiB before decoding. Its allocation sequence is
+also capped at 4,096 while decoding, before parsing an excess item's contents.
+Other configuration limits are checked before constructing the ledger; they are local tooling limits, not
 mainnet parameters. Distribute and pin this file through a trusted channel;
 placing a matching commitment inside an untrusted file does not authenticate it.
 
