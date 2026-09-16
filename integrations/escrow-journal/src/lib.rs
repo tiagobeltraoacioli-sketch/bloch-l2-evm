@@ -21,7 +21,8 @@ use std::{
 pub const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 /// Prototype journal bound; compaction/checkpointing is not implemented.
 pub const MAX_RECORDS: u64 = 1_000_000;
-/// Operator recovery budget. Counts committed records and complete record bytes;
+/// Operator history budget, retained for commits after recovery.
+/// Counts committed records and complete record bytes;
 /// this does not bound decoded memory, callback work or EVM execution time.
 #[derive(Debug, Clone, Copy)]
 pub struct RecoveryLimits {
@@ -95,6 +96,8 @@ pub struct Journal {
     _lock: File,
     domain: EscrowEvmDomain,
     head: JournalHead,
+    committed_bytes: u64,
+    limits: RecoveryLimits,
     poisoned: bool,
 }
 impl Journal {
@@ -124,6 +127,8 @@ impl Journal {
             directory: path.to_owned(),
             _lock: lock,
             head: JournalHead::genesis(domain.id()),
+            committed_bytes: 0,
+            limits: RecoveryLimits::default(),
             domain,
             poisoned: false,
         })
@@ -144,6 +149,7 @@ impl Journal {
 
     /// Recover under a caller-selected budget. Exceeding it fails without
     /// truncating history, returning partial state or modifying committed files.
+    /// The recovered writer also enforces this budget on subsequent commits.
     pub fn open_with_limits(
         path: impl AsRef<Path>,
         mut domain: EscrowEvmDomain,
@@ -234,6 +240,8 @@ impl Journal {
             _lock: lock,
             domain,
             head,
+            committed_bytes: limits.bytes - remaining,
+            limits,
             poisoned: false,
         })
     }
@@ -262,7 +270,7 @@ impl Journal {
         if self.poisoned {
             return Err(JournalError::Poisoned);
         }
-        if self.head.blocks >= MAX_RECORDS {
+        if self.head.blocks >= MAX_RECORDS.min(self.limits.records) {
             return Err(JournalError::Limit);
         }
         let mut candidate = self.domain.clone();
@@ -279,11 +287,19 @@ impl Journal {
             receipt: receipt.commitment(),
         };
         let (bytes, digest) = encode(&record)?;
+        let committed_bytes = self
+            .committed_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or(JournalError::Limit)?;
+        if committed_bytes > self.limits.bytes {
+            return Err(JournalError::Limit);
+        }
         // A rename may succeed even when the subsequent directory sync fails.
         // Never retry with this in-memory cursor after any publication error.
         self.poisoned = true;
         publisher(&self.directory, &record_name(record.number), &bytes).map_err(JournalError::CommitUncertain)?;
         self.domain = candidate;
+        self.committed_bytes = committed_bytes;
         self.head = JournalHead {
             blocks: record.number,
             digest,

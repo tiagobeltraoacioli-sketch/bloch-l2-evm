@@ -723,3 +723,103 @@ fn cli_recovery_budgets_apply_to_status_and_apply_without_mutating_history() {
         assert_eq!(cli(&temp, "status").status.code(), Some(1));
     }
 }
+
+#[test]
+fn retained_recovery_budget_prevents_unrecoverable_new_commits() {
+    use bloch_escrow_journal::RecoveryLimits;
+    let f = fixture();
+    let reference = Temp::new();
+    let mut measured = Journal::create(&reference.0, f.domain.clone()).unwrap();
+    measured.commit(&f.trusted, &f.proofs, &f.input, &f.witness).unwrap();
+    measured.commit(&f.second.0, &[], &f.second.1, &f.second.2).unwrap();
+    let total = fs::metadata(reference.record(1)).unwrap().len() + fs::metadata(reference.record(2)).unwrap().len();
+    let temp = Temp::new();
+    let created = Journal::create(&temp.0, f.domain.clone()).unwrap();
+    let genesis = created.head();
+    drop(created);
+    for limits in [
+        RecoveryLimits {
+            records: 0,
+            bytes: total,
+        },
+        RecoveryLimits { records: 2, bytes: 0 },
+    ] {
+        let mut journal =
+            Journal::open_with_limits(&temp.0, f.domain.clone(), genesis, limits, |_| panic!("empty history")).unwrap();
+        assert!(matches!(
+            journal.commit(&f.trusted, &f.proofs, &f.input, &f.witness),
+            Err(JournalError::Limit)
+        ));
+        assert_eq!(journal.head(), genesis);
+        assert!(!temp.record(1).exists());
+    }
+    let limits = RecoveryLimits {
+        records: 2,
+        bytes: total - 1,
+    };
+    let mut journal =
+        Journal::open_with_limits(&temp.0, f.domain.clone(), genesis, limits, |_| panic!("empty history")).unwrap();
+    journal.commit(&f.trusted, &f.proofs, &f.input, &f.witness).unwrap();
+    let first = journal.head();
+    assert!(matches!(
+        journal.commit(&f.second.0, &[], &f.second.1, &f.second.2),
+        Err(JournalError::Limit)
+    ));
+    assert_eq!(journal.head(), first);
+    assert_eq!(journal.next_block(), 2);
+    assert!(!temp.record(2).exists());
+    assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 3); // no pending publication
+    drop(journal);
+    let mut journal = Journal::open_with_limits(
+        &temp.0,
+        f.domain.clone(),
+        first,
+        RecoveryLimits {
+            records: 2,
+            bytes: total,
+        },
+        |_| Ok(f.trusted.clone()),
+    )
+    .unwrap();
+    journal.commit(&f.second.0, &[], &f.second.1, &f.second.2).unwrap();
+    let head = journal.head();
+    drop(journal);
+    let recovered = Journal::open_with_limits(
+        &temp.0,
+        f.domain,
+        head,
+        RecoveryLimits {
+            records: 2,
+            bytes: total,
+        },
+        |n| Ok(if n == 1 { f.trusted.clone() } else { f.second.0.clone() }),
+    )
+    .unwrap();
+    assert_eq!(recovered.head(), head);
+}
+
+#[test]
+fn cli_apply_does_not_write_beyond_configured_recovery_budget() {
+    let f = fixture();
+    let temp = Temp::new();
+    cli_setup(&temp, &f);
+    assert!(cli(&temp, "init").status.success());
+    let path = temp.0.join("config.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for limits in [
+        serde_json::json!({"max_records": 0, "max_bytes": 10000000}),
+        serde_json::json!({"max_records": 10, "max_bytes": 0}),
+    ] {
+        config["recovery"] = limits;
+        write_json(path.clone(), &config);
+        assert!(cli(&temp, "status").status.success());
+        let output = cli(&temp, "apply");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Limit"));
+        assert!(!temp.0.join("journal/00000000000000000001.blj").exists());
+        assert_eq!(fs::read_dir(temp.0.join("journal")).unwrap().count(), 2);
+    }
+    config.as_object_mut().unwrap().remove("recovery");
+    write_json(path, &config);
+    assert!(cli(&temp, "apply").status.success());
+}

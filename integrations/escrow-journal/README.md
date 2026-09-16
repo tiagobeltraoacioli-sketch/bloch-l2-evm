@@ -142,10 +142,19 @@ releases the lock and does not truncate files or return a partial recovered stat
 The existing `open` retains its previous limits through `RecoveryLimits::default`.
 These defaults are format ceilings, not recommended operational budgets. Choose
 smaller budgets according to available resources. This API does not bound decoded
-heap amplification, callback cost, EVM execution time, pending-file scan time or
-future commits; it is neither a disk quota nor automatic compaction. Tests cover
+heap amplification, callback cost, EVM execution time or pending-file scan time;
+it is neither a filesystem quota nor automatic compaction. Tests cover
 exact and insufficient boundaries, cumulative bytes over multiple records,
 rejection before derivation and successful retry with a sufficient budget.
+
+The recovered writer retains its budget and exact committed byte count. New
+commits must leave the resulting history within both limits. Record-count limits
+are checked before re-execution; the cumulative-byte limit is checked after
+candidate verification/serialization but before creating any pending file.
+Rejection leaves the live state, counters and disk unchanged and does not poison
+the handle. The byte counter advances only after successful publication; recovery
+reconstructs it from actual committed records. Reopen with an explicitly larger
+budget to permit more history. `create` and plain `open` retain format ceilings.
 
 Proof decoding uses the shared `serde_bounded::vector` implementation: committed
 records and CLI proposals accept at most 4,096 inbox proofs, each with at most

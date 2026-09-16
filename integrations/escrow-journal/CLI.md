@@ -57,9 +57,13 @@ operator settings, not consensus parameters or recommended universal defaults.
 Excess history returns exit 1 before L1 derivation/re-execution, without truncating
 files or returning partial state. Exact limits are accepted; zero permits only
 empty history for the corresponding resource. `init` has no history to recover.
-These settings do not alter domain identity, cap a new commit or impose a disk
-quota: a successful `apply` may create history that needs a larger budget on its
-next recovery. They do not bound decoded memory or callback/execution time.
+These settings do not alter domain identity. `apply` also enforces them against
+the resulting committed history, preventing a new block from exceeding the same
+budget needed for subsequent recovery. A rejected commit creates no pending file
+and leaves state/cursors unchanged. Raising the budget requires an explicit
+configuration change. These are journal limits, not a filesystem quota: pending
+files, manifest and lock are excluded. They do not bound decoded memory or
+callback/execution time.
 
 This initial CLI supports only the library's default Cancun ChainSpec and its
 fresh zero-credit EVM genesis. It cannot import arbitrary account allocations or
