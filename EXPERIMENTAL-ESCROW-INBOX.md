@@ -65,3 +65,20 @@ cargo +1.94.1 test --offline --locked --features experimental-escrow
 cargo +1.94.1 check --offline --locked --no-default-features --features experimental-escrow
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml
 ```
+
+## Reusable immutable proof index
+
+Snapshots cache their wrapped root and all non-root Merkle levels at construction.
+After the existing sequence sort, building those levels requires linear hashing
+and retains O(n) hashes. Reading the root is O(1); producing a proof requires
+O(log n) sibling lookups and output storage, with no reconstruction or rehashing
+of the full tree. Reuse one snapshot for multiple proof requests; calling
+`ledger.inbox()` again still constructs a new snapshot. Cloning a snapshot copies
+its records and cached levels, so it is also O(n), not a cheap shared handle.
+
+This changes local computation and memory use only. Domain separation, odd-node
+promotion, count binding and proof serialization are unchanged. Compatibility
+tests pin roots and odd-tail paths captured from the previous implementation,
+while existing tests cover every position in even/odd trees, mutation rejection
+and snapshot independence after new deposits. Cached roots remain local escrow
+commitments and do not establish native finality or mint permission.

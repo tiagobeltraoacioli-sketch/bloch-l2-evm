@@ -49,18 +49,26 @@ fn reduce(nodes: &[B256]) -> Vec<B256> {
 /// Immutable local snapshot. Its root still requires independent L1 authentication.
 #[derive(Debug, Clone)]
 pub struct InboxSnapshot {
-    network: B256,
-    domain: B256,
     records: Vec<LockedDeposit>,
+    levels: Vec<Vec<B256>>,
+    root: B256,
 }
 impl InboxSnapshot {
     pub(crate) fn new(network: B256, domain: B256, mut records: Vec<LockedDeposit>) -> Self {
         records.sort_unstable_by_key(|d| d.sequence);
-        Self {
-            network,
-            domain,
-            records,
+        let mut levels = Vec::new();
+        let mut nodes: Vec<_> = records.iter().map(leaf).collect();
+        while nodes.len() > 1 {
+            let next = reduce(&nodes);
+            levels.push(nodes);
+            nodes = next;
         }
+        let tree = nodes
+            .first()
+            .copied()
+            .unwrap_or_else(|| hash(b"BLOCH:EXPERIMENTAL:INBOX:EMPTY:1", &[]));
+        let root = wrap(network, domain, records.len() as u64, tree);
+        Self { records, levels, root }
     }
     /// Number of escrow locks in this snapshot.
     pub fn len(&self) -> usize {
@@ -72,30 +80,20 @@ impl InboxSnapshot {
     }
     /// Commitment to network, domain, exact count and the ordered Merkle tree.
     pub fn root(&self) -> B256 {
-        let mut nodes: Vec<_> = self.records.iter().map(leaf).collect();
-        while nodes.len() > 1 {
-            nodes = reduce(&nodes);
-        }
-        let tree = nodes
-            .first()
-            .copied()
-            .unwrap_or_else(|| hash(b"BLOCH:EXPERIMENTAL:INBOX:EMPTY:1", &[]));
-        wrap(self.network, self.domain, self.records.len() as u64, tree)
+        self.root
     }
     /// Build an inclusion path for a zero-based sequence. Odd nodes are promoted.
     pub fn proof(&self, sequence: u64) -> Option<InboxProof> {
         let mut index = usize::try_from(sequence).ok()?;
         let deposit = self.records.get(index)?.clone();
-        let mut nodes: Vec<_> = self.records.iter().map(leaf).collect();
-        let mut siblings = Vec::new();
-        while nodes.len() > 1 {
+        let mut siblings = Vec::with_capacity(self.levels.len());
+        for nodes in &self.levels {
             if index % 2 == 1 {
                 siblings.push(nodes[index - 1]);
             } else if index + 1 < nodes.len() {
                 siblings.push(nodes[index + 1]);
             }
             index /= 2;
-            nodes = reduce(&nodes);
         }
         Some(InboxProof {
             deposit,

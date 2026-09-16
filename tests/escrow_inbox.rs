@@ -133,3 +133,46 @@ fn snapshots_are_immutable_and_membership_is_not_replay_consumption() {
         assert!(proof.verify(B256::repeat_byte(1), B256::repeat_byte(2), old.root()));
     }
 }
+
+// Pinned from the pre-cache implementation; consensus hashes must not change.
+#[test]
+fn cached_snapshots_preserve_existing_commitments_and_odd_paths() {
+    let vectors = [
+        (
+            0,
+            "a019da2e3889d746224a252f73b075de328c5cd7868cbc07e0198dc8a39e37a7",
+            None,
+        ),
+        (
+            1,
+            "20bd6ca52d9becdaec1d7d5f9da4cb2bae5dc0750399564f207ddd611a6c0c3f",
+            None,
+        ),
+        (
+            3,
+            "01e133115118405d2e8cb0bea269cf2b15cea5bb29a06952526f96ff9fd6aaeb",
+            Some("a6f3e71423fe00efcc2a4641e133e5890459c0d168d52d3427f12e9e0b055ebc"),
+        ),
+        (
+            5,
+            "ca7340c21097ba8bf83d82dd5ac5ccfe8e3d17cd165df266ef57b8f1c513bac5",
+            Some("0ddf698384f1e2c457aa94ed47a125e1b3a442ea132605249e52b4f3bf1d05c9"),
+        ),
+        (
+            17,
+            "7a674e5de162ae1acf22d572b136e8d52862f0748808a6d3fe588189754dac7d",
+            Some("6dd97075550f411b34d80b613d28de15c5b5ad5f2f4ebe7da6d5aec339263131"),
+        ),
+    ];
+    for (count, root, sibling) in vectors {
+        let snapshot = ledger(count).inbox();
+        assert_eq!(snapshot.root(), root.parse::<B256>().unwrap());
+        let cloned = snapshot.clone();
+        assert_eq!(cloned.root(), snapshot.root());
+        if count > 0 {
+            let expected: Vec<B256> = sibling.into_iter().map(|s| s.parse().unwrap()).collect();
+            assert_eq!(snapshot.proof(count - 1).unwrap().siblings, expected);
+            assert_eq!(cloned.proof(count - 1), snapshot.proof(count - 1));
+        }
+    }
+}
