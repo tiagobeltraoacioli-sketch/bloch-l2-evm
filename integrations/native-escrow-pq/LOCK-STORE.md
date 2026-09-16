@@ -59,4 +59,30 @@ Tests use disposable keys and temporary directories. They exercise reopen/replay
 exclusive locking, older and newer retained floors, ignored pending files,
 repeated spend rejection, signature tampering, wrong baseline, publication
 collision with poisoning, and rejection of a later invalid lock without any write.
-They do not yet inject process death at every fsync/rename boundary.
+
+## Publication fault matrix
+
+Private test instrumentation injects both an I/O error and immediate child-process
+exit (without running Rust destructors) after each boundary below. Production
+calls use a no-op hook; no environment variable enables faults in the library.
+
+| Boundary reached | State recovered after process exit or injected error |
+| --- | --- |
+| Pending file created | Previous complete state |
+| Payload written | Previous complete state |
+| Pending file synced | Previous complete state |
+| File renamed to committed sequence | Complete new batch |
+| Directory synced | Complete new batch |
+
+Each case contains two signed locks, with the second spending the first lock's
+change. Tests compare the entire recovered ledger commitment, verify conservation,
+retry an unpublished batch, reject replay of a published batch and reopen again
+with the new externally retained mark. Injected I/O errors additionally verify
+that memory has not advanced and every subsequent read/write is refused until
+recovery. Child-process exit verifies that the OS releases the writer lock even
+without destructor cleanup.
+
+This matrix tests process failure on the host filesystem, not hardware power loss.
+In particular, rename-before-directory-sync may recover differently after power
+loss. The pending filename includes process ID, time and a counter to reduce
+collisions with retained files across process-ID reuse; creation is still exclusive.

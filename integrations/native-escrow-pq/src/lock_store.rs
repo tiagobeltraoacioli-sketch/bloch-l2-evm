@@ -153,6 +153,13 @@ impl LockStore {
     /// Publish disk state before memory. On any publication error, reopen and
     /// recover: the batch might already be committed, so blind retries are unsafe.
     pub fn submit_batch(&mut self, requests: &[SignedLock<'_>]) -> Result<Vec<LockedDeposit>, StoreError> {
+        self.submit_staged(requests, |_| Ok(()))
+    }
+    fn submit_staged(
+        &mut self,
+        requests: &[SignedLock<'_>],
+        after: impl FnMut(PublicationStage) -> io::Result<()>,
+    ) -> Result<Vec<LockedDeposit>, StoreError> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
@@ -182,7 +189,7 @@ impl LockStore {
             digest: hash(&bytes),
         };
         self.poisoned = true;
-        publish(&self.directory, &name(mark.batches), &bytes).map_err(StoreError::CommitUncertain)?;
+        publish_staged(&self.directory, &name(mark.batches), &bytes, after).map_err(StoreError::CommitUncertain)?;
         self.escrow = candidate;
         self.mark = mark;
         self.poisoned = false;
@@ -232,10 +239,33 @@ fn read(path: &Path) -> Result<Vec<u8>, StoreError> {
     Ok(bytes)
 }
 fn publish(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    publish_staged(directory, name, bytes, |_| Ok(()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationStage {
+    Created,
+    Written,
+    FileSynced,
+    Renamed,
+    DirectorySynced,
+}
+
+// Private instrumentation: production has no environment-controlled fault hook.
+fn publish_staged(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    mut after: impl FnMut(PublicationStage) -> io::Result<()>,
+) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let pending = directory.join(format!(
-        ".pending-{}-{}",
+        ".pending-{}-{}-{}",
         std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let target = directory.join(name);
@@ -247,8 +277,16 @@ fn publish(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&pending)?;
+    after(PublicationStage::Created)?;
     file.write_all(bytes)?;
+    after(PublicationStage::Written)?;
     file.sync_all()?;
+    after(PublicationStage::FileSynced)?;
     fs::rename(pending, target)?;
-    File::open(directory)?.sync_all()
+    after(PublicationStage::Renamed)?;
+    File::open(directory)?.sync_all()?;
+    after(PublicationStage::DirectorySynced)
 }
+
+#[cfg(test)]
+mod fault_tests;
