@@ -69,6 +69,7 @@ impl LockIntent {
 }
 /// Recorded liability; not a mint authorization or finality certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LockedDeposit {
     /// Unique intent commitment.
     pub id: B256,

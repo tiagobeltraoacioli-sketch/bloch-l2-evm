@@ -107,6 +107,7 @@ impl InboxSnapshot {
 
 /// Untrusted inclusion data; verification does not establish finality or unspentness.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InboxProof {
     /// Complete claimed deposit; every field is authenticated by the leaf.
     pub deposit: LockedDeposit,

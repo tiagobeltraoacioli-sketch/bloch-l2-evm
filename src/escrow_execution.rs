@@ -81,7 +81,7 @@ impl EscrowExecutionReceipt {
 
 /// Private domain and inbox cursors advance together after successful verification.
 /// In-memory atomicity only; persistent recovery and L1 authentication are external.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EscrowEvmDomain {
     network: B256,
     execution: EvmDomain,

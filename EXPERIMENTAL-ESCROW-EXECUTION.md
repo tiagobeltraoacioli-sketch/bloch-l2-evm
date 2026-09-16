@@ -50,9 +50,11 @@ does not implement its consensus activation or a verifier for those host claims.
 
 Construction is for a fresh domain with a trusted initial EVM root containing
 no credits for this inbox. The cursor starts at zero. Restarting from an arbitrary
-later root is unsupported; there is no recovery/import API. Atomicity is local
-and in-memory: durable state, inbox cursor, snapshot and receipt must eventually
-be committed and recovered in one transaction. The additional inbox cursor is
+later root is unsupported; there is no direct cursor-import API. The separate
+[Unix host journal](integrations/escrow-journal/README.md) now persists complete
+execution records and recovers both cursors by re-execution from genesis with
+fresh host-authenticated L1 derivation. The portable facade itself remains
+in-memory. The additional inbox cursor is
 bound by the composite receipt, not inserted into the legacy EVM state layout.
 The low-level EVM API remains usable independently and still trusts its own
 derivation caller; only this facade enforces the additional inclusion checks.

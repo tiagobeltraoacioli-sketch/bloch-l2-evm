@@ -82,7 +82,7 @@ pub enum DomainError {
 
 /// Immutable EVM runtime configuration with an atomic local commitment cursor.
 /// A runtime upgrade requires a new domain and an explicit state migration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EvmDomain {
     id: B256,
     spec: ChainSpec,
