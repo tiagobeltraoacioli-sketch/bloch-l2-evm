@@ -13,6 +13,9 @@ use alloy_eips::{
 };
 use alloy_primitives::{Address, Bytes, B256};
 use revm::context::TxEnv;
+use revm::{database::CacheDB, DatabaseRef};
+
+use crate::executor::{run_block, BlockRun};
 
 use crate::{
     execute_block, generate_batch_witness, verify_batch, BatchWitness, BlockContext, BlockExecutionError, BlockInput,
@@ -249,6 +252,76 @@ pub fn execute_signed_block(
 ) -> Result<ExecutionOutcome, SignedInputError<BlockExecutionError>> {
     let authenticated = input.authenticate(spec)?;
     execute_block(spec, state, authenticated).map_err(SignedInputError::Execution)
+}
+
+/// A successfully executed block over a read-only host database.
+///
+/// The private overlay contains only loaded/changed accounts, not the complete
+/// post-state. No state has been persisted, and no post-state root has been
+/// calculated or authenticated. Drop this value to discard the candidate.
+#[must_use = "execution is provisional until the host computes and commits its state root"]
+pub struct DatabaseBlockExecution<DB> {
+    overlay: CacheDB<DB>,
+    run: BlockRun,
+    chain_id: u64,
+    context: BlockContext,
+}
+
+impl<DB> DatabaseBlockExecution<DB> {
+    /// Read the successful overlay before calculating the full post-state root.
+    ///
+    /// Use the backing database for untouched state. Loaded accounts are not
+    /// necessarily changed accounts; cleared storage and deleted/empty accounts
+    /// must follow revm/EIP-161 semantics when translating to host persistence.
+    pub fn overlay(&self) -> &CacheDB<DB> {
+        &self.overlay
+    }
+
+    /// Attach a host-calculated root and return the overlay and execution result.
+    ///
+    /// `post_state_root` is a trusted host input: this method does not verify it.
+    /// The host must compute the complete MPT root from the unchanged backing
+    /// snapshot plus this overlay and atomically persist the matching changes.
+    /// The returned header retains Bloch's existing hash format; it is not an
+    /// Ethereum RLP header, a proof, or an authenticated execution-domain receipt.
+    pub fn finalize(self, post_state_root: B256) -> (CacheDB<DB>, ExecutionOutcome) {
+        let outcome = self.run.into_outcome(self.chain_id, &self.context, post_state_root);
+        (self.overlay, outcome)
+    }
+}
+
+/// Authenticate signed envelopes and execute against an arbitrary host database.
+///
+/// This uses the same block kernel as [`execute_signed_block`], including
+/// deposit gas/cursors, vault fee routing, supply accounting, EIP-4788 and the
+/// committed Bloch block-hash ring. It creates a fresh overlay and never invokes
+/// a write/commit method on `database`. Errors return no candidate overlay.
+/// Database implementations may still perform interior read-cache bookkeeping.
+///
+/// The host must provide an immutable, consistent pre-state snapshot and its
+/// correct `previous_root`; the root is not authenticated here. In particular,
+/// supplying a wrong root can change parent/BLOCKHASH commitments without a
+/// database read error. Deposits and L1 context likewise require independent
+/// authentication. Use [`verify_signed_batch`] or an execution domain when an
+/// untrusted proposal requires authenticated witness/root verification.
+///
+/// This is a whole-block execution adapter, not a transaction pool, incremental
+/// payload builder, persistent database or Reth node.
+pub fn execute_signed_block_on_database<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    database: DB,
+    previous_root: B256,
+    input: &SignedBlockInput,
+) -> Result<DatabaseBlockExecution<DB>, SignedInputError<BlockExecutionError>> {
+    let authenticated = input.authenticate(spec)?;
+    let (overlay, run) =
+        run_block(spec, CacheDB::new(database), previous_root, &authenticated).map_err(SignedInputError::Execution)?;
+    Ok(DatabaseBlockExecution {
+        overlay,
+        run,
+        chain_id: spec.chain_id,
+        context: input.context.clone(),
+    })
 }
 
 /// Generate a witness from original signed bytes on the host.

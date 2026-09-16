@@ -10,7 +10,7 @@ activation and movement of real funds are outside the currently authorized work.
 | --- | --- | --- |
 | Signed contract execution | `developer_contract` executes signed deploy/call with storage, gas, nonce, root agreement and adversarial assertions | Local example gate exercised; wider conformance remains under compatibility below |
 | Reproducible local operator workflow | `tools/developer-rehearsal.py` generates synthetic escrow/deploy/call proposals and drives separate `bloch-domain` processes | Local two-block recovery/replay/tamper gate exercised; this recovers commitments/cursors, not a queryable node database |
-| Developer node and wallet workflow | EIP-1193 client adapter; Reth RPC, pool and node are stubs | Real Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
+| Developer node and wallet workflow | EIP-1193 client adapter and Reth state-provider execution boundary; RPC, pool and node remain stubs | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
 | Proof backend | Host witness verifier; SP1 entrypoint and prover are stubs | Reproducible pinned guest/prover/verifier build, real accepted and rejected proofs binding all public inputs, measured proving cost and documented cryptographic assumptions |
@@ -67,10 +67,14 @@ adapter was linked, no node was launched, and neither core dependencies nor its
 pinned compiler changed. The upstream lock also resolves older Alloy/ruint
 versions than the core; a combined dependency graph still needs qualification.
 
-The next code boundary is the core's existing generic `run_block<DatabaseRef>`
-kernel: expose a signed read-only-database adapter with a successful overlay and
-explicit host-supplied root finalization, then differential-test a Reth storage
-adapter against `execute_signed_block`. Preserve the core's fixed-width header
+The core's existing generic `run_block<DatabaseRef>` kernel now has a
+[signed database adapter](DATABASE-EXECUTION.md) returning a successful overlay
+and explicit host-supplied root finalization. The separate
+[Reth provider integration](../integrations/reth-execution/README.md) wraps the
+actual upstream database reader; its own lockfile resolves the core's exact EVM
+and signed-envelope versions. This is not the node or persistence layer.
+The next steps are Reth state-change/root persistence conversion and incremental
+block execution/building. Preserve the core's fixed-width header
 hash and committed `BLOCKHASH` ring. Vanilla Ethereum RLP headers have different
 identities. The current header also lacks transaction/receipt-root commitments;
 adding them requires a versioned execution-domain upgrade, not extra uncommitted

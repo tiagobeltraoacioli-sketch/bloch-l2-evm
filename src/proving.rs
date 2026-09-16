@@ -409,7 +409,7 @@ pub fn verify_batch(
             derived,
         });
     }
-    let header = run.header(spec, input, derived);
+    let header = run.header(spec.chain_id, &input.context, derived);
     Ok(VerifiedBatch {
         new_state_root: derived,
         deposits_hash: deposits_hash(&input.deposits),
@@ -591,7 +591,7 @@ pub fn generate_batch_witness(
         pre_accounts,
         absent_accounts,
     };
-    let outcome = run.into_outcome(spec, &input, new_state_root);
+    let outcome = run.into_outcome(spec.chain_id, &input.context, new_state_root);
 
     // 4. Self-check: the guest procedure must accept the witness and reproduce
     //    the host's outcome exactly.

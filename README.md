@@ -60,6 +60,9 @@ cargo +1.94.1 run --locked --example developer_contract
 
 The [delivery plan](docs/EVM-DELIVERY-PLAN.md) tracks the remaining node, proving
 and native settlement work separately from runnable local developer examples.
+The [generic database adapter](docs/DATABASE-EXECUTION.md) exposes the same signed
+execution kernel to external storage, including the experimental
+[Reth provider integration](integrations/reth-execution/README.md).
 
 ## Version pins (normative for this scaffold)
 

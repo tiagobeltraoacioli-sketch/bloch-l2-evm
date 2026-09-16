@@ -593,12 +593,12 @@ pub(crate) struct BlockRun {
 
 impl BlockRun {
     /// The full outcome, given the post-state root.
-    pub(crate) fn into_outcome(self, spec: &ChainSpec, input: &BlockInput, state_root: B256) -> ExecutionOutcome {
-        let header = self.header(spec, input, state_root);
+    pub(crate) fn into_outcome(self, chain_id: u64, context: &BlockContext, state_root: B256) -> ExecutionOutcome {
+        let header = self.header(chain_id, context, state_root);
         ExecutionOutcome {
-            block_number: input.context.number,
+            block_number: context.number,
             gas_used: self.gas_used,
-            base_fee_per_gas: input.context.base_fee_per_gas,
+            base_fee_per_gas: context.base_fee_per_gas,
             minted_wei: self.minted_wei,
             burned_wei: self.burned_wei,
             deposits_hash: self.deposits_hash,
@@ -612,15 +612,15 @@ impl BlockRun {
     }
 
     /// The header of the executed block, given its post-state root.
-    pub(crate) fn header(&self, spec: &ChainSpec, input: &BlockInput, state_root: B256) -> L2Header {
+    pub(crate) fn header(&self, chain_id: u64, context: &BlockContext, state_root: B256) -> L2Header {
         L2Header {
-            chain_id: spec.chain_id,
-            number: input.context.number,
-            timestamp: input.context.timestamp,
-            base_fee_per_gas: input.context.base_fee_per_gas,
+            chain_id,
+            number: context.number,
+            timestamp: context.timestamp,
+            base_fee_per_gas: context.base_fee_per_gas,
             gas_used: self.gas_used,
-            prevrandao: input.context.prevrandao,
-            anchor_root: input.context.anchor_root,
+            prevrandao: context.prevrandao,
+            anchor_root: context.anchor_root,
             parent_hash: self.parent_hash,
             deposits_hash: self.deposits_hash,
             state_root,
@@ -992,7 +992,7 @@ pub fn execute_block(
     // Real keccak-256 MPT state root over the post-execution state, re-hashing
     // only what this block touched.
     let state_root = state.commit_root();
-    Ok(run.into_outcome(spec, &input, state_root))
+    Ok(run.into_outcome(spec.chain_id, &input.context, state_root))
 }
 
 #[cfg(test)]

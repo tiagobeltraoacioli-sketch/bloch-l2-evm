@@ -1,0 +1,22 @@
+[package]
+name = "bloch-reth-execution"
+version = "0.1.0-experimental"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+bloch-l2-evm = { path = "../.." }
+alloy-primitives = { version = "=1.6.1", default-features = false }
+# Development checkout: verify the exact revision recorded in README.md.
+reth-revm = { path = "../../../reth-bloch-integration/crates/revm" }
+
+[dev-dependencies]
+alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
+alloy-eips = { version = "=2.2.0", default-features = false }
+k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+reth-primitives-traits = "=0.5.2"
+reth-storage-errors = { path = "../../../reth-bloch-integration/crates/storage/errors" }
