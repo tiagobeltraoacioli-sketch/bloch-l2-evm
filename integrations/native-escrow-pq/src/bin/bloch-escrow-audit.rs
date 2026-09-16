@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Local audit only: no signing, submission, networking or consensus activation.
+#[cfg(unix)]
+mod unix {
+    use alloy_primitives::B256;
+    use bloch_l2_evm::escrow::{Coin, Outpoint};
+    use bloch_native_escrow_pq::{
+        lock_store::{LockMark, LockStore},
+        PqEscrow,
+    };
+    use serde::Deserialize;
+    use std::{
+        fs::{self, File},
+        io::{self, Read, Write},
+        path::Path,
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Allocation {
+        outpoint: Outpoint,
+        value: u64,
+        owner: B256,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Baseline {
+        version: u8,
+        profile: String,
+        network: B256,
+        domain: B256,
+        capacity: usize,
+        expected_commitment: B256,
+        allocations: Vec<Allocation>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Minimum {
+        batches: u64,
+        digest: B256,
+    }
+    fn read<T: serde::de::DeserializeOwned>(path: &Path, max: u64) -> Result<T, String> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| "input metadata unavailable")?;
+        if !metadata.file_type().is_file() || metadata.len() > max {
+            return Err("input type or size rejected".into());
+        }
+        let file = File::open(path).map_err(|_| "input unreadable")?;
+        let mut bytes = Vec::new();
+        file.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "input read failed")?;
+        if bytes.len() as u64 > max {
+            return Err("input size rejected".into());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "input JSON rejected".into())
+    }
+    fn audit(args: &[std::ffi::OsString]) -> Result<serde_json::Value, String> {
+        let config: Baseline = read(Path::new(&args[1]), 1024 * 1024)?;
+        let minimum: Minimum = read(Path::new(&args[3]), 4096)?;
+        if config.version != 1
+            || config.profile != "bloch-local-escrow-v1"
+            || config.capacity == 0
+            || config.capacity > 10_000
+            || config.allocations.len() > 4096
+        {
+            return Err("baseline profile or limits rejected".into());
+        }
+        let baseline = PqEscrow::new(
+            config.network,
+            config.domain,
+            config
+                .allocations
+                .into_iter()
+                .map(|a| {
+                    (
+                        a.outpoint,
+                        Coin {
+                            value: a.value,
+                            owner: a.owner,
+                        },
+                    )
+                })
+                .collect(),
+            config.capacity,
+        )
+        .map_err(|_| "baseline allocation rejected")?;
+        if baseline.commitment() != config.expected_commitment {
+            return Err("baseline commitment mismatch".into());
+        }
+        let store = LockStore::open(
+            Path::new(&args[2]),
+            baseline,
+            LockMark {
+                batches: minimum.batches,
+                digest: minimum.digest,
+            },
+        )
+        .map_err(|e| format!("history recovery rejected: {e:?}"))?;
+        let mark = store.mark().map_err(|_| "history unavailable")?;
+        let escrow = store.escrow().map_err(|_| "state unavailable")?;
+        if !escrow.conserved() {
+            return Err("conservation check failed".into());
+        }
+        let inbox = escrow.inbox();
+        Ok(serde_json::json!({
+            "version": 1, "profile": "bloch-local-escrow-v1",
+            "network": config.network, "domain": config.domain,
+            "baseline_commitment": config.expected_commitment,
+            "mark": { "batches": mark.batches, "digest": mark.digest },
+            "state_commitment": escrow.commitment(),
+            "inbox": { "root": inbox.root(), "count": inbox.len() },
+            "locked_sat": escrow.locked_sat().to_string(),
+            "conserved": true,
+            "native_finality_verified": false
+        }))
+    }
+    pub fn run() -> i32 {
+        let args: Vec<_> = std::env::args_os().collect();
+        if args.len() == 2 && args[1] == "--help" {
+            return match writeln!(io::stdout().lock(), "Usage: bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON\nReplays local signed history. No native finality claim.") {
+                Ok(()) => 0, Err(_) => 3,
+            };
+        }
+        if args.len() != 4 {
+            eprintln!("Usage: bloch-escrow-audit BASELINE_JSON JOURNAL MINIMUM_JSON");
+            return 1;
+        }
+        match audit(&args) {
+            Ok(value) => {
+                let mut out = io::stdout().lock();
+                if serde_json::to_writer(&mut out, &value).is_err()
+                    || out.write_all(b"\n").is_err()
+                    || out.flush().is_err()
+                {
+                    3
+                } else {
+                    0
+                }
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                1
+            }
+        }
+    }
+}
+fn main() {
+    #[cfg(unix)]
+    std::process::exit(unix::run());
+    #[cfg(not(unix))]
+    {
+        eprintln!("bloch-escrow-audit requires Unix");
+        std::process::exit(1);
+    }
+}

@@ -188,4 +188,61 @@ fn recovered_pq_locks_feed_durable_evm_without_recredit_after_restart() {
     assert_eq!(escrow.mark().unwrap(), mark);
     assert_eq!(escrow.escrow().unwrap().inbox().root(), snapshot.root());
     assert!(escrow.escrow().unwrap().conserved());
+    let config = serde_json::json!({
+        "version": 1, "profile": "bloch-local-escrow-v1",
+        "network": network, "domain": domain_id, "capacity": 100,
+        "expected_commitment": baseline().commitment(),
+        "allocations": [{"outpoint": source, "value": 1000, "owner": owner}]
+    });
+    let config_path = temp.0.join("baseline.json");
+    let minimum_path = temp.0.join("minimum.json");
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::write(
+        &minimum_path,
+        serde_json::to_vec(&serde_json::json!({
+            "batches": mark.batches, "digest": mark.digest
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let audit = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_bloch-escrow-audit"))
+            .arg(&config_path)
+            .arg(&escrow_path)
+            .arg(&minimum_path)
+            .output()
+            .unwrap()
+    };
+    // A concurrent writer prevents reporting a stale or unlocked snapshot.
+    assert_eq!(audit().status.code(), Some(1));
+    let expected_state = escrow.escrow().unwrap().commitment();
+    drop(escrow);
+    let output = audit();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["locked_sat"], "900");
+    assert_eq!(
+        report["state_commitment"],
+        serde_json::to_value(expected_state).unwrap()
+    );
+    assert_eq!(report["inbox"]["root"], serde_json::to_value(snapshot.root()).unwrap());
+    assert_eq!(report["inbox"]["count"], 2);
+    assert_eq!(report["native_finality_verified"], false);
+    assert_eq!(report["mark"]["digest"], serde_json::to_value(mark.digest).unwrap());
+    let mut wrong = config.clone();
+    wrong["allocations"][0]["value"] = 1001.into();
+    fs::write(&config_path, serde_json::to_vec(&wrong).unwrap()).unwrap();
+    let output = audit();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::write(
+        &minimum_path,
+        serde_json::to_vec(&serde_json::json!({
+            "batches": mark.batches + 1, "digest": mark.digest
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(audit().status.code(), Some(1));
 }

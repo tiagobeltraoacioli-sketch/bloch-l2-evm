@@ -12,6 +12,8 @@ trusted signer distribution or prove FFG history independently.
 The Unix [lock store](LOCK-STORE.md) persists signed batches with exclusive writer
 locking, replay verification and independently retained rollback floors. It wraps
 the in-memory facade below without introducing native consensus activation.
+The [local audit CLI](AUDIT-CLI.md) replays that history and reports its verified
+local accounting, commitments and rollback mark as JSON.
 
 ## Authorization and state transition
 
