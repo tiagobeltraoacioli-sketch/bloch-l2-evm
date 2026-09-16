@@ -115,7 +115,10 @@ establish a complete SDK executor factory or node lifecycle.
 
 `executor::lifecycle::prepare_block_start` validates the supplied `BlockInput`
 and stages header/ring updates plus beacon-account installation. Committing it
-returns `PendingSystemCall`. Run EIP-4788 through the actual supplied EVM, then
+returns `PendingSystemCall`. Install its `block_hashes()` snapshot in the supplied
+EVM before any system call: the portable kernel freezes this window before
+beacon/deposit/user execution, so later writes to the live ring must not change
+BLOCKHASH results. Run EIP-4788 through that actual supplied EVM, then
 pass its uncommitted result to `complete`: a successful result commits before
 all deposits are staged and committed together. This returns `ActiveBlock`.
 
@@ -148,3 +151,21 @@ and final-head read failure without publishing a staged burn. The host's
 inspector and both InMemoryDB and revm State. Roots, headers, accounting and
 results match the portable kernel, and State's account/storage/code changes
 match the portable execution bundle. This is not a BlockExecutorFactory or node.
+
+## Owned SDK candidates
+
+`ActiveBlock::prepare_owned_transaction` returns the same read-complete
+`PreparedTransaction` without borrowing block accounting. This is a trusted
+adapter API: `commit_prepared_transaction` assumes the adapter has checked the
+originating session and unchanged database generation. The borrowed API delegates
+to these shared methods. `result_and_state` and `into_result_and_state` expose the
+original EVM result before protocol fee routing; extracting it consumes the token
+and discards the prepared fee effects. The original EvmState is stored once;
+only execution-result metadata is cloned for the existing TxOutcome view.
+
+The real host `BlochBlockExecutorFactory` supplies the required owned-token
+checks with an Arc session identity and checked generation. Results are Send and
+'static, but cannot be constructed or cloned externally. Mutable EVM access and
+accepted commits invalidate outstanding results. A rejected commit poisons the
+executor so its finalization cannot silently succeed. Direct callers of the low
+level core API must provide equivalent protection themselves.

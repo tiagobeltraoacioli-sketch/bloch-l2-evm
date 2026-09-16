@@ -83,11 +83,10 @@ from persisted changesets after reopening, recovering the original root. This
 does not prune history or unwind block metadata. The remaining canonical unwind,
 crash recovery and the node storage service remain open. Incremental signed
 construction now shares the core kernel with whole-block verification and runs
-through the real Reth provider in storage tests. SDK executor-factory/payload
-builder wiring is still required. Preserve the core's fixed-width header
-hash and committed `BLOCKHASH` ring. Shared transaction-effect preparation now
-supports mutable-only databases and read-free commitment for a supplied EVM;
-the SDK lifecycle, inspector and block-hash integration still need completion.
+through the real Reth provider in storage tests. The real SDK executor factory
+now uses the shared lifecycle with supplied inspectors, bounded signed candidates
+and a frozen committed BLOCKHASH window. Payload builder and custom node wiring
+remain required. Preserve the core's fixed-width header hash and domain identity.
 Vanilla Ethereum RLP headers have different
 identities. The current header also lacks transaction/receipt-root commitments;
 adding them requires a versioned execution-domain upgrade, not extra uncommitted
@@ -95,3 +94,15 @@ RPC fields. A full node additionally needs the incremental block-building path,
 custom primitives/assembler, receipts and authenticated deposit context.
 The [node integration dependency map](RETH-NODE-INTEGRATION.md) records the
 inspected Reth interfaces, storage qualification and versioning requirements.
+
+### SDK block factory qualification
+
+The host now implements the real Alloy `BlockExecutorFactory` using the supplied
+Bloch EVM, the shared protocol lifecycle and canonical signed reauthentication.
+It produces typed user receipts, preserves deposit gas in the block total, and
+rejects stale/foreign owned results before publication. The core captures the
+immutable BLOCKHASH window before system calls; an adversarial contract mutation
+fixture verifies parity. Multi-block roots, receipts/logs and inspector tests
+qualify this factory. This does not close the developer node gate: custom header/
+body primitives and committed transaction/receipt roots, assembler, consensus,
+pool/RPC, durable canonical unwind and the independent native/prover gates remain.

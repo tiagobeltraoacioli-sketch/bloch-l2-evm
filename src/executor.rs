@@ -840,7 +840,7 @@ fn block_context<DB: Database>(
 #[must_use = "commit prepared effects or drop them to discard the candidate"]
 #[derive(Debug)]
 pub struct PreparedTransaction {
-    state: EvmState,
+    execution: ResultAndState<HaltReason>,
     fee_credit: EvmState,
     committed: CommittedTransaction,
 }
@@ -862,12 +862,23 @@ impl PreparedTransaction {
         &self.committed.outcome
     }
 
+    /// Inspect the original EVM result and state, before protocol fee routing.
+    pub fn result_and_state(&self) -> &ResultAndState<HaltReason> {
+        &self.execution
+    }
+
+    /// Extract the original EVM result, discarding prepared protocol accounting.
+    /// This consumes the candidate and does not commit any state.
+    pub fn into_result_and_state(self) -> ResultAndState<HaltReason> {
+        self.execution
+    }
+
     /// Commit to the same logical pre-state used for preparation, without database reads.
     ///
     /// No other transition may change that pre-state between preparation and commit.
     /// The two commits preserve deletion followed by protocol-level vault recreation.
     pub fn commit(self, db: &mut impl DatabaseCommit) -> CommittedTransaction {
-        db.commit(self.state);
+        db.commit(self.execution.state);
         if !self.fee_credit.is_empty() {
             db.commit(self.fee_credit);
         }
@@ -945,7 +956,10 @@ pub fn prepare_transaction_effects<DB: Database>(
         fee_credit.insert(spec.base_fee_vault, account);
     }
     Ok(PreparedTransaction {
-        state,
+        execution: ResultAndState {
+            result: result.clone(),
+            state,
+        },
         fee_credit,
         committed: CommittedTransaction {
             outcome: TxOutcome {

@@ -94,6 +94,7 @@ fn run_sdk<DB: Database + DatabaseCommit>(
     let pending = prepare_block_start(spec, evm.db_mut(), previous_root, input)
         .unwrap()
         .commit(evm.db_mut());
+    evm.install_block_hashes(pending.block_hashes());
     let system = evm
         .transact_system_call(
             SYSTEM_ADDRESS,

@@ -21,6 +21,7 @@ pub struct PreparedBlockStart {
 pub struct PendingSystemCall {
     active: ActiveBlock,
     deposits: Vec<DepositMint>,
+    block_hashes: Vec<(u64, B256)>,
 }
 
 /// Protocol bookkeeping after the system call and deposits have committed.
@@ -63,10 +64,14 @@ pub fn prepare_block_start<DB: Database>(
     input: &BlockInput,
 ) -> Result<PreparedBlockStart, BlockExecutionError> {
     validate_block_input(spec, input)?;
-    let (changes, parent_hash) = stage_protocol(db, |overlay| {
-        let (parent_hash, _) = apply_header_update(spec, overlay, previous_root, &input.context)?;
+    let (changes, (parent_hash, block_hashes)) = stage_protocol(db, |overlay| {
+        let parent_hash = apply_header_rules(spec, overlay, previous_root, &input.context)?;
+        let start = input.context.number.saturating_sub(BLOCK_HASH_HISTORY);
+        let block_hashes = (start..input.context.number)
+            .map(|number| (number, overlay.cache.block_hashes[&U256::from(number)]))
+            .collect();
         ensure_system_account(overlay, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())).map_err(db_error)?;
-        Ok(parent_hash)
+        Ok((parent_hash, block_hashes))
     })?;
     Ok(PreparedBlockStart {
         changes,
@@ -86,6 +91,7 @@ pub fn prepare_block_start<DB: Database>(
                 },
             },
             deposits: input.deposits.clone(),
+            block_hashes,
         },
     })
 }
@@ -99,6 +105,14 @@ impl PreparedBlockStart {
 }
 
 impl PendingSystemCall {
+    /// Immutable BLOCKHASH window captured at the same point as the portable
+    /// kernel: after the header update, before beacon/deposit/user execution.
+    /// Install this in the supplied EVM before its system call. Reading the live
+    /// ring during later transactions can diverge when contracts mutate it.
+    pub fn block_hashes(&self) -> &[(u64, B256)] {
+        &self.block_hashes
+    }
+
     /// Commit a successful, matching EIP-4788 result, then prepare and commit
     /// the entire deposit batch. On any error discard the provisional block
     /// database: the earlier header prefix may already have committed.
@@ -142,19 +156,55 @@ impl ActiveBlock {
         result: ResultAndState<HaltReason>,
         db: &mut DB,
     ) -> Result<PreparedBlockTransaction<'a>, BlockExecutionError> {
+        let transaction = self.prepare_owned_transaction(tx, result, db)?;
+        Ok(PreparedBlockTransaction {
+            block: self,
+            transaction,
+        })
+    }
+
+    /// Prepare an owned result for adapters requiring `Send + 'static` tokens.
+    ///
+    /// Unlike the borrowed variant this does not bind the result to this block.
+    /// The adapter must bind session and database generation, invalidate tokens
+    /// on mutable EVM access, and reject stale/foreign results before commit.
+    pub fn prepare_owned_transaction<DB: Database>(
+        &self,
+        tx: &TxEnv,
+        result: ResultAndState<HaltReason>,
+        db: &mut DB,
+    ) -> Result<PreparedTransaction, BlockExecutionError> {
         self.validate_transaction(tx)?;
-        let transaction = prepare_transaction_effects(
+        prepare_transaction_effects(
             &self.spec,
             self.context.base_fee_per_gas,
             tx,
             self.run.tx_outcomes.len(),
             result,
             db,
-        )?;
-        Ok(PreparedBlockTransaction {
-            block: self,
-            transaction,
-        })
+        )
+    }
+
+    /// Commit an owned result that the adapter has bound to this exact block
+    /// and unchanged database pre-state. This trusted method does not repeat
+    /// session/generation or signature checks; those must precede the commit.
+    pub fn commit_prepared_transaction(
+        &mut self,
+        prepared: PreparedTransaction,
+        db: &mut impl DatabaseCommit,
+    ) -> &TxOutcome {
+        self.run.record(prepared.commit(db));
+        self.run.tx_outcomes.last().expect("just recorded a transaction")
+    }
+
+    /// Total gas used by deposits and committed user transactions.
+    pub fn gas_used(&self) -> u64 {
+        self.run.gas_used
+    }
+
+    /// Number of committed user transactions, excluding protocol deposits.
+    pub fn transaction_count(&self) -> usize {
+        self.run.tx_outcomes.len()
     }
 
     /// Prepare the burned-supply ledger and committed head together.
@@ -174,7 +224,7 @@ impl PreparedBlockTransaction<'_> {
 
     /// Commit effects and advance the originating block's accounting once.
     pub fn commit(self, db: &mut impl DatabaseCommit) {
-        self.block.run.record(self.transaction.commit(db));
+        self.block.commit_prepared_transaction(self.transaction, db);
     }
 }
 

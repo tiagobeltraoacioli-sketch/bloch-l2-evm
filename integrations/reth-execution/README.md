@@ -207,3 +207,42 @@ This establishes shared protocol phases, not an implementation of the SDK's
 Callers must discard provisional block state after a later phase failure;
 prepared commits cannot undo earlier phases on a generic mutable database.
 See [the lifecycle contract](../../docs/DATABASE-EXECUTION.md#protocol-lifecycle-on-a-mutable-database).
+
+## SDK block executor factory
+
+`BlochBlockExecutorFactory::new(&spec)` implements the pinned Alloy
+`BlockExecutorFactory`, preserving its supplied Bloch EVM, database and inspector.
+Provide `BlochBlockExecutionCtx { previous_root, context, deposits }` from a
+consistent provisional state and independently authenticated L1 derivation.
+The supplied EVM configuration must match the canonical Bloch environment.
+
+The executor uses the shared lifecycle, reauthenticates signed envelopes instead
+of trusting recovered senders/prebuilt TxEnv values, and limits total candidate
+attempts and bytes. `execute_transaction_without_commit` returns an owned result;
+dropping it skips the candidate. Prefer `checked_commit_transaction` for an
+immediate Result. The SDK infallible commit returns zero gas and poisons the
+executor on a stale/foreign token; later execution and finalization must fail.
+Mutable EVM access and accepted commits invalidate older results.
+
+The core prefix supplies an immutable BLOCKHASH window captured before any
+beacon/deposit/user execution. The executor restores this window and canonical
+upstream precompiles before each candidate. The standalone EVM factory also
+supports trusted `install_block_hashes` for lifecycle consumers; without an
+installed window it reads the live committed ring for isolated simulations.
+
+Typed user receipts contain status/logs and cumulative user gas. Total block gas
+also includes deposits, so it can exceed the last user receipt; there are no
+fabricated deposit receipts. `finish_bloch` returns the SDK EVM/block result plus
+the core FinishedBlock, to which the caller attaches the calculated root.
+The SDK trait's `finish` returns its normal EVM/block result only.
+
+`tests/block_executor.rs` exercises the actual traits, multiple signed blocks,
+receipts/logs, supplied inspector, forged recovery/environment inputs, skipped
+candidates, stale/foreign/mutable-access tokens, environment rejection,
+canonical precompiles and a contract mutating the block-info ring during a block.
+`tests/block_executor_bounds.rs` checks rejected/skipped candidate budgets,
+oversized preflight, and disabled validation or wrong block-info configuration
+without original-database reads. The factory still requires custom node
+primitives, committed transaction/receipt
+roots, assembler, consensus, pool and RPC integration. Existing production/domain
+formats are unchanged and no live chain is activated.

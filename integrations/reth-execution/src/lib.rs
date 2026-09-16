@@ -12,6 +12,11 @@ use bloch_l2_evm::{
 };
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
+pub mod block;
+pub use block::{
+    BlochBlockExecutionCtx, BlochBlockExecutor, BlochBlockExecutorFactory, BlochBlockFinish, BlochTxResult,
+};
+
 pub mod context;
 pub mod factory;
 pub use context::BlochContext;

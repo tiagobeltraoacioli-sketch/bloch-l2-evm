@@ -2,7 +2,7 @@
 //! Alloy EVM factory preserving Bloch BLOCKHASH without replacing the database.
 use crate::context::BlochContext;
 use alloy_evm::{precompiles::PrecompilesMap, Database, Evm, EvmEnv, EvmFactory};
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, B256};
 use bloch_l2_evm::ChainSpec;
 use reth_revm::revm::{
     context::{BlockEnv, CfgEnv, Evm as RevmEvm, TxEnv},
@@ -22,6 +22,21 @@ pub struct BlochEvm<DB: Database, I> {
     inner: Inner<DB, I>,
     inspect: bool,
 }
+impl<DB: Database, I> BlochEvm<DB, I> {
+    pub(crate) fn block_info(&self) -> Address {
+        self.inner.ctx.block_info
+    }
+    /// Install the BLOCKHASH window captured by shared core preparation.
+    ///
+    /// Call with `PendingSystemCall::block_hashes()` before running its system
+    /// call. This trusted host helper performs no reads or proof verification;
+    /// arbitrary values change execution semantics. The block executor retains
+    /// its own canonical copy and reinstalls it before each candidate.
+    pub fn install_block_hashes(&mut self, window: &[(u64, B256)]) {
+        self.inner.ctx.block_hashes = Some(window.to_vec());
+    }
+}
+
 impl<DB: Database, I: Inspector<BlochContext<DB>>> Evm for BlochEvm<DB, I> {
     type DB = DB;
     type Tx = TxEnv;
@@ -108,6 +123,7 @@ impl BlochEvmFactory {
                 .with_cfg(env.cfg_env)
                 .with_db(db),
             block_info: self.block_info,
+            block_hashes: None,
         };
         let precompiles = PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(spec)));
         BlochEvm {

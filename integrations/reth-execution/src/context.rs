@@ -20,6 +20,7 @@ use reth_revm::revm::{
 pub struct BlochContext<DB: Database> {
     pub(crate) inner: EthEvmContext<DB>,
     pub(crate) block_info: Address,
+    pub(crate) block_hashes: Option<Vec<(u64, B256)>>,
 }
 impl<DB: Database> ContextTr for BlochContext<DB> {
     type Block = BlockEnv;
@@ -68,6 +69,15 @@ impl<DB: Database> ContextSetters for BlochContext<DB> {
 }
 impl<DB: Database> Host for BlochContext<DB> {
     fn block_hash(&mut self, number: u64) -> Option<B256> {
+        if let Some(window) = &self.block_hashes {
+            return Some(
+                window
+                    .iter()
+                    .find(|(height, _)| *height == number)
+                    .map(|(_, hash)| *hash)
+                    .unwrap_or(B256::ZERO),
+            );
+        }
         // Window checks and opcode gas remain upstream interpreter behavior.
         // Raw database reads must not warm the block-info account or its slots.
         let address = self.block_info;
