@@ -206,8 +206,14 @@ not a complete canonical state/header/receipt unwind or process-crash qualificat
 
 ## Remaining integration
 
-Required next steps are authenticated execution-domain initialization, full
-provider/node wiring, custom consensus and receipt/RPC semantics,
+The full Reth ProviderFactory now instantiates with `BlochChainSpec`, custom
+payload types and `BlochNodeTypes`. A real database test computes the advertised
+zero-issuance allocation's root, persists the canonical V2 genesis and state, and
+reopens all backends to verify their identity. Payload transport retains deposits
+and custom hashes; it does not implement an Engine API or authenticate L1 inputs.
+
+Required next steps are authenticated execution-domain initialization, subsequent
+block persistence and node wiring, custom consensus and receipt/RPC semantics,
 durable canonical unwind, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

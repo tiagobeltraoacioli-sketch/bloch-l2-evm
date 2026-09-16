@@ -18,6 +18,8 @@ alloy-rlp = "=0.3.16"
 reth-primitives-traits = { version = "=0.5.2", features = ["serde", "reth-codec"] }
 reth-codecs = "=0.5.2"
 serde = "1.0"
+alloy-genesis = "=2.1.1"
+alloy-rpc-types-engine = "=2.1.1"
 # Development checkout: verify the exact revision recorded in README.md.
 reth-revm = { path = "../../../reth-bloch-integration/crates/revm" }
 reth-evm = { path = "../../../reth-bloch-integration/crates/evm/evm" }
@@ -25,6 +27,10 @@ reth-db-api = { path = "../../../reth-bloch-integration/crates/storage/db-api" }
 reth-storage-api = { path = "../../../reth-bloch-integration/crates/storage/storage-api", features = ["db-api"] }
 reth-storage-errors = { path = "../../../reth-bloch-integration/crates/storage/errors" }
 reth-provider = { path = "../../../reth-bloch-integration/crates/storage/provider" }
+reth-chainspec = { path = "../../../reth-bloch-integration/crates/chainspec" }
+reth-network-peers = { path = "../../../reth-bloch-integration/crates/net/peers" }
+reth-payload-primitives = { path = "../../../reth-bloch-integration/crates/payload/primitives" }
+reth-node-types = { path = "../../../reth-bloch-integration/crates/node/types" }
 
 [dev-dependencies]
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }

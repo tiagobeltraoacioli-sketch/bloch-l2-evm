@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Bloch execution through Reth state providers and the Alloy EVM factory.
 //!
-//! This module does not implement a node, RPC, pool, persistence or finality.
+//! Includes custom primitives, provider types and deposit-body storage, but no
+//! launched node, RPC, pool, canonical recovery service or finality.
 //! The provider snapshot and roots are trusted host inputs. Signed Ethereum
 //! bytes are authenticated by the existing Bloch kernel, not a sender cache.
 
@@ -13,7 +14,21 @@ use bloch_l2_evm::{
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
 pub mod block;
+pub mod chainspec;
 pub mod config;
+pub use chainspec::BlochChainSpec;
+pub mod payload;
+pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
+/// Complete type selection for a provider; does not launch a node or Engine API.
+#[derive(Clone, Debug, Default)]
+pub struct BlochNodeTypes;
+
+impl reth_node_types::NodeTypes for BlochNodeTypes {
+    type Primitives = BlochNodePrimitives;
+    type ChainSpec = BlochChainSpec;
+    type Storage = BlochChainStorage;
+    type Payload = BlochPayloadTypes;
+}
 pub mod node_factory;
 pub mod primitives;
 pub mod storage;

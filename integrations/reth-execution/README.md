@@ -98,8 +98,8 @@ block unwind and crash recovery remain unqualified.
 The existing V1 header retains its fixed-width identity. The separate V2 path now
 provides committed transaction/receipt roots, full Reth primitive adapters,
 configuration and assembly. A complete node still needs authenticated domain
-initialization, complete provider wiring and canonical recovery, custom import
-consensus, payload/node/pool/RPC wiring and authenticated deposit derivation.
+initialization, subsequent-block persistence and canonical recovery, custom import
+consensus, payload service/node/pool/RPC wiring and authenticated deposit derivation.
 Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
 ## Validation scope
@@ -322,4 +322,26 @@ remove headers, transaction indices, receipts or execution state by itself.
 `tests/node_storage.rs` uses actual MDBX and close/reopen to qualify persisted V2
 headers/transactions/deposits, reconstructed body commitments, dropped writers/removals,
 committed removals and corrupt records. Full canonical unwind, process-crash
-recovery and a launched ProviderFactory/node remain subsequent integration work.
+recovery and a launched node remain subsequent integration work.
+
+## Complete provider types and genesis
+
+`BlochChainSpec::new(kernel_spec, domain, timestamp)` derives an immutable,
+zero-issuance genesis allocation with system bytecode and V2 head storage. Its
+header/hash use the custom V2 format; base-fee calculation delegates to the
+kernel, including saturation at the integer boundary. Cancun describes EVM
+semantics without enabling blobs or Ethereum withdrawals. The caller must
+authenticate the domain and L1 inputs separately.
+
+`BlochNodeTypes` selects those rules, Bloch primitives, `BlochChainStorage` and
+`BlochPayloadTypes` for a real Reth ProviderFactory. `tests/node_provider.rs`
+loads the advertised allocation through Reth's actual trie, verifies its root,
+persists the V2 genesis and state, closes all handles and verifies the block,
+root and storage after reopening MDBX, RocksDB and static files.
+
+`BlochBuiltPayload` and `BlochExecutionPayload` retain the canonical block and
+deposits. `BlochPayloadAttributes` uses bounded deposits-only serialization and
+a tagged build identifier binding the domain, parent, timestamp, randomness,
+anchor and complete deposit sequence. Optional transport sidecars remain bounded
+and unsupported by V2 execution. Payload traits do not constitute an Engine API,
+payload-building service, consensus validation or signed developer workflow.

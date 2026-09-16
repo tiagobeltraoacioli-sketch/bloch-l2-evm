@@ -122,7 +122,10 @@ before final writes. The host now implements full Reth primitive traits, bounded
 internal serde, header Compact, ConfigureEvm and an assembler that checks metadata
 already committed by execution. The chain storage adapter now persists bounded
 deposit records, verifies reconstructed body commitments and supports transactional
-body removal in real MDBX reopen tests. Full provider/node wiring and coordinated
-canonical recovery remain required; domain initialization, consensus, pool/RPC and
+body removal in real MDBX reopen tests. The full Reth ProviderFactory now uses
+custom chain-spec, payload and node types; a real-backend test independently
+computes the genesis allocation root and persists/reopens the V2 genesis and state.
+Subsequent-block persistence and coordinated canonical recovery remain required;
+domain initialization, consensus, payload service, pool/RPC and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.

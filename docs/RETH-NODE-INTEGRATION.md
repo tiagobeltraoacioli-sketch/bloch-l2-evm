@@ -174,6 +174,16 @@ header implements fallible database decompression of its canonical tagged RLP.
 Missing deposit rows, corrupt records, duplicate batch heights and conflicting
 existing deposits are errors; an explicit empty row is distinct from absence.
 Body reads verify transaction/deposit commitments against the supplied header.
-The adapter implements actual `reth_provider::providers::ChainStorage`, but a
-complete ProviderFactory instantiation still requires the custom EthChainSpec and
-payload/node types, static files/RocksDB configuration and canonical integration.
+The adapter implements actual `reth_provider::providers::ChainStorage`.
+`BlochChainSpec`, custom payload types and `BlochNodeTypes` now instantiate the
+complete Reth `ProviderFactory` with Bloch primitives and storage. The genesis
+test computes the advertised allocation's root through Reth's trie, writes the
+actual V2 block and state, closes all handles and reads the same block, root and
+storage after reopening MDBX, static files and RocksDB. This qualifies explicit
+genesis persistence, not subsequent-block canonical unwind or crash recovery.
+
+The immutable chain specification derives the allocation from zero-issuance V2
+genesis and uses the kernel's exact base-fee arithmetic. Cancun EVM semantics do
+not enable blobs or Ethereum withdrawals. Payload containers preserve V2 identity
+and deposits; their tagged build identifier binds the domain, parent and every
+attribute. They implement Reth payload traits, not an Engine API or payload service.
