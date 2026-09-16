@@ -5,6 +5,73 @@ use alloc::vec::Vec;
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 
+/// Authenticated membership summary, not a mint permit or consumption receipt.
+/// The caller remains responsible for authenticating the expected root and count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedInboxRange {
+    root: B256,
+    count: u64,
+    range: core::ops::Range<u64>,
+    total_sat: u128,
+}
+impl VerifiedInboxRange {
+    /// Independently supplied root against which every proof verified.
+    pub fn root(&self) -> B256 {
+        self.root
+    }
+    /// Total snapshot length, including deposits outside this interval.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+    /// Exact verified half-open sequence interval.
+    pub fn range(&self) -> core::ops::Range<u64> {
+        self.range.clone()
+    }
+    /// Sum of native amounts in this interval, not the full inbox balance.
+    pub fn total_sat(&self) -> u128 {
+        self.total_sat
+    }
+}
+
+/// Verify an exact nonempty interval against independently supplied expectations.
+/// Missing, extra, reordered and repeated sequences fail as a whole. No cursor
+/// advances, and no unverified partial total is exposed on failure.
+/// Empty ranges are refused because no inclusion proof can bind their root/count.
+pub fn verify_proof_range(
+    network: B256,
+    domain: B256,
+    expected_root: B256,
+    expected_count: u64,
+    range: core::ops::Range<u64>,
+    proofs: &[InboxProof],
+) -> Option<VerifiedInboxRange> {
+    if range.start >= range.end
+        || range.end > expected_count
+        || range.end - range.start > 4096
+        || proofs.len() as u64 != range.end - range.start
+        || proofs.iter().any(|p| p.siblings.len() > 64)
+    {
+        return None;
+    }
+    let mut total_sat = 0u128;
+    for (sequence, proof) in range.clone().zip(proofs) {
+        if proof.deposit.sequence != sequence
+            || proof.count != expected_count
+            || !proof.verify(network, domain, expected_root)
+        {
+            return None;
+        }
+        // At most 4096 u64 amounts, so the sum fits u128.
+        total_sat += proof.deposit.amount as u128;
+    }
+    Some(VerifiedInboxRange {
+        root: expected_root,
+        count: expected_count,
+        range,
+        total_sat,
+    })
+}
+
 fn hash(tag: &[u8], parts: &[&[u8]]) -> B256 {
     let mut h = Sha3_256::new();
     h.update(tag);

@@ -99,3 +99,20 @@ the verifier still requires independently authenticated root/count, real L1
 locations and valid execution. A preview of a count alone never authenticates
 the corresponding snapshot. These are ordinary proofs sharing a cached tree,
 not a compressed Merkle multiproof.
+
+## Consumer-side range verification
+
+`verify_proof_range(network, domain, expected_root, expected_count, range, proofs)`
+verifies a nonempty exact interval against separately supplied expectations. It
+rejects missing, extra, reordered or repeated sequences, changed counts, wrong
+roots and malformed paths, and returns no partial result when a later proof fails.
+The result is a `VerifiedInboxRange` with private fields and read-only access to
+the root, count, interval and exact u128 satoshi total. At most 4,096 u64 amounts
+are summed, so the sum cannot overflow u128.
+
+Empty intervals remain valid for export but return no verified summary: without
+any inclusion proof the verifier cannot bind the supplied root/count. Transport
+must enforce input bounds before allocation; this API bounds already decoded
+proofs. The expected root must be authenticated independently of the exported
+JSON, not simply copied from it. This summary proves membership only, does not
+consume deposits, and cannot replace L1 provenance, finality or EVM verification.

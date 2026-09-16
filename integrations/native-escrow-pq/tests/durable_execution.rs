@@ -246,6 +246,16 @@ fn recovered_pq_locks_feed_durable_evm_without_recredit_after_restart() {
     let decoded: Vec<bloch_l2_evm::escrow_inbox::InboxProof> =
         serde_json::from_value(exported["proof_batch"]["proofs"].clone()).unwrap();
     assert_eq!(decoded, proofs);
+    let verified = bloch_l2_evm::escrow_inbox::verify_proof_range(
+        network,
+        domain_id,
+        snapshot.root(),
+        snapshot.len() as u64,
+        0..2,
+        &decoded,
+    )
+    .unwrap();
+    assert_eq!(verified.total_sat(), 900);
     for proof in &decoded {
         assert!(proof.verify(network, domain_id, snapshot.root()));
         assert!(!proof.verify(network, domain_id, B256::ZERO));

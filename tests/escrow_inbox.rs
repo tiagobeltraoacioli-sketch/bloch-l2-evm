@@ -192,3 +192,37 @@ fn contiguous_proof_batches_are_exact_and_bounded() {
     assert!(snapshot.proofs(0..u64::MAX).is_none());
     assert!(ledger(0).inbox().proofs(0..0).unwrap().is_empty());
 }
+
+#[test]
+fn proof_range_verification_binds_external_expectations_and_exact_sequence() {
+    use bloch_l2_evm::escrow_inbox::verify_proof_range;
+    let snapshot = ledger(5).inbox();
+    let proofs = snapshot.proofs(1..4).unwrap();
+    let network = B256::repeat_byte(1);
+    let domain = B256::repeat_byte(2);
+    let verify = |proofs: &[_]| verify_proof_range(network, domain, snapshot.root(), 5, 1..4, proofs);
+    let observed = verify(&proofs).unwrap();
+    assert_eq!(observed.total_sat(), 2 + 3 + 4);
+    assert_eq!(observed.root(), snapshot.root());
+    assert_eq!(observed.count(), 5);
+    assert_eq!(observed.range(), 1..4);
+    assert!(verify(&proofs[..2]).is_none());
+    for mode in 0..5 {
+        let mut changed = proofs.clone();
+        match mode {
+            0 => changed.reverse(),
+            1 => changed[1] = changed[0].clone(),
+            2 => changed[2].deposit.amount += 1,
+            3 => changed[2].count += 1,
+            _ => changed[2].siblings.push(B256::ZERO),
+        }
+        assert!(verify(&changed).is_none());
+    }
+    assert!(verify_proof_range(network, domain, B256::ZERO, 5, 1..4, &proofs).is_none());
+    assert!(verify_proof_range(network, domain, snapshot.root(), 6, 1..4, &proofs).is_none());
+    assert!(verify_proof_range(B256::ZERO, domain, snapshot.root(), 5, 1..4, &proofs).is_none());
+    assert!(verify_proof_range(network, B256::ZERO, snapshot.root(), 5, 1..4, &proofs).is_none());
+    assert!(verify_proof_range(network, domain, snapshot.root(), 5, 5..5, &[]).is_none());
+    assert!(verify_proof_range(network, domain, snapshot.root(), u64::MAX, 0..u64::MAX, &[]).is_none());
+    assert_eq!(verify(&proofs).unwrap(), observed); // membership never consumes
+}
