@@ -66,10 +66,13 @@ or from an untrusted RPC. The API is a bootstrap verifier, not a replacement for
 a running node's local finality or native `cross_check`/reconciliation policy.
 Callers must never use a signed envelope to override conflicting local finality.
 
-The last accepted checkpoint is not automatically persisted. Retain its signed
-artifact and independently protected progress, reverify it on recovery, and
-provide it as `previous` to retain anti-rollback checks. Omitting `previous`
-starts a fresh bootstrap trust decision. This module does not wire the operator
+The pure verifier does not automatically persist the last accepted checkpoint.
+The [Unix checkpoint store](CHECKPOINT-STORE.md) now handles durable history and
+reverification, retaining stale checkpoints only as rollback evidence and
+checking current freshness before exposing an anchor. Keep its latest watermark
+independently protected. Direct verifier callers must still retain/reverify the
+signed artifact and supply `previous`; omitting it starts a fresh bootstrap
+trust decision. This module does not wire the operator
 CLI's trusted inbox files to consensus: the experimental inbox still needs a
 native committed representation and activation.
 

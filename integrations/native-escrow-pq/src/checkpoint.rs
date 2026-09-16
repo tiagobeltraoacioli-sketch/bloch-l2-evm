@@ -89,6 +89,25 @@ impl VerifiedCheckpoint {
     }
 }
 impl CheckpointPolicy {
+    /// Storage identity for this exact out-of-band policy, including key order.
+    pub(crate) fn storage_identity(&self) -> B256 {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BLOCH:EXPERIMENTAL:WS:POLICY:1");
+        h.update(self.network.to_le_bytes());
+        h.update(self.genesis);
+        h.update(self.set.id.to_le_bytes());
+        h.update(self.set.adopted_epoch.to_le_bytes());
+        let (threshold, count, external) = self.phase.shape();
+        for n in [threshold, count, external] {
+            h.update((n as u64).to_le_bytes());
+        }
+        for signer in &self.set.signers {
+            h.update(signer.pubkey);
+            h.update([u8::from(signer.external)]);
+        }
+        B256::from_slice(&h.finalize())
+    }
     /// Bind independently authenticated keys and chain identity. Duplicate keys,
     /// self-declared weaker thresholds and overflowing review clocks are refused.
     pub fn new(network: u32, genesis: [u8; 32], set: SignerSet, phase: Phase) -> Result<Self, CheckpointError> {

@@ -195,3 +195,164 @@ fn envelope_and_header_work_are_bounded() {
     env.signatures[0].1 = vec![0; 8193];
     assert_eq!(p.verify(&env, &header, 101, None).unwrap_err(), Error::Limit);
 }
+
+#[cfg(unix)]
+mod persistence {
+    use super::*;
+    use bloch_native_escrow_pq::checkpoint_store::{CheckpointStore, StoreError};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let name = format!(
+                "bloch-checkpoint-store-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            Self(std::env::temp_dir().join(name))
+        }
+        fn record(&self, epoch: u64) -> PathBuf {
+            self.0.join(format!("{epoch:020}.ckp"))
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_floor_and_identical_acceptance_is_idempotent() {
+        let temp = Temp::new();
+        let (env, header) = fixture(100);
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        assert!(matches!(store.current(100), Err(StoreError::Empty)));
+        let mark = store.accept(&env, &header, 100).unwrap();
+        assert!(matches!(
+            CheckpointStore::open(&temp.0, policy(), Some(mark)),
+            Err(StoreError::Locked)
+        ));
+        drop(store);
+        let mut store = CheckpointStore::open(&temp.0, policy(), Some(mark)).unwrap();
+        assert_eq!(store.current(101).unwrap().digest(), mark.digest);
+        assert_eq!(store.accept(&env, &header, 101).unwrap(), mark);
+        let (old, old_header) = fixture(99);
+        assert!(matches!(
+            store.accept(&old, &old_header, 101),
+            Err(StoreError::Verify(Error::Rollback))
+        ));
+        assert!(!temp.record(99).exists());
+    }
+    #[test]
+    fn stale_history_can_recover_but_cannot_become_a_current_anchor() {
+        let temp = Temp::new();
+        let (env, header) = fixture(100);
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let mark = store.accept(&env, &header, 100).unwrap();
+        drop(store);
+        let mut store = CheckpointStore::open(&temp.0, policy(), Some(mark)).unwrap();
+        let now = 100 + ws::WS_PERIOD_EPOCHS;
+        assert!(matches!(store.current(now), Err(StoreError::Verify(Error::Stale))));
+        assert_eq!(store.mark(), Some(mark));
+        let (new, new_header) = fixture(now);
+        let latest = store.accept(&new, &new_header, now).unwrap();
+        assert_eq!(store.current(now).unwrap().digest(), latest.digest);
+        drop(store);
+        assert_eq!(
+            CheckpointStore::open(&temp.0, policy(), Some(mark)).unwrap().mark(),
+            Some(latest)
+        );
+    }
+    #[test]
+    fn conflicting_checkpoint_never_replaces_committed_file() {
+        let temp = Temp::new();
+        let (env, header) = fixture(100);
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let mark = store.accept(&env, &header, 100).unwrap();
+        let bytes = fs::read(temp.record(100)).unwrap();
+        let mut cp = env.checkpoint;
+        cp.issued_at += 1;
+        assert!(matches!(
+            store.accept(&signed(cp, &[0, 2]), &header, 100),
+            Err(StoreError::Verify(Error::Conflict))
+        ));
+        assert_eq!(store.mark(), Some(mark));
+        assert_eq!(fs::read(temp.record(100)).unwrap(), bytes);
+    }
+    #[test]
+    fn tampering_truncation_and_tail_deletion_fail_closed() {
+        for mode in 0..3 {
+            let temp = Temp::new();
+            let (env, header) = fixture(100);
+            let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+            let mark = store.accept(&env, &header, 100).unwrap();
+            drop(store);
+            if mode == 2 {
+                fs::remove_file(temp.record(100)).unwrap();
+            } else {
+                let mut bytes = fs::read(temp.record(100)).unwrap();
+                if mode == 0 {
+                    let last = bytes.len() - 1;
+                    bytes[last] ^= 1;
+                } else {
+                    bytes.truncate(bytes.len() - 1);
+                }
+                fs::write(temp.record(100), bytes).unwrap();
+            }
+            assert!(CheckpointStore::open(&temp.0, policy(), Some(mark)).is_err());
+        }
+    }
+    #[test]
+    fn immutable_policy_and_oversized_records_are_enforced() {
+        let temp = Temp::new();
+        let store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        drop(store);
+        let changed = CheckpointPolicy::new(8, [9; 32], set(false), Phase::A).unwrap();
+        assert!(matches!(
+            CheckpointStore::open(&temp.0, changed, None),
+            Err(StoreError::Policy)
+        ));
+        fs::File::create(temp.record(100)).unwrap().set_len(65537).unwrap();
+        assert!(matches!(
+            CheckpointStore::open(&temp.0, policy(), None),
+            Err(StoreError::Limit)
+        ));
+    }
+    #[test]
+    fn publication_failure_poisoning_requires_recovery() {
+        let temp = Temp::new();
+        let (env, header) = fixture(100);
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        fs::create_dir(temp.record(100)).unwrap();
+        assert!(matches!(
+            store.accept(&env, &header, 100),
+            Err(StoreError::CommitUncertain(_))
+        ));
+        assert_eq!(store.mark(), None);
+        assert!(matches!(store.current(100), Err(StoreError::Poisoned)));
+        assert!(matches!(store.accept(&env, &header, 100), Err(StoreError::Poisoned)));
+        fs::remove_dir(temp.record(100)).unwrap();
+        drop(store);
+        let mut store = CheckpointStore::open(&temp.0, policy(), None).unwrap();
+        store.accept(&env, &header, 100).unwrap();
+    }
+    #[test]
+    fn incomplete_temporary_files_are_not_accepted_as_checkpoints() {
+        let temp = Temp::new();
+        let store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        drop(store);
+        fs::write(temp.0.join(".pending-interrupted"), b"partial checkpoint").unwrap();
+        let store = CheckpointStore::open(&temp.0, policy(), None).unwrap();
+        assert_eq!(store.mark(), None);
+        assert!(matches!(store.current(100), Err(StoreError::Empty)));
+    }
+}

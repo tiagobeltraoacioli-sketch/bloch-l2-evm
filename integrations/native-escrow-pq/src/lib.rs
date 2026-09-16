@@ -6,6 +6,8 @@ use bloch_l2_evm::escrow::{Coin, EscrowError, EscrowLedger, LockIntent, LockedDe
 use sha3::{Digest, Sha3_256};
 
 pub mod checkpoint;
+#[cfg(unix)]
+pub mod checkpoint_store;
 
 /// Authentication or state-transition rejection. All errors preserve ledger state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
