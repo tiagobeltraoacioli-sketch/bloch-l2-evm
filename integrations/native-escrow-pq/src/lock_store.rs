@@ -39,8 +39,11 @@ impl From<io::Error> for StoreError {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OwnedLock {
+    #[serde(deserialize_with = "bounded::intent")]
     intent: LockIntent,
+    #[serde(deserialize_with = "bounded::vector::<_, _, 3749>")]
     public_key: Vec<u8>,
+    #[serde(deserialize_with = "bounded::vector::<_, _, 8192>")]
     signature: Vec<u8>,
 }
 #[derive(Serialize, Deserialize)]
@@ -49,8 +52,11 @@ struct Record {
     version: u8,
     previous: B256,
     after: B256,
+    #[serde(deserialize_with = "bounded::vector::<_, _, 64>")]
     locks: Vec<OwnedLock>,
 }
+
+mod bounded;
 /// Exclusive local writer. Private ledger prevents bypassing durable submission.
 /// The caller supplies and independently trusts the same baseline on every open.
 pub struct LockStore {

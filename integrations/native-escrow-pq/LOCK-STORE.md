@@ -53,6 +53,17 @@ mark protects acknowledged ordering against history replacement.
 Limits are 8 MiB per serialized record and 10,000 committed batches, plus the
 64-lock/4,096-input limits per batch. Disk reads are capped before JSON decoding;
 decoding can allocate additional memory proportional to the capped payload.
+Nested JSON sequences are also bounded during decoding: at most 64 locks,
+4,096 inputs per intent, 3,749 public-key bytes and 8,192 signature bytes. The
+decoder refuses an excess element before decoding its contents, rather than
+building an oversized vector and rejecting it afterward. Intent objects reject
+unknown fields. The existing aggregate 4,096-input budget across all locks is
+still checked after decoding and before signatures or candidate-state cloning.
+These are allocation defenses, not authorization: exact suite/key lengths,
+ownership, signatures and transition rules still undergo their normal checks.
+The emitted version-1 format is unchanged; previously accepted hand-edited
+records with unknown intent fields now fail closed.
+
 Recovery is linear in retained history and redoes PQ work. There is no pruning,
 snapshot migration or total disk quota. Candidate construction clones the ledger
 once per batch. Operators must separately budget disk, memory and concurrency.
@@ -95,6 +106,11 @@ rename, verify the writer lock remains held during synchronization and is releas
 on failure, then successfully reopen and reject replay. Additional checks cover
 sync on empty and populated histories and rejection of malformed history or an
 absent retained minimum before attempting synchronization.
+
+Decoder tests cover exact field limits, the first excess element (including
+nested malformed content), deserializers with known sequence lengths, unchanged
+intent round trips and unknown intent fields. Full recovery and publication
+failure tests continue to exercise actual hybrid signatures.
 
 This matrix tests process failure on the host filesystem, not hardware power loss.
 In particular, rename-before-directory-sync may recover differently after power
