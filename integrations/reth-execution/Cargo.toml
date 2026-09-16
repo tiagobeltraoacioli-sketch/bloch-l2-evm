@@ -9,13 +9,13 @@ publish = false
 [workspace]
 
 [dependencies]
+alloy-evm = "=0.37.1"
 bloch-l2-evm = { path = "../.." }
 alloy-primitives = { version = "=1.6.1", default-features = false }
 # Development checkout: verify the exact revision recorded in README.md.
 reth-revm = { path = "../../../reth-bloch-integration/crates/revm" }
 
 [dev-dependencies]
-alloy-evm = "=0.37.1"
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-eips = { version = "=2.2.0", default-features = false }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }

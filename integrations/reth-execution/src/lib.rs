@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Whole-block Bloch execution using Reth's state-provider database adapter.
+//! Bloch execution through Reth state providers and the Alloy EVM factory.
 //!
 //! This module does not implement a node, RPC, pool, persistence or finality.
 //! The provider snapshot and roots are trusted host inputs. Signed Ethereum
@@ -11,6 +11,11 @@ use bloch_l2_evm::{
     DepositMint, SignedBlockBuilder, SignedBlockInput, SignedInputError,
 };
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
+
+pub mod context;
+pub mod factory;
+pub use context::BlochContext;
+pub use factory::{BlochEvm, BlochEvmFactory};
 
 pub mod bundle;
 pub use bundle::{execution_bundle, BundleError};

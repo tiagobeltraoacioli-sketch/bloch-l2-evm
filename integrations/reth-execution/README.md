@@ -171,7 +171,24 @@ supplied EVM. A second test covers vault self-destruction followed by protocol
 fee credit, including storage wiping and the original value in the bundle.
 
 These tests qualify the transaction-accounting phase against the real SDK types.
-They do not implement `BlockExecutorFactory`, the block lifecycle, Bloch
-`BLOCKHASH` handling, custom primitives/receipts or a node. The prepared API is a
+They do not implement `BlockExecutorFactory`, the block lifecycle, custom
+primitives/receipts or a node. The prepared API is a
 trusted-backend interface; the future adapter must reject stale or foreign
 prepared results and preserve signature authentication.
+
+## Bloch SDK transaction host
+
+`BlochEvmFactory::new(&spec)` creates an actual SDK EVM with the exact supplied
+database and inspector. `BlochContext` overrides only the block-hash source;
+upstream opcode gas/window checks, handlers and precompiles remain in use.
+History comes from the configured block-info account, not external header
+lookups, and these protocol reads do not warm journal accounts or slots.
+A missing committed head returns zero; provider errors propagate.
+
+`blockhash_context` covers window boundaries, custom block-info addresses,
+missing heads, provider errors, inspector callbacks and upstream gas parity.
+`core_history` compares signed transaction results against the core using its
+real generated history despite a conflicting database hash cache. It stages the
+protocol prefix with an empty core block; it does not qualify a complete SDK
+block executor. Header/system-call/deposit/finalization integration is still
+required before building the node.
