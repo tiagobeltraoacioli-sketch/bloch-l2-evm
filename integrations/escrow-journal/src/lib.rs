@@ -87,6 +87,9 @@ impl Journal {
         require_fresh(&domain)?;
         let path = path.as_ref();
         fs::DirBuilder::new().mode(0o700).create(path)?;
+        // Pin the location before retaining the writer: later process cwd changes
+        // must not redirect a commit away from the directory whose LOCK we hold.
+        let path = fs::canonicalize(path)?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -95,7 +98,7 @@ impl Journal {
             .open(path.join("LOCK"))?;
         lock.try_lock().map_err(|_| JournalError::Locked)?;
         lock.sync_all()?;
-        publish(path, "MANIFEST", &manifest(domain.id()))?;
+        publish(&path, "MANIFEST", &manifest(domain.id()))?;
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -125,6 +128,7 @@ impl Journal {
         if !fs::symlink_metadata(path)?.file_type().is_dir() {
             return Err(JournalError::Format);
         }
+        let path = fs::canonicalize(path)?;
         regular(&path.join("LOCK"))?;
         let lock = OpenOptions::new().read(true).write(true).open(path.join("LOCK"))?;
         lock.try_lock().map_err(|_| JournalError::Locked)?;
@@ -136,7 +140,7 @@ impl Journal {
         let mut head = JournalHead::genesis(domain.id());
         let mut watermark_seen = minimum == head;
         let mut numbers = Vec::new();
-        for item in fs::read_dir(path)? {
+        for item in fs::read_dir(&path)? {
             let item = item?;
             let name = item.file_name().into_string().map_err(|_| JournalError::Format)?;
             if name == "LOCK" || name == "MANIFEST" || name.starts_with(".pending-") {
@@ -183,7 +187,7 @@ impl Journal {
             return Err(JournalError::Rollback);
         }
         // Complete durability of any visible rename left by an interrupted writer.
-        File::open(path)?.sync_all()?;
+        File::open(&path)?.sync_all()?;
         Ok(Self {
             directory: path.to_owned(),
             _lock: lock,
@@ -201,6 +205,18 @@ impl Journal {
         proofs: &[InboxProof],
         input: &SignedBlockInput,
         witness: &BatchWitness,
+    ) -> Result<EscrowExecutionReceipt, JournalError> {
+        self.commit_with_publisher(trusted, proofs, input, witness, publish)
+    }
+
+    // Private seam for publication fault tests. Callers cannot replace persistence.
+    fn commit_with_publisher(
+        &mut self,
+        trusted: &TrustedEscrowBatch,
+        proofs: &[InboxProof],
+        input: &SignedBlockInput,
+        witness: &BatchWitness,
+        publisher: impl FnOnce(&Path, &str, &[u8]) -> io::Result<()>,
     ) -> Result<EscrowExecutionReceipt, JournalError> {
         if self.poisoned {
             return Err(JournalError::Poisoned);
@@ -225,7 +241,7 @@ impl Journal {
         // A rename may succeed even when the subsequent directory sync fails.
         // Never retry with this in-memory cursor after any publication error.
         self.poisoned = true;
-        publish(&self.directory, &record_name(record.number), &bytes).map_err(JournalError::CommitUncertain)?;
+        publisher(&self.directory, &record_name(record.number), &bytes).map_err(JournalError::CommitUncertain)?;
         self.domain = candidate;
         self.head = JournalHead {
             blocks: record.number,
@@ -321,6 +337,25 @@ fn decode(bytes: &[u8]) -> Result<(Record, B256), JournalError> {
     Ok((record, digest))
 }
 fn publish(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    publish_staged(directory, name, bytes, |_| Ok(()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationStage {
+    Created,
+    Written,
+    FileSynced,
+    Renamed,
+    DirectorySynced,
+}
+
+// No public/environment-controlled fault injection; production uses a no-op hook.
+fn publish_staged(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    mut after: impl FnMut(PublicationStage) -> io::Result<()>,
+) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let destination = directory.join(name);
     if destination.try_exists()? {
@@ -343,8 +378,16 @@ fn publish(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&temporary)?;
+    after(PublicationStage::Created)?;
     file.write_all(bytes)?;
+    after(PublicationStage::Written)?;
     file.sync_all()?;
+    after(PublicationStage::FileSynced)?;
     fs::rename(&temporary, destination)?;
-    File::open(directory)?.sync_all()
+    after(PublicationStage::Renamed)?;
+    File::open(directory)?.sync_all()?;
+    after(PublicationStage::DirectorySynced)
 }
+
+#[cfg(test)]
+mod fault_tests;

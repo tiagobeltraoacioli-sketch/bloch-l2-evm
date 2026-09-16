@@ -9,6 +9,9 @@ It does not deploy a service, activate a bridge or authenticate L1 finality.
 1. Create a new directory with mode 0700 and files with mode 0600, subject to
    the process umask. Existing directories are never implicitly reinitialized.
    Hold an exclusive OS file lock for the lifetime of the journal.
+   Creation and reopening resolve the directory to an absolute canonical path
+   before retaining the writer. Later process working-directory changes cannot
+   redirect commits to an unrelated directory while the original lock is held.
 2. Clone the private verification cursor and validate inclusion, deposit order,
    exact EVM mint data and the full EVM execution witness on that candidate.
    Rejected execution produces no committed file and does not poison the writer.
@@ -86,7 +89,7 @@ Run from the modular execution repository root with Rust 1.94.1:
 cargo +1.94.1 test --offline --locked --manifest-path integrations/escrow-journal/Cargo.toml
 ```
 
-Fourteen tests, including the child-process helper, passed. They cover restart
+Eighteen tests, including two child-process helpers, passed. They cover restart
 after a real local deposit, duplicate-credit refusal, lock exclusion, incomplete
 temporary files, recovery after a lost acknowledgment, publication-error
 poisoning, corrupted/truncated/gapped journals, independently pinned rollback
@@ -94,3 +97,30 @@ detection, wrong domains, missing L1 derivation, symlinks, oversized files and
 tampering with a recomputed checksum. A child process commits and exits without
 destructors; the parent recovers the accepted deposit and lock. Fixtures use
 synthetic L1 trust inputs and real local EVM witness verification.
+
+### Publication fault matrix
+
+The private publication path exposes test hooks at five boundaries. Tests inject
+an I/O error and separately terminate a child process without destructors at
+each boundary. For I/O errors, the writer remains at its old in-memory root and
+cursors and refuses subsequent commits until recovery. The same production
+write/sync/rename path is used; hooks are private and there is no public or
+environment-controlled production fault switch.
+
+| Interruption after | Visible final record in process-exit tests | Recovery |
+| --- | --- | --- |
+| Temporary file creation | No | Previous state; retry can credit once |
+| Complete temporary write | No | Previous state; retry can credit once |
+| Temporary file synchronization | No | Previous state; retry can credit once |
+| Rename to final sequence name | Yes | Re-execute committed record; refuse replay |
+| Directory synchronization | Yes | Re-execute committed record; refuse replay |
+
+The checks compare execution roots, block numbers, deposit cursors and committed
+heads, rather than merely checking file existence. They require one fresh L1
+derivation for each recovered record. A separate child-process regression test
+changes working directory after both relative creation and relative reopening,
+then commits to the original journal successfully.
+
+These tests simulate errors at operation boundaries and process termination.
+They do not establish which unsynchronized directory entries survive hardware
+power loss. Actual filesystem/device synchronization guarantees still apply.
