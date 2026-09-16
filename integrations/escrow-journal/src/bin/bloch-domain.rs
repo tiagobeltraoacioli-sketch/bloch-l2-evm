@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Local operator CLI. Trusted L1 files must come from an independent authenticator.
 use alloy_primitives::B256;
-use bloch_escrow_journal::{Journal, JournalError, JournalHead, MAX_RECORD_BYTES};
+use bloch_escrow_journal::{Journal, JournalError, JournalHead, RecoveryLimits, MAX_RECORD_BYTES};
 use bloch_l2_evm::{
     domain::TrustedL1Batch,
     escrow_execution::{EscrowEvmDomain, TrustedEscrowBatch, TrustedLockLocation},
@@ -35,6 +35,14 @@ struct Config {
     runtime: B256,
     expected_domain: B256,
     witness_limit: usize,
+    #[serde(default)]
+    recovery: Option<RecoveryConfig>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryConfig {
+    max_records: u64,
+    max_bytes: u64,
 }
 impl Config {
     fn domain(self) -> Result<EscrowEvmDomain, Failure> {
@@ -206,6 +214,13 @@ fn run() -> Result<(), Failure> {
         return Err(fail(USAGE));
     }
     let config: Config = load(Path::new(&args[1]), 8192).map_err(|e| fail(format!("configuration: {e}")))?;
+    let limits = config
+        .recovery
+        .as_ref()
+        .map_or_else(RecoveryLimits::default, |r| RecoveryLimits {
+            records: r.max_records,
+            bytes: r.max_bytes,
+        });
     let domain = config.domain()?;
     let id = domain.id();
     let directory = Path::new(&args[2]);
@@ -234,13 +249,14 @@ fn run() -> Result<(), Failure> {
     } else {
         None
     };
-    let mut journal = Journal::open(
+    let mut journal = Journal::open_with_limits(
         directory,
         domain,
         JournalHead {
             blocks: minimum.blocks,
             digest: minimum.digest,
         },
+        limits,
         |number| trusted(&trust, number),
     )
     .map_err(journal_failure)?;

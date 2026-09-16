@@ -36,7 +36,7 @@ for example, an output failure can follow a successful durable commit.
 
 ## Configuration and profile
 
-CONFIG is a strict JSON object with exactly these fields:
+CONFIG is a strict JSON object with these fields:
 
 | Field | Type / requirement |
 | --- | --- |
@@ -45,6 +45,21 @@ CONFIG is a strict JSON object with exactly these fields:
 | `network`, `module`, `runtime` | nonzero 32-byte hex identities |
 | `expected_domain` | independently pinned 32-byte domain identity |
 | `witness_limit` | positive integer, at most 16,777,216 bytes |
+| `recovery` | optional object `{ "max_records": u64, "max_bytes": u64 }` |
+
+`recovery` limits existing committed history during both `status` and `apply`.
+Both fields are required when the object is supplied; unknown fields and negative
+values are rejected. Omission or `null` preserves the library's existing format
+ceilings. For example, `{"max_records": 10000, "max_bytes": 268435456}` allows
+up to 10,000 records and 256 MiB of complete record files. These are illustrative
+operator settings, not consensus parameters or recommended universal defaults.
+
+Excess history returns exit 1 before L1 derivation/re-execution, without truncating
+files or returning partial state. Exact limits are accepted; zero permits only
+empty history for the corresponding resource. `init` has no history to recover.
+These settings do not alter domain identity, cap a new commit or impose a disk
+quota: a successful `apply` may create history that needs a larger budget on its
+next recovery. They do not bound decoded memory or callback/execution time.
 
 This initial CLI supports only the library's default Cancun ChainSpec and its
 fresh zero-credit EVM genesis. It cannot import arbitrary account allocations or

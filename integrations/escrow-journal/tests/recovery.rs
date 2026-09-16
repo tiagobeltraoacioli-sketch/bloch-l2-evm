@@ -675,3 +675,51 @@ fn recovery_byte_budget_is_cumulative_across_records() {
     .unwrap();
     assert_eq!(recovered.head(), head);
 }
+
+#[test]
+fn cli_recovery_budgets_apply_to_status_and_apply_without_mutating_history() {
+    let f = fixture();
+    let temp = Temp::new();
+    cli_setup(&temp, &f);
+    assert!(cli(&temp, "init").status.success());
+    let applied = cli(&temp, "apply");
+    assert!(applied.status.success());
+    let applied: serde_json::Value = serde_json::from_slice(&applied.stdout).unwrap();
+    write_json(temp.0.join("head.json"), &applied["head"]);
+    let record = temp.0.join("journal/00000000000000000001.blj");
+    let original = fs::read(&record).unwrap();
+    let size = original.len() as u64;
+    let path = temp.0.join("config.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for limits in [
+        serde_json::json!({"max_records": 0, "max_bytes": size}),
+        serde_json::json!({"max_records": 1, "max_bytes": size - 1}),
+    ] {
+        config["recovery"] = limits;
+        write_json(path.clone(), &config);
+        for command in ["status", "apply"] {
+            let output = cli(&temp, command);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Limit"));
+        }
+        assert_eq!(fs::read(&record).unwrap(), original);
+        assert!(!temp.0.join("journal/00000000000000000002.blj").exists());
+    }
+    config["recovery"] = serde_json::json!({"max_records": 1, "max_bytes": size});
+    write_json(path.clone(), &config);
+    let status = cli(&temp, "status");
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["head"], applied["head"]);
+    // Misspelled or incomplete budget objects must not silently use defaults.
+    for limits in [
+        serde_json::json!({"max_record": 1, "max_bytes": size}),
+        serde_json::json!({"max_records": 1}),
+        serde_json::json!({"max_records": -1, "max_bytes": size}),
+    ] {
+        config["recovery"] = limits;
+        write_json(path.clone(), &config);
+        assert_eq!(cli(&temp, "status").status.code(), Some(1));
+    }
+}
