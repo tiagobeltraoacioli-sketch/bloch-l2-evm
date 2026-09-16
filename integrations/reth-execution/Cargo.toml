@@ -20,3 +20,6 @@ alloy-eips = { version = "=2.2.0", default-features = false }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 reth-primitives-traits = "=0.5.2"
 reth-storage-errors = { path = "../../../reth-bloch-integration/crates/storage/errors" }
+reth-provider = { path = "../../../reth-bloch-integration/crates/storage/provider", features = ["test-utils"] }
+reth-db = { path = "../../../reth-bloch-integration/crates/storage/db", features = ["test-utils"] }
+reth-tasks = { path = "../../../reth-bloch-integration/crates/tasks", features = ["test-utils"] }

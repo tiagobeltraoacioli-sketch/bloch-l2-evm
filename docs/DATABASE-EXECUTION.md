@@ -36,7 +36,9 @@ state-root implementation.
 The [Reth provider adapter](../integrations/reth-execution/README.md) uses this
 entry point with upstream's actual database reader. Its `execution_bundle`
 converts the successful overlay to upstream state changes and reverts; fixture
-tests check both forward and restored roots. Actual Reth trie calculation and
-durable database commits/recovery remain unimplemented. Neither layer implements
+tests check both forward and restored roots. A separate real-storage test checks
+Reth trie calculation, commit/abort and orderly close/reopen against signed
+execution. These storage operations are test-harness plumbing, not a node
+service; canonical unwind and crash recovery remain unqualified. Neither layer implements
 incremental block building, a transaction pool or RPC. The API does not change
 the existing header hash, domain identity or portable dependency/toolchain pins.

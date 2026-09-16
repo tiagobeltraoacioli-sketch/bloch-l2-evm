@@ -156,9 +156,10 @@ impl Default for BlockContext {
 }
 
 /// The L2 block header this scaffold commits to. Its hash is the L2 block
-/// hash (`BLOCKHASH`, parent linkage, anchoring). Transactions are not yet
-/// committed (the node layer that owns signed transactions and receipts will
-/// add their roots); `deposits_hash` commits the deposit list.
+/// hash (`BLOCKHASH`, parent linkage, anchoring). This header does not commit
+/// transaction or receipt roots; `deposits_hash` commits the deposit list.
+/// Adding those roots requires a versioned execution-domain change, including
+/// the committed head record and its reconstruction, not just RPC fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct L2Header {
     /// EIP-155 chain id (domain separation).

@@ -46,7 +46,7 @@ jobs:
       - run: cargo test --locked --test audit_regressions -- --ignored --list
 
   reth-provider:
-    name: Reth provider execution boundary
+    name: Reth provider execution and storage
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -62,6 +62,10 @@ jobs:
           path: reth-bloch-integration
       - name: Install the separate pinned host toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+      - name: Install native storage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bloch-modular-execution/integrations/reth-execution

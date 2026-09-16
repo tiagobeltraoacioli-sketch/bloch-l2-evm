@@ -75,11 +75,18 @@ actual upstream database reader; its own lockfile resolves the core's exact EVM
 and signed-envelope versions. This is not the node or persistence layer.
 The adapter now converts successful overlays to upstream `BundleState` with
 storage wipes, new bytecode and one block of reverts. Fixture tests apply its
-plain changes and reverts and compare forward and restored roots. Real Reth trie
-calculation, atomic persistent writes/reopening/unwind and incremental block
-execution/building remain open. Preserve the core's fixed-width header
+plain changes and reverts and compare forward and restored roots. A real Reth
+storage test also checks trie roots, committed state/bytecode/changesets,
+uncommitted writer abort and orderly close/reopen. Those operations remain test
+harness plumbing. A deleted account's unread storage is also restored solely
+from persisted changesets after reopening, recovering the original root. This
+does not prune history or unwind block metadata. The remaining canonical unwind,
+crash recovery, the node storage service and
+incremental block execution/building remain open. Preserve the core's fixed-width header
 hash and committed `BLOCKHASH` ring. Vanilla Ethereum RLP headers have different
 identities. The current header also lacks transaction/receipt-root commitments;
 adding them requires a versioned execution-domain upgrade, not extra uncommitted
 RPC fields. A full node additionally needs the incremental block-building path,
 custom primitives/assembler, receipts and authenticated deposit context.
+The [node integration dependency map](RETH-NODE-INTEGRATION.md) records the
+inspected Reth interfaces, storage qualification and versioning requirements.

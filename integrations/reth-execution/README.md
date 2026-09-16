@@ -18,6 +18,10 @@ https://github.com/paradigmxyz/reth
 The path dependency does not enforce its Git revision; verify the checkout before
 building. The host integration uses Rust **1.98.1** and its own committed lockfile.
 The portable EVM core retains its separate Rust 1.94.1 toolchain and lockfile.
+Storage tests additionally build MDBX and RocksDB. Install a C/C++ toolchain,
+Clang/libclang, CMake and pkg-config (on macOS, use the Xcode command-line tools
+and a discoverable libclang). The first native build can take substantially
+longer than the execution-only build.
 From the modular execution repository root:
 
 ```sh
@@ -31,6 +35,10 @@ older Alloy consensus/ruint versions; this integration's graph resolves the core
 exact Alloy consensus 2.2.0, primitives 1.6.1, trie 0.9.5, ruint 1.20.0 and revm
 41.0.0. It is a separately qualified host build, not the unchanged upstream
 release binary or an attested execution artifact.
+The storage provider also enables Alloy's `secp256k1` recovery feature through
+Reth. `tests/signed_boundary.rs` reuses the portable signature/authentication
+regressions under this host graph; the core's `serde` wire regression remains in
+the portable all-features job.
 
 ## Execution boundary
 
@@ -71,8 +79,10 @@ storage writer in the same host transaction. Deleted storage that was never read
 is deliberately absent from this sparse bundle. Reth's writer must capture that
 account's original storage while processing wipe reverts **before** applying
 forward changes. The bundle alone is not a complete historical snapshot.
-Actual Reth trie calculation, atomic database writes, reopening and unwind remain
-integration work; this adapter does not provide those operations.
+The storage test below exercises actual Reth trie calculation, state writes,
+commit/abort and orderly reopening. These operations currently live in the test
+harness; this adapter does not yet expose a node storage service. Canonical
+block unwind and crash recovery remain unqualified.
 
 ## Remaining node work
 
@@ -94,8 +104,8 @@ and compares it with direct core execution over signed deployment/call and rever
 Provider errors propagate and malformed signed input fails before provider reads.
 The tests also apply upstream plain changes and reverts to a fixture store,
 checking both the forward root and the restored pre-state root for every block.
-The fixture provider is not MDBX or a live node; no persistence qualification
-follows from these tests. The portable core has separate generic-adapter tests,
+This fixture provider is not MDBX or a live node; its tests establish conversion
+semantics. The portable core has separate generic-adapter tests,
 including a valid first transaction followed by an invalid nonce, which must
 leave its borrowed backing snapshot unchanged.
 
@@ -111,3 +121,30 @@ builds agree on the following fixture roots, now pinned in both suites:
 
 These vectors check cross-build agreement for the exercised scenarios, not full
 EVM conformance or equivalence of every dependency/compiler configuration.
+
+## Real storage qualification
+
+`tests/persistence.rs` uses upstream's provider factory with actual MDBX,
+RocksDB and static-file handles. It seeds the Bloch genesis state without
+inserting an Ethereum genesis/header. Synthetic deposits fund signed contract
+deployment, a call storing `42`, and a call clearing the slot. For each block,
+Reth's trie independently calculates the same root as portable core execution;
+the writer persists plain/hashed state, bytecode, changesets and trie updates.
+Fresh snapshots expose the expected balances, nonces and storage.
+
+The test drops a fully staged writer without committing and checks the previous
+root survives. It then commits, checks original values in persisted changesets,
+closes all storage handles, opens the same disposable directory with new handles,
+and checks state, root, bytecode and change history again. This is orderly
+close/reopen evidence, not forced-process/power-loss recovery. Receipts and block
+metadata are deliberately outside this storage test; canonical chain unwind,
+real native derivation and a running RPC/node still require their own gates.
+
+A second storage test executes signed creation/self-destruction at a prefunded
+address with an old storage slot that execution never reads. The sparse bundle
+contains only a wipe marker for that slot; the real writer saves its old value
+in durable changesets before deletion. After reopening, the test reconstructs
+an inverse delta using only disk changesets and current state, restores the
+original root/account/storage and reopens again. It deliberately retains history
+and does not remove block metadata: this establishes storage restoration, not
+Reth's canonical chain unwind.
