@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Bloch execution through Reth state providers and the Alloy EVM factory.
 //!
-//! Includes custom primitives, provider types and deposit-body storage, but no
-//! launched node, RPC, pool, canonical recovery service or finality.
+//! Includes custom primitives, provider types, deposit-body storage and pool
+//! admission, but no launched node, RPC, canonical recovery service or finality.
 //! The provider snapshot and roots are trusted host inputs. Signed Ethereum
 //! bytes are authenticated by the existing Bloch kernel, not a sender cache.
 
@@ -22,7 +22,9 @@ pub mod execute;
 pub use chainspec::BlochChainSpec;
 pub use execute::{execute_next_block, prepare_genesis, validate_and_execute_block};
 pub mod payload;
+pub mod pool;
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
+pub use pool::{pooled_from_raw, BlochPoolError, BlochTransactionValidator};
 /// Complete type selection for a provider; does not launch a node or Engine API.
 #[derive(Clone, Debug, Default)]
 pub struct BlochNodeTypes;

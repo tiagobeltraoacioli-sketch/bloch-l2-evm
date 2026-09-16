@@ -223,7 +223,7 @@ expected derivation inputs and re-executes to compare the complete received
 header and state root. Those traits alone do not prove state roots or L1 finality.
 
 Required next steps are authenticated execution-domain initialization,
-node/fork-choice wiring and receipt/RPC semantics,
+node/fork-choice wiring, pool maintenance and receipt/RPC semantics,
 crash recovery, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

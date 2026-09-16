@@ -208,3 +208,12 @@ inputs, re-executes against the provider and compares the complete received
 header, including the actual post-state root. Canonical persistence tests use
 that import path and reject forged state/receipt roots without writes.
 Fork choice, authenticated derivation and a launched import pipeline remain open.
+
+The real Reth pool now uses `BlochTransactionValidator` to authenticate canonical
+bytes and reconstruct sender/hash/cost/length before upstream balance/nonce/gas
+validation. Its actual client is `BlockchainProvider`, not the bare factory.
+The real-database pool test covers nonce queuing, deploy/call selection, mined
+removal and readmission after canonical unwind. Provider head and pool account/
+fee notifications are explicitly coordinated by the fixture; a running maintenance
+service, persistence policy and RPC ingress remain open. Pool fee/size/replacement
+policies are additional local admission rules, not new consensus rules.

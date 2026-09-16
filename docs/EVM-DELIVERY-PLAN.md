@@ -10,7 +10,7 @@ activation and movement of real funds are outside the currently authorized work.
 | --- | --- | --- |
 | Signed contract execution | `developer_contract` executes signed deploy/call with storage, gas, nonce, root agreement and adversarial assertions | Local example gate exercised; wider conformance remains under compatibility below |
 | Reproducible local operator workflow | `tools/developer-rehearsal.py` generates synthetic escrow/deploy/call proposals and drives separate `bloch-domain` processes | Local two-block recovery/replay/tamper gate exercised; this recovers commitments/cursors, not a queryable node database |
-| Developer node and wallet workflow | EIP-1193 client adapter and Reth state-provider execution boundary; RPC, pool and node remain stubs | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
+| Developer node and wallet workflow | EIP-1193 adapter; actual Reth execution, canonical storage, validation and pool admission; no launched RPC/node | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
 | Proof backend | Host witness verifier; SP1 entrypoint and prover are stubs | Reproducible pinned guest/prover/verifier build, real accepted and rejected proofs binding all public inputs, measured proving cost and documented cryptographic assumptions |
@@ -131,6 +131,9 @@ bytecode, block/transaction/receipt indices and deposit rows. Process-crash
 recovery remains unqualified. Reth validation traits now check configured V2
 headers/bodies/receipts; received-block import additionally checks externally
 expected derivation inputs and re-executes to verify the full header/state root.
-Domain initialization, fork choice, launched import/payload services, pool/RPC and
+The actual Reth pool now authenticates canonical signed bytes before upstream
+state-dependent admission. Real-provider tests cover queued nonces, selection,
+contract deployment/call, mined removal and reorg readmission. Domain
+initialization, fork choice, launched import/payload services, pool maintenance/RPC and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.

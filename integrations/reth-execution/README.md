@@ -3,8 +3,8 @@
 This host integration uses the real `reth_revm::database::StateProviderDatabase`
 to run Bloch's signed whole-block executor against an `EvmStateProvider`. Reth's
 `StateProvider` has an upstream blanket implementation of that interface.
-It provides the storage-read boundary for future node integration, not a node,
-RPC endpoint, pool, proof backend or durable database writer.
+It includes custom execution/validation, canonical storage and pool admission
+components. It does not yet launch a developer node, RPC endpoint or proof backend.
 
 ## Reproduce
 
@@ -408,3 +408,29 @@ rejects forged state/receipt roots and mismatched expected derivation inputs.
 Trait tests separately cover malformed parent/genesis/body data, invalid receipts,
 unsupported extensions and poisoned commitment hints. A launched import pipeline,
 authenticated L1 derivation and fork-choice integration remain required.
+
+## Transaction pool admission
+
+`pooled_from_raw` authenticates canonical signed bytes with the portable kernel
+and decodes a fresh native Reth transaction. `BlochTransactionValidator` repeats
+that authentication before delegating to the actual Reth validator, rebuilding
+sender, transaction hash, maximum cost and encoded length. Forged public cache
+fields cannot substitute for signed data. Oversized, wrong-chain or unsupported
+transactions and blob sidecars fail before the inner validator reads state.
+
+Configure the inner `EthTransactionValidatorBuilder` with the same Bloch rules,
+balance checks enabled, blobs/7702 disabled and the chain's gas limit. Its client
+is a real `BlockchainProvider` over initialized canonical storage; a bare
+`ProviderFactory` does not satisfy its state-factory and block-ID requirements.
+The pool orders user transactions; deposits remain separate authenticated block
+attributes. The generic wrapper cannot inspect arbitrary inner-validator settings.
+Upstream pool policies still apply: the builder's default fee cap is `1e18` wei,
+so pool rejection does not necessarily imply a consensus-invalid transaction.
+
+`tests/node_pool.rs` funds a sender through a deposited block, queues a future
+nonce, authenticates forged caches, selects deploy/call transactions, executes
+and fully persists them, removes mined transactions and readmits them after
+canonical unwind. It also rejects insufficient balances and already-mined nonces.
+The fixture coordinates the provider head, pending base fee, changed accounts and
+pool notifications explicitly. A continuously running maintenance/reorg service,
+pool persistence policy, RPC ingress and a launched developer node remain open.
