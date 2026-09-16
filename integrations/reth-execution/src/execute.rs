@@ -15,12 +15,13 @@ use bloch_l2_evm::node_primitives::NodeBodyV2;
 use bloch_l2_evm::transactions::{MAX_RAW_TRANSACTION_BYTES, MAX_SIGNED_BLOCK_BYTES, MAX_SIGNED_TRANSACTIONS};
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::EthChainSpec;
+use reth_consensus::{Consensus, FullConsensus, HeaderValidator};
 use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
     ConfigureEvm,
 };
 use reth_execution_types::BlockExecutionOutput;
-use reth_primitives_traits::{RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{BlockBody, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_provider::StateProvider;
 use reth_revm::{
     database::StateProviderDatabase,
@@ -31,6 +32,64 @@ use reth_revm::{
 };
 use reth_trie_common::ComputedTrieData;
 use std::sync::Arc;
+
+/// Validate and re-execute a received block before handing it to persistence.
+///
+/// `expected` must come from the caller's authenticated derivation, not from the
+/// received block. Matching it prevents an otherwise valid block from selecting
+/// its own deposits, anchor, randomness or timestamp. This API does not perform
+/// L1 finality verification itself. The configured domain/genesis and canonical
+/// parent must also be trusted by the caller.
+///
+/// Header/body checks and actual execution receipts are validated through Reth's
+/// custom consensus traits. Re-execution then compares the entire V2 header,
+/// including the independently computed state root, which those traits cannot
+/// check alone. No failed import commits state. Successful imports retain the
+/// same snapshot/serialization requirements as [`execute_next_block`].
+pub fn validate_and_execute_block(
+    spec: &BlochChainSpec,
+    provider: &dyn StateProvider,
+    parent: &SealedHeader<BlochNodeHeader>,
+    block: &SealedBlock<BlochNodeBlock>,
+    expected: BlochNextBlockEnvCtx,
+) -> Result<ExecutedBlock<BlochNodePrimitives>, BlockExecutionError> {
+    let header = &block.header().0;
+    if header.timestamp != expected.timestamp
+        || header.prevrandao != expected.prevrandao
+        || header.anchor_root != expected.anchor_root
+        || block.body().as_core().deposits != expected.deposits
+    {
+        return Err(BlockExecutionError::msg(
+            "V2 block disagrees with authenticated derivation inputs",
+        ));
+    }
+    let consensus = crate::BlochConsensus::new(Arc::new(spec.clone()));
+    consensus
+        .validate_block_pre_execution(block)
+        .map_err(BlockExecutionError::other)?;
+    consensus
+        .validate_header_against_parent(block.sealed_header(), parent)
+        .map_err(BlockExecutionError::other)?;
+    let config = BlochEvmConfig::new(spec.execution(), spec.domain());
+    let executed = execute_next_block(
+        &config,
+        provider,
+        parent,
+        expected,
+        block.body().transactions().to_vec(),
+    )?;
+    // Post-execution checks must use the received header rather than the one we built.
+    let incoming = RecoveredBlock::try_recover_sealed(block.clone()).map_err(BlockExecutionError::other)?;
+    consensus
+        .validate_block_post_execution(&incoming, &executed.execution_output.result, None, None)
+        .map_err(BlockExecutionError::other)?;
+    if executed.recovered_block().header() != block.header() {
+        return Err(BlockExecutionError::msg(
+            "V2 imported header disagrees with re-execution",
+        ));
+    }
+    Ok(executed)
+}
 
 /// Prepare the configured zero-issuance genesis on an empty state snapshot.
 ///

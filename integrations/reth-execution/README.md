@@ -98,8 +98,8 @@ block unwind and crash recovery remain unqualified.
 The existing V1 header retains its fixed-width identity. The separate V2 path now
 provides committed transaction/receipt roots, full Reth primitive adapters,
 configuration and assembly. A complete node still needs authenticated domain
-initialization, subsequent-block persistence and canonical recovery, custom import
-consensus, payload service/node/pool/RPC wiring and authenticated deposit derivation.
+initialization, crash recovery, canonical-tip coordination and launched import,
+payload service/node/pool/RPC wiring and authenticated deposit derivation.
 Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
 ## Validation scope
@@ -298,7 +298,7 @@ serde, Compact and receipt conversions.
 integration to persist deposits alongside the separately stored transactions.
 The Ethereum body projection omits those deposits and must never replace the
 canonical Bloch body in storage.
-Full import consensus, process-crash recovery and launched developer workflows
+Launched import/fork-choice integration, process-crash recovery and developer workflows
 remain unqualified.
 
 ## Durable V2 body storage
@@ -382,3 +382,29 @@ storage and bytecode, retained block/transaction/receipt data and removal of the
 second block's hashes, transactions, receipts and deposits. Wrong snapshots,
 invalid cached parent seals and late transaction failure leave persistent state
 unchanged. This qualifies orderly persistence/unwind, not process-crash recovery.
+
+## Received-block validation
+
+`BlochConsensus` implements Reth's actual `HeaderValidator`, `Consensus` and
+`FullConsensus` interfaces for Bloch primitives. It binds the exact configured
+genesis/domain, verifies canonical seals and parent rules, authenticates bounded
+signed bodies, checks deposit gas, and reconciles actual receipts, total/user gas,
+receipt root and bloom. Unsupported requests, blob gas and block access lists are
+rejected. Optional cached transaction/receipt commitments cannot override the
+independently recomputed commitments. These traits do not establish L1 finality,
+select fork choice or check an execution state root that is absent from their
+post-execution inputs.
+
+`validate_and_execute_block(spec, provider, parent, block, expected_attributes)`
+adds received-block re-execution using the actual provider and compares the entire
+header, including its state root. The expected timestamp, randomness, anchor and
+deposit sequence must come from authenticated derivation outside the received
+block. Passing the block's own fields as those expected inputs does not establish
+their authenticity. Success returns an executed block for the full writer;
+failure commits nothing. The caller still coordinates the canonical tip at save.
+
+The canonical storage test now imports re-executed blocks before saving them and
+rejects forged state/receipt roots and mismatched expected derivation inputs.
+Trait tests separately cover malformed parent/genesis/body data, invalid receipts,
+unsupported extensions and poisoned commitment hints. A launched import pipeline,
+authenticated L1 derivation and fork-choice integration remain required.

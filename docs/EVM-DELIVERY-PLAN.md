@@ -128,6 +128,9 @@ computes the genesis allocation root and persists/reopens the V2 genesis and sta
 The host now prepares genesis/child executed blocks with real trie data and
 retained reverts; signed full-save and canonical-unwind/reopen tests verify state,
 bytecode, block/transaction/receipt indices and deposit rows. Process-crash
-recovery remains unqualified. Domain initialization, consensus, payload service, pool/RPC and
+recovery remains unqualified. Reth validation traits now check configured V2
+headers/bodies/receipts; received-block import additionally checks externally
+expected derivation inputs and re-executes to verify the full header/state root.
+Domain initialization, fork choice, launched import/payload services, pool/RPC and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.

@@ -197,3 +197,14 @@ The genesis must also use the full writer to initialize empty receipt boundaries
 state, preserved bytecode and canonical block/receipt/transaction/deposit indices.
 This qualifies orderly save/unwind with real data; failure injection, startup
 consistency repair and a running node remain separate integration work.
+
+`BlochConsensus` now implements the actual Reth header, body and post-execution
+validation traits against the configured V2 genesis/domain. It verifies signed
+body commitments, deposit/user gas accounting and actual receipt commitments,
+rejecting unsupported extensions and inconsistent cached hints. These interfaces
+do not receive the computed state root or prove L1 provenance.
+`validate_and_execute_block` additionally requires external expected derivation
+inputs, re-executes against the provider and compares the complete received
+header, including the actual post-state root. Canonical persistence tests use
+that import path and reject forged state/receipt roots without writes.
+Fork choice, authenticated derivation and a launched import pipeline remain open.

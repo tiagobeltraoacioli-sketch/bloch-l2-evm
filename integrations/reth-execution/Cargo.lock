@@ -1204,6 +1204,7 @@ dependencies = [
  "reth-chain-state",
  "reth-chainspec",
  "reth-codecs",
+ "reth-consensus",
  "reth-db",
  "reth-db-api",
  "reth-evm",

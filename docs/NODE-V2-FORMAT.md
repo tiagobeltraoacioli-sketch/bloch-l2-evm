@@ -217,8 +217,13 @@ actual trie root and retained reverts. Real-backend tests cover full saves of
 signed blocks, orderly reopen and canonical unwind/reopen, including state,
 receipts, transaction indices and deposit rows. Crash recovery remains unqualified.
 
+The host also implements Reth header/body/post-execution validation traits,
+bound to the configured genesis/domain, and an import helper that checks external
+expected derivation inputs and re-executes to compare the complete received
+header and state root. Those traits alone do not prove state roots or L1 finality.
+
 Required next steps are authenticated execution-domain initialization,
-node wiring, custom consensus and receipt/RPC semantics,
+node/fork-choice wiring and receipt/RPC semantics,
 crash recovery, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

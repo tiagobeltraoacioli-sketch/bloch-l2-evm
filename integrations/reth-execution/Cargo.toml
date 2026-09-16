@@ -32,6 +32,7 @@ reth-network-peers = { path = "../../../reth-bloch-integration/crates/net/peers"
 reth-payload-primitives = { path = "../../../reth-bloch-integration/crates/payload/primitives" }
 reth-node-types = { path = "../../../reth-bloch-integration/crates/node/types" }
 reth-chain-state = { path = "../../../reth-bloch-integration/crates/chain-state" }
+reth-consensus = { path = "../../../reth-bloch-integration/crates/consensus/consensus" }
 reth-execution-types = { path = "../../../reth-bloch-integration/crates/evm/execution-types" }
 reth-trie-common = { path = "../../../reth-bloch-integration/crates/trie/common" }
 

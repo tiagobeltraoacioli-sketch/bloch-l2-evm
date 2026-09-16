@@ -9,8 +9,8 @@ use bloch_l2_evm::{
     ChainSpec, DepositMint, DepositProvenance,
 };
 use bloch_reth_execution::{
-    execute_next_block, BlochChainSpec, BlochEvmConfig, BlochNextBlockEnvCtx, BlochNodeBlock, BlochNodeBody,
-    BlochNodeHeader, BlochNodeTypes, BlochRethTransaction, BlochTables,
+    execute_next_block, validate_and_execute_block, BlochChainSpec, BlochEvmConfig, BlochNextBlockEnvCtx,
+    BlochNodeBlock, BlochNodeBody, BlochNodeHeader, BlochNodeTypes, BlochRethTransaction, BlochTables,
 };
 use k256::ecdsa::SigningKey;
 use reth_chainspec::EthChainSpec;
@@ -21,7 +21,7 @@ use reth_db::{
 };
 use reth_evm::ConfigureEvm;
 use reth_node_types::NodeTypesWithDBAdapter;
-use reth_primitives_traits::{BlockBody, SealedHeader};
+use reth_primitives_traits::{BlockBody, SealedBlock, SealedHeader};
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     BlockExecutionWriter, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
@@ -140,7 +140,40 @@ fn full_saved_v2_execution_unwinds_and_reopens_to_exact_previous_state() {
         };
         let executed = {
             let snapshot = factory.latest().unwrap();
-            execute_next_block(&config, snapshot.as_ref(), &parent, attributes, transactions).unwrap()
+            let built =
+                execute_next_block(&config, snapshot.as_ref(), &parent, attributes.clone(), transactions).unwrap();
+            let incoming = built.recovered_block().sealed_block();
+            let mut wrong_root = incoming.clone().into_block();
+            wrong_root.header.0.state_root = B256::repeat_byte(99);
+            assert!(validate_and_execute_block(
+                &spec,
+                snapshot.as_ref(),
+                &parent,
+                &SealedBlock::seal_slow(wrong_root),
+                attributes.clone()
+            )
+            .is_err());
+            let mut wrong_receipts = incoming.clone().into_block();
+            wrong_receipts.header.0.receipts_root = B256::repeat_byte(99);
+            assert!(validate_and_execute_block(
+                &spec,
+                snapshot.as_ref(),
+                &parent,
+                &SealedBlock::seal_slow(wrong_receipts),
+                attributes.clone()
+            )
+            .is_err());
+            let mut unauthenticated = attributes.clone();
+            unauthenticated.anchor_root = B256::repeat_byte(99);
+            assert!(validate_and_execute_block(&spec, snapshot.as_ref(), &parent, incoming, unauthenticated).is_err());
+            let mut unauthenticated = attributes.clone();
+            unauthenticated.deposits.clear();
+            assert!(validate_and_execute_block(&spec, snapshot.as_ref(), &parent, incoming, unauthenticated).is_err());
+            assert_eq!(snapshot.state_root(Default::default()).unwrap(), parent.0.state_root);
+            let imported = validate_and_execute_block(&spec, snapshot.as_ref(), &parent, incoming, attributes).unwrap();
+            assert_eq!(imported.recovered_block(), built.recovered_block());
+            assert_eq!(imported.execution_output, built.execution_output);
+            imported
         };
         let expected = execute_node_block(&kernel, domain, &mut reference, &context.context, &body).unwrap();
         assert_eq!(executed.recovered_block().header().0, expected.header);
