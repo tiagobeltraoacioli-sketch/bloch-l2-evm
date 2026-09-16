@@ -46,6 +46,11 @@ prove an output is still unspent. No keys, wallet unlock or broadcast are involv
 
 ## Required native escrow design before credits
 
+The [native state inclusion adapter](integrations/native-state-proof/README.md)
+now verifies historical eUTXO membership and the existing native EVM commitment
+under an authenticated header using the official consensus SMT verifier. These
+observations do not prove an experimental escrow lock or authorize minting.
+
 For the noncustodial execution-module design, a future consensus-enforced lock
 must authenticate all of these together:
 
