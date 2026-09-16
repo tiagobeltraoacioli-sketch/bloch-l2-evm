@@ -351,3 +351,84 @@ fn zero_recovery_budget_accepts_empty_escrow() {
     .unwrap();
     assert_eq!(store.mark().unwrap(), floor(&locks));
 }
+
+#[test]
+fn new_locks_respect_retained_budget_without_poisoning_or_partial_publication() {
+    let locks = fixture();
+    let temp = Temp::new();
+    let reference = temp.0.join("reference");
+    let mut measured = LockStore::create(&reference, baseline(&locks)).unwrap();
+    measured.submit_batch(&requests(&locks[..1])).unwrap();
+    measured.submit_batch(&requests(&locks[1..])).unwrap();
+    let total =
+        fs::metadata(reference.join(name(1))).unwrap().len() + fs::metadata(reference.join(name(2))).unwrap().len();
+    drop(measured);
+    let path = temp.0.join("journal");
+    drop(LockStore::create(&path, baseline(&locks)).unwrap());
+    for limits in [
+        RecoveryLimits {
+            batches: 0,
+            bytes: total,
+        },
+        RecoveryLimits { batches: 2, bytes: 0 },
+    ] {
+        let mut store = LockStore::open_with_limits(&path, baseline(&locks), floor(&locks), limits).unwrap();
+        assert!(matches!(
+            store.submit_batch(&requests(&locks[..1])),
+            Err(StoreError::Limit)
+        ));
+        assert_eq!(store.mark().unwrap(), floor(&locks));
+        assert_eq!(store.escrow().unwrap().commitment(), baseline(&locks).commitment());
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
+    }
+    let mut store = LockStore::open_with_limits(
+        &path,
+        baseline(&locks),
+        floor(&locks),
+        RecoveryLimits {
+            batches: 2,
+            bytes: total - 1,
+        },
+    )
+    .unwrap();
+    store.submit_batch(&requests(&locks[..1])).unwrap();
+    let mark = store.mark().unwrap();
+    let root = store.escrow().unwrap().commitment();
+    for _ in 0..2 {
+        assert!(matches!(
+            store.submit_batch(&requests(&locks[1..])),
+            Err(StoreError::Limit)
+        ));
+        assert_eq!(store.mark().unwrap(), mark);
+        assert_eq!(store.escrow().unwrap().commitment(), root);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 3);
+    }
+    drop(store);
+    let mut store = LockStore::open_with_limits(
+        &path,
+        baseline(&locks),
+        mark,
+        RecoveryLimits {
+            batches: 2,
+            bytes: total,
+        },
+    )
+    .unwrap();
+    store.submit_batch(&requests(&locks[1..])).unwrap();
+    let final_mark = store.mark().unwrap();
+    assert_eq!(store.escrow().unwrap().locked_sat(), 900);
+    assert!(store.escrow().unwrap().conserved());
+    drop(store);
+    let recovered = LockStore::open_with_limits(
+        &path,
+        baseline(&locks),
+        final_mark,
+        RecoveryLimits {
+            batches: 2,
+            bytes: total,
+        },
+    )
+    .unwrap();
+    assert_eq!(recovered.mark().unwrap(), final_mark);
+    assert_eq!(recovered.escrow().unwrap().locked_sat(), 900);
+}

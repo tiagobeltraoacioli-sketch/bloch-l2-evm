@@ -14,7 +14,7 @@ use std::{
 };
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BATCHES: u64 = 10_000;
-/// Recovery budgets for committed batches and their serialized file bytes.
+/// History budgets for recovery and subsequent committed batches and file bytes.
 /// Does not bound decoded heap size, directory scans or cryptographic time.
 #[derive(Debug, Clone, Copy)]
 pub struct RecoveryLimits {
@@ -79,6 +79,8 @@ pub struct LockStore {
     _lock: File,
     escrow: PqEscrow,
     mark: LockMark,
+    committed_bytes: u64,
+    limits: RecoveryLimits,
     poisoned: bool,
 }
 impl LockStore {
@@ -101,6 +103,8 @@ impl LockStore {
             _lock: lock,
             escrow: baseline,
             mark: LockMark { batches: 0, digest },
+            committed_bytes: 0,
+            limits: RecoveryLimits::default(),
             poisoned: false,
         })
     }
@@ -213,6 +217,8 @@ impl LockStore {
             _lock: lock,
             escrow: baseline,
             mark,
+            committed_bytes: limits.bytes - remaining,
+            limits,
             poisoned: false,
         })
     }
@@ -229,7 +235,7 @@ impl LockStore {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
-        if self.mark.batches >= MAX_BATCHES {
+        if self.mark.batches >= MAX_BATCHES.min(self.limits.batches) {
             return Err(StoreError::Limit);
         }
         let (candidate, records) = self.escrow.prepare_batch(requests).map_err(StoreError::Authorization)?;
@@ -250,6 +256,13 @@ impl LockStore {
         if bytes.len() > MAX_BYTES {
             return Err(StoreError::Limit);
         }
+        let committed_bytes = self
+            .committed_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or(StoreError::Limit)?;
+        if committed_bytes > self.limits.bytes {
+            return Err(StoreError::Limit);
+        }
         let mark = LockMark {
             batches: self.mark.batches + 1,
             digest: hash(&bytes),
@@ -257,6 +270,7 @@ impl LockStore {
         self.poisoned = true;
         publish_staged(&self.directory, &name(mark.batches), &bytes, after).map_err(StoreError::CommitUncertain)?;
         self.escrow = candidate;
+        self.committed_bytes = committed_bytes;
         self.mark = mark;
         self.poisoned = false;
         Ok(records)

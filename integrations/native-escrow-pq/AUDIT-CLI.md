@@ -30,8 +30,10 @@ Both recovery fields are required if the object is supplied; omission or `null`
 retains the library's existing format ceilings. The budget covers all committed
 batch files and is checked before replay for both summary and proof export.
 Over-budget history returns exit 1 with no success JSON; exact budgets succeed.
-These limits do not change the baseline commitment and are not write quotas or
-decoded-memory/time limits. Retrying with a sufficient budget does not require
+These limits do not change the baseline commitment. The library's recovered
+writer also retains them for subsequent writes; this audit command never submits
+locks. They are not filesystem quotas or decoded-memory/time limits.
+Retrying with a sufficient budget does not require
 changing the journal or its independently retained minimum mark.
 
 B256 values use 32-byte hex encoding; allocation values are exact native satoshis

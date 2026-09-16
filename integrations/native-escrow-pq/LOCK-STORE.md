@@ -127,7 +127,16 @@ lock and pending files are excluded from that total. Exceeding a limit returns
 are accepted, and a zero budget can recover an empty journal. The existing `open`
 retains the original format ceilings through default limits.
 
-These are recovery-only budgets, not write quotas, decoded-memory limits or time
-limits. Future successful commits can require a larger recovery budget. Tests
+The recovered writer retains these limits for new batches and tracks actual
+committed bytes. Batch count is checked before signature work; the resulting
+byte total is checked after candidate verification/serialization and before
+creating pending files. Rejection leaves the ledger, inbox, fees and disk unchanged
+and does not poison the handle. A larger history requires explicitly reopening
+with a larger budget. Plain `create` and `open` retain the format ceilings.
+
+These are journal-history budgets, not filesystem quotas, decoded-memory limits
+or time limits. Pending files and metadata remain excluded. Tests
 cover cumulative bytes over two signed batches, exact boundaries, zero budgets,
 unchanged files after rejection and refusal before malformed JSON is decoded.
+Write tests also cover repeatable rejection without poisoning, unchanged accounting,
+exact-limit publication, restart and continuation after explicitly raising limits.
