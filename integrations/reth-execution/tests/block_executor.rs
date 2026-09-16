@@ -206,6 +206,35 @@ fn sdk_factory_receipts_and_multiblock_state_match_signed_kernel() {
             sdk_result.gas_used,
             user_gas + spec.deposit_gas * input.deposits.len() as u64
         );
+        // Qualify the independent V2 commitment codec with actual SDK receipts.
+        // This state root belongs to V1 execution; no V2 execution is asserted.
+        let body = bloch_l2_evm::node_primitives::NodeBodyV2 {
+            transactions: input.transactions.clone(),
+            deposits: input.deposits.clone(),
+        };
+        let header = bloch_l2_evm::node_primitives::NodeHeaderV2 {
+            domain: B256::repeat_byte(0x44),
+            chain_id: spec.chain_id,
+            number: actual.header.number,
+            timestamp: actual.header.timestamp,
+            base_fee_per_gas: actual.header.base_fee_per_gas,
+            gas_limit: spec.gas_limit,
+            gas_used: actual.gas_used,
+            user_gas_used: user_gas,
+            beneficiary: spec.coinbase(),
+            prevrandao: actual.header.prevrandao,
+            anchor_root: actual.header.anchor_root,
+            parent_hash: actual.header.parent_hash,
+            parent_state_root: previous_root,
+            transactions_root: body.transactions_root(),
+            receipts_root: alloy_consensus::proofs::calculate_receipt_root(&sdk_result.receipts),
+            deposits_hash: body.deposits_hash(),
+            logs_bloom: sdk_result.receipts.iter().flat_map(|receipt| receipt.logs()).collect(),
+            state_root: actual.state_root,
+        };
+        header
+            .validate_commitments(&spec, header.domain, &body, &sdk_result.receipts)
+            .unwrap();
     }
     assert!(observed.0.get() > 0);
 }

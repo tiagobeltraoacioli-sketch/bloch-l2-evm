@@ -109,7 +109,11 @@ domain and explicit migration, including head storage, reconstruction, witness
 execution and public inputs. Extra RPC fields cannot supply those commitments.
 No current domain or production consensus is activated by this integration.
 
-Define the new header/body/receipt format before implementing its assembler.
+The independent [V2 node format](NODE-V2-FORMAT.md) now defines tagged RLP
+header/body/block primitives, parent-state-root linkage and signed-body/receipt
+consistency checks. Its codecs are bounded and preserve V1 identities. V2 head
+storage, genesis/domain initialization and portable/witness execution still need
+implementation before the assembler can use these commitments.
 In particular, Bloch block gas currently includes deposit gas, while deposits
 are not Ethereum signed transactions. The new format must specify deposit body
 representation, receipt indexing and cumulative gas semantics together. Do not

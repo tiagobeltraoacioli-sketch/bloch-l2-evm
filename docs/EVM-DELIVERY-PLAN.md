@@ -106,3 +106,13 @@ fixture verifies parity. Multi-block roots, receipts/logs and inspector tests
 qualify this factory. This does not close the developer node gate: custom header/
 body primitives and committed transaction/receipt roots, assembler, consensus,
 pool/RPC, durable canonical unwind and the independent native/prover gates remain.
+
+### Independent V2 primitives
+
+The [V2 node format](NODE-V2-FORMAT.md) now has bounded, version-tagged header,
+body and block RLP codecs plus signature, commitment, parent and receipt/gas
+consistency validation. Golden vectors and malformed-input tests preserve its
+wire identity; actual SDK user receipts pass the new consistency checks.
+This is a format foundation only. V2 genesis/head state, domain initialization,
+portable/witness execution and Reth primitive traits remain open; no existing
+V1 execution or production consensus has changed.

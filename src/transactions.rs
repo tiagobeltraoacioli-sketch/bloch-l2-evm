@@ -198,9 +198,9 @@ impl<E: core::error::Error + 'static> core::error::Error for SignedInputError<E>
 }
 
 impl SignedBlockInput {
-    // Private: callers cannot authenticate once, mutate a TxEnv, then submit it
-    // through the signed execution/proving boundary.
-    fn authenticate<E>(&self, spec: &ChainSpec) -> Result<BlockInput, SignedInputError<E>> {
+    // Crate-private: network callers cannot authenticate once, mutate a TxEnv,
+    // then submit it through the signed execution/proving boundary.
+    pub(crate) fn authenticate<E>(&self, spec: &ChainSpec) -> Result<BlockInput, SignedInputError<E>> {
         let block_error = |reason| SignedInputError::Authentication {
             transaction_index: None,
             reason,
