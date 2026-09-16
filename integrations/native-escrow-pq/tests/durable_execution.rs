@@ -221,6 +221,14 @@ fn recovered_pq_locks_feed_durable_evm_without_recredit_after_restart() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["locked_sat"], "900");
+    assert_eq!(report["history_usage"]["batches"], 1);
+    assert_eq!(
+        report["history_usage"]["bytes"],
+        fs::metadata(escrow_path.join("00000000000000000001.locks"))
+            .unwrap()
+            .len()
+            .to_string()
+    );
     assert_eq!(
         report["state_commitment"],
         serde_json::to_value(expected_state).unwrap()

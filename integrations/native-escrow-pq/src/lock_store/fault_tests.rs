@@ -152,6 +152,7 @@ fn io_failure_at_each_publication_boundary_poison_and_recover() {
         assert!(matches!(result, Err(StoreError::CommitUncertain(_))), "{stage:?}");
         assert_eq!(store.escrow.commitment(), old_root);
         assert!(matches!(store.mark(), Err(StoreError::Poisoned)));
+        assert!(matches!(store.history_usage(), Err(StoreError::Poisoned)));
         assert!(matches!(store.escrow(), Err(StoreError::Poisoned)));
         assert!(matches!(
             store.submit_batch(&requests(&locks)),
@@ -431,4 +432,9 @@ fn new_locks_respect_retained_budget_without_poisoning_or_partial_publication() 
     .unwrap();
     assert_eq!(recovered.mark().unwrap(), final_mark);
     assert_eq!(recovered.escrow().unwrap().locked_sat(), 900);
+    let usage = recovered.history_usage().unwrap();
+    assert_eq!(usage.batches, 2);
+    assert_eq!(usage.bytes, total);
+    assert_eq!(usage.remaining_batches, 0);
+    assert_eq!(usage.remaining_bytes, 0);
 }

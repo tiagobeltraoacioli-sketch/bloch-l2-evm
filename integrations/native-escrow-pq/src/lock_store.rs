@@ -34,6 +34,14 @@ pub struct LockMark {
     pub batches: u64,
     pub digest: B256,
 }
+/// Committed batch usage; excludes metadata and pending files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryUsage {
+    pub batches: u64,
+    pub bytes: u64,
+    pub remaining_batches: u64,
+    pub remaining_bytes: u64,
+}
 #[derive(Debug)]
 pub enum StoreError {
     Io(io::Error),
@@ -281,6 +289,17 @@ impl LockStore {
         } else {
             Ok(self.mark)
         }
+    }
+    pub fn history_usage(&self) -> Result<HistoryUsage, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        Ok(HistoryUsage {
+            batches: self.mark.batches,
+            bytes: self.committed_bytes,
+            remaining_batches: self.limits.batches.min(MAX_BATCHES) - self.mark.batches,
+            remaining_bytes: self.limits.bytes.min(RecoveryLimits::default().bytes) - self.committed_bytes,
+        })
     }
     pub fn escrow(&self) -> Result<&PqEscrow, StoreError> {
         if self.poisoned {

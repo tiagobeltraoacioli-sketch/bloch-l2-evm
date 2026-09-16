@@ -183,8 +183,11 @@ fn trusted(directory: &Path, number: u64) -> io::Result<TrustedEscrowBatch> {
 }
 fn output(journal: &Journal, domain: B256, receipt: Option<B256>) -> Result<(), Failure> {
     let head = journal.head();
+    let usage = journal.history_usage().map_err(journal_failure)?;
     let value = json!({ "version": 1, "experimental": true, "domain": domain,
         "head": { "blocks": head.blocks, "digest": head.digest },
+        "history_usage": { "records": usage.records, "bytes": usage.bytes.to_string(),
+            "remaining_records": usage.remaining_records, "remaining_bytes": usage.remaining_bytes.to_string() },
         "state_root": journal.state_root(), "next_block": journal.next_block(),
         "next_deposit": journal.next_deposit(), "receipt": receipt });
     let mut out = io::stdout().lock();

@@ -133,6 +133,7 @@ mod unix {
         )
         .map_err(|e| format!("history recovery rejected: {e:?}"))?;
         let mark = store.mark().map_err(|_| "history unavailable")?;
+        let usage = store.history_usage().map_err(|_| "history usage unavailable")?;
         let escrow = store.escrow().map_err(|_| "state unavailable")?;
         if !escrow.conserved() {
             return Err("conservation check failed".into());
@@ -143,6 +144,8 @@ mod unix {
             "network": config.network, "domain": config.domain,
             "baseline_commitment": config.expected_commitment,
             "mark": { "batches": mark.batches, "digest": mark.digest },
+            "history_usage": { "batches": usage.batches, "bytes": usage.bytes.to_string(),
+                "remaining_batches": usage.remaining_batches, "remaining_bytes": usage.remaining_bytes.to_string() },
             "state_commitment": escrow.commitment(),
             "inbox": { "root": inbox.root(), "count": inbox.len() },
             "locked_sat": escrow.locked_sat().to_string(),

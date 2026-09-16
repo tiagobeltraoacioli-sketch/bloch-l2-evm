@@ -40,6 +40,15 @@ impl Default for RecoveryLimits {
 const RECORD_MAGIC: &[u8; 8] = b"BLOCHJ01";
 const MANIFEST_MAGIC: &[u8; 8] = b"BLOCHM01";
 
+/// Committed history usage; excludes metadata and pending files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryUsage {
+    pub records: u64,
+    pub bytes: u64,
+    pub remaining_records: u64,
+    pub remaining_bytes: u64,
+}
+
 /// Independently retain this watermark to detect deletion of an accepted suffix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalHead {
@@ -306,6 +315,18 @@ impl Journal {
         };
         self.poisoned = false;
         Ok(receipt)
+    }
+    /// Usage from acknowledged or recovered state; unavailable after uncertain publication.
+    pub fn history_usage(&self) -> Result<HistoryUsage, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Poisoned);
+        }
+        Ok(HistoryUsage {
+            records: self.head.blocks,
+            bytes: self.committed_bytes,
+            remaining_records: self.limits.records.min(MAX_RECORDS) - self.head.blocks,
+            remaining_bytes: self.limits.bytes.min(RecoveryLimits::default().bytes) - self.committed_bytes,
+        })
     }
     /// Watermark to retain independently after an acknowledged commit.
     pub fn head(&self) -> JournalHead {

@@ -92,3 +92,14 @@ rerun the audit to obtain the report. Recovery errors produce no success JSON.
 The integrated durable-execution test invokes this executable on real disposable
 PQ signatures, checks exact reported commitments and rejects a concurrent writer,
 modified baseline and missing minimum history.
+
+## History capacity report
+
+The `history_usage` object includes `batches`, `bytes`, `remaining_batches` and
+`remaining_bytes`. Byte values are exact decimal strings. These counters describe
+committed batch files under the effective retained budget, excluding metadata and
+pending files. They are not available disk space or heap usage, and remaining
+bytes alone do not guarantee another batch will fit. Library callers can obtain
+the same snapshot through `LockStore::history_usage`; poisoned handles refuse
+this query until recovered. Reports and exported proofs use the same recovered
+handle, and tests compare byte counts with actual committed file lengths.

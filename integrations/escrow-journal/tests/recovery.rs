@@ -507,6 +507,14 @@ fn cli_initializes_applies_recovers_and_refuses_duplicate_credit() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let applied: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(applied["next_deposit"], 1);
+    assert_eq!(applied["history_usage"]["records"], 1);
+    assert_eq!(
+        applied["history_usage"]["bytes"],
+        fs::metadata(temp.0.join("journal/00000000000000000001.blj"))
+            .unwrap()
+            .len()
+            .to_string()
+    );
     assert_eq!(
         applied["state_root"],
         serde_json::to_value(f.witness.new_state_root).unwrap()
@@ -796,6 +804,11 @@ fn retained_recovery_budget_prevents_unrecoverable_new_commits() {
     )
     .unwrap();
     assert_eq!(recovered.head(), head);
+    let usage = recovered.history_usage().unwrap();
+    assert_eq!(usage.records, 2);
+    assert_eq!(usage.bytes, total);
+    assert_eq!(usage.remaining_records, 0);
+    assert_eq!(usage.remaining_bytes, 0);
 }
 
 #[test]

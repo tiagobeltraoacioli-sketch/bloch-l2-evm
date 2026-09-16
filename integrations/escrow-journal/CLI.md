@@ -145,3 +145,15 @@ output, replay refusal, missing historical L1 inputs, forged embedded trust,
 wrong derived input commitments, incorrect domain identity, symlink proposals
 and oversized proposal files. They use synthetic trusted L1 fixtures and actual
 EVM witness verification. The journal's existing 18 tests also pass.
+
+## History capacity report
+
+Successful output includes `history_usage` with `records`, `bytes`,
+`remaining_records` and `remaining_bytes`. Byte values are decimal strings to
+preserve exact integer precision in JSON consumers. Values describe committed
+record files under the handle's effective limits, excluding metadata and pending
+files. `init` reports the library's initial format ceilings; `status` and `apply`
+report the configured retained budget. Neither remaining counter guarantees that
+another block will fit: both limits and the next serialized record size apply.
+The report is not free filesystem capacity or decoded-memory usage. Uncertain
+publication must be recovered before usage can be queried.
