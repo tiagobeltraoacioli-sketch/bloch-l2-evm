@@ -85,7 +85,10 @@ crash recovery and the node storage service remain open. Incremental signed
 construction now shares the core kernel with whole-block verification and runs
 through the real Reth provider in storage tests. SDK executor-factory/payload
 builder wiring is still required. Preserve the core's fixed-width header
-hash and committed `BLOCKHASH` ring. Vanilla Ethereum RLP headers have different
+hash and committed `BLOCKHASH` ring. Shared transaction-effect preparation now
+supports mutable-only databases and read-free commitment for a supplied EVM;
+the SDK lifecycle, inspector and block-hash integration still need completion.
+Vanilla Ethereum RLP headers have different
 identities. The current header also lacks transaction/receipt-root commitments;
 adding them requires a versioned execution-domain upgrade, not extra uncommitted
 RPC fields. A full node additionally needs the incremental block-building path,

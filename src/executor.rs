@@ -47,18 +47,19 @@
 use alloc::{format, string::String, vec::Vec};
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use revm::context::result::{ExecutionResult, HaltReason};
+use revm::context::result::{ExecutionResult, HaltReason, ResultAndState};
 use revm::context::TxEnv;
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::context_interface::Transaction;
 use revm::database::CacheDB;
 use revm::handler::{ExecuteEvm, SystemCallCommitEvm};
+use revm::state::{Account, EvmState};
 use revm::{Context, Database, DatabaseCommit, DatabaseRef, MainBuilder, MainContext};
 
 use crate::chainspec::{ChainSpec, ChainSpecError, BEACON_ROOTS_ADDRESS};
 use crate::state::{
-    apply_deposit, beacon_roots_bytecode, block_hash_slot, credit_balance, ensure_system_account, ledger_add,
-    DepositApplyError, DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
+    apply_deposit, beacon_roots_bytecode, block_hash_slot, ensure_system_account, ledger_add, DepositApplyError,
+    DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
     BLOCK_INFO_BASE_FEE_SLOT, BLOCK_INFO_DEPOSITS_HASH_SLOT, BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_GAS_USED_SLOT,
     BLOCK_INFO_NUMBER_SLOT, BLOCK_INFO_PARENT_HASH_SLOT, BLOCK_INFO_PREVRANDAO_SLOT, BLOCK_INFO_TIMESTAMP_SLOT,
     SUPPLY_LEDGER_BURNED_SLOT,
@@ -804,6 +805,132 @@ fn block_context<DB: Database>(
         })
 }
 
+/// Fully prepared effects from a trusted, matching revm execution result.
+/// Dropping this value discards all writes. It is not an authentication or proof boundary.
+#[must_use = "commit prepared effects or drop them to discard the candidate"]
+#[derive(Debug)]
+pub struct PreparedTransaction {
+    state: EvmState,
+    fee_credit: EvmState,
+    committed: CommittedTransaction,
+}
+
+/// Accounting produced when a prepared transaction is committed.
+#[derive(Debug)]
+pub struct CommittedTransaction {
+    /// EVM execution outcome, including separately accounted destruction.
+    pub outcome: TxOutcome,
+    /// Base fee credited by the protocol to the configured vault.
+    pub base_fee_routed_wei: U256,
+    /// Priority fee already credited by revm to the beneficiary.
+    pub priority_fee_routed_wei: U256,
+}
+
+impl PreparedTransaction {
+    /// Inspect the execution outcome before choosing whether to commit.
+    pub fn outcome(&self) -> &TxOutcome {
+        &self.committed.outcome
+    }
+
+    /// Commit to the same logical pre-state used for preparation, without database reads.
+    ///
+    /// No other transition may change that pre-state between preparation and commit.
+    /// The two commits preserve deletion followed by protocol-level vault recreation.
+    pub fn commit(self, db: &mut impl DatabaseCommit) -> CommittedTransaction {
+        db.commit(self.state);
+        if !self.fee_credit.is_empty() {
+            db.commit(self.fee_credit);
+        }
+        self.committed
+    }
+}
+
+/// Reconcile a matching revm result and prepare all fee effects without committing.
+///
+/// The caller must supply the actual result of executing `tx` against `db` at the
+/// given base fee. This function does not authenticate transactions, validate an
+/// arbitrary result, enforce block gas limits, or prove the backing state. Reads
+/// may populate database caches; errors never call `DatabaseCommit::commit`.
+pub fn prepare_transaction_effects<DB: Database>(
+    spec: &ChainSpec,
+    base_fee: u64,
+    tx: &TxEnv,
+    tx_index: usize,
+    result: ResultAndState<HaltReason>,
+    db: &mut DB,
+) -> Result<PreparedTransaction, BlockExecutionError> {
+    let ResultAndState { result, state } = result;
+    let gas_used = result.tx_gas_used();
+    let effective = Transaction::effective_gas_price(tx, base_fee as u128);
+    let base_fee_wei = U256::from(core::cmp::min(effective, base_fee as u128))
+        .checked_mul(U256::from(gas_used))
+        .expect("fee cannot overflow U256");
+    let priority_fee_routed_wei = U256::from(effective.saturating_sub(base_fee as u128))
+        .checked_mul(U256::from(gas_used))
+        .expect("fee cannot overflow U256");
+    let mut pre_sum = U256::ZERO;
+    let mut post_sum = U256::ZERO;
+    for (address, account) in &state {
+        let pre = db
+            .basic(*address)
+            .map_err(db_error)?
+            .map(|info| info.balance)
+            .unwrap_or_default();
+        let post = if account.is_selfdestructed() {
+            U256::ZERO
+        } else {
+            account.info.balance
+        };
+        pre_sum = pre_sum.checked_add(pre).expect("balances cannot overflow U256");
+        post_sum = post_sum.checked_add(post).expect("balances cannot overflow U256");
+    }
+    let lost = pre_sum.saturating_sub(post_sum);
+    let burned = lost
+        .checked_sub(base_fee_wei)
+        .ok_or(BlockExecutionError::Conservation {
+            tx_index,
+            lost_wei: lost,
+            base_fee_wei,
+        })?;
+    let mut fee_credit = EvmState::default();
+    if !base_fee_wei.is_zero() {
+        // DatabaseCommit ignores untouched entries. Model the state after the
+        // original EVM commit before preparing the independent protocol credit.
+        let info = match state.get(&spec.base_fee_vault).filter(|account| account.is_touched()) {
+            Some(account) if account.is_selfdestructed() => None,
+            Some(account) => Some(account.info.clone()),
+            None => db.basic(spec.base_fee_vault).map_err(db_error)?,
+        };
+        let absent = info.is_none();
+        let mut account = Account::from(info.unwrap_or_default());
+        account.info.balance = account
+            .info
+            .balance
+            .checked_add(base_fee_wei)
+            .expect("balance cannot overflow U256");
+        account.mark_touch();
+        if absent {
+            account.mark_created();
+        }
+        fee_credit.insert(spec.base_fee_vault, account);
+    }
+    Ok(PreparedTransaction {
+        state,
+        fee_credit,
+        committed: CommittedTransaction {
+            outcome: TxOutcome {
+                success: result.is_success(),
+                gas_used,
+                created_address: result.created_address(),
+                burned_wei: burned,
+                result,
+            },
+            base_fee_routed_wei: base_fee_wei,
+            priority_fee_routed_wei,
+        },
+    })
+}
+
 /// Incremental execution with a sparse, disposable overlay for each candidate.
 /// Only accepted candidates modify the session; protocol transitions run once.
 pub(crate) struct BlockSession<DB> {
@@ -894,94 +1021,35 @@ impl<DB: DatabaseRef> BlockSession<DB> {
         if self.run.gas_used.saturating_add(tx.gas_limit) > spec.gas_limit {
             return Err(BlockExecutionError::BlockGasLimitExceeded { tx_index: i });
         }
-        // The effective gas price exactly as revm's handler computes it for this
-        // TxEnv (type-aware): what the caller is charged per gas. revm pays
-        // `effective - basefee` to the beneficiary and leaves the rest
-        // uncredited; that rest — never more than the basefee — is routed here.
-        let effective_gas_price = Transaction::effective_gas_price(tx, base_fee as u128);
-        let base_fee_paid_per_gas = core::cmp::min(effective_gas_price, base_fee as u128);
-        let priority_per_gas = effective_gas_price.saturating_sub(base_fee as u128);
-
         // Execute without committing, so the balance deltas of every touched
         // account can be reconciled against the pre-state before they land.
         let res = evm.transact(tx.clone()).map_err(|e| BlockExecutionError::Evm {
             tx_index: i,
             detail: format!("{e:?}"),
         })?;
-        let result = res.result;
-        let gas_used = result.tx_gas_used();
-
-        let mut pre_sum = U256::ZERO;
-        let mut post_sum = U256::ZERO;
-        for (addr, acc) in res.state.iter() {
-            let pre = evm
-                .ctx
-                .journaled_state
-                .database
-                .basic(*addr)
-                .map_err(db_error)?
-                .map(|i| i.balance)
-                .unwrap_or(U256::ZERO);
-            let post = if acc.is_selfdestructed() {
-                U256::ZERO
-            } else {
-                acc.info.balance
-            };
-            pre_sum = pre_sum.checked_add(pre).expect("balances cannot overflow U256");
-            post_sum = post_sum.checked_add(post).expect("balances cannot overflow U256");
-        }
-        evm.ctx.journaled_state.database.commit(res.state);
-
-        // Conservation: the touched accounts lost exactly the basefee revm
-        // collected (uncredited) plus whatever the EVM destroyed (EIP-6780).
-        let base_fee_wei = U256::from(base_fee_paid_per_gas)
-            .checked_mul(U256::from(gas_used))
-            .expect("fee cannot overflow U256");
-        let lost = pre_sum.saturating_sub(post_sum);
-        let burned = lost
-            .checked_sub(base_fee_wei)
-            .ok_or(BlockExecutionError::Conservation {
-                tx_index: i,
-                lost_wei: lost,
-                base_fee_wei,
-            })?;
-        // Route the basefee portion to the BaseFeeVault (never burn).
-        // Protocol-level accounting between transactions, outside EVM opcode
-        // semantics — the journal is empty here (transact finalized), so direct
-        // DB credit is safe.
-        credit_balance(&mut evm.ctx.journaled_state.database, spec.base_fee_vault, base_fee_wei).map_err(db_error)?;
-        let outcome = TxOutcome {
-            success: result.is_success(),
-            gas_used,
-            created_address: result.created_address(),
-            burned_wei: burned,
-            result,
-        };
-        if !commit(&outcome) {
+        let prepared = prepare_transaction_effects(spec, base_fee, tx, i, res, &mut evm.ctx.journaled_state.database)?;
+        if !commit(prepared.outcome()) {
             return Ok(None);
         }
-        // Everything fallible, including vault reads, precedes this commit point.
+        let committed = prepared.commit(&mut evm.ctx.journaled_state.database);
         let cache = evm.ctx.journaled_state.database.cache;
         merge_candidate(&mut self.db, cache);
-        self.run.gas_used += gas_used;
+        let outcome = committed.outcome;
+        self.run.gas_used += outcome.gas_used;
         self.run.burned_wei = self
             .run
             .burned_wei
-            .checked_add(burned)
+            .checked_add(outcome.burned_wei)
             .expect("burned wei cannot overflow U256");
         self.run.base_fee_routed_wei = self
             .run
             .base_fee_routed_wei
-            .checked_add(base_fee_wei)
+            .checked_add(committed.base_fee_routed_wei)
             .expect("routed wei cannot overflow U256");
         self.run.priority_fee_routed_wei = self
             .run
             .priority_fee_routed_wei
-            .checked_add(
-                U256::from(priority_per_gas)
-                    .checked_mul(U256::from(gas_used))
-                    .expect("fee cannot overflow U256"),
-            )
+            .checked_add(committed.priority_fee_routed_wei)
             .expect("routed wei cannot overflow U256");
         self.run.tx_outcomes.push(outcome);
         Ok(self.run.tx_outcomes.last())

@@ -123,8 +123,8 @@ pub mod transactions;
 
 pub use chainspec::{ChainSpec, ChainSpecError};
 pub use executor::{
-    deposits_hash, execute_block, validate_block_input, BlockContext, BlockExecutionError, BlockInput,
-    ExecutionOutcome, L2Header, TxOutcome, SUPPORTED_TX_TYPES,
+    deposits_hash, execute_block, prepare_transaction_effects, validate_block_input, BlockContext, BlockExecutionError,
+    BlockInput, CommittedTransaction, ExecutionOutcome, L2Header, PreparedTransaction, TxOutcome, SUPPORTED_TX_TYPES,
 };
 pub use mpt::Mpt;
 pub use proving::{

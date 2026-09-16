@@ -158,3 +158,20 @@ an inverse delta using only disk changesets and current state, restores the
 original root/account/storage and reopens again. It deliberately retains history
 and does not remove block metadata: this establishes storage restoration, not
 Reth's canonical chain unwind.
+
+## Supplied EVM preparation
+
+`tests/sdk_preparation.rs` uses the exact upstream `EthEvmFactory` to construct
+an inspector-bearing EVM over revm `State<InMemoryDB>`. It authenticates signed
+bytes, executes through that EVM, and calls the core's shared
+`prepare_transaction_effects` with the same mutable database. Dropping the
+prepared effects leaves state unchanged; retrying and committing updates that
+same state/cache/bundle. Inspector counters confirm that execution occurs in the
+supplied EVM. A second test covers vault self-destruction followed by protocol
+fee credit, including storage wiping and the original value in the bundle.
+
+These tests qualify the transaction-accounting phase against the real SDK types.
+They do not implement `BlockExecutorFactory`, the block lifecycle, Bloch
+`BLOCKHASH` handling, custom primitives/receipts or a node. The prepared API is a
+trusted-backend interface; the future adapter must reject stale or foreign
+prepared results and preserve signature authentication.

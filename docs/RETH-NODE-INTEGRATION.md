@@ -48,6 +48,24 @@ single execute-and-conditionally-commit operation; Reth's separately exposed
 execute/commit methods also require protection against stale or foreign
 candidate results. The assembler and custom primitives remain unimplemented.
 
+The SDK requires `EvmFactory::Evm<DB, I>` to expose that exact database and
+inspector, and `StateDB` requires mutable `Database + DatabaseCommit`, not
+`DatabaseRef`. The shared core now supplies `prepare_transaction_effects` over
+that mutable boundary. It prepares owned EVM/accounting effects with all reads
+finished before its infallible commit; `BlockSession` calls the same function.
+This resolves candidate accounting, but does not yet generalize the full
+header/deposit/system-call/finalization lifecycle for the supplied EVM.
+The host's `sdk_preparation` tests execute original signed candidates in the
+actual Alloy EVM factory over revm `State`, observe real inspector callbacks,
+and prepare/commit through that same EVM/database, including vault recreation.
+
+The SDK adapter must also derive `BLOCKHASH` from the committed Bloch ring.
+Generic `StateDB` does not offer a block-hash-cache setter; simply executing a
+vanilla supplied EVM can query external header history instead. A custom context
+or a correctly typed database boundary must preserve that rule together with
+real inspector callbacks. Do not use a second EVM to satisfy an interface while
+executing transactions elsewhere.
+
 Pool recovery is not an authentication boundary. Admission and execution must
 retain canonical signed bytes; reauthenticate them rather than trusting a
 cached sender or an independently supplied transaction environment. RPC call

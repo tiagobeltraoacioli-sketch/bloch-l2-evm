@@ -1194,6 +1194,7 @@ version = "0.1.0-experimental"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-evm",
  "alloy-primitives",
  "bloch-l2-evm",
  "k256",

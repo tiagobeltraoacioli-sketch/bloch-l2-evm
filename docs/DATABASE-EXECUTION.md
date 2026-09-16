@@ -79,3 +79,34 @@ work against whole-block execution. Executor units cover sparse merge flags
 and a late provider failure during fee-vault credit. The real Reth persistence
 test uses `begin_on_provider`, skips and then includes the same signed candidates,
 and checks independently calculated/persisted roots and orderly reopening.
+
+## Preparing effects for a supplied EVM
+
+`prepare_transaction_effects` separates protocol accounting from ownership of
+the EVM. It accepts an actual matching revm `ResultAndState`, transaction,
+base fee and mutable `Database`, reads the original balances, checks conservation
+and prepares vault credits. It returns an owned `PreparedTransaction` without
+committing anything. `outcome()` permits inspection; dropping the value discards
+the effects. `commit(db)` performs no reads and returns `CommittedTransaction`
+with the outcome and fee accounting.
+
+Two ordered state updates preserve the case where the EVM destroys the fee
+vault and the protocol then recreates it to receive fees. A vault created by the
+transaction keeps its new storage when the subsequent fee credit is applied.
+`BlockSession` uses this same preparation path; a host executor must not duplicate
+its fee and burn rules.
+
+This is a low-level trusted-backend interface. It does not authenticate signed
+bytes, prove the result, enforce block gas limits, or bind a prepared value to a
+particular database/session. The caller must keep the logical pre-state unchanged
+between execution, preparation and commit. A split SDK execute/commit adapter
+must also reject stale or foreign prepared results before publishing effects.
+
+`tests/prepared_execution.rs` uses a database that implements `Database` and
+`DatabaseCommit` but intentionally not `DatabaseRef`. It checks preparation/drop,
+read-free commit, late read failure, vault destruction/recreation and preservation
+of newly created vault storage. This supplies the mutable database boundary
+required by Alloy without introducing a second hidden EVM.
+The host integration also exercises this phase using an actual Alloy factory,
+inspector and revm `State`, including bundle generation. That test does not
+establish a complete SDK executor factory or node lifecycle.
