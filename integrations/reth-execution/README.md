@@ -107,7 +107,10 @@ Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
 `CanonicalCoordinator::attach(factory)` attaches to an already initialized
 database, checking configured genesis, execution/header checkpoints, the head
-seal, state root and committed V2 metadata. `extend(parent_hash, attributes, txs)`
+seal, state root, committed V2 metadata and every configured genesis allocation
+through historical account/code/storage reads. This requires archival history;
+missing genesis indices fail closed rather than being silently repaired.
+`extend(parent_hash, attributes, txs)`
 executes through the shared Bloch kernel, rechecks the durable parent while holding
 the database writer, persists the full execution and then publishes canonical
 head/persistence markers and a Reth commit notification. Use its `provider()` for
@@ -124,6 +127,8 @@ repair historical indices, recover from process crashes or choose/reorganize for
 notifications, rejected stale parents/invalid execution, orderly reopen and
 continued execution, and rejection of a different configured domain. A separate
 test deliberately violates sole-writer ownership to check defensive rejection.
+Separate regressions remove account or storage history indices and verify that
+attachment rejects the database without restoring the deleted indices.
 
 ## Validation scope
 
@@ -551,6 +556,15 @@ genesis to check chain ID, V2 block identity/domain and storage. It also waits f
 the listening socket to become available after shutdown. This transport test is
 separate from the in-process deployment/receipt fixture above; it does not qualify
 a complete wallet workflow or persistent node restart.
+
+`tests/rpc_developer_flow.rs` now submits signed deploy/call transactions through
+real HTTP, selects them from the actual pool and persists them through
+`CanonicalCoordinator`. Pool maintenance consumes the resulting canonical
+notification; the test waits for both mined events and verifies removal from the
+pool. HTTP queries then check receipts/logs, balance, nonce, contract code/storage,
+raw signed bytes and V2 block identity before shutdown. Funding and derivation
+attributes are synthetic, and block production is explicitly driven by the test.
+This qualifies the connected components, not a standalone wallet-connected node.
 
 ## Genesis history initialization
 

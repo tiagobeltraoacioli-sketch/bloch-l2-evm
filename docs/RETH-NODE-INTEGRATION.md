@@ -238,6 +238,13 @@ a persistence error. Its provider supplies the shared RPC/pool notification
 channel. Sole-writer ownership is a host contract; complete startup validation,
 cross-backend crash recovery and fork-choice/reorganization remain separate work.
 
+Attachment also checks configured genesis accounts, code and storage through
+historical reads; missing allocation indices reject startup without repair.
+`rpc_developer_flow` exercises real HTTP signed deploy/call through the coordinator
+and automatic pool maintenance, then reads receipts/logs, state and V2 identity.
+Its synthetic funding and explicitly driven block production do not establish
+an autonomous developer node or native derivation.
+
 Call/estimate qualification now covers latest/historical BLOCKHASH, explicit RPC
 hash overrides, transient state writes and inspector-assisted access-list creation.
 RPC uses an EVM configuration clone whose block-hash fallback reads provider

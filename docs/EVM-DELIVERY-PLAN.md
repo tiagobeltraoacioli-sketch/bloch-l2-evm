@@ -169,3 +169,11 @@ through that coordinator. Real-provider tests cover rejection without publicatio
 orderly reopen/continuation and domain mismatch. Genesis initialization policy,
 historical-index validation, crash recovery and reorganization orchestration
 remain startup/node work; a successful orderly reopen is not crash qualification.
+
+Attachment now validates every configured genesis allocation through historical
+account, bytecode and storage reads. Independent account/storage-index deletion
+tests establish rejection without automatic repair. A real HTTP developer-flow
+fixture now connects signed deploy/call submission, the pool, canonical extension,
+automatic mined removal and receipt/log/state queries. Its funding and block
+production remain synthetic and test-driven; a launched developer executable,
+wallet integration and crash recovery are still required.

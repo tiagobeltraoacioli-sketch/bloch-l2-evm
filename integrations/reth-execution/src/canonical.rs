@@ -5,7 +5,7 @@ use crate::{
 };
 use alloy_eips::BlockNumHash;
 use alloy_evm::block::BlockExecutionError;
-use alloy_primitives::B256;
+use alloy_primitives::{keccak256, B256, U256};
 use reth_chain_state::CanonStateNotification;
 use reth_chainspec::EthChainSpec;
 use reth_db::DatabaseEnv;
@@ -36,8 +36,9 @@ pub struct CanonicalCoordinator {
 
 impl CanonicalCoordinator {
     /// Attach to a configured, initialized head after checking its identity and root.
-    /// Historical indices and cross-backend crash consistency require separate
-    /// startup validation; this is not an automatic database recovery operation.
+    /// Checks every configured genesis allocation through historical reads, so
+    /// databases missing genesis history indices fail closed. This requires an
+    /// archival database; it does not repair indices or cross-backend crash damage.
     pub fn attach(factory: BlochProviderFactory) -> Result<Self, BlockExecutionError> {
         let spec = factory.chain_spec();
         let number = factory.best_block_number().map_err(BlockExecutionError::other)?;
@@ -82,6 +83,48 @@ impl CanonicalCoordinator {
             ));
         }
         drop(state);
+        let historical = factory
+            .history_by_block_hash(spec.genesis_hash())
+            .map_err(BlockExecutionError::other)?;
+        for (address, allocation) in &spec.genesis().alloc {
+            let account = historical
+                .basic_account(address)
+                .map_err(BlockExecutionError::other)?
+                .ok_or_else(|| BlockExecutionError::msg("historical genesis account is missing"))?;
+            let code = allocation.code.clone().unwrap_or_default();
+            let code_hash = keccak256(&code);
+            if account.nonce != allocation.nonce.unwrap_or_default()
+                || account.balance != allocation.balance
+                || account.bytecode_hash.unwrap_or(alloy_primitives::KECCAK256_EMPTY) != code_hash
+            {
+                return Err(BlockExecutionError::msg(
+                    "historical genesis account disagrees with allocation",
+                ));
+            }
+            if !code.is_empty() {
+                let stored = historical
+                    .bytecode_by_hash(&code_hash)
+                    .map_err(BlockExecutionError::other)?
+                    .ok_or_else(|| BlockExecutionError::msg("historical genesis bytecode is missing"))?;
+                if stored.original_bytes() != code {
+                    return Err(BlockExecutionError::msg(
+                        "historical genesis bytecode disagrees with allocation",
+                    ));
+                }
+            }
+            for (slot, value) in allocation.storage.iter().flatten() {
+                let stored = historical
+                    .storage(*address, *slot)
+                    .map_err(BlockExecutionError::other)?
+                    .unwrap_or_default();
+                if stored != U256::from_be_bytes(value.0) {
+                    return Err(BlockExecutionError::msg(
+                        "historical genesis storage disagrees with allocation",
+                    ));
+                }
+            }
+        }
+        drop(historical);
         let provider = BlockchainProvider::new(factory.clone()).map_err(BlockExecutionError::other)?;
         Ok(Self {
             factory,
