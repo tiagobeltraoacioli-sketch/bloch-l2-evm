@@ -190,5 +190,20 @@ missing heads, provider errors, inspector callbacks and upstream gas parity.
 `core_history` compares signed transaction results against the core using its
 real generated history despite a conflicting database hash cache. It stages the
 protocol prefix with an empty core block; it does not qualify a complete SDK
-block executor. Header/system-call/deposit/finalization integration is still
-required before building the node.
+block executor. The separate lifecycle qualification below covers those phases.
+
+## Supplied EVM block phases
+
+`tests/sdk_lifecycle.rs` drives the core staged lifecycle through an actual
+`BlochEvmFactory` EVM with its original inspector/database. Five signed blocks
+cover deposit funding, deployment, storage writes/clears, committed BLOCKHASH,
+self-destruction burns and a reverted transaction. Every candidate is skipped
+and retried before inclusion. Full roots, headers, fee/burn accounting and
+execution results match the portable signed kernel. The same phases also run
+on revm `State`; its plain account/storage/code changes match the portable bundle.
+
+This establishes shared protocol phases, not an implementation of the SDK's
+`BlockExecutorFactory`, receipts, custom primitives, assembler, pool or RPC.
+Callers must discard provisional block state after a later phase failure;
+prepared commits cannot undo earlier phases on a generic mutable database.
+See [the lifecycle contract](../../docs/DATABASE-EXECUTION.md#protocol-lifecycle-on-a-mutable-database).

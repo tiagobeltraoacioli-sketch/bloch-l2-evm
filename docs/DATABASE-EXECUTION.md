@@ -110,3 +110,41 @@ required by Alloy without introducing a second hidden EVM.
 The host integration also exercises this phase using an actual Alloy factory,
 inspector and revm `State`, including bundle generation. That test does not
 establish a complete SDK executor factory or node lifecycle.
+
+## Protocol lifecycle on a mutable database
+
+`executor::lifecycle::prepare_block_start` validates the supplied `BlockInput`
+and stages header/ring updates plus beacon-account installation. Committing it
+returns `PendingSystemCall`. Run EIP-4788 through the actual supplied EVM, then
+pass its uncommitted result to `complete`: a successful result commits before
+all deposits are staged and committed together. This returns `ActiveBlock`.
+
+For each authenticated candidate, call `validate_transaction` before execution,
+then `prepare_transaction` with its matching result. The prepared candidate
+borrows the originating block's accounting until it is dropped or committed;
+commit advances gas, fees and burns once. `prepare_finish` stages burned supply
+and the final head together; commit returns `FinishedBlock`, whose `finalize`
+attaches the independently calculated post-state root.
+
+These phases share header, deposit, fee, burn and final-head helpers with the
+portable kernel. A private mutable-read bridge temporarily stages the existing
+CacheDB helpers, then emits sparse owned state transitions. It preserves original
+storage, zero writes, code and deletion/recreation; commits perform no reads.
+Unchanged canonical entries are filtered, while loaded EIP-161-empty records
+are pruned consistently with the portable overlay merge.
+
+The caller must use a provisional database and discard the whole block on any
+later failure. Arbitrary `DatabaseCommit` cannot roll back a previously committed
+phase, and beacon execution needs the preceding installation to be visible.
+The types enforce phase order, not EVM/result authenticity or database identity.
+The borrowed candidate prevents reuse across accounting sessions, but callers
+must still preserve its logical database pre-state. An SDK adapter requiring
+owned `'static` candidate results needs its own session/generation protection.
+
+`tests/protocol_lifecycle.rs` covers start/drop/read failure, unsuccessful actual
+system execution, a late deposit failure without partial mint/cursor writes,
+and final-head read failure without publishing a staged burn. The host's
+`sdk_lifecycle` executes five signed blocks using the real Bloch SDK factory,
+inspector and both InMemoryDB and revm State. Roots, headers, accounting and
+results match the portable kernel, and State's account/storage/code changes
+match the portable execution bundle. This is not a BlockExecutorFactory or node.

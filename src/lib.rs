@@ -112,6 +112,7 @@ pub mod executor;
 pub mod l1;
 pub mod l1_transfer;
 pub mod mpt;
+mod protocol_overlay;
 pub mod proving;
 pub mod scale;
 #[cfg(feature = "serde")]

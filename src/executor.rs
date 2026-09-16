@@ -57,6 +57,8 @@ use revm::state::{Account, EvmState};
 use revm::{Context, Database, DatabaseCommit, DatabaseRef, MainBuilder, MainContext};
 
 use crate::chainspec::{ChainSpec, ChainSpecError, BEACON_ROOTS_ADDRESS};
+
+pub mod lifecycle;
 use crate::state::{
     apply_deposit, beacon_roots_bytecode, block_hash_slot, ensure_system_account, ledger_add, DepositApplyError,
     DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
@@ -599,6 +601,24 @@ pub(crate) struct BlockRun {
 }
 
 impl BlockRun {
+    fn record(&mut self, committed: CommittedTransaction) {
+        let outcome = committed.outcome;
+        self.gas_used += outcome.gas_used;
+        self.burned_wei = self
+            .burned_wei
+            .checked_add(outcome.burned_wei)
+            .expect("burned wei cannot overflow U256");
+        self.base_fee_routed_wei = self
+            .base_fee_routed_wei
+            .checked_add(committed.base_fee_routed_wei)
+            .expect("routed wei cannot overflow U256");
+        self.priority_fee_routed_wei = self
+            .priority_fee_routed_wei
+            .checked_add(committed.priority_fee_routed_wei)
+            .expect("routed wei cannot overflow U256");
+        self.tx_outcomes.push(outcome);
+    }
+
     /// The full outcome, given the post-state root.
     pub(crate) fn into_outcome(self, chain_id: u64, context: &BlockContext, state_root: B256) -> ExecutionOutcome {
         let header = self.header(chain_id, context, state_root);
@@ -684,15 +704,14 @@ fn write_head<ExtDB: DatabaseRef>(
 }
 
 /// Validate the block context against the head record and return the parent
-/// block's hash (writing it into the ring buffer), then fill the `BLOCKHASH`
-/// window of revm's cache from the committed ring so no placeholder is ever
-/// served.
-fn apply_header_rules<ExtDB: DatabaseRef>(
+/// block's hash (writing it into the ring buffer), plus whether a committed
+/// head exists. Portable cache population is separate from this protocol update.
+fn apply_header_update<ExtDB: DatabaseRef>(
     spec: &ChainSpec,
     db: &mut CacheDB<ExtDB>,
     prev_state_root: B256,
     ctx: &BlockContext,
-) -> Result<B256, BlockExecutionError> {
+) -> Result<(B256, bool), BlockExecutionError> {
     let info = spec.block_info;
     let head = read_head(db, info).map_err(db_error)?;
     let parent_hash = match head {
@@ -739,11 +758,22 @@ fn apply_header_rules<ExtDB: DatabaseRef>(
         }
     };
 
+    Ok((parent_hash, head.is_some()))
+}
+
+fn apply_header_rules<ExtDB: DatabaseRef>(
+    spec: &ChainSpec,
+    db: &mut CacheDB<ExtDB>,
+    prev_state_root: B256,
+    ctx: &BlockContext,
+) -> Result<B256, BlockExecutionError> {
+    let (parent_hash, has_head) = apply_header_update(spec, db, prev_state_root, ctx)?;
+    let info = spec.block_info;
     // BLOCKHASH window: every number in [N-256, N-1] is served from the ring
     // (zero for blocks before the chain started), never from a backing DB.
     let start = ctx.number.saturating_sub(BLOCK_HASH_HISTORY);
     for n in start..ctx.number {
-        let v = if head.is_some() {
+        let v = if has_head {
             db.storage(info, block_hash_slot(n)).map_err(db_error)?
         } else {
             U256::ZERO
@@ -982,14 +1012,7 @@ impl<DB: DatabaseRef> BlockSession<DB> {
         // 4. Deposit mints (before any user tx). This is the ONLY place native
         //    balance is created; provenance is bridged BLCH only and positions must
         //    advance the committed cursor (one mint per escrow).
-        let mut minted_wei = U256::ZERO;
-        for deposit in deposits {
-            let wei = apply_deposit(&mut evm.ctx.journaled_state.database, spec, deposit).map_err(|e| match e {
-                DepositApplyError::Deposit(d) => BlockExecutionError::Deposit(d),
-                DepositApplyError::Db(e) => db_error(e),
-            })?;
-            minted_wei = minted_wei.checked_add(wei).expect("minted wei cannot overflow U256");
-        }
+        let minted_wei = apply_deposits(&mut evm.ctx.journaled_state.database, spec, deposits)?;
 
         Ok(Self {
             spec: spec.clone(),
@@ -1034,56 +1057,59 @@ impl<DB: DatabaseRef> BlockSession<DB> {
         let committed = prepared.commit(&mut evm.ctx.journaled_state.database);
         let cache = evm.ctx.journaled_state.database.cache;
         merge_candidate(&mut self.db, cache);
-        let outcome = committed.outcome;
-        self.run.gas_used += outcome.gas_used;
-        self.run.burned_wei = self
-            .run
-            .burned_wei
-            .checked_add(outcome.burned_wei)
-            .expect("burned wei cannot overflow U256");
-        self.run.base_fee_routed_wei = self
-            .run
-            .base_fee_routed_wei
-            .checked_add(committed.base_fee_routed_wei)
-            .expect("routed wei cannot overflow U256");
-        self.run.priority_fee_routed_wei = self
-            .run
-            .priority_fee_routed_wei
-            .checked_add(committed.priority_fee_routed_wei)
-            .expect("routed wei cannot overflow U256");
-        self.run.tx_outcomes.push(outcome);
+        self.run.record(committed);
         Ok(self.run.tx_outcomes.last())
     }
 
     pub(crate) fn finish(self) -> Result<(CacheDB<DB>, BlockRun), BlockExecutionError> {
         let mut db = self.db;
-        if !self.run.burned_wei.is_zero() {
-            ledger_add(
-                &mut db,
-                self.spec.supply_ledger,
-                SUPPLY_LEDGER_BURNED_SLOT,
-                self.run.burned_wei,
-            )
-            .map_err(db_error)?;
-        }
-        write_head(
-            &mut db,
-            self.spec.block_info,
-            &HeadRecord {
-                number: self.context.number,
-                timestamp: self.context.timestamp,
-                base_fee_per_gas: self.context.base_fee_per_gas,
-                gas_used: self.run.gas_used,
-                prevrandao: self.context.prevrandao,
-                anchor_root: self.context.anchor_root,
-                parent_hash: self.run.parent_hash,
-                deposits_hash: self.run.deposits_hash,
-            },
-        )
-        .map_err(db_error)?;
+        finish_protocol(&mut db, &self.spec, &self.context, &self.run)?;
 
         Ok((db, self.run))
     }
+}
+
+fn apply_deposits<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+    deposits: &[DepositMint],
+) -> Result<U256, BlockExecutionError> {
+    let mut minted = U256::ZERO;
+    for deposit in deposits {
+        let wei = apply_deposit(db, spec, deposit).map_err(|error| match error {
+            DepositApplyError::Deposit(error) => BlockExecutionError::Deposit(error),
+            DepositApplyError::Db(error) => db_error(error),
+        })?;
+        minted = minted.checked_add(wei).expect("minted wei cannot overflow U256");
+    }
+    Ok(minted)
+}
+
+fn finish_protocol<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+    context: &BlockContext,
+    run: &BlockRun,
+) -> Result<(), BlockExecutionError> {
+    if !run.burned_wei.is_zero() {
+        ledger_add(db, spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, run.burned_wei).map_err(db_error)?;
+    }
+    write_head(
+        db,
+        spec.block_info,
+        &HeadRecord {
+            number: context.number,
+            timestamp: context.timestamp,
+            base_fee_per_gas: context.base_fee_per_gas,
+            gas_used: run.gas_used,
+            prevrandao: context.prevrandao,
+            anchor_root: context.anchor_root,
+            parent_hash: run.parent_hash,
+            deposits_hash: run.deposits_hash,
+        },
+    )
+    .map_err(db_error)?;
+    Ok(())
 }
 
 /// Merge sparse reads/writes without replacing an account's untouched storage.
