@@ -73,8 +73,11 @@ and explicit host-supplied root finalization. The separate
 [Reth provider integration](../integrations/reth-execution/README.md) wraps the
 actual upstream database reader; its own lockfile resolves the core's exact EVM
 and signed-envelope versions. This is not the node or persistence layer.
-The next steps are Reth state-change/root persistence conversion and incremental
-block execution/building. Preserve the core's fixed-width header
+The adapter now converts successful overlays to upstream `BundleState` with
+storage wipes, new bytecode and one block of reverts. Fixture tests apply its
+plain changes and reverts and compare forward and restored roots. Real Reth trie
+calculation, atomic persistent writes/reopening/unwind and incremental block
+execution/building remain open. Preserve the core's fixed-width header
 hash and committed `BLOCKHASH` ring. Vanilla Ethereum RLP headers have different
 identities. The current header also lacks transaction/receipt-root commitments;
 adding them requires a versioned execution-domain upgrade, not extra uncommitted

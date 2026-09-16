@@ -57,8 +57,22 @@ untrusted proposal.
 The overlay is sparse. Read-only cached accounts are not necessarily changes;
 untouched storage survives unless cleared, and destroyed/empty accounts must be
 handled consistently with revm/EIP-161. Simply replacing full backing accounts
-with partial overlay entries is incorrect. Root calculation and Reth
-`State`/`BundleState` persistence conversion are still host integration work.
+with partial overlay entries is incorrect.
+
+`execution_bundle(&execution)` converts a successful execution to upstream
+`BundleState`, including one block of reverts. It compares cached entries with
+the unchanged backing snapshot, retains explicit zero writes, preserves storage
+wipes and includes newly deployed bytecode. It does not scan untouched accounts
+or their storage. Conversion may fail on a backing read or missing new bytecode;
+no partial bundle is returned and no backing writes occur.
+
+Use the bundle to calculate the complete post-state root and pass it to the
+storage writer in the same host transaction. Deleted storage that was never read
+is deliberately absent from this sparse bundle. Reth's writer must capture that
+account's original storage while processing wipe reverts **before** applying
+forward changes. The bundle alone is not a complete historical snapshot.
+Actual Reth trie calculation, atomic database writes, reopening and unwind remain
+integration work; this adapter does not provide those operations.
 
 ## Remaining node work
 
@@ -78,6 +92,8 @@ block hashes are never read: Bloch's committed ring supplies `BLOCKHASH`.
 The fixture enumerates complete local state to calculate an independent MPT root
 and compares it with direct core execution over signed deployment/call and revert.
 Provider errors propagate and malformed signed input fails before provider reads.
+The tests also apply upstream plain changes and reverts to a fixture store,
+checking both the forward root and the restored pre-state root for every block.
 The fixture provider is not MDBX or a live node; no persistence qualification
 follows from these tests. The portable core has separate generic-adapter tests,
 including a valid first transaction followed by an invalid nonce, which must

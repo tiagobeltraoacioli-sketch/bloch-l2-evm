@@ -12,6 +12,9 @@ use bloch_l2_evm::{
 };
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
+pub mod bundle;
+pub use bundle::{execution_bundle, BundleError};
+
 /// Run against a Reth state provider without committing its storage.
 ///
 /// An actual Reth `StateProvider` implements `EvmStateProvider` via upstream's

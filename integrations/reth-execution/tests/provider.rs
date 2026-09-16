@@ -7,12 +7,12 @@ use bloch_l2_evm::{
     execute_signed_block, stateroot::compute_keccak_mpt_state_root, BlockContext, ChainSpec, DepositMint,
     DepositProvenance, ExecutionOutcome, L2State, SignedBlockInput,
 };
-use bloch_reth_execution::execute_on_provider;
+use bloch_reth_execution::{execute_on_provider, execution_bundle};
 use k256::ecdsa::SigningKey;
 use reth_primitives_traits::{Account, Bytecode};
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 use reth_revm::revm::{
-    database::{CacheDB, InMemoryDB},
+    database::{states::bundle_state::OriginalValuesKnown, CacheDB, InMemoryDB},
     DatabaseRef,
 };
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
@@ -176,6 +176,76 @@ fn differential(
     );
     let reconstructed = materialize(pending.overlay());
     let root = compute_keccak_mpt_state_root(&reconstructed);
+    // Exercise the upstream plain changes consumed by a storage writer. This
+    // fixture writer is intentionally not a claim of MDBX integration.
+    let bundle = execution_bundle(&pending).unwrap();
+    let (changes, reverts) = bundle.to_plain_state_and_reverts(OriginalValuesKnown::Yes);
+    assert_eq!(reverts.accounts.len(), 1);
+    assert_eq!(reverts.storage.len(), 1);
+    let mut persisted = database.db().clone();
+    for (address, info) in &changes.accounts {
+        match info {
+            Some(info) => persisted.insert_account_info(*address, info.clone()),
+            None => {
+                persisted.cache.accounts.remove(address);
+            }
+        }
+    }
+    for change in &changes.storage {
+        if change.wipe_storage {
+            if let Some(account) = persisted.cache.accounts.get_mut(&change.address) {
+                account.storage.clear();
+            }
+        }
+        for (slot, value) in &change.storage {
+            persisted.insert_account_storage(change.address, *slot, *value).unwrap();
+        }
+    }
+    persisted.cache.contracts.extend(changes.contracts);
+    let persisted_state = materialize(&CacheDB::new(StateProviderDatabase::new(Provider::new(
+        persisted.clone(),
+    ))));
+    assert_eq!(
+        compute_keccak_mpt_state_root(&persisted_state),
+        root,
+        "plain bundle forward root"
+    );
+    // Reth saves the old storage for wiped accounts before writing changes.
+    // Recreate that requirement using only affected accounts, not a snapshot
+    // rollback: unknown old slots are not contained in the sparse bundle.
+    for (address, info) in &reverts.accounts[0] {
+        match info {
+            Some(info) => persisted.insert_account_info(*address, info.clone()),
+            None => {
+                persisted.cache.accounts.remove(address);
+            }
+        }
+    }
+    for revert in &reverts.storage[0] {
+        if revert.wiped {
+            if let Some(original) = database.db().cache.accounts.get(&revert.address) {
+                persisted.cache.accounts.get_mut(&revert.address).unwrap().storage = original.storage.clone();
+            }
+        } else if persisted.basic_ref(revert.address).unwrap().is_some() {
+            for (slot, value) in &revert.storage_revert {
+                let original = match value {
+                    reth_revm::revm::database::states::RevertToSlot::Some(value) => *value,
+                    reth_revm::revm::database::states::RevertToSlot::Destroyed => {
+                        database.db().storage_ref(revert.address, *slot).unwrap()
+                    }
+                };
+                persisted
+                    .insert_account_storage(revert.address, *slot, original)
+                    .unwrap();
+            }
+        }
+    }
+    let reverted_state = materialize(&CacheDB::new(StateProviderDatabase::new(Provider::new(persisted))));
+    assert_eq!(
+        compute_keccak_mpt_state_root(&reverted_state),
+        compute_keccak_mpt_state_root(database),
+        "plain bundle reverse root"
+    );
     let (_, actual) = pending.finalize(root);
     let expected = execute_signed_block(spec, reference, input).unwrap();
     assert_eq!(actual.header, expected.header);
@@ -302,6 +372,15 @@ fn provider_errors_propagate_and_malformed_signatures_do_not_read_provider() {
 
 #[test]
 fn same_transaction_selfdestruct_burns_value_and_deletes_prefunded_account() {
+    prefunded_selfdestruct(false);
+}
+
+#[test]
+fn selfdestruct_reverts_restore_storage_not_read_by_execution() {
+    prefunded_selfdestruct(true);
+}
+
+fn prefunded_selfdestruct(with_unread_storage: bool) {
     let spec = ChainSpec::default();
     let mut reference = L2State::genesis(&spec);
     let mut database = reference.clone();
@@ -320,6 +399,17 @@ fn same_transaction_selfdestruct_burns_value_and_deletes_prefunded_account() {
     };
     let funding = input(&spec, &reference, vec![], vec![deposit(), prefund]);
     differential(&spec, &mut reference, &mut database, &funding);
+    if with_unread_storage {
+        // Storage at a prefunded, nonce-zero address does not prevent CREATE.
+        // The constructor never reads this slot. Its removal must still be
+        // represented by a wipe, and the writer must retain it for rollback.
+        for state in [&mut reference, &mut database] {
+            state
+                .db_mut()
+                .insert_account_storage(doomed, U256::from(123), U256::from(456))
+                .unwrap();
+        }
+    }
     assert!(database.account(&doomed).is_some());
     let prefunded_balance = database.balance_of(&doomed);
     assert_eq!(prefunded_balance, U256::from(30_000_000_000u64));
@@ -349,8 +439,49 @@ fn same_transaction_selfdestruct_burns_value_and_deletes_prefunded_account() {
     assert!(reference.account(&doomed).is_none());
     assert_eq!(database.balance_of(&doomed), U256::ZERO);
     assert_eq!(database.total_native_wei(), database.total_minted_wei() - expected_burn);
-    assert_eq!(
-        compute_keccak_mpt_state_root(&database),
-        alloy_primitives::b256!("8d248f2fca24dad8c10537c898904ab52a031c765cb8e6a41f465dff2ef57873")
+    if !with_unread_storage {
+        assert_eq!(
+            compute_keccak_mpt_state_root(&database),
+            alloy_primitives::b256!("8d248f2fca24dad8c10537c898904ab52a031c765cb8e6a41f465dff2ef57873")
+        );
+    }
+}
+
+#[test]
+fn signed_storage_zero_write_is_preserved_in_plain_changes() {
+    let spec = ChainSpec::default();
+    let mut reference = L2State::genesis(&spec);
+    let mut database = reference.clone();
+    let first = input(
+        &spec,
+        &reference,
+        vec![signed(
+            &spec,
+            0,
+            TxKind::Create,
+            deploy(&[0x60, 0, 0x35, 0x60, 0, 0x55, 0]),
+        )],
+        vec![deposit()],
     );
+    let contract = differential(&spec, &mut reference, &mut database, &first).tx_outcomes[0]
+        .created_address
+        .unwrap();
+    for (nonce, value) in [(1, 42), (2, 0)] {
+        let call = input(
+            &spec,
+            &reference,
+            vec![signed(
+                &spec,
+                nonce,
+                TxKind::Call(contract),
+                U256::from(value).to_be_bytes::<32>().to_vec().into(),
+            )],
+            vec![],
+        );
+        differential(&spec, &mut reference, &mut database, &call);
+        assert_eq!(
+            database.db().storage_ref(contract, U256::ZERO).unwrap(),
+            U256::from(value)
+        );
+    }
 }
