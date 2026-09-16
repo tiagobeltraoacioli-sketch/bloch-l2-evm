@@ -818,6 +818,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bloch-escrow-journal"
+version = "0.1.0-experimental"
+dependencies = [
+ "alloy-primitives",
+ "bloch-l2-evm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bloch-l2-evm"
 version = "0.0.0-scaffold"
 dependencies = [
@@ -838,6 +848,7 @@ version = "0.1.0-experimental"
 dependencies = [
  "alloy-primitives",
  "bloch-crypto",
+ "bloch-escrow-journal",
  "bloch-l2-evm",
  "bloch-pos-committee",
  "serde",

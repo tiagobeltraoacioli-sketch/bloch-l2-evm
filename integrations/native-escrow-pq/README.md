@@ -84,6 +84,35 @@ Batch tests additionally cover sequential equivalence, chained change spending,
 whole-batch rollback on signature/replay/double-spend/capacity failures and
 aggregate input/signature/count limits before authentication.
 
+## Durable escrow-to-EVM integration test
+
+`tests/durable_execution.rs` connects the real hybrid authorization adapter,
+`LockStore`, cached inbox proofs, the mandatory deposit-range API, real EVM
+execution and the independent durable execution `Journal`. The journal crate is
+a development-only dependency; this does not add a new runtime service.
+
+Run the scenario with:
+
+```sh
+cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml --test durable_execution
+```
+
+Two signed local locks spend 1,000 satoshis of test allocation into 900 locked,
+20 in fees and 80 in change. The test closes and reopens the escrow before any
+EVM credit, generates inclusion proofs, rejects a modified deposit, verifies
+execution and checks exactly 900 satoshis scaled to wei in both recipient balance
+and total minted supply. It then reopens both journals and rejects repeated
+funding and repeated EVM credit. Missing host derivation or a changed inbox root
+also prevents execution-journal recovery.
+
+This is a local integration test with disposable keys. Its L1 locations, anchor
+and finality context are explicitly synthetic, host-trusted inputs. The test
+does not derive them from native blocks, activate an escrow transaction on L1,
+prove mainnet backing or create a distributed atomic transaction across journals.
+It tests recovery after a durable escrow commit preceding EVM credit. Native
+consensus integration remains necessary before this flow can represent production
+deposits; neither journal may supply its own trusted L1 derivation.
+
 ## Remaining boundaries
 
 Initial coins are trusted local genesis allocations. This adapter does not

@@ -22,3 +22,6 @@ sha3 = { version = "=0.11.0", default-features = false }
 
 [patch.crates-io]
 pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-internals" }
+
+[dev-dependencies]
+bloch-escrow-journal = { path = "../escrow-journal" }
