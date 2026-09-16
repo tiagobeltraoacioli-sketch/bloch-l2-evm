@@ -231,6 +231,13 @@ server builder. A separate real HTTP client fixture checks genesis identity,
 chain ID, storage and listener release after shutdown. It does not yet run the
 deployment/receipt workflow through a standalone, restartable developer node.
 
+`CanonicalCoordinator` now owns serialized canonical extensions and publishes
+commit notifications only after full persistence succeeds. It checks the configured
+genesis and selected head, rejects stale parents and prevents further writes after
+a persistence error. Its provider supplies the shared RPC/pool notification
+channel. Sole-writer ownership is a host contract; complete startup validation,
+cross-backend crash recovery and fork-choice/reorganization remain separate work.
+
 Call/estimate qualification now covers latest/historical BLOCKHASH, explicit RPC
 hash overrides, transient state writes and inspector-assisted access-list creation.
 RPC uses an EVM configuration clone whose block-hash fallback reads provider

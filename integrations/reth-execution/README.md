@@ -103,6 +103,28 @@ initialization, crash recovery, canonical-tip coordination and launched import,
 payload service/node/pool/RPC wiring and authenticated deposit derivation.
 Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
+## Canonical extension coordinator
+
+`CanonicalCoordinator::attach(factory)` attaches to an already initialized
+database, checking configured genesis, execution/header checkpoints, the head
+seal, state root and committed V2 metadata. `extend(parent_hash, attributes, txs)`
+executes through the shared Bloch kernel, rechecks the durable parent while holding
+the database writer, persists the full execution and then publishes canonical
+head/persistence markers and a Reth commit notification. Use its `provider()` for
+RPC and pool maintenance so they share the notification channel.
+
+The coordinator must be the sole writer; external factory/provider clones are
+read-only by contract. Attributes still require authenticated host derivation.
+A failed persistence operation poisons the coordinator because static files,
+RocksDB and MDBX do not form one atomic crash transaction. It must not be retried
+without independently checking storage. This API does not initialize genesis,
+repair historical indices, recover from process crashes or choose/reorganize forks.
+
+`tests/canonical_coordinator.rs` checks persisted extensions, canonical
+notifications, rejected stale parents/invalid execution, orderly reopen and
+continued execution, and rejection of a different configured domain. A separate
+test deliberately violates sole-writer ownership to check defensive rejection.
+
 ## Validation scope
 
 `tests/provider.rs` supplies a fixture implementing upstream's `EvmStateProvider`

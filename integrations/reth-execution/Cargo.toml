@@ -27,6 +27,7 @@ alloy-network-primitives = "=2.1.1"
 alloy-serde = "=2.2.0"
 reth-rpc = { path = "../../../reth-bloch-integration/crates/rpc/rpc" }
 reth-rpc-builder = { path = "../../../reth-bloch-integration/crates/rpc/rpc-builder" }
+reth-db = { path = "../../../reth-bloch-integration/crates/storage/db" }
 jsonrpsee = { version = "=0.26.0", features = ["server"] }
 reth-rpc-convert = { path = "../../../reth-bloch-integration/crates/rpc/rpc-convert" }
 reth-rpc-eth-api = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-api" }

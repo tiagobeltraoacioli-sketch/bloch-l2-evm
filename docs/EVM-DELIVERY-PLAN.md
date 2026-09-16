@@ -161,3 +161,11 @@ on IPv4 loopback. A real-client test covers persisted genesis chain ID, V2 block
 identity, storage and listener release on shutdown. Canonical coordination,
 restart orchestration and wallet deployment over a running developer node remain
 separate requirements; the HTTP helper alone does not close the node gate.
+
+Canonical extension now has a sole-writer coordinator: validate the initialized
+head, execute, revalidate the durable parent under the writer, persist, then
+publish the canonical notification. Persistence errors prevent further writes
+through that coordinator. Real-provider tests cover rejection without publication,
+orderly reopen/continuation and domain mismatch. Genesis initialization policy,
+historical-index validation, crash recovery and reorganization orchestration
+remain startup/node work; a successful orderly reopen is not crash qualification.

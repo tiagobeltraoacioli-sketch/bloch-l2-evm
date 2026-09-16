@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! Serialized canonical extension and publication after durable persistence.
+use crate::{
+    execute_next_block, BlochEvmConfig, BlochNextBlockEnvCtx, BlochNodeHeader, BlochNodeTypes, BlochRethTransaction,
+};
+use alloy_eips::BlockNumHash;
+use alloy_evm::block::BlockExecutionError;
+use alloy_primitives::B256;
+use reth_chain_state::CanonStateNotification;
+use reth_chainspec::EthChainSpec;
+use reth_db::DatabaseEnv;
+use reth_execution_types::{Chain, ExecutionOutcome};
+use reth_node_types::NodeTypesWithDBAdapter;
+use reth_primitives_traits::SealedHeader;
+use reth_provider::{
+    providers::{BlockchainProvider, SaveBlocksMode},
+    BlockNumReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+};
+use std::sync::Arc;
+
+pub type BlochProviderFactory = ProviderFactory<NodeTypesWithDBAdapter<BlochNodeTypes, Arc<DatabaseEnv>>>;
+pub type BlochBlockchainProvider = BlockchainProvider<NodeTypesWithDBAdapter<BlochNodeTypes, Arc<DatabaseEnv>>>;
+
+/// Own the sole canonical writer for an initialized database.
+///
+/// All external factory/provider clones must be used only for reads. Concurrent
+/// direct writes and other coordinators are outside this ownership contract.
+/// This component extends the selected head; it does not choose forks, verify L1
+/// derivation, initialize genesis or repair a crashed database.
+pub struct CanonicalCoordinator {
+    factory: BlochProviderFactory,
+    provider: BlochBlockchainProvider,
+    head: SealedHeader<BlochNodeHeader>,
+    poisoned: bool,
+}
+
+impl CanonicalCoordinator {
+    /// Attach to a configured, initialized head after checking its identity and root.
+    /// Historical indices and cross-backend crash consistency require separate
+    /// startup validation; this is not an automatic database recovery operation.
+    pub fn attach(factory: BlochProviderFactory) -> Result<Self, BlockExecutionError> {
+        let spec = factory.chain_spec();
+        let number = factory.best_block_number().map_err(BlockExecutionError::other)?;
+        if factory.last_block_number().map_err(BlockExecutionError::other)? != number {
+            return Err(BlockExecutionError::msg(
+                "canonical header and execution checkpoints disagree",
+            ));
+        }
+        let genesis = factory
+            .sealed_header(0)
+            .map_err(BlockExecutionError::other)?
+            .ok_or_else(|| BlockExecutionError::msg("canonical genesis is missing"))?;
+        if genesis.hash() != spec.genesis_hash() || genesis.0 != spec.genesis_header().0 {
+            return Err(BlockExecutionError::msg(
+                "canonical genesis disagrees with configured domain",
+            ));
+        }
+        let head = factory
+            .sealed_header(number)
+            .map_err(BlockExecutionError::other)?
+            .ok_or_else(|| BlockExecutionError::msg("canonical head is missing"))?;
+        if head.hash() != head.0.hash() {
+            return Err(BlockExecutionError::msg("canonical head seal disagrees with header"));
+        }
+        let state = factory.latest().map_err(BlockExecutionError::other)?;
+        let root = state
+            .state_root(Default::default())
+            .map_err(BlockExecutionError::other)?;
+        if root != head.0.state_root {
+            return Err(BlockExecutionError::msg("canonical head and state root disagree"));
+        }
+        let recorded = bloch_l2_evm::node_execution::node_head_on_database(
+            spec.execution(),
+            spec.domain(),
+            reth_revm::database::StateProviderDatabase::new(state.as_ref()),
+            root,
+        )
+        .map_err(BlockExecutionError::other)?;
+        if recorded != head.0 {
+            return Err(BlockExecutionError::msg(
+                "canonical head and committed metadata disagree",
+            ));
+        }
+        drop(state);
+        let provider = BlockchainProvider::new(factory.clone()).map_err(BlockExecutionError::other)?;
+        Ok(Self {
+            factory,
+            provider,
+            head,
+            poisoned: false,
+        })
+    }
+
+    /// Read/query provider sharing the canonical notification channel.
+    pub fn provider(&self) -> BlochBlockchainProvider {
+        self.provider.clone()
+    }
+
+    pub fn head(&self) -> &SealedHeader<BlochNodeHeader> {
+        &self.head
+    }
+
+    /// A persistence error can leave static files/RocksDB ahead of MDBX.
+    /// A poisoned coordinator must be discarded and storage independently checked.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Execute against the selected parent and publish only after commit.
+    /// `attributes` must be authenticated by the host; no L1 proof is checked here.
+    pub fn extend(
+        &mut self,
+        expected_parent: B256,
+        attributes: BlochNextBlockEnvCtx,
+        transactions: Vec<BlochRethTransaction>,
+    ) -> Result<SealedHeader<BlochNodeHeader>, BlockExecutionError> {
+        if self.poisoned {
+            return Err(BlockExecutionError::msg(
+                "canonical coordinator requires storage recovery",
+            ));
+        }
+        if expected_parent != self.head.hash() {
+            return Err(BlockExecutionError::msg("stale canonical parent"));
+        }
+        let spec = self.factory.chain_spec();
+        let config = BlochEvmConfig::new(spec.execution(), spec.domain());
+        let executed = {
+            let state = self.factory.latest().map_err(BlockExecutionError::other)?;
+            execute_next_block(&config, state.as_ref(), &self.head, attributes, transactions)?
+        };
+        let tip = executed.recovered_block().clone_sealed_header();
+        let notification = Arc::new(Chain::from_block(
+            executed.recovered_block().clone(),
+            ExecutionOutcome::from((executed.execution_outcome().clone(), executed.block_number())),
+            executed.trie_data_handle(),
+        ));
+        let writer = self
+            .factory
+            .database_provider_rw()
+            .map_err(BlockExecutionError::other)?;
+        let number = writer.best_block_number().map_err(BlockExecutionError::other)?;
+        let durable = writer.sealed_header(number).map_err(BlockExecutionError::other)?;
+        if number != self.head.0.number
+            || writer.last_block_number().map_err(BlockExecutionError::other)? != number
+            || durable.as_ref().map(|header| header.hash()) != Some(expected_parent)
+        {
+            return Err(BlockExecutionError::msg("canonical parent changed before persistence"));
+        }
+        // Full persistence crosses multiple backends. Even a save error must
+        // prevent retrying this object as though the failed operation was atomic.
+        self.poisoned = true;
+        writer
+            .save_blocks(vec![executed], SaveBlocksMode::Full)
+            .map_err(BlockExecutionError::other)?;
+        writer.commit().map_err(BlockExecutionError::other)?;
+        self.provider
+            .canonical_in_memory_state()
+            .set_canonical_head(tip.clone());
+        self.provider
+            .canonical_in_memory_state()
+            .set_persisted(BlockNumHash::new(tip.0.number, tip.hash()));
+        self.provider
+            .canonical_in_memory_state()
+            .notify_canon_state(CanonStateNotification::Commit { new: notification });
+        self.head = tip;
+        self.poisoned = false;
+        Ok(self.head.clone())
+    }
+}

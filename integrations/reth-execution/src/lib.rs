@@ -15,7 +15,9 @@ use bloch_l2_evm::{
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
 pub mod block;
+pub mod canonical;
 pub mod chainspec;
+pub use canonical::{BlochBlockchainProvider, BlochProviderFactory, CanonicalCoordinator};
 pub mod config;
 pub mod consensus;
 pub use consensus::BlochConsensus;
