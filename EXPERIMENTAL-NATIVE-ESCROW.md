@@ -39,6 +39,12 @@ verifier. The example/test harness supplies synthetic authorized intents.
 Anyone embedding this without real funding authentication could steal its model
 coins; passing the model tests does not authenticate any real funds.
 
+The separate [hybrid PQ adapter](integrations/native-escrow-pq/README.md) now
+provides an authenticated local facade using the actual native ML-DSA-65 AND
+Falcon-1024 verifier. Its eight integration tests exercise real signatures.
+The raw kernel API still requires authenticated callers; native consensus
+integration and finalized deposit derivation remain outstanding.
+
 The genesis allocation is likewise trusted input for simulations. The kernel
 does not import an existing live eUTXO set or mutate the existing consensus state.
 Fees are accounted, not routed to a live validator. The experimental commitment
