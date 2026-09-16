@@ -704,8 +704,11 @@ dependencies = [
 name = "bloch-escrow-journal"
 version = "0.1.0-experimental"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "bloch-l2-evm",
+ "k256",
  "serde",
  "serde_json",
 ]

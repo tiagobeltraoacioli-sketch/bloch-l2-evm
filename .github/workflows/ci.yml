@@ -31,6 +31,12 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked
       - run: cargo test --locked --features serde
+      - name: Run the signed developer contract lifecycle
+        run: cargo run --locked --example developer_contract
+      - name: Rehearse durable signed contract execution and recovery
+        run: python3 tools/developer-rehearsal.py "$RUNNER_TEMP/bloch-developer-rehearsal"
+      - name: Test durable journal recovery and publication failures
+        run: cargo test --locked --manifest-path integrations/escrow-journal/Cargo.toml
       - run: cargo build --locked --no-default-features
       - run: cargo test --locked --no-default-features
       # Capacity and overflow guards must also hold with release optimizations.

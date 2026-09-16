@@ -5,6 +5,11 @@ access, broadcast, mainnet consensus activation or automatic finality verifier.
 The CLI exercises the real inclusion/EVM verifier and durable journal. Trusted
 L1 context must be supplied independently by the operator's authentication layer.
 
+For a reproducible signed deploy/call with synthetic inputs, follow the
+[developer rehearsal](../../docs/DEVELOPER-QUICKSTART.md#continue-toward-a-node).
+The fixture generator is a separate example; the operator CLI itself never
+generates or authenticates L1 trust from a proposal.
+
 ## Build and commands
 
 From the modular execution repository root:

@@ -22,17 +22,18 @@ original signed Ethereum bytes in host execution and guest verification; native
 Bloch L1 authorization remains PQ-only. The included EIP-1193 client adapter is
 ready to integrate with an application; the RPC/Reth node itself remains stubbed. Regressions live in `tests/deep_security.rs`.
 
-> **The reorg gate (from the design, read first).** An L2 inherits its L1's
-> finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited — a Bloch
-> reorg can unwind L2 state anchored to reorged blocks. Real value is gated on
-> Bloch mainnet security (k=8 ramp, WAN hashrate, checkpoint finality) + a
-> third-party audit + legal review. Everything below is **testnet /
-> zero-value** until then.
+The original scaffold described PoW anchoring. Current modular integration work
+targets Genesis-4 headers and native state commitments; the earlier PoW finality
+assumptions do not describe that integration. See
+[MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) and
+[the native state adapter](integrations/native-state-proof/README.md).
+Writing an ordinary transaction containing a hash does not enforce settlement.
+Consensus-enforced escrow/inbox transitions, finality authentication and the
+proof backend remain required before this local implementation can settle real
+assets. All examples use synthetic, zero-real-value inputs.
 
-The L2 is an **owned Postern product** (it has a sequencer/operator) that
-anchors to the ownerless Bloch-SIS-PoW base as ordinary transactions — the
-base gains no operator and needs no consensus change. The native gas token is
-an L2 representation of **bridged BLCH**: zero issuance, never sold, and never
+The native gas-token model is an L2 representation of **bridged BLCH**:
+zero issuance, never sold, and never
 burned by the protocol. The EVM's EIP-6780 `SELFDESTRUCT`-to-self can still
 destroy value; the executor measures that per transaction and commits the
 running total, so `total_native == total_minted - total_burned` always holds
@@ -49,6 +50,16 @@ transaction-body commitments against an externally trusted checkpoint; finality
 authentication and escrow derivation remain pending.
 See [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) for the trust boundary, tested
 behavior and remaining L1 integration.
+
+For signed contract deployment and execution, follow the
+[developer quickstart](docs/DEVELOPER-QUICKSTART.md):
+
+```sh
+cargo +1.94.1 run --locked --example developer_contract
+```
+
+The [delivery plan](docs/EVM-DELIVERY-PLAN.md) tracks the remaining node, proving
+and native settlement work separately from runnable local developer examples.
 
 ## Version pins (normative for this scaffold)
 
