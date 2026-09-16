@@ -572,3 +572,106 @@ fn cli_rejects_wrong_identity_symlinks_and_oversized_inputs() {
     assert_eq!(cli(&temp, "apply").status.code(), Some(1));
     assert!(!temp.0.join("journal/00000000000000000001.blj").exists());
 }
+
+#[test]
+fn recovery_budget_rejects_before_derivation_and_accepts_exact_boundary() {
+    use bloch_escrow_journal::RecoveryLimits;
+    let temp = Temp::new();
+    let f = fixture();
+    let mut journal = Journal::create(&temp.0, f.domain.clone()).unwrap();
+    journal.commit(&f.trusted, &f.proofs, &f.input, &f.witness).unwrap();
+    let head = journal.head();
+    drop(journal);
+    let bytes = fs::metadata(temp.record(1)).unwrap().len();
+    let original = fs::read(temp.record(1)).unwrap();
+    for limits in [
+        RecoveryLimits { records: 0, bytes },
+        RecoveryLimits {
+            records: 1,
+            bytes: bytes - 1,
+        },
+    ] {
+        assert!(matches!(
+            Journal::open_with_limits(&temp.0, f.domain.clone(), head, limits, |_| panic!(
+                "over-budget history must not request derivation"
+            )),
+            Err(JournalError::Limit)
+        ));
+        assert_eq!(fs::read(temp.record(1)).unwrap(), original);
+    }
+    let mut calls = 0;
+    let recovered = Journal::open_with_limits(
+        &temp.0,
+        f.domain,
+        head,
+        RecoveryLimits { records: 1, bytes },
+        |number| {
+            calls += 1;
+            assert_eq!(number, 1);
+            Ok(f.trusted.clone())
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(recovered.head(), head);
+}
+
+#[test]
+fn empty_journal_recovers_with_zero_record_budget() {
+    use bloch_escrow_journal::RecoveryLimits;
+    let temp = Temp::new();
+    let f = fixture();
+    let journal = Journal::create(&temp.0, f.domain.clone()).unwrap();
+    let head = journal.head();
+    drop(journal);
+    let recovered = Journal::open_with_limits(&temp.0, f.domain, head, RecoveryLimits { records: 0, bytes: 0 }, |_| {
+        panic!("empty journal needs no derivation")
+    })
+    .unwrap();
+    assert_eq!(recovered.head(), head);
+}
+
+#[test]
+fn recovery_byte_budget_is_cumulative_across_records() {
+    use bloch_escrow_journal::RecoveryLimits;
+    let temp = Temp::new();
+    let f = fixture();
+    let mut journal = Journal::create(&temp.0, f.domain.clone()).unwrap();
+    journal.commit(&f.trusted, &f.proofs, &f.input, &f.witness).unwrap();
+    journal.commit(&f.second.0, &[], &f.second.1, &f.second.2).unwrap();
+    let head = journal.head();
+    drop(journal);
+    let first = fs::metadata(temp.record(1)).unwrap().len();
+    let second = fs::metadata(temp.record(2)).unwrap().len();
+    assert!(matches!(
+        Journal::open_with_limits(
+            &temp.0,
+            f.domain.clone(),
+            head,
+            RecoveryLimits {
+                records: 2,
+                bytes: first.max(second)
+            },
+            |_| panic!("total budget must be checked before replay")
+        ),
+        Err(JournalError::Limit)
+    ));
+    let recovered = Journal::open_with_limits(
+        &temp.0,
+        f.domain,
+        head,
+        RecoveryLimits {
+            records: 2,
+            bytes: first + second,
+        },
+        |number| {
+            Ok(if number == 1 {
+                f.trusted.clone()
+            } else {
+                f.second.0.clone()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(recovered.head(), head);
+}

@@ -21,6 +21,21 @@ use std::{
 pub const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 /// Prototype journal bound; compaction/checkpointing is not implemented.
 pub const MAX_RECORDS: u64 = 1_000_000;
+/// Operator recovery budget. Counts committed records and complete record bytes;
+/// this does not bound decoded memory, callback work or EVM execution time.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryLimits {
+    pub records: u64,
+    pub bytes: u64,
+}
+impl Default for RecoveryLimits {
+    fn default() -> Self {
+        Self {
+            records: MAX_RECORDS,
+            bytes: MAX_RECORDS * (MAX_RECORD_BYTES as u64 + 48),
+        }
+    }
+}
 const RECORD_MAGIC: &[u8; 8] = b"BLOCHJ01";
 const MANIFEST_MAGIC: &[u8; 8] = b"BLOCHM01";
 
@@ -119,8 +134,20 @@ impl Journal {
     /// A minimum watermark permits recovery of a commit whose acknowledgment was lost.
     pub fn open(
         path: impl AsRef<Path>,
+        domain: EscrowEvmDomain,
+        minimum: JournalHead,
+        derive: impl FnMut(u64) -> io::Result<TrustedEscrowBatch>,
+    ) -> Result<Self, JournalError> {
+        Self::open_with_limits(path, domain, minimum, RecoveryLimits::default(), derive)
+    }
+
+    /// Recover under a caller-selected budget. Exceeding it fails without
+    /// truncating history, returning partial state or modifying committed files.
+    pub fn open_with_limits(
+        path: impl AsRef<Path>,
         mut domain: EscrowEvmDomain,
         minimum: JournalHead,
+        limits: RecoveryLimits,
         mut derive: impl FnMut(u64) -> io::Result<TrustedEscrowBatch>,
     ) -> Result<Self, JournalError> {
         require_fresh(&domain)?;
@@ -140,6 +167,7 @@ impl Journal {
         let mut head = JournalHead::genesis(domain.id());
         let mut watermark_seen = minimum == head;
         let mut numbers = Vec::new();
+        let mut total_bytes = 0u64;
         for item in fs::read_dir(&path)? {
             let item = item?;
             let name = item.file_name().into_string().map_err(|_| JournalError::Format)?;
@@ -152,18 +180,30 @@ impl Journal {
             }
             let number: u64 = name[..20].parse().map_err(|_| JournalError::Format)?;
             numbers.push(number);
-            if numbers.len() as u64 > MAX_RECORDS {
+            if numbers.len() as u64 > MAX_RECORDS.min(limits.records) {
+                return Err(JournalError::Limit);
+            }
+            regular(&item.path())?;
+            let size = fs::metadata(item.path())?.len();
+            if size > MAX_RECORD_BYTES as u64 + 48 {
+                return Err(JournalError::Limit);
+            }
+            total_bytes = total_bytes.checked_add(size).ok_or(JournalError::Limit)?;
+            if total_bytes > limits.bytes {
                 return Err(JournalError::Limit);
             }
         }
         numbers.sort_unstable();
+        let mut remaining = limits.bytes;
         for number in numbers {
             if number != head.blocks + 1 {
                 return Err(JournalError::Format);
             }
             let file = path.join(record_name(number));
             regular(&file)?;
-            let bytes = read_bounded(&file, MAX_RECORD_BYTES + 48)?;
+            let limit = remaining.min(MAX_RECORD_BYTES as u64 + 48) as usize;
+            let bytes = read_bounded(&file, limit)?;
+            remaining -= bytes.len() as u64;
             let (record, digest) = decode(&bytes)?;
             if record.domain != domain.id() || record.number != number || record.previous != head.digest {
                 return Err(JournalError::Format);

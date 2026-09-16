@@ -127,3 +127,22 @@ then commits to the original journal successfully.
 These tests simulate errors at operation boundaries and process termination.
 They do not establish which unsynchronized directory entries survive hardware
 power loss. Actual filesystem/device synchronization guarantees still apply.
+
+## Operator recovery budgets
+
+`Journal::open_with_limits` accepts `RecoveryLimits { records, bytes }` to cap
+recovery work below the prototype's maximum history size. `bytes` counts complete
+committed record files, including their framing; manifest, lock and ignored
+pending files are excluded. Recovery checks record count and cumulative file
+sizes before requesting L1 derivation or re-executing any block, then caps actual
+reads against the remaining budget. Exact boundaries are accepted. Zero limits
+can recover an empty journal. A budget failure returns `JournalError::Limit`,
+releases the lock and does not truncate files or return a partial recovered state.
+
+The existing `open` retains its previous limits through `RecoveryLimits::default`.
+These defaults are format ceilings, not recommended operational budgets. Choose
+smaller budgets according to available resources. This API does not bound decoded
+heap amplification, callback cost, EVM execution time, pending-file scan time or
+future commits; it is neither a disk quota nor automatic compaction. Tests cover
+exact and insufficient boundaries, cumulative bytes over multiple records,
+rejection before derivation and successful retry with a sufficient budget.
