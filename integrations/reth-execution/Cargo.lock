@@ -1685,6 +1685,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-serde",
  "bloch-l2-evm",
+ "eyre",
  "futures-util",
  "jsonrpsee",
  "k256",

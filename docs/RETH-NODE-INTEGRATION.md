@@ -245,6 +245,12 @@ and automatic pool maintenance, then reads receipts/logs, state and V2 identity.
 Its synthetic funding and explicitly driven block production do not establish
 an autonomous developer node or native derivation.
 
+The separate `bloch-evm-dev` executable now composes these services in an explicit
+synthetic domain, mines periodically and supports orderly stop/reopen. A real
+subprocess regression preserves signed contract storage, receipts and nonce across
+restart and continues mining. It does not start P2P or native derivation; see
+`integrations/reth-execution/DEVNODE.md` for invocation and remaining limitations.
+
 Call/estimate qualification now covers latest/historical BLOCKHASH, explicit RPC
 hash overrides, transient state writes and inspector-assisted access-list creation.
 RPC uses an EVM configuration clone whose block-hash fallback reads provider

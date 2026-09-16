@@ -20,7 +20,11 @@ It also records the remaining L1 authentication and proof-system integration
 requirements. The [L2 wallet boundary](WALLET-COMPATIBILITY.md) now authenticates
 original signed Ethereum bytes in host execution and guest verification; native
 Bloch L1 authorization remains PQ-only. The included EIP-1193 client adapter is
-ready to integrate with an application; the RPC/Reth node itself remains stubbed. Regressions live in `tests/deep_security.rs`.
+ready to integrate with an application. The separate pinned Reth host now has an
+[isolated developer executable](integrations/reth-execution/DEVNODE.md) with
+synthetic funding, real HTTP, automatic mining and orderly database restart.
+Native derivation, browser-wallet qualification and proof integration remain open.
+Regressions live in `tests/deep_security.rs`.
 
 The original scaffold described PoW anchoring. Current modular integration work
 targets Genesis-4 headers and native state commitments; the earlier PoW finality

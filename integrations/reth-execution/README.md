@@ -4,8 +4,10 @@ This host integration uses the real `reth_revm::database::StateProviderDatabase`
 to run Bloch's signed whole-block executor against an `EvmStateProvider`. Reth's
 `StateProvider` has an upstream blanket implementation of that interface.
 It includes custom execution/validation, canonical storage and pool admission
-components, upstream Reth RPC handlers and loopback HTTP transport. It does not yet
-launch a complete developer node or proof backend.
+components, upstream Reth RPC handlers and loopback HTTP transport. The
+[isolated developer executable](DEVNODE.md) mines signed transactions and reopens
+its persistent database in explicit synthetic mode. Native derivation, full
+wallet qualification, crash recovery and the proof backend remain open.
 
 ## Reproduce
 
@@ -98,9 +100,10 @@ block unwind and crash recovery remain unqualified.
 
 The existing V1 header retains its fixed-width identity. The separate V2 path now
 provides committed transaction/receipt roots, full Reth primitive adapters,
-configuration and assembly. A complete node still needs authenticated domain
-initialization, crash recovery, canonical-tip coordination and launched import,
-payload service/node/pool/RPC wiring and authenticated deposit derivation.
+configuration and assembly. The synthetic executable composes canonical extension,
+storage, pool maintenance and HTTP. Remaining node work includes authenticated
+domain initialization/deposit derivation, fork choice/reorganization, received-block
+and payload services, crash recovery and wallet compatibility.
 Launching a vanilla Ethereum Reth node would not satisfy these requirements.
 
 ## Canonical extension coordinator

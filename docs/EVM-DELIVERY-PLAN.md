@@ -10,7 +10,7 @@ activation and movement of real funds are outside the currently authorized work.
 | --- | --- | --- |
 | Signed contract execution | `developer_contract` executes signed deploy/call with storage, gas, nonce, root agreement and adversarial assertions | Local example gate exercised; wider conformance remains under compatibility below |
 | Reproducible local operator workflow | `tools/developer-rehearsal.py` generates synthetic escrow/deploy/call proposals and drives separate `bloch-domain` processes | Local two-block recovery/replay/tamper gate exercised; this recovers commitments/cursors, not a queryable node database |
-| Developer node and wallet workflow | EIP-1193 adapter; actual Reth execution, storage, validation, pool maintenance, JSON-RPC handlers and loopback HTTP helper; complete node orchestration remains open | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
+| Developer node and wallet workflow | EIP-1193 adapter; isolated synthetic executable with Reth HTTP, automatic mining, canonical persistence and pool maintenance; signed process-level deploy/call and orderly restart exercised | Browser-wallet workflow, authenticated pending/native derivation, crash recovery and complete supported RPC surface |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
 | Proof backend | Host witness verifier; SP1 entrypoint and prover are stubs | Reproducible pinned guest/prover/verifier build, real accepted and rejected proofs binding all public inputs, measured proving cost and documented cryptographic assumptions |
@@ -177,3 +177,12 @@ fixture now connects signed deploy/call submission, the pool, canonical extensio
 automatic mined removal and receipt/log/state queries. Its funding and block
 production remain synthetic and test-driven; a launched developer executable,
 wallet integration and crash recovery are still required.
+
+`bloch-evm-dev` now launches the isolated synthetic service with explicit mode
+selection, exclusive new-directory initialization, optional synthetic funding,
+loopback HTTP, periodic mining and signal-driven shutdown. A subprocess test
+deploys/calls, stops and reopens the database, checks the same receipt and state,
+then mines the next nonce. It also verifies rejection of an existing init target
+and missing synthetic-mode consent. This closes the local executable/orderly
+restart subtask, not wallet compatibility, native authentication or crash recovery.
+Usage and concrete limits are in `integrations/reth-execution/DEVNODE.md`.
