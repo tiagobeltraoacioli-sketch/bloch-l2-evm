@@ -44,6 +44,9 @@ running total, so `total_native == total_minted - total_burned` always holds
 parameters, ordered inputs and sequential state roots to actual signed EVM
 re-execution. Run `cargo run --locked --example modular_evm` for a zero-value local
 demonstration. This is not an on-chain verifier, proof backend or working rollup.
+`l1::authenticate_body` additionally checks Genesis-4 header ancestry and full
+transaction-body commitments against an externally trusted checkpoint; finality
+authentication and escrow derivation remain pending.
 See [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) for the trust boundary, tested
 behavior and remaining L1 integration.
 

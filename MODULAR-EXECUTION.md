@@ -98,3 +98,55 @@ regression. Ten new tests cover the execution-domain boundary (nine dedicated
 cases plus one signed-transfer integration). `cargo check --no-default-features`
 passed and the `modular_evm` example executed successfully. These checks are
 local correctness evidence, not a mainnet qualification or external audit.
+
+## Genesis-4 authentication increment
+
+`l1::authenticate_body` now verifies canonical 304-byte Genesis-4 headers,
+SHA3-256 block IDs, parent links and strictly increasing slots up to an externally
+trusted finalized checkpoint. It verifies the COMPLETE ordered transaction body
+against the target header's body root. Empty trees, leaf lengths, node/leaf domain
+separation and odd-node promotion follow the authoritative Genesis-4 commitment.
+It does not confuse SHA3-256 with Ethereum Keccak or slot with block height.
+
+The returned `AuthenticatedBody` has private fields and can only be constructed
+by successful verification. The local bounds are 2,048 headers, 4,096 transactions
+and 16 MiB of transaction payload; these are verifier resource limits, not claims
+about consensus limits. Fetch nearer authenticated checkpoints for longer paths.
+This approach authenticates the whole body so a caller cannot silently select
+only convenient transactions. It does not prove network-wide data availability.
+
+`examples/verify_l1_body.rs` is a bounded offline tool. Its JSON input contains
+`headers` and `transactions` arrays of hexadecimal strings. The expected block
+ID and slot are separate arguments, taken from the host's trusted finality source:
+
+```sh
+cargo +1.94.1 run --locked --example verify_l1_body --   body.json TRUSTED_FINALIZED_BLOCK_ID TRUSTED_FINALIZED_SLOT
+```
+
+Do not take those trusted arguments from the same untrusted response you are
+checking. No RPC `finalized: true` flag is accepted as cryptographic evidence.
+The tool does not verify validator votes, proposer signatures, validator-set
+transitions or checkpoint signatures. Finality authenticity remains external.
+Header inclusion alone also cannot prove that a transaction locked coins in an
+escrow: canonical transaction decoding and the escrow/inbox rules remain pending.
+Consequently, this increment does not manufacture `TrustedL1Batch` values from
+arbitrary transaction bytes and does not authorize deposits or withdrawals.
+
+Seven commitment fixtures (0, 1, 2, 3, 5, 17 and 32 transactions) were generated
+by linking `tools/generate-g4-fixtures.rs` against `bloch-pos-committee` at commit
+`5af78a04a27dcb2c2253c32134fca888a8a965f9`. File hashes and fixture provenance are
+recorded in `tests/fixtures/genesis4-bodies.provenance.json`. The generator is a
+separate development tool; the execution library does not link the consensus
+crate or require a sibling checkout. These are synthetic encoding vectors, not
+finalized mainnet blocks. To regenerate, create a temporary Rust binary project,
+use that file as `src/main.rs`, and add a path dependency named
+`bloch-pos-committee` pointing to the pinned consensus crate; capture stdout as
+the JSON fixture and compare it before replacing any checked-in vector.
+
+Eight additional tests cover official vectors, omitted/reordered/duplicated
+transactions, tampered headers, wrong checkpoints, malformed encodings, missing
+intermediate headers and input work limits.
+
+Validation after the Genesis-4 increment: 143 tests passed, one pre-existing test
+ignored; no-default-features compilation passed. The offline CLI accepted the
+five-transaction consensus fixture and rejected an incorrect checkpoint slot.

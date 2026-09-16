@@ -39,6 +39,8 @@ description = "SCAFFOLD, UNAUDITED, not a working L2. Execution-layer state-tran
 # the feature set is chosen here, explicitly, because it determines the code
 # that is compiled.
 [dependencies]
+# Genesis-4 header and body commitments use SHA3-256, not EVM Keccak.
+sha3 = { version = "=0.11.0", default-features = false }
 # revm — the EVM. Features: `c-kzg` provides the Cancun point-evaluation
 # precompile (0x0a; without a KZG backend revm omits the precompile, a
 # consensus change), `portable` builds its C backend without CPU-specific
