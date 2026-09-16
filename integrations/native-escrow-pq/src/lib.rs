@@ -23,6 +23,14 @@ pub enum AuthorizationError {
     /// Authenticated intent failed the native transition.
     Transition(EscrowError),
 }
+/// Borrowed authorization; each complete intent needs its own hybrid signature.
+pub struct SignedLock<'a> {
+    pub intent: &'a LockIntent,
+    pub public_key: &'a [u8],
+    pub signature: &'a [u8],
+}
+/// Bound cryptographic work per call independently of the ledger capacity.
+pub const MAX_LOCK_BATCH: usize = 64;
 /// Authenticated facade; the unchecked transition kernel is never exposed mutably.
 /// Constructor allocations remain trusted local genesis inputs.
 #[derive(Debug)]
@@ -30,6 +38,33 @@ pub struct PqEscrow {
     ledger: EscrowLedger,
 }
 impl PqEscrow {
+    /// Apply an ordered batch atomically on a private candidate state. Later
+    /// intents may spend earlier change, but cannot spend consumed inputs again.
+    /// All request limits are checked before cloning or signature verification.
+    /// This local operation does not persist state or establish L1 finality.
+    pub fn submit_batch(&mut self, requests: &[SignedLock<'_>]) -> Result<Vec<LockedDeposit>, AuthorizationError> {
+        if requests.is_empty()
+            || requests.len() > MAX_LOCK_BATCH
+            || requests
+                .iter()
+                .any(|r| r.signature.len() > 8192 || r.public_key.len() > 3749)
+            || requests
+                .iter()
+                .fold(0usize, |n, r| n.saturating_add(r.intent.inputs.len()))
+                > 4096
+        {
+            return Err(AuthorizationError::Limit);
+        }
+        let mut candidate = Self {
+            ledger: self.ledger.clone(),
+        };
+        let records = requests
+            .iter()
+            .map(|r| candidate.submit(r.intent, r.public_key, r.signature))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.ledger = candidate.ledger;
+        Ok(records)
+    }
     /// Create a local ledger from trusted genesis allocations, not an RPC balance.
     pub fn new(
         network: B256,

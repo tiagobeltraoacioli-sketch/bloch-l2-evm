@@ -175,3 +175,113 @@ fn authenticated_funding_does_not_enable_unverified_withdrawals() {
     assert_eq!(ledger.release(), Err(EscrowError::ReleaseUnavailable));
     assert_eq!(ledger.commitment(), root);
 }
+
+fn chained(intent: &LockIntent) -> LockIntent {
+    let mut next = intent.clone();
+    next.inputs = vec![Outpoint {
+        txid: intent.signing_root(),
+        vout: 0,
+    }];
+    next.amount = 300;
+    next.nonce += 1;
+    next
+}
+fn request<'a>(intent: &'a LockIntent, signature: &'a [u8]) -> bloch_native_escrow_pq::SignedLock<'a> {
+    bloch_native_escrow_pq::SignedLock {
+        intent,
+        public_key: &keys().0,
+        signature,
+    }
+}
+#[test]
+fn atomic_batch_matches_sequential_locks_and_spends_change() {
+    let (mut batch, first) = setup();
+    let (mut sequential, _) = setup();
+    let second = chained(&first);
+    let a = sign(&first);
+    let b = sign(&second);
+    let expected = vec![
+        sequential.submit(&first, &keys().0, &a).unwrap(),
+        sequential.submit(&second, &keys().0, &b).unwrap(),
+    ];
+    assert_eq!(
+        batch
+            .submit_batch(&[request(&first, &a), request(&second, &b)])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(batch.commitment(), sequential.commitment());
+    assert_eq!(batch.locked_sat(), 900);
+    assert!(batch.conserved());
+    let root = batch.commitment();
+    assert!(batch
+        .submit_batch(&[request(&first, &a), request(&second, &b)])
+        .is_err());
+    assert_eq!(batch.commitment(), root);
+}
+#[test]
+fn batch_rolls_back_invalid_signature_double_spend_and_capacity_failure() {
+    let (mut ledger, first) = setup();
+    let a = sign(&first);
+    let root = ledger.commitment();
+    let second = chained(&first);
+    let mut bad_signature = sign(&second);
+    bad_signature[4] ^= 1;
+    assert_eq!(
+        ledger.submit_batch(&[request(&first, &a), request(&second, &bad_signature)]),
+        Err(Error::Signature)
+    );
+    assert_eq!(ledger.commitment(), root);
+    let mut conflict = first.clone();
+    conflict.nonce += 1;
+    assert_eq!(
+        ledger.submit_batch(&[request(&first, &a), request(&conflict, &sign(&conflict))]),
+        Err(Error::Transition(EscrowError::Funding))
+    );
+    assert_eq!(ledger.commitment(), root);
+    assert_eq!(
+        ledger.submit_batch(&[request(&first, &a), request(&first, &a)]),
+        Err(Error::Transition(EscrowError::Replay))
+    );
+    assert_eq!(ledger.commitment(), root);
+    let mut limited = PqEscrow::new(
+        first.network,
+        first.domain,
+        vec![(
+            first.inputs[0],
+            Coin {
+                value: 1000,
+                owner: first.owner,
+            },
+        )],
+        1,
+    )
+    .unwrap();
+    let root = limited.commitment();
+    assert_eq!(
+        limited.submit_batch(&[request(&first, &a), request(&second, &sign(&second))]),
+        Err(Error::Transition(EscrowError::Capacity))
+    );
+    assert_eq!(limited.commitment(), root);
+}
+#[test]
+fn batch_preflights_total_work_before_any_authentication() {
+    let (mut ledger, first) = setup();
+    let root = ledger.commitment();
+    assert_eq!(ledger.submit_batch(&[]), Err(Error::Limit));
+    let requests: Vec<_> = (0..=bloch_native_escrow_pq::MAX_LOCK_BATCH)
+        .map(|_| request(&first, &[]))
+        .collect();
+    assert_eq!(ledger.submit_batch(&requests), Err(Error::Limit));
+    let mut oversized = first.clone();
+    oversized.inputs = vec![first.inputs[0]; 4096];
+    assert_eq!(
+        ledger.submit_batch(&[request(&first, &[]), request(&oversized, &[])]),
+        Err(Error::Limit)
+    );
+    assert_eq!(
+        ledger.submit_batch(&[request(&first, &[]), request(&first, &vec![0; 8193])]),
+        Err(Error::Limit)
+    );
+    assert_eq!(ledger.commitment(), root);
+}

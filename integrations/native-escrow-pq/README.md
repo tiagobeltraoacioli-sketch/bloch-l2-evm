@@ -29,6 +29,26 @@ Requests are bounded to 4,096 inputs, 8,192 signature bytes and the exact
 mainnet consensus parameters. A future network decoder must enforce size limits
 before allocation and budget concurrent cryptographic work.
 
+### Atomic ordered lock batches
+
+`PqEscrow::submit_batch` takes 1–64 borrowed `SignedLock` requests, with at most
+4,096 inputs across the entire batch. All size budgets are checked before
+cloning state or verifying signatures. Every intent still requires its own
+complete hybrid authorization; this is not cryptographic signature aggregation.
+
+Requests execute in order on a private candidate ledger. A later request may
+spend change created by an earlier request, but cannot reuse an already consumed
+input. Only after every authorization and transition succeeds is the candidate
+published. Signature failure, double spend, replay or capacity exhaustion discards
+the entire candidate, including its fees, change, deposits and inbox sequence.
+Results match sequential submission for a successful batch.
+
+The implementation clones the existing ledger once per batch, so memory/time
+also depend on existing local state size. These per-call limits are not a global
+memory or concurrency budget. Atomicity is in-memory only; no durability, native
+checkpoint import or consensus activation is introduced. Ordinary verified UTXOs
+must not be imported as escrow allocations without a consensus-enforced lock.
+
 ## Reproduce
 
 Use Rust 1.94.1 and a sibling `bloch-validator-payout` checkout at:
@@ -50,12 +70,15 @@ git -C ../bloch-validator-payout rev-parse HEAD
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml
 ```
 
-Offline execution requires dependencies already cached. Eight integration tests
+Offline execution requires dependencies already cached. Eleven authorization tests
 passed using real, disposable hybrid keypairs and signatures. They cover valid
 funding, corruption/removal of each signature component, changes to every intent
 field, suite downgrade, malformed and oversized requests, replay, a re-signed
 double spend, overspending, wrong network and unavailable withdrawals. Tests do
 not open wallets, persist private keys or contact the network.
+Batch tests additionally cover sequential equivalence, chained change spending,
+whole-batch rollback on signature/replay/double-spend/capacity failures and
+aggregate input/signature/count limits before authentication.
 
 ## Remaining boundaries
 
