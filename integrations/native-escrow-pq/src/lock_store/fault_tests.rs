@@ -203,3 +203,84 @@ fn process_exit_without_destructors_recovers_complete_batches() {
         check_recovery(&temp.0.join("journal"), &locks, stage);
     }
 }
+
+#[test]
+fn recovery_sync_failure_returns_no_handle_and_releases_writer_lock() {
+    let locks = fixture();
+    let temp = Temp::new();
+    let path = temp.0.join("journal");
+    let mut store = LockStore::create(&path, baseline(&locks)).unwrap();
+    // Reproduce the unresolved publication case: rename completed, directory
+    // sync has not run and the caller never received a success acknowledgment.
+    assert!(matches!(
+        store.submit_staged(&requests(&locks), |at| {
+            if at == PublicationStage::Renamed {
+                Err(io::Error::other("interrupted before directory sync"))
+            } else {
+                Ok(())
+            }
+        }),
+        Err(StoreError::CommitUncertain(_))
+    ));
+    drop(store);
+    let mut called = false;
+    let recovered = LockStore::open_with_sync(&path, baseline(&locks), floor(&locks), |directory| {
+        called = true;
+        assert_eq!(directory, fs::canonicalize(&path).unwrap());
+        // Recovery must retain the exclusive lock until synchronization finishes.
+        assert!(matches!(
+            LockStore::open(&path, baseline(&locks), floor(&locks)),
+            Err(StoreError::Locked)
+        ));
+        Err(io::Error::other("injected recovery sync failure"))
+    });
+    assert!(called);
+    assert!(matches!(recovered, Err(StoreError::Io(_))));
+    check_recovery(&path, &locks, PublicationStage::Renamed);
+}
+
+#[test]
+fn recovery_syncs_both_empty_and_committed_histories_before_returning() {
+    let locks = fixture();
+    let temp = Temp::new();
+    let path = temp.0.join("journal");
+    drop(LockStore::create(&path, baseline(&locks)).unwrap());
+    for batches in 0..=1 {
+        let mut called = false;
+        let mut store = LockStore::open_with_sync(&path, baseline(&locks), floor(&locks), |directory| {
+            called = true;
+            File::open(directory)?.sync_all()
+        })
+        .unwrap();
+        assert!(called);
+        assert_eq!(store.mark().unwrap().batches, batches);
+        if batches == 0 {
+            store.submit_batch(&requests(&locks)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn recovery_rejects_bad_history_and_missing_floor_before_sync() {
+    let locks = fixture();
+    let temp = Temp::new();
+    let path = temp.0.join("journal");
+    drop(LockStore::create(&path, baseline(&locks)).unwrap());
+    let missing = LockMark {
+        batches: 1,
+        digest: B256::repeat_byte(99),
+    };
+    assert!(matches!(
+        LockStore::open_with_sync(&path, baseline(&locks), missing, |_| {
+            panic!("must reject absent acknowledged history before syncing")
+        }),
+        Err(StoreError::Rollback)
+    ));
+    fs::write(path.join(name(1)), b"broken record").unwrap();
+    assert!(matches!(
+        LockStore::open_with_sync(&path, baseline(&locks), floor(&locks), |_| {
+            panic!("must authenticate history before syncing")
+        }),
+        Err(StoreError::Format)
+    ));
+}

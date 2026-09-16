@@ -85,7 +85,17 @@ impl LockStore {
     }
     /// Minimum must be retained outside this directory. No local-only mechanism
     /// can detect replacement with an older valid prefix without such a floor.
-    pub fn open(path: impl AsRef<Path>, mut baseline: PqEscrow, minimum: LockMark) -> Result<Self, StoreError> {
+    pub fn open(path: impl AsRef<Path>, baseline: PqEscrow, minimum: LockMark) -> Result<Self, StoreError> {
+        Self::open_with_sync(path, baseline, minimum, |directory| File::open(directory)?.sync_all())
+    }
+    // Private recovery boundary: no recovered handle may escape before the
+    // directory sync completes, including after a rename with a lost acknowledgment.
+    fn open_with_sync(
+        path: impl AsRef<Path>,
+        mut baseline: PqEscrow,
+        minimum: LockMark,
+        sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<Self, StoreError> {
         if !fs::symlink_metadata(path.as_ref())?.file_type().is_dir() {
             return Err(StoreError::Format);
         }
@@ -142,6 +152,7 @@ impl LockStore {
         if !found {
             return Err(StoreError::Rollback);
         }
+        sync_directory(&directory)?;
         Ok(Self {
             directory,
             _lock: lock,

@@ -32,6 +32,14 @@ publishing memory. Any publication I/O failure poisons the handle: reads and
 writes refuse service until it is closed and recovered. The batch may have reached
 disk despite the error, so do not blindly resubmit it.
 
+Recovery keeps the exclusive writer lock while it validates the entire history,
+checks the retained minimum and synchronizes the directory. Only then does it
+return a usable handle or mark. This completes publication when an earlier
+process stopped after rename but before directory sync. If recovery sync fails,
+`open` returns an I/O error, releases the lock and exposes no recovered state;
+retry recovery rather than treating that failure as proof the batch was absent.
+The same synchronization step applies to an empty history.
+
 Committed files are `00000000000000000001.locks`, etc. Gaps, unexpected filenames,
 non-regular committed files, malformed JSON, wrong baseline, invalid signatures,
 wrong prior digest and incorrect resulting state commitments fail closed. Pending
@@ -81,6 +89,12 @@ with the new externally retained mark. Injected I/O errors additionally verify
 that memory has not advanced and every subsequent read/write is refused until
 recovery. Child-process exit verifies that the OS releases the writer lock even
 without destructor cleanup.
+
+Recovery-specific tests inject a directory-sync failure after an interrupted
+rename, verify the writer lock remains held during synchronization and is released
+on failure, then successfully reopen and reject replay. Additional checks cover
+sync on empty and populated histories and rejection of malformed history or an
+absent retained minimum before attempting synchronization.
 
 This matrix tests process failure on the host filesystem, not hardware power loss.
 In particular, rename-before-directory-sync may recover differently after power
