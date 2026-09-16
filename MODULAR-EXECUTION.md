@@ -158,3 +158,11 @@ indices and derives consensus txids. The offline body verifier can emit script
 payment observations. These are not mint authorizations.
 See [GENESIS4-BRIDGE-DERIVATION.md](GENESIS4-BRIDGE-DERIVATION.md) for the discovered
 legacy-envelope incompatibility and required native escrow rules.
+
+## Experimental native lock kernel
+
+A default-disabled native escrow transition model now consumes synthetic funding
+outputs and conserves spendable value, liabilities, change and fees. It assumes
+funding authorization from the consensus host and cannot release or mint assets.
+See [EXPERIMENTAL-NATIVE-ESCROW.md](EXPERIMENTAL-NATIVE-ESCROW.md) for executable
+examples, tested invariants and the remaining consensus integration boundary.

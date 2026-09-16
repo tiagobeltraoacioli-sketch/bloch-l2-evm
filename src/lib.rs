@@ -136,3 +136,6 @@ pub use transactions::{
 /// in `Cargo.toml` and recorded in `README.md`). Any bump is a documented
 /// program upgrade per the design's determinism contract.
 pub const REVM_PIN: &str = "41.0.0";
+
+#[cfg(feature = "experimental-escrow")]
+pub mod escrow;
