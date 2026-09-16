@@ -56,6 +56,12 @@ impl HeaderResponse for BlochRpcHeader {
 struct HeaderJson {
     hash: B256,
     size: U256,
+    // Neutral RPC projections already defined by BlockHeader for this domain.
+    // Neither is an additional field in the tagged V2 consensus encoding.
+    #[serde(default)]
+    difficulty: U256,
+    #[serde(default)]
+    extra_data: Bytes,
     domain: B256,
     #[serde(with = "alloy_serde::quantity")]
     chain_id: u64,
@@ -89,6 +95,8 @@ impl Serialize for BlochRpcHeader {
         HeaderJson {
             hash: self.hash(),
             size: self.size,
+            difficulty: self.difficulty(),
+            extra_data: self.extra_data().clone(),
             domain: self.header.0.domain,
             chain_id: self.header.0.chain_id,
             number: self.header.0.number,
@@ -114,6 +122,11 @@ impl Serialize for BlochRpcHeader {
 impl<'de> Deserialize<'de> for BlochRpcHeader {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let json = HeaderJson::deserialize(deserializer)?;
+        if json.difficulty != U256::ZERO || !json.extra_data.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Bloch V2 RPC requires zero difficulty and empty extraData",
+            ));
+        }
         let header = BlochNodeHeader(NodeHeaderV2 {
             domain: json.domain,
             chain_id: json.chain_id,
@@ -277,6 +290,8 @@ mod tests {
         assert_eq!(json["chainId"], "0x2a");
         assert_eq!(json["number"], "0x2");
         assert_eq!(json["size"], "0x3e7");
+        assert_eq!(json["difficulty"], "0x0");
+        assert_eq!(json["extraData"], "0x");
         assert_eq!(json["gasUsed"], "0xa474");
         assert_eq!(json["userGasUsed"], "0x526c");
         assert_eq!(
@@ -307,6 +322,16 @@ mod tests {
             .convert_header(SealedHeader::new(header.clone(), B256::ZERO), 1)
             .is_err());
         let rpc = BlochRpcHeader::new(header, 1);
+        for (field, value) in [("difficulty", "0x1"), ("extraData", "0x01")] {
+            let mut json = serde_json::to_value(&rpc).unwrap();
+            json[field] = serde_json::json!(value);
+            assert!(serde_json::from_value::<BlochRpcHeader>(json).is_err(), "{field}");
+        }
+        // Decode older V2 responses which omitted the neutral projections.
+        let mut old = serde_json::to_value(&rpc).unwrap();
+        old.as_object_mut().unwrap().remove("difficulty");
+        old.as_object_mut().unwrap().remove("extraData");
+        assert_eq!(serde_json::from_value::<BlochRpcHeader>(old).unwrap(), rpc);
         for field in ["hash", "domain", "depositsHash", "parentStateRoot", "receiptsRoot"] {
             let mut json = serde_json::to_value(&rpc).unwrap();
             json[field] = serde_json::to_value(B256::repeat_byte(99)).unwrap();

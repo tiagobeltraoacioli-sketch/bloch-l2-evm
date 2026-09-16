@@ -186,3 +186,9 @@ then mines the next nonce. It also verifies rejection of an existing init target
 and missing synthetic-mode consent. This closes the local executable/orderly
 restart subtask, not wallet compatibility, native authentication or crash recovery.
 Usage and concrete limits are in `integrations/reth-execution/DEVNODE.md`.
+
+Real ethers 6.17.0 acceptance now exercises automatic nonce, gas and fee filling,
+signed deploy/call, receipts/logs/state/block parsing and orderly restart. It
+exposed omitted neutral RPC header projections (`difficulty`, `extraData`), now
+serialized consistently with the existing Reth header traits without changing V2
+hashes. Browser wallet approval/network flows remain a separate unverified gate.

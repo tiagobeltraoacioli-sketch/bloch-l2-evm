@@ -1,0 +1,10 @@
+{
+  "name": "bloch-developer-wallet-acceptance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test bloch-l2.test.mjs",
+    "test:devnode": "node --test devnode-ethers.test.mjs"
+  },
+  "dependencies": { "ethers": "6.17.0" }
+}

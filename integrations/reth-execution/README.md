@@ -509,6 +509,10 @@ are used.
 `BlochRpcHeader` serializes an object with hexadecimal quantities, standard
 `miner`/`mixHash` fields and the V2 domain, chain ID, anchor, parent state root,
 deposit commitment and user gas. Its hash remains the tagged V2 consensus hash.
+The neutral `difficulty: "0x0"` and `extraData: "0x"` projections match the
+existing header traits and allow standard client block/fee parsing. They do not
+enter the V2 consensus encoding; decoding rejects non-neutral values and accepts
+older responses which omitted these projections.
 Conversion rejects an inconsistent cached seal; JSON decoding checks the supplied
 hash against all consensus fields. Standard Ethereum user-transaction and receipt
 envelopes remain usable. The standard block response exposes user transactions

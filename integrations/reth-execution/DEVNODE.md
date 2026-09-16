@@ -75,6 +75,21 @@ ports. Run it with:
 cargo +1.98.1 test --locked --manifest-path integrations/reth-execution/Cargo.toml --test devnode_process
 ```
 
+The separate ethers acceptance test uses ethers 6.17.0 with automatic nonce, gas
+estimation and fee discovery; it does not prefill these fields to bypass client
+compatibility. It starts its own temporary node and tests signing, deployment,
+calls, logs/state queries and orderly restart. After building the binary:
+
+```sh
+npm ci --prefix wallets --ignore-scripts
+npm --prefix wallets run test:devnode
+```
+
+Use `BLOCH_DEVNODE_BIN` to select another build of the executable. The RPC header
+exposes zero difficulty and empty extra data, matching its Reth header traits,
+while retaining the tagged Bloch V2 hash and domain/commitment fields. This is an
+RPC representation; it is not an Ethereum consensus-header encoding.
+
 Empty blocks are mined too. Timestamps advance synthetically by one per block,
 independently of the wall-clock interval. Selection conservatively reserves each
 transaction's declared gas limit and stops at the first resource limit. An
