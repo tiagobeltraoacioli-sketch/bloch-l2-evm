@@ -61,6 +61,23 @@ the named checkpoint, not present unspentness, independently verified FFG,
 agreement between independent operators or permission to mint. Revalidate for
 each decision and apply the application's separate freshness/finality policy.
 
+### Atomic UTXO batches
+
+`checkpoint_reader::read_utxos` accepts 1–256 borrowed `UtxoRequest` entries.
+It authenticates the checkpoint signatures and complete block body once for the
+whole batch, then verifies each independent native SMT path against that same
+state root. Results preserve request order and carry the same checkpoint digest
+and checked epoch. If any proof fails, the call returns an error without exposing
+partial results or mutating the store.
+
+Duplicate outpoints are rejected even when the claimed values differ. Batch size
+and every path length are checked before PQ verification; the maximum sibling
+payload is 2 MiB, in addition to the existing body limit. This is a bounded list
+of ordinary inclusion proofs, not a compressed Merkle multiproof. Each call
+rechecks checkpoint freshness. The API neither enumerates all wallet outputs
+nor proves a complete balance, and does not turn verified outputs into escrow
+funding or mint authority.
+
 `verify_utxo` uses the official `eutxo_leaf` codec to authenticate the native
 transaction ID, output index, exact u64 value and script hash. It proves that
 the output belongs to the committed unspent set **at the observed block**.
@@ -126,7 +143,7 @@ git -C ../bloch-validator-payout rev-parse HEAD
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-state-proof/Cargo.toml
 ```
 
-Twelve integration tests use the official full consensus state builder and native
+Fifteen integration tests use the official full consensus state builder and native
 header codec with synthetic states/checkpoints. They cover exact UTXO values
 including u64::MAX, every UTXO/EVM field, malformed/reversed/corrupted paths,
 cross-component and cross-state substitution, historical inclusion after a spend
@@ -134,5 +151,8 @@ and a zero EVM commitment. Five end-to-end cases additionally use disposable rea
 hybrid signing keys and a persisted/reopened checkpoint store: successful typed
 reads and provenance, empty/stale/future rejection, pre-spend state substitution
 after a newer checkpoint, body/value tampering and early request bounds.
+Three batch cases additionally cover request order and shared provenance,
+failure after a valid first entry, expiry, duplicate outpoints with altered values,
+empty/oversized batches and malformed later paths.
 These are state-proof correctness tests, not live
 network finality or protocol-activation evidence. No wallet or network is used.

@@ -13,9 +13,56 @@ use bloch_pos_committee::state_root::{EutxoEntry, EvmCommitment};
 #[derive(Debug)]
 pub enum ReadError {
     Limit,
+    DuplicateOutput,
     Checkpoint(StoreError),
     Body(L1Error),
     State(StateProofError),
+}
+
+/// Maximum independent SMT paths per atomic read (2 MiB of sibling hashes).
+pub const MAX_UTXO_BATCH: usize = 256;
+
+/// Untrusted borrowed output and its root-to-leaf native SMT path.
+pub struct UtxoRequest<'a> {
+    pub entry: &'a EutxoEntry,
+    pub siblings: &'a [[u8; 32]],
+}
+
+/// Read distinct outputs at one checkpoint, preserving request order. All bounds
+/// and duplicate keys are checked before PQ work. Signatures and the block body
+/// are authenticated once; no partial result escapes if any proof fails.
+/// This is neither a complete wallet balance nor funding/mint authorization.
+pub fn read_utxos(
+    store: &CheckpointStore,
+    current_epoch: u64,
+    header: &[u8],
+    transactions: &[Bytes],
+    requests: &[UtxoRequest<'_>],
+) -> Result<Vec<CheckpointObservation<EutxoEntry>>, ReadError> {
+    if requests.is_empty() || requests.len() > MAX_UTXO_BATCH || requests.iter().any(|r| r.siblings.len() != 256) {
+        return Err(ReadError::Limit);
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for request in requests {
+        // The official key binds the outpoint, independently of its claimed value.
+        if !keys.insert(bloch_pos_committee::state_root::eutxo_leaf(request.entry).0) {
+            return Err(ReadError::DuplicateOutput);
+        }
+    }
+    let (cp, body) = body(store, current_epoch, header, transactions, requests[0].siblings)?;
+    requests
+        .iter()
+        .map(|request| {
+            let state = verify_utxo(&body, request.entry, request.siblings).map_err(ReadError::State)?;
+            Ok(CheckpointObservation {
+                state,
+                checkpoint_epoch: cp.epoch(),
+                checked_at_epoch: current_epoch,
+                signed_digest: cp.digest(),
+                review_due: cp.arrangement_review_due(),
+            })
+        })
+        .collect()
 }
 /// Point-in-time observation, not a perpetual freshness assertion or mint permit.
 #[derive(Debug)]

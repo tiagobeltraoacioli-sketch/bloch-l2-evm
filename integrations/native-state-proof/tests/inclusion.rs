@@ -234,7 +234,9 @@ mod checkpoint_pipeline {
         checkpoint::{CheckpointError, CheckpointPolicy, Phase},
         checkpoint_store::{CheckpointStore, StoreError},
     };
-    use bloch_native_state_proof::checkpoint_reader::{read_evm_commitment, read_utxo, ReadError};
+    use bloch_native_state_proof::checkpoint_reader::{
+        read_evm_commitment, read_utxo, read_utxos, ReadError, UtxoRequest, MAX_UTXO_BATCH,
+    };
     use bloch_pos_committee::ws::{self, CheckpointEnvelope, Signer, SignerSet, WeakSubjectivityCheckpoint};
     use std::{
         fs,
@@ -455,6 +457,107 @@ mod checkpoint_pipeline {
         ));
         assert!(matches!(
             read_utxo(&store, 100, &[0; 304], &[], &entry, &[[0; 32]; 257]),
+            Err(ReadError::Limit)
+        ));
+    }
+
+    #[test]
+    fn batch_preserves_order_and_checkpoint_and_rejects_partial_success() {
+        let outputs = entries();
+        let tree = tree(&outputs, evm());
+        let proofs: Vec<_> = outputs.iter().map(|e| tree.prove(&eutxo_leaf(e).0).unwrap()).collect();
+        let temp = Temp::new();
+        let (env, header) = signed(tree.root(), 100, [0; 32]);
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let mark = store.accept(&env, &header, 100).unwrap();
+        let mut requests: Vec<_> = outputs
+            .iter()
+            .zip(&proofs)
+            .rev()
+            .map(|(entry, proof)| UtxoRequest {
+                entry,
+                siblings: &proof.siblings,
+            })
+            .collect();
+        let observed = read_utxos(&store, 101, &header, &[], &requests).unwrap();
+        for (observation, request) in observed.iter().zip(&requests) {
+            assert_eq!(observation.state().value(), request.entry);
+            assert_eq!(observation.signed_digest(), mark.digest);
+            assert_eq!(observation.checked_at_epoch(), 101);
+            assert_eq!(observation.state().block(), env.checkpoint.block_root);
+        }
+        let mut bad = requests[1].entry.clone();
+        bad.value -= 1;
+        requests[1].entry = &bad;
+        assert!(matches!(
+            read_utxos(&store, 101, &header, &[], &requests),
+            Err(ReadError::State(_))
+        ));
+        assert_eq!(store.mark(), Some(mark));
+        assert!(matches!(
+            read_utxos(&store, 100 + ws::WS_PERIOD_EPOCHS, &header, &[], &requests),
+            Err(ReadError::Checkpoint(StoreError::Verify(CheckpointError::Stale)))
+        ));
+    }
+
+    #[test]
+    fn batch_rejects_duplicate_outpoints_even_with_different_values_before_pq() {
+        let temp = Temp::new();
+        let store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let entry = entries().remove(0);
+        let mut altered = entry.clone();
+        altered.value -= 1;
+        let siblings = [[0; 32]; 256];
+        for second in [&entry, &altered] {
+            let requests = [
+                UtxoRequest {
+                    entry: &entry,
+                    siblings: &siblings,
+                },
+                UtxoRequest {
+                    entry: second,
+                    siblings: &siblings,
+                },
+            ];
+            assert!(matches!(
+                read_utxos(&store, 100, &[0; 304], &[], &requests),
+                Err(ReadError::DuplicateOutput)
+            ));
+        }
+    }
+
+    #[test]
+    fn batch_bounds_cover_empty_oversized_and_later_malformed_paths() {
+        let temp = Temp::new();
+        let store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let outputs = entries();
+        let siblings = [[0; 32]; 256];
+        assert!(matches!(
+            read_utxos(&store, 100, &[0; 304], &[], &[]),
+            Err(ReadError::Limit)
+        ));
+        let oversized: Vec<_> = (0..=MAX_UTXO_BATCH)
+            .map(|_| UtxoRequest {
+                entry: &outputs[0],
+                siblings: &siblings,
+            })
+            .collect();
+        assert!(matches!(
+            read_utxos(&store, 100, &[0; 304], &[], &oversized),
+            Err(ReadError::Limit)
+        ));
+        let malformed = [
+            UtxoRequest {
+                entry: &outputs[0],
+                siblings: &siblings,
+            },
+            UtxoRequest {
+                entry: &outputs[1],
+                siblings: &siblings[..255],
+            },
+        ];
+        assert!(matches!(
+            read_utxos(&store, 100, &[0; 304], &[], &malformed),
             Err(ReadError::Limit)
         ));
     }
