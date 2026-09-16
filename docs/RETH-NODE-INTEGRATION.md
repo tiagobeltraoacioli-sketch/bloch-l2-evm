@@ -214,6 +214,14 @@ bytes and reconstruct sender/hash/cost/length before upstream balance/nonce/gas
 validation. Its actual client is `BlockchainProvider`, not the bare factory.
 The real-database pool test covers nonce queuing, deploy/call selection, mined
 removal and readmission after canonical unwind. Provider head and pool account/
-fee notifications are explicitly coordinated by the fixture; a running maintenance
-service, persistence policy and RPC ingress remain open. Pool fee/size/replacement
+fee notifications are explicitly coordinated by that fixture. Automatic maintenance
+now consumes provider broadcasts and guards asynchronous account reloads against
+stale head hashes. Pool persistence policy remains open. Pool fee/size/replacement
 policies are additional local admission rules, not new consensus rules.
+
+The host also constructs upstream Reth `EthApi` handlers over the real provider
+and pool. The custom RPC header preserves V2 identity and exposes domain/deposit
+commitments alongside standard user transaction and receipt envelopes. Its local
+JSON-RPC fixture submits signed transactions, persists selected deploy/call blocks
+and queries canonical receipts and state. HTTP/WebSocket launch, wallet workflow,
+RPC execution environment qualification and restart orchestration remain open.

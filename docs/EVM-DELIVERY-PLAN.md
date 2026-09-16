@@ -10,7 +10,7 @@ activation and movement of real funds are outside the currently authorized work.
 | --- | --- | --- |
 | Signed contract execution | `developer_contract` executes signed deploy/call with storage, gas, nonce, root agreement and adversarial assertions | Local example gate exercised; wider conformance remains under compatibility below |
 | Reproducible local operator workflow | `tools/developer-rehearsal.py` generates synthetic escrow/deploy/call proposals and drives separate `bloch-domain` processes | Local two-block recovery/replay/tamper gate exercised; this recovers commitments/cursors, not a queryable node database |
-| Developer node and wallet workflow | EIP-1193 adapter; actual Reth execution, canonical storage, validation and pool admission; no launched RPC/node | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
+| Developer node and wallet workflow | EIP-1193 adapter; actual Reth execution, storage, validation, pool maintenance and JSON-RPC handlers; no launched RPC/node | Complete Reth integration preserving signed bytes through admission/execution; wallet deployment/call, receipts, logs, state queries and restart tests |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
 | Proof backend | Host witness verifier; SP1 entrypoint and prover are stubs | Reproducible pinned guest/prover/verifier build, real accepted and rejected proofs binding all public inputs, measured proving cost and documented cryptographic assumptions |
@@ -138,6 +138,12 @@ maintenance now consumes canonical provider notifications, retains unmined
 transactions and reinserts displaced transactions after reorgs. A local adaptation
 of the pinned Reth maintainer rejects account reloads from an obsolete head;
 unit and real-provider regression tests cover the stale-reload race. Domain
-initialization, fork choice, launched import/payload services, RPC and
+initialization, fork choice, launched import/payload services, RPC transport and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.
+
+Upstream Reth EthApi handler construction and a V2 RPC header converter now connect
+the canonical provider and authenticated pool. A real-provider JSON-RPC fixture
+targets raw signed admission, receipts/log metadata, block identity and state reads.
+The developer-node gate still requires execution-query qualification, transport,
+wallet tools and restart tests; handler construction alone does not close it.

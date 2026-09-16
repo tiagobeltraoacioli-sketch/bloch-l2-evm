@@ -22,6 +22,13 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["sync", "time", "macros"] }
 alloy-genesis = "=2.1.1"
 alloy-rpc-types-engine = "=2.1.1"
+alloy-rpc-types-eth = { version = "=2.1.1", features = ["serde"] }
+alloy-network-primitives = "=2.1.1"
+alloy-serde = "=2.2.0"
+reth-rpc = { path = "../../../reth-bloch-integration/crates/rpc/rpc" }
+reth-rpc-convert = { path = "../../../reth-bloch-integration/crates/rpc/rpc-convert" }
+reth-rpc-eth-api = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-api" }
+reth-rpc-eth-types = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-types" }
 # Development checkout: verify the exact revision recorded in README.md.
 reth-revm = { path = "../../../reth-bloch-integration/crates/revm" }
 reth-evm = { path = "../../../reth-bloch-integration/crates/evm/evm" }
@@ -41,6 +48,7 @@ reth-execution-types = { path = "../../../reth-bloch-integration/crates/evm/exec
 reth-trie-common = { path = "../../../reth-bloch-integration/crates/trie/common" }
 
 [dev-dependencies]
+reth-network-api = { path = "../../../reth-bloch-integration/crates/net/network-api" }
 tokio = { version = "1", features = ["rt", "macros"] }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 serde_json = "1.0"

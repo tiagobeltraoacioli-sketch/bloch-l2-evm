@@ -8,7 +8,10 @@ use bloch_l2_evm::{
     node_execution::{genesis_v2, node_head},
     BlockExecutionError, ChainSpec,
 };
-use reth_chainspec::{Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition};
+use reth_chainspec::{
+    Chain, ChainHardforks, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
+    ForkFilter, ForkFilterKey, ForkId, Hardfork, Hardforks, Head,
+};
 use reth_network_peers::NodeRecord;
 use std::fmt::Display;
 
@@ -24,6 +27,7 @@ pub struct BlochChainSpec {
     domain: B256,
     genesis: Genesis,
     header: BlochNodeHeader,
+    hardforks: ChainHardforks,
 }
 
 impl BlochChainSpec {
@@ -93,6 +97,7 @@ impl BlochChainSpec {
             domain,
             genesis,
             header,
+            hardforks: evm_hardforks(),
         })
     }
 
@@ -158,19 +163,140 @@ impl EthChainSpec for BlochChainSpec {
     }
 }
 
+// One immutable schedule backs both the Ethereum EVM helpers and generic Reth
+// fork introspection. This does not enable Ethereum consensus body/header rules.
+fn evm_hardforks() -> ChainHardforks {
+    use EthereumHardfork::*;
+    let forks = [
+        Frontier,
+        Homestead,
+        Tangerine,
+        SpuriousDragon,
+        Byzantium,
+        Constantinople,
+        Petersburg,
+        Istanbul,
+        Berlin,
+        London,
+        Paris,
+        Shanghai,
+        Cancun,
+    ];
+    ChainHardforks::new(
+        forks
+            .into_iter()
+            .map(|fork| {
+                let condition = match fork {
+                    Paris => ForkCondition::TTD {
+                        activation_block_number: 0,
+                        fork_block: Some(0),
+                        total_difficulty: U256::ZERO,
+                    },
+                    Shanghai | Cancun => ForkCondition::Timestamp(0),
+                    _ => ForkCondition::Block(0),
+                };
+                (Box::new(fork) as Box<dyn Hardfork>, condition)
+            })
+            .collect(),
+    )
+}
+
 impl EthereumHardforks for BlochChainSpec {
     fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
-        use EthereumHardfork::*;
-        match fork {
-            Frontier | Homestead | Tangerine | SpuriousDragon | Byzantium | Constantinople | Petersburg | Istanbul
-            | Berlin | London => ForkCondition::Block(0),
-            Paris => ForkCondition::TTD {
-                activation_block_number: 0,
-                fork_block: Some(0),
-                total_difficulty: U256::ZERO,
-            },
-            Shanghai | Cancun => ForkCondition::Timestamp(0),
-            _ => ForkCondition::Never,
+        self.hardforks.fork(fork)
+    }
+}
+
+impl Hardforks for BlochChainSpec {
+    fn fork<H: Hardfork>(&self, fork: H) -> ForkCondition {
+        self.hardforks.fork(fork)
+    }
+    fn forks_iter(&self) -> impl Iterator<Item = (&dyn Hardfork, ForkCondition)> {
+        self.hardforks.forks_iter()
+    }
+    fn fork_id(&self, head: &Head) -> ForkId {
+        self.fork_filter(*head).current()
+    }
+    fn latest_fork_id(&self) -> ForkId {
+        // Every configured transition is active at genesis; there is no future ID.
+        self.fork_id(&Head {
+            timestamp: self.genesis.timestamp,
+            ..Default::default()
+        })
+    }
+    fn fork_filter(&self, head: Head) -> ForkFilter {
+        let forks = self
+            .hardforks
+            .forks_iter()
+            .filter_map(|(_, condition)| match condition {
+                ForkCondition::Block(block)
+                | ForkCondition::TTD {
+                    fork_block: Some(block),
+                    ..
+                } => Some(ForkFilterKey::Block(block)),
+                ForkCondition::Timestamp(timestamp) => Some(ForkFilterKey::Time(timestamp)),
+                _ => None,
+            });
+        ForkFilter::new(head, self.genesis_hash(), self.genesis.timestamp, forks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn generic_schedule_matches_evm_and_has_no_future_upgrade() {
+        let spec = BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(1), 100).unwrap();
+        assert_eq!(spec.forks_iter().count(), 13);
+        for fork in [
+            EthereumHardfork::Frontier,
+            EthereumHardfork::Homestead,
+            EthereumHardfork::Tangerine,
+            EthereumHardfork::SpuriousDragon,
+            EthereumHardfork::Byzantium,
+            EthereumHardfork::Constantinople,
+            EthereumHardfork::Petersburg,
+            EthereumHardfork::Istanbul,
+            EthereumHardfork::Berlin,
+            EthereumHardfork::London,
+            EthereumHardfork::Paris,
+            EthereumHardfork::Shanghai,
+            EthereumHardfork::Cancun,
+            EthereumHardfork::Dao,
+            EthereumHardfork::Prague,
+            EthereumHardfork::Osaka,
+        ] {
+            assert_eq!(spec.fork(fork), spec.ethereum_fork_activation(fork));
         }
+        assert_eq!(spec.fork(EthereumHardfork::Cancun), ForkCondition::Timestamp(0));
+        assert_eq!(spec.fork(EthereumHardfork::Prague), ForkCondition::Never);
+        assert_eq!(spec.fork(EthereumHardfork::Dao), ForkCondition::Never);
+        assert_eq!(spec.latest_fork_id().next, 0);
+        assert_eq!(
+            spec.fork_id(&Head {
+                number: u64::MAX,
+                timestamp: u64::MAX,
+                ..Default::default()
+            }),
+            spec.latest_fork_id()
+        );
+    }
+    #[test]
+    fn fork_identity_uses_actual_v2_genesis_and_filter_agrees() {
+        let spec = BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(1), 100).unwrap();
+        let other = BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(2), 100).unwrap();
+        let head = Head {
+            timestamp: 100,
+            ..Default::default()
+        };
+        let expected = ForkId {
+            hash: reth_chainspec::ForkHash::from(spec.genesis_header().0.hash()),
+            next: 0,
+        };
+        assert_eq!(spec.fork_id(&head), expected);
+        assert_eq!(spec.fork_filter(head).current(), expected);
+        assert!(spec.fork_filter(head).validate(expected).is_ok());
+        assert_ne!(other.latest_fork_id(), expected);
+        assert!(spec.fork_filter(head).validate(other.latest_fork_id()).is_err());
     }
 }

@@ -4,7 +4,8 @@ This host integration uses the real `reth_revm::database::StateProviderDatabase`
 to run Bloch's signed whole-block executor against an `EvmStateProvider`. Reth's
 `StateProvider` has an upstream blanket implementation of that interface.
 It includes custom execution/validation, canonical storage and pool admission
-components. It does not yet launch a developer node, RPC endpoint or proof backend.
+components and upstream Reth RPC handler construction. It does not yet launch a
+developer node, RPC endpoint or proof backend.
 
 ## Reproduce
 
@@ -433,7 +434,8 @@ and fully persists them, removes mined transactions and readmits them after
 canonical unwind. It also rejects insufficient balances and already-mined nonces.
 That fixture coordinates provider head and pool updates explicitly. The automatic
 maintenance path below replaces those manual pool updates with canonical broadcasts.
-Pool persistence policy, RPC ingress and a launched developer node remain open.
+Pool persistence policy and a launched developer node remain open. The RPC handler
+integration below connects raw transaction ingress to this same validator.
 
 ## Automatic pool maintenance
 
@@ -462,4 +464,40 @@ head hash; stale results are discarded and their addresses queued for a fresh
 read. Unsupported blob-conversion and blob-maintenance paths are not included.
 
 This is pool maintenance, not a fork-choice or storage coordinator. Startup/crash
-repair, pool backup/restart policy, RPC and the launched developer node remain open.
+repair, pool backup/restart policy and the launched developer node remain open.
+
+## Reth RPC handlers
+
+`build_eth_api(components, runtime)` constructs the upstream `reth_rpc::EthApi`
+using `RpcNodeCoreAdapter` over the initialized Bloch provider, authenticated pool,
+network handle and `BlochEvmConfig`. Call it inside Tokio and supervise the runtime's
+cache/background tasks. The caller still coordinates persistence, canonical
+notifications and pool maintenance. `EthApiServer::into_rpc()` supplies the actual
+upstream JSON-RPC module; no handwritten replacements for the standard handlers
+are used.
+
+`BlochRpcHeader` serializes an object with hexadecimal quantities, standard
+`miner`/`mixHash` fields and the V2 domain, chain ID, anchor, parent state root,
+deposit commitment and user gas. Its hash remains the tagged V2 consensus hash.
+Conversion rejects an inconsistent cached seal; JSON decoding checks the supplied
+hash against all consensus fields. Standard Ethereum user-transaction and receipt
+envelopes remain usable. The standard block response exposes user transactions
+and the deposit commitment, but does not transport the complete deposit body.
+
+`NoDerivedPending` returns an explicit error when Reth attempts to synthesize a
+pending environment without authenticated derivation inputs. It does not invent
+an L1 anchor or deposits. A provider-supplied actual pending block remains governed
+by the provider's own trust boundary. Execution queries (`eth_call`, gas estimation,
+simulation and tracing) require separate qualification against Bloch's environment
+and committed `BLOCKHASH` semantics before a public endpoint is launched.
+In particular, latest-state calls currently read the post-block history ring,
+while canonical block execution freezes its original history snapshot; adversarial
+ring writes and RPC `blockHashes` overrides need dedicated handling and tests.
+
+`tests/node_rpc.rs` exercises JSON requests through the upstream module over real
+MDBX/RocksDB storage and the pool: signed admission, deployment/call selection,
+canonical persistence, receipts/log metadata, balance/nonce/code/storage and V2
+block identity. Its `NoopNetwork` is explicitly a local test component, not P2P.
+The fixture executes selected blocks through the canonical Bloch executor; it is
+not yet a wallet-connected, autonomously producing node. HTTP/WebSocket transport,
+restart orchestration and end-to-end wallet tooling remain to be delivered.
