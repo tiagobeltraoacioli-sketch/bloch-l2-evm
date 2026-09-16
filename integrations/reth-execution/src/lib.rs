@@ -16,7 +16,9 @@ use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 pub mod block;
 pub mod chainspec;
 pub mod config;
+pub mod execute;
 pub use chainspec::BlochChainSpec;
+pub use execute::{execute_next_block, prepare_genesis};
 pub mod payload;
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
 /// Complete type selection for a provider; does not launch a node or Engine API.

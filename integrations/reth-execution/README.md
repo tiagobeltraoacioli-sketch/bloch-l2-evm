@@ -298,7 +298,7 @@ serde, Compact and receipt conversions.
 integration to persist deposits alongside the separately stored transactions.
 The Ethereum body projection omits those deposits and must never replace the
 canonical Bloch body in storage.
-Full import consensus, durable canonical unwind and launched developer workflows
+Full import consensus, process-crash recovery and launched developer workflows
 remain unqualified.
 
 ## Durable V2 body storage
@@ -321,8 +321,8 @@ errors. Abort the entire database transaction on a write/removal error. It does 
 remove headers, transaction indices, receipts or execution state by itself.
 `tests/node_storage.rs` uses actual MDBX and close/reopen to qualify persisted V2
 headers/transactions/deposits, reconstructed body commitments, dropped writers/removals,
-committed removals and corrupt records. Full canonical unwind, process-crash
-recovery and a launched node remain subsequent integration work.
+committed removals and corrupt records. The full canonical test described below
+covers orderly unwind; process-crash recovery and a launched node remain open.
 
 ## Complete provider types and genesis
 
@@ -345,3 +345,40 @@ a tagged build identifier binding the domain, parent, timestamp, randomness,
 anchor and complete deposit sequence. Optional transport sidecars remain bounded
 and unsupported by V2 execution. Payload traits do not constitute an Engine API,
 payload-building service, consensus validation or signed developer workflow.
+
+## Executed blocks for canonical persistence
+
+`prepare_genesis(spec, provider)` derives the configured allocation on an empty
+state snapshot, verifies its actual trie root and returns a complete executed
+genesis. Save it through `SaveBlocksMode::Full`, including its empty receipts:
+writing only the genesis block and state leaves receipt-file boundaries absent
+and prevents the next full block save. The caller must also check that there is
+no existing chain history; the state-root check alone does not prove that.
+
+`execute_next_block(config, provider, parent, attributes, transactions)` runs the
+signed V2 lifecycle on a consistent Reth snapshot and returns an actual
+`ExecutedBlock<BlochNodePrimitives>`. It checks transaction resource bounds, the
+parent's canonical seal and the snapshot root, executes authenticated transactions,
+retains state reverts, computes the database trie root and assembles the block
+from committed execution metadata. The returned block contains user receipts,
+the state bundle and sorted hashed-state/trie updates for Reth's full writer.
+
+The caller authenticates the parent, domain and deposit/anchor provenance before
+calling this API. Failed preparation discards its provisional state. A successful
+return does not commit storage or select a canonical head: those are separate
+operations. The result does not reserve the canonical tip; the persistence
+coordinator must ensure its snapshot's parent is still current before saving.
+Use the complete Reth writer with `SaveBlocksMode::Full` to persist
+all block and execution data together; body-only writes are insufficient.
+Static files, RocksDB and MDBX have separate durability boundaries, so dropping
+a writer after a full save is not a claim of cross-backend atomic rollback.
+
+`tests/node_canonical.rs` uses these APIs with actual MDBX, static files and
+RocksDB. It saves two signed V2 blocks containing deposits, contract deployment,
+storage writes, logs, BLOCKHASH and a revert; compares their headers/receipts
+with portable execution; reopens; calls `remove_block_and_execution_above(1)`;
+commits and reopens again. It verifies the prior root, head, balance, nonce,
+storage and bytecode, retained block/transaction/receipt data and removal of the
+second block's hashes, transactions, receipts and deposits. Wrong snapshots,
+invalid cached parent seals and late transaction failure leave persistent state
+unchanged. This qualifies orderly persistence/unwind, not process-crash recovery.

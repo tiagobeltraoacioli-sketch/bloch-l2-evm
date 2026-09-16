@@ -212,8 +212,13 @@ zero-issuance allocation's root, persists the canonical V2 genesis and state, an
 reopens all backends to verify their identity. Payload transport retains deposits
 and custom hashes; it does not implement an Engine API or authenticate L1 inputs.
 
-Required next steps are authenticated execution-domain initialization, subsequent
-block persistence and node wiring, custom consensus and receipt/RPC semantics,
-durable canonical unwind, and the full signed developer workflow. V1 identities
+The host now prepares complete executed genesis/child blocks using the provider's
+actual trie root and retained reverts. Real-backend tests cover full saves of
+signed blocks, orderly reopen and canonical unwind/reopen, including state,
+receipts, transaction indices and deposit rows. Crash recovery remains unqualified.
+
+Required next steps are authenticated execution-domain initialization,
+node wiring, custom consensus and receipt/RPC semantics,
+crash recovery, and the full signed developer workflow. V1 identities
 and production consensus remain unchanged. Format changes require distinct
 version and domain commitments rather than silently reinterpreting existing blocks.

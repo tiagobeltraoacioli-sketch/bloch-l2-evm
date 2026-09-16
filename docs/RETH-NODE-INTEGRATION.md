@@ -165,8 +165,9 @@ alongside the separately stored signed transactions.
 `into_ethereum_body` is only a lossy RPC projection. The upstream EthStorage
 implementation is for Ethereum bodies and cannot serve the Bloch body format.
 Real MDBX tests cover commit, orderly reopen, aborted writes/removals and body-only
-removal. Canonical unwind and crash recovery must still coordinate this extra body
-data with headers, transaction indices, receipts, trie updates and state.
+removal. The full canonical test now coordinates this extra body data with
+headers, transaction indices, receipts, trie updates and state through Reth's
+full save and canonical unwind APIs. Process-crash recovery remains unqualified.
 
 `BlochTables` includes the standard Reth table set; initialize/reopen with
 `reth_db::mdbx::init_db_for::<_, BlochTables>` before sharing the database. The
@@ -187,3 +188,12 @@ genesis and uses the kernel's exact base-fee arithmetic. Cancun EVM semantics do
 not enable blobs or Ethereum withdrawals. Payload containers preserve V2 identity
 and deposits; their tagged build identifier binds the domain, parent and every
 attribute. They implement Reth payload traits, not an Engine API or payload service.
+
+`prepare_genesis` and `execute_next_block` now produce actual Reth executed
+blocks with retained reverts and independently computed database trie data.
+The genesis must also use the full writer to initialize empty receipt boundaries.
+`tests/node_canonical.rs` saves signed V2 blocks, reopens all backends, performs
+`remove_block_and_execution_above`, commits and reopens to verify the prior
+state, preserved bytecode and canonical block/receipt/transaction/deposit indices.
+This qualifies orderly save/unwind with real data; failure injection, startup
+consistency repair and a running node remain separate integration work.

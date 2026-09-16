@@ -80,18 +80,18 @@ storage test also checks trie roots, committed state/bytecode/changesets,
 uncommitted writer abort and orderly close/reopen. Those operations remain test
 harness plumbing. A deleted account's unread storage is also restored solely
 from persisted changesets after reopening, recovering the original root. This
-does not prune history or unwind block metadata. The remaining canonical unwind,
-crash recovery and the node storage service remain open. Incremental signed
+does not prune history or unwind block metadata; the separate V2 canonical test
+below covers orderly full unwind. Crash recovery and the node storage service
+remain open. Incremental signed
 construction now shares the core kernel with whole-block verification and runs
 through the real Reth provider in storage tests. The real SDK executor factory
 now uses the shared lifecycle with supplied inspectors, bounded signed candidates
 and a frozen committed BLOCKHASH window. Payload builder and custom node wiring
 remain required. Preserve the core's fixed-width header hash and domain identity.
 Vanilla Ethereum RLP headers have different
-identities. The current header also lacks transaction/receipt-root commitments;
-adding them requires a versioned execution-domain upgrade, not extra uncommitted
-RPC fields. A full node additionally needs the incremental block-building path,
-custom primitives/assembler, receipts and authenticated deposit context.
+identities. The V1 header lacks transaction/receipt-root commitments; the separate
+V2 format below adds those commitments without changing V1 identities. A full
+node still needs authenticated deposit context and the remaining node services.
 The [node integration dependency map](RETH-NODE-INTEGRATION.md) records the
 inspected Reth interfaces, storage qualification and versioning requirements.
 
@@ -103,9 +103,9 @@ It produces typed user receipts, preserves deposit gas in the block total, and
 rejects stale/foreign owned results before publication. The core captures the
 immutable BLOCKHASH window before system calls; an adversarial contract mutation
 fixture verifies parity. Multi-block roots, receipts/logs and inspector tests
-qualify this factory. This does not close the developer node gate: custom header/
-body primitives and committed transaction/receipt roots, assembler, consensus,
-pool/RPC, durable canonical unwind and the independent native/prover gates remain.
+qualify this factory. The V2 primitives, assembler and canonical storage coverage
+below build on it. Consensus, pool/RPC, crash recovery and the independent
+native/prover gates still prevent closure of the developer node gate.
 
 ### Independent V2 primitives
 
@@ -125,7 +125,9 @@ deposit records, verifies reconstructed body commitments and supports transactio
 body removal in real MDBX reopen tests. The full Reth ProviderFactory now uses
 custom chain-spec, payload and node types; a real-backend test independently
 computes the genesis allocation root and persists/reopens the V2 genesis and state.
-Subsequent-block persistence and coordinated canonical recovery remain required;
-domain initialization, consensus, payload service, pool/RPC and
+The host now prepares genesis/child executed blocks with real trie data and
+retained reverts; signed full-save and canonical-unwind/reopen tests verify state,
+bytecode, block/transaction/receipt indices and deposit rows. Process-crash
+recovery remains unqualified. Domain initialization, consensus, payload service, pool/RPC and
 end-to-end node operation remain open. No existing V1 execution or production
 consensus has changed.

@@ -129,6 +129,9 @@ fn complete_provider_persists_and_reopens_custom_genesis_and_its_state() {
     };
     let recovered = RecoveredBlock::try_recover(block.clone()).unwrap();
     let writer = factory.database_provider_rw().unwrap();
+    // This isolates allocation/header persistence. It is not node bootstrap:
+    // Full genesis save must also initialize empty receipt-file boundaries.
+    // See prepare_genesis and node_canonical.rs for the complete write path.
     writer.insert_block(&recovered).unwrap();
     writer
         .write_state(

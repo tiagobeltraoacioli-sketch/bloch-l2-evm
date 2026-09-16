@@ -31,6 +31,9 @@ reth-chainspec = { path = "../../../reth-bloch-integration/crates/chainspec" }
 reth-network-peers = { path = "../../../reth-bloch-integration/crates/net/peers" }
 reth-payload-primitives = { path = "../../../reth-bloch-integration/crates/payload/primitives" }
 reth-node-types = { path = "../../../reth-bloch-integration/crates/node/types" }
+reth-chain-state = { path = "../../../reth-bloch-integration/crates/chain-state" }
+reth-execution-types = { path = "../../../reth-bloch-integration/crates/evm/execution-types" }
+reth-trie-common = { path = "../../../reth-bloch-integration/crates/trie/common" }
 
 [dev-dependencies]
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
