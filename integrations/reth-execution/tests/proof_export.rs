@@ -16,10 +16,37 @@ use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     BlockNumReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory, StateProvider,
 };
+use sha3::{Digest, Sha3_256};
 use std::{io::Write, process::Command, sync::Arc};
 
 #[test]
 fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
+    contract_export(
+        B256::repeat_byte(0xd3),
+        Some("BLOCH_QUALIFICATION_ARTIFACT"),
+        "BLOCH_QUALIFICATION_CHAIN_DIRECTORY",
+    );
+}
+
+#[test]
+fn persisted_source_anchored_contract_exports_the_same_selected_source() {
+    // Match the independently constructed SP1 source fixture's synthetic native
+    // ancestry. This header hash is NOT native consensus/funding authentication.
+    let mut parent = B256::ZERO;
+    for index in 0..2u64 {
+        let mut header = [0u8; 304];
+        header[..4].copy_from_slice(&0xb10c_0005u32.to_le_bytes());
+        header[4..36].copy_from_slice(parent.as_slice());
+        header[100..108].copy_from_slice(&(100 + index * 50).to_le_bytes());
+        let mut hash = Sha3_256::new();
+        hash.update(b"BLCH4:BLOCK\0\0\0\0\0");
+        hash.update(header);
+        parent = B256::from_slice(&hash.finalize());
+    }
+    contract_export(parent, None, "BLOCH_SOURCE_QUALIFICATION_CHAIN_DIRECTORY");
+}
+
+fn contract_export(anchor: B256, artifact_variable: Option<&str>, directory_variable: &str) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("node");
     std::fs::create_dir(&source).unwrap();
@@ -46,7 +73,7 @@ fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
     let attributes = |timestamp, deposits| BlochNextBlockEnvCtx {
         timestamp,
         prevrandao: B256::ZERO,
-        anchor_root: B256::repeat_byte(0xd3),
+        anchor_root: anchor,
         deposits,
     };
     coordinator
@@ -194,7 +221,7 @@ fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
     }
     // Explicit opt-in for the separate SP1 qualification process. Never replace
     // an existing artifact or retain the database/test fixture implicitly.
-    if let Some(path) = std::env::var_os("BLOCH_QUALIFICATION_ARTIFACT") {
+    if let Some(path) = artifact_variable.and_then(std::env::var_os) {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -203,7 +230,7 @@ fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
         file.write_all(&bytes).unwrap();
         file.sync_all().unwrap();
     }
-    if let Some(path) = std::env::var_os("BLOCH_QUALIFICATION_CHAIN_DIRECTORY") {
+    if let Some(path) = std::env::var_os(directory_variable) {
         let path = std::path::PathBuf::from(path);
         std::fs::create_dir(&path).unwrap();
         for (index, encoded) in chain_bytes.iter().enumerate() {

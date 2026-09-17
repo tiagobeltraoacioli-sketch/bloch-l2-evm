@@ -74,16 +74,33 @@ existing directory; failure may leave an incomplete directory, never a success
 report. Those artifacts allow the separate SP1 host to qualify the complete
 chain from canonical genesis, rather than trusting an intermediate anchor.
 
+The second test uses the synthetic native anchor from the SP1 host's existing
+source fixture, with the same funding recipient, amount and deposit provenance.
+Set `BLOCH_SOURCE_QUALIFICATION_CHAIN_DIRECTORY` to retain this separate chain.
+It allows the same real exported transitions to be checked against the
+experimental source registry and its durable consumption journal. The native
+headers and backing allocation remain synthetic; matching their anchor is not
+native state inclusion or consensus authorization. The original developer
+anchor fixture and its output variables remain separate.
+
 Local qualification on 2026-09-17 passed with Rust 1.98.1 and the prepared Reth
-snapshot correction: the three-block contract/CLI test passed in 5.79 seconds,
+snapshot correction: both three-block contract/CLI tests passed in 9.53 seconds,
 including an explicit storage-slot value of `42`; scoped Clippy with
 `-D warnings` and package formatting passed.
 These results establish host reconstruction/export; SP1 qualification is separate.
 
-Its exact JSON artifacts are:
+The original developer-anchor JSON artifacts are:
 
 | Block | Bytes | SHA-256 |
 | --- | ---: | --- |
 | 1: synthetic funding | 4720 | `a31dc550733e3cf97045fbf81ae8327b4c57a36bbc2b57d4d0e563d2efe49d57` |
 | 2: signed deployment | 5958 | `1326de31e426def53faf1ce7822cb58b5fd6d0ef138f6202ba52803ab771f2d2` |
 | 3: signed storage update | 7221 | `2b2e192921bf2e4471bc29d40ffaaca3a251fdf22bd4f37512dcb6229889e987` |
+
+The source-fixture-anchor artifacts selected for combined SP1 qualification are:
+
+| Block | Bytes | SHA-256 |
+| --- | ---: | --- |
+| 1: synthetic funding | 4720 | `f1d05a30f121ee535adefc133c049e15724b74c55209bd370c517aef5b38034b` |
+| 2: signed deployment | 5958 | `c98eac0ab100caa804cd135df2f87b55ff02208b5c4f21a8052bb39a46bed1dc` |
+| 3: signed storage update | 7221 | `9afa1f56e1c7062a2ae5d17cfacb603ebe3dd170c2da0446c34e102026e18a6e` |
