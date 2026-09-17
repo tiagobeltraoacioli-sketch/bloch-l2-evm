@@ -61,6 +61,49 @@ the named checkpoint, not present unspentness, independently verified FFG,
 agreement between independent operators or permission to mint. Revalidate for
 each decision and apply the application's separate freshness/finality policy.
 
+### Genesis-derived height identification
+
+`checkpoint_reader::read_utxos_with_height` adds a block-height annotation to
+the existing authenticated batch reader. Its `HeightCursor` is initialized with
+an independently configured **genesis block hash** and the exact genesis header;
+that hash is not the checkpoint policy's genesis/state root. There is no input
+for a claimed starting height. The configured genesis starts at height zero.
+
+Each call supplies a complete forward header chain including the cursor's
+previous block and ending at the latest stored PQ-signed checkpoint. Every
+parent link and increasing slot is verified. Height increases by the number of
+parent edges, not by slot differences: slots `0 → 7 → 100` give heights
+`0 → 1 → 2`. At most 2,048 exact 304-byte headers are accepted per call; empty,
+oversized or incorrectly sized paths fail before signature work. As elsewhere,
+transport must enforce limits before allocation.
+
+The reader authenticates the checkpoint's complete body and every requested
+UTXO proof through `read_utxos`, then publishes the candidate cursor only after
+the full path check succeeds. Omitted ancestors, conflicting forks, repeats,
+stale checkpoints, body tampering and a later invalid UTXO proof leave the cursor
+unchanged. The checkpoint store remains read-only. The result retains the
+existing state observation and signed checkpoint provenance alongside a private
+height position bound to the same block and configured genesis.
+
+This is a concrete consumer for identifying native observations by block height
+without inventing a slot-to-height conversion. It does **not** turn the observed
+UTXO into a lock, derive an intent-to-transaction mapping, produce
+`TrustedEscrowBatch`, prove completeness of all deposits or authorize an EVM
+mint. Those consensus/inbox/source-mapping requirements remain open.
+
+The cursor is in-memory and monotonic, with no arbitrary-height deserialization
+or checkpoint import. It is not a durable rollback-protected index. Repeated
+queries at the same checkpoint use the existing `read_utxos` API; the annotated
+variant requires forward progress. Starting from a fresh genesis cursor cannot
+skip to a checkpoint more than 2,047 blocks away, and missing intermediate
+authenticated checkpoints are not bypassed. Catch-up requires an available
+sequence of authenticated advances satisfying both the path bounds and the
+checkpoint reader's freshness policy; supplying a historical epoch as though
+it were the current epoch is not an authorized bootstrap shortcut.
+Durable bootstrap/recovery of this
+identification cursor remains a separate task; no persisted height is silently
+trusted.
+
 ### Atomic UTXO batches
 
 `checkpoint_reader::read_utxos` accepts 1–256 borrowed `UtxoRequest` entries.

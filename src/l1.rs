@@ -8,6 +8,8 @@ use alloc::vec::Vec;
 use alloy_primitives::{Bytes, B256};
 use sha3::{Digest, Sha3_256};
 
+pub mod height;
+
 const HEADER_LEN: usize = 304;
 const VERSION: u32 = 0xb10c_0005;
 const MAX_HEADERS: usize = 2048;

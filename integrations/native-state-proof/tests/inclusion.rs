@@ -235,7 +235,7 @@ mod checkpoint_pipeline {
         checkpoint_store::{CheckpointStore, StoreError},
     };
     use bloch_native_state_proof::checkpoint_reader::{
-        read_evm_commitment, read_utxo, read_utxos, ReadError, UtxoRequest, MAX_UTXO_BATCH,
+        read_evm_commitment, read_utxo, read_utxos, read_utxos_with_height, ReadError, UtxoRequest, MAX_UTXO_BATCH,
     };
     use bloch_pos_committee::ws::{self, CheckpointEnvelope, Signer, SignerSet, WeakSubjectivityCheckpoint};
     use std::{
@@ -273,12 +273,15 @@ mod checkpoint_pipeline {
         .unwrap()
     }
     fn signed(root: [u8; 32], epoch: u64, parent: [u8; 32]) -> (CheckpointEnvelope, Vec<u8>) {
+        signed_at_slot(root, epoch, parent, epoch * 120)
+    }
+    fn signed_at_slot(root: [u8; 32], epoch: u64, parent: [u8; 32], slot: u64) -> (CheckpointEnvelope, Vec<u8>) {
         let mut header = vec![0; 304];
         header[..4].copy_from_slice(&0xb10c_0005u32.to_le_bytes());
         header[4..36].copy_from_slice(&parent);
         header[36..68].copy_from_slice(&root);
         header[68..100].copy_from_slice(&body_root(&[]));
-        header[100..108].copy_from_slice(&(epoch * 120).to_le_bytes());
+        header[100..108].copy_from_slice(&slot.to_le_bytes());
         let native = BlockHeaderV4::canonical_deserialize(&header).unwrap();
         let cp = WeakSubjectivityCheckpoint {
             version: ws::WS_FORMAT_VERSION,
@@ -560,5 +563,98 @@ mod checkpoint_pipeline {
             read_utxos(&store, 100, &[0; 304], &[], &malformed),
             Err(ReadError::Limit)
         ));
+    }
+
+    #[test]
+    fn height_annotated_reader_authenticates_whole_path_and_advances_only_after_all_proofs() {
+        use bloch_l2_evm::l1::height::{HeightCursor, HeightError};
+        let outputs = entries();
+        let tree = tree(&outputs, evm());
+        let proofs: Vec<_> = outputs
+            .iter()
+            .map(|entry| tree.prove(&eutxo_leaf(entry).0).unwrap())
+            .collect();
+        let (genesis, genesis_header) = signed_at_slot(tree.root(), 0, [0; 32], 0);
+        let (middle, middle_header) = signed_at_slot(tree.root(), 0, genesis.checkpoint.block_root, 7);
+        let (tip, tip_header) = signed_at_slot(tree.root(), 0, middle.checkpoint.block_root, 100);
+        let headers = vec![
+            Bytes::from(genesis_header),
+            Bytes::from(middle_header),
+            Bytes::from(tip_header.clone()),
+        ];
+        let mut cursor = HeightCursor::from_genesis(genesis.checkpoint.block_root.into(), &headers[0]).unwrap();
+        let original = cursor.clone();
+        let temp = Temp::new();
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let mark = store.accept(&tip, &tip_header, 0).unwrap();
+        let requests: Vec<_> = outputs
+            .iter()
+            .zip(&proofs)
+            .map(|(entry, proof)| UtxoRequest {
+                entry,
+                siblings: &proof.siblings,
+            })
+            .collect();
+
+        let omitted = [headers[0].clone(), headers[2].clone()];
+        assert!(matches!(
+            read_utxos_with_height(&store, 0, &mut cursor, &omitted, &[], &requests),
+            Err(ReadError::Height(_))
+        ));
+        assert_eq!(cursor, original);
+        let mut changed = outputs[1].clone();
+        changed.value -= 1;
+        let forged = [
+            UtxoRequest {
+                entry: &outputs[0],
+                siblings: &proofs[0].siblings,
+            },
+            UtxoRequest {
+                entry: &changed,
+                siblings: &proofs[1].siblings,
+            },
+        ];
+        assert!(matches!(
+            read_utxos_with_height(&store, 0, &mut cursor, &headers, &[], &forged),
+            Err(ReadError::State(_))
+        ));
+        assert_eq!(cursor, original);
+        assert!(matches!(
+            read_utxos_with_height(&store, 0, &mut cursor, &headers, &[Bytes::from_static(&[1])], &requests),
+            Err(ReadError::Body(_))
+        ));
+        assert_eq!(cursor, original);
+        assert!(matches!(
+            read_utxos_with_height(&store, ws::WS_PERIOD_EPOCHS, &mut cursor, &headers, &[], &requests),
+            Err(ReadError::Checkpoint(_))
+        ));
+        assert_eq!(cursor, original);
+
+        let observed = read_utxos_with_height(&store, 0, &mut cursor, &headers, &[], &requests).unwrap();
+        assert_eq!(observed.len(), outputs.len());
+        for (observed, entry) in observed.iter().zip(&outputs) {
+            assert_eq!(observed.observation().state().value(), entry);
+            assert_eq!(observed.observation().signed_digest(), mark.digest);
+            assert_eq!(observed.position().block(), observed.observation().state().block());
+            assert_eq!((observed.position().height(), observed.position().slot()), (2, 100));
+        }
+        let accepted = cursor.clone();
+        assert!(matches!(
+            read_utxos_with_height(&store, 0, &mut cursor, &headers[2..], &[], &requests),
+            Err(ReadError::Height(HeightError::Replay))
+        ));
+        assert_eq!(cursor, accepted);
+        assert_eq!(store.mark(), Some(mark));
+        // A later, correctly signed checkpoint does not itself prove ancestry.
+        // Its fork diverges before the accepted height-2 position.
+        let (conflicting, conflicting_header) = signed_at_slot(tree.root(), 1, genesis.checkpoint.block_root, 120);
+        let conflict_mark = store.accept(&conflicting, &conflicting_header, 1).unwrap();
+        let conflicting_path = [headers[0].clone(), Bytes::from(conflicting_header)];
+        assert!(matches!(
+            read_utxos_with_height(&store, 1, &mut cursor, &conflicting_path, &[], &requests),
+            Err(ReadError::Height(HeightError::Continuity))
+        ));
+        assert_eq!(cursor, accepted);
+        assert_eq!(store.mark(), Some(conflict_mark));
     }
 }

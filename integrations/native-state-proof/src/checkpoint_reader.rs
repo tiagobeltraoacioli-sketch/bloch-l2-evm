@@ -3,6 +3,7 @@
 //! No arbitrary root or historical-header substitution is accepted by this API.
 use crate::{verify_evm_commitment, verify_utxo, StateObservation, StateProofError};
 use alloy_primitives::{Bytes, B256};
+use bloch_l2_evm::l1::height::{check_path_bounds, HeightCursor, HeightError, HeightPosition};
 use bloch_l2_evm::l1::{authenticate_body, AuthenticatedBody, L1Error};
 use bloch_native_escrow_pq::{
     checkpoint::VerifiedCheckpoint,
@@ -17,6 +18,7 @@ pub enum ReadError {
     Checkpoint(StoreError),
     Body(L1Error),
     State(StateProofError),
+    Height(HeightError),
 }
 
 /// Maximum independent SMT paths per atomic read (2 MiB of sibling hashes).
@@ -26,6 +28,52 @@ pub const MAX_UTXO_BATCH: usize = 256;
 pub struct UtxoRequest<'a> {
     pub entry: &'a EutxoEntry,
     pub siblings: &'a [[u8; 32]],
+}
+
+/// A checkpoint state observation annotated with a genesis-derived block height.
+/// This is block identification, not escrow funding or a permission to mint.
+#[derive(Debug)]
+pub struct HeightCheckpointObservation<T> {
+    observation: CheckpointObservation<T>,
+    position: HeightPosition,
+}
+impl<T> HeightCheckpointObservation<T> {
+    pub fn observation(&self) -> &CheckpointObservation<T> {
+        &self.observation
+    }
+    pub fn position(&self) -> HeightPosition {
+        self.position
+    }
+}
+
+/// Read UTXOs at the latest signed checkpoint and atomically advance their
+/// identification cursor through a complete chain from its previous position.
+/// `headers` includes that previous header and ends at the checkpoint header;
+/// only the checkpoint's complete transaction body and state proofs are supplied.
+/// The existing reader checks PQ signatures, freshness, body and every SMT path.
+/// Neither cursor nor store changes on failure. Successful calls advance only
+/// the in-memory cursor; repeated state queries use [`read_utxos`] instead.
+pub fn read_utxos_with_height(
+    store: &CheckpointStore,
+    current_epoch: u64,
+    cursor: &mut HeightCursor,
+    headers: &[Bytes],
+    transactions: &[Bytes],
+    requests: &[UtxoRequest<'_>],
+) -> Result<Vec<HeightCheckpointObservation<EutxoEntry>>, ReadError> {
+    check_path_bounds(headers).map_err(ReadError::Height)?;
+    // Bounds established that this header exists and has the exact native length.
+    let header = headers.last().ok_or(ReadError::Limit)?;
+    let observations = read_utxos(store, current_epoch, header, transactions, requests)?;
+    let anchor = observations.first().ok_or(ReadError::Limit)?.state().checkpoint();
+    let mut candidate = cursor.clone();
+    let position = candidate.advance(anchor, headers).map_err(ReadError::Height)?;
+    let result = observations
+        .into_iter()
+        .map(|observation| HeightCheckpointObservation { observation, position })
+        .collect();
+    *cursor = candidate;
+    Ok(result)
 }
 
 /// Read distinct outputs at one checkpoint, preserving request order. All bounds
