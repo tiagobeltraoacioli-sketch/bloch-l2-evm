@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+mod fixture;
+
+use bloch_l2_evm::proof_statement::ExecutionStatement;
+use sp1_sdk::{
+    Elf, LightProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Proof, SP1ProofWithPublicValues,
+    SP1PublicValues, SP1Stdin, SP1VerifyingKey,
+};
+use std::{error::Error, fs, io, time::Instant};
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+fn inputs(fixture: &fixture::Fixture) -> SP1Stdin {
+    let mut stdin = SP1Stdin::new();
+    stdin.write(&fixture.witness);
+    stdin.write(&fixture.context);
+    stdin.write_vec(alloy_rlp::encode(&fixture.body));
+    stdin
+}
+
+fn verify_expected<P: Prover>(
+    client: &P,
+    key: &SP1VerifyingKey,
+    proof: &SP1ProofWithPublicValues,
+    expected: &ExecutionStatement,
+) -> Result<()> {
+    if !matches!(proof.proof, SP1Proof::Core(_)) {
+        return Err(io::Error::other("only SP1 core proofs are permitted").into());
+    }
+    // Key comes from the operator-selected trusted ELF, never from the proof.
+    // None requires a successful guest exit, not a proven panic.
+    client.verify(proof, key, None)?;
+    expected.check_expected(proof.public_values.as_slice())?;
+    Ok(())
+}
+
+#[tokio::main(worker_threads = 2)]
+async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage: bloch-evm-sp1-host fixture <empty|contract> | <execute|prove|verify> <empty|contract> TRUSTED_ELF [PROOF_FILE]";
+    let mode = args.first().map(String::as_str).ok_or(usage)?;
+    let fixture = match args.get(1).map(String::as_str) {
+        Some("empty") => fixture::fixture_empty()?,
+        Some("contract") => fixture::fixture()?,
+        _ => return Err(usage.into()),
+    };
+    let expected_args = match mode {
+        "fixture" => 2,
+        "execute" => 3,
+        "prove" | "verify" => 4,
+        _ => return Err(usage.into()),
+    };
+    if args.len() != expected_args {
+        return Err(usage.into());
+    }
+    println!("SYNTHETIC DEV ONLY: local execution fixture; no L1 provenance or settlement.");
+    println!("Expected statement: {:?}", fixture.expected);
+    if mode == "fixture" {
+        return Ok(());
+    }
+    let elf = Elf::from(fs::read(&args[2])?);
+    if mode == "execute" {
+        println!("Initializing local SP1 executor");
+        let client = LightProver::new().await;
+        println!("Executing guest");
+        let started = Instant::now();
+        let (public, report) = client.execute(elf.clone(), inputs(&fixture)).await?;
+        if report.exit_code != 0 {
+            return Err(io::Error::other("guest execution failed").into());
+        }
+        fixture.expected.check_expected(public.as_slice())?;
+        println!(
+            "Guest matched host: {} instructions, {:?}",
+            report.total_instruction_count(),
+            started.elapsed()
+        );
+
+        // The real guest must abort for a false post-state and malformed body.
+        let mut invalid = fixture.witness.clone();
+        invalid.new_state_root = alloy_primitives::B256::ZERO;
+        let mut bad_root = SP1Stdin::new();
+        bad_root.write(&invalid);
+        bad_root.write(&fixture.context);
+        bad_root.write_vec(alloy_rlp::encode(&fixture.body));
+        let mut malformed = SP1Stdin::new();
+        malformed.write(&fixture.witness);
+        malformed.write(&fixture.context);
+        let mut body = alloy_rlp::encode(&fixture.body);
+        body.push(0);
+        malformed.write_vec(body);
+        for (name, stdin) in [("false post-state", bad_root), ("trailing body bytes", malformed)] {
+            let (_, report) = client.execute(elf.clone(), stdin).await?;
+            if report.exit_code == 0 {
+                return Err(io::Error::other(format!("guest accepted {name}")).into());
+            }
+            println!("Guest rejected {name}");
+        }
+        return Ok(());
+    }
+
+    if mode == "verify" {
+        // LightProver performs full cryptographic verification and cannot prove.
+        let client = LightProver::new().await;
+        let key = client.setup(elf).await?;
+        let proof = SP1ProofWithPublicValues::load(&args[3])?;
+        verify_expected(&client, key.verifying_key(), &proof, &fixture.expected)?;
+        println!("Core proof verified against trusted ELF and independently executed fixture");
+        return Ok(());
+    }
+
+    // Refuse replacement before starting an expensive proving job.
+    if fs::exists(&args[3])? {
+        return Err(io::Error::other("proof output already exists").into());
+    }
+    // Explicit CPU builder: environment variables cannot select a mock or remote prover.
+    println!("Initializing local SP1 CPU prover");
+    let client = ProverClient::builder().cpu().build().await;
+    println!("Setting up trusted guest key");
+    let key = client.setup(elf).await?;
+    println!("Generating core proof");
+    let started = Instant::now();
+    let proof = client.prove(&key, inputs(&fixture)).core().await?;
+    let prove_time = started.elapsed();
+    verify_expected(&client, key.verifying_key(), &proof, &fixture.expected)?;
+
+    let mut wrong_expected = fixture.expected;
+    wrong_expected.domain[0] ^= 1;
+    if verify_expected(&client, key.verifying_key(), &proof, &wrong_expected).is_ok() {
+        return Err(io::Error::other("accepted wrong trusted expectation").into());
+    }
+    let mut tampered = proof.clone();
+    let mut public = tampered.public_values.as_slice().to_vec();
+    *public.last_mut().ok_or("proof has no public bytes")? ^= 1;
+    tampered.public_values = SP1PublicValues::from(public.as_slice());
+    if client.verify(&tampered, key.verifying_key(), None).is_ok() {
+        return Err(io::Error::other("accepted tampered proof public values").into());
+    }
+    drop(tampered);
+    let mut truncated = proof.clone();
+    if let SP1Proof::Core(shards) = &mut truncated.proof {
+        shards.pop().ok_or("prover returned an empty core proof")?;
+    }
+    if client.verify(&truncated, key.verifying_key(), None).is_ok() {
+        return Err(io::Error::other("accepted a core proof missing its final shard").into());
+    }
+    drop(truncated);
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(&args[3])?;
+    bincode::serialize_into(&file, &proof)?;
+    file.sync_all()?;
+    let loaded = SP1ProofWithPublicValues::load(&args[3])?;
+    verify_expected(&client, key.verifying_key(), &loaded, &fixture.expected)?;
+    println!(
+        "Core proof accepted; altered expectation, public values and truncated core proof rejected; prove {:?}, {} bytes persisted",
+        prove_time,
+        file.metadata()?.len()
+    );
+    Ok(())
+}

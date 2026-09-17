@@ -8,11 +8,15 @@ Changing the core source, configuration, domain, dependencies, features or
 compiler changes the program that a future verifier must identify and trust.
 
 The guest linked successfully on 2026-09-17 using SP1 CLI 6.8.0 and the
-checksum-verified `succinct-1.96.0-64bit-v2` compiler. The release build took
-3m 08s with two build jobs. Its local ELF SHA-256 is
-`fe2cc19af1309396d1d58034e45acfbfab8a64c6060c2e1fb3b11ee217c21ad6`.
-This is build evidence, not successful zkVM execution or an accepted proof;
-it does not establish bit-for-bit reproducibility on other machines.
+checksum-verified `succinct-1.96.0-64bit-v2` compiler. The initial release build
+took 3m 08s with two build jobs. After the core's height-identification module
+was added, the guest was rebuilt successfully in 17.07s; its current local
+ELF SHA-256 is
+`39d78301107d0b2550355894dff4ce57e5762c7e6ed72fbb1766d9b6af80cbf2`.
+The local SDK subsequently executed both the empty and signed-contract fixtures
+successfully and rejected false post-state roots and trailing body bytes. See
+the [host qualification results](../host/README.md). This is not an accepted
+cryptographic proof or bit-for-bit reproducibility on other machines.
 Compiler qualification and artifact checks are recorded in
 [SP1-TOOLCHAIN.md](../../../docs/SP1-TOOLCHAIN.md).
 
