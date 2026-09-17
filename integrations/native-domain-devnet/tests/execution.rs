@@ -107,6 +107,51 @@ fn accepted_source_drives_mandatory_chunks_without_duplicate_credit_after_failed
             &inbox.proofs(0..3).unwrap(),
         )
         .unwrap();
+    #[cfg(unix)]
+    {
+        use bloch_native_domain_devnet::journal::{JournalLimits, SourceJournal};
+        // Recover through actual files with an independently retained mark,
+        // then use that recovered source for every EVM block below.
+        let directory = std::env::temp_dir().join(format!(
+            "bloch-source-execution-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut journal = SourceJournal::create(
+            &directory,
+            network,
+            domain.id(),
+            support::cursor(),
+            JournalLimits::default(),
+        )
+        .unwrap();
+        let retained = journal
+            .append(
+                trusted_source,
+                position,
+                &support::headers(2),
+                &snapshot,
+                &inbox.proofs(0..3).unwrap(),
+            )
+            .unwrap();
+        drop(journal);
+        let recovered = SourceJournal::open(
+            &directory,
+            network,
+            domain.id(),
+            support::cursor(),
+            retained,
+            JournalLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(recovered.registry().unwrap(), &source);
+        source = recovered.registry().unwrap().clone();
+        drop(recovered);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     let accepted_source = source.clone();
     for expected_consumed in [2, 3, 3] {
         let range = domain.required_deposit_range(source.count()).unwrap();
