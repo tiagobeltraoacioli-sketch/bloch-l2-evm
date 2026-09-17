@@ -62,6 +62,31 @@ existing directory. If initialization/funding succeeded but binding the HTTP
 port failed, the database is already initialized: use reopen with a free port.
 A partially initialized directory is not automatically overwritten or repaired.
 
+## Recover by replay into another directory
+
+Stop the source node first. If its canonical headers and complete bodies are
+readable, reconstruct its last completed MDBX checkpoint into a new directory:
+
+```sh
+integrations/reth-execution/target/debug/bloch-evm-dev \
+  --synthetic-dev --data-dir /tmp/bloch-evm-recovered --init \
+  --replay-from /tmp/bloch-evm-local --port 8545
+```
+
+`--replay-from` requires `--init`, forbids `--fund`, and opens the source datasets
+read-only. It re-executes each block and checks its full V2 header/commitments,
+including state and receipts, rather than copying potentially damaged current
+state or history indices. The new service starts only after replay and attachment
+validation succeed. Existing target directories are refused.
+
+Static-file rows ahead of the completed MDBX checkpoint are excluded; the source
+is not truncated or repaired. Missing/corrupt canonical bodies or inconsistent
+headers stop recovery instead of inventing replacement blocks. An error leaves
+the separate target incomplete. Preserve the source and inspect the error before
+attempting another new target. This local synthetic recovery trusts the recorded
+canonical selection; it does not authenticate native/L1 derivation or establish
+finality.
+
 ## Evidence and limits
 
 `tests/devnode_process.rs` launches the executable as a separate process, sends
@@ -97,7 +122,13 @@ execution/persistence error terminates the service; it does not silently discard
 transactions or retry partially persisted work. Pool contents are in memory and
 are not restored after restart; already mined transactions remain queryable.
 
-The restart test establishes orderly shutdown/reopen, not crash recovery. Storage
-spans MDBX, static files and RocksDB; cross-backend crash recovery, fork choice,
+Recovery tests cover SIGKILL between writes after a completed commit, replay of
+signed contracts into another directory, and a reproduced commit boundary where
+static files are finalized but MDBX aborts. Startup rejects that mismatch; replay
+recovers only the completed prefix. Separate tests rebuild missing genesis history
+indices and reject a missing required block body. These are specific failure
+models, not exhaustive crash/power-loss qualification.
+
+Storage spans MDBX, static files and RocksDB; broader crash recovery, fork choice,
 reorganizations, native derivation/finality, authenticated pending environments,
 browser-wallet qualification and the proof backend remain open delivery work.

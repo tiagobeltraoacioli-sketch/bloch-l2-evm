@@ -133,6 +133,15 @@ test deliberately violates sole-writer ownership to check defensive rejection.
 Separate regressions remove account or storage history indices and verify that
 attachment rejects the database without restoring the deleted indices.
 
+`replay_canonical_prefix(source, fresh_target)` re-executes the completed MDBX
+prefix into separate storage. It validates each full V2 header against execution,
+rebuilds historical indices and excludes static-file rows ahead of the checkpoint.
+It requires stopped source writers and trusted local canonical selection; it does
+not authenticate L1 attributes. The developer CLI's `--replay-from` opens source
+datasets read-only and refuses an existing target. Missing bodies fail recovery.
+Tests reproduce static-file finalization before an aborted MDBX commit, rebuild
+missing history indices and exercise signed contract replay through subprocesses.
+
 ## Validation scope
 
 `tests/provider.rs` supplies a fixture implementing upstream's `EvmStateProvider`

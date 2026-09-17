@@ -27,6 +27,8 @@ pub use execute::{execute_next_block, prepare_genesis, validate_and_execute_bloc
 pub mod maintenance;
 pub mod payload;
 pub mod pool;
+pub mod recovery;
+pub use recovery::replay_canonical_prefix;
 pub mod rpc;
 pub mod rpc_transport;
 pub mod rpc_types;

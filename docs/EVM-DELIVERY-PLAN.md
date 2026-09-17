@@ -192,3 +192,10 @@ signed deploy/call, receipts/logs/state/block parsing and orderly restart. It
 exposed omitted neutral RPC header projections (`difficulty`, `extraData`), now
 serialized consistently with the existing Reth header traits without changing V2
 hashes. Browser wallet approval/network flows remain a separate unverified gate.
+
+Local recovery now replays the completed MDBX canonical prefix into a separate
+fresh directory, with source datasets opened read-only by the developer CLI.
+Tests cover SIGKILL between writes, signed contract replay/continued mining,
+static-file finalization before MDBX abort, genesis-index reconstruction and
+rejection of missing bodies. Broader crash/power-loss and native-finality recovery
+remain open; this path trusts the synthetic source's canonical selection.

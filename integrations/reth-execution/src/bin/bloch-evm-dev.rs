@@ -8,11 +8,12 @@ use bloch_l2_evm::{
     ChainSpec, DepositMint, DepositProvenance,
 };
 use bloch_reth_execution::{
-    build_eth_api, pool_maintenance, prepare_genesis, start_http_rpc, BlochChainSpec, BlochEvmConfig,
-    BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, BlochTransactionValidator, CanonicalCoordinator,
+    build_eth_api, pool_maintenance, prepare_genesis, replay_canonical_prefix, start_http_rpc, BlochChainSpec,
+    BlochEvmConfig, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, BlochTransactionValidator,
+    CanonicalCoordinator,
 };
 use eyre::{bail, ensure, Result};
-use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
+use reth_db::mdbx::{init_db_for, open_db, open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
@@ -26,9 +27,10 @@ use reth_transaction_pool::{
 };
 use std::{future::Future, path::PathBuf, sync::Arc, task::Poll, time::Duration};
 
-const USAGE: &str = "bloch-evm-dev --synthetic-dev --data-dir PATH [--init] [--fund ADDRESS] [--port 8545] [--block-interval-ms 1000]\n\
+const USAGE: &str = "bloch-evm-dev --synthetic-dev --data-dir PATH [--init] [--fund ADDRESS] [--replay-from SOURCE] [--port 8545] [--block-interval-ms 1000]\n\
 Isolated synthetic developer domain, loopback HTTP, no P2P/L1 derivation/finality.\n\
 --init requires a nonexistent directory; --fund is init-only synthetic issuance (100,000,000 sats).\n\
+--replay-from requires --init and forbids --fund; re-executes a stopped source into the new directory without writing the source.\n\
 Without --init the existing archival database is validated and reopened. Partial initialization is never retried automatically.\n\
 Pending RPC is unsupported. No private keys are generated or accepted. Ctrl-C stops the service.";
 
@@ -36,6 +38,7 @@ struct Options {
     path: PathBuf,
     init: bool,
     fund: Option<Address>,
+    replay_from: Option<PathBuf>,
     port: u16,
     block_time: Duration,
 }
@@ -43,6 +46,7 @@ impl Options {
     fn parse() -> Result<Option<Self>> {
         let mut args = std::env::args().skip(1);
         let (mut synthetic, mut path, mut init, mut fund) = (false, None, false, None);
+        let mut replay_from = None;
         let (mut port, mut millis) = (8545, 1000u64);
         let mut seen = std::collections::BTreeSet::new();
         while let Some(arg) = args.next() {
@@ -56,6 +60,9 @@ impl Options {
                 "--init" => init = true,
                 "--data-dir" => path = Some(PathBuf::from(args.next().ok_or_else(|| eyre::eyre!("missing PATH"))?)),
                 "--fund" => fund = Some(args.next().ok_or_else(|| eyre::eyre!("missing ADDRESS"))?.parse()?),
+                "--replay-from" => {
+                    replay_from = Some(PathBuf::from(args.next().ok_or_else(|| eyre::eyre!("missing SOURCE"))?))
+                }
                 "--port" => port = args.next().ok_or_else(|| eyre::eyre!("missing port"))?.parse()?,
                 "--block-interval-ms" => {
                     millis = args.next().ok_or_else(|| eyre::eyre!("missing interval"))?.parse()?
@@ -65,6 +72,10 @@ impl Options {
         }
         ensure!(synthetic, "--synthetic-dev is mandatory\n{USAGE}");
         ensure!(fund.is_none() || init, "--fund is only allowed with --init");
+        ensure!(
+            replay_from.is_none() || (init && fund.is_none()),
+            "--replay-from requires --init and forbids --fund"
+        );
         ensure!(millis > 0, "block interval must be nonzero");
         let block_time = Duration::from_millis(millis);
         ensure!(
@@ -75,6 +86,7 @@ impl Options {
             path: path.ok_or_else(|| eyre::eyre!("--data-dir is required"))?,
             init,
             fund,
+            replay_from,
             port,
             block_time,
         }))
@@ -148,7 +160,24 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
             .build()?,
         runtime.clone(),
     )?;
-    if options.init {
+    if let Some(source) = &options.replay_from {
+        let source: BlochProviderFactory = ProviderFactory::new(
+            Arc::new(open_db_read_only(source.join("db"), DatabaseArguments::default())?),
+            spec.clone(),
+            StaticFileProvider::read_only(source.join("static"))?,
+            RocksDBBuilder::new(source.join("rocks"))
+                .with_default_tables()
+                .with_read_only(true)
+                .build()?,
+            runtime.clone(),
+        )?;
+        let recovered = replay_canonical_prefix(&source, &factory)?;
+        eprintln!(
+            "Replayed acknowledged synthetic prefix: block={} hash={}; source opened read-only",
+            recovered.0.number,
+            recovered.hash()
+        );
+    } else if options.init {
         let genesis = prepare_genesis(&spec, factory.latest()?.as_ref())?;
         let writer = factory.database_provider_rw()?;
         writer.save_blocks(vec![genesis], SaveBlocksMode::Full)?;

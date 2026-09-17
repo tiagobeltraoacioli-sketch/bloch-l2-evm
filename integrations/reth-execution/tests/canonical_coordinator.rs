@@ -14,7 +14,8 @@ use reth_db_api::{
 };
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
-    BlockNumReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+    BlockNumReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+    StaticFileProviderFactory, StaticFileWriter,
 };
 use std::{path::Path, sync::Arc};
 
@@ -151,4 +152,79 @@ fn assert_missing_history(accounts: bool) {
     }
     assert_eq!(factory.sealed_header(1).unwrap().unwrap(), tip);
     assert_eq!(factory.best_block_number().unwrap(), 1);
+    let rebuilt_directory = tempfile::tempdir().unwrap();
+    let rebuilt = open(rebuilt_directory.path(), spec);
+    assert_eq!(
+        bloch_reth_execution::replay_canonical_prefix(&factory, &rebuilt).unwrap(),
+        tip
+    );
+    assert_eq!(CanonicalCoordinator::attach(rebuilt).unwrap().head(), &tip);
+    if accounts {
+        assert_eq!(reader.tx_ref().entries::<tables::AccountsHistory>().unwrap(), 0);
+    } else {
+        assert_eq!(reader.tx_ref().entries::<tables::StoragesHistory>().unwrap(), 0);
+    }
+}
+
+#[test]
+fn finalized_static_files_ahead_of_mdbx_are_rejected_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let spec = Arc::new(BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(74), 10).unwrap());
+    let factory = open(directory.path(), spec.clone());
+    let genesis = prepare_genesis(&spec, factory.latest().unwrap().as_ref()).unwrap();
+    let writer = factory.database_provider_rw().unwrap();
+    writer.save_blocks(vec![genesis], SaveBlocksMode::Full).unwrap();
+    writer.commit().unwrap();
+    let mut accepted = CanonicalCoordinator::attach(factory.clone()).unwrap();
+    let parent = accepted.extend(spec.genesis_hash(), attributes(11), vec![]).unwrap();
+    drop(accepted);
+    let executed = bloch_reth_execution::execute_next_block(
+        &bloch_reth_execution::BlochEvmConfig::new(spec.execution(), spec.domain()),
+        factory.latest().unwrap().as_ref(),
+        &parent,
+        attributes(12),
+        vec![],
+    )
+    .unwrap();
+    let writer = factory.database_provider_rw().unwrap();
+    writer.save_blocks(vec![executed], SaveBlocksMode::Full).unwrap();
+    // Reproduce the durable boundary in DatabaseProvider::commit: static files
+    // are finalized before MDBX commits. Abort MDBX after that boundary.
+    factory.static_file_provider().finalize().unwrap();
+    drop(writer);
+    assert_eq!(factory.best_block_number().unwrap(), 1);
+    assert_eq!(factory.last_block_number().unwrap(), 2);
+    drop(factory);
+
+    let reopened = open(directory.path(), spec.clone());
+    let error = CanonicalCoordinator::attach(reopened.clone())
+        .err()
+        .expect("partial persistence must not serve a head");
+    assert!(error.to_string().contains("checkpoints disagree"), "{error}");
+    assert_eq!(reopened.best_block_number().unwrap(), 1);
+    assert_eq!(reopened.last_block_number().unwrap(), 2);
+    assert_eq!(reopened.sealed_header(1).unwrap().unwrap(), parent);
+    let target_directory = tempfile::tempdir().unwrap();
+    let target = open(target_directory.path(), spec);
+    let recovered = bloch_reth_execution::replay_canonical_prefix(&reopened, &target).unwrap();
+    assert_eq!(recovered, parent);
+    assert_eq!(CanonicalCoordinator::attach(target.clone()).unwrap().head(), &parent);
+    assert_eq!(target.last_block_number().unwrap(), 1);
+    assert!(target.sealed_header(2).unwrap().is_none());
+    // Recovery did not truncate or otherwise repair the source in place.
+    assert_eq!(reopened.best_block_number().unwrap(), 1);
+    assert_eq!(reopened.last_block_number().unwrap(), 2);
+    assert!(bloch_reth_execution::replay_canonical_prefix(&reopened, &target).is_err());
+    // Losing a required body is not recoverable by inventing an empty block.
+    let writer = reopened.database_provider_rw().unwrap();
+    writer
+        .tx_ref()
+        .delete::<bloch_reth_execution::BlochV2Deposits>(1, None)
+        .unwrap();
+    writer.commit().unwrap();
+    let incomplete_directory = tempfile::tempdir().unwrap();
+    let incomplete = open(incomplete_directory.path(), target.chain_spec());
+    assert!(bloch_reth_execution::replay_canonical_prefix(&reopened, &incomplete).is_err());
+    assert_eq!(incomplete.best_block_number().unwrap(), 0);
+    assert!(incomplete.sealed_header(1).unwrap().is_none());
 }

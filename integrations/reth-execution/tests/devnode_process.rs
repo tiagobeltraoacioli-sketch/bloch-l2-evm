@@ -48,13 +48,31 @@ impl Node {
 }
 
 fn launch(directory: &Path, fund: Option<Address>) -> (Node, HttpClient) {
+    launch_at_interval(directory, fund, "50")
+}
+
+fn launch_at_interval(directory: &Path, fund: Option<Address>, interval: &str) -> (Node, HttpClient) {
+    launch_options(directory, fund, interval, None)
+}
+
+fn launch_options(
+    directory: &Path,
+    fund: Option<Address>,
+    interval: &str,
+    replay: Option<&Path>,
+) -> (Node, HttpClient) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_bloch-evm-dev"));
-    command
-        .args(["--synthetic-dev", "--data-dir"])
-        .arg(directory)
-        .args(["--port", "0", "--block-interval-ms", "50"]);
+    command.args(["--synthetic-dev", "--data-dir"]).arg(directory).args([
+        "--port",
+        "0",
+        "--block-interval-ms",
+        interval,
+    ]);
     if let Some(address) = fund {
         command.args(["--init", "--fund", &address.to_string()]);
+    }
+    if let Some(source) = replay {
+        command.args(["--init", "--replay-from"]).arg(source);
     }
     let mut node = Node(command.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap());
     let output = node.0.stdout.take().unwrap();
@@ -119,6 +137,15 @@ async fn send_and_mine(client: &HttpClient, transaction: Bytes) -> Value {
 
 #[tokio::test]
 async fn executable_mines_signed_contract_and_reopens_persisted_state() {
+    contract_restart(false).await;
+}
+
+#[tokio::test]
+async fn executable_replays_contract_into_fresh_storage_and_continues_mining() {
+    contract_restart(true).await;
+}
+
+async fn contract_restart(replay: bool) {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("node");
     let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
@@ -164,7 +191,11 @@ async fn executable_mines_signed_contract_and_reopens_persisted_state() {
     first.stop();
     drop(first);
 
-    let (mut second, client) = launch(&directory, None);
+    let (mut second, client) = if replay {
+        launch_options(&temporary.path().join("replayed"), None, "50", Some(&directory))
+    } else {
+        launch(&directory, None)
+    };
     let stored: String = client
         .request("eth_getStorageAt", rpc_params![contract, "0x0", "latest"])
         .await
@@ -242,4 +273,50 @@ fn executable_requires_synthetic_mode_and_refuses_existing_initialization() {
     assert!(!missing.exists());
     assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve original contents");
     assert_eq!(std::fs::read_dir(existing).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn abrupt_exit_after_acknowledged_commit_preserves_funding_and_can_resume() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("node");
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let sender = Address::from_public_key(key.verifying_key());
+    // Keep the process between writes. This tests SIGKILL after an acknowledged
+    // commit, deliberately not interruption inside multi-backend persistence.
+    let (mut first, client) = launch_at_interval(&directory, Some(sender), "60000");
+    let acknowledged: Value = client
+        .request("eth_getBlockByNumber", rpc_params!["latest", false])
+        .await
+        .unwrap();
+    assert_eq!(acknowledged["number"], "0x1");
+    let balance: String = client
+        .request("eth_getBalance", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    assert_ne!(balance, "0x0");
+    drop(client);
+    first.0.kill().unwrap();
+    assert!(!first.0.wait().unwrap().success());
+    drop(first);
+
+    let (mut resumed, client) = launch(&directory, None);
+    let stored: Value = client
+        .request("eth_getBlockByNumber", rpc_params!["0x1", false])
+        .await
+        .unwrap();
+    assert_eq!(stored, acknowledged);
+    let restored: String = client
+        .request("eth_getBalance", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    assert_eq!(restored, balance);
+    let receipt = send_and_mine(&client, signed(&key, 0, TxKind::Call(sender), Bytes::new())).await;
+    assert_eq!(receipt["status"], "0x1");
+    let nonce: String = client
+        .request("eth_getTransactionCount", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    assert_eq!(nonce, "0x1");
+    drop(client);
+    resumed.stop();
 }
