@@ -2,7 +2,9 @@
 
 The objective is a developer-usable EVM integrated with Bloch. A successful
 library test or local example alone does not complete that objective. Production
-activation and movement of real funds are outside the currently authorized work.
+activation and movement of real funds are outside the currently authorized work. The
+[native activation proposal](NATIVE-DOMAIN-ACTIVATION-PROPOSAL.md) records the
+required consensus state and release gates without assigning an activation epoch.
 
 ## Current evidence and completion gates
 
