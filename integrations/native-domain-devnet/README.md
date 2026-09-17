@@ -48,7 +48,8 @@ domain/anchor identity, and returns the existing `TrustedEscrowBatch` with only
 the requested locations. It neither creates `DepositMint` nor authenticates
 transaction DA. The existing escrow execution verifier still requires the exact
 mandatory prefix and atomic EVM/witness verification before its cursor advances.
-Source and EVM persistence are not implemented by this in-memory registry.
+The registry itself remains in-memory. The optional Unix [source journal](JOURNAL.md)
+adds exact-tip durable source replay; EVM/SP1 settlement persistence remains separate.
 
 ## Canonical codec
 
@@ -84,7 +85,7 @@ cargo +1.94.1 test --offline --locked --manifest-path integrations/native-domain
 cargo +1.94.1 clippy --offline --locked --manifest-path integrations/native-domain-devnet/Cargo.toml --all-targets -- -D warnings
 ```
 
-Validation on 2026-09-17: **10 unit tests and 2 execution integration tests passed**,
+Validation on 2026-09-17: **18 unit tests and 2 execution integration tests passed**,
 with no ignored cases; all-target Clippy with warnings denied also passed.
 
 The standalone lockfile starts from the portable core's dependency versions;
@@ -99,8 +100,7 @@ execution, exercises mandatory prefix chunks and invalid-witness atomic retry,
 and compares minted balances and independently computed state roots. No mainnet funds, wallet keys or consensus rules are modified.
 
 Remaining gates: native consensus-enforced locks and source commitment
-inclusion, independently authenticated finalized checkpoint policy, durable
-source replay with retained rollback protection, transaction DA derivation,
+inclusion, independently authenticated finalized checkpoint policy, independent durable retention of the exact source trust mark, transaction DA derivation,
 atomic integration with execution persistence, and withdrawal/release proofs.
 
 ## V2 selection for an independently verified execution

@@ -17,6 +17,9 @@ use bloch_l2_evm::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(unix)]
+pub mod journal;
+
 mod v2;
 pub use v2::ValidatedV2Prefix;
 
@@ -239,6 +242,16 @@ impl SourceRegistry {
             locations: vec![],
             deposits: vec![],
         })
+    }
+
+    pub fn network(&self) -> B256 {
+        self.network
+    }
+    pub fn genesis(&self) -> B256 {
+        self.genesis
+    }
+    pub fn domain(&self) -> B256 {
+        self.domain
     }
 
     pub fn commitment(&self) -> B256 {

@@ -7,7 +7,7 @@ fn hash(n: u8) -> B256 {
     B256::repeat_byte(n)
 }
 #[path = "../tests/support/mod.rs"]
-mod support;
+pub(crate) mod support;
 use support::{cursor, headers, position};
 fn path(state: &SourceRegistry, height: u64) -> Vec<Bytes> {
     headers(height)[state.anchor().height as usize..].to_vec()
@@ -23,10 +23,10 @@ fn anchor(height: u64) -> SourceAnchor {
 fn registry() -> SourceRegistry {
     SourceRegistry::new(hash(1), hash(2), cursor()).unwrap()
 }
-fn fixture(count: usize) -> (SourceBatch, Vec<InboxProof>) {
+pub(crate) fn fixture(count: usize) -> (SourceBatch, Vec<InboxProof>) {
     fixture_recipient(count, Address::repeat_byte(9))
 }
-fn fixture_recipient(count: usize, recipient: Address) -> (SourceBatch, Vec<InboxProof>) {
+pub(crate) fn fixture_recipient(count: usize, recipient: Address) -> (SourceBatch, Vec<InboxProof>) {
     let coins = (0..count)
         .map(|index| {
             (

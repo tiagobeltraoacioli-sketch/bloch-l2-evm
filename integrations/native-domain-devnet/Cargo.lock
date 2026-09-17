@@ -718,6 +718,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "bloch-l2-evm",
+ "libc",
  "sha3",
 ]
 
