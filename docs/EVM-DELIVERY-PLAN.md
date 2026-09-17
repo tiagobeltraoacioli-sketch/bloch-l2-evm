@@ -15,7 +15,7 @@ required consensus state and release gates without assigning an activation epoch
 | Developer node and wallet workflow | Isolated synthetic executable with Reth HTTP/log filters, mining, canonical persistence and pool maintenance; ethers and real MetaMask deploy/call/restart exercised, plus compiled Cancun Solidity, ABI events, custom errors, rejection, revert and log-query tests | Broader wallet compatibility, authenticated pending/native derivation, crash recovery and complete supported RPC qualification |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations with genesis-derived height identification; experimental complete inbox/source registry checks native ancestry and immutable historical leaves | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
-| Proof backend | Canonical execution statement; pinned SP1 6.8.0 guest and real core proofs for empty and signed-contract fixtures, independently verified with tamper and cross-fixture rejection; costs and cryptographic assumptions recorded | Consensus integration with authenticated native inputs, trusted program/key upgrade policy, bounded proof admission and broader adversarial/security qualification |
+| Proof backend | Canonical execution statement; pinned SP1 6.8.0 guest and real core proofs for empty and signed-contract fixtures, independently verified with tamper and cross-fixture rejection; costs and cryptographic assumptions recorded; verified capabilities feed a local V2 cursor and a proof-reverified journal with independently retained rollback floors | Consensus integration with authenticated native inputs, trusted program/key upgrade policy, bounded proof admission and broader adversarial/security qualification |
 | Compatibility and release evidence | Focused core regressions, all 122 pinned Ethereum KZG verification vectors passing on both backends, wallet adapter, real MetaMask and compiled Solidity acceptance tests, and a documented exercised RPC surface | Wider applicable EVM conformance fixtures, combined native settlement acceptance and complete deployment/recovery qualification |
 
 ## Execution order
@@ -51,6 +51,13 @@ retained native ancestry cursor. Its integration test executes the mandatory
 deposit prefix through the real EVM, including failed-witness retry without
 repeated credit. The source commitment is still authenticated externally; this
 does not establish a native consensus lock or turn UTXO membership into funding.
+
+The [local SP1 settlement journal](../integrations/sp1-execution/host/SETTLEMENT.md)
+now checks program identity and V2 continuity before durable publication, then
+reverifies the actual proofs on reopen. Three real-artifact integration tests
+cover alternate fixtures, replay, rollback floors, corruption and separate CLI
+processes. This journal alone does not persist source authorization or inbox
+consumption and is not a native settlement transaction.
 
 ## Work tracking
 
