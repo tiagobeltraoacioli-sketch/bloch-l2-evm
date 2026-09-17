@@ -283,7 +283,9 @@ async fn contract_restart(replay: bool) {
     let filter: String = client
         .request(
             "eth_newFilter",
-            rpc_params![serde_json::json!({"address": contract, "fromBlock": "latest"})],
+            // getFilterLogs re-evaluates the stored filter's block tags. Pin
+            // the start so later empty blocks cannot move it past the event.
+            rpc_params![serde_json::json!({"address": contract, "fromBlock": deployed["blockNumber"]})],
         )
         .await
         .unwrap();
