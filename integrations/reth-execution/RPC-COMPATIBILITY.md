@@ -19,6 +19,7 @@ the commands in [DEVNODE.md](DEVNODE.md).
 | Read a pool-aware nonce | `eth_getTransactionCount(address, "pending")` is available; ethers exercises this during transaction population | `../../wallets/devnode-ethers.test.mjs` |
 | Read a synthesized pending block | `eth_getBlockByNumber("pending", false)` returns an error | `tests/rpc_developer_flow.rs`, `../../wallets/devnode-ethers.test.mjs` |
 | Recover readable canonical history | Fresh-directory replay re-executes the completed source prefix and preserves transaction receipts and state | `tests/devnode_process.rs`, `tests/canonical_coordinator.rs` |
+| Use compiled Solidity through ethers | Pinned solc 0.8.30 targeting Cancun deploys a contract, decodes indexed ABI events and custom errors, and reads persisted code/state/logs after restart | [Solidity acceptance](../../wallets/SOLIDITY.md) |
 | Use MetaMask approval and signing | The pinned real extension connects, rejects, deploys, calls and reads state after restart, with observed UI clicks and independently recovered transaction signatures | [Browser acceptance](../../wallets/browser/README.md) |
 
 The process tests use public fixture keys and synthetic initial funding. They do

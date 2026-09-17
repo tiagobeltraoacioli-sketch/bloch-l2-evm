@@ -25,7 +25,9 @@ synthetic funding, real HTTP, automatic mining and orderly database restart.
 The [real MetaMask UI acceptance](wallets/browser/README.md) now covers connection,
 rejection, signing, deployment/call and state after restart. The
 [RPC compatibility matrix](integrations/reth-execution/RPC-COMPATIBILITY.md)
-records logs, filters, revert handling and other exercised behavior.
+records logs, filters, revert handling and other exercised behavior. The
+[Solidity acceptance](wallets/SOLIDITY.md) compiles for Cancun and exercises
+ABI deployment, events, custom errors and state persistence through ethers.
 The [SP1 harness](integrations/sp1-execution/host/README.md) records actual proof
 results and costs separately from ordinary guest execution. Native derivation,
 settlement, broader compatibility and production proof integration remain open.
