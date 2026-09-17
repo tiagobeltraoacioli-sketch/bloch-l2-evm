@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test bloch-l2.test.mjs",
-    "test:devnode": "node --test devnode-ethers.test.mjs"
+    "test:devnode": "node --test devnode-ethers.test.mjs",
+    "test:browser": "node --test browser/devnode-metamask.test.mjs"
   },
   "dependencies": {
     "ethers": "6.17.0"

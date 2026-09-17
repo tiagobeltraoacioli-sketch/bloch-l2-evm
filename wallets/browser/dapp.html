@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>Bloch synthetic wallet acceptance</title>
+<h1>Synthetic developer domain only</h1><p id="notice"></p><button id="connect">Connect MetaMask</button><pre id="result"></pre>
+<script type="module">
+import {createBlochL2Wallet} from './bloch-l2.mjs';
+const providers=[];
+window.addEventListener('eip6963:announceProvider',event=>providers.push(event.detail));
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+window.result=null;window.rpcTrace=[];window.requestSequence=0;
+window.start=async(action)=>{const sequence=++window.requestSequence;window.result=null;try{window.result={sequence,ok:true,value:await action()};}catch(e){window.result={sequence,ok:false,code:e.code,message:e.message};}document.querySelector('#result').textContent=JSON.stringify(window.result);};
+window.connect=()=>window.start(async()=>{
+ const selected=providers.find(p=>p.info.rdns==='io.metamask');if(!selected)throw Error('real MetaMask EIP-6963 provider missing');
+ window.realProvider=selected.provider;
+ // Transparent request tracing: results and errors come exclusively from the real extension.
+ const observed={request:async(request)=>{const entry={method:request.method,status:'pending'};window.rpcTrace.push(entry);try{const result=await selected.provider.request(request);entry.status='resolved';return result;}catch(error){entry.status='rejected';entry.code=error.code;throw error;}}};
+ window.wallet=createBlochL2Wallet(observed,{rpcUrl:RPC_ENDPOINT_JSON,chainId:700771});
+ document.querySelector('#notice').textContent=wallet.security.notice;
+ const session=await wallet.connect();window.account=session.accounts[0];return session;
+});
+document.querySelector('#connect').onclick=window.connect;
+window.send=(tx)=>window.start(()=>wallet.sendTransaction({from:window.account,...tx}));
+</script>
