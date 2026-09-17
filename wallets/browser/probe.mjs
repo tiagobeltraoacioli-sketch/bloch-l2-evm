@@ -15,6 +15,6 @@ try {
  await page.getByRole('button',{name:'Import using Secret Recovery Phrase',exact:true}).click();
  await page.getByRole('button',{name:'Import using Secret Recovery Phrase',exact:true}).waitFor({state:'hidden'});
  console.log('AFTER SRP',await page.locator('body').innerText());
- for(const input of await page.locator('input').all()) console.log('INPUT',await input.getAttribute('type'),await input.getAttribute('data-testid'),await input.getAttribute('placeholder'));
+ console.log((await page.locator('body').innerHTML()).slice(-12000));
 
 } finally {await c.close();await rm(p,{recursive:true,force:true});}
