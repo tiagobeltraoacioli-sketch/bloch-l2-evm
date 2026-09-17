@@ -132,6 +132,9 @@ fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
         assert_eq!(factory.best_block_number().unwrap(), 3);
         assert_eq!(factory.sealed_header(3).unwrap().unwrap(), tip);
     }
+    let expected_prefix: Vec<_> = (1..=2)
+        .map(|height| export_canonical_witness(&factory, height).unwrap().expected())
+        .collect();
     drop(coordinator);
     drop(factory);
     let output = directory.path().join("block-3.json");
@@ -168,6 +171,27 @@ fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
     let second = directory.path().join("block-3-again.json");
     assert!(run("3", &second).status.success());
     assert_eq!(std::fs::read(second).unwrap(), bytes);
+    let mut chain_bytes = Vec::new();
+    for (index, expected) in expected_prefix.iter().enumerate() {
+        let height = (index + 1).to_string();
+        let output = directory.path().join(format!("block-{height}.json"));
+        let exported = run(&height, &output);
+        assert!(
+            exported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        let encoded = std::fs::read(output).unwrap();
+        let restored = ExecutionArtifact::decode(&encoded, spec.execution(), spec.domain()).unwrap();
+        assert_eq!(&restored.expected(), expected);
+        chain_bytes.push(encoded);
+    }
+    chain_bytes.push(bytes.clone());
+    for pair in chain_bytes.windows(2) {
+        let previous = ExecutionArtifact::decode(&pair[0], spec.execution(), spec.domain()).unwrap();
+        let next = ExecutionArtifact::decode(&pair[1], spec.execution(), spec.domain()).unwrap();
+        assert_eq!(next.parent(), previous.header());
+    }
     // Explicit opt-in for the separate SP1 qualification process. Never replace
     // an existing artifact or retain the database/test fixture implicitly.
     if let Some(path) = std::env::var_os("BLOCH_QUALIFICATION_ARTIFACT") {
@@ -178,5 +202,19 @@ fn persisted_signed_contract_exports_actual_witness_and_cli_preserves_source() {
             .unwrap();
         file.write_all(&bytes).unwrap();
         file.sync_all().unwrap();
+    }
+    if let Some(path) = std::env::var_os("BLOCH_QUALIFICATION_CHAIN_DIRECTORY") {
+        let path = std::path::PathBuf::from(path);
+        std::fs::create_dir(&path).unwrap();
+        for (index, encoded) in chain_bytes.iter().enumerate() {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path.join(format!("block-{}.json", index + 1)))
+                .unwrap();
+            file.write_all(encoded).unwrap();
+            file.sync_all().unwrap();
+        }
+        std::fs::File::open(path).unwrap().sync_all().unwrap();
     }
 }

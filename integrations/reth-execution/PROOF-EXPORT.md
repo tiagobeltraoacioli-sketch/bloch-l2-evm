@@ -50,8 +50,9 @@ expectation, not a proof or a native funding permission.
 
 The integration test persists a synthetic funding block, a signed contract
 deployment and a signed storage update to `42`. It checks the library export,
-then closes the writer and exports through the separate CLI process. It also
-checks rejected heights, output overwrite protection and repeated export bytes.
+then closes the writer and exports all three blocks through separate CLI
+processes. Their complete parent headers must form the same selected chain.
+It also checks rejected heights, output overwrite protection and repeated bytes.
 
 ```sh
 python3 integrations/reth-execution/prepare-reth.py --check -- \
@@ -66,9 +67,23 @@ are refused. Without this variable the temporary database and export disappear
 when the test finishes. The fixture uses a public test signing key and synthetic
 deposits; its transport does not authenticate native funding.
 
+Alternatively, set `BLOCH_QUALIFICATION_CHAIN_DIRECTORY` to a new directory path.
+After the assertions pass, it saves `block-1.json`, `block-2.json` and
+`block-3.json` and synchronizes the files and directory. This mode refuses an
+existing directory; failure may leave an incomplete directory, never a success
+report. Those artifacts allow the separate SP1 host to qualify the complete
+chain from canonical genesis, rather than trusting an intermediate anchor.
+
 Local qualification on 2026-09-17 passed with Rust 1.98.1 and the prepared Reth
-snapshot correction: the persisted contract/CLI test passed in 4.73 seconds,
+snapshot correction: the three-block contract/CLI test passed in 5.79 seconds,
 including an explicit storage-slot value of `42`; scoped Clippy with
-`-D warnings` and package formatting passed. The exported JSON is 7221 bytes,
-SHA-256 `2b2e192921bf2e4471bc29d40ffaaca3a251fdf22bd4f37512dcb6229889e987`.
+`-D warnings` and package formatting passed.
 These results establish host reconstruction/export; SP1 qualification is separate.
+
+Its exact JSON artifacts are:
+
+| Block | Bytes | SHA-256 |
+| --- | ---: | --- |
+| 1: synthetic funding | 4720 | `a31dc550733e3cf97045fbf81ae8327b4c57a36bbc2b57d4d0e563d2efe49d57` |
+| 2: signed deployment | 5958 | `1326de31e426def53faf1ce7822cb58b5fd6d0ef138f6202ba52803ab771f2d2` |
+| 3: signed storage update | 7221 | `2b2e192921bf2e4471bc29d40ffaaca3a251fdf22bd4f37512dcb6229889e987` |
