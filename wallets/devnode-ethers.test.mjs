@@ -67,6 +67,32 @@ async function launch(directory, fund) {
   }
 }
 
+async function assertPersistedLogs(provider, contract, receipt, phase) {
+  const topic = zeroPadValue(toBeHex(42), 32);
+  const range = {
+    address: contract,
+    fromBlock: receipt.blockNumber,
+    toBlock: receipt.blockNumber,
+  };
+  const [logs, absentTopic] = await Promise.all([
+    provider.getLogs({ ...range, topics: [topic] }),
+    provider.getLogs({ ...range, topics: [zeroPadValue(toBeHex(43), 32)] }),
+  ]).catch(cause => {
+    throw new Error(`eth_getLogs ${phase}, receipt block #${receipt.blockNumber}`, { cause });
+  });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].address, contract);
+  assert.equal(logs[0].blockNumber, receipt.blockNumber);
+  assert.equal(logs[0].blockHash, receipt.blockHash);
+  assert.equal(logs[0].transactionHash, receipt.hash);
+  assert.equal(logs[0].transactionIndex, receipt.index);
+  assert.equal(logs[0].index, receipt.logs[0].index);
+  assert.equal(logs[0].removed, false);
+  assert.equal(logs[0].data, "0x");
+  assert.deepEqual(logs[0].topics, [topic]);
+  assert.deepEqual(absentTopic, []);
+}
+
 test("ethers wallet automatically populates, signs, mines and queries synthetic deploy/call across restart", { timeout: 120_000 }, async () => {
   const temporary = await mkdtemp(join(tmpdir(), "bloch-ethers-"));
   const directory = join(temporary, "node");
@@ -99,6 +125,7 @@ test("ethers wallet automatically populates, signs, mines and queries synthetic 
     assert.equal(call.nonce, 1);
     assert.equal(receipt.logs.length, 1);
     assert.equal(receipt.logs[0].topics[0], zeroPadValue(toBeHex(42), 32));
+    await assertPersistedLogs(provider, contract, receipt, "before restart");
     assert.equal(await provider.getStorage(contract, 0), zeroPadValue(toBeHex(42), 32));
     assert.equal(await provider.call({ to: contract }), zeroPadValue(toBeHex(42), 32));
     const block = await provider.getBlock(receipt.blockNumber);
@@ -111,6 +138,7 @@ test("ethers wallet automatically populates, signs, mines and queries synthetic 
     node = await launch(directory);
     provider = new JsonRpcProvider(node.url);
     assert.equal((await provider.getTransactionReceipt(call.hash)).blockHash, receipt.blockHash);
+    await assertPersistedLogs(provider, contract, receipt, "after restart");
     assert.equal(await provider.getStorage(contract, 0), zeroPadValue(toBeHex(42), 32));
     assert.equal(await provider.getTransactionCount(wallet.address), 2);
   } finally {
