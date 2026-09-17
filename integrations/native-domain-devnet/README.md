@@ -84,7 +84,7 @@ cargo +1.94.1 test --offline --locked --manifest-path integrations/native-domain
 cargo +1.94.1 clippy --offline --locked --manifest-path integrations/native-domain-devnet/Cargo.toml --all-targets -- -D warnings
 ```
 
-Validation on 2026-09-17: **8 unit tests and 1 execution integration test passed**,
+Validation on 2026-09-17: **10 unit tests and 2 execution integration tests passed**,
 with no ignored cases; all-target Clippy with warnings denied also passed.
 
 The standalone lockfile starts from the portable core's dependency versions;
@@ -102,3 +102,33 @@ Remaining gates: native consensus-enforced locks and source commitment
 inclusion, independently authenticated finalized checkpoint policy, durable
 source replay with retained rollback protection, transaction DA derivation,
 atomic integration with execution persistence, and withdrawal/release proofs.
+
+## V2 selection for an independently verified execution
+
+`validate_v2_prefix(spec, next_sequence, header, body)` returns a private-field
+`ValidatedV2Prefix`. It requires exactly the next mandatory range, capped by
+`min(gas_limit / deposit_gas, 4096)`, with each mint's recipient, amount, native
+transaction and position equal to the accepted source mapping. It validates
+canonical signed body bytes, header configuration/domain, transaction/deposit
+roots, deposit gas accounting and the exact source anchor block.
+
+The token binds source commitment, network/genesis/domain, inbox root/count,
+anchor, range, canonical body commitment and an `ExecutionStatement` containing
+configuration, parent state root and the complete V2 header hash. The existing
+SP1 guest need not change: a host can compare authenticated proof public values
+to `token.statement()`. This does not by itself verify a proof, receipt execution,
+parent canonicality, native finality or source authority.
+
+`next_sequence` must come from a separately retained settlement cursor. Selection
+is deliberately read-only and repeatable; possession of a token is not a
+single-use permit. A settlement host must atomically verify proof identity and
+public values, ensure that token source/configuration/parent/cursor still match
+its own state, and advance consumption exactly once. No such persistent host is
+implemented by this module.
+
+The V2 integration test demonstrates why the distinction matters: altered
+recipient, amount and omitted deposits can produce valid real EVM/witness
+execution statements, but this source selector rejects them. Successful chunks
+and an empty suffix match actual V2 execution statements and conserved minted
+balances. Unit negatives also bind header/post-state changes, malformed signed
+bytes, domain/anchor, cursor bounds and unchanged registry state.

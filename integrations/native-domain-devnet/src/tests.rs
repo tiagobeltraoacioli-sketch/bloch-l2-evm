@@ -400,3 +400,142 @@ fn valid_position_on_divergent_branch_cannot_extend_accepted_source() {
         .unwrap();
     assert_eq!(state.anchor().height, 2);
 }
+
+fn v2_fixture() -> (
+    SourceRegistry,
+    bloch_l2_evm::ChainSpec,
+    bloch_l2_evm::node_primitives::NodeHeaderV2,
+    bloch_l2_evm::node_primitives::NodeBodyV2,
+) {
+    use bloch_l2_evm::{
+        node_primitives::{NodeBodyV2, NodeHeaderV2},
+        ChainSpec, DepositMint, DepositProvenance,
+    };
+    let (batch, proofs) = fixture(2);
+    let mut state = registry();
+    state
+        .apply(batch.commitment().unwrap(), position(1), &headers(1), &batch, &proofs)
+        .unwrap();
+    let spec = ChainSpec::default();
+    let body = NodeBodyV2 {
+        deposits: batch
+            .locations
+            .iter()
+            .zip(&proofs)
+            .map(|(location, proof)| DepositMint {
+                recipient: proof.deposit.recipient,
+                provenance: DepositProvenance::BridgedBlch {
+                    l1_height: location.position.l1_height,
+                    l1_tx_index: location.position.l1_tx_index,
+                    l1_txid: location.transaction.into(),
+                    l1_vout: location.position.l1_vout,
+                    l1_sats: proof.deposit.amount,
+                },
+            })
+            .collect(),
+        transactions: vec![],
+    };
+    // Deliberately only structural data: this unit fixture is NOT executed or
+    // claimed to be a proof. Separate integration tests use actual V2 execution.
+    let header = NodeHeaderV2 {
+        domain: batch.domain,
+        chain_id: spec.chain_id,
+        number: 1,
+        gas_limit: spec.gas_limit,
+        gas_used: spec.deposit_gas * 2,
+        beneficiary: spec.coinbase(),
+        anchor_root: batch.anchor.block,
+        transactions_root: body.transactions_root(),
+        deposits_hash: body.deposits_hash(),
+        parent_state_root: hash(81),
+        state_root: hash(82),
+        ..Default::default()
+    };
+    (state, spec, header, body)
+}
+
+#[test]
+fn v2_selection_binds_complete_header_body_source_and_configuration_without_consuming() {
+    use bloch_l2_evm::proof_statement::configuration_commitment;
+    let (state, spec, header, body) = v2_fixture();
+    let before = state.clone();
+    let token = state.validate_v2_prefix(&spec, 0, &header, &body).unwrap();
+    assert_eq!(token.range(), 0..2);
+    assert_eq!(token.network(), hash(1));
+    assert_eq!(token.genesis(), position(0).genesis());
+    assert_eq!(token.domain(), header.domain);
+    assert_eq!(token.source_commitment(), state.commitment());
+    assert_eq!(token.inbox_root(), state.inbox_root());
+    assert_eq!(token.inbox_count(), 2);
+    assert_eq!(token.anchor(), state.anchor());
+    assert_eq!(token.body_commitment(), keccak256(alloy_rlp::encode(&body)));
+    assert_eq!(
+        token.statement().configuration,
+        configuration_commitment(&spec).unwrap()
+    );
+    assert_eq!(token.statement().previous_state_root, header.parent_state_root);
+    assert_eq!(token.statement().header_hash, header.hash());
+    // Selection may be repeated. Only the future atomic settlement cursor will
+    // prevent consuming this range twice; this method makes no replay claim.
+    assert_eq!(state.validate_v2_prefix(&spec, 0, &header, &body).unwrap(), token);
+    assert_eq!(state, before);
+    let mut different = header;
+    different.state_root = hash(88);
+    let other = state.validate_v2_prefix(&spec, 0, &different, &body).unwrap();
+    assert_ne!(other.statement(), token.statement());
+    assert!(token.statement().check_expected(&other.statement().encode()).is_err());
+}
+
+#[test]
+fn v2_selection_rejects_forged_mints_even_with_matching_body_hash() {
+    let (state, spec, header, body) = v2_fixture();
+    let before = state.clone();
+    let mut wrong = body.clone();
+    wrong.deposits[1].recipient = Address::repeat_byte(44);
+    let mut matching = header.clone();
+    matching.deposits_hash = wrong.deposits_hash();
+    assert_eq!(
+        state.validate_v2_prefix(&spec, 0, &matching, &wrong),
+        Err(Error::Mapping)
+    );
+    let mut wrong = body.clone();
+    let bloch_l2_evm::DepositProvenance::BridgedBlch { l1_sats, .. } = &mut wrong.deposits[1].provenance;
+    *l1_sats += 1;
+    let mut matching = header.clone();
+    matching.deposits_hash = wrong.deposits_hash();
+    assert_eq!(
+        state.validate_v2_prefix(&spec, 0, &matching, &wrong),
+        Err(Error::Mapping)
+    );
+    let mut wrong = body.clone();
+    wrong.deposits.pop();
+    assert_eq!(
+        state.validate_v2_prefix(&spec, 0, &header, &wrong),
+        Err(Error::Incomplete)
+    );
+    assert_eq!(
+        state.validate_v2_prefix(&spec, 3, &header, &body),
+        Err(Error::Incomplete)
+    );
+    let mut wrong = body.clone();
+    wrong.transactions.push(Bytes::from_static(&[2]));
+    let mut matching = header.clone();
+    matching.transactions_root = wrong.transactions_root();
+    assert_eq!(state.validate_v2_prefix(&spec, 0, &matching, &wrong), Err(Error::Body));
+    let mut wrong = header.clone();
+    wrong.deposits_hash = hash(45);
+    assert_eq!(state.validate_v2_prefix(&spec, 0, &wrong, &body), Err(Error::Body));
+    let mut wrong = header.clone();
+    wrong.anchor_root = hash(46);
+    assert_eq!(state.validate_v2_prefix(&spec, 0, &wrong, &body), Err(Error::Identity));
+    let mut wrong = header.clone();
+    wrong.domain = hash(47);
+    assert_eq!(
+        state.validate_v2_prefix(&spec, 0, &wrong, &body),
+        Err(Error::Configuration)
+    );
+    let mut wrong = header;
+    wrong.gas_used += 1;
+    assert_eq!(state.validate_v2_prefix(&spec, 0, &wrong, &body), Err(Error::Body));
+    assert_eq!(state, before);
+}

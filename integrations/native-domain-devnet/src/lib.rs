@@ -17,6 +17,9 @@ use bloch_l2_evm::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod v2;
+pub use v2::ValidatedV2Prefix;
+
 const TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SOURCE:1";
 /// Entire retained inbox limit, not a per-page limit. No truncation is permitted.
 pub const MAX_LOCKS: usize = 4096;
@@ -61,6 +64,7 @@ pub enum Error {
     Mapping,
     Conflict,
     Inclusion,
+    Body,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
