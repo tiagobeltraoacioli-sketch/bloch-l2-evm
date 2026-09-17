@@ -5,7 +5,7 @@ program. It compiles `ChainSpec::testnet()` (chain ID 700771) and the domain
 `0xd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3`
 into the program. There is no input for an arbitrary trusted configuration.
 Changing the core source, configuration, domain, dependencies, features or
-compiler changes the program that a future verifier must identify and trust.
+compiler changes the program that a verifier must identify and trust.
 
 The guest linked successfully on 2026-09-17 using SP1 CLI 6.8.0 and the
 checksum-verified `succinct-1.96.0-64bit-v2` compiler. The initial release build
@@ -14,9 +14,13 @@ was added, the guest was rebuilt successfully in 17.07s; its current local
 ELF SHA-256 is
 `39d78301107d0b2550355894dff4ce57e5762c7e6ed72fbb1766d9b6af80cbf2`.
 The local SDK subsequently executed both the empty and signed-contract fixtures
-successfully and rejected false post-state roots and trailing body bytes. See
-the [host qualification results](../host/README.md). This is not an accepted
-cryptographic proof or bit-for-bit reproducibility on other machines.
+successfully and rejected false post-state roots and trailing body bytes.
+The release CPU host also generated and independently verified a real core
+proof for both the empty and signed-contract fixtures, rejecting tampered proofs
+and mismatched expected statements.
+See the [host qualification results](../host/README.md) for proof checks and
+measured costs. These runs do not establish bit-for-bit reproducibility on
+other machines or authenticate native L1 deposits.
 Compiler qualification and artifact checks are recorded in
 [SP1-TOOLCHAIN.md](../../../docs/SP1-TOOLCHAIN.md).
 
@@ -64,7 +68,7 @@ followed by four raw 32-byte commitments: complete chain configuration,
 execution domain, previous state root, and full V2 header hash. It contains no
 bincode length prefix. See the core's `proof_statement` module for exact layout.
 
-A future verifier must first verify an actual proof against an independently
+A verifier must first verify an actual proof against an independently
 trusted key for this exact program, then compare the authenticated public bytes
 with an expected statement constructed from trusted configuration, parent state
 and canonical block selection. Comparing public bytes alone is not a proof.

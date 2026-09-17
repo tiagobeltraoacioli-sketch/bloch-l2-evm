@@ -19,12 +19,12 @@ Build the guest first. Run these from this directory, setting `BLOCH_GUEST_ELF`
 to the trusted ELF produced by that build:
 
 ```sh
-CARGO_BUILD_JOBS=2 cargo build --locked
-target/debug/bloch-evm-sp1-host fixture contract
-target/debug/bloch-evm-sp1-host execute empty "$BLOCH_GUEST_ELF"
-target/debug/bloch-evm-sp1-host execute contract "$BLOCH_GUEST_ELF"
-target/debug/bloch-evm-sp1-host prove empty "$BLOCH_GUEST_ELF" target/empty.proof
-target/debug/bloch-evm-sp1-host verify empty "$BLOCH_GUEST_ELF" target/empty.proof
+CARGO_BUILD_JOBS=2 cargo build --release --locked
+target/release/bloch-evm-sp1-host fixture contract
+RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host execute empty "$BLOCH_GUEST_ELF"
+RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host execute contract "$BLOCH_GUEST_ELF"
+RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host prove empty "$BLOCH_GUEST_ELF" target/empty.proof
+RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host verify empty "$BLOCH_GUEST_ELF" target/empty.proof
 ```
 
 The SDK also needs a protobuf compiler. Put `protoc` on `PATH` or set `PROTOC`
@@ -36,6 +36,8 @@ checked against the official release API, is
 The executable reports `libprotoc 36.2`.
 
 Use `contract` instead of `empty` for the signed deploy/call proof qualification.
+Use the optimized release build for proof qualification; the debug executor
+measurements below do not qualify debug proving performance.
 Proof creation refuses an existing output path. The `fixture` command executes
 the native kernel only; it is useful for diagnosing fixture construction but
 does not exercise the zkVM or prove anything.
@@ -68,11 +70,83 @@ checked as nonzero guest exits; each complete acceptance command exited zero.
 
 An initial attempt initialized the full CPU proving engine for execution and
 was interrupted after 101s without a result; it is not counted as a passing
-run. Execution and verification now use the official light client. Optimized
-host compilation and actual core-proof acceptance remain in progress; no proof
-generation, persisted-proof verification or proof-cost result is claimed yet.
+run. Execution and verification now use the official light client.
+
+The optimized host subsequently built successfully in 20m 07s with two build
+jobs, reusing dependencies from the earlier interrupted release build. The
+release `execute` commands also passed for the same ELF:
+
+| Fixture | Guest instructions | Successful execution time | Negative guest inputs |
+|---|---:|---:|---|
+| Empty V2 block | 950,085 | 0.237s | False post-state and trailing body bytes rejected |
+| Signed deposit/deploy/call storing 42 | 7,113,088 | 0.619s | False post-state and trailing body bytes rejected |
+
+These are successful execution-request timings with `RAYON_NUM_THREADS=2`,
+not proof costs.
+
+The release CPU prover subsequently generated and cryptographically verified
+**real core proofs for both fixtures**. The driver rejected a changed trusted
+expectation, tampered public values and removal of the final proof shard. It
+saved and reloaded each proof and verified it again. Separate `verify empty`
+and `verify contract` processes also succeeded with exit code zero against the
+trusted ELF and locally recomputed expectation.
+
+The separate command `verify contract <TRUSTED_ELF>
+target/qualification-empty.proof` rejected that same cryptographically valid
+proof with `Error: Mismatch` and exit code 1: an empty-block proof cannot satisfy
+the independently derived signed-contract header commitment. The original proof
+file was not modified. The reverse combination, `verify empty` with the valid
+contract proof, also failed with `Error: Mismatch` and exit code 1.
+
+| Fixture | Core proving request | Complete proving command | Proof bytes |
+|---|---:|---:|---:|
+| Empty V2 block | 226.115s | 360.51s | 2,812,364 |
+| Signed deposit/deploy/call storing 42 | 640.465s | 777.10s | 2,885,716 |
+
+The complete command includes CPU engine initialization, key setup, verification
+and negative checks. For the empty run, `/usr/bin/time -l` reported the elapsed time, then failed
+to query `kern.clockrate` under the sandbox and returned exit 1 after the
+successful driver. Consequently no peak-memory result is claimed for that run;
+the separate successful verifier confirms the persisted proof independently.
+The local artifact is `target/qualification-empty.proof`, SHA-256
+`9b5a0dfee75a42a63b0b05262620e5b956da9c9afbd820edba8347d32db19db4`.
+This digest identifies that particular proof file, not a deterministic proof
+encoding. The signed-contract artifact is `target/qualification-contract.proof`,
+SHA-256 `46f0530b2408d0dd6f98038c8b144670a84670c06bbf6df1a7050c9c58f75dc4`.
+Both use the same guest ELF recorded above and host executable SHA-256
+`a671c72be68fcde13f715a2ec137d5143a1768e1def8687f8567e6c02f45adc6`.
+
+The contract proving command and resource wrapper both exited zero. macOS
+`time -l` reported maximum resident set size of **10,636,984,320 bytes** and
+peak memory footprint of **32,160,780,288 bytes**. These are different OS
+accounting metrics; neither is a memory cap or a prediction for larger blocks.
+The standalone contract verification took **15.26s** for the entire command,
+including light-client initialization, trusted-key setup, native fixture
+execution and proof verification. It reported maximum RSS **841,494,528 bytes**
+and peak memory footprint **732,143,616 bytes**. All runs used two Rayon threads.
+These single-machine measurements do not establish production throughput or
+economically viable proving costs.
+
+`cargo clippy --release --locked --offline -- -D warnings` passed for the host
+in 2m 35s. Cargo still reports the upstream `proc-macro-error2` future-compatibility
+notice; that is separate from the host's Clippy result.
 
 ## Trust and resource boundaries
+
+Acceptance qualifies local execution and verification under the pinned SP1
+6.8.0 implementation, qualified compiler and trusted guest ELF. It relies on
+the upstream proof system, its implementation and cryptographic assumptions;
+these runs are not an independent soundness audit or a privacy assessment.
+Generating a `Core` proof does not establish that private inputs remain hidden,
+and this harness makes no zero-knowledge or quantified security-level claim.
+The pinned CPU core uses the Basefold/FRI verifier configured by
+[`CoreProver::verifier`](https://github.com/succinctlabs/sp1/blob/v6.8.0/crates/prover/src/components.rs)
+and [`core_fri_config`](https://github.com/succinctlabs/sp1/blob/v6.8.0/crates/primitives/src/fri_params.rs),
+with `CORE_LOG_BLOWUP = 2` and the upstream query-count/grinding configuration.
+Its inner context is
+[`KoalaBearDegree4Duplex`](https://github.com/succinctlabs/sp1/blob/v6.8.0/crates/primitives/src/lib.rs).
+Those are implementation parameters, not security guarantees derived by this
+project. No recursion, compressed proof or pairing-based wrapper is accepted.
 
 The operator supplies the trusted ELF, not the prover. A different arbitrary
 program could simply publish a claimed statement, so an ELF obtained alongside
