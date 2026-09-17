@@ -33,7 +33,9 @@ cargo test --locked --no-default-features --test kzg_backends
 cargo check --locked --no-default-features --features serde --lib
 ```
 
-The tests cover a nontrivial Ethereum KZG proof, the zero polynomial,
+The tests include all 122 point-proof verification cases from the pinned
+[official Ethereum corpus](../tests/fixtures/kzg/README.md), including valid
+proofs, false proofs and invalid encodings. They also cover the zero polynomial,
 tampered proof and evaluation, out-of-field scalars, mismatched versioned
 hash, input length, gas threshold and the exact successful return bytes.
 They establish targeted backend parity; they are not a complete differential

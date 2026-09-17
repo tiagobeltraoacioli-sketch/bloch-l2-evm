@@ -96,3 +96,36 @@ fn cancun_checks_hash_length_and_gas() {
         PrecompileStatus::Halt(PrecompileHalt::OutOfGas)
     );
 }
+
+#[test]
+fn cancun_matches_complete_pinned_ethereum_verification_corpus() {
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/kzg/verify_kzg_proof.json")).unwrap();
+    assert_eq!(cases.len(), 122);
+    for case in cases {
+        let decode = |field: &str| alloy_primitives::hex::decode(case["input"][field].as_str().unwrap()).unwrap();
+        let commitment = decode("commitment");
+        let encoded = [
+            kzg_to_versioned_hash(&commitment).to_vec(),
+            decode("z"),
+            decode("y"),
+            commitment,
+            decode("proof"),
+        ]
+        .concat();
+        let result = execute(&encoded, GAS_COST);
+        let expected = if encoded.len() != 192 {
+            PrecompileStatus::Halt(PrecompileHalt::BlobInvalidInputLength)
+        } else if case["output"] == true {
+            PrecompileStatus::Success
+        } else {
+            // The C API distinguishes false from invalid-encoding null;
+            // the EVM maps both to a failed point-evaluation precompile.
+            PrecompileStatus::Halt(PrecompileHalt::BlobVerifyKzgProofFailed)
+        };
+        assert_eq!(result.status, expected, "{}", case["name"]);
+        if case["output"] == true {
+            assert_success(&encoded);
+        }
+    }
+}
