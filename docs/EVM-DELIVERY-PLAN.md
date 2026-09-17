@@ -10,11 +10,11 @@ activation and movement of real funds are outside the currently authorized work.
 | --- | --- | --- |
 | Signed contract execution | `developer_contract` executes signed deploy/call with storage, gas, nonce, root agreement and adversarial assertions | Local example gate exercised; wider conformance remains under compatibility below |
 | Reproducible local operator workflow | `tools/developer-rehearsal.py` generates synthetic escrow/deploy/call proposals and drives separate `bloch-domain` processes | Local two-block recovery/replay/tamper gate exercised; this recovers commitments/cursors, not a queryable node database |
-| Developer node and wallet workflow | EIP-1193 adapter; isolated synthetic executable with Reth HTTP, automatic mining, canonical persistence and pool maintenance; signed process-level deploy/call and orderly restart exercised | Browser-wallet workflow, authenticated pending/native derivation, crash recovery and complete supported RPC surface |
+| Developer node and wallet workflow | Isolated synthetic executable with Reth HTTP/log filters, mining, canonical persistence and pool maintenance; ethers and real MetaMask deploy/call/restart exercised, plus rejection, revert and log-query tests | Broader wallet compatibility, authenticated pending/native derivation, crash recovery and complete supported RPC qualification |
 | Authenticated native derivation | Header/body verification, PQ checkpoints and typed native state observations with genesis-derived height identification | Consensus-defined domain/inbox commitments and source mapping; reject forged, incomplete, stale, conflicting and replayed derivation; no mint from UTXO membership alone |
 | Native settlement and escrow | Experimental lock/inbox kernel and durable PQ facade | Implemented consensus-enforced lock/settle/withdraw transitions with conservation, replay and invalid-proof tests in an isolated devnet; documented activation proposal |
 | Proof backend | Canonical execution statement; SP1 6.8.0 synthetic guest linked and executed for empty and signed-contract fixtures, with invalid guest inputs rejected; local core-proof harness under validation | Reproducible pinned guest/prover/verifier build, real accepted and rejected proofs binding all public inputs, measured proving cost and documented cryptographic assumptions |
-| Compatibility and release evidence | Focused core regressions and wallet adapter tests | Applicable EVM conformance fixtures, end-to-end developer acceptance tests and an honest supported/unsupported surface; deployment and recovery instructions |
+| Compatibility and release evidence | Focused core regressions, all 122 pinned Ethereum KZG verification vectors passing on both backends, wallet adapter tests and a documented exercised RPC surface | Wider applicable EVM conformance fixtures, end-to-end developer acceptance tests and complete deployment/recovery qualification |
 
 ## Execution order
 
@@ -36,6 +36,12 @@ The external design file referenced by the original scaffold,
 this resumption. Existing explicit constraints in `src/stubs.rs`, the wallet
 compatibility document and the modular integration documents remain applicable.
 Missing source material is not permission to silently change those constraints.
+
+The current host source additionally applies a recorded two-site Reth transaction
+snapshot correction in a separate prepared worktree. The upstream base remains
+pinned and clean; see [source preparation and regression](../integrations/reth-execution/RETH-SNAPSHOT.md).
+The patch addresses concurrent log queries observing a newer static-file tip than
+their MDBX read snapshot. It does not change the portable executor or SP1 program.
 
 ## Work tracking
 
@@ -191,7 +197,18 @@ Real ethers 6.17.0 acceptance now exercises automatic nonce, gas and fee filling
 signed deploy/call, receipts/logs/state/block parsing and orderly restart. It
 exposed omitted neutral RPC header projections (`difficulty`, `extraData`), now
 serialized consistently with the existing Reth header traits without changing V2
-hashes. Browser wallet approval/network flows remain a separate unverified gate.
+hashes. The separately pinned real MetaMask UI flow now passes network/account
+approval, rejection, deployment/call and state queries after node restart, with
+observed UI clicks and independent signature recovery. See the
+[browser acceptance](../wallets/browser/README.md) for exact versions and limits.
+
+The executable now registers Reth's real `EthFilter` module alongside `EthApi`,
+fixing `eth_getLogs` previously returning method-not-found. Process tests cover
+persisted log queries, polling filters and removal across normal operation, and
+log reconstruction after reopen/replay. A revert fixture verifies exact RPC error
+data, failed receipt persistence, nonce/gas accounting, storage/log rollback and
+continued mining. The [RPC matrix](../integrations/reth-execution/RPC-COMPATIBILITY.md)
+distinguishes exercised methods and clients from the remaining RPC surface.
 
 Local recovery now replays the completed MDBX canonical prefix into a separate
 fresh directory, with source datasets opened read-only by the developer CLI.

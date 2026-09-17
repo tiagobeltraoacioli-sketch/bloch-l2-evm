@@ -145,14 +145,17 @@ async fn executable_replays_contract_into_fresh_storage_and_continues_mining() {
     contract_restart(true).await;
 }
 
-async fn contract_restart(replay: bool) {
+#[tokio::test]
+async fn reverted_contract_preserves_error_fee_nonce_and_receipt_across_restart() {
     let temporary = tempfile::tempdir().unwrap();
-    let directory = temporary.path().join("node");
-    let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let directory = temporary.path().join("reverted-node");
+    let key = SigningKey::from_bytes((&[8u8; 32]).into()).unwrap();
     let sender = Address::from_public_key(key.verifying_key());
     let contract = sender.create(0);
-    let (mut first, client) = launch(&directory, Some(sender));
-    let runtime = [0x60, 0, 0x35, 0x60, 0, 0x55, 0];
+    let (mut node, client) = launch(&directory, Some(sender));
+    // Write slot zero and emit a log, then revert with exactly four bytes.
+    // Neither the write nor the log may survive; nonce and gas payment must.
+    let runtime = alloy_primitives::hex!("602a600055602a60006000a163deadbeef6000526004601cfd");
     let mut init = vec![
         0x60,
         runtime.len() as u8,
@@ -171,6 +174,119 @@ async fn contract_restart(replay: bool) {
     let deployed = send_and_mine(&client, signed(&key, 0, TxKind::Create, init.into())).await;
     assert_eq!(deployed["status"], "0x1");
     assert_eq!(deployed["contractAddress"], serde_json::json!(contract));
+
+    for method in ["eth_call", "eth_estimateGas"] {
+        let error = client
+            .request::<Value, _>(
+                method,
+                rpc_params![serde_json::json!({"from": sender, "to": contract}), "latest"],
+            )
+            .await
+            .expect_err("simulation must expose the actual revert");
+        let jsonrpsee::core::client::Error::Call(error) = error else {
+            panic!("expected RPC execution error, got {error}");
+        };
+        assert_eq!(error.code(), 3, "{method}: {error}");
+        assert_eq!(error.data().unwrap().get(), "\"0xdeadbeef\"", "{method}: {error}");
+    }
+    let balance_before: U256 = client
+        .request("eth_getBalance", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    let failed = send_and_mine(&client, signed(&key, 1, TxKind::Call(contract), Bytes::new())).await;
+    assert_eq!(failed["status"], "0x0");
+    assert_eq!(failed["logs"], serde_json::json!([]));
+    let gas: U256 = serde_json::from_value(failed["gasUsed"].clone()).unwrap();
+    let price: U256 = serde_json::from_value(failed["effectiveGasPrice"].clone()).unwrap();
+    assert!(gas > U256::from(21_000) && gas < U256::from(200_000));
+    assert!(price > U256::ZERO);
+    let balance_after: U256 = client
+        .request("eth_getBalance", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    assert_eq!(balance_before - balance_after, gas * price);
+    let nonce: String = client
+        .request("eth_getTransactionCount", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    assert_eq!(nonce, "0x2");
+    let stored: U256 = client
+        .request("eth_getStorageAt", rpc_params![contract, "0x0", "latest"])
+        .await
+        .unwrap();
+    assert_eq!(stored, U256::ZERO);
+    let logs: Value = client
+        .request(
+            "eth_getLogs",
+            rpc_params![serde_json::json!({"address": contract, "blockHash": failed["blockHash"]})],
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs, serde_json::json!([]));
+    // A revert is an included transaction, not a fatal block-production error.
+    let next = send_and_mine(&client, signed(&key, 2, TxKind::Call(sender), Bytes::new())).await;
+    assert_eq!(next["status"], "0x1");
+    drop(client);
+    node.stop();
+    drop(node);
+
+    let (mut reopened, client) = launch(&directory, None);
+    let receipt: Value = client
+        .request(
+            "eth_getTransactionReceipt",
+            rpc_params![failed["transactionHash"].clone()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt, failed);
+    let stored: U256 = client
+        .request("eth_getStorageAt", rpc_params![contract, "0x0", "latest"])
+        .await
+        .unwrap();
+    assert_eq!(stored, U256::ZERO);
+    let nonce: String = client
+        .request("eth_getTransactionCount", rpc_params![sender, "latest"])
+        .await
+        .unwrap();
+    assert_eq!(nonce, "0x3");
+    drop(client);
+    reopened.stop();
+}
+
+async fn contract_restart(replay: bool) {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("node");
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let sender = Address::from_public_key(key.verifying_key());
+    let contract = sender.create(0);
+    let (mut first, client) = launch(&directory, Some(sender));
+    // Store calldata and emit its value as one topic with empty data.
+    let runtime = alloy_primitives::hex!("60003560005560005460006000a100");
+    let mut init = vec![
+        0x60,
+        runtime.len() as u8,
+        0x60,
+        12,
+        0x60,
+        0,
+        0x39,
+        0x60,
+        runtime.len() as u8,
+        0x60,
+        0,
+        0xf3,
+    ];
+    init.extend(runtime);
+    let deployed = send_and_mine(&client, signed(&key, 0, TxKind::Create, init.into())).await;
+    assert_eq!(deployed["status"], "0x1");
+    assert_eq!(deployed["contractAddress"], serde_json::json!(contract));
+    let filter: String = client
+        .request(
+            "eth_newFilter",
+            rpc_params![serde_json::json!({"address": contract, "fromBlock": "latest"})],
+        )
+        .await
+        .unwrap();
     let called = send_and_mine(
         &client,
         signed(
@@ -182,6 +298,30 @@ async fn contract_restart(replay: bool) {
     )
     .await;
     assert_eq!(called["status"], "0x1");
+    assert_eq!(called["logs"].as_array().unwrap().len(), 1);
+    assert_eq!(called["logs"][0]["topics"][0], format!("0x{:064x}", 42));
+    let changes: Value = client
+        .request("eth_getFilterChanges", rpc_params![&filter])
+        .await
+        .unwrap();
+    assert_eq!(changes, called["logs"]);
+    let changes: Value = client
+        .request("eth_getFilterChanges", rpc_params![&filter])
+        .await
+        .unwrap();
+    assert_eq!(changes, serde_json::json!([]));
+    let filter_logs: Value = client.request("eth_getFilterLogs", rpc_params![&filter]).await.unwrap();
+    assert_eq!(filter_logs, called["logs"]);
+    let removed: bool = client
+        .request("eth_uninstallFilter", rpc_params![&filter])
+        .await
+        .unwrap();
+    assert!(removed);
+    let removed: bool = client
+        .request("eth_uninstallFilter", rpc_params![&filter])
+        .await
+        .unwrap();
+    assert!(!removed);
     let stored: String = client
         .request("eth_getStorageAt", rpc_params![contract, "0x0", "latest"])
         .await
@@ -214,6 +354,19 @@ async fn contract_restart(replay: bool) {
         .await
         .unwrap();
     assert_eq!(receipt, called);
+    let logs: Value = client
+        .request(
+            "eth_getLogs",
+            rpc_params![serde_json::json!({"address": contract, "blockHash": called["blockHash"]})],
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs, called["logs"]);
+    let no_logs: Value = client
+        .request("eth_getLogs", rpc_params![serde_json::json!({"address": contract, "fromBlock": called["blockNumber"], "toBlock": called["blockNumber"], "topics": [format!("0x{:064x}", 43)]})])
+        .await
+        .unwrap();
+    assert_eq!(no_logs, serde_json::json!([]));
     let block: Value = client
         .request(
             "eth_getBlockByNumber",

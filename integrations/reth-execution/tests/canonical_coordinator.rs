@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Real persistence, publication and rejection boundaries of the canonical writer.
-use alloy_primitives::B256;
-use bloch_l2_evm::ChainSpec;
+use alloy_consensus::{SignableTransaction, TxEip1559};
+use alloy_primitives::{Address, Signature, TxKind, B256};
+use bloch_l2_evm::{ChainSpec, DepositMint, DepositProvenance};
 use bloch_reth_execution::{
     prepare_genesis, BlochChainSpec, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, CanonicalCoordinator,
 };
+use k256::ecdsa::SigningKey;
 use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions};
 use reth_chainspec::EthChainSpec;
 use reth_db::mdbx::{init_db_for, DatabaseArguments};
@@ -15,7 +17,7 @@ use reth_db_api::{
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     BlockNumReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
-    StaticFileProviderFactory, StaticFileWriter,
+    ReceiptProvider, StaticFileProviderFactory, StaticFileWriter, TransactionsProvider,
 };
 use std::{path::Path, sync::Arc};
 
@@ -40,6 +42,99 @@ fn attributes(timestamp: u64) -> BlochNextBlockEnvCtx {
         anchor_root: B256::ZERO,
         deposits: vec![],
     }
+}
+
+#[test]
+fn held_transaction_snapshot_does_not_follow_newer_static_file_tip() {
+    snapshot_queries_survive_static_tip_advance(false);
+}
+
+#[test]
+fn held_transaction_range_snapshot_does_not_follow_newer_static_file_tip() {
+    snapshot_queries_survive_static_tip_advance(true);
+}
+
+fn snapshot_queries_survive_static_tip_advance(range: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let spec = Arc::new(BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(75), 10).unwrap());
+    let factory = open(directory.path(), spec.clone());
+    let genesis = prepare_genesis(&spec, factory.latest().unwrap().as_ref()).unwrap();
+    let writer = factory.database_provider_rw().unwrap();
+    writer.save_blocks(vec![genesis], SaveBlocksMode::Full).unwrap();
+    writer.commit().unwrap();
+    let mut coordinator = CanonicalCoordinator::attach(factory.clone()).unwrap();
+    let provider = coordinator.provider();
+    assert!(provider.canonical_in_memory_state().head_state().is_none());
+    // Hold a real MDBX read transaction while publishing a later static-file
+    // header. No sleep or scheduler race is needed to expose this boundary.
+    let snapshot = provider.consistent_provider().unwrap();
+    coordinator.extend(spec.genesis_hash(), attributes(11), vec![]).unwrap();
+    assert_eq!(factory.last_block_number().unwrap(), 1);
+    if range {
+        assert!(snapshot.transactions_by_tx_range(0..1).unwrap().is_empty());
+        assert!(snapshot.receipts_by_tx_range(0..1).unwrap().is_empty());
+    } else {
+        assert!(snapshot.transaction_by_id(0).unwrap().is_none());
+    }
+    assert!(provider.transaction_by_id(0).unwrap().is_none());
+}
+
+#[test]
+fn held_snapshot_preserves_old_transactions_and_excludes_later_transactions() {
+    let directory = tempfile::tempdir().unwrap();
+    let kernel = ChainSpec::testnet();
+    let spec = Arc::new(BlochChainSpec::new(kernel.clone(), B256::repeat_byte(76), 10).unwrap());
+    let factory = open(directory.path(), spec.clone());
+    let genesis = prepare_genesis(&spec, factory.latest().unwrap().as_ref()).unwrap();
+    let writer = factory.database_provider_rw().unwrap();
+    writer.save_blocks(vec![genesis], SaveBlocksMode::Full).unwrap();
+    writer.commit().unwrap();
+    let mut coordinator = CanonicalCoordinator::attach(factory).unwrap();
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let sender = Address::from_public_key(key.verifying_key());
+    let mut funding = attributes(11);
+    funding.deposits.push(DepositMint {
+        recipient: sender,
+        provenance: DepositProvenance::BridgedBlch {
+            l1_height: 1,
+            l1_tx_index: 0,
+            l1_txid: [76; 32],
+            l1_vout: 0,
+            l1_sats: 100_000_000,
+        },
+    });
+    coordinator.extend(spec.genesis_hash(), funding, vec![]).unwrap();
+    let signed = |nonce| {
+        let tx = TxEip1559 {
+            chain_id: kernel.chain_id,
+            nonce,
+            to: TxKind::Call(sender),
+            gas_limit: 21_000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            ..Default::default()
+        };
+        let signature: Signature = key
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
+        bloch_reth_execution::BlochRethTransaction::from(tx.into_signed(signature))
+    };
+    let first = signed(0);
+    coordinator
+        .extend(coordinator.head().hash(), attributes(12), vec![first.clone()])
+        .unwrap();
+    let provider = coordinator.provider();
+    let snapshot = provider.consistent_provider().unwrap();
+    let second = signed(1);
+    coordinator
+        .extend(coordinator.head().hash(), attributes(13), vec![second.clone()])
+        .unwrap();
+    assert_eq!(snapshot.transaction_by_id(0).unwrap(), Some(first.clone()));
+    assert!(snapshot.transaction_by_id(1).unwrap().is_none());
+    assert_eq!(snapshot.transactions_by_tx_range(0..2).unwrap(), vec![first.clone()]);
+    assert_eq!(snapshot.receipts_by_tx_range(0..2).unwrap().len(), 1);
+    assert_eq!(provider.transactions_by_tx_range(0..2).unwrap(), vec![first, second]);
 }
 
 #[test]

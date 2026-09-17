@@ -1,6 +1,6 @@
 # Isolated Bloch EVM developer node
 
-`bloch-evm-dev` serves the actual Reth Ethereum RPC handlers on IPv4 loopback,
+`bloch-evm-dev` serves the actual Reth Ethereum RPC and filter handlers on IPv4 loopback,
 admits signed transactions into the Bloch pool, mines periodically through the
 canonical coordinator and persists blocks/state. It is an explicitly synthetic
 local domain: no native deposit verification, P2P, production consensus, settlement
@@ -12,7 +12,9 @@ Use the pinned sibling Reth checkout and native build prerequisites from
 [README.md](README.md). From the modular execution repository root:
 
 ```sh
-cargo +1.98.1 build --locked --manifest-path integrations/reth-execution/Cargo.toml --bin bloch-evm-dev
+python3 integrations/reth-execution/prepare-reth.py
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 build --locked --manifest-path integrations/reth-execution/Cargo.toml --bin bloch-evm-dev
 ```
 
 Create a local test account in your signing tool and assign its address below.
@@ -39,11 +41,16 @@ curl -s http://127.0.0.1:8545 -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":2,"method":"eth_getBlockByNumber","params":["latest",false]}'
 ```
 
+The [RPC compatibility matrix](RPC-COMPATIBILITY.md) records the exercised
+methods, client behavior and current limits.
+
 Sign transactions with the reported chain ID and submit through
 `eth_sendRawTransaction`. The node mines selected transactions automatically;
 use `eth_getTransactionReceipt` to observe inclusion. For execution queries use
 an explicit `latest` or historical block. Synthesized `pending` is unsupported,
-so tools relying on it need configuration or further integration. No browser
+so tools relying on it need configuration or further integration. Pool-aware
+`eth_getTransactionCount(address, "pending")` remains available; it does not
+provide a pending block or execution environment. No browser
 wallet compatibility is claimed by the process test.
 
 ## Stop and reopen
@@ -93,11 +100,17 @@ finality.
 signed deployment and storage mutation over HTTP, stops it, reopens the database,
 checks receipt identity/nonce/storage and mines the next signed transaction.
 It also checks mandatory synthetic mode and preservation of an existing directory.
+The process suite additionally exercises logs by block hash, address and topic,
+polling-filter changes/removal, and a transaction that writes storage and emits
+a log before reverting. That transaction retains its failed receipt, nonce and
+exact gas charge while storage/logs roll back; call/estimate preserve the revert
+bytes. The failed receipt survives restart, and later valid transactions still mine.
 The process/signal test currently runs on Unix and needs permission to bind local
 ports. Run it with:
 
 ```sh
-cargo +1.98.1 test --locked --manifest-path integrations/reth-execution/Cargo.toml --test devnode_process
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 test --locked --manifest-path integrations/reth-execution/Cargo.toml --test devnode_process
 ```
 
 The separate ethers acceptance test uses ethers 6.17.0 with automatic nonce, gas
@@ -115,6 +128,12 @@ exposes zero difficulty and empty extra data, matching its Reth header traits,
 while retaining the tagged Bloch V2 hash and domain/commitment fields. This is an
 RPC representation; it is not an Ethereum consensus-header encoding.
 
+The separate [MetaMask acceptance](../../wallets/browser/README.md) now qualifies
+real UI connection, rejection, signing, deployment/call and state queries after
+restart with a pinned official browser and extension. It uses a fresh profile
+and public synthetic fixture, and independently recovers both signed transactions.
+Run `npm --prefix wallets run test:browser` after the documented preparation.
+
 Empty blocks are mined too. Timestamps advance synthetically by one per block,
 independently of the wall-clock interval. Selection conservatively reserves each
 transaction's declared gas limit and stops at the first resource limit. An
@@ -131,4 +150,4 @@ models, not exhaustive crash/power-loss qualification.
 
 Storage spans MDBX, static files and RocksDB; broader crash recovery, fork choice,
 reorganizations, native derivation/finality, authenticated pending environments,
-browser-wallet qualification and the proof backend remain open delivery work.
+broader wallet qualification and the proof backend remain open delivery work.

@@ -19,7 +19,8 @@ use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     DBProvider, DatabaseProviderFactory, ProviderFactory,
 };
-use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer};
+use reth_rpc::EthFilter;
+use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
 use reth_tasks::{RuntimeBuilder, RuntimeConfig, TokioConfig};
 use reth_transaction_pool::{
     blobstore::InMemoryBlobStore, maintain::MaintainPoolConfig, validate::EthTransactionValidatorBuilder,
@@ -235,7 +236,16 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
         ),
         runtime.clone(),
     );
-    let server = start_http_rpc(api.into_rpc().remove_context(), options.port).await?;
+    // Reth exposes logs and polling filters in a separate module from EthApi.
+    // Share its real provider, receipt cache and runtime with ordinary queries.
+    let filter = EthFilter::new(
+        api.clone(),
+        reth_rpc_eth_types::EthConfig::default().filter_config(),
+        runtime.clone(),
+    );
+    let mut module = api.into_rpc().remove_context();
+    module.merge(filter.into_rpc())?;
+    let server = start_http_rpc(module, options.port).await?;
     let mut critical = runtime
         .take_task_manager_handle()
         .ok_or_else(|| eyre::eyre!("runtime task manager unavailable"))?;

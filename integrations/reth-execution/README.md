@@ -11,15 +11,23 @@ wallet qualification, crash recovery and the proof backend remain open.
 
 ## Reproduce
 
-Use a sibling `reth-bloch-integration` checkout at exactly:
+Use a clean sibling `reth-bloch-integration` checkout at exactly this base:
 
 ```text
 https://github.com/paradigmxyz/reth
 8eb210175687c9f0c889a3b6795c16781d830e3a (v2.4.1)
 ```
 
-The path dependency does not enforce its Git revision; verify the checkout before
-building. The host integration uses Rust **1.98.1** and its own committed lockfile.
+Run `python3 integrations/reth-execution/prepare-reth.py` from the modular
+repository root. It creates a separate `../reth-bloch-rpc-snapshot` worktree at
+that base and applies the versioned [snapshot patch](RETH-SNAPSHOT.md). The
+manifest uses this prepared worktree, preserving the original checkout. The
+helper refuses unrelated changes; `--check` verifies the exact base and patch
+without modifying files. A bare upstream checkout lacks the required transaction
+snapshot fix.
+
+The path dependency does not enforce its Git revision or patch automatically;
+verify it before building. The host integration uses Rust **1.98.1** and its own committed lockfile.
 The portable EVM core retains its separate Rust 1.94.1 toolchain and lockfile.
 Storage tests additionally build MDBX and RocksDB. Install a C/C++ toolchain,
 Clang/libclang, CMake and pkg-config (on macOS, use the Xcode command-line tools
@@ -28,9 +36,11 @@ longer than the execution-only build.
 From the modular execution repository root:
 
 ```sh
-git -C ../reth-bloch-integration rev-parse HEAD
-cargo +1.98.1 test --locked --manifest-path integrations/reth-execution/Cargo.toml
-cargo +1.98.1 clippy --locked --manifest-path integrations/reth-execution/Cargo.toml --all-targets -- -D warnings
+python3 integrations/reth-execution/prepare-reth.py
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 test --locked --manifest-path integrations/reth-execution/Cargo.toml
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 clippy --locked --manifest-path integrations/reth-execution/Cargo.toml --all-targets -- -D warnings
 ```
 
 Add `--offline` once dependencies are cached. Upstream's original lock resolves
@@ -38,6 +48,9 @@ older Alloy consensus/ruint versions; this integration's graph resolves the core
 exact Alloy consensus 2.2.0, primitives 1.6.1, trie 0.9.5, ruint 1.20.0 and revm
 41.0.0. It is a separately qualified host build, not the unchanged upstream
 release binary or an attested execution artifact.
+The helper's optional command receives the actual Git revision/description and
+the recorded dirty-source marker, avoiding an upstream libgit2 describe failure
+on shallow worktrees. It does not substitute fabricated build metadata.
 The storage provider also enables Alloy's `secp256k1` recovery feature through
 Reth. `tests/signed_boundary.rs` reuses the portable signature/authentication
 regressions under this host graph; the core's `serde` wire regression remains in

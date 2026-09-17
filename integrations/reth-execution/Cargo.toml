@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 eyre = "0.6"
-reth-network-api = { path = "../../../reth-bloch-integration/crates/net/network-api" }
+reth-network-api = { path = "../../../reth-bloch-rpc-snapshot/crates/net/network-api" }
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-eips = { version = "=2.2.0", default-features = false }
 alloy-evm = "=0.37.1"
@@ -27,30 +27,30 @@ alloy-rpc-types-engine = "=2.1.1"
 alloy-rpc-types-eth = { version = "=2.1.1", features = ["serde"] }
 alloy-network-primitives = "=2.1.1"
 alloy-serde = "=2.2.0"
-reth-rpc = { path = "../../../reth-bloch-integration/crates/rpc/rpc" }
-reth-rpc-builder = { path = "../../../reth-bloch-integration/crates/rpc/rpc-builder" }
-reth-db = { path = "../../../reth-bloch-integration/crates/storage/db" }
+reth-rpc = { path = "../../../reth-bloch-rpc-snapshot/crates/rpc/rpc" }
+reth-rpc-builder = { path = "../../../reth-bloch-rpc-snapshot/crates/rpc/rpc-builder" }
+reth-db = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db" }
 jsonrpsee = { version = "=0.26.0", features = ["server"] }
-reth-rpc-convert = { path = "../../../reth-bloch-integration/crates/rpc/rpc-convert" }
-reth-rpc-eth-api = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-api" }
-reth-rpc-eth-types = { path = "../../../reth-bloch-integration/crates/rpc/rpc-eth-types" }
-# Development checkout: verify the exact revision recorded in README.md.
-reth-revm = { path = "../../../reth-bloch-integration/crates/revm" }
-reth-evm = { path = "../../../reth-bloch-integration/crates/evm/evm" }
-reth-db-api = { path = "../../../reth-bloch-integration/crates/storage/db-api" }
-reth-storage-api = { path = "../../../reth-bloch-integration/crates/storage/storage-api", features = ["db-api"] }
-reth-storage-errors = { path = "../../../reth-bloch-integration/crates/storage/errors" }
-reth-provider = { path = "../../../reth-bloch-integration/crates/storage/provider" }
-reth-chainspec = { path = "../../../reth-bloch-integration/crates/chainspec" }
-reth-network-peers = { path = "../../../reth-bloch-integration/crates/net/peers" }
-reth-payload-primitives = { path = "../../../reth-bloch-integration/crates/payload/primitives" }
-reth-node-types = { path = "../../../reth-bloch-integration/crates/node/types" }
-reth-chain-state = { path = "../../../reth-bloch-integration/crates/chain-state" }
-reth-consensus = { path = "../../../reth-bloch-integration/crates/consensus/consensus" }
-reth-transaction-pool = { path = "../../../reth-bloch-integration/crates/transaction-pool" }
-reth-tasks = { path = "../../../reth-bloch-integration/crates/tasks" }
-reth-execution-types = { path = "../../../reth-bloch-integration/crates/evm/execution-types" }
-reth-trie-common = { path = "../../../reth-bloch-integration/crates/trie/common" }
+reth-rpc-convert = { path = "../../../reth-bloch-rpc-snapshot/crates/rpc/rpc-convert" }
+reth-rpc-eth-api = { path = "../../../reth-bloch-rpc-snapshot/crates/rpc/rpc-eth-api" }
+reth-rpc-eth-types = { path = "../../../reth-bloch-rpc-snapshot/crates/rpc/rpc-eth-types" }
+# Prepared base + snapshot patch: run prepare-reth.py --check before building.
+reth-revm = { path = "../../../reth-bloch-rpc-snapshot/crates/revm" }
+reth-evm = { path = "../../../reth-bloch-rpc-snapshot/crates/evm/evm" }
+reth-db-api = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db-api" }
+reth-storage-api = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/storage-api", features = ["db-api"] }
+reth-storage-errors = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/errors" }
+reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider" }
+reth-chainspec = { path = "../../../reth-bloch-rpc-snapshot/crates/chainspec" }
+reth-network-peers = { path = "../../../reth-bloch-rpc-snapshot/crates/net/peers" }
+reth-payload-primitives = { path = "../../../reth-bloch-rpc-snapshot/crates/payload/primitives" }
+reth-node-types = { path = "../../../reth-bloch-rpc-snapshot/crates/node/types" }
+reth-chain-state = { path = "../../../reth-bloch-rpc-snapshot/crates/chain-state" }
+reth-consensus = { path = "../../../reth-bloch-rpc-snapshot/crates/consensus/consensus" }
+reth-transaction-pool = { path = "../../../reth-bloch-rpc-snapshot/crates/transaction-pool" }
+reth-tasks = { path = "../../../reth-bloch-rpc-snapshot/crates/tasks" }
+reth-execution-types = { path = "../../../reth-bloch-rpc-snapshot/crates/evm/execution-types" }
+reth-trie-common = { path = "../../../reth-bloch-rpc-snapshot/crates/trie/common" }
 
 [dev-dependencies]
 jsonrpsee = { version = "=0.26.0", features = ["http-client"] }
@@ -58,7 +58,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 serde_json = "1.0"
 tempfile = "3"
-reth-prune-types = { path = "../../../reth-bloch-integration/crates/prune/types" }
-reth-provider = { path = "../../../reth-bloch-integration/crates/storage/provider", features = ["test-utils"] }
-reth-db = { path = "../../../reth-bloch-integration/crates/storage/db", features = ["test-utils"] }
-reth-tasks = { path = "../../../reth-bloch-integration/crates/tasks", features = ["test-utils"] }
+reth-prune-types = { path = "../../../reth-bloch-rpc-snapshot/crates/prune/types" }
+reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider", features = ["test-utils"] }
+reth-db = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db", features = ["test-utils"] }
+reth-tasks = { path = "../../../reth-bloch-rpc-snapshot/crates/tasks", features = ["test-utils"] }
