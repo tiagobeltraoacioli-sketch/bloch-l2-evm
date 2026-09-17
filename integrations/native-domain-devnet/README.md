@@ -85,7 +85,7 @@ cargo +1.94.1 test --offline --locked --manifest-path integrations/native-domain
 cargo +1.94.1 clippy --offline --locked --manifest-path integrations/native-domain-devnet/Cargo.toml --all-targets -- -D warnings
 ```
 
-Validation on 2026-09-17: **18 unit tests and 2 execution integration tests passed**,
+Validation on 2026-09-17: **21 unit tests and 2 execution integration tests passed**,
 with no ignored cases; all-target Clippy with warnings denied also passed.
 
 The standalone lockfile starts from the portable core's dependency versions;

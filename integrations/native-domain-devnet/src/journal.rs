@@ -13,7 +13,7 @@ use bloch_l2_evm::{
 };
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::Path,
 };
@@ -126,6 +126,8 @@ pub enum JournalError {
     CommitUncertain(io::Error),
     Poisoned,
     StorageChanged,
+    /// Requested historical mark is absent from an otherwise valid history.
+    SnapshotMissing,
 }
 impl std::fmt::Display for JournalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,6 +145,7 @@ impl From<io::Error> for JournalError {
 /// validation. Files live in an exclusively controlled directory; hostile
 /// concurrent filesystem replacement is outside this process-lock model.
 pub struct SourceJournal {
+    bootstrap: SourceRegistry,
     registry: SourceRegistry,
     file: File,
     lock: File,
@@ -192,6 +195,7 @@ impl SourceJournal {
         directory(path.parent().ok_or(JournalError::Format)?)?.sync_all()?;
         let mark = SourceMark::of(&registry, 0);
         Ok(Self {
+            bootstrap: registry.clone(),
             registry,
             file,
             lock,
@@ -244,80 +248,15 @@ impl SourceJournal {
         if !file.metadata()?.is_file() {
             return Err(JournalError::Format);
         }
-        let bytes = file.metadata()?.len();
-        if bytes < FILE_HEADER as u64 {
-            return Err(JournalError::Format);
-        }
-        if bytes > limits.bytes {
-            return Err(JournalError::Limit);
-        }
-        let mut registry = SourceRegistry::new(network, domain, genesis).map_err(JournalError::Verification)?;
-        let mut header = [0u8; FILE_HEADER];
-        file.read_exact(&mut header)?;
-        if &header[..8] != FILE_TAG || &header[8..] != registry.commitment().as_slice() {
-            return Err(JournalError::WrongGenesis);
-        }
-        let mut read = FILE_HEADER as u64;
-        let mut records = 0;
-        while read < bytes {
-            if records >= limits.records || records >= expected.records {
-                return Err(JournalError::Mark);
-            }
-            if bytes - read < FRAME_OVERHEAD as u64 {
-                return Err(JournalError::Format);
-            }
-            let mut prefix = [0u8; 12];
-            file.read_exact(&mut prefix)?;
-            if &prefix[..8] != FRAME_TAG {
-                return Err(JournalError::Format);
-            }
-            let length = u32::from_le_bytes(prefix[8..].try_into().map_err(|_| JournalError::Format)?) as usize;
-            if length > MAX_FRAME_BYTES {
-                return Err(JournalError::Limit);
-            }
-            let frame_bytes = length as u64 + FRAME_OVERHEAD as u64;
-            if frame_bytes > bytes - read {
-                return Err(JournalError::Format);
-            }
-            let mut payload = vec![0; length];
-            file.read_exact(&mut payload)?;
-            let mut digest = [0; 32];
-            file.read_exact(&mut digest)?;
-            if frame_digest(&prefix, &payload) != B256::from(digest) {
-                return Err(JournalError::Format);
-            }
-            let record = decode_payload(&payload)?;
-            let mut identified = registry.cursor.clone();
-            let position = identified
-                .advance(
-                    FinalizedCheckpoint {
-                        block: record.batch.anchor.block,
-                        slot: record.batch.anchor.slot,
-                    },
-                    &record.headers,
-                )
-                .map_err(|_| JournalError::Height)?;
-            let commitment = record.batch.commitment().map_err(JournalError::Verification)?;
-            registry
-                .apply(commitment, position, &record.headers, &record.batch, &record.proofs)
-                .map_err(JournalError::Verification)?;
-            records += 1;
-            read += frame_bytes;
-        }
-        if file.metadata()?.len() != bytes {
-            return Err(JournalError::StorageChanged);
-        }
-        let mark = SourceMark::of(&registry, records);
-        if mark != expected {
-            return Err(JournalError::Mark);
-        }
-        // No provisional registry or partially replayed mark escapes above.
+        let bootstrap = SourceRegistry::new(network, domain, genesis).map_err(JournalError::Verification)?;
+        let replayed = replay(&mut file, &bootstrap, expected, limits, None)?;
         Ok(Self {
-            registry,
+            bootstrap,
+            registry: replayed.registry,
             file,
             lock,
-            mark,
-            bytes,
+            mark: replayed.mark,
+            bytes: replayed.bytes,
             limits,
             poisoned: false,
         })
@@ -335,6 +274,29 @@ impl SourceJournal {
         }
         Ok(self.mark)
     }
+    /// Recover an exact historical snapshot only after revalidating the ENTIRE
+    /// journal against this instance's trusted tip. A requested prefix is never
+    /// itself treated as authority. The mutable borrow serializes file seeks;
+    /// subsequent appends retain O_APPEND semantics.
+    pub fn snapshot_at(&mut self, requested: SourceMark) -> Result<SourceRegistry, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Poisoned);
+        }
+        self.check_length()?;
+        match replay(&mut self.file, &self.bootstrap, self.mark, self.limits, Some(requested)) {
+            Ok(replayed) if replayed.bytes == self.bytes => replayed.snapshot.ok_or(JournalError::SnapshotMissing),
+            Ok(_) => {
+                self.poisoned = true;
+                Err(JournalError::StorageChanged)
+            }
+            Err(JournalError::SnapshotMissing) => Err(JournalError::SnapshotMissing),
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
     /// The returned mark must be durably retained independently. Failure to
     /// retain it can leave a valid but unacknowledged suffix which open rejects.
     pub fn append(
@@ -398,6 +360,107 @@ impl SourceJournal {
         self.poisoned = false;
         Ok(mark)
     }
+}
+
+struct Replay {
+    registry: SourceRegistry,
+    mark: SourceMark,
+    bytes: u64,
+    snapshot: Option<SourceRegistry>,
+}
+
+// One bounded replay implementation for open and historical lookup. Never return
+// the captured snapshot until the final exact tip has also been authenticated.
+fn replay(
+    file: &mut File,
+    bootstrap: &SourceRegistry,
+    expected: SourceMark,
+    limits: JournalLimits,
+    requested: Option<SourceMark>,
+) -> Result<Replay, JournalError> {
+    let bytes = file.metadata()?.len();
+    if bytes < FILE_HEADER as u64 {
+        return Err(JournalError::Format);
+    }
+    if bytes > limits.bytes {
+        return Err(JournalError::Limit);
+    }
+    let mut registry = bootstrap.clone();
+    let mut snapshot = requested
+        .filter(|mark| *mark == SourceMark::of(&registry, 0))
+        .map(|_| registry.clone());
+    file.seek(SeekFrom::Start(0))?;
+    let mut header = [0u8; FILE_HEADER];
+    file.read_exact(&mut header)?;
+    if &header[..8] != FILE_TAG || &header[8..] != registry.commitment().as_slice() {
+        return Err(JournalError::WrongGenesis);
+    }
+    let mut read = FILE_HEADER as u64;
+    let mut records = 0;
+    while read < bytes {
+        if records >= limits.records || records >= expected.records {
+            return Err(JournalError::Mark);
+        }
+        if bytes - read < FRAME_OVERHEAD as u64 {
+            return Err(JournalError::Format);
+        }
+        let mut prefix = [0u8; 12];
+        file.read_exact(&mut prefix)?;
+        if &prefix[..8] != FRAME_TAG {
+            return Err(JournalError::Format);
+        }
+        let length = u32::from_le_bytes(prefix[8..].try_into().map_err(|_| JournalError::Format)?) as usize;
+        if length > MAX_FRAME_BYTES {
+            return Err(JournalError::Limit);
+        }
+        let frame_bytes = length as u64 + FRAME_OVERHEAD as u64;
+        if frame_bytes > bytes - read {
+            return Err(JournalError::Format);
+        }
+        let mut payload = vec![0; length];
+        file.read_exact(&mut payload)?;
+        let mut digest = [0; 32];
+        file.read_exact(&mut digest)?;
+        if frame_digest(&prefix, &payload) != B256::from(digest) {
+            return Err(JournalError::Format);
+        }
+        let record = decode_payload(&payload)?;
+        let mut identified = registry.cursor.clone();
+        let position = identified
+            .advance(
+                FinalizedCheckpoint {
+                    block: record.batch.anchor.block,
+                    slot: record.batch.anchor.slot,
+                },
+                &record.headers,
+            )
+            .map_err(|_| JournalError::Height)?;
+        let commitment = record.batch.commitment().map_err(JournalError::Verification)?;
+        registry
+            .apply(commitment, position, &record.headers, &record.batch, &record.proofs)
+            .map_err(JournalError::Verification)?;
+        records += 1;
+        read += frame_bytes;
+        if requested.is_some_and(|mark| mark == SourceMark::of(&registry, records)) {
+            snapshot = Some(registry.clone());
+        }
+    }
+    if file.metadata()?.len() != bytes {
+        return Err(JournalError::StorageChanged);
+    }
+    let mark = SourceMark::of(&registry, records);
+    if mark != expected {
+        return Err(JournalError::Mark);
+    }
+    if requested.is_some() && snapshot.is_none() {
+        return Err(JournalError::SnapshotMissing);
+    }
+    Ok(Replay {
+        registry,
+        mark,
+        bytes,
+        snapshot,
+    })
 }
 
 fn directory(path: &Path) -> io::Result<File> {

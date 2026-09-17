@@ -83,3 +83,20 @@ leaf, transaction tag, authority policy or activation epoch.
 Run all registry, V2 and journal tests with the commands in [README.md](README.md).
 The journal tests use actual temporary files and real core ancestry/inbox
 verification, with synthetic checkpoint/source authority explicitly supplied.
+
+## Historical source snapshots
+
+`snapshot_at(&mut self, requested_mark)` reconstructs a historical source
+registry only if that exact mark occurs in the journal's history **and the
+entire file still validates through the instance's independently trusted current
+tip**. It shares the same replay implementation as `open`; it does not open a
+second writer, trust a requested prefix in isolation, or alter the live source
+cursor. The mutable borrow serializes file seeks, and subsequent writes retain
+`O_APPEND` behavior.
+
+An absent/forged requested mark returns `SnapshotMissing` after confirming the
+file is otherwise valid; it does not poison an intact journal. Corruption,
+changed length, a different final tip, or replay I/O failure does poison the
+instance. Even a valid alternate prefix with recomputed checksums is never
+returned if the final trusted tip differs. This API supports later combined
+settlement recovery, but does not itself persist or restore EVM consumption.

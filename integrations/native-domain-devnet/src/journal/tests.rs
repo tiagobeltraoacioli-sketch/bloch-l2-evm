@@ -417,3 +417,145 @@ fn replay_rederives_heights_and_rejects_divergent_native_path_even_with_matching
     ));
     assert_eq!(fs::read(temp.source()).unwrap(), bad_file);
 }
+
+#[test]
+fn historical_snapshot_revalidates_tip_and_does_not_move_live_cursor() {
+    let temp = Temp::new();
+    let mut journal = create(&temp);
+    let genesis_mark = journal.mark().unwrap();
+    let genesis = journal.registry().unwrap().clone();
+    let first = append(&mut journal);
+    let first_registry = journal.registry().unwrap().clone();
+    let (batch, proofs) = next(&journal);
+    let second = journal
+        .append(
+            batch.commitment().unwrap(),
+            support::position(2),
+            &support::headers(2)[1..],
+            &batch,
+            &proofs,
+        )
+        .unwrap();
+    assert_eq!(journal.snapshot_at(first).unwrap(), first_registry);
+    assert_eq!(journal.snapshot_at(genesis_mark).unwrap(), genesis);
+    assert_eq!(journal.mark().unwrap(), second);
+    for wrong in [
+        SourceMark { records: 999, ..first },
+        SourceMark {
+            inbox_count: 0,
+            ..first
+        },
+        SourceMark {
+            inbox_root: B256::repeat_byte(90),
+            ..first
+        },
+        SourceMark {
+            commitment: B256::repeat_byte(91),
+            ..first
+        },
+    ] {
+        assert!(matches!(journal.snapshot_at(wrong), Err(JournalError::SnapshotMissing)));
+        assert_eq!(journal.mark().unwrap(), second);
+    }
+    // Historical reads seek on this file descriptor. O_APPEND must still add a
+    // new frame rather than overwrite a prior record after these reads.
+    let mut third = batch;
+    third.previous = second.commitment;
+    let position = support::position(3);
+    third.anchor = SourceAnchor {
+        block: position.block(),
+        slot: position.slot(),
+        height: position.height(),
+    };
+    let third_mark = journal
+        .append(
+            third.commitment().unwrap(),
+            position,
+            &support::headers(3)[2..],
+            &third,
+            &proofs,
+        )
+        .unwrap();
+    assert_eq!(third_mark.records, 3);
+    drop(journal);
+    let mut reopened = open(&temp, third_mark).unwrap();
+    assert_eq!(reopened.snapshot_at(first).unwrap(), first_registry);
+    assert_eq!(reopened.mark().unwrap(), third_mark);
+}
+
+#[test]
+fn historical_lookup_never_exposes_valid_prefix_of_untrusted_alternative_tip() {
+    let temp = Temp::new();
+    let mut journal = create(&temp);
+    append(&mut journal);
+    let (batch, proofs) = next(&journal);
+    journal
+        .append(
+            batch.commitment().unwrap(),
+            support::position(2),
+            &support::headers(2)[1..],
+            &batch,
+            &proofs,
+        )
+        .unwrap();
+    let original_len = fs::metadata(temp.source()).unwrap().len();
+    let accepted = journal.registry().unwrap().clone();
+    let (first, replacement_proofs) = fixture_recipient(2, Address::repeat_byte(88));
+    let first_mark = SourceMark {
+        records: 1,
+        commitment: first.commitment().unwrap(),
+        anchor: first.anchor,
+        inbox_count: first.count,
+        inbox_root: first.inbox_root,
+    };
+    let mut second = batch;
+    second.previous = first_mark.commitment;
+    second.inbox_root = first.inbox_root;
+    second.locations = first.locations.clone();
+    // Both alternative transitions are individually valid. Only their final
+    // identity differs from the independently trusted tip held by this journal.
+    let mut alternative = journal.bootstrap.clone();
+    alternative
+        .apply(
+            first_mark.commitment,
+            support::position(1),
+            &support::headers(1),
+            &first,
+            &replacement_proofs,
+        )
+        .unwrap();
+    alternative
+        .apply(
+            second.commitment().unwrap(),
+            support::position(2),
+            &support::headers(2)[1..],
+            &second,
+            &replacement_proofs,
+        )
+        .unwrap();
+    let mut bytes = fs::read(temp.source()).unwrap()[..FILE_HEADER].to_vec();
+    bytes.extend_from_slice(&encode_frame(&support::headers(1), &first, &replacement_proofs).unwrap());
+    bytes.extend_from_slice(&encode_frame(&support::headers(2)[1..], &second, &replacement_proofs).unwrap());
+    assert_eq!(bytes.len() as u64, original_len);
+    fs::write(temp.source(), &bytes).unwrap();
+    assert!(matches!(journal.snapshot_at(first_mark), Err(JournalError::Mark)));
+    assert_eq!(journal.registry, accepted);
+    assert!(matches!(journal.registry(), Err(JournalError::Poisoned)));
+    assert!(matches!(journal.snapshot_at(first_mark), Err(JournalError::Poisoned)));
+    assert_eq!(fs::read(temp.source()).unwrap(), bytes);
+}
+
+#[test]
+fn historical_lookup_detects_changed_file_length_and_poison() {
+    let temp = Temp::new();
+    let mut journal = create(&temp);
+    let first = append(&mut journal);
+    OpenOptions::new()
+        .append(true)
+        .open(temp.source())
+        .unwrap()
+        .write_all(b"extra")
+        .unwrap();
+    assert!(matches!(journal.snapshot_at(first), Err(JournalError::StorageChanged)));
+    assert!(matches!(journal.mark(), Err(JournalError::Poisoned)));
+}
