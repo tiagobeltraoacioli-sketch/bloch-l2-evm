@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 mod fixture;
 
-use bloch_l2_evm::proof_statement::ExecutionStatement;
-use sp1_sdk::{
-    Elf, LightProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Proof, SP1ProofWithPublicValues,
-    SP1PublicValues, SP1Stdin, SP1VerifyingKey,
+use bloch_evm_sp1_host::{
+    settlement::{SettlementCursor, SettlementJournal, SettlementMark},
+    verification::{load_proof, TrustedProgram},
 };
+use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Proof, SP1PublicValues, SP1Stdin};
 use std::{error::Error, fs, io, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -18,26 +18,10 @@ fn inputs(fixture: &fixture::Fixture) -> SP1Stdin {
     stdin
 }
 
-fn verify_expected<P: Prover>(
-    client: &P,
-    key: &SP1VerifyingKey,
-    proof: &SP1ProofWithPublicValues,
-    expected: &ExecutionStatement,
-) -> Result<()> {
-    if !matches!(proof.proof, SP1Proof::Core(_)) {
-        return Err(io::Error::other("only SP1 core proofs are permitted").into());
-    }
-    // Key comes from the operator-selected trusted ELF, never from the proof.
-    // None requires a successful guest exit, not a proven panic.
-    client.verify(proof, key, None)?;
-    expected.check_expected(proof.public_values.as_slice())?;
-    Ok(())
-}
-
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-host fixture <empty|contract> | <execute|prove|verify> <empty|contract> TRUSTED_ELF [PROOF_FILE]";
+    let usage = "usage: bloch-evm-sp1-host fixture <empty|contract> | execute <empty|contract> TRUSTED_ELF | <prove|verify> <empty|contract> TRUSTED_ELF PROOF_FILE | settle <empty|contract> TRUSTED_ELF PROOF_FILE NEW_JOURNAL | verify-settlement <empty|contract> TRUSTED_ELF JOURNAL";
     let mode = args.first().map(String::as_str).ok_or(usage)?;
     let fixture = match args.get(1).map(String::as_str) {
         Some("empty") => fixture::fixture_empty()?,
@@ -47,13 +31,14 @@ async fn main() -> Result<()> {
     let expected_args = match mode {
         "fixture" => 2,
         "execute" => 3,
-        "prove" | "verify" => 4,
+        "prove" | "verify" | "verify-settlement" => 4,
+        "settle" => 5,
         _ => return Err(usage.into()),
     };
     if args.len() != expected_args {
         return Err(usage.into());
     }
-    println!("SYNTHETIC DEV ONLY: local execution fixture; no L1 provenance or settlement.");
+    println!("SYNTHETIC DEV ONLY: local fixture/cursor; no native L1 provenance, settlement or payouts.");
     println!("Expected statement: {:?}", fixture.expected);
     if mode == "fixture" {
         return Ok(());
@@ -98,12 +83,42 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let trusted = TrustedProgram::from_trusted_elf(elf.clone()).await?;
+    if mode == "settle" || mode == "verify-settlement" {
+        let anchor = SettlementCursor::from_trusted_anchor(
+            bloch_l2_evm::ChainSpec::testnet(),
+            fixture.expected.domain,
+            trusted.identity(),
+            fixture.parent.clone(),
+        )?;
+        if mode == "settle" {
+            let verified = trusted.verify_file(&args[3], &fixture.expected)?;
+            let mut journal = SettlementJournal::create(&args[4], anchor.clone())?;
+            let floor = journal.append(&verified, &fixture.header)?;
+            drop(journal);
+            let recovered = SettlementJournal::open(&args[4], &trusted, anchor, floor)?;
+            println!(
+                "Local settlement persisted and reverified: {:?}",
+                recovered.cursor().mark()
+            );
+        } else {
+            // The floor comes from independently executed fixture selection, not
+            // the untrusted journal's claimed cursor.
+            let floor = SettlementMark {
+                number: fixture.header.number,
+                header_hash: fixture.header.hash(),
+                state_root: fixture.header.state_root,
+            };
+            let recovered = SettlementJournal::open(&args[3], &trusted, anchor, floor)?;
+            println!(
+                "Local settlement reopened under independent fixture floor: {:?}",
+                recovered.cursor().mark()
+            );
+        }
+        return Ok(());
+    }
     if mode == "verify" {
-        // LightProver performs full cryptographic verification and cannot prove.
-        let client = LightProver::new().await;
-        let key = client.setup(elf).await?;
-        let proof = SP1ProofWithPublicValues::load(&args[3])?;
-        verify_expected(&client, key.verifying_key(), &proof, &fixture.expected)?;
+        trusted.verify_file(&args[3], &fixture.expected)?;
         println!("Core proof verified against trusted ELF and independently executed fixture");
         return Ok(());
     }
@@ -121,11 +136,11 @@ async fn main() -> Result<()> {
     let started = Instant::now();
     let proof = client.prove(&key, inputs(&fixture)).core().await?;
     let prove_time = started.elapsed();
-    verify_expected(&client, key.verifying_key(), &proof, &fixture.expected)?;
+    trusted.verify(proof.clone(), &fixture.expected)?;
 
     let mut wrong_expected = fixture.expected;
     wrong_expected.domain[0] ^= 1;
-    if verify_expected(&client, key.verifying_key(), &proof, &wrong_expected).is_ok() {
+    if trusted.verify(proof.clone(), &wrong_expected).is_ok() {
         return Err(io::Error::other("accepted wrong trusted expectation").into());
     }
     let mut tampered = proof.clone();
@@ -147,8 +162,8 @@ async fn main() -> Result<()> {
     let file = fs::OpenOptions::new().write(true).create_new(true).open(&args[3])?;
     bincode::serialize_into(&file, &proof)?;
     file.sync_all()?;
-    let loaded = SP1ProofWithPublicValues::load(&args[3])?;
-    verify_expected(&client, key.verifying_key(), &loaded, &fixture.expected)?;
+    let loaded = load_proof(&args[3])?;
+    trusted.verify(loaded, &fixture.expected)?;
     println!(
         "Core proof accepted; altered expectation, public values and truncated core proof rejected; prove {:?}, {} bytes persisted",
         prove_time,

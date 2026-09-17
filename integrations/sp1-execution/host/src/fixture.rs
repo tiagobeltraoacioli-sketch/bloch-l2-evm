@@ -7,7 +7,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use bloch_l2_evm::{
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
-    node_primitives::NodeBodyV2,
+    node_primitives::{NodeBodyV2, NodeHeaderV2},
     proof_statement::{configuration_commitment, ExecutionStatement},
     proving::BatchWitness,
     BlockContext, ChainSpec, DepositMint, DepositProvenance, L2State,
@@ -21,6 +21,8 @@ pub struct Fixture {
     pub context: BlockContext,
     pub body: NodeBodyV2,
     pub expected: ExecutionStatement,
+    pub parent: NodeHeaderV2,
+    pub header: NodeHeaderV2,
 }
 
 /// Synthetic deposit funds nonce-0 deployment and nonce-1 call storing 42 in slot 0.
@@ -166,6 +168,8 @@ fn execute_fixture(
             context,
             body,
             expected,
+            parent,
+            header: outcome.header.clone(),
         },
         state,
         outcome,

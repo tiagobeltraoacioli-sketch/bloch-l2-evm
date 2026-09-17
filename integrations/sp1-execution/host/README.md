@@ -5,6 +5,10 @@ This executable is an experimental acceptance harness for the fixed
 Bloch deposits, run a sequencer, or settle a proof on either chain. The fixture
 uses a public signing key and synthetic funds only.
 
+The [local settlement library and journal](SETTLEMENT.md) bind verified proof
+capabilities to a V2 cursor and independently retained recovery floor. They do
+not activate native settlement or release funds.
+
 The SDK is pinned to 6.8.0 without `network`, `cuda`, `native-gnark` or
 `experimental` features. Proof generation constructs the CPU prover explicitly;
 execution and standalone verification use the SDK's `LightProver`, which performs
@@ -113,7 +117,7 @@ The local artifact is `target/qualification-empty.proof`, SHA-256
 This digest identifies that particular proof file, not a deterministic proof
 encoding. The signed-contract artifact is `target/qualification-contract.proof`,
 SHA-256 `46f0530b2408d0dd6f98038c8b144670a84670c06bbf6df1a7050c9c58f75dc4`.
-Both use the same guest ELF recorded above and host executable SHA-256
+Both proof-generation runs used the same guest ELF recorded above and host executable SHA-256
 `a671c72be68fcde13f715a2ec137d5143a1768e1def8687f8567e6c02f45adc6`.
 
 The contract proving command and resource wrapper both exited zero. macOS
@@ -130,6 +134,20 @@ economically viable proving costs.
 `cargo clippy --release --locked --offline -- -D warnings` passed for the host
 in 2m 35s. Cargo still reports the upstream `proc-macro-error2` future-compatibility
 notice; that is separate from the host's Clippy result.
+
+The subsequent reusable verifier/local-settlement increment passed all three
+`settlement_proofs` integration tests (228.84s, zero ignored), reusing those exact
+proof artifacts and the unchanged guest ELF. This includes strict bounded file
+admission, real capability/program/header/cursor binding and durable recovery,
+and independent CLI processes for both fixtures. Replay/fork attempts, altered
+ELF identity with the same VM key, wrong recovery floors, truncation, tampered
+proofs with recomputed journal checksums, lock contention and external length
+changes were rejected. Both `settle`/`verify-settlement` workflows passed; wrong
+fixture, existing-target, corrupt and truncated journal commands failed without
+repairing their inputs. Release Clippy with `--all-targets -- -D warnings`,
+format checking and `git diff --check` passed. The host was rebuilt for this
+increment; the preceding executable digest identifies the earlier measured
+proof-generation binary, not every later host build.
 
 ## Trust and resource boundaries
 
