@@ -59,6 +59,14 @@ cover alternate fixtures, replay, rollback floors, corruption and separate CLI
 processes. This journal alone does not persist source authorization or inbox
 consumption and is not a native settlement transaction.
 
+The optional [source-bound SP1 journal](../integrations/sp1-execution/host/SOURCE-JOURNAL.md)
+now combines that verified execution with an independently authenticated source
+journal. One synchronized frame publishes the execution successor and derived
+mandatory-prefix consumption. The real `source-contract` proof passed; three
+journal integration tests cover replay/reopen, source history substitution,
+native identity mismatch, complete rollback floors and external-write poisoning.
+Source authority remains an independent trust input, not a native consensus rule.
+
 ## Work tracking
 
 Keep implementation and validation evidence in the relevant component documents

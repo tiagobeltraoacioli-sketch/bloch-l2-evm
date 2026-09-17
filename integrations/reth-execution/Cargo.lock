@@ -1656,6 +1656,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bloch-execution-artifact"
+version = "0.1.0-experimental"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "bloch-l2-evm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bloch-l2-evm"
 version = "0.0.0-scaffold"
 dependencies = [
@@ -1684,6 +1695,7 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-serde",
+ "bloch-execution-artifact",
  "bloch-l2-evm",
  "eyre",
  "futures-util",
