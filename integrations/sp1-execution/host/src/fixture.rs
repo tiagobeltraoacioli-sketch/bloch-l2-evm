@@ -104,6 +104,13 @@ pub fn fixture_empty() -> Result<Fixture, Box<dyn Error>> {
 fn execute_fixture(
     body: NodeBodyV2,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
+    execute_fixture_at(body, B256::repeat_byte(8))
+}
+
+pub(crate) fn execute_fixture_at(
+    body: NodeBodyV2,
+    anchor_root: B256,
+) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
     let spec = ChainSpec::testnet();
     let domain = B256::repeat_byte(0xd3);
     let mut pre_state = genesis_v2(&spec, 0)?;
@@ -114,7 +121,7 @@ fn execute_fixture(
         timestamp: 1,
         base_fee_per_gas: spec.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
         prevrandao: B256::repeat_byte(7),
-        anchor_root: B256::repeat_byte(8),
+        anchor_root,
     };
     let (witness, recorded) = generate_node_batch_witness(&pre_state, &spec, domain, &context, &body)?;
     ensure(

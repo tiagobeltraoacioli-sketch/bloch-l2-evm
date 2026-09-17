@@ -8,7 +8,14 @@ publish = false
 
 [workspace]
 
+[features]
+default = []
+source-settlement = ["dep:bloch-native-domain-devnet", "dep:sha3"]
+
 [dependencies]
+bloch-native-domain-devnet = { path = "../../native-domain-devnet", optional = true }
+libc = "=0.2.189"
+sha3 = { version = "=0.11.0", default-features = false, optional = true }
 bloch-l2-evm = { path = "../../..", features = ["serde"] }
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-eips = { version = "=2.2.0", default-features = false }

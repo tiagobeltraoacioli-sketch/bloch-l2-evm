@@ -954,7 +954,10 @@ dependencies = [
  "alloy-rlp",
  "bincode",
  "bloch-l2-evm",
+ "bloch-native-domain-devnet",
  "k256",
+ "libc",
+ "sha3",
  "sp1-sdk",
  "tokio",
 ]
@@ -972,6 +975,16 @@ dependencies = [
  "ruint",
  "serde",
  "sha3",
+]
+
+[[package]]
+name = "bloch-native-domain-devnet"
+version = "0.1.0-experimental"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "bloch-l2-evm",
+ "libc",
 ]
 
 [[package]]

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 mod fixture;
+#[cfg(feature = "source-settlement")]
+mod source_fixture;
 
 use bloch_evm_sp1_host::{
     settlement::{SettlementCursor, SettlementJournal, SettlementMark},
@@ -21,17 +23,21 @@ fn inputs(fixture: &fixture::Fixture) -> SP1Stdin {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-host fixture <empty|contract> | execute <empty|contract> TRUSTED_ELF | <prove|verify> <empty|contract> TRUSTED_ELF PROOF_FILE | settle <empty|contract> TRUSTED_ELF PROOF_FILE NEW_JOURNAL | verify-settlement <empty|contract> TRUSTED_ELF JOURNAL";
+    let usage = "source-settlement feature also accepts fixture source-contract and verify-source source-contract TRUSTED_ELF PROOF_FILE; usage: bloch-evm-sp1-host fixture <empty|contract> | execute <empty|contract> TRUSTED_ELF | <prove|verify> <empty|contract> TRUSTED_ELF PROOF_FILE | settle <empty|contract> TRUSTED_ELF PROOF_FILE NEW_JOURNAL | verify-settlement <empty|contract> TRUSTED_ELF JOURNAL";
     let mode = args.first().map(String::as_str).ok_or(usage)?;
     let fixture = match args.get(1).map(String::as_str) {
         Some("empty") => fixture::fixture_empty()?,
         Some("contract") => fixture::fixture()?,
+        #[cfg(feature = "source-settlement")]
+        Some("source-contract") => source_fixture::source_contract()?.execution,
         _ => return Err(usage.into()),
     };
     let expected_args = match mode {
         "fixture" => 2,
         "execute" => 3,
         "prove" | "verify" | "verify-settlement" => 4,
+        #[cfg(feature = "source-settlement")]
+        "verify-source" => 4,
         "settle" => 5,
         _ => return Err(usage.into()),
     };
@@ -115,6 +121,37 @@ async fn main() -> Result<()> {
                 recovered.cursor().mark()
             );
         }
+        return Ok(());
+    }
+    #[cfg(feature = "source-settlement")]
+    if mode == "verify-source" {
+        if args[1] != "source-contract" {
+            return Err("verify-source requires source-contract".into());
+        }
+        let source = source_fixture::source_contract()?;
+        let mut coordinated = bloch_evm_sp1_host::source_settlement::SourceSettlement::from_trusted_genesis(
+            bloch_l2_evm::ChainSpec::testnet(),
+            source.registry.network(),
+            source.registry.genesis(),
+            source.registry.domain(),
+            trusted.identity(),
+            fixture.parent.clone(),
+            source.registry,
+        )?;
+        coordinated.apply_source(
+            source.expected_source,
+            source.position,
+            &source.headers,
+            &source.batch,
+            &source.proofs,
+        )?;
+        let proof = trusted.verify_file(&args[3], &fixture.expected)?;
+        let mark = coordinated.advance(&proof, &fixture.header, &fixture.body)?;
+        println!("Synthetic source and core proof accepted atomically in memory: {mark:?}");
+        if coordinated.advance(&proof, &fixture.header, &fixture.body).is_ok() {
+            return Err("source coordinator accepted replay".into());
+        }
+        println!("Source replay rejected; no native authority or durable combined cursor claimed");
         return Ok(());
     }
     if mode == "verify" {

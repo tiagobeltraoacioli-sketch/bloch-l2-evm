@@ -7,7 +7,10 @@ uses a public signing key and synthetic funds only.
 
 The [local settlement library and journal](SETTLEMENT.md) bind verified proof
 capabilities to a V2 cursor and independently retained recovery floor. They do
-not activate native settlement or release funds.
+not activate native settlement or release funds. The optional `source-settlement`
+feature also connects the exact mandatory deposit prefix to the verified V2
+transition: see [source coordinator commands](SETTLEMENT.md#optional-source-selection-coordinator)
+and the [combined local source/proof journal](SOURCE-JOURNAL.md).
 
 The SDK is pinned to 6.8.0 without `network`, `cuda`, `native-gnark` or
 `experimental` features. Proof generation constructs the CPU prover explicitly;
@@ -204,3 +207,54 @@ metadata comparison confirmed that all 268 package identities in the native
 core's resolved non-development dependency closure remain present in the SDK
 host's core closure. SP1 adds packages and unifies additional features; this is
 not a claim that the complete host and guest dependency graphs are identical.
+
+## Source-bound contract qualification
+
+On 2026-09-17, the optional `source-settlement` build passed in 4m 12s. The
+`source-contract` fixture binds the signed deposit/deploy/call to canonical
+synthetic native ancestry and a complete locally allocated escrow inbox. The
+unchanged guest ELF shown above executed 7,113,088 instructions in 0.428440s,
+matched the independently executed host statement, and rejected both false
+post-state and trailing-body inputs. The expected V2 header hash is
+`422676f406aa4cee089aff87b5a55c9f1e61faa9a47419ffc4e8e0b2dcdfa02a`.
+
+A real local CPU core proof then passed generation, cryptographic verification,
+wrong-expectation/public-value/final-shard rejection, save, reload and verification:
+
+| Core proving request | Complete command | Proof bytes | Exit |
+|---:|---:|---:|---:|
+| 621.834817s | 773.086562s | 2,885,716 | 0 |
+
+The proof is `target/qualification-source-contract.proof`, SHA-256
+`5b7bb456ac487aaf385650a99687aff845135c83bf6acb0d5cfa89c43348b099`.
+A Python subprocess wrapper measured elapsed time and Darwin
+`getrusage(RUSAGE_CHILDREN).ru_maxrss`: 10,189,324,288 bytes. This is the child
+maximum RSS metric, not peak memory footprint. The wrapper and prover both
+returned zero. These are local observations with `RAYON_NUM_THREADS=2`, not
+isolated-machine throughput guarantees. Raw metrics are retained in
+`target/qualification-source-contract.metrics.json`.
+
+The feature's bootstrap/source-policy test passed using the prior genuine
+contract proof: altered source commitment, repeated source updates, legacy
+synthetic anchor, mismatched verified statement, precredited/altered genesis,
+wrong native identity and pre-advanced registry all failed without advancing
+execution or deposit consumption. Commands, authority boundaries and artifact
+overrides are in [SETTLEMENT.md](SETTLEMENT.md).
+
+The source coordinator's real-proof acceptance test also passed (28.90s):
+missing source and omitted/altered deposits or transaction bodies were rejected;
+the valid transition advanced execution and consumption exactly once; replay
+left both unchanged. A separate `verify-source source-contract` process repeated
+real cryptographic verification against the trusted ELF and independently
+executed fixture, accepted the coupled transition and rejected replay. Both
+source coordinator tests passed individually, with no mocks or ignored tests.
+This qualifies one source-bound first execution block. It does not qualify a
+long consecutive chain of proven execution blocks or native consensus inclusion
+of the source commitment.
+
+The combined source/proof journal integration suite passed 3/3 tests in 29.65s
+with the same genuine source proof. Recovery re-derived the consumed cursor,
+reverified historical source selection beneath an independently trusted exact
+source tip, and rejected conflicting native identity, corrupted/truncated
+frames and inconsistent retained floors. Details and separate-file durability
+semantics are documented in [SOURCE-JOURNAL.md](SOURCE-JOURNAL.md).

@@ -4,6 +4,10 @@
 //! Neither proof validity nor this local journal authenticates native deposits,
 //! consensus selection or withdrawal authority.
 pub mod settlement;
+#[cfg(all(feature = "source-settlement", unix))]
+pub mod source_journal;
+#[cfg(feature = "source-settlement")]
+pub mod source_settlement;
 pub mod verification;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -19,14 +23,10 @@ pub(crate) fn open_regular(path: &std::path::Path, writable: bool) -> Result<std
     #[cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "x86_64")))]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        #[cfg(target_os = "macos")]
-        const FLAGS: i32 = 0x100 | 0x4; // Darwin O_NOFOLLOW | O_NONBLOCK.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        const FLAGS: i32 = 0x20000 | 0x800; // Linux x86_64 O_NOFOLLOW | O_NONBLOCK.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(writable)
-            .custom_flags(FLAGS)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)?;
         if !file.metadata()?.is_file() {
             return Err(invalid("expected a regular file"));

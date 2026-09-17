@@ -1,8 +1,8 @@
 # Local verified V2 settlement cursor
 
 This host library connects actual SP1 core-proof verification to a local V2
-head and proof journal. It changes no native state, liability, inbox consumption
-or withdrawal permission. Its existing fixtures remain synthetic. A successful
+head and proof journal. It changes no native consensus state, liability,
+consensus inbox consumption or withdrawal permission. Its existing fixtures remain synthetic. A successful
 append is a local acknowledgment, not native consensus settlement.
 
 ## Verification capability
@@ -108,3 +108,49 @@ Override them with `BLOCH_SP1_ELF`, `BLOCH_SP1_EMPTY_PROOF` and
 `BLOCH_SP1_CONTRACT_PROOF`. The two fixtures are alternative first blocks; these
 tests do not claim proof qualification of a longer consecutive block sequence.
 Actual validation results are recorded in [README.md](README.md).
+
+## Optional source selection coordinator
+
+Build with `--features source-settlement` for `SourceSettlement`. This owns the
+experimental `SourceRegistry`, execution cursor and consumed sequence privately.
+Bootstrap requires the canonical V2 genesis derived from the configured spec,
+domain and genesis timestamp, plus an empty native genesis registry with pinned
+network/genesis/domain identities. Arbitrary precredited height-zero headers and
+already advanced registries are rejected. Source updates require an independently
+trusted commitment and the complete ancestry/mapping/inbox proof checks of the
+registry. The application must authenticate that commitment; receiving a batch
+and computing its hash does not establish native authority.
+
+`advance` selects the exact mandatory prefix in its own registry, compares the
+selected statement to the cryptographically verified token, and checks trusted
+program identity and execution continuity before publishing the execution head
+and consumed sequence together. An invalid body, stale source, mismatched proof
+or replay cannot consume deposits. Source updates do not consume deposits.
+This coordinator is in-memory only; the ordinary `SettlementJournal` does not
+persist or recover source history or consumption. Native consensus activation
+and withdrawal authorization remain separate gates.
+
+The optional `source-contract` fixture retains the signed deployment and call
+from `contract`, but binds the execution anchor to a canonical synthetic native
+header hash. It allocates local fixture funding into `EscrowLedger`, builds the
+full inbox inclusion and source mapping, and independently executes the V2 body.
+The synthetic native source commitment is constructed by the fixture as a trust
+input; it is not included in a real native consensus state root. The guest ELF
+and all dependency versions remain unchanged. `sha3` and `libc` use versions
+already present in the lockfile; only the optional native-domain path package is
+added.
+
+```sh
+cargo build --release --locked --offline --features source-settlement
+target/release/bloch-evm-sp1-host fixture source-contract
+target/release/bloch-evm-sp1-host execute source-contract "$TRUSTED_ELF"
+target/release/bloch-evm-sp1-host prove source-contract "$TRUSTED_ELF" target/qualification-source-contract.proof
+target/release/bloch-evm-sp1-host verify-source source-contract "$TRUSTED_ELF" target/qualification-source-contract.proof
+```
+
+Use the same `PROTOC`, `CARGO_BUILD_JOBS=2`, `CARGO_NET_OFFLINE=true` and
+`RAYON_NUM_THREADS=2` environment from the host README. `verify-source` verifies
+against the independently executed fixture, applies the independently selected
+source to the owned registry, advances both cursors once, and rejects replay.
+The feature's real-proof tests require `BLOCH_SP1_SOURCE_PROOF` or the default
+proof path shown above; missing proof artifacts fail rather than skip.
