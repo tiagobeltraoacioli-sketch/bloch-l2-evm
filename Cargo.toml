@@ -21,7 +21,7 @@ version = "0.0.0-scaffold"
 edition = "2021"
 # Alloy consensus 2.2.0 requires rustc >= 1.94.1; the exact compiler is pinned in
 # rust-toolchain.toml (determinism contract: node and guest re-execute
-# byte-identical code, so the toolchain is part of the program identity).
+# the same kernel source, so the toolchain is part of the program identity).
 rust-version = "1.94.1"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -33,7 +33,7 @@ description = "SCAFFOLD, UNAUDITED, not a working L2. Execution-layer state-tran
 
 # Every consensus-relevant crate is an EXACT pin (`=`), matching the committed
 # Cargo.lock: the design rule is that the node and the future SP1 guest
-# re-execute byte-identical code, and a manifest of caret ranges would let a
+# execute the same kernel source, and a manifest of caret ranges would let a
 # separate guest crate resolve to different versions. Any bump is a documented
 # program upgrade (and a new SP1 vkey). `default-features = false` everywhere:
 # the feature set is chosen here, explicitly, because it determines the code
@@ -41,15 +41,12 @@ description = "SCAFFOLD, UNAUDITED, not a working L2. Execution-layer state-tran
 [dependencies]
 # Genesis-4 header and body commitments use SHA3-256, not EVM Keccak.
 sha3 = { version = "=0.11.0", default-features = false }
-# revm — the EVM. Features: `c-kzg` provides the Cancun point-evaluation
-# precompile (0x0a; without a KZG backend revm omits the precompile, a
-# consensus change), `portable` builds its C backend without CPU-specific
-# code. NOT enabled from revm's defaults: `secp256k1` (libsecp256k1 in C —
-# ecrecover falls back to the pure-Rust `k256`, same results), `blst`
-# (BLS12-381 precompiles are Prague; the arkworks fallback covers them) and
-# `tracer`. The SP1 guest must swap `c-kzg` for a pure-Rust KZG backend
-# (`kzg-rs`); that is the one documented feature delta between host and guest.
-revm = { version = "=41.0.0", default-features = false, features = ["c-kzg", "portable"] }
+# revm — the EVM. `host-kzg` below selects portable c-kzg by default.
+# Without it, revm 41 keeps Cancun's 0x0a precompile and uses its pure-Rust
+# arkworks verifier (there is no `kzg-rs` feature in this release). Do not
+# enable revm's defaults: they also select C crypto backends. Ecrecover uses
+# pure-Rust k256. See docs/KZG-BACKENDS.md for guest feature isolation.
+revm = { version = "=41.0.0", default-features = false }
 # Address/U256/B256: one type family across the crate (revm 41 uses 1.6.x).
 alloy-primitives = { version = "=1.6.1", default-features = false }
 # keccak-256 hexary Merkle-Patricia trie node encoders / HashBuilder / proofs
@@ -78,7 +75,9 @@ k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 [features]
 # Local transition kernel only; no mainnet bridge or proof verifier.
 experimental-escrow = []
-default = ["std"]
+default = ["std", "host-kzg"]
+# Native host acceleration; omit for the guest's pure-Rust arkworks backend.
+host-kzg = ["revm/c-kzg", "revm/portable"]
 # Host build. Without it the crate — and the whole revm/alloy tree — is
 # `no_std` + `alloc`, the shape an SP1 guest requires
 # (`cargo test --no-default-features` exercises it).

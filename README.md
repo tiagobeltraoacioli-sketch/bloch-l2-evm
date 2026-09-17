@@ -72,7 +72,7 @@ execution kernel to external storage, including the experimental
 
 | dependency | pin | why |
 |---|---|---|
-| `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The design requires ONE pinned revm so the native node and the future SP1 guest re-execute byte-identical code; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled (ecrecover uses the pure-Rust `k256`), nor `blst`/`tracer`. The guest's one feature delta is `c-kzg` → `kzg-rs`. |
+| `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The design requires ONE pinned revm so the native node and the future SP1 guest execute the same Cancun transition; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled (ecrecover uses the pure-Rust `k256`), nor `blst`/`tracer`. Default `host-kzg` enables the native backend; `--no-default-features` selects revm 41's built-in pure-Rust arkworks verifier without removing Cancun's precompile. See [KZG backends](docs/KZG-BACKENDS.md). |
 | `alloy-consensus` / `alloy-eips` | **`=2.2.0`** / **`=2.2.0`** (exact) | Signed Ethereum envelopes and k256 sender recovery, exclusively at the L2 authorization boundary. |
 | `alloy-primitives` | **`=1.6.1`** (exact) | `Address`/`U256`/`B256` are one type family across the crate. |
 | `alloy-trie` / `alloy-rlp` | **`=0.9.5`** / **`=0.3.16`** (exact) | Trie node encoders, `HashBuilder`, proofs and RLP: consensus-relevant, pinned like revm. |

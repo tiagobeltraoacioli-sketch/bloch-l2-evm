@@ -114,6 +114,7 @@ pub mod l1_transfer;
 pub mod mpt;
 pub mod node_execution;
 pub mod node_primitives;
+pub mod proof_statement;
 mod protocol_overlay;
 pub mod proving;
 pub mod scale;
