@@ -23,6 +23,9 @@ pub mod journal;
 mod v2;
 pub use v2::ValidatedV2Prefix;
 
+mod payload;
+pub use payload::{SourcePayload, MAX_SOURCE_PAYLOAD_BYTES};
+
 const TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SOURCE:1";
 /// Entire retained inbox limit, not a per-page limit. No truncation is permitted.
 pub const MAX_LOCKS: usize = 4096;

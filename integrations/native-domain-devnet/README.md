@@ -132,3 +132,8 @@ execution statements, but this source selector rejects them. Successful chunks
 and an empty suffix match actual V2 execution statements and conserved minted
 balances. Unit negatives also bind header/post-state changes, malformed signed
 bytes, domain/anchor, cursor bounds and unchanged registry state.
+
+The separate [post-genesis source payload](PAYLOAD.md) codec omits the current
+anchor block hash to avoid a self-referential header commitment. Binding a typed
+position reconstructs the anchored envelope; native state inclusion and source
+authority remain external and no native component tag is assigned.
