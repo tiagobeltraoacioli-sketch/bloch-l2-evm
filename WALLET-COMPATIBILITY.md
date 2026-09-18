@@ -98,9 +98,10 @@ construction so later property replacement cannot split checks and signing
 between implementations. The adapter bounds calldata at 128 KiB (the node
 separately bounds the entire encoded transaction), bounds provider-returned
 account and access-list collections, and rejects inconsistent
-legacy/EIP-2930/EIP-1559 fee fields before opening a signing request. Private
-keys remain in the wallet. This is an integrable client component, not a
-completed MetaMask end-to-end deployment.
+legacy/EIP-2930/EIP-1559 fee fields before opening a signing request. Nonce and
+gas quantities are bounded to the node's `u64` transaction fields, and fee
+quantities to its `u128` fields. Private keys remain in the wallet. This is an
+integrable client component, not a completed MetaMask end-to-end deployment.
 
 ## Remaining node and settlement work
 

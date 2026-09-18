@@ -19,6 +19,8 @@ const MAX_ACCOUNT_COUNT = 1024;
 const MAX_CALLDATA_BYTES = 128 * 1024;
 const MAX_ACCESS_LIST_ENTRIES = 1024;
 const MAX_ACCESS_LIST_STORAGE_KEYS = 8192;
+const MAX_U64 = 0xffffffffffffffffn;
+const MAX_U128 = 0xffffffffffffffffffffffffffffffffn;
 
 function isAddress(value) {
   return typeof value === "string" && address.test(value);
@@ -130,6 +132,16 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
       if (tx[field] !== undefined &&
           (typeof tx[field] !== "string" || tx[field].length > MAX_U256_HEX_LENGTH || !quantity.test(tx[field]))) {
         throw new TypeError(`Invalid hex quantity: ${field}`);
+      }
+    }
+    for (const field of ["gas", "nonce"]) {
+      if (tx[field] !== undefined && BigInt(tx[field]) > MAX_U64) {
+        throw new RangeError(`${field} exceeds the L2 transaction field width`);
+      }
+    }
+    for (const field of ["gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"]) {
+      if (tx[field] !== undefined && BigInt(tx[field]) > MAX_U128) {
+        throw new RangeError(`${field} exceeds the L2 transaction field width`);
       }
     }
     const dynamicFees = tx.maxFeePerGas !== undefined || tx.maxPriorityFeePerGas !== undefined;
