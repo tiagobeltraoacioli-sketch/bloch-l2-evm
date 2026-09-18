@@ -27,7 +27,7 @@ const MAX_U64 = 0xffffffffffffffffn;
 const MAX_U128 = 0xffffffffffffffffffffffffffffffffn;
 
 function isAddress(value) {
-  return typeof value === "string" && address.test(value);
+  return typeof value === "string" && value.length === 42 && address.test(value);
 }
 
 function boundedArrayLength(value, maximum) {
