@@ -12,6 +12,10 @@ feature also connects the exact mandatory deposit prefix to the verified V2
 transition: see [source coordinator commands](SETTLEMENT.md#optional-source-selection-coordinator)
 and the [combined local source/proof journal](SOURCE-JOURNAL.md).
 
+The optional `node-artifact` feature accepts independently selected sparse
+block exports from the developer node through a separate CLI; see
+[ARTIFACT.md](ARTIFACT.md). It retains the same pinned guest and proof verifier.
+
 The SDK is pinned to 6.8.0 without `network`, `cuda`, `native-gnark` or
 `experimental` features. Proof generation constructs the CPU prover explicitly;
 execution and standalone verification use the SDK's `LightProver`, which performs

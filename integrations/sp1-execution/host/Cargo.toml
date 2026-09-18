@@ -5,14 +5,27 @@ edition = "2021"
 rust-version = "1.98.1"
 license = "MIT OR Apache-2.0"
 publish = false
+default-run = "bloch-evm-sp1-host"
 
 [workspace]
 
 [features]
 default = []
 source-settlement = ["dep:bloch-native-domain-devnet", "dep:sha3"]
+node-artifact = ["dep:bloch-execution-artifact"]
+
+[[bin]]
+name = "bloch-evm-sp1-artifact"
+path = "src/bin/bloch-evm-sp1-artifact.rs"
+required-features = ["node-artifact"]
+
+[[bin]]
+name = "bloch-evm-sp1-chain"
+path = "src/bin/bloch-evm-sp1-chain.rs"
+required-features = ["node-artifact"]
 
 [dependencies]
+bloch-execution-artifact = { path = "../../execution-artifact", optional = true }
 bloch-native-domain-devnet = { path = "../../native-domain-devnet", optional = true }
 libc = "=0.2.189"
 sha3 = { version = "=0.11.0", default-features = false, optional = true }

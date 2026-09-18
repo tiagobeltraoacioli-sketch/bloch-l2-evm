@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! HTTP transport for the actual Reth RPC module; no alternate JSON handlers.
+//! Loopback transports for actual Reth RPC modules; no alternate JSON handlers.
 use jsonrpsee::{server::ServerConfig, RpcModule};
 use reth_rpc_builder::{error::RpcError, RpcServerConfig, RpcServerHandle, TransportRpcModules};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -16,6 +16,17 @@ pub async fn start_http_rpc(module: RpcModule<()>, port: u16) -> Result<RpcServe
     let modules = TransportRpcModules::default().with_http(module);
     RpcServerConfig::http(ServerConfig::builder())
         .with_http_address(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        .start(&modules)
+        .await
+}
+
+/// Start a separate loopback WebSocket listener for an upstream RPC module.
+/// Independent listeners allow HTTP and WS to have different method sets and
+/// independently selected ephemeral ports. The caller owns both server handles.
+pub async fn start_ws_rpc(module: RpcModule<()>, port: u16) -> Result<RpcServerHandle, RpcError> {
+    let modules = TransportRpcModules::default().with_ws(module);
+    RpcServerConfig::ws(ServerConfig::builder().max_subscriptions_per_connection(64))
+        .with_ws_address(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
         .start(&modules)
         .await
 }

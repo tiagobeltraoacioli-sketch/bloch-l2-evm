@@ -28,8 +28,13 @@ root commits that leaf. That would create a circular hash dependency. The curren
 `SourceBatch` is a host envelope that binds an already identified anchor block;
 its entire commitment cannot simply be inserted into that anchor's state tree.
 The native codec must instead commit the inbox/mapping data independently, then
-derive the anchored envelope from authenticated header/state inclusion. Exact
-conversion and prior-source linkage need conformance vectors before activation.
+derive the anchored envelope from authenticated header/state inclusion. The
+[experimental post-genesis payload](../integrations/native-domain-devnet/PAYLOAD.md)
+now provides a bounded codec and typed-height binding without the current block
+hash. Its byte vectors and branch/identity tests pass. It excludes height zero
+because the stored native genesis identity would otherwise reintroduce a cycle.
+Native component assignment, state inclusion, accepted source authority and
+activation conformance remain required; the codec alone supplies none of them.
 
 ## Lock transition
 

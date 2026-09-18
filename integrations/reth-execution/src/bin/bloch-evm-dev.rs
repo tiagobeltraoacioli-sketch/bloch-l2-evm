@@ -8,8 +8,8 @@ use bloch_l2_evm::{
     ChainSpec, DepositMint, DepositProvenance,
 };
 use bloch_reth_execution::{
-    build_eth_api, pool_maintenance, prepare_genesis, replay_canonical_prefix, start_http_rpc, BlochChainSpec,
-    BlochEvmConfig, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, BlochTransactionValidator,
+    build_eth_api, pool_maintenance, prepare_genesis, replay_canonical_prefix, start_http_rpc, start_ws_rpc,
+    BlochChainSpec, BlochEvmConfig, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, BlochTransactionValidator,
     CanonicalCoordinator,
 };
 use eyre::{bail, ensure, Result};
@@ -19,8 +19,8 @@ use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     DBProvider, DatabaseProviderFactory, ProviderFactory,
 };
-use reth_rpc::EthFilter;
-use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
+use reth_rpc::{EthFilter, EthPubSub};
+use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, pubsub::EthPubSubApiServer, EthApiServer, EthFilterApiServer};
 use reth_tasks::{RuntimeBuilder, RuntimeConfig, TokioConfig};
 use reth_transaction_pool::{
     blobstore::InMemoryBlobStore, maintain::MaintainPoolConfig, validate::EthTransactionValidatorBuilder,
@@ -28,12 +28,13 @@ use reth_transaction_pool::{
 };
 use std::{future::Future, path::PathBuf, sync::Arc, task::Poll, time::Duration};
 
-const USAGE: &str = "bloch-evm-dev --synthetic-dev --data-dir PATH [--init] [--fund ADDRESS] [--replay-from SOURCE] [--port 8545] [--block-interval-ms 1000]\n\
-Isolated synthetic developer domain, loopback HTTP, no P2P/L1 derivation/finality.\n\
+const USAGE: &str = "bloch-evm-dev --synthetic-dev --data-dir PATH [--init] [--fund ADDRESS] [--replay-from SOURCE] [--port 8545] [--ws-port PORT] [--block-interval-ms 1000]\n\
+Isolated synthetic developer domain, loopback HTTP and optional WebSocket, no P2P/L1 derivation/finality.\n\
+--ws-port enables a separate loopback listener; port 0 selects an available port.\n\
 --init requires a nonexistent directory; --fund is init-only synthetic issuance (100,000,000 sats).\n\
 --replay-from requires --init and forbids --fund; re-executes a stopped source into the new directory without writing the source.\n\
 Without --init the existing archival database is validated and reopened. Partial initialization is never retried automatically.\n\
-Pending RPC is unsupported. No private keys are generated or accepted. Ctrl-C stops the service.";
+Pending block/state queries are unsupported. No private keys are generated or accepted. Ctrl-C stops the service.";
 
 struct Options {
     path: PathBuf,
@@ -41,6 +42,7 @@ struct Options {
     fund: Option<Address>,
     replay_from: Option<PathBuf>,
     port: u16,
+    ws_port: Option<u16>,
     block_time: Duration,
 }
 impl Options {
@@ -49,6 +51,7 @@ impl Options {
         let (mut synthetic, mut path, mut init, mut fund) = (false, None, false, None);
         let mut replay_from = None;
         let (mut port, mut millis) = (8545, 1000u64);
+        let mut ws_port = None;
         let mut seen = std::collections::BTreeSet::new();
         while let Some(arg) = args.next() {
             ensure!(seen.insert(arg.clone()), "duplicate option {arg}");
@@ -65,6 +68,7 @@ impl Options {
                     replay_from = Some(PathBuf::from(args.next().ok_or_else(|| eyre::eyre!("missing SOURCE"))?))
                 }
                 "--port" => port = args.next().ok_or_else(|| eyre::eyre!("missing port"))?.parse()?,
+                "--ws-port" => ws_port = Some(args.next().ok_or_else(|| eyre::eyre!("missing WS port"))?.parse()?),
                 "--block-interval-ms" => {
                     millis = args.next().ok_or_else(|| eyre::eyre!("missing interval"))?.parse()?
                 }
@@ -78,6 +82,10 @@ impl Options {
             "--replay-from requires --init and forbids --fund"
         );
         ensure!(millis > 0, "block interval must be nonzero");
+        ensure!(
+            port == 0 || ws_port != Some(port),
+            "HTTP and WebSocket need distinct fixed ports"
+        );
         let block_time = Duration::from_millis(millis);
         ensure!(
             tokio::time::Instant::now().checked_add(block_time).is_some(),
@@ -89,6 +97,7 @@ impl Options {
             fund,
             replay_from,
             port,
+            ws_port,
             block_time,
         }))
     }
@@ -243,21 +252,36 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
         reth_rpc_eth_types::EthConfig::default().filter_config(),
         runtime.clone(),
     );
-    let mut module = api.into_rpc().remove_context();
+    let mut module = api.clone().into_rpc().remove_context();
     module.merge(filter.into_rpc())?;
+    let ws_module = if options.ws_port.is_some() {
+        let mut ws = module.clone();
+        ws.merge(EthPubSub::new(api, runtime.clone()).into_rpc())?;
+        Some(ws)
+    } else {
+        None
+    };
     let server = start_http_rpc(module, options.port).await?;
+    let ws_server = if let (Some(module), Some(port)) = (ws_module, options.ws_port) {
+        Some(start_ws_rpc(module, port).await?)
+    } else {
+        None
+    };
     let mut critical = runtime
         .take_task_manager_handle()
         .ok_or_else(|| eyre::eyre!("runtime task manager unavailable"))?;
     let mut maintenance = tokio::spawn(maintenance_future);
     println!(
-        "SYNTHETIC DEV ONLY: HTTP={} chain_id={} domain={} head={} no P2P; pending unsupported",
+        "SYNTHETIC DEV ONLY: HTTP={} chain_id={} domain={} head={} no P2P; pending block/state queries unsupported",
         server.http_url().unwrap_or_default(),
         kernel.chain_id,
         spec.domain(),
         coordinator.head().hash()
     );
     println!("RPC listening at {}", server.http_url().unwrap_or_default());
+    if let Some(ws) = &ws_server {
+        println!("WS listening at {}", ws.ws_url().unwrap_or_default());
+    }
     let mut interval = tokio::time::interval_at(first_tick, options.block_time);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let outcome: Result<()> = async {
@@ -288,6 +312,7 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
         Ok(())
     }.await;
     let stopped = server.stop();
+    let ws_stopped = ws_server.map(|server| server.stop()).transpose();
     maintenance.abort();
     // The handle may already have completed on the error branch above.
     if !maintenance.is_finished() {
@@ -295,5 +320,6 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
     }
     outcome?;
     stopped?;
+    ws_stopped?;
     Ok(())
 }

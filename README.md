@@ -29,7 +29,10 @@ records logs, filters, revert handling and other exercised behavior. The
 [Solidity acceptance](wallets/SOLIDITY.md) compiles for Cancun and exercises
 ABI deployment, events, custom errors and state persistence through ethers.
 The [SP1 harness](integrations/sp1-execution/host/README.md) records actual proof
-results and costs separately from ordinary guest execution. Native derivation,
+results and costs separately from ordinary guest execution. The optional
+[WebSocket transport](integrations/reth-execution/WEBSOCKET.md) and
+[three-block proof-chain rehearsal](docs/PROOF-CHAIN-REHEARSAL.md) are also
+qualified for the isolated synthetic workflow. Native derivation, consensus
 settlement, broader compatibility and production proof integration remain open.
 Regressions live in `tests/deep_security.rs`.
 
@@ -39,9 +42,10 @@ assumptions do not describe that integration. See
 [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) and
 [the native state adapter](integrations/native-state-proof/README.md).
 Writing an ordinary transaction containing a hash does not enforce settlement.
-Consensus-enforced escrow/inbox transitions, finality authentication and the
-proof backend remain required before this local implementation can settle real
-assets. All examples use synthetic, zero-real-value inputs.
+Consensus-enforced escrow/inbox transitions, finality authentication and native
+integration of the proof verifier remain required before this local
+implementation can settle real assets. All examples use synthetic,
+zero-real-value inputs.
 
 The native gas-token model is an L2 representation of **bridged BLCH**:
 zero issuance, never sold, and never

@@ -3,6 +3,8 @@
 //!
 //! Neither proof validity nor this local journal authenticates native deposits,
 //! consensus selection or withdrawal authority.
+#[cfg(feature = "node-artifact")]
+pub mod artifact;
 pub mod settlement;
 #[cfg(all(feature = "source-settlement", unix))]
 pub mod source_journal;

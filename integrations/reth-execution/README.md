@@ -6,8 +6,13 @@ to run Bloch's signed whole-block executor against an `EvmStateProvider`. Reth's
 It includes custom execution/validation, canonical storage and pool admission
 components, upstream Reth RPC handlers and loopback HTTP transport. The
 [isolated developer executable](DEVNODE.md) mines signed transactions and reopens
-its persistent database in explicit synthetic mode. Native derivation, full
-wallet qualification, crash recovery and the proof backend remain open.
+its persistent database in explicit synthetic mode. Actual MetaMask and compiled
+Solidity acceptance, selected process-recovery cases, and checked
+[execution-witness export](PROOF-EXPORT.md) have been exercised. The separate
+[SP1 host](../sp1-execution/host/README.md) verifies real proofs over the same
+execution core. Native consensus integration, broader wallet/conformance and
+crash/power-loss coverage remain open; see the current
+[delivery gates](../../docs/EVM-DELIVERY-PLAN.md).
 
 ## Reproduce
 
@@ -570,8 +575,10 @@ MDBX/RocksDB storage and the pool: signed admission, deployment/call selection,
 canonical persistence, receipts/log metadata, balance/nonce/code/storage and V2
 block identity. Its `NoopNetwork` is explicitly a local test component, not P2P.
 The fixture executes selected blocks through the canonical Bloch executor; it is
-not yet a wallet-connected, autonomously producing node. WebSocket transport,
-restart orchestration and end-to-end wallet tooling remain to be delivered.
+not itself a wallet-connected, autonomously producing node. The separate
+developer executable, orderly restart, ethers/MetaMask workflows and optional
+WebSocket subscriptions are qualified by their process tests; P2P, authenticated
+native derivation and production operation remain to be delivered.
 
 `start_http_rpc(api.into_rpc().remove_context(), port).await` serves the same
 upstream module through `reth_rpc_builder::RpcServerConfig` on IPv4 loopback.
@@ -585,6 +592,13 @@ genesis to check chain ID, V2 block identity/domain and storage. It also waits f
 the listening socket to become available after shutdown. This transport test is
 separate from the in-process deployment/receipt fixture above; it does not qualify
 a complete wallet workflow or persistent node restart.
+
+`start_ws_rpc` serves a separately selected upstream module on IPv4 loopback.
+The developer executable adds Reth `EthPubSub` only to this listener, keeping the
+HTTP method set unchanged. `tests/websocket_process.rs` passed 2/2 process tests
+with real `newHeads`, `newPendingTransactions` and filtered `logs` subscriptions,
+unsubscribe/reconnect, orderly restart and persisted HTTP state. See
+[`WEBSOCKET.md`](WEBSOCKET.md) for the exact scope and limits.
 
 `tests/rpc_developer_flow.rs` now submits signed deploy/call transactions through
 real HTTP, selects them from the actual pool and persists them through

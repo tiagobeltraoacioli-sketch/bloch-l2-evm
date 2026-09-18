@@ -34,6 +34,13 @@ Omit it for an unfunded domain. The fixed synthetic domain and chain configurati
 are printed at startup, along with the head hash. `--port 0` selects an available
 port; the `RPC listening at ...` line reports the actual endpoint.
 
+Add `--ws-port 8546` to enable the separate loopback WebSocket endpoint for
+`eth_subscribe` and `eth_unsubscribe`. Use `--ws-port 0` for an available port;
+the `WS listening at ...` line reports it. HTTP and WebSocket can both request
+port zero, but identical fixed ports are rejected. See
+[WebSocket subscriptions](WEBSOCKET.md) for event types, reconnect behavior and
+client tests.
+
 ```sh
 curl -s http://127.0.0.1:8545 -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
@@ -55,7 +62,7 @@ wallet compatibility is claimed by the process test.
 
 ## Stop and reopen
 
-Ctrl-C stops HTTP and background services. Reopen the same directory without
+Ctrl-C stops the RPC transports and background services. Reopen the same directory without
 `--init` or `--fund`:
 
 ```sh
@@ -65,7 +72,7 @@ integrations/reth-execution/target/debug/bloch-evm-dev \
 
 The node checks genesis/domain, head seal and committed metadata/state root, and
 historical genesis allocations before serving. Initialization refuses any
-existing directory. If initialization/funding succeeded but binding the HTTP
+existing directory. If initialization/funding succeeded but binding an RPC
 port failed, the database is already initialized: use reopen with a free port.
 A partially initialized directory is not automatically overwritten or repaired.
 
@@ -150,4 +157,7 @@ models, not exhaustive crash/power-loss qualification.
 
 Storage spans MDBX, static files and RocksDB; broader crash recovery, fork choice,
 reorganizations, native derivation/finality, authenticated pending environments,
-broader wallet qualification and the proof backend remain open delivery work.
+broader wallet qualification and native proof-verifier integration remain open.
+The stopped node's selected blocks can be [exported](PROOF-EXPORT.md) for the
+separate [SP1 proof-chain workflow](../../docs/PROOF-CHAIN-REHEARSAL.md); the
+developer service itself does not start a prover or settle native transactions.
