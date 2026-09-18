@@ -80,9 +80,10 @@
 //! * the SP1 guest (riscv32im) build target ([`stubs::sp1_guest`]) — the
 //!   procedure it must run is [`transactions::verify_signed_batch`].
 //!
-//! The L2 is an **owned Postern product** that anchors to the ownerless Bloch
-//! base as ordinary transactions; the base gains no operator and needs no
-//! consensus change. BLCH is never sold and the L2 never issues new BLCH.
+//! Modular Genesis-4 settlement still requires authenticated derivation and
+//! consensus-enforced escrow/verifier rules. An ordinary transaction containing
+//! a commitment does not establish settlement. The local execution model has
+//! zero issuance: native balance enters only through derived deposit mints.
 
 // Design determinism rule (§1): integer-only arithmetic in the execution path.
 #![deny(clippy::float_arithmetic)]
@@ -95,6 +96,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+#[cfg(feature = "experimental-escrow")]
+pub mod escrow_execution;
+#[cfg(feature = "experimental-escrow")]
+pub mod escrow_inbox;
 // The test harness itself links std; make it available to test code in the
 // no_std configuration too, so `cargo test --no-default-features` compiles.
 #[cfg(test)]
@@ -102,10 +107,19 @@ extern crate alloc;
 extern crate std;
 
 pub mod chainspec;
+pub mod domain;
 pub mod executor;
+pub mod l1;
+pub mod l1_transfer;
 pub mod mpt;
+pub mod node_execution;
+pub mod node_primitives;
+pub mod proof_statement;
+mod protocol_overlay;
 pub mod proving;
 pub mod scale;
+#[cfg(feature = "serde")]
+pub mod serde_bounded;
 pub mod state;
 pub mod stateroot;
 pub mod stubs;
@@ -113,8 +127,8 @@ pub mod transactions;
 
 pub use chainspec::{ChainSpec, ChainSpecError};
 pub use executor::{
-    deposits_hash, execute_block, validate_block_input, BlockContext, BlockExecutionError, BlockInput,
-    ExecutionOutcome, L2Header, TxOutcome, SUPPORTED_TX_TYPES,
+    deposits_hash, execute_block, prepare_transaction_effects, validate_block_input, BlockContext, BlockExecutionError,
+    BlockInput, CommittedTransaction, ExecutionOutcome, L2Header, PreparedTransaction, TxOutcome, SUPPORTED_TX_TYPES,
 };
 pub use mpt::Mpt;
 pub use proving::{
@@ -125,11 +139,15 @@ pub use scale::{sats_to_wei, wei_to_sats, ATOM_SCALE};
 pub use state::{DepositError, DepositMint, DepositPosition, DepositProvenance, HeadRecord, L2Account, L2State};
 pub use stateroot::{compute_keccak_mpt_state_root, stateless_new_root, SparseTrieView, WitnessError};
 pub use transactions::{
-    decode_signed_transaction, execute_signed_block, generate_signed_batch_witness, verify_signed_batch,
-    AuthenticatedTransaction, SignedBlockInput, SignedInputError, TransactionAuthError,
+    decode_signed_transaction, execute_signed_block, execute_signed_block_on_database, generate_signed_batch_witness,
+    verify_signed_batch, AuthenticatedTransaction, DatabaseBlockExecution, SignedBlockBuilder, SignedBlockInput,
+    SignedInputError, TransactionAuthError,
 };
 
 /// The exact revm version this scaffold is pinned to (also pinned as `=41.0.0`
 /// in `Cargo.toml` and recorded in `README.md`). Any bump is a documented
 /// program upgrade per the design's determinism contract.
 pub const REVM_PIN: &str = "41.0.0";
+
+#[cfg(feature = "experimental-escrow")]
+pub mod escrow;

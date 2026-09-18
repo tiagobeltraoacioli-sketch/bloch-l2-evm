@@ -1,0 +1,26 @@
+diff --git a/crates/storage/provider/src/providers/consistent.rs b/crates/storage/provider/src/providers/consistent.rs
+index 89c9795d0041c39030f8ea686e7be84916a60c3b..07c684688735aaae53f6374c791dd87ced56550e 100644
+--- a/crates/storage/provider/src/providers/consistent.rs
++++ b/crates/storage/provider/src/providers/consistent.rs
+@@ -279,7 +279,9 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
+         let last_database_block_number = in_mem_chain
+             .last()
+             .map(|b| Ok(b.anchor().number))
+-            .unwrap_or_else(|| provider.last_block_number())?;
++            // Static-file headers can advance after the MDBX read transaction
++            // was opened. Select the storage boundary from that same snapshot.
++            .unwrap_or_else(|| provider.best_block_number())?;
+ 
+         // Get the next tx number for the last block stored in the storage, which marks the start of
+         // the in-memory state.
+@@ -376,7 +378,9 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
+         let last_database_block_number = in_mem_chain
+             .last()
+             .map(|b| Ok(b.anchor().number))
+-            .unwrap_or_else(|| provider.last_block_number())?;
++            // Static-file headers can advance after the MDBX read transaction
++            // was opened. Select the storage boundary from that same snapshot.
++            .unwrap_or_else(|| provider.best_block_number())?;
+ 
+         // Get the next tx number for the last block stored in the database and consider it the
+         // first tx number of the in-memory state

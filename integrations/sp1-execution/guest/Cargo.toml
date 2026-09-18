@@ -1,0 +1,21 @@
+[package]
+name = "bloch-evm-synthetic-guest"
+version = "0.1.0-experimental"
+edition = "2021"
+rust-version = "1.94.1"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Experimental SP1 guest for the fixed Bloch synthetic developer domain"
+
+# Keep native c-kzg/default features out of the guest dependency graph.
+[workspace]
+
+[dependencies]
+bloch-l2-evm = { path = "../../..", default-features = false, features = ["serde"] }
+alloy-primitives = { version = "=1.6.1", default-features = false }
+alloy-rlp = { version = "=0.3.16", default-features = false }
+sp1-zkvm = { version = "=6.8.0", default-features = false, features = ["lib"] }
+
+[profile.release]
+panic = "abort"
+

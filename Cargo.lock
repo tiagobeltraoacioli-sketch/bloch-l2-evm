@@ -714,6 +714,7 @@ dependencies = [
  "ruint",
  "serde",
  "serde_json",
+ "sha3",
 ]
 
 [[package]]

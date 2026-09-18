@@ -31,6 +31,12 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked
       - run: cargo test --locked --features serde
+      - name: Run the signed developer contract lifecycle
+        run: cargo run --locked --example developer_contract
+      - name: Rehearse durable signed contract execution and recovery
+        run: python3 tools/developer-rehearsal.py "$RUNNER_TEMP/bloch-developer-rehearsal"
+      - name: Test durable journal recovery and publication failures
+        run: cargo test --locked --manifest-path integrations/escrow-journal/Cargo.toml
       - run: cargo build --locked --no-default-features
       - run: cargo test --locked --no-default-features
       # Capacity and overflow guards must also hold with release optimizations.
@@ -38,6 +44,34 @@ jobs:
       - run: cargo doc --locked --no-deps
       # List the pre-existing ignored performance benchmark for discoverability.
       - run: cargo test --locked --test audit_regressions -- --ignored --list
+
+  reth-provider:
+    name: Reth provider execution and storage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bloch-modular-execution
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bloch-modular-execution
+      - uses: actions/checkout@v4
+        with:
+          repository: paradigmxyz/reth
+          ref: 8eb210175687c9f0c889a3b6795c16781d830e3a
+          path: reth-bloch-integration
+      - name: Install the separate pinned host toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+      - name: Install native storage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bloch-modular-execution/integrations/reth-execution
+      - run: cargo +1.98.1 fmt --manifest-path integrations/reth-execution/Cargo.toml -- --check
+      - run: cargo +1.98.1 test --locked --manifest-path integrations/reth-execution/Cargo.toml
+      - run: cargo +1.98.1 clippy --locked --manifest-path integrations/reth-execution/Cargo.toml --all-targets -- -D warnings
 
   wallets:
     name: EIP-1193 wallet adapter

@@ -1,0 +1,9 @@
+{
+  "evmVersion": "cancun",
+  "optimizer": { "enabled": true, "runs": 200 },
+  "viaIR": false,
+  "metadata": { "bytecodeHash": "none", "appendCBOR": true },
+  "outputSelection": {
+    "*": { "*": ["abi", "evm.bytecode.object", "evm.deployedBytecode.object"] }
+  }
+}

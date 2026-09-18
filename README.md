@@ -1,17 +1,16 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # bloch-l2-evm
 
-> **SCAFFOLD, not a working L2.** This crate is a first-iteration,
-> compiling skeleton of the execution layer described in
-> `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1 (design documents live in the
-> upstream monorepo, not in this repository). Nothing here is deployed or
-> value-bearing, and **no claim of ethereum/tests or EEST conformance is made
-> anywhere**. It is not a node, not a sequencer, not a prover, and not a Reth
-> embedding — it is the state-transition core those would call, plus honest
-> labelled stubs. An internal deep audit and its status live in
-> [`AUDITORIA-L2.md`](AUDITORIA-L2.md) (Portuguese) and
-> [`tests/audit_regressions.rs`](tests/audit_regressions.rs); its P0, P1 and
-> P2 findings are fixed and every finding has a live regression test.
+> **Experimental developer EVM; production L2 delivery remains incomplete.**
+> This repository contains the signed Cancun execution core, an isolated
+> synthetic Reth developer node, wallet acceptance tests and SP1 core-proof
+> qualification. Native consensus-enforced deposits, settlement and withdrawals
+> remain unfinished. Nothing here is deployed or value-bearing. Targeted
+> conformance tests do not establish full ethereum/tests or EEST conformance.
+
+The internal execution audit and its regression history are recorded in
+[`AUDITORIA-L2.md`](AUDITORIA-L2.md) (Portuguese) and
+[`tests/audit_regressions.rs`](tests/audit_regressions.rs).
 
 The [second-pass security audit](SECURITY-AUDIT-2026-09-07.md) documents
 additional fixes for sparse-proof completeness, canonical decoding, the Cancun
@@ -20,34 +19,76 @@ It also records the remaining L1 authentication and proof-system integration
 requirements. The [L2 wallet boundary](WALLET-COMPATIBILITY.md) now authenticates
 original signed Ethereum bytes in host execution and guest verification; native
 Bloch L1 authorization remains PQ-only. The included EIP-1193 client adapter is
-ready to integrate with an application; the RPC/Reth node itself remains stubbed. Regressions live in `tests/deep_security.rs`.
+ready to integrate with an application. The separate pinned Reth host now has an
+[isolated developer executable](integrations/reth-execution/DEVNODE.md) with
+synthetic funding, real HTTP, automatic mining and orderly database restart.
+The [real MetaMask UI acceptance](wallets/browser/README.md) now covers connection,
+rejection, signing, deployment/call and state after restart. The
+[RPC compatibility matrix](integrations/reth-execution/RPC-COMPATIBILITY.md)
+records logs, filters, revert handling and other exercised behavior. The
+[Solidity acceptance](wallets/SOLIDITY.md) compiles for Cancun and exercises
+ABI deployment, events, custom errors and state persistence through ethers.
+The [SP1 harness](integrations/sp1-execution/host/README.md) records actual proof
+results and costs separately from ordinary guest execution. The optional
+[WebSocket transport](integrations/reth-execution/WEBSOCKET.md) and
+[three-block proof-chain rehearsal](docs/PROOF-CHAIN-REHEARSAL.md) are also
+qualified for the isolated synthetic workflow. Native derivation, consensus
+settlement, broader compatibility and production proof integration remain open.
+Regressions live in `tests/deep_security.rs`.
 
-> **The reorg gate (from the design, read first).** An L2 inherits its L1's
-> finality. Bloch today is k=4 forgeable, 51%-attackable, unaudited — a Bloch
-> reorg can unwind L2 state anchored to reorged blocks. Real value is gated on
-> Bloch mainnet security (k=8 ramp, WAN hashrate, checkpoint finality) + a
-> third-party audit + legal review. Everything below is **testnet /
-> zero-value** until then.
+The original scaffold described PoW anchoring. Current modular integration work
+targets Genesis-4 headers and native state commitments; the earlier PoW finality
+assumptions do not describe that integration. See
+[MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) and
+[the native state adapter](integrations/native-state-proof/README.md).
+Writing an ordinary transaction containing a hash does not enforce settlement.
+Consensus-enforced escrow/inbox transitions, finality authentication and native
+integration of the proof verifier remain required before this local
+implementation can settle real assets. All examples use synthetic,
+zero-real-value inputs.
 
-The L2 is an **owned Postern product** (it has a sequencer/operator) that
-anchors to the ownerless Bloch-SIS-PoW base as ordinary transactions — the
-base gains no operator and needs no consensus change. The native gas token is
-an L2 representation of **bridged BLCH**: zero issuance, never sold, and never
+The native gas-token model is an L2 representation of **bridged BLCH**:
+zero issuance, never sold, and never
 burned by the protocol. The EVM's EIP-6780 `SELFDESTRUCT`-to-self can still
 destroy value; the executor measures that per transaction and commits the
 running total, so `total_native == total_minted - total_burned` always holds
 (audit finding C11).
 
-## Version pins (normative for this scaffold)
+## Local modular execution boundary
+
+`domain::EvmDomain` now binds network/module/runtime identity, immutable execution
+parameters, ordered inputs and sequential state roots to actual signed EVM
+re-execution. Run `cargo run --locked --example modular_evm` for a zero-value local
+demonstration. This is not an on-chain verifier, proof backend or working rollup.
+`l1::authenticate_body` additionally checks Genesis-4 header ancestry and full
+transaction-body commitments against an externally trusted checkpoint; finality
+authentication and escrow derivation remain pending.
+See [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) for the trust boundary, tested
+behavior and remaining L1 integration.
+
+For signed contract deployment and execution, follow the
+[developer quickstart](docs/DEVELOPER-QUICKSTART.md):
+
+```sh
+cargo +1.94.1 run --locked --example developer_contract
+```
+
+The [delivery plan](docs/EVM-DELIVERY-PLAN.md) tracks the remaining node, proving
+and native settlement work separately from runnable local developer examples.
+The [generic database adapter](docs/DATABASE-EXECUTION.md) exposes the same signed
+execution kernel to external storage, including the experimental
+[Reth provider integration](integrations/reth-execution/README.md).
+
+## Execution version pins
 
 | dependency | pin | why |
 |---|---|---|
-| `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The design requires ONE pinned revm so the native node and the future SP1 guest re-execute byte-identical code; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled (ecrecover uses the pure-Rust `k256`), nor `blst`/`tracer`. The guest's one feature delta is `c-kzg` → `kzg-rs`. |
+| `revm` | **`=41.0.0`** (exact), `default-features = false`, features `c-kzg`, `portable` | The native node and SP1 guest execute the same pinned Cancun transition; any bump is a documented program upgrade. `c-kzg` provides the Cancun point-evaluation precompile; `secp256k1` (C) is not enabled in the portable core (ecrecover uses pure-Rust `k256`), nor `blst`/`tracer`. Default `host-kzg` enables the native backend; `--no-default-features` selects revm 41's built-in pure-Rust arkworks verifier without removing Cancun's precompile. See [KZG backends](docs/KZG-BACKENDS.md). |
 | `alloy-consensus` / `alloy-eips` | **`=2.2.0`** / **`=2.2.0`** (exact) | Signed Ethereum envelopes and k256 sender recovery, exclusively at the L2 authorization boundary. |
 | `alloy-primitives` | **`=1.6.1`** (exact) | `Address`/`U256`/`B256` are one type family across the crate. |
 | `alloy-trie` / `alloy-rlp` | **`=0.9.5`** / **`=0.3.16`** (exact) | Trie node encoders, `HashBuilder`, proofs and RLP: consensus-relevant, pinned like revm. |
 | `ruint` | **`=1.20.0`** (exact) | The U256 implementation. A documented program upgrade over the audited 1.19.0 (RUSTSEC-2026-0220, shift overflow flags); revm bounds every EVM shift to < 256, so no executed semantics changed. |
-| toolchain | **`1.94.1`** (`rust-toolchain.toml`), `rust-version = 1.94.1` | The SP1 vkey depends on the exact compiler; a moving channel is not acceptable. |
+| core toolchain | **`1.94.1`** (`rust-toolchain.toml`), `rust-version = 1.94.1` | Host integrations use their separately pinned toolchains. The SP1 guest uses the exact cross-compiler and artifact hashes in [SP1-TOOLCHAIN.md](docs/SP1-TOOLCHAIN.md); its verification key depends on the compiled program. |
 | hardfork | `SpecId::CANCUN` | Cancun at genesis per the design; Prague only via a coordinated, height-gated upgrade. |
 
 `Cargo.lock` is committed and CI builds `--locked` (determinism contract,
@@ -150,19 +191,23 @@ backends and unknown sources.
   that read other accounts, deposits through the ledger) and tampering
   (omitted / injected / stripped / forged inputs are rejected).
 
-## What is honestly STUBBED (`todo!()` / `unimplemented!()`, `// SCAFFOLD:`)
+## Remaining integration boundaries
 
-* `eth_*` JSON-RPC, txpool, and the Reth-SDK node embedding (`src/stubs.rs`)
-  — the design mandates Reth's stack precisely so this surface is *not*
-  hand-rolled.
-* the SP1 guest (riscv32im) build target (`src/stubs.rs::sp1_guest`) — the
-  procedure it must run is `transactions::verify_signed_batch`; the dependency-level
-  no_std wiring is the SP1 toolchain stage.
-* genesis alloc / vault predeploy bytecode (the vault addresses exist as
-  plain balance-holding accounts here, not deployed Solidity vaults), the
-  anchor reader (the Bloch anchor root and `prevrandao` are inputs the node
-  must derive; the STF commits them), RPC/pool wiring of the signed transaction
-  boundary and receipts (transactions are not yet committed in the block header).
+`src/stubs.rs` retains the original scaffold interfaces. The implemented Reth
+node and SP1 harness live in separate `integrations/` workspaces with their own
+dependency graphs and reproduction instructions. Core `cargo test` does not run
+those integration suites.
+
+The Reth developer node uses real pool/RPC/storage components and V2 headers
+committing signed transactions and receipts. Its funding and block derivation
+remain explicitly synthetic. The SP1 guest targets `riscv64im-succinct-zkvm-elf`
+and executes `proof_statement::execute_statement` for the compiled synthetic
+configuration; an execution proof does not authenticate native/L1 deposits.
+
+Vault addresses remain balance-holding accounts rather than deployed Solidity
+withdrawal vaults. Native consensus-enforced escrow, authenticated complete
+inbox/source derivation, settlement and replay-safe native payouts remain delivery
+gates. See the [current plan](docs/EVM-DELIVERY-PLAN.md) for their status.
 
 ## Layout / build
 

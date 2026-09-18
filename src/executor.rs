@@ -40,25 +40,28 @@
 //! to a working copy, and the caller's state is replaced only on success — on
 //! any `Err` it is byte-identical to the pre-block state, so a sequencer can
 //! drop the offending transaction (identified by `tx_index`) and rebuild.
-//! A separate block-*builder* entry point (skip invalid candidates, stop at the
-//! gas limit) is not part of this scaffold.
+//! The authenticated incremental builder shares this kernel, staging each
+//! candidate separately before accepting its effects into the working block.
 
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use revm::context::result::{ExecutionResult, HaltReason};
+use revm::context::result::{ExecutionResult, HaltReason, ResultAndState};
 use revm::context::TxEnv;
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::context_interface::Transaction;
 use revm::database::CacheDB;
 use revm::handler::{ExecuteEvm, SystemCallCommitEvm};
+use revm::state::{Account, EvmState};
 use revm::{Context, Database, DatabaseCommit, DatabaseRef, MainBuilder, MainContext};
 
 use crate::chainspec::{ChainSpec, ChainSpecError, BEACON_ROOTS_ADDRESS};
+
+pub mod lifecycle;
 use crate::state::{
-    apply_deposit, beacon_roots_bytecode, block_hash_slot, credit_balance, ensure_system_account, ledger_add,
-    DepositApplyError, DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
+    apply_deposit, beacon_roots_bytecode, block_hash_slot, ensure_system_account, ledger_add, DepositApplyError,
+    DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
     BLOCK_INFO_BASE_FEE_SLOT, BLOCK_INFO_DEPOSITS_HASH_SLOT, BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_GAS_USED_SLOT,
     BLOCK_INFO_NUMBER_SLOT, BLOCK_INFO_PARENT_HASH_SLOT, BLOCK_INFO_PREVRANDAO_SLOT, BLOCK_INFO_TIMESTAMP_SLOT,
     SUPPLY_LEDGER_BURNED_SLOT,
@@ -156,9 +159,10 @@ impl Default for BlockContext {
 }
 
 /// The L2 block header this scaffold commits to. Its hash is the L2 block
-/// hash (`BLOCKHASH`, parent linkage, anchoring). Transactions are not yet
-/// committed (the node layer that owns signed transactions and receipts will
-/// add their roots); `deposits_hash` commits the deposit list.
+/// hash (`BLOCKHASH`, parent linkage, anchoring). This header does not commit
+/// transaction or receipt roots; `deposits_hash` commits the deposit list.
+/// Adding those roots requires a versioned execution-domain change, including
+/// the committed head record and its reconstruction, not just RPC fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct L2Header {
     /// EIP-155 chain id (domain separation).
@@ -274,6 +278,11 @@ pub struct ExecutionOutcome {
 /// **unchanged** on every variant.
 #[derive(Debug)]
 pub enum BlockExecutionError {
+    /// The separately configured V2 committed header state is malformed.
+    HeaderState {
+        /// Description of the invalid metadata.
+        detail: String,
+    },
     /// A deposit mint violated the ledger rules (cursor, L1 cap).
     Deposit(DepositError),
     /// The block's deposits are not in strictly increasing L1 position order
@@ -397,6 +406,7 @@ pub enum BlockExecutionError {
 impl core::fmt::Display for BlockExecutionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            BlockExecutionError::HeaderState { detail } => write!(f, "invalid header state: {detail}"),
             BlockExecutionError::Deposit(e) => write!(f, "deposit failed: {e}"),
             BlockExecutionError::DepositsOutOfOrder {
                 first_index,
@@ -533,31 +543,36 @@ pub fn validate_block_input(spec: &ChainSpec, input: &BlockInput) -> Result<(), 
         }
     }
     for (i, tx) in input.txs.iter().enumerate() {
-        if tx.tx_type == BLOB_TX_TYPE || !tx.blob_hashes.is_empty() || tx.max_fee_per_blob_gas != 0 {
-            return Err(BlockExecutionError::BlobTxRejected { tx_index: i });
-        }
-        if !SUPPORTED_TX_TYPES.contains(&tx.tx_type) {
-            return Err(BlockExecutionError::UnsupportedTxType {
-                tx_index: i,
-                tx_type: tx.tx_type,
-            });
-        }
-        let is_1559 = tx.tx_type == 2;
-        if is_1559 != tx.gas_priority_fee.is_some()
-            || (tx.tx_type == 0 && !tx.access_list.0.is_empty())
-            || !tx.authorization_list.is_empty()
-        {
-            return Err(BlockExecutionError::InconsistentTxEnv { tx_index: i });
-        }
-        if tx.chain_id != Some(spec.chain_id) {
-            return Err(BlockExecutionError::ChainIdMismatch {
-                tx_index: i,
-                got: tx.chain_id,
-            });
-        }
-        if tx.gas_limit > spec.gas_limit {
-            return Err(BlockExecutionError::TxGasLimitExceedsBlock { tx_index: i });
-        }
+        validate_transaction(spec, tx, i)?;
+    }
+    Ok(())
+}
+
+fn validate_transaction(spec: &ChainSpec, tx: &TxEnv, i: usize) -> Result<(), BlockExecutionError> {
+    if tx.tx_type == BLOB_TX_TYPE || !tx.blob_hashes.is_empty() || tx.max_fee_per_blob_gas != 0 {
+        return Err(BlockExecutionError::BlobTxRejected { tx_index: i });
+    }
+    if !SUPPORTED_TX_TYPES.contains(&tx.tx_type) {
+        return Err(BlockExecutionError::UnsupportedTxType {
+            tx_index: i,
+            tx_type: tx.tx_type,
+        });
+    }
+    let is_1559 = tx.tx_type == 2;
+    if is_1559 != tx.gas_priority_fee.is_some()
+        || (tx.tx_type == 0 && !tx.access_list.0.is_empty())
+        || !tx.authorization_list.is_empty()
+    {
+        return Err(BlockExecutionError::InconsistentTxEnv { tx_index: i });
+    }
+    if tx.chain_id != Some(spec.chain_id) {
+        return Err(BlockExecutionError::ChainIdMismatch {
+            tx_index: i,
+            got: tx.chain_id,
+        });
+    }
+    if tx.gas_limit > spec.gas_limit {
+        return Err(BlockExecutionError::TxGasLimitExceedsBlock { tx_index: i });
     }
     Ok(())
 }
@@ -592,13 +607,31 @@ pub(crate) struct BlockRun {
 }
 
 impl BlockRun {
+    fn record(&mut self, committed: CommittedTransaction) {
+        let outcome = committed.outcome;
+        self.gas_used += outcome.gas_used;
+        self.burned_wei = self
+            .burned_wei
+            .checked_add(outcome.burned_wei)
+            .expect("burned wei cannot overflow U256");
+        self.base_fee_routed_wei = self
+            .base_fee_routed_wei
+            .checked_add(committed.base_fee_routed_wei)
+            .expect("routed wei cannot overflow U256");
+        self.priority_fee_routed_wei = self
+            .priority_fee_routed_wei
+            .checked_add(committed.priority_fee_routed_wei)
+            .expect("routed wei cannot overflow U256");
+        self.tx_outcomes.push(outcome);
+    }
+
     /// The full outcome, given the post-state root.
-    pub(crate) fn into_outcome(self, spec: &ChainSpec, input: &BlockInput, state_root: B256) -> ExecutionOutcome {
-        let header = self.header(spec, input, state_root);
+    pub(crate) fn into_outcome(self, chain_id: u64, context: &BlockContext, state_root: B256) -> ExecutionOutcome {
+        let header = self.header(chain_id, context, state_root);
         ExecutionOutcome {
-            block_number: input.context.number,
+            block_number: context.number,
             gas_used: self.gas_used,
-            base_fee_per_gas: input.context.base_fee_per_gas,
+            base_fee_per_gas: context.base_fee_per_gas,
             minted_wei: self.minted_wei,
             burned_wei: self.burned_wei,
             deposits_hash: self.deposits_hash,
@@ -612,15 +645,15 @@ impl BlockRun {
     }
 
     /// The header of the executed block, given its post-state root.
-    pub(crate) fn header(&self, spec: &ChainSpec, input: &BlockInput, state_root: B256) -> L2Header {
+    pub(crate) fn header(&self, chain_id: u64, context: &BlockContext, state_root: B256) -> L2Header {
         L2Header {
-            chain_id: spec.chain_id,
-            number: input.context.number,
-            timestamp: input.context.timestamp,
-            base_fee_per_gas: input.context.base_fee_per_gas,
+            chain_id,
+            number: context.number,
+            timestamp: context.timestamp,
+            base_fee_per_gas: context.base_fee_per_gas,
             gas_used: self.gas_used,
-            prevrandao: input.context.prevrandao,
-            anchor_root: input.context.anchor_root,
+            prevrandao: context.prevrandao,
+            anchor_root: context.anchor_root,
             parent_hash: self.parent_hash,
             deposits_hash: self.deposits_hash,
             state_root,
@@ -677,15 +710,14 @@ fn write_head<ExtDB: DatabaseRef>(
 }
 
 /// Validate the block context against the head record and return the parent
-/// block's hash (writing it into the ring buffer), then fill the `BLOCKHASH`
-/// window of revm's cache from the committed ring so no placeholder is ever
-/// served.
-fn apply_header_rules<ExtDB: DatabaseRef>(
+/// block's hash (writing it into the ring buffer), plus whether a committed
+/// head exists. Portable cache population is separate from this protocol update.
+fn apply_header_update<ExtDB: DatabaseRef>(
     spec: &ChainSpec,
     db: &mut CacheDB<ExtDB>,
     prev_state_root: B256,
     ctx: &BlockContext,
-) -> Result<B256, BlockExecutionError> {
+) -> Result<(B256, bool), BlockExecutionError> {
     let info = spec.block_info;
     let head = read_head(db, info).map_err(db_error)?;
     let parent_hash = match head {
@@ -732,11 +764,22 @@ fn apply_header_rules<ExtDB: DatabaseRef>(
         }
     };
 
+    Ok((parent_hash, head.is_some()))
+}
+
+fn apply_header_rules<ExtDB: DatabaseRef>(
+    spec: &ChainSpec,
+    db: &mut CacheDB<ExtDB>,
+    prev_state_root: B256,
+    ctx: &BlockContext,
+) -> Result<B256, BlockExecutionError> {
+    let (parent_hash, has_head) = apply_header_update(spec, db, prev_state_root, ctx)?;
+    let info = spec.block_info;
     // BLOCKHASH window: every number in [N-256, N-1] is served from the ring
     // (zero for blocks before the chain started), never from a backing DB.
     let start = ctx.number.saturating_sub(BLOCK_HASH_HISTORY);
     for n in start..ctx.number {
-        let v = if head.is_some() {
+        let v = if has_head {
             db.storage(info, block_hash_slot(n)).map_err(db_error)?
         } else {
             U256::ZERO
@@ -755,23 +798,27 @@ fn apply_header_rules<ExtDB: DatabaseRef>(
 /// recording overlay, or a stateless guest state). `prev_state_root` is the
 /// root of `db` before this block (the host computes it, the guest takes it
 /// from the authenticated witness).
-pub(crate) fn run_block<ExtDB: DatabaseRef>(
+pub(crate) fn run_block<DB: DatabaseRef>(
     spec: &ChainSpec,
-    mut db: CacheDB<ExtDB>,
+    db: CacheDB<DB>,
     prev_state_root: B256,
     input: &BlockInput,
-) -> Result<(CacheDB<ExtDB>, BlockRun), BlockExecutionError> {
-    // 0. Input-only validation, before anything is touched.
+) -> Result<(CacheDB<DB>, BlockRun), BlockExecutionError> {
+    // Keep verifier-wide preflight ahead of every database read.
     validate_block_input(spec, input)?;
+    let mut session = BlockSession::begin(spec, db, prev_state_root, &input.context, &input.deposits)?;
+    for tx in &input.txs {
+        session.try_transaction(tx, |_| true)?;
+    }
+    session.finish()
+}
 
-    // 1. Header rules against the committed head; parent hash into the ring;
-    //    BLOCKHASH window filled from the ring.
-    let parent_hash = apply_header_rules(spec, &mut db, prev_state_root, &input.context)?;
-
-    // 2. Build the EVM: UNMODIFIED revm, mainnet handler, pinned hardfork.
-    //    The database is moved into the EVM context and recovered afterwards.
-    let base_fee = input.context.base_fee_per_gas;
-    let mut evm = Context::mainnet()
+fn block_context<DB: Database>(
+    spec: &ChainSpec,
+    context: &BlockContext,
+    db: DB,
+) -> Context<revm::context::BlockEnv, TxEnv, revm::context::CfgEnv, DB> {
+    Context::mainnet()
         .with_db(db)
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = spec.chain_id;
@@ -779,190 +826,372 @@ pub(crate) fn run_block<ExtDB: DatabaseRef>(
             cfg.set_spec_and_mainnet_gas_params(spec.spec_id);
         })
         .modify_block_chained(|b| {
-            b.number = U256::from(input.context.number);
-            b.timestamp = U256::from(input.context.timestamp);
+            b.number = U256::from(context.number);
+            b.timestamp = U256::from(context.timestamp);
             b.gas_limit = spec.gas_limit;
-            b.basefee = base_fee;
+            b.basefee = context.base_fee_per_gas;
             // COINBASE = fee-vault address (design §1): priority fees are
             // paid to the beneficiary by revm's unmodified handler.
             b.beneficiary = spec.coinbase();
-            b.prevrandao = Some(input.context.prevrandao);
+            b.prevrandao = Some(context.prevrandao);
             b.difficulty = U256::ZERO;
             // Blobless blocks: BLOBHASH / blob-basefee opcodes still return
             // spec-correct values (zero excess gas) for Cancun.
             b.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice::new_with_spec(0, spec.spec_id));
         })
-        .build_mainnet();
+}
 
-    // 3. EIP-4788 system call: store this block's anchor root under its
-    //    timestamp in the canonical beacon-roots predeploy (materialized if
-    //    absent), before any transaction.
-    ensure_system_account(
-        &mut evm.ctx.journaled_state.database,
-        BEACON_ROOTS_ADDRESS,
-        Some(&beacon_roots_bytecode()),
-    )
-    .map_err(db_error)?;
-    let sys = evm
-        .system_call_commit(
+/// Fully prepared effects from a trusted, matching revm execution result.
+/// Dropping this value discards all writes. It is not an authentication or proof boundary.
+#[must_use = "commit prepared effects or drop them to discard the candidate"]
+#[derive(Debug)]
+pub struct PreparedTransaction {
+    execution: ResultAndState<HaltReason>,
+    fee_credit: EvmState,
+    committed: CommittedTransaction,
+}
+
+/// Accounting produced when a prepared transaction is committed.
+#[derive(Debug)]
+pub struct CommittedTransaction {
+    /// EVM execution outcome, including separately accounted destruction.
+    pub outcome: TxOutcome,
+    /// Base fee credited by the protocol to the configured vault.
+    pub base_fee_routed_wei: U256,
+    /// Priority fee already credited by revm to the beneficiary.
+    pub priority_fee_routed_wei: U256,
+}
+
+impl PreparedTransaction {
+    /// Inspect the execution outcome before choosing whether to commit.
+    pub fn outcome(&self) -> &TxOutcome {
+        &self.committed.outcome
+    }
+
+    /// Inspect the original EVM result and state, before protocol fee routing.
+    pub fn result_and_state(&self) -> &ResultAndState<HaltReason> {
+        &self.execution
+    }
+
+    /// Extract the original EVM result, discarding prepared protocol accounting.
+    /// This consumes the candidate and does not commit any state.
+    pub fn into_result_and_state(self) -> ResultAndState<HaltReason> {
+        self.execution
+    }
+
+    /// Commit to the same logical pre-state used for preparation, without database reads.
+    ///
+    /// No other transition may change that pre-state between preparation and commit.
+    /// The two commits preserve deletion followed by protocol-level vault recreation.
+    pub fn commit(self, db: &mut impl DatabaseCommit) -> CommittedTransaction {
+        db.commit(self.execution.state);
+        if !self.fee_credit.is_empty() {
+            db.commit(self.fee_credit);
+        }
+        self.committed
+    }
+}
+
+/// Reconcile a matching revm result and prepare all fee effects without committing.
+///
+/// The caller must supply the actual result of executing `tx` against `db` at the
+/// given base fee. This function does not authenticate transactions, validate an
+/// arbitrary result, enforce block gas limits, or prove the backing state. Reads
+/// may populate database caches; errors never call `DatabaseCommit::commit`.
+pub fn prepare_transaction_effects<DB: Database>(
+    spec: &ChainSpec,
+    base_fee: u64,
+    tx: &TxEnv,
+    tx_index: usize,
+    result: ResultAndState<HaltReason>,
+    db: &mut DB,
+) -> Result<PreparedTransaction, BlockExecutionError> {
+    let ResultAndState { result, state } = result;
+    let gas_used = result.tx_gas_used();
+    let effective = Transaction::effective_gas_price(tx, base_fee as u128);
+    let base_fee_wei = U256::from(core::cmp::min(effective, base_fee as u128))
+        .checked_mul(U256::from(gas_used))
+        .expect("fee cannot overflow U256");
+    let priority_fee_routed_wei = U256::from(effective.saturating_sub(base_fee as u128))
+        .checked_mul(U256::from(gas_used))
+        .expect("fee cannot overflow U256");
+    let mut pre_sum = U256::ZERO;
+    let mut post_sum = U256::ZERO;
+    for (address, account) in &state {
+        let pre = db
+            .basic(*address)
+            .map_err(db_error)?
+            .map(|info| info.balance)
+            .unwrap_or_default();
+        let post = if account.is_selfdestructed() {
+            U256::ZERO
+        } else {
+            account.info.balance
+        };
+        pre_sum = pre_sum.checked_add(pre).expect("balances cannot overflow U256");
+        post_sum = post_sum.checked_add(post).expect("balances cannot overflow U256");
+    }
+    let lost = pre_sum.saturating_sub(post_sum);
+    let burned = lost
+        .checked_sub(base_fee_wei)
+        .ok_or(BlockExecutionError::Conservation {
+            tx_index,
+            lost_wei: lost,
+            base_fee_wei,
+        })?;
+    let mut fee_credit = EvmState::default();
+    if !base_fee_wei.is_zero() {
+        // DatabaseCommit ignores untouched entries. Model the state after the
+        // original EVM commit before preparing the independent protocol credit.
+        let info = match state.get(&spec.base_fee_vault).filter(|account| account.is_touched()) {
+            Some(account) if account.is_selfdestructed() => None,
+            Some(account) => Some(account.info.clone()),
+            None => db.basic(spec.base_fee_vault).map_err(db_error)?,
+        };
+        let absent = info.is_none();
+        let mut account = Account::from(info.unwrap_or_default());
+        account.info.balance = account
+            .info
+            .balance
+            .checked_add(base_fee_wei)
+            .expect("balance cannot overflow U256");
+        account.mark_touch();
+        if absent {
+            account.mark_created();
+        }
+        fee_credit.insert(spec.base_fee_vault, account);
+    }
+    Ok(PreparedTransaction {
+        execution: ResultAndState {
+            result: result.clone(),
+            state,
+        },
+        fee_credit,
+        committed: CommittedTransaction {
+            outcome: TxOutcome {
+                success: result.is_success(),
+                gas_used,
+                created_address: result.created_address(),
+                burned_wei: burned,
+                result,
+            },
+            base_fee_routed_wei: base_fee_wei,
+            priority_fee_routed_wei,
+        },
+    })
+}
+
+/// Incremental execution with a sparse, disposable overlay for each candidate.
+/// Only accepted candidates modify the session; protocol transitions run once.
+pub(crate) struct BlockSession<DB> {
+    spec: ChainSpec,
+    context: BlockContext,
+    db: CacheDB<DB>,
+    run: BlockRun,
+}
+
+impl<DB: DatabaseRef> BlockSession<DB> {
+    pub(crate) fn begin(
+        spec: &ChainSpec,
+        db: CacheDB<DB>,
+        previous_root: B256,
+        context: &BlockContext,
+        deposits: &[DepositMint],
+    ) -> Result<Self, BlockExecutionError> {
+        Self::begin_with_header(spec, db, context, deposits, |db| {
+            apply_header_rules(spec, db, previous_root, context)
+        })
+    }
+
+    pub(crate) fn begin_with_header(
+        spec: &ChainSpec,
+        mut db: CacheDB<DB>,
+        context: &BlockContext,
+        deposits: &[DepositMint],
+        prepare_header: impl FnOnce(&mut CacheDB<DB>) -> Result<B256, BlockExecutionError>,
+    ) -> Result<Self, BlockExecutionError> {
+        let input = BlockInput {
+            context: context.clone(),
+            deposits: deposits.to_vec(),
+            txs: Vec::new(),
+        };
+        validate_block_input(spec, &input)?;
+        let parent_hash = prepare_header(&mut db)?;
+        let mut evm = block_context(spec, context, db).build_mainnet();
+        // 3. EIP-4788 system call: store this block's anchor root under its
+        //    timestamp in the canonical beacon-roots predeploy (materialized if
+        //    absent), before any transaction.
+        ensure_system_account(
+            &mut evm.ctx.journaled_state.database,
             BEACON_ROOTS_ADDRESS,
-            Bytes::copy_from_slice(input.context.anchor_root.as_slice()),
+            Some(&beacon_roots_bytecode()),
         )
-        .map_err(|e| BlockExecutionError::SystemCall {
-            detail: format!("{e:?}"),
-        })?;
-    if !sys.is_success() {
-        return Err(BlockExecutionError::SystemCall {
-            detail: format!("{sys:?}"),
-        });
+        .map_err(db_error)?;
+        let sys = evm
+            .system_call_commit(
+                BEACON_ROOTS_ADDRESS,
+                Bytes::copy_from_slice(context.anchor_root.as_slice()),
+            )
+            .map_err(|e| BlockExecutionError::SystemCall {
+                detail: format!("{e:?}"),
+            })?;
+        if !sys.is_success() {
+            return Err(BlockExecutionError::SystemCall {
+                detail: format!("{sys:?}"),
+            });
+        }
+
+        // 4. Deposit mints (before any user tx). This is the ONLY place native
+        //    balance is created; provenance is bridged BLCH only and positions must
+        //    advance the committed cursor (one mint per escrow).
+        let minted_wei = apply_deposits(&mut evm.ctx.journaled_state.database, spec, deposits)?;
+
+        Ok(Self {
+            spec: spec.clone(),
+            context: context.clone(),
+            db: evm.ctx.journaled_state.database,
+            run: BlockRun {
+                gas_used: deposits_gas(spec, &input)?,
+                minted_wei,
+                burned_wei: U256::ZERO,
+                deposits_hash: deposits_hash(deposits),
+                parent_hash,
+                base_fee_routed_wei: U256::ZERO,
+                priority_fee_routed_wei: U256::ZERO,
+                tx_outcomes: Vec::new(),
+            },
+        })
     }
 
-    // 4. Deposit mints (before any user tx). This is the ONLY place native
-    //    balance is created; provenance is bridged BLCH only and positions must
-    //    advance the committed cursor (one mint per escrow).
-    let mut minted_wei = U256::ZERO;
-    for deposit in &input.deposits {
-        let wei = apply_deposit(&mut evm.ctx.journaled_state.database, spec, deposit).map_err(|e| match e {
-            DepositApplyError::Deposit(d) => BlockExecutionError::Deposit(d),
-            DepositApplyError::Db(e) => db_error(e),
-        })?;
-        minted_wei = minted_wei.checked_add(wei).expect("minted wei cannot overflow U256");
-    }
-
-    // 5. Execute transactions in order, routing fees and measuring burns per tx.
-    //    Deposits already consumed their (fee-less) share of the block gas.
-    let mut tx_outcomes = Vec::with_capacity(input.txs.len());
-    let mut block_gas_used: u64 = deposits_gas(spec, input)?;
-    let mut base_fee_routed = U256::ZERO;
-    let mut priority_fee_routed = U256::ZERO;
-    let mut burned_total = U256::ZERO;
-
-    for (i, tx) in input.txs.iter().enumerate() {
-        if block_gas_used.saturating_add(tx.gas_limit) > spec.gas_limit {
+    pub(crate) fn try_transaction(
+        &mut self,
+        tx: &TxEnv,
+        commit: impl FnOnce(&TxOutcome) -> bool,
+    ) -> Result<Option<&TxOutcome>, BlockExecutionError> {
+        let spec = &self.spec;
+        let i = self.run.tx_outcomes.len();
+        validate_transaction(spec, tx, i)?;
+        let base_fee = self.context.base_fee_per_gas;
+        let mut evm = block_context(spec, &self.context, CacheDB::new(&self.db)).build_mainnet();
+        if self.run.gas_used.saturating_add(tx.gas_limit) > spec.gas_limit {
             return Err(BlockExecutionError::BlockGasLimitExceeded { tx_index: i });
         }
-        // The effective gas price exactly as revm's handler computes it for this
-        // TxEnv (type-aware): what the caller is charged per gas. revm pays
-        // `effective - basefee` to the beneficiary and leaves the rest
-        // uncredited; that rest — never more than the basefee — is routed here.
-        let effective_gas_price = Transaction::effective_gas_price(tx, base_fee as u128);
-        let base_fee_paid_per_gas = core::cmp::min(effective_gas_price, base_fee as u128);
-        let priority_per_gas = effective_gas_price.saturating_sub(base_fee as u128);
-
         // Execute without committing, so the balance deltas of every touched
         // account can be reconciled against the pre-state before they land.
         let res = evm.transact(tx.clone()).map_err(|e| BlockExecutionError::Evm {
             tx_index: i,
             detail: format!("{e:?}"),
         })?;
-        let result = res.result;
-        let gas_used = result.tx_gas_used();
-
-        let mut pre_sum = U256::ZERO;
-        let mut post_sum = U256::ZERO;
-        for (addr, acc) in res.state.iter() {
-            let pre = evm
-                .ctx
-                .journaled_state
-                .database
-                .basic(*addr)
-                .map_err(db_error)?
-                .map(|i| i.balance)
-                .unwrap_or(U256::ZERO);
-            let post = if acc.is_selfdestructed() {
-                U256::ZERO
-            } else {
-                acc.info.balance
-            };
-            pre_sum = pre_sum.checked_add(pre).expect("balances cannot overflow U256");
-            post_sum = post_sum.checked_add(post).expect("balances cannot overflow U256");
+        let prepared = prepare_transaction_effects(spec, base_fee, tx, i, res, &mut evm.ctx.journaled_state.database)?;
+        if !commit(prepared.outcome()) {
+            return Ok(None);
         }
-        evm.ctx.journaled_state.database.commit(res.state);
-
-        // Conservation: the touched accounts lost exactly the basefee revm
-        // collected (uncredited) plus whatever the EVM destroyed (EIP-6780).
-        let base_fee_wei = U256::from(base_fee_paid_per_gas)
-            .checked_mul(U256::from(gas_used))
-            .expect("fee cannot overflow U256");
-        let lost = pre_sum.saturating_sub(post_sum);
-        let burned = lost
-            .checked_sub(base_fee_wei)
-            .ok_or(BlockExecutionError::Conservation {
-                tx_index: i,
-                lost_wei: lost,
-                base_fee_wei,
-            })?;
-        burned_total = burned_total
-            .checked_add(burned)
-            .expect("burned wei cannot overflow U256");
-        block_gas_used = block_gas_used
-            .checked_add(gas_used)
-            .expect("block gas is bounded by the gas limit");
-
-        // Route the basefee portion to the BaseFeeVault (never burn).
-        // Protocol-level accounting between transactions, outside EVM opcode
-        // semantics — the journal is empty here (transact finalized), so direct
-        // DB credit is safe.
-        credit_balance(&mut evm.ctx.journaled_state.database, spec.base_fee_vault, base_fee_wei).map_err(db_error)?;
-        base_fee_routed = base_fee_routed
-            .checked_add(base_fee_wei)
-            .expect("routed wei cannot overflow U256");
-        // The priority portion was already paid to the beneficiary
-        // (= SequencerFeeVault) by revm itself; track it for the outcome.
-        priority_fee_routed = priority_fee_routed
-            .checked_add(
-                U256::from(priority_per_gas)
-                    .checked_mul(U256::from(gas_used))
-                    .expect("fee cannot overflow U256"),
-            )
-            .expect("routed wei cannot overflow U256");
-
-        tx_outcomes.push(TxOutcome {
-            success: result.is_success(),
-            gas_used,
-            created_address: result.created_address(),
-            burned_wei: burned,
-            result,
-        });
+        let committed = prepared.commit(&mut evm.ctx.journaled_state.database);
+        let cache = evm.ctx.journaled_state.database.cache;
+        merge_candidate(&mut self.db, cache);
+        self.run.record(committed);
+        Ok(self.run.tx_outcomes.last())
     }
 
-    // 6. Recover the database; commit the ledger's burn total and the new head
-    //    record (block reward is ZERO by design — checked in
-    //    validate_block_input; issuance is deposits only).
-    let mut db = evm.ctx.journaled_state.database;
-    if !burned_total.is_zero() {
-        ledger_add(&mut db, spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, burned_total).map_err(db_error)?;
+    pub(crate) fn finish(self) -> Result<(CacheDB<DB>, BlockRun), BlockExecutionError> {
+        let mut db = self.db;
+        finish_protocol(&mut db, &self.spec, &self.context, &self.run)?;
+
+        Ok((db, self.run))
     }
-    let dep_hash = deposits_hash(&input.deposits);
+
+    pub(crate) fn finish_with_header<T>(
+        self,
+        write_header: impl FnOnce(&mut CacheDB<DB>, &BlockRun) -> Result<T, BlockExecutionError>,
+    ) -> Result<(CacheDB<DB>, BlockRun, T), BlockExecutionError> {
+        let mut db = self.db;
+        finish_burns(&mut db, &self.spec, &self.run)?;
+        let header = write_header(&mut db, &self.run)?;
+        Ok((db, self.run, header))
+    }
+}
+
+fn apply_deposits<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+    deposits: &[DepositMint],
+) -> Result<U256, BlockExecutionError> {
+    let mut minted = U256::ZERO;
+    for deposit in deposits {
+        let wei = apply_deposit(db, spec, deposit).map_err(|error| match error {
+            DepositApplyError::Deposit(error) => BlockExecutionError::Deposit(error),
+            DepositApplyError::Db(error) => db_error(error),
+        })?;
+        minted = minted.checked_add(wei).expect("minted wei cannot overflow U256");
+    }
+    Ok(minted)
+}
+
+fn finish_protocol<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+    context: &BlockContext,
+    run: &BlockRun,
+) -> Result<(), BlockExecutionError> {
+    finish_burns(db, spec, run)?;
     write_head(
-        &mut db,
+        db,
         spec.block_info,
         &HeadRecord {
-            number: input.context.number,
-            timestamp: input.context.timestamp,
-            base_fee_per_gas: base_fee,
-            gas_used: block_gas_used,
-            prevrandao: input.context.prevrandao,
-            anchor_root: input.context.anchor_root,
-            parent_hash,
-            deposits_hash: dep_hash,
+            number: context.number,
+            timestamp: context.timestamp,
+            base_fee_per_gas: context.base_fee_per_gas,
+            gas_used: run.gas_used,
+            prevrandao: context.prevrandao,
+            anchor_root: context.anchor_root,
+            parent_hash: run.parent_hash,
+            deposits_hash: run.deposits_hash,
         },
     )
     .map_err(db_error)?;
+    Ok(())
+}
 
-    Ok((
-        db,
-        BlockRun {
-            gas_used: block_gas_used,
-            minted_wei,
-            burned_wei: burned_total,
-            deposits_hash: dep_hash,
-            parent_hash,
-            base_fee_routed_wei: base_fee_routed,
-            priority_fee_routed_wei: priority_fee_routed,
-            tx_outcomes,
-        },
-    ))
+fn finish_burns<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+    run: &BlockRun,
+) -> Result<(), BlockExecutionError> {
+    if !run.burned_wei.is_zero() {
+        ledger_add(db, spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, run.burned_wei).map_err(db_error)?;
+    }
+    Ok(())
+}
+
+/// Merge sparse reads/writes without replacing an account's untouched storage.
+/// Deletion and clear markers remain until the block overlay reaches its backing.
+fn merge_candidate<DB>(db: &mut CacheDB<DB>, candidate: revm::database::Cache) {
+    use revm::database::AccountState;
+    for (address, mut account) in candidate.accounts {
+        match account.account_state {
+            AccountState::NotExisting | AccountState::StorageCleared => {
+                db.cache.accounts.insert(address, account);
+            }
+            AccountState::None | AccountState::Touched => {
+                if let Some(previous) = db.cache.accounts.get_mut(&address) {
+                    previous.info = account.info;
+                    if previous.account_state == AccountState::StorageCleared
+                        || previous.account_state == AccountState::NotExisting
+                    {
+                        previous.account_state = AccountState::StorageCleared;
+                    } else if account.account_state == AccountState::Touched {
+                        previous.account_state = AccountState::Touched;
+                    }
+                    previous.storage.extend(account.storage.drain());
+                } else {
+                    db.cache.accounts.insert(address, account);
+                }
+            }
+        }
+    }
+    db.cache.contracts.extend(candidate.contracts);
+    db.cache.logs.extend(candidate.logs);
+    db.cache.block_hashes.extend(candidate.block_hashes);
 }
 
 /// Execute one block: validate it (input and header), run the EIP-4788 system
@@ -992,7 +1221,7 @@ pub fn execute_block(
     // Real keccak-256 MPT state root over the post-execution state, re-hashing
     // only what this block touched.
     let state_root = state.commit_root();
-    Ok(run.into_outcome(spec, &input, state_root))
+    Ok(run.into_outcome(spec.chain_id, &input.context, state_root))
 }
 
 #[cfg(test)]
@@ -1004,6 +1233,126 @@ mod tests {
     use alloy_primitives::{address, bytes, Bytes, TxKind};
     use alloy_trie::EMPTY_ROOT_HASH;
     use core::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn sparse_candidate_merge_preserves_slots_and_storage_wipes() {
+        use revm::database::{AccountState, Cache, DbAccount, EmptyDB};
+        let mut db = CacheDB::new(EmptyDB::default());
+        let mut original = DbAccount::default();
+        original.info.balance = U256::from(1);
+        original.storage.insert(U256::from(1), U256::from(11));
+        original.storage.insert(U256::from(2), U256::from(22));
+        db.cache.accounts.insert(ALICE, original.clone());
+        let mut delta = original.clone();
+        delta.account_state = AccountState::Touched;
+        delta.storage.clear();
+        delta.storage.insert(U256::from(1), U256::ZERO);
+        let mut cache = Cache::default();
+        cache.accounts.insert(ALICE, delta);
+        merge_candidate(&mut db, cache);
+        assert_eq!(db.storage(ALICE, U256::from(1)).unwrap(), U256::ZERO);
+        assert_eq!(db.storage(ALICE, U256::from(2)).unwrap(), U256::from(22));
+
+        let mut cache = Cache::default();
+        cache.accounts.insert(ALICE, DbAccount::new_not_existing());
+        merge_candidate(&mut db, cache);
+        let mut cache = Cache::default();
+        original.storage.clear();
+        cache.accounts.insert(ALICE, original);
+        merge_candidate(&mut db, cache);
+        assert_eq!(db.cache.accounts[&ALICE].account_state, AccountState::StorageCleared);
+        assert_eq!(db.storage(ALICE, U256::from(2)).unwrap(), U256::ZERO);
+
+        let mut cache = Cache::default();
+        let mut delta = DbAccount::default();
+        delta.info.balance = U256::from(1);
+        delta.account_state = AccountState::Touched;
+        delta.storage.insert(U256::from(3), U256::from(33));
+        cache.accounts.insert(ALICE, delta);
+        merge_candidate(&mut db, cache);
+        assert_eq!(db.cache.accounts[&ALICE].account_state, AccountState::StorageCleared);
+        assert_eq!(db.storage(ALICE, U256::from(3)).unwrap(), U256::from(33));
+        assert_eq!(db.storage(ALICE, U256::from(2)).unwrap(), U256::ZERO);
+    }
+
+    #[test]
+    fn late_vault_read_failure_does_not_commit_candidate() {
+        use core::cell::Cell;
+        use revm::state::{AccountInfo, Bytecode};
+        #[derive(Debug)]
+        struct Unavailable;
+        impl core::fmt::Display for Unavailable {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("vault unavailable")
+            }
+        }
+        impl core::error::Error for Unavailable {}
+        impl revm::database_interface::DBErrorMarker for Unavailable {}
+        struct Provider {
+            vault: Address,
+            fail: Cell<bool>,
+            vault_reads: Cell<usize>,
+        }
+        impl DatabaseRef for Provider {
+            type Error = Unavailable;
+            fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+                if address == self.vault {
+                    self.vault_reads.set(self.vault_reads.get() + 1);
+                    if self.fail.get() {
+                        return Err(Unavailable);
+                    }
+                }
+                Ok(None)
+            }
+            fn code_by_hash_ref(&self, _: B256) -> Result<Bytecode, Self::Error> {
+                Ok(Bytecode::default())
+            }
+            fn storage_ref(&self, _: Address, _: U256) -> Result<U256, Self::Error> {
+                Ok(U256::ZERO)
+            }
+            fn block_hash_ref(&self, _: u64) -> Result<B256, Self::Error> {
+                Ok(B256::ZERO)
+            }
+        }
+        let spec = ChainSpec::testnet();
+        let provider = Provider {
+            vault: spec.base_fee_vault,
+            fail: Cell::new(true),
+            vault_reads: Cell::new(0),
+        };
+        let mut session = BlockSession::begin(
+            &spec,
+            CacheDB::new(provider),
+            EMPTY_ROOT_HASH,
+            &BlockContext::default(),
+            &[deposit(ALICE, SATS_PER_BLCH)],
+        )
+        .unwrap();
+        let before = format!("{:?}", session.db.cache);
+        let gas = session.run.gas_used;
+        let tx = transfer(ALICE, BOB, 0, U256::from(7), 21_000);
+        let condition_called = Cell::new(false);
+        let error = session
+            .try_transaction(&tx, |_| {
+                condition_called.set(true);
+                true
+            })
+            .unwrap_err();
+        assert!(matches!(error, BlockExecutionError::Database { .. }));
+        assert_eq!(session.db.db.vault_reads.get(), 1);
+        assert!(!condition_called.get());
+        assert_eq!(format!("{:?}", session.db.cache), before);
+        assert_eq!(session.run.gas_used, gas);
+        assert!(session.run.tx_outcomes.is_empty());
+        assert!(session.run.burned_wei.is_zero());
+        assert!(session.run.base_fee_routed_wei.is_zero());
+        assert!(session.run.priority_fee_routed_wei.is_zero());
+        session.db.db.fail.set(false);
+        assert!(session.try_transaction(&tx, |_| true).unwrap().unwrap().success);
+        assert_eq!(session.db.basic_ref(ALICE).unwrap().unwrap().nonce, 1);
+        assert_eq!(session.db.basic_ref(BOB).unwrap().unwrap().balance, U256::from(7));
+        session.finish().unwrap();
+    }
 
     const ALICE: Address = address!("00000000000000000000000000000000000a11ce");
     const BOB: Address = address!("0000000000000000000000000000000000000b0b");

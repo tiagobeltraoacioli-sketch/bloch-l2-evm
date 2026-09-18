@@ -335,3 +335,44 @@ fn guest_wire_round_trip_retains_bytes_and_reauthenticates() {
         Err(SignedInputError::Authentication { .. })
     ));
 }
+
+#[test]
+fn execution_domain_reexecutes_signed_transfer_and_rejects_mutated_signature() {
+    use bloch_l2_evm::domain::{input_commitment, DomainError, EvmDomain, TrustedL1Batch};
+    let spec = ChainSpec::default();
+    let mut state = funded(&spec);
+    let root = state.commit_root();
+    let mut signed = input(&spec, &state, vec![encode1559(tx1559(spec.chain_id, 0))]);
+    signed.context.anchor_root = B256::repeat_byte(44);
+    let (witness, _) = generate_signed_batch_witness(&state, &spec, &signed).unwrap();
+    let mut domain = EvmDomain::new(
+        B256::repeat_byte(1),
+        B256::repeat_byte(2),
+        B256::repeat_byte(3),
+        spec,
+        root,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let mut trusted = TrustedL1Batch {
+        height: 1,
+        block: signed.context.anchor_root,
+        domain: domain.id(),
+        input: input_commitment(&signed),
+    };
+    let mut tampered = signed.clone();
+    let mut raw = tampered.transactions[0].to_vec();
+    *raw.last_mut().unwrap() ^= 1;
+    tampered.transactions[0] = raw.into();
+    trusted.input = input_commitment(&tampered);
+    assert_eq!(
+        domain.verify_and_advance(&trusted, &tampered, &witness),
+        Err(DomainError::Execution)
+    );
+    assert_eq!(domain.state_root(), root);
+    trusted.input = input_commitment(&signed);
+    assert_eq!(
+        domain.verify_and_advance(&trusted, &signed, &witness).unwrap().new_root,
+        witness.new_state_root
+    );
+}

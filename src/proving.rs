@@ -387,29 +387,8 @@ pub fn verify_batch(
     let hydrated = hydrate_and_verify(witness)?;
     let (db, run) = run_block(spec, hydrated.state, witness.prev_state_root, input).map_err(VerifyError::Execution)?;
 
-    let post_leaves: BTreeMap<Nibbles, Vec<u8>> = account_leaves_of(&db)
-        .into_iter()
-        .map(|(k, v)| (Nibbles::unpack(k), v))
-        .collect();
-    let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
-    for (k, v) in &post_leaves {
-        if hydrated.pre_leaves.get(k) != Some(v) {
-            changes.insert(*k, Some(v.clone()));
-        }
-    }
-    for k in hydrated.pre_leaves.keys() {
-        if !post_leaves.contains_key(k) {
-            changes.insert(*k, None);
-        }
-    }
-    let derived = hydrated.view.apply(&changes)?;
-    if derived != witness.new_state_root {
-        return Err(VerifyError::ClaimedRootMismatch {
-            claimed: witness.new_state_root,
-            derived,
-        });
-    }
-    let header = run.header(spec, input, derived);
+    let derived = verify_overlay_root(witness, hydrated.pre_leaves, hydrated.view, &db)?;
+    let header = run.header(spec.chain_id, &input.context, derived);
     Ok(VerifiedBatch {
         new_state_root: derived,
         deposits_hash: deposits_hash(&input.deposits),
@@ -422,6 +401,37 @@ pub fn verify_batch(
         block_hash: header.hash(),
         header,
     })
+}
+
+pub(crate) fn verify_overlay_root<DB: DatabaseRef>(
+    witness: &BatchWitness,
+    pre_leaves: BTreeMap<Nibbles, Vec<u8>>,
+    view: SparseTrieView,
+    db: &CacheDB<DB>,
+) -> Result<B256, VerifyError> {
+    let post_leaves: BTreeMap<Nibbles, Vec<u8>> = account_leaves_of(db)
+        .into_iter()
+        .map(|(k, v)| (Nibbles::unpack(k), v))
+        .collect();
+    let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
+    for (k, v) in &post_leaves {
+        if pre_leaves.get(k) != Some(v) {
+            changes.insert(*k, Some(v.clone()));
+        }
+    }
+    for k in pre_leaves.keys() {
+        if !post_leaves.contains_key(k) {
+            changes.insert(*k, None);
+        }
+    }
+    let derived = view.apply(&changes)?;
+    if derived != witness.new_state_root {
+        return Err(VerifyError::ClaimedRootMismatch {
+            claimed: witness.new_state_root,
+            derived,
+        });
+    }
+    Ok(derived)
 }
 
 /// Why the host could not produce a witness.
@@ -511,6 +521,36 @@ pub fn generate_batch_witness(
         run_block(spec, CacheDB::new(pre.db()), prev_state_root, &input).map_err(GenerateError::Execution)?;
     let CacheDB { cache: probe, .. } = probe;
 
+    let witness = witness_from_overlay(pre, prev_state_root, &probe)?;
+    let new_state_root = witness.new_state_root;
+    let outcome = run.into_outcome(spec.chain_id, &input.context, new_state_root);
+
+    // 4. Self-check: the guest procedure must accept the witness and reproduce
+    //    the host's outcome exactly.
+    let verified = verify_batch(spec, &witness, &input).map_err(GenerateError::SelfCheck)?;
+    let same_outcome = verified.gas_used == outcome.gas_used
+        && verified.minted_wei == outcome.minted_wei
+        && verified.base_fee_routed_wei == outcome.base_fee_routed_wei
+        && verified.priority_fee_routed_wei == outcome.priority_fee_routed_wei
+        && verified.burned_wei == outcome.burned_wei
+        && verified.header == outcome.header
+        && verified.block_hash == outcome.block_hash
+        && verified.tx_outcomes.len() == outcome.tx_outcomes.len()
+        && verified.tx_outcomes.iter().zip(&outcome.tx_outcomes).all(|(g, h)| {
+            g.success == h.success && g.gas_used == h.gas_used && g.burned_wei == h.burned_wei && g.result == h.result
+        });
+    if !same_outcome {
+        return Err(GenerateError::SelfCheck(VerifyError::OutcomeMismatch));
+    }
+
+    Ok((witness, outcome))
+}
+
+pub(crate) fn witness_from_overlay(
+    pre: &L2State,
+    prev_state_root: B256,
+    probe: &revm::database::Cache,
+) -> Result<BatchWitness, GenerateError> {
     let mut pre_accounts: Vec<WitnessAccount> = Vec::new();
     let mut absent_accounts: Vec<Address> = Vec::new();
     let mut changes: BTreeMap<Nibbles, Option<Vec<u8>>> = BTreeMap::new();
@@ -591,27 +631,7 @@ pub fn generate_batch_witness(
         pre_accounts,
         absent_accounts,
     };
-    let outcome = run.into_outcome(spec, &input, new_state_root);
-
-    // 4. Self-check: the guest procedure must accept the witness and reproduce
-    //    the host's outcome exactly.
-    let verified = verify_batch(spec, &witness, &input).map_err(GenerateError::SelfCheck)?;
-    let same_outcome = verified.gas_used == outcome.gas_used
-        && verified.minted_wei == outcome.minted_wei
-        && verified.base_fee_routed_wei == outcome.base_fee_routed_wei
-        && verified.priority_fee_routed_wei == outcome.priority_fee_routed_wei
-        && verified.burned_wei == outcome.burned_wei
-        && verified.header == outcome.header
-        && verified.block_hash == outcome.block_hash
-        && verified.tx_outcomes.len() == outcome.tx_outcomes.len()
-        && verified.tx_outcomes.iter().zip(&outcome.tx_outcomes).all(|(g, h)| {
-            g.success == h.success && g.gas_used == h.gas_used && g.burned_wei == h.burned_wei && g.result == h.result
-        });
-    if !same_outcome {
-        return Err(GenerateError::SelfCheck(VerifyError::OutcomeMismatch));
-    }
-
-    Ok((witness, outcome))
+    Ok(witness)
 }
 
 #[cfg(test)]

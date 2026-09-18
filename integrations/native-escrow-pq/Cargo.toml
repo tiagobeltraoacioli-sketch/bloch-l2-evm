@@ -1,0 +1,27 @@
+[package]
+name = "bloch-native-escrow-pq"
+version = "0.1.0-experimental"
+edition = "2021"
+rust-version = "1.94.1"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# Deliberately separate from the portable EVM workspace and its license/dependencies.
+[workspace]
+
+[dependencies]
+bloch-l2-evm = { path = "../..", features = ["experimental-escrow", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "=1.0.151"
+# Development integration: the official consensus repository must be checked out
+# beside bloch-modular-execution at the revision documented in README.md.
+bloch-crypto = { path = "../../../bloch-validator-payout/crates/bloch-crypto", default-features = false }
+bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos-committee" }
+alloy-primitives = { version = "=1.6.1", default-features = false }
+sha3 = { version = "=0.11.0", default-features = false }
+
+[patch.crates-io]
+pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-internals" }
+
+[dev-dependencies]
+bloch-escrow-journal = { path = "../escrow-journal" }

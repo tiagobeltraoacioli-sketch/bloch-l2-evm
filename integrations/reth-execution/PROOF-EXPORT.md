@@ -1,0 +1,106 @@
+# Export a persisted developer block for proving
+
+The `bloch-evm-export` executable opens a **stopped** synthetic developer node's
+MDBX, static files and RocksDB read-only. It reconstructs canonical genesis and
+re-executes every selected block up to the requested height, comparing each full
+V2 header with storage. For the selected block it generates a real sparse witness
+and validates the complete transport artifact with stateless re-execution.
+
+This exports input for a prover. It does not generate a cryptographic proof,
+authenticate native deposits/finality, or turn an arbitrary received artifact
+into trusted canonical selection.
+
+Build after verifying the prepared Reth source:
+
+```sh
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 build --locked --offline \
+  --manifest-path integrations/reth-execution/Cargo.toml --bin bloch-evm-export
+
+integrations/reth-execution/target/debug/bloch-evm-export \
+  --synthetic-dev /absolute/path/to/stopped-devnode 3 /absolute/path/outside-node/block-3.json
+```
+
+The CLI fixes the developer configuration: testnet chain parameters, V2 domain
+`0xd3…d3` and timestamp-zero genesis. The source must already contain `db`,
+`static` and `rocks`; it never initializes or repairs them. Output must be a new
+file outside the source tree and is synchronized before success is reported.
+An existing output is never replaced. A failed write may leave a partial new
+artifact; it is not silently retried or presented as successful.
+
+## Selection and resource boundary
+
+Stop all source writers before exporting. Read-only handles do not freeze a
+writer in another process. The exporter compares the chosen header and tip
+before/after reconstruction and validates the complete parent-linked prefix;
+these checks are not a claim of an atomic live-provider snapshot or native
+canonicality. The operator remains responsible for choosing the source.
+
+This prototype exports non-genesis heights 1 through 4096 by reconstructing the
+whole prefix. It needs all those bodies. Pruned or missing data fails closed.
+Work and accumulated state depend on every transaction in that prefix, so this
+is not a public proof-request endpoint or complete memory/CPU budget. Incremental
+provider witness capture and a production admission policy remain separate work.
+
+The [artifact envelope](../execution-artifact/README.md) keeps the transport
+independent of Reth and SP1 SDK versions. Its expected statement is an execution
+expectation, not a proof or a native funding permission.
+
+## Reproduce the persisted contract fixture
+
+The integration test persists a synthetic funding block, a signed contract
+deployment and a signed storage update to `42`. It checks the library export,
+then closes the writer and exports all three blocks through separate CLI
+processes. Their complete parent headers must form the same selected chain.
+It also checks rejected heights, output overwrite protection and repeated bytes.
+
+```sh
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 test --locked --offline \
+  --manifest-path integrations/reth-execution/Cargo.toml --test proof_export
+```
+
+For subsequent SP1 qualification, explicitly set `BLOCH_QUALIFICATION_ARTIFACT`
+to a new file path when running that test. Only after all assertions pass, the
+test writes and synchronizes the same CLI-exported bytes there. Existing files
+are refused. Without this variable the temporary database and export disappear
+when the test finishes. The fixture uses a public test signing key and synthetic
+deposits; its transport does not authenticate native funding.
+
+Alternatively, set `BLOCH_QUALIFICATION_CHAIN_DIRECTORY` to a new directory path.
+After the assertions pass, it saves `block-1.json`, `block-2.json` and
+`block-3.json` and synchronizes the files and directory. This mode refuses an
+existing directory; failure may leave an incomplete directory, never a success
+report. Those artifacts allow the separate SP1 host to qualify the complete
+chain from canonical genesis, rather than trusting an intermediate anchor.
+
+The second test uses the synthetic native anchor from the SP1 host's existing
+source fixture, with the same funding recipient, amount and deposit provenance.
+Set `BLOCH_SOURCE_QUALIFICATION_CHAIN_DIRECTORY` to retain this separate chain.
+It allows the same real exported transitions to be checked against the
+experimental source registry and its durable consumption journal. The native
+headers and backing allocation remain synthetic; matching their anchor is not
+native state inclusion or consensus authorization. The original developer
+anchor fixture and its output variables remain separate.
+
+Local qualification on 2026-09-17 passed with Rust 1.98.1 and the prepared Reth
+snapshot correction: both three-block contract/CLI tests passed in 9.53 seconds,
+including an explicit storage-slot value of `42`; scoped Clippy with
+`-D warnings` and package formatting passed.
+These results establish host reconstruction/export; SP1 qualification is separate.
+
+The original developer-anchor JSON artifacts are:
+
+| Block | Bytes | SHA-256 |
+| --- | ---: | --- |
+| 1: synthetic funding | 4720 | `a31dc550733e3cf97045fbf81ae8327b4c57a36bbc2b57d4d0e563d2efe49d57` |
+| 2: signed deployment | 5958 | `1326de31e426def53faf1ce7822cb58b5fd6d0ef138f6202ba52803ab771f2d2` |
+| 3: signed storage update | 7221 | `2b2e192921bf2e4471bc29d40ffaaca3a251fdf22bd4f37512dcb6229889e987` |
+
+The source-fixture-anchor artifacts selected for combined SP1 qualification are:
+
+| Block | Bytes | SHA-256 |
+| --- | ---: | --- |
+| 1: synthetic funding | 4720 | `f1d05a30f121ee535adefc133c049e15724b74c55209bd370c517aef5b38034b` |
+| 2: signed deployment | 5958 | `c98eac0ab100caa804cd135df2f87b55ff02208b5c4f21a8052bb39a46bed1dc` |
+| 3: signed storage update | 7221 | `9afa1f56e1c7062a2ae5d17cfacb603ebe3dd170c2da0446c34e102026e18a6e` |

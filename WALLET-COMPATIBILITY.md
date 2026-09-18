@@ -11,7 +11,7 @@ L1 SDK/Snap must obtain an actual native PQ authorization from the owner.
 | Native L1 Ustav | PQ hybrid signatures, including PQ custody quorums | Separate `bloch-sis-pow/crates/bloch-ustav` reference kernel |
 | L2 user transaction | Classical ECDSA/secp256k1, EIP-155 replay domain | Canonical signed-byte decoding and sender recovery |
 | Application → wallet | EIP-1193 requests to the user-selected provider | Network selection and transaction-request adapter |
-| Wallet → L2 node | Ethereum JSON-RPC and Reth txpool | Node integration still required |
+| Wallet → L2 node | Ethereum JSON-RPC and Reth txpool | Isolated synthetic developer executable with signed admission, mining, receipts/state and orderly restart |
 | L1 ↔ L2 | Finalized deposits, proof/settlement and withdrawal rules | Not implemented by this wallet boundary |
 
 L2 accounts are **not post-quantum**. A PQ L1 or a PQ-compatible proof system
@@ -98,22 +98,31 @@ client component, not a completed MetaMask end-to-end deployment.
 
 ## Remaining node and settlement work
 
-1. Embed Reth's RPC/txpool stack as required by the existing design. Wire this
-   signed boundary into validation, execution and guest input. Do not replace
-   the RPC stubs with placeholder success responses. Wallets need functioning
+The [developer executable](integrations/reth-execution/DEVNODE.md) now connects
+the real Reth RPC/txpool stack to Bloch execution and canonical persistence.
+Process tests exercise signed contract deployment/call and database restart.
+Its funding, anchor and block production are explicitly synthetic.
+
+1. Complete RPC/wallet qualification beyond the tested surface. Wallets need functioning
    `eth_chainId`, nonce/balance/code/storage queries, `eth_call`, gas estimation,
    fee suggestions/fee history, `eth_sendRawTransaction`, transaction/receipt
    lookup, blocks/logs and appropriate subscription support.
-2. Bind ordered transaction and receipt roots into the block/header and public
-   proof statement. The current header still lacks these commitments. Pin the
+   The V2 RPC header retains its tagged Bloch hash, and exposes zero `difficulty`
+   and empty `extraData` consistently with its existing Reth header traits. These
+   neutral compatibility fields are not new consensus fields. Synthesized pending
+   blocks remain unsupported; pending account nonces use the upstream pool path.
+2. V2 headers already bind ordered transaction and receipt roots. Integrate the
+   real proof backend and bind those commitments at native settlement. Pin the
    accepted pre-state root, chain configuration and guest/program identity at
    settlement; running the Rust verification procedure alone is not a zk proof.
 3. Implement and test finalized-L1 escrow derivation, anchor/reorg handling,
    deposit authentication and withdrawals. PQ native authorization is not a
    substitute for a correct bridge policy.
-4. Register/select a collision-free chain ID, deploy a test node, and exercise
-   real MetaMask and other wallets against it. The automated JS tests use an
-   EIP-1193 mock; they do not claim browser or network interoperability testing.
+4. Register/select a collision-free public chain ID and exercise real MetaMask
+   and other browser wallets. The EIP-1193 adapter tests still use a mock.
+   `wallets/devnode-ethers.test.mjs` separately exercises the real ethers signing
+   client and automatic nonce/gas/fee population over HTTP; it does not exercise
+   browser account approval or an injected wallet provider.
 
 ## Verification
 
@@ -123,6 +132,9 @@ cargo test --locked --features serde --test signed_transactions
 cargo test --locked --no-default-features
 cargo test --locked --release --test signed_transactions
 node --test wallets/bloch-l2.test.mjs
+# Build the developer binary as documented in DEVNODE.md first.
+npm ci --prefix wallets --ignore-scripts
+npm --prefix wallets run test:devnode
 ```
 
 Upstream interface references: [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193),

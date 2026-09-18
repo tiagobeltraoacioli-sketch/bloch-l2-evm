@@ -79,9 +79,12 @@ pub mod node {
 /// [`crate::transactions::generate_signed_batch_witness`] — and the whole crate, revm and
 /// alloy tree included, builds and tests in `no_std` + `alloc` with
 /// `--no-default-features`; the witness has a `serde` wire format. What does
-/// not exist here: the `sp1_zkvm` entrypoint, the public-values encoding, the
-/// guest crate itself and its one documented feature delta (`c-kzg` → the
-/// pure-Rust `kzg-rs` KZG backend for the Cancun point-evaluation precompile).
+/// not exist in this placeholder: a working SP1 prover/verifier. The V2
+/// public-values encoding and stateless execution procedure are implemented in
+/// [`crate::proof_statement`]; those alone do not verify a cryptographic proof.
+/// Omitting the default `host-kzg` feature selects revm
+/// 41's pure-Rust arkworks Cancun point-evaluation verifier; see
+/// `docs/KZG-BACKENDS.md` for the feature and program-identity contract.
 pub mod sp1_guest {
     /// Re-execute a batch inside the zkVM guest.
     pub fn guest_main() -> ! {

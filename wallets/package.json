@@ -1,0 +1,19 @@
+{
+  "name": "bloch-developer-wallet-acceptance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test bloch-l2.test.mjs",
+    "test:devnode": "node --test devnode-ethers.test.mjs",
+    "test:browser": "node --test browser/devnode-metamask.test.mjs",
+    "test:solidity": "node --test devnode-solidity.test.mjs",
+    "test:websocket": "node --test devnode-websocket.test.mjs"
+  },
+  "dependencies": {
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2",
+    "solc": "0.8.30"
+  }
+}

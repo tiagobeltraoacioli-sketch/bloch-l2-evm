@@ -1,0 +1,94 @@
+# Hybrid-PQ weak-subjectivity checkpoint authentication
+
+The `checkpoint` module authenticates the native checkpoint envelope using the
+official committee quorum verifier and the real ML-DSA-65 AND Falcon-1024
+primitives. It returns a private `VerifiedCheckpoint`, whose anchor can feed
+`bloch_l2_evm::l1::authenticate_body` and the native state-proof integration.
+No production signing keys, network requests or signing ceremony are included.
+
+## Pinned trust policy
+
+Construct `CheckpointPolicy` from an independently authenticated signer set,
+network ID, genesis root and explicit phase. The policy is immutable. It cannot
+learn a weaker threshold from an incoming envelope:
+
+| Policy | Threshold | Set size | Required external signatures |
+| --- | --- | --- | --- |
+| Phase A | 2 | 3 | 1 |
+| Phase B | 3 | 5 | 2 |
+
+The values come from the native `ws` constants. Construction rejects an invalid
+shape, duplicate public keys, the reserved genesis signer-set ID, a zero genesis
+identity and overflowing arrangement review/grace clocks. The externally flagged
+keys remain organizational trust assertions: signatures cannot prove that two
+people or organizations actually operate independently.
+
+## Verification path
+
+The adapter bounds the header to 304 bytes, signature count to the pinned set
+size and each signature to 8,192 bytes before cryptographic work. The checkpoint
+must not be in the future relative to the caller's independently determined
+current epoch. Its age must be strictly below the native weak-subjectivity
+period, and it cannot predate adoption of its signing arrangement.
+
+`verify_envelope_with_shape_policy` then checks format, chain identity, signer
+set ID, arrangement expiry, signer indices, quorum and external minimum. The
+native `staking::verify_hybrid` requires both algorithms for every listed
+signature; the adapter supplies real primitive implementations, never a caller
+callback or success flag. Signatures and public keys use the native raw hybrid
+checkpoint encoding, not the wallet's four-byte suite envelope.
+
+The supplied canonical header must have the Genesis-4 version, match the signed
+block identity and contain exactly the signed state root. The output anchor's
+slot comes from this header. The signed epoch is retained separately; neither
+epoch nor slot is silently converted into block height. Header linkage does not
+execute the block or validate its proposer/FFG signatures.
+
+If a previously verified checkpoint is supplied, its chain identity must match.
+An older incoming epoch is refused. A different digest at the same epoch raises
+a conflict; an identical checkpoint is accepted idempotently. A newer checkpoint
+can advance the bootstrap anchor. The result exposes the native arrangement
+review-due warning; callers must surface it rather than treating grace as an
+unreviewed permanent arrangement.
+
+## Remaining trust and operational boundaries
+
+This authenticates a weak-subjectivity assertion by trusted signers. It is not
+an independent proof of historical FFG finality. Colluding trusted signers can
+still attest a fabricated history. Signer-key distribution, ceremony procedures,
+organizational independence, revocation/rotation and cross-channel verification
+remain required operator/release responsibilities. No claim about current
+publication of mainnet checkpoints follows from the disposable-key tests.
+
+`current_epoch` is supplied from a trusted local clock and authenticated chain
+schedule; it must not come from the checkpoint's informational `issued_at` field
+or from an untrusted RPC. The API is a bootstrap verifier, not a replacement for
+a running node's local finality or native `cross_check`/reconciliation policy.
+Callers must never use a signed envelope to override conflicting local finality.
+
+The pure verifier does not automatically persist the last accepted checkpoint.
+The [Unix checkpoint store](CHECKPOINT-STORE.md) now handles durable history and
+reverification, retaining stale checkpoints only as rollback evidence and
+checking current freshness before exposing an anchor. Keep its latest watermark
+independently protected. Direct verifier callers must still retain/reverify the
+signed artifact and supply `previous`; omitting it starts a fresh bootstrap
+trust decision. This module does not wire the operator
+CLI's trusted inbox files to consensus: the experimental inbox still needs a
+native committed representation and activation.
+
+## Validation
+
+Seven new tests use five disposable locally generated hybrid keys. They cover
+real Phase-A and Phase-B signatures, successful header/body authentication,
+corruption/removal of signature components, weakened or duplicate-key policies,
+missing external quorum, duplicate signer indices, freshness boundaries,
+adoption/review/expiry clocks, network/genesis/state/header/version mismatch,
+rollback, same-epoch conflict, identical retry and resource bounds. The eight
+existing escrow authorization tests also pass. Keys are not printed or saved.
+
+```sh
+cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml
+```
+
+The sibling native checkout remains `5af78a04a27dcb2c2253c32134fca888a8a965f9`;
+the path dependency must be checked explicitly as described in [README](README.md).

@@ -13,6 +13,9 @@ use alloy_eips::{
 };
 use alloy_primitives::{Address, Bytes, B256};
 use revm::context::TxEnv;
+use revm::{database::CacheDB, DatabaseRef};
+
+use crate::executor::{run_block, BlockRun, BlockSession};
 
 use crate::{
     execute_block, generate_batch_witness, verify_batch, BatchWitness, BlockContext, BlockExecutionError, BlockInput,
@@ -95,7 +98,7 @@ impl AuthenticatedTransaction {
     }
 }
 
-/// Authenticate a raw Ethereum transaction for this L2, using pinned Alloy/k256.
+/// Authenticate a raw Ethereum transaction using the pinned Alloy implementation.
 ///
 /// This verifies encoding, replay domain and signature, not state-dependent
 /// validity. Nonce, balance, intrinsic gas and fees are checked by the executor.
@@ -163,7 +166,8 @@ pub struct SignedBlockInput {
 /// Authentication failure or the existing executor/proving error.
 #[derive(Debug)]
 pub enum SignedInputError<E> {
-    /// Rejected before any execution/state mutation.
+    /// Rejected before executing the candidate. Whole-block authentication
+    /// happens before any block execution; a builder may have earlier candidates.
     Authentication {
         /// The zero-based transaction index, or `None` for a block-wide bound.
         transaction_index: Option<usize>,
@@ -194,9 +198,9 @@ impl<E: core::error::Error + 'static> core::error::Error for SignedInputError<E>
 }
 
 impl SignedBlockInput {
-    // Private: callers cannot authenticate once, mutate a TxEnv, then submit it
-    // through the signed execution/proving boundary.
-    fn authenticate<E>(&self, spec: &ChainSpec) -> Result<BlockInput, SignedInputError<E>> {
+    // Crate-private: network callers cannot authenticate once, mutate a TxEnv,
+    // then submit it through the signed execution/proving boundary.
+    pub(crate) fn authenticate<E>(&self, spec: &ChainSpec) -> Result<BlockInput, SignedInputError<E>> {
         let block_error = |reason| SignedInputError::Authentication {
             transaction_index: None,
             reason,
@@ -249,6 +253,205 @@ pub fn execute_signed_block(
 ) -> Result<ExecutionOutcome, SignedInputError<BlockExecutionError>> {
     let authenticated = input.authenticate(spec)?;
     execute_block(spec, state, authenticated).map_err(SignedInputError::Execution)
+}
+
+/// A successfully executed block over a read-only host database.
+///
+/// The private overlay contains only loaded/changed accounts, not the complete
+/// post-state. No state has been persisted, and no post-state root has been
+/// calculated or authenticated. Drop this value to discard the candidate.
+#[must_use = "execution is provisional until the host computes and commits its state root"]
+pub struct DatabaseBlockExecution<DB> {
+    overlay: CacheDB<DB>,
+    run: BlockRun,
+    chain_id: u64,
+    context: BlockContext,
+}
+
+/// Incremental signed block construction over an immutable host snapshot.
+///
+/// Header rules, system calls and authenticated-by-host deposits run once at
+/// construction. Each candidate is reauthenticated from its original bytes.
+/// Rejected or conditionally skipped transactions publish no state, gas or fee
+/// changes. A reverted EVM transaction remains valid and may be included.
+///
+/// Attempt budgets include rejected and skipped candidates, bounding recovery
+/// work for this builder's lifetime. Pool scheduling and network rate limiting
+/// remain the caller's responsibility. This is not a pool or Reth node.
+#[must_use = "finish the builder or drop it to discard the provisional block"]
+pub struct SignedBlockBuilder<DB> {
+    session: BlockSession<DB>,
+    spec: ChainSpec,
+    input: SignedBlockInput,
+    attempted_transactions: usize,
+    attempted_bytes: usize,
+}
+
+impl<DB: DatabaseRef> SignedBlockBuilder<DB> {
+    /// Begin a block using a consistent snapshot and its trusted root.
+    ///
+    /// The caller must independently authenticate deposits and L1 context.
+    /// Neither this constructor nor finishing verifies the supplied state root.
+    pub fn new(
+        spec: &ChainSpec,
+        database: DB,
+        previous_root: B256,
+        context: BlockContext,
+        deposits: Vec<DepositMint>,
+    ) -> Result<Self, SignedInputError<BlockExecutionError>> {
+        let input = SignedBlockInput {
+            context,
+            deposits,
+            transactions: Vec::new(),
+        };
+        // Apply the same spec/deposit limits before any provider access.
+        input.authenticate::<BlockExecutionError>(spec)?;
+        let session = BlockSession::begin(
+            spec,
+            CacheDB::new(database),
+            previous_root,
+            &input.context,
+            &input.deposits,
+        )
+        .map_err(SignedInputError::Execution)?;
+        Ok(Self {
+            session,
+            spec: spec.clone(),
+            input,
+            attempted_transactions: 0,
+            attempted_bytes: 0,
+        })
+    }
+
+    /// The accepted signed input so far. Context and deposits cannot be changed.
+    pub fn input(&self) -> &SignedBlockInput {
+        &self.input
+    }
+
+    /// Number of candidates charged to this builder's authentication budget.
+    pub fn attempted_transactions(&self) -> usize {
+        self.attempted_transactions
+    }
+
+    /// Authenticate and include a candidate if it executes as a valid transaction.
+    pub fn try_push(&mut self, raw: &[u8]) -> Result<&crate::TxOutcome, SignedInputError<BlockExecutionError>> {
+        self.try_push_with_condition(raw, |_| true)
+            .map(|outcome| outcome.expect("unconditional inclusion"))
+    }
+
+    /// Inspect execution and include its effects only when `include` returns true.
+    ///
+    /// `Ok(None)` means the candidate was skipped. Errors and skips preserve the
+    /// accepted block. Candidates sent to decoding consume authentication budget;
+    /// cheap size/budget preflight failures do not. Error indices
+    /// identify the next accepted transaction position, not the attempt count.
+    pub fn try_push_with_condition(
+        &mut self,
+        raw: &[u8],
+        include: impl FnOnce(&crate::TxOutcome) -> bool,
+    ) -> Result<Option<&crate::TxOutcome>, SignedInputError<BlockExecutionError>> {
+        let index = self.input.transactions.len();
+        let auth_error = |reason| SignedInputError::Authentication {
+            transaction_index: Some(index),
+            reason,
+        };
+        if raw.len() > MAX_RAW_TRANSACTION_BYTES {
+            return Err(auth_error(TransactionAuthError::TooLarge));
+        }
+        if self.attempted_transactions >= MAX_SIGNED_TRANSACTIONS {
+            return Err(auth_error(TransactionAuthError::TooManyTransactions));
+        }
+        let bytes = self.attempted_bytes.checked_add(raw.len());
+        if bytes.is_none_or(|bytes| bytes > MAX_SIGNED_BLOCK_BYTES) {
+            return Err(auth_error(TransactionAuthError::BlockTooLarge));
+        }
+        self.attempted_transactions += 1;
+        self.attempted_bytes = bytes.expect("checked authentication byte budget");
+        let tx = decode_signed_transaction(&self.spec, raw).map_err(auth_error)?;
+        let outcome = self
+            .session
+            .try_transaction(&tx.env, include)
+            .map_err(SignedInputError::Execution)?;
+        if outcome.is_some() {
+            self.input.transactions.push(tx.raw);
+        }
+        Ok(outcome)
+    }
+
+    /// Finalize ledger/head changes and return the exact accepted signed input.
+    ///
+    /// Compute the complete post-state root from the returned execution overlay
+    /// before its host finalization and atomic persistence. No backing write is
+    /// performed here. A failure discards the entire provisional block.
+    pub fn finish(
+        self,
+    ) -> Result<(SignedBlockInput, DatabaseBlockExecution<DB>), SignedInputError<BlockExecutionError>> {
+        let (overlay, run) = self.session.finish().map_err(SignedInputError::Execution)?;
+        let execution = DatabaseBlockExecution {
+            overlay,
+            run,
+            chain_id: self.spec.chain_id,
+            context: self.input.context.clone(),
+        };
+        Ok((self.input, execution))
+    }
+}
+
+impl<DB> DatabaseBlockExecution<DB> {
+    /// Read the successful overlay before calculating the full post-state root.
+    ///
+    /// Use the backing database for untouched state. Loaded accounts are not
+    /// necessarily changed accounts; cleared storage and deleted/empty accounts
+    /// must follow revm/EIP-161 semantics when translating to host persistence.
+    pub fn overlay(&self) -> &CacheDB<DB> {
+        &self.overlay
+    }
+
+    /// Attach a host-calculated root and return the overlay and execution result.
+    ///
+    /// `post_state_root` is a trusted host input: this method does not verify it.
+    /// The host must compute the complete MPT root from the unchanged backing
+    /// snapshot plus this overlay and atomically persist the matching changes.
+    /// The returned header retains Bloch's existing hash format; it is not an
+    /// Ethereum RLP header, a proof, or an authenticated execution-domain receipt.
+    pub fn finalize(self, post_state_root: B256) -> (CacheDB<DB>, ExecutionOutcome) {
+        let outcome = self.run.into_outcome(self.chain_id, &self.context, post_state_root);
+        (self.overlay, outcome)
+    }
+}
+
+/// Authenticate signed envelopes and execute against an arbitrary host database.
+///
+/// This uses the same block kernel as [`execute_signed_block`], including
+/// deposit gas/cursors, vault fee routing, supply accounting, EIP-4788 and the
+/// committed Bloch block-hash ring. It creates a fresh overlay and never invokes
+/// a write/commit method on `database`. Errors return no candidate overlay.
+/// Database implementations may still perform interior read-cache bookkeeping.
+///
+/// The host must provide an immutable, consistent pre-state snapshot and its
+/// correct `previous_root`; the root is not authenticated here. In particular,
+/// supplying a wrong root can change parent/BLOCKHASH commitments without a
+/// database read error. Deposits and L1 context likewise require independent
+/// authentication. Use [`verify_signed_batch`] or an execution domain when an
+/// untrusted proposal requires authenticated witness/root verification.
+///
+/// This is a whole-block execution adapter, not a transaction pool, incremental
+/// payload builder, persistent database or Reth node.
+pub fn execute_signed_block_on_database<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    database: DB,
+    previous_root: B256,
+    input: &SignedBlockInput,
+) -> Result<DatabaseBlockExecution<DB>, SignedInputError<BlockExecutionError>> {
+    let authenticated = input.authenticate(spec)?;
+    let (overlay, run) =
+        run_block(spec, CacheDB::new(database), previous_root, &authenticated).map_err(SignedInputError::Execution)?;
+    Ok(DatabaseBlockExecution {
+        overlay,
+        run,
+        chain_id: spec.chain_id,
+        context: input.context.clone(),
+    })
 }
 
 /// Generate a witness from original signed bytes on the host.
