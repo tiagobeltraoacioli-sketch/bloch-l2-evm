@@ -77,10 +77,18 @@ pub struct BatchWitness {
     /// Every pre-state account the batch READS or WRITES that existed before it,
     /// keyed by address (the trie stores only `keccak(address)`), with its
     /// complete non-zero storage. Sorted by address.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::serde_bounded::streaming_vector")
+    )]
     pub pre_accounts: Vec<WitnessAccount>,
     /// Every address the batch touches that did NOT exist in the pre-state
     /// (recipients created in-block, cold precompiles, ...). Each must be
     /// provably absent from `prev_state_root`. Sorted.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::serde_bounded::streaming_vector")
+    )]
     pub absent_accounts: Vec<Address>,
 }
 
@@ -107,6 +115,10 @@ pub struct WitnessAccount {
     #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_witness_code"))]
     pub code: Vec<u8>,
     /// Non-zero storage slots, sorted by slot.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::serde_bounded::streaming_vector")
+    )]
     pub storage: Vec<(U256, U256)>,
 }
 

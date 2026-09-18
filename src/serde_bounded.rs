@@ -158,6 +158,33 @@ where
     deserializer.deserialize_seq(Bounded::<T, N>(PhantomData))
 }
 
+/// Decode an unbounded sequence incrementally without trusting its declared length.
+///
+/// Use this when the protocol has no fixed element limit: allocation remains
+/// proportional to elements actually decoded instead of an attacker-controlled
+/// `size_hint` supplied before any input is read.
+pub fn streaming_vector<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Streaming<T>(PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Streaming<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a sequence decoded without trusting its declared length")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut items = Vec::new();
+            while let Some(value) = seq.next_element()? {
+                items.push(value);
+            }
+            Ok(items)
+        }
+    }
+    deserializer.deserialize_seq(Streaming(PhantomData))
+}
+
 /// Decode a vector of bounded byte strings with count, per-item and aggregate limits.
 pub fn byte_vectors<'de, D, const COUNT: usize, const ITEM: usize, const TOTAL: usize>(
     deserializer: D,
@@ -235,5 +262,22 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<ProofWire>(json).is_err(), "accepted {json}");
         }
+    }
+
+    #[test]
+    fn streaming_vector_ignores_hostile_declared_length() {
+        struct EmptyHuge;
+        impl Iterator for EmptyHuge {
+            type Item = u8;
+            fn next(&mut self) -> Option<u8> {
+                None
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (usize::MAX, Some(usize::MAX))
+            }
+        }
+        let deserializer = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(EmptyHuge);
+        let decoded = streaming_vector::<_, u8>(deserializer).unwrap();
+        assert!(decoded.is_empty());
     }
 }
