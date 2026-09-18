@@ -119,8 +119,10 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
   async function sendTransaction(transaction) {
     if (!transaction || typeof transaction !== "object" || Array.isArray(transaction)) throw new TypeError("Transaction object required");
     const allowed = new Set(["from", "to", "value", "data", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "nonce", "type", "chainId", "accessList"]);
-    for (const field of Object.keys(transaction)) {
-      if (!allowed.has(field)) throw new TypeError(`Unsupported Cancun transaction field: ${field}`);
+    for (const field of Reflect.ownKeys(transaction)) {
+      if (typeof field !== "string" || !allowed.has(field)) {
+        throw new TypeError(`Unsupported Cancun transaction field: ${String(field)}`);
+      }
     }
     // Snapshot caller input before awaiting the provider (including access lists).
     const tx = { ...transaction };

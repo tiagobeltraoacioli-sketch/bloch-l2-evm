@@ -92,6 +92,7 @@ test("accepts transaction quantities exactly at the node field widths", async ()
 test("chain/account changes and unsupported authorization cannot reach signing", async () => {
   const provider = mock();
   const wallet = createBlochL2Wallet(provider, options);
+  const symbolField = Symbol("provider-specific signing override");
   for (const tx of [
     { from: account, chainId: "0x1" }, { from: account, type: "0x4" },
     { from: account, authorizationList: [] }, { from: account, value: "0x01" },
@@ -107,6 +108,7 @@ test("chain/account changes and unsupported authorization cannot reach signing",
     { from: account, type: "0x1", maxFeePerGas: "0x2" },
     { from: account, type: "0x2", gasPrice: "0x1" },
     { from: account, maxFeePerGas: "0x1", maxPriorityFeePerGas: "0x2" },
+    { from: account, [symbolField]: true },
   ]) await assert.rejects(wallet.sendTransaction(tx));
   assert.ok(!provider.calls.some(call => call.method === "eth_sendTransaction"));
   let reads = 0;
