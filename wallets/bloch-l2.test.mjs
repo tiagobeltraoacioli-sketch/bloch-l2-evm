@@ -96,14 +96,20 @@ test("bounds untrusted provider responses and transaction collections", async ()
 
   const wallet = createBlochL2Wallet(mock(), options);
   const addressLikeObject = { toString: () => account, toLowerCase: () => account };
+  let oversizedStorageKeysInspected = false;
+  const oversizedStorageKeys = new Proxy(Array(8193), { get(target, key, receiver) {
+    if (key === "some") oversizedStorageKeysInspected = true;
+    return Reflect.get(target, key, receiver);
+  } });
   for (const tx of [
     { from: addressLikeObject },
     { from: account, to: addressLikeObject },
     { from: account, accessList: [{ address: addressLikeObject, storageKeys: [] }] },
     { from: account, data: `0x${"00".repeat(128 * 1024 + 1)}` },
     { from: account, accessList: Array(1025).fill({ address: account, storageKeys: [] }) },
-    { from: account, accessList: [{ address: account, storageKeys: Array(8193).fill(`0x${"00".repeat(32)}`) }] },
+    { from: account, accessList: [{ address: account, storageKeys: oversizedStorageKeys }] },
   ]) await assert.rejects(wallet.sendTransaction(tx));
+  assert.equal(oversizedStorageKeysInspected, false);
 
   const invalidHash = mock({ eth_sendTransaction: () => "0x01" });
   await assert.rejects(createBlochL2Wallet(invalidHash, options).sendTransaction({ from: account }), /invalid transaction hash/);
