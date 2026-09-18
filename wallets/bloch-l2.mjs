@@ -13,16 +13,24 @@ export const BLOCH_L2_TESTNET_CHAIN_ID = 700771n; // Placeholder, not a register
 const address = /^0x[0-9a-fA-F]{40}$/;
 const quantity = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const data = /^0x(?:[0-9a-fA-F]{2})*$/;
+const MAX_U256_HEX_LENGTH = 66;
 
 function chainHex(value) {
   if (typeof value === "number" && !Number.isSafeInteger(value)) throw new TypeError("Unsafe chain ID");
   if (!["string", "number", "bigint"].includes(typeof value)) throw new TypeError("Invalid chain ID");
+  if (typeof value === "string" &&
+      (value.length > 22 || !/^(?:0x[0-9a-fA-F]+|[0-9]+)$/.test(value))) {
+    throw new TypeError("Invalid chain ID");
+  }
   const id = BigInt(value);
   if (id <= 0n || id > 0xffffffffffffffffn) throw new RangeError("Chain ID must be a positive u64");
   return `0x${id.toString(16)}`;
 }
 
 function checkedRpcUrl(value) {
+  if (typeof value !== "string" || !value || value.length > 2048) {
+    throw new TypeError("RPC must be a bounded URL string");
+  }
   const url = new URL(value);
   const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) || url.username || url.password || url.hash) {
@@ -88,7 +96,10 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     if (tx.type !== undefined && !["0x0", "0x1", "0x2"].includes(tx.type)) throw new TypeError("Only transaction types 0, 1 and 2 are supported");
     if (tx.data !== undefined && (typeof tx.data !== "string" || !data.test(tx.data))) throw new TypeError("Invalid transaction data");
     for (const field of ["value", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "nonce"]) {
-      if (tx[field] !== undefined && (typeof tx[field] !== "string" || !quantity.test(tx[field]))) throw new TypeError(`Invalid hex quantity: ${field}`);
+      if (tx[field] !== undefined &&
+          (typeof tx[field] !== "string" || tx[field].length > MAX_U256_HEX_LENGTH || !quantity.test(tx[field]))) {
+        throw new TypeError(`Invalid hex quantity: ${field}`);
+      }
     }
     if (tx.accessList !== undefined) {
       if (!Array.isArray(tx.accessList)) throw new TypeError("Invalid access list");

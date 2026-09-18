@@ -51,10 +51,10 @@ test("does not bypass user rejection or request accounts on the wrong chain", as
 });
 
 test("requires a real configured endpoint and rejects unsafe chain IDs", () => {
-  for (const rpcUrl of [undefined, "http://example.com", "https://user:pass@example.com", "https://example.com/#x"]) {
+  for (const rpcUrl of [undefined, "http://example.com", "https://user:pass@example.com", "https://example.com/#x", "https://" + "a".repeat(2048)]) {
     assert.throws(() => createBlochL2Wallet(mock(), { rpcUrl }));
   }
-  for (const id of [0, -1, Number.MAX_SAFE_INTEGER + 1, 1n << 64n]) {
+  for (const id of [0, -1, Number.MAX_SAFE_INTEGER + 1, 1n << 64n, " 700771 ", "9".repeat(10_000)]) {
     assert.throws(() => createBlochL2Wallet(mock(), { ...options, chainId: id }));
   }
 });
@@ -75,6 +75,7 @@ test("chain/account changes and unsupported authorization cannot reach signing",
   for (const tx of [
     { from: account, chainId: "0x1" }, { from: account, type: "0x4" },
     { from: account, authorizationList: [] }, { from: account, value: "0x01" },
+    { from: account, value: `0x${"f".repeat(65)}` },
     { from: account, data: "0x1" }, { from: `0x${"22".repeat(20)}` },
   ]) await assert.rejects(wallet.sendTransaction(tx));
   assert.ok(!provider.calls.some(call => call.method === "eth_sendTransaction"));
