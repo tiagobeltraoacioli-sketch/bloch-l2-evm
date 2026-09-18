@@ -65,7 +65,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
   // The selected provider is part of this wallet's identity. Capture its request
   // method once so later page-side property replacement cannot split network
   // checks and signing across different implementations.
-  const request = requestMethod.bind(provider);
+  const request = Function.prototype.bind.call(requestMethod, provider);
   const id = chainHex(chainId);
   const rpc = checkedRpcUrl(rpcUrl);
   const network = Object.freeze({

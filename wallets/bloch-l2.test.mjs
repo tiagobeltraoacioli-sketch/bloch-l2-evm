@@ -162,6 +162,7 @@ test("snapshots collection lengths before validating and copying", async () => {
 
 test("keeps all requests on the provider implementation selected at construction", async () => {
   const provider = mock();
+  provider.request.bind = () => async () => { throw new Error("instance bind hook ran"); };
   const wallet = createBlochL2Wallet(provider, options);
   provider.request = async () => { throw new Error("replacement request method ran"); };
   const session = await wallet.connect();
