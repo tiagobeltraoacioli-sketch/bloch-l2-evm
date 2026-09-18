@@ -72,6 +72,21 @@ test("sends via the wallet with an explicit chain domain and connected sender", 
   assert.equal(sent.params[0].from, account);
 });
 
+test("accepts transaction quantities exactly at the node field widths", async () => {
+  const provider = mock();
+  const wallet = createBlochL2Wallet(provider, options);
+  await wallet.sendTransaction({
+    from: account,
+    type: "0x2",
+    gas: `0x${"f".repeat(16)}`,
+    nonce: `0x${"f".repeat(16)}`,
+    maxFeePerGas: `0x${"f".repeat(32)}`,
+    maxPriorityFeePerGas: `0x${"f".repeat(32)}`,
+    value: `0x${"f".repeat(64)}`,
+  });
+  assert.equal(provider.calls.at(-1).method, "eth_sendTransaction");
+});
+
 test("chain/account changes and unsupported authorization cannot reach signing", async () => {
   const provider = mock();
   const wallet = createBlochL2Wallet(provider, options);
