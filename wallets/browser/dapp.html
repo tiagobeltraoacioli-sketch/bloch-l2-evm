@@ -13,7 +13,7 @@ window.connect=()=>window.start(async()=>{
  // Transparent request tracing: results and errors come exclusively from the real extension.
  const selectedRequest=Function.prototype.bind.call(selected.provider.request,selected.provider);
  const observed={request:async(request)=>{const entry={method:request.method,status:'pending'};window.rpcTrace.push(entry);try{const result=await selectedRequest(request);entry.status='resolved';return result;}catch(error){entry.status='rejected';entry.code=error.code;throw error;}}};
- window.wallet=createBlochL2Wallet(observed,{rpcUrl:RPC_ENDPOINT_JSON,chainId:700771});
+ window.wallet=createBlochL2Wallet(observed,{rpcUrl:RPC_ENDPOINT_JSON,chainId:700771,genesisHash:GENESIS_HASH_JSON});
  document.querySelector('#notice').textContent=wallet.security.notice;
  const session=await wallet.connect();window.account=session.accounts[0];return session;
 });

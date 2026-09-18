@@ -23,7 +23,8 @@ test('real MetaMask EIP-1193 UI connects, rejects, signs deploy/call on isolated
   assert.equal(createHash('sha256').update(archive).digest('hex'),'d95e4c23001ed7485ccdc86c879b4e944806ababdf52e0fc578e277131e48cea');
   const account=HDNodeWallet.fromPhrase(PHRASE).address;
   node=await startNode(join(root,'node'),account);provider=new JsonRpcProvider(node.url);
-  web=await serveDapp(node.url);
+  const genesis=(await provider.getBlock(0)).hash;
+  web=await serveDapp(node.url,genesis);
   context=await chromium.launchPersistentContext(join(root,'profile'),{
    executablePath:process.env.CHROME??fileURLToPath(new URL('./.cache/chrome-153.0.8010.47/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',import.meta.url)),
    headless:true,locale:'en-US',ignoreDefaultArgs:['--disable-extensions'],

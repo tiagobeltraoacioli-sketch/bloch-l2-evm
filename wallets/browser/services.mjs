@@ -29,12 +29,14 @@ export async function startNode(directory, account, port = 0) {
   }catch(e){child.kill('SIGKILL');await exited.catch(()=>{});throw e;}finally{clearTimeout(timeout);}
 }
 
-export async function serveDapp(rpcUrl){
+export async function serveDapp(rpcUrl,genesisHash){
   const html=await readFile(new URL('./dapp.html',import.meta.url),'utf8');
   const adapter=await readFile(new URL('../bloch-l2.mjs',import.meta.url));
   const server=createServer((req,res)=>{
     if(req.url==='/bloch-l2.mjs'){res.setHeader('Content-Type','text/javascript');res.end(adapter);}
-    else if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html.replace('RPC_ENDPOINT_JSON',JSON.stringify(rpcUrl)));}
+    else if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html
+      .replace('RPC_ENDPOINT_JSON',JSON.stringify(rpcUrl))
+      .replace('GENESIS_HASH_JSON',JSON.stringify(genesisHash)));}
     else{res.writeHead(404);res.end();}
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});

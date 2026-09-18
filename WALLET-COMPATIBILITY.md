@@ -72,6 +72,7 @@ import { createBlochL2Wallet } from "./wallets/bloch-l2.mjs";
 const wallet = createBlochL2Wallet(selectedProvider, {
   rpcUrl: applicationConfig.blochL2RpcUrl,
   chainId: applicationConfig.blochL2ChainId,
+  genesisHash: applicationConfig.blochL2GenesisHash,
 });
 networkNotice.textContent = wallet.security.notice;
 const { accounts } = await wallet.connect();
@@ -86,14 +87,15 @@ const hash = await wallet.sendTransaction({
 The registered wallet network is named **Bloch L2 (ECDSA)**, with bridged BLCH
 at 18 decimals. The crate's test configuration is chain ID **700771**, hex
 **0xab163**; this is an unregistered placeholder, not an advertised public
-network. Supply the node's actual chain ID and endpoint. No production endpoint,
-explorer, faucet or token is invented by this adapter.
+network. Supply the node's actual chain ID, genesis block hash and endpoint from
+one reviewed deployment manifest. No production identity, endpoint, explorer,
+faucet or token is invented by this adapter.
 
 The adapter requests `wallet_switchEthereumChain`, adds the chain only on error
 4902, then explicitly switches again (adding need not select it). It respects
-user rejection, checks the active chain before obtaining accounts and before
-sending, includes the chain ID in signing requests, and accepts only an
-authorized sender. The selected provider's request method is captured once at
+user rejection, checks both the active chain ID and the exact block-zero hash
+before obtaining accounts and before sending, includes the chain ID in signing
+requests, and accepts only an authorized sender. The selected provider's request method is captured once at
 construction so later property replacement cannot split checks and signing
 between implementations. The adapter conservatively accounts for calldata,
 access lists and maximum envelope overhead against the node's 128 KiB encoded

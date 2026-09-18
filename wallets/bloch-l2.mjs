@@ -11,6 +11,7 @@ export const BLOCH_L2_SECURITY = Object.freeze({
 export const BLOCH_L2_TESTNET_CHAIN_ID = 700771n; // Placeholder, not a registered/public network.
 
 const address = /^0x[0-9a-fA-F]{40}$/;
+const hash = /^0x[0-9a-fA-F]{64}$/;
 const quantity = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const data = /^0x(?:[0-9a-fA-F]{2})*$/;
 const MAX_U256_HEX_LENGTH = 66;
@@ -28,6 +29,13 @@ const MAX_U128 = 0xffffffffffffffffffffffffffffffffn;
 
 function isAddress(value) {
   return typeof value === "string" && value.length === 42 && address.test(value);
+}
+
+function checkedHash(value, name) {
+  if (typeof value !== "string" || value.length !== 66 || !hash.test(value)) {
+    throw new TypeError(`${name} must be a 32-byte hex hash`);
+  }
+  return value.toLowerCase();
 }
 
 function boundedArrayLength(value, maximum) {
@@ -65,7 +73,11 @@ function checkedRpcUrl(value) {
  * when offering this network and supplies its actual configured RPC endpoint.
  * No endpoint is guessed and no secret key is requested or stored here.
  */
-export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTNET_CHAIN_ID } = {}) {
+export function createBlochL2Wallet(provider, {
+  rpcUrl,
+  chainId = BLOCH_L2_TESTNET_CHAIN_ID,
+  genesisHash,
+} = {}) {
   const requestMethod = provider?.request;
   if (typeof requestMethod !== "function") throw new TypeError("An EIP-1193 provider is required");
   // The selected provider is part of this wallet's identity. Capture its request
@@ -74,6 +86,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
   const request = Function.prototype.bind.call(requestMethod, provider);
   const id = chainHex(chainId);
   const rpc = checkedRpcUrl(rpcUrl);
+  const genesis = checkedHash(genesisHash, "Genesis hash");
   const network = Object.freeze({
     chainId: id,
     chainName: "Bloch L2 (ECDSA)",
@@ -86,6 +99,11 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     if (typeof current !== "string" || current.length > U64_HEX_LENGTH ||
         !quantity.test(current) || chainHex(current) !== id) {
       throw new Error("Wallet is not connected to the configured Bloch L2");
+    }
+    const block = await request({ method: "eth_getBlockByNumber", params: ["0x0", false] });
+    if (!block || typeof block !== "object" || Array.isArray(block) ||
+        block.number !== "0x0" || checkedHash(block.hash, "RPC genesis hash") !== genesis) {
+      throw new Error("Wallet is not connected to the configured Bloch L2 genesis");
     }
   }
 
@@ -113,7 +131,12 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
       accountSnapshot[i] = account;
     }
     await assertNetwork(); // The user may change chains while approving accounts.
-    return Object.freeze({ accounts: Object.freeze(accountSnapshot), chainId: id, security: BLOCH_L2_SECURITY });
+    return Object.freeze({
+      accounts: Object.freeze(accountSnapshot),
+      chainId: id,
+      genesisHash: genesis,
+      security: BLOCH_L2_SECURITY,
+    });
   }
 
   async function sendTransaction(transaction) {
@@ -226,5 +249,5 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     return transactionHash;
   }
 
-  return Object.freeze({ network, security: BLOCH_L2_SECURITY, connect, sendTransaction });
+  return Object.freeze({ network, genesisHash: genesis, security: BLOCH_L2_SECURITY, connect, sendTransaction });
 }

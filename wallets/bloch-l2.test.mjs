@@ -5,13 +5,15 @@ import { createBlochL2Wallet, BLOCH_L2_SECURITY } from "./bloch-l2.mjs";
 
 const account = `0x${"11".repeat(20)}`;
 const chainId = `0x${700771n.toString(16)}`;
-const options = { rpcUrl: "http://127.0.0.1:8545" };
+const genesisHash = `0x${"42".repeat(32)}`;
+const options = { rpcUrl: "http://127.0.0.1:8545", genesisHash };
 function mock(handlers = {}) {
   const calls = [];
   return { calls, request: async request => {
     calls.push(request);
     if (handlers[request.method]) return handlers[request.method](request);
     if (request.method === "eth_chainId") return chainId;
+    if (request.method === "eth_getBlockByNumber") return { number: "0x0", hash: genesisHash };
     if (["eth_requestAccounts", "eth_accounts"].includes(request.method)) return [account];
     if (request.method === "eth_sendTransaction") return `0x${"aa".repeat(32)}`;
     return null;
@@ -23,6 +25,7 @@ test("connects the selected EIP-1193 wallet with explicit classical L2 metadata"
   const wallet = createBlochL2Wallet(provider, options);
   const session = await wallet.connect();
   assert.equal(session.chainId, chainId);
+  assert.equal(session.genesisHash, genesisHash);
   assert.deepEqual(session.accounts, [account]);
   assert.equal(session.security, BLOCH_L2_SECURITY);
   assert.equal(session.security.postQuantumAccounts, false);
@@ -51,14 +54,25 @@ test("does not bypass user rejection or request accounts on the wrong chain", as
   const oversized = mock({ eth_chainId: () => `0x${"f".repeat(10_000)}` });
   await assert.rejects(createBlochL2Wallet(oversized, options).connect(), /not connected/);
   assert.ok(!oversized.calls.some(call => call.method === "eth_requestAccounts"));
+  const wrongGenesis = mock({ eth_getBlockByNumber: () => ({ number: "0x0", hash: `0x${"24".repeat(32)}` }) });
+  await assert.rejects(createBlochL2Wallet(wrongGenesis, options).connect(), /configured Bloch L2 genesis/);
+  assert.ok(!wrongGenesis.calls.some(call => call.method === "eth_requestAccounts"));
+  for (const value of [null, [], { number: "0x1", hash: genesisHash }, { number: "0x0", hash: "0x1" }]) {
+    const malformedGenesis = mock({ eth_getBlockByNumber: () => value });
+    await assert.rejects(createBlochL2Wallet(malformedGenesis, options).connect());
+    assert.ok(!malformedGenesis.calls.some(call => call.method === "eth_requestAccounts"));
+  }
 });
 
 test("requires a real configured endpoint and rejects unsafe chain IDs", () => {
   for (const rpcUrl of [undefined, "http://example.com", "https://user:pass@example.com", "https://example.com/#x", "https://" + "a".repeat(2048)]) {
-    assert.throws(() => createBlochL2Wallet(mock(), { rpcUrl }));
+    assert.throws(() => createBlochL2Wallet(mock(), { rpcUrl, genesisHash }));
   }
   for (const id of [0, -1, Number.MAX_SAFE_INTEGER + 1, 1n << 64n, " 700771 ", "9".repeat(10_000)]) {
     assert.throws(() => createBlochL2Wallet(mock(), { ...options, chainId: id }));
+  }
+  for (const configuredGenesis of [undefined, "0x1", `0x${"g".repeat(64)}`, `0x${"00".repeat(33)}`]) {
+    assert.throws(() => createBlochL2Wallet(mock(), { ...options, genesisHash: configuredGenesis }));
   }
 });
 
@@ -115,6 +129,18 @@ test("chain/account changes and unsupported authorization cannot reach signing",
   const changed = mock({ eth_chainId: () => ++reads === 1 ? chainId : "0x1" });
   await assert.rejects(createBlochL2Wallet(changed, options).sendTransaction({ from: account }), /not connected/);
   assert.ok(!changed.calls.some(call => call.method === "eth_sendTransaction"));
+  let genesisReads = 0;
+  const changedGenesis = mock({
+    eth_getBlockByNumber: () => ({
+      number: "0x0",
+      hash: ++genesisReads === 1 ? genesisHash : `0x${"24".repeat(32)}`,
+    }),
+  });
+  await assert.rejects(
+    createBlochL2Wallet(changedGenesis, options).sendTransaction({ from: account }),
+    /configured Bloch L2 genesis/,
+  );
+  assert.ok(!changedGenesis.calls.some(call => call.method === "eth_sendTransaction"));
 });
 
 test("bounds untrusted provider responses and transaction collections", async () => {
