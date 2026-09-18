@@ -14,6 +14,10 @@ const address = /^0x[0-9a-fA-F]{40}$/;
 const quantity = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const data = /^0x(?:[0-9a-fA-F]{2})*$/;
 const MAX_U256_HEX_LENGTH = 66;
+const MAX_ACCOUNT_COUNT = 1024;
+const MAX_CALLDATA_BYTES = 128 * 1024;
+const MAX_ACCESS_LIST_ENTRIES = 1024;
+const MAX_ACCESS_LIST_STORAGE_KEYS = 8192;
 
 function chainHex(value) {
   if (typeof value === "number" && !Number.isSafeInteger(value)) throw new TypeError("Unsafe chain ID");
@@ -75,7 +79,8 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     }
     await assertNetwork();
     const accounts = await provider.request({ method: "eth_requestAccounts" });
-    if (!Array.isArray(accounts) || !accounts.length || accounts.some(account => typeof account !== "string" || !address.test(account))) {
+    if (!Array.isArray(accounts) || !accounts.length || accounts.length > MAX_ACCOUNT_COUNT ||
+        accounts.some(account => typeof account !== "string" || !address.test(account))) {
       throw new Error("Wallet did not return valid Ethereum accounts");
     }
     await assertNetwork(); // The user may change chains while approving accounts.
@@ -94,7 +99,10 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     if (tx.to !== undefined && !address.test(tx.to)) throw new TypeError("Invalid destination address");
     if (tx.chainId !== undefined && chainHex(tx.chainId) !== id) throw new Error("Transaction targets another chain");
     if (tx.type !== undefined && !["0x0", "0x1", "0x2"].includes(tx.type)) throw new TypeError("Only transaction types 0, 1 and 2 are supported");
-    if (tx.data !== undefined && (typeof tx.data !== "string" || !data.test(tx.data))) throw new TypeError("Invalid transaction data");
+    if (tx.data !== undefined && (typeof tx.data !== "string" ||
+        tx.data.length > 2 + 2 * MAX_CALLDATA_BYTES || !data.test(tx.data))) {
+      throw new TypeError("Invalid transaction data");
+    }
     for (const field of ["value", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "nonce"]) {
       if (tx[field] !== undefined &&
           (typeof tx[field] !== "string" || tx[field].length > MAX_U256_HEX_LENGTH || !quantity.test(tx[field]))) {
@@ -102,22 +110,32 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
       }
     }
     if (tx.accessList !== undefined) {
-      if (!Array.isArray(tx.accessList)) throw new TypeError("Invalid access list");
+      if (!Array.isArray(tx.accessList) || tx.accessList.length > MAX_ACCESS_LIST_ENTRIES) {
+        throw new TypeError("Invalid access list");
+      }
+      let storageKeyCount = 0;
       tx.accessList = tx.accessList.map(item => {
         if (!item || !address.test(item.address) || !Array.isArray(item.storageKeys) || item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
           throw new TypeError("Invalid access list entry");
         }
+        storageKeyCount += item.storageKeys.length;
+        if (storageKeyCount > MAX_ACCESS_LIST_STORAGE_KEYS) throw new TypeError("Access list has too many storage keys");
         return { address: item.address, storageKeys: [...item.storageKeys] };
       });
     }
     tx.chainId = id; // The signing request carries the configured replay domain.
     await assertNetwork();
     const accounts = await provider.request({ method: "eth_accounts" });
-    if (!Array.isArray(accounts) || !accounts.some(account => typeof account === "string" && account.toLowerCase() === tx.from.toLowerCase())) {
+    if (!Array.isArray(accounts) || accounts.length > MAX_ACCOUNT_COUNT ||
+        !accounts.some(account => typeof account === "string" && account.toLowerCase() === tx.from.toLowerCase())) {
       throw new Error("Transaction sender is not an authorized wallet account");
     }
     await assertNetwork();
-    return provider.request({ method: "eth_sendTransaction", params: [tx] });
+    const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [tx] });
+    if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) {
+      throw new Error("Wallet returned an invalid transaction hash");
+    }
+    return transactionHash;
   }
 
   return Object.freeze({ network, security: BLOCH_L2_SECURITY, connect, sendTransaction });

@@ -84,3 +84,18 @@ test("chain/account changes and unsupported authorization cannot reach signing",
   await assert.rejects(createBlochL2Wallet(changed, options).sendTransaction({ from: account }), /not connected/);
   assert.ok(!changed.calls.some(call => call.method === "eth_sendTransaction"));
 });
+
+test("bounds untrusted provider responses and transaction collections", async () => {
+  const tooManyAccounts = mock({ eth_requestAccounts: () => Array(1025).fill(account) });
+  await assert.rejects(createBlochL2Wallet(tooManyAccounts, options).connect(), /valid Ethereum accounts/);
+
+  const wallet = createBlochL2Wallet(mock(), options);
+  for (const tx of [
+    { from: account, data: `0x${"00".repeat(128 * 1024 + 1)}` },
+    { from: account, accessList: Array(1025).fill({ address: account, storageKeys: [] }) },
+    { from: account, accessList: [{ address: account, storageKeys: Array(8193).fill(`0x${"00".repeat(32)}`) }] },
+  ]) await assert.rejects(wallet.sendTransaction(tx));
+
+  const invalidHash = mock({ eth_sendTransaction: () => "0x01" });
+  await assert.rejects(createBlochL2Wallet(invalidHash, options).sendTransaction({ from: account }), /invalid transaction hash/);
+});
