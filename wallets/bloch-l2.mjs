@@ -14,6 +14,7 @@ const address = /^0x[0-9a-fA-F]{40}$/;
 const quantity = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const data = /^0x(?:[0-9a-fA-F]{2})*$/;
 const MAX_U256_HEX_LENGTH = 66;
+const U64_HEX_LENGTH = 18;
 const MAX_ACCOUNT_COUNT = 1024;
 const MAX_CALLDATA_BYTES = 128 * 1024;
 const MAX_ACCESS_LIST_ENTRIES = 1024;
@@ -65,7 +66,8 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
 
   async function assertNetwork() {
     const current = await provider.request({ method: "eth_chainId" });
-    if (typeof current !== "string" || !quantity.test(current) || chainHex(current) !== id) {
+    if (typeof current !== "string" || current.length > U64_HEX_LENGTH ||
+        !quantity.test(current) || chainHex(current) !== id) {
       throw new Error("Wallet is not connected to the configured Bloch L2");
     }
   }
@@ -148,7 +150,8 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     }
     await assertNetwork();
     const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [tx] });
-    if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) {
+    if (typeof transactionHash !== "string" || transactionHash.length !== 66 ||
+        !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) {
       throw new Error("Wallet returned an invalid transaction hash");
     }
     return transactionHash;

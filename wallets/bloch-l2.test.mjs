@@ -48,6 +48,9 @@ test("does not bypass user rejection or request accounts on the wrong chain", as
   const wrong = mock({ eth_chainId: () => "0x1" });
   await assert.rejects(createBlochL2Wallet(wrong, options).connect(), /not connected/);
   assert.ok(!wrong.calls.some(call => call.method === "eth_requestAccounts"));
+  const oversized = mock({ eth_chainId: () => `0x${"f".repeat(10_000)}` });
+  await assert.rejects(createBlochL2Wallet(oversized, options).connect(), /not connected/);
+  assert.ok(!oversized.calls.some(call => call.method === "eth_requestAccounts"));
 });
 
 test("requires a real configured endpoint and rejects unsafe chain IDs", () => {
