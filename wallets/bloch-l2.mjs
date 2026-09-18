@@ -9,6 +9,8 @@ export const BLOCH_L2_SECURITY = Object.freeze({
   notice: "Bloch L2 uses ECDSA accounts. These accounts are not post-quantum; native Bloch L1 requires PQ signatures.",
 });
 export const BLOCH_L2_TESTNET_CHAIN_ID = 700771n; // Placeholder, not a registered/public network.
+export const BLOCH_L2_IDENTITY_FORMAT = "bloch-chain-identity-v1";
+export const BLOCH_L2_HEADER_FORMAT = "bloch-node-header-v2-fixed-width";
 
 const address = /^0x[0-9a-fA-F]{40}$/;
 const hash = /^0x[0-9a-fA-F]{64}$/;
@@ -26,6 +28,9 @@ const MAX_ACCESS_LIST_ENTRIES = 1024;
 const MAX_ACCESS_LIST_STORAGE_KEYS = 8192;
 const MAX_U64 = 0xffffffffffffffffn;
 const MAX_U128 = 0xffffffffffffffffffffffffffffffffn;
+const identityFields = Object.freeze(["format", "chainId", "domain", "genesisHash", "headerFormat"]);
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const ownKeys = Reflect.ownKeys;
 
 function isAddress(value) {
   return typeof value === "string" && value.length === 42 && address.test(value);
@@ -36,6 +41,26 @@ function checkedHash(value, name) {
     throw new TypeError(`${name} must be a 32-byte hex hash`);
   }
   return value.toLowerCase();
+}
+
+function checkedIdentityResponse(value, expected) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    const keys = ownKeys(value);
+    if (keys.length !== identityFields.length) throw new Error();
+    const response = Object.create(null);
+    for (let i = 0; i < identityFields.length; i += 1) {
+      const key = identityFields[i];
+      const descriptor = getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) throw new Error();
+      response[key] = descriptor.value;
+    }
+    if (response.format !== expected.format || response.headerFormat !== expected.headerFormat ||
+        response.chainId !== expected.chainId || response.domain !== expected.domain ||
+        response.genesisHash !== expected.genesisHash) throw new Error();
+  } catch {
+    throw new Error("RPC does not match the configured Bloch L2 identity");
+  }
 }
 
 function boundedArrayLength(value, maximum) {
@@ -77,6 +102,7 @@ export function createBlochL2Wallet(provider, {
   rpcUrl,
   chainId = BLOCH_L2_TESTNET_CHAIN_ID,
   genesisHash,
+  domain,
 } = {}) {
   const requestMethod = provider?.request;
   if (typeof requestMethod !== "function") throw new TypeError("An EIP-1193 provider is required");
@@ -87,6 +113,14 @@ export function createBlochL2Wallet(provider, {
   const id = chainHex(chainId);
   const rpc = checkedRpcUrl(rpcUrl);
   const genesis = checkedHash(genesisHash, "Genesis hash");
+  const executionDomain = checkedHash(domain, "Execution domain");
+  const identity = Object.freeze({
+    format: BLOCH_L2_IDENTITY_FORMAT,
+    chainId: id,
+    domain: executionDomain,
+    genesisHash: genesis,
+    headerFormat: BLOCH_L2_HEADER_FORMAT,
+  });
   const network = Object.freeze({
     chainId: id,
     chainName: "Bloch L2 (ECDSA)",
@@ -105,6 +139,8 @@ export function createBlochL2Wallet(provider, {
         block.number !== "0x0" || checkedHash(block.hash, "RPC genesis hash") !== genesis) {
       throw new Error("Wallet is not connected to the configured Bloch L2 genesis");
     }
+    const reportedIdentity = await request({ method: "bloch_chainIdentity", params: [] });
+    checkedIdentityResponse(reportedIdentity, identity);
   }
 
   async function connect() {
@@ -135,6 +171,7 @@ export function createBlochL2Wallet(provider, {
       accounts: Object.freeze(accountSnapshot),
       chainId: id,
       genesisHash: genesis,
+      identity,
       security: BLOCH_L2_SECURITY,
     });
   }
@@ -249,5 +286,5 @@ export function createBlochL2Wallet(provider, {
     return transactionHash;
   }
 
-  return Object.freeze({ network, genesisHash: genesis, security: BLOCH_L2_SECURITY, connect, sendTransaction });
+  return Object.freeze({ network, genesisHash: genesis, identity, security: BLOCH_L2_SECURITY, connect, sendTransaction });
 }

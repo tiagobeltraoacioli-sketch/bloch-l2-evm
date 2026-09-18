@@ -1,12 +1,25 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createBlochL2Wallet, BLOCH_L2_SECURITY } from "./bloch-l2.mjs";
+import {
+  createBlochL2Wallet,
+  BLOCH_L2_HEADER_FORMAT,
+  BLOCH_L2_IDENTITY_FORMAT,
+  BLOCH_L2_SECURITY,
+} from "./bloch-l2.mjs";
 
 const account = `0x${"11".repeat(20)}`;
 const chainId = `0x${700771n.toString(16)}`;
 const genesisHash = `0x${"42".repeat(32)}`;
-const options = { rpcUrl: "http://127.0.0.1:8545", genesisHash };
+const domain = `0x${"71".repeat(32)}`;
+const identity = Object.freeze({
+  format: BLOCH_L2_IDENTITY_FORMAT,
+  chainId,
+  domain,
+  genesisHash,
+  headerFormat: BLOCH_L2_HEADER_FORMAT,
+});
+const options = { rpcUrl: "http://127.0.0.1:8545", genesisHash, domain };
 function mock(handlers = {}) {
   const calls = [];
   return { calls, request: async request => {
@@ -14,6 +27,7 @@ function mock(handlers = {}) {
     if (handlers[request.method]) return handlers[request.method](request);
     if (request.method === "eth_chainId") return chainId;
     if (request.method === "eth_getBlockByNumber") return { number: "0x0", hash: genesisHash };
+    if (request.method === "bloch_chainIdentity") return { ...identity };
     if (["eth_requestAccounts", "eth_accounts"].includes(request.method)) return [account];
     if (request.method === "eth_sendTransaction") return `0x${"aa".repeat(32)}`;
     return null;
@@ -26,6 +40,8 @@ test("connects the selected EIP-1193 wallet with explicit classical L2 metadata"
   const session = await wallet.connect();
   assert.equal(session.chainId, chainId);
   assert.equal(session.genesisHash, genesisHash);
+  assert.deepEqual(session.identity, identity);
+  assert.ok(Object.isFrozen(session.identity));
   assert.deepEqual(session.accounts, [account]);
   assert.equal(session.security, BLOCH_L2_SECURITY);
   assert.equal(session.security.postQuantumAccounts, false);
@@ -74,6 +90,52 @@ test("requires a real configured endpoint and rejects unsafe chain IDs", () => {
   for (const configuredGenesis of [undefined, "0x1", `0x${"g".repeat(64)}`, `0x${"00".repeat(33)}`]) {
     assert.throws(() => createBlochL2Wallet(mock(), { ...options, genesisHash: configuredGenesis }));
   }
+  for (const configuredDomain of [undefined, "0x1", `0x${"g".repeat(64)}`, `0x${"00".repeat(33)}`]) {
+    assert.throws(() => createBlochL2Wallet(mock(), { ...options, domain: configuredDomain }));
+  }
+});
+
+test("requires the exact versioned chain identity before requesting accounts", async () => {
+  for (const changed of [
+    null,
+    [],
+    { ...identity, format: "bloch-chain-identity-v2" },
+    { ...identity, chainId: "0xAB163" },
+    { ...identity, domain: `0x${"72".repeat(32)}` },
+    { ...identity, genesisHash: `0x${"43".repeat(32)}` },
+    { ...identity, headerFormat: "ethereum-rlp" },
+    { ...identity, extra: true },
+  ]) {
+    const provider = mock({ bloch_chainIdentity: () => changed });
+    await assert.rejects(createBlochL2Wallet(provider, options).connect(), /configured Bloch L2 identity/);
+    assert.ok(!provider.calls.some(call => call.method === "eth_requestAccounts"));
+  }
+  for (const missing of Object.keys(identity)) {
+    const changed = { ...identity };
+    delete changed[missing];
+    const provider = mock({ bloch_chainIdentity: () => changed });
+    await assert.rejects(createBlochL2Wallet(provider, options).connect(), /configured Bloch L2 identity/);
+    assert.ok(!provider.calls.some(call => call.method === "eth_requestAccounts"));
+  }
+});
+
+test("does not execute identity accessors and rechecks identity immediately before signing", async () => {
+  let getterCalls = 0;
+  const accessor = { ...identity };
+  Object.defineProperty(accessor, "domain", { get() { getterCalls += 1; return domain; }, enumerable: true });
+  const accessorProvider = mock({ bloch_chainIdentity: () => accessor });
+  await assert.rejects(createBlochL2Wallet(accessorProvider, options).connect(), /configured Bloch L2 identity/);
+  assert.equal(getterCalls, 0);
+
+  let reads = 0;
+  const changed = mock({
+    bloch_chainIdentity: () => ++reads === 1 ? { ...identity } : { ...identity, domain: `0x${"72".repeat(32)}` },
+  });
+  await assert.rejects(
+    createBlochL2Wallet(changed, options).sendTransaction({ from: account }),
+    /configured Bloch L2 identity/,
+  );
+  assert.ok(!changed.calls.some(call => call.method === "eth_sendTransaction"));
 });
 
 test("sends via the wallet with an explicit chain domain and connected sender", async () => {
