@@ -9,6 +9,8 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use alloy_primitives::{Address, B256};
 use sha3::{Digest, Sha3_256};
 
+const MAX_LOCK_INPUTS: usize = 4096;
+
 /// Native output identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -37,6 +39,7 @@ pub struct LockIntent {
     /// Authority the consensus host must authenticate.
     pub owner: B256,
     /// Canonically sorted, unique funding outpoints.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_lock_inputs"))]
     pub inputs: Vec<Outpoint>,
     /// Runtime-specific EVM recipient.
     pub recipient: Address,
@@ -48,6 +51,11 @@ pub struct LockIntent {
     pub change_owner: B256,
     /// Explicit authorization nonce.
     pub nonce: u64,
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_lock_inputs<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Outpoint>, D::Error> {
+    crate::serde_bounded::vector::<_, _, MAX_LOCK_INPUTS>(deserializer)
 }
 impl LockIntent {
     /// Domain-separated signing root binding every authorization field.
@@ -155,7 +163,7 @@ impl EscrowLedger {
             || intent.owner == B256::ZERO
             || intent.change_owner == B256::ZERO
             || intent.inputs.is_empty()
-            || intent.inputs.len() > 4096
+            || intent.inputs.len() > MAX_LOCK_INPUTS
         {
             return Err(EscrowError::Configuration);
         }

@@ -199,3 +199,16 @@ fn duplicate_genesis_outpoints_are_rejected() {
         Err(Error::Configuration)
     ));
 }
+
+#[cfg(feature = "serde")]
+#[test]
+fn lock_wire_rejects_input_count_before_application() {
+    let (_, intent) = setup();
+    let encoded = serde_json::to_string(&intent).unwrap();
+    let decoded: LockIntent = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, intent);
+
+    let mut oversized = serde_json::to_value(&intent).unwrap();
+    oversized["inputs"] = serde_json::Value::Array(vec![serde_json::to_value(intent.inputs[0]).unwrap(); 4097]);
+    assert!(serde_json::from_value::<LockIntent>(oversized).is_err());
+}
