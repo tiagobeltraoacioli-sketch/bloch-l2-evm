@@ -109,6 +109,17 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
         throw new TypeError(`Invalid hex quantity: ${field}`);
       }
     }
+    const dynamicFees = tx.maxFeePerGas !== undefined || tx.maxPriorityFeePerGas !== undefined;
+    if ((tx.gasPrice !== undefined && dynamicFees) ||
+        (tx.type === "0x0" && (dynamicFees || tx.accessList !== undefined)) ||
+        (tx.type === "0x1" && dynamicFees) ||
+        (tx.type === "0x2" && tx.gasPrice !== undefined)) {
+      throw new TypeError("Transaction type and fee fields are inconsistent");
+    }
+    if (tx.maxFeePerGas !== undefined && tx.maxPriorityFeePerGas !== undefined &&
+        BigInt(tx.maxPriorityFeePerGas) > BigInt(tx.maxFeePerGas)) {
+      throw new RangeError("Priority fee exceeds the maximum fee");
+    }
     if (tx.accessList !== undefined) {
       if (!Array.isArray(tx.accessList) || tx.accessList.length > MAX_ACCESS_LIST_ENTRIES) {
         throw new TypeError("Invalid access list");

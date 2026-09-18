@@ -77,6 +77,11 @@ test("chain/account changes and unsupported authorization cannot reach signing",
     { from: account, authorizationList: [] }, { from: account, value: "0x01" },
     { from: account, value: `0x${"f".repeat(65)}` },
     { from: account, data: "0x1" }, { from: `0x${"22".repeat(20)}` },
+    { from: account, gasPrice: "0x1", maxFeePerGas: "0x2" },
+    { from: account, type: "0x0", accessList: [] },
+    { from: account, type: "0x1", maxFeePerGas: "0x2" },
+    { from: account, type: "0x2", gasPrice: "0x1" },
+    { from: account, maxFeePerGas: "0x1", maxPriorityFeePerGas: "0x2" },
   ]) await assert.rejects(wallet.sendTransaction(tx));
   assert.ok(!provider.calls.some(call => call.method === "eth_sendTransaction"));
   let reads = 0;

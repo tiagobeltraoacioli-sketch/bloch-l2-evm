@@ -93,8 +93,11 @@ The adapter requests `wallet_switchEthereumChain`, adds the chain only on error
 4902, then explicitly switches again (adding need not select it). It respects
 user rejection, checks the active chain before obtaining accounts and before
 sending, includes the chain ID in signing requests, and accepts only an
-authorized sender. Private keys remain in the wallet. This is an integrable
-client component, not a completed MetaMask end-to-end deployment.
+authorized sender. It applies the same 128 KiB calldata ceiling as the signed
+transaction boundary, bounds provider-returned account and access-list
+collections, and rejects inconsistent legacy/EIP-2930/EIP-1559 fee fields before
+opening a signing request. Private keys remain in the wallet. This is an
+integrable client component, not a completed MetaMask end-to-end deployment.
 
 ## Remaining node and settlement work
 
