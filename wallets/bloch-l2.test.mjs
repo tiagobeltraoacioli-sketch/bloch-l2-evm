@@ -124,6 +124,8 @@ test("does not trust array instance methods or iterators from provider data", as
   deceptiveConnectAccounts[Symbol.iterator] = function* () { yield account; };
   const connectProvider = mock({ eth_requestAccounts: () => deceptiveConnectAccounts });
   await assert.rejects(createBlochL2Wallet(connectProvider, options).connect(), /valid Ethereum accounts/);
+  const sparseConnectProvider = mock({ eth_requestAccounts: () => Array(1) });
+  await assert.rejects(createBlochL2Wallet(sparseConnectProvider, options).connect(), /valid Ethereum accounts/);
 
   const deceptiveAuthorizedAccounts = [`0x${"22".repeat(20)}`];
   deceptiveAuthorizedAccounts.some = () => true;
@@ -136,4 +138,24 @@ test("does not trust array instance methods or iterators from provider data", as
   const accessList = [{ address: account, storageKeys }];
   accessList.map = () => [];
   await assert.rejects(createBlochL2Wallet(mock(), options).sendTransaction({ from: account, accessList }), /Invalid access list entry/);
+  await assert.rejects(createBlochL2Wallet(mock(), options).sendTransaction({ from: account, accessList: Array(1) }), /Invalid access list entry/);
+  await assert.rejects(createBlochL2Wallet(mock(), options).sendTransaction({
+    from: account, accessList: [{ address: account, storageKeys: Array(1) }],
+  }), /Invalid access list entry/);
+});
+
+test("snapshots collection lengths before validating and copying", async () => {
+  let accessLengthReads = 0;
+  let keyLengthReads = 0;
+  const storageKeys = new Proxy([`0x${"00".repeat(32)}`], { get(target, key, receiver) {
+    if (key === "length") { keyLengthReads += 1; return keyLengthReads === 1 ? 1 : 1_000_000; }
+    return Reflect.get(target, key, receiver);
+  } });
+  const accessList = new Proxy([{ address: account, storageKeys }], { get(target, key, receiver) {
+    if (key === "length") { accessLengthReads += 1; return accessLengthReads === 1 ? 1 : 1_000_000; }
+    return Reflect.get(target, key, receiver);
+  } });
+  await createBlochL2Wallet(mock(), options).sendTransaction({ from: account, accessList });
+  assert.equal(accessLengthReads, 1);
+  assert.equal(keyLengthReads, 1);
 });
