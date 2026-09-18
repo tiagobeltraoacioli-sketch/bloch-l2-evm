@@ -95,7 +95,11 @@ test("bounds untrusted provider responses and transaction collections", async ()
   await assert.rejects(createBlochL2Wallet(tooManyAccounts, options).connect(), /valid Ethereum accounts/);
 
   const wallet = createBlochL2Wallet(mock(), options);
+  const addressLikeObject = { toString: () => account, toLowerCase: () => account };
   for (const tx of [
+    { from: addressLikeObject },
+    { from: account, to: addressLikeObject },
+    { from: account, accessList: [{ address: addressLikeObject, storageKeys: [] }] },
     { from: account, data: `0x${"00".repeat(128 * 1024 + 1)}` },
     { from: account, accessList: Array(1025).fill({ address: account, storageKeys: [] }) },
     { from: account, accessList: [{ address: account, storageKeys: Array(8193).fill(`0x${"00".repeat(32)}`) }] },

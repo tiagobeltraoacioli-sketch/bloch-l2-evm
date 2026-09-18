@@ -19,6 +19,10 @@ const MAX_CALLDATA_BYTES = 128 * 1024;
 const MAX_ACCESS_LIST_ENTRIES = 1024;
 const MAX_ACCESS_LIST_STORAGE_KEYS = 8192;
 
+function isAddress(value) {
+  return typeof value === "string" && address.test(value);
+}
+
 function chainHex(value) {
   if (typeof value === "number" && !Number.isSafeInteger(value)) throw new TypeError("Unsafe chain ID");
   if (!["string", "number", "bigint"].includes(typeof value)) throw new TypeError("Invalid chain ID");
@@ -80,7 +84,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     await assertNetwork();
     const accounts = await provider.request({ method: "eth_requestAccounts" });
     if (!Array.isArray(accounts) || !accounts.length || accounts.length > MAX_ACCOUNT_COUNT ||
-        accounts.some(account => typeof account !== "string" || !address.test(account))) {
+        accounts.some(account => !isAddress(account))) {
       throw new Error("Wallet did not return valid Ethereum accounts");
     }
     await assertNetwork(); // The user may change chains while approving accounts.
@@ -95,8 +99,8 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     }
     // Snapshot caller input before awaiting the provider (including access lists).
     const tx = { ...transaction };
-    if (!address.test(tx.from)) throw new TypeError("Explicit Ethereum from address required");
-    if (tx.to !== undefined && !address.test(tx.to)) throw new TypeError("Invalid destination address");
+    if (!isAddress(tx.from)) throw new TypeError("Explicit Ethereum from address required");
+    if (tx.to !== undefined && !isAddress(tx.to)) throw new TypeError("Invalid destination address");
     if (tx.chainId !== undefined && chainHex(tx.chainId) !== id) throw new Error("Transaction targets another chain");
     if (tx.type !== undefined && !["0x0", "0x1", "0x2"].includes(tx.type)) throw new TypeError("Only transaction types 0, 1 and 2 are supported");
     if (tx.data !== undefined && (typeof tx.data !== "string" ||
@@ -126,7 +130,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
       }
       let storageKeyCount = 0;
       tx.accessList = tx.accessList.map(item => {
-        if (!item || !address.test(item.address) || !Array.isArray(item.storageKeys) || item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
+        if (!item || !isAddress(item.address) || !Array.isArray(item.storageKeys) || item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
           throw new TypeError("Invalid access list entry");
         }
         storageKeyCount += item.storageKeys.length;
