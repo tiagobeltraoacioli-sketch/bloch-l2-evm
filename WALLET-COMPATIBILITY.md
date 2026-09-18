@@ -95,9 +95,10 @@ user rejection, checks the active chain before obtaining accounts and before
 sending, includes the chain ID in signing requests, and accepts only an
 authorized sender. The selected provider's request method is captured once at
 construction so later property replacement cannot split checks and signing
-between implementations. The adapter bounds calldata at 128 KiB (the node
-separately bounds the entire encoded transaction), bounds provider-returned
-account and access-list collections, and rejects inconsistent
+between implementations. The adapter conservatively accounts for calldata,
+access lists and maximum envelope overhead against the node's 128 KiB encoded
+transaction limit, bounds provider-returned account and access-list collections,
+and rejects inconsistent
 legacy/EIP-2930/EIP-1559 fee fields before opening a signing request. Nonce and
 gas quantities are bounded to the node's `u64` transaction fields, and fee
 quantities to its `u128` fields. Private keys remain in the wallet. This is an

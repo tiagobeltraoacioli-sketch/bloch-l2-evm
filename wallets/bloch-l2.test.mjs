@@ -83,6 +83,8 @@ test("accepts transaction quantities exactly at the node field widths", async ()
     maxFeePerGas: `0x${"f".repeat(32)}`,
     maxPriorityFeePerGas: `0x${"f".repeat(32)}`,
     value: `0x${"f".repeat(64)}`,
+    data: `0x${"00".repeat(128 * 1024 - 256 - 62)}`,
+    accessList: [{ address: account, storageKeys: [`0x${"00".repeat(32)}`] }],
   });
   assert.equal(provider.calls.at(-1).method, "eth_sendTransaction");
 });
@@ -129,8 +131,12 @@ test("bounds untrusted provider responses and transaction collections", async ()
     { from: account, to: addressLikeObject },
     { from: account, accessList: [{ address: addressLikeObject, storageKeys: [] }] },
     { from: account, data: `0x${"00".repeat(128 * 1024 + 1)}` },
+    { from: account, data: `0x${"00".repeat(128 * 1024 - 255)}` },
     { from: account, accessList: Array(1025).fill({ address: account, storageKeys: [] }) },
     { from: account, accessList: [{ address: account, storageKeys: oversizedStorageKeys }] },
+    { from: account, accessList: [{
+      address: account, storageKeys: Array(3964).fill(`0x${"00".repeat(32)}`),
+    }] },
   ]) await assert.rejects(wallet.sendTransaction(tx));
   assert.equal(oversizedStorageKeysInspected, false);
 

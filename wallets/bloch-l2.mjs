@@ -17,6 +17,10 @@ const MAX_U256_HEX_LENGTH = 66;
 const U64_HEX_LENGTH = 18;
 const MAX_ACCOUNT_COUNT = 1024;
 const MAX_CALLDATA_BYTES = 128 * 1024;
+const MAX_ENCODED_TRANSACTION_BYTES = 128 * 1024;
+// Covers the typed/RLP envelope, bounded scalar fields, destination, access-list
+// outer prefix and signature at their maximum encoded widths.
+const MAX_TRANSACTION_ENVELOPE_BYTES = 256;
 const MAX_ACCESS_LIST_ENTRIES = 1024;
 const MAX_ACCESS_LIST_STORAGE_KEYS = 8192;
 const MAX_U64 = 0xffffffffffffffffn;
@@ -155,6 +159,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
         BigInt(tx.maxPriorityFeePerGas) > BigInt(tx.maxFeePerGas)) {
       throw new RangeError("Priority fee exceeds the maximum fee");
     }
+    let accessListEncodedBytes = 0;
     if (tx.accessList !== undefined) {
       const accessListCount = boundedArrayLength(tx.accessList, MAX_ACCESS_LIST_ENTRIES);
       if (accessListCount < 0) {
@@ -179,9 +184,17 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
           storageKeySnapshot[j] = key;
         }
         storageKeyCount += itemStorageKeyCount;
+        // RLP upper bound: tuple/list prefixes, 20-byte address and 33 bytes
+        // for each encoded 32-byte storage key.
+        accessListEncodedBytes += 29 + 33 * itemStorageKeyCount;
         accessListSnapshot[i] = { address: itemAddress, storageKeys: storageKeySnapshot };
       }
       tx.accessList = accessListSnapshot;
+    }
+    const calldataBytes = tx.data === undefined ? 0 : (tx.data.length - 2) / 2;
+    if (MAX_TRANSACTION_ENVELOPE_BYTES + calldataBytes + accessListEncodedBytes >
+        MAX_ENCODED_TRANSACTION_BYTES) {
+      throw new RangeError("Transaction exceeds the encoded L2 size limit");
     }
     tx.chainId = id; // The signing request carries the configured replay domain.
     await assertNetwork();
