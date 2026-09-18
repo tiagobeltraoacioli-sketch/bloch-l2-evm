@@ -3,9 +3,9 @@
 use alloy_primitives::{B256, U256};
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    build_eth_api, chain_identity_rpc, prepare_genesis, start_http_rpc, BlochChainIdentity, BlochChainSpec,
-    BlochEvmConfig, BlochNodeTypes, BlochTables, BlochTransactionValidator, CHAIN_IDENTITY_FORMAT, HEADER_FORMAT,
-    RPC_MAX_REQUEST_BYTES,
+    build_eth_api, chain_identity_rpc, chain_status_rpc, prepare_genesis, start_http_rpc, BlochChainIdentity,
+    BlochChainSpec, BlochChainStatus, BlochEvmConfig, BlochNodeTypes, BlochTables, BlochTransactionValidator,
+    CHAIN_IDENTITY_FORMAT, CHAIN_STATUS_FORMAT, HEADER_FORMAT, RPC_MAX_REQUEST_BYTES,
 };
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder, rpc_params};
 use reth_chainspec::EthChainSpec;
@@ -66,7 +66,7 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
     );
     let api = build_eth_api(
         RpcNodeCoreAdapter::new(
-            provider,
+            provider.clone(),
             pool,
             NoopNetwork::default().with_chain_id(kernel.chain_id),
             config,
@@ -75,6 +75,7 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
     );
     let mut module = api.into_rpc().remove_context();
     module.merge(chain_identity_rpc(spec.clone())).unwrap();
+    module.merge(chain_status_rpc(spec.clone(), provider)).unwrap();
     let handle = start_http_rpc(module, 0).await.unwrap();
     let address = handle.http_local_addr().unwrap();
     assert!(address.ip().is_loopback());
@@ -99,6 +100,25 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
     assert_eq!(identity.header_format, HEADER_FORMAT);
     assert!(client
         .request::<BlochChainIdentity, _>("bloch_chainIdentity", rpc_params!["unexpected"])
+        .await
+        .is_err());
+    let challenge = B256::repeat_byte(0xa5);
+    let status: BlochChainStatus = client
+        .request("bloch_chainStatus", rpc_params![challenge])
+        .await
+        .unwrap();
+    assert_eq!(status.format, CHAIN_STATUS_FORMAT);
+    assert_eq!(status.challenge, challenge);
+    assert_eq!(status.identity, identity);
+    assert_eq!(status.head_number, "0x0");
+    assert_eq!(status.head_hash, spec.genesis_hash());
+    assert_eq!(status.state_root, spec.genesis_header().0.state_root);
+    assert!(client
+        .request::<BlochChainStatus, _>("bloch_chainStatus", rpc_params![B256::ZERO])
+        .await
+        .is_err());
+    assert!(client
+        .request::<BlochChainStatus, _>("bloch_chainStatus", rpc_params![])
         .await
         .is_err());
     let flag: B256 = client

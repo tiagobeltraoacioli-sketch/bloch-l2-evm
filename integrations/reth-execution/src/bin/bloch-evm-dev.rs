@@ -8,9 +8,9 @@ use bloch_l2_evm::{
     ChainSpec, DepositMint, DepositProvenance,
 };
 use bloch_reth_execution::{
-    build_eth_api, chain_identity_rpc, pool_maintenance, prepare_genesis, replay_canonical_prefix, start_http_rpc,
-    start_ws_rpc, BlochChainSpec, BlochEvmConfig, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables,
-    BlochTransactionValidator, CanonicalCoordinator,
+    build_eth_api, chain_identity_rpc, chain_status_rpc, pool_maintenance, prepare_genesis, replay_canonical_prefix,
+    start_http_rpc, start_ws_rpc, BlochChainSpec, BlochEvmConfig, BlochNextBlockEnvCtx, BlochProviderFactory,
+    BlochTables, BlochTransactionValidator, CanonicalCoordinator,
 };
 use eyre::{bail, ensure, Result};
 use reth_db::mdbx::{init_db_for, open_db, open_db_read_only, DatabaseArguments};
@@ -238,7 +238,7 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
     )?;
     let api = build_eth_api(
         RpcNodeCoreAdapter::new(
-            provider,
+            provider.clone(),
             pool.clone(),
             NoopNetwork::default().with_chain_id(kernel.chain_id),
             config,
@@ -255,6 +255,7 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
     let mut module = api.clone().into_rpc().remove_context();
     module.merge(filter.into_rpc())?;
     module.merge(chain_identity_rpc(spec.clone()))?;
+    module.merge(chain_status_rpc(spec.clone(), provider))?;
     let ws_module = if options.ws_port.is_some() {
         let mut ws = module.clone();
         ws.merge(EthPubSub::new(api, runtime.clone()).into_rpc())?;

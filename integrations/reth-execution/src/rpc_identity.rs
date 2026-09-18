@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Read-only deployment identity for clients with an independently trusted manifest.
-use crate::BlochChainSpec;
+use crate::{BlochBlockchainProvider, BlochChainSpec};
 use alloy_primitives::B256;
 use jsonrpsee::{types::ErrorObjectOwned, RpcModule};
 use reth_chainspec::EthChainSpec;
+use reth_provider::{BlockNumReader, HeaderProvider};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -11,6 +12,8 @@ use std::sync::Arc;
 pub const CHAIN_IDENTITY_FORMAT: &str = "bloch-chain-identity-v1";
 /// Canonical block-header encoding whose hash identifies this chain.
 pub const HEADER_FORMAT: &str = "bloch-node-header-v2-fixed-width";
+/// Schema identifier for a challenge-bound canonical head snapshot.
+pub const CHAIN_STATUS_FORMAT: &str = "bloch-chain-status-v1";
 
 /// Immutable identity values derived only from the configured chain specification.
 ///
@@ -24,6 +27,23 @@ pub struct BlochChainIdentity {
     pub domain: B256,
     pub genesis_hash: B256,
     pub header_format: String,
+}
+
+/// A challenge-bound view of the currently persisted canonical head.
+///
+/// Echoing a fresh client challenge prevents an intermediary from satisfying a
+/// request with a response cached for another request. This is not a signature
+/// or a finality proof: clients still need a trusted deployment manifest and an
+/// authenticated transport, and must treat the reported head as unfinalized.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlochChainStatus {
+    pub format: String,
+    pub challenge: B256,
+    pub identity: BlochChainIdentity,
+    pub head_number: String,
+    pub head_hash: B256,
+    pub state_root: B256,
 }
 
 impl BlochChainIdentity {
@@ -49,6 +69,52 @@ pub fn chain_identity_rpc(spec: Arc<BlochChainSpec>) -> RpcModule<()> {
         })
         .expect("the static identity method name is unique in a new module");
     module
+}
+
+/// Build an isolated `bloch_chainStatus` module over the canonical provider.
+///
+/// The provider is sampled before and after reading the selected header. A
+/// concurrent canonical change fails the request instead of publishing a torn
+/// `(number, hash, stateRoot)` tuple. The method accepts exactly one nonzero
+/// 32-byte challenge and performs no writes.
+pub fn chain_status_rpc(spec: Arc<BlochChainSpec>, provider: BlochBlockchainProvider) -> RpcModule<()> {
+    let identity = BlochChainIdentity::from_spec(&spec);
+    let mut module = RpcModule::new(());
+    module
+        .register_method("bloch_chainStatus", move |params, _, _| {
+            let (challenge,): (B256,) = params.parse()?;
+            if challenge == B256::ZERO {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "chain status challenge must be nonzero",
+                    None::<()>,
+                ));
+            }
+            let number = provider.best_block_number().map_err(internal_error)?;
+            let head = provider
+                .sealed_header(number)
+                .map_err(internal_error)?
+                .ok_or_else(|| internal_error("canonical head is missing"))?;
+            let stable_number = provider.best_block_number().map_err(internal_error)?;
+            let stable_head = provider.sealed_header(number).map_err(internal_error)?;
+            if stable_number != number || stable_head.as_ref() != Some(&head) {
+                return Err(internal_error("canonical head changed while reading status"));
+            }
+            Ok::<_, ErrorObjectOwned>(BlochChainStatus {
+                format: CHAIN_STATUS_FORMAT.to_owned(),
+                challenge,
+                identity: identity.clone(),
+                head_number: format!("0x{number:x}"),
+                head_hash: head.hash(),
+                state_root: head.0.state_root,
+            })
+        })
+        .expect("the chain status method name is unique in a new module");
+    module
+}
+
+fn internal_error(_error: impl std::fmt::Display) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32603, "canonical chain status is unavailable", None::<()>)
 }
 
 #[cfg(test)]

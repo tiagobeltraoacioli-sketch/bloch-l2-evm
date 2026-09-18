@@ -57,6 +57,15 @@ accepts no parameters. Its response is not a trust root: clients must compare
 every field with an independently reviewed deployment manifest before enabling
 privileged actions.
 
+`bloch_chainStatus(challenge)` adds a read-only, versioned canonical-head
+snapshot. It accepts exactly one nonzero 32-byte challenge, echoes it, and
+returns the immutable identity plus the persisted head number, hash and state
+root. The provider is sampled before and after the header read; a concurrent
+canonical change fails rather than returning a torn tuple. A fresh challenge
+prevents ordinary intermediary caches from replaying another request's response,
+but the response is not signed and does not prove native finality. Clients still
+need authenticated transport and an independently trusted deployment manifest.
+
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
 by the tested client, consistently with the Reth header traits. Reconstructing an
