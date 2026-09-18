@@ -130,11 +130,12 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
       }
       let storageKeyCount = 0;
       tx.accessList = tx.accessList.map(item => {
-        if (!item || !isAddress(item.address) || !Array.isArray(item.storageKeys) || item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
+        if (!item || !isAddress(item.address) || !Array.isArray(item.storageKeys) ||
+            item.storageKeys.length > MAX_ACCESS_LIST_STORAGE_KEYS - storageKeyCount ||
+            item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
           throw new TypeError("Invalid access list entry");
         }
         storageKeyCount += item.storageKeys.length;
-        if (storageKeyCount > MAX_ACCESS_LIST_STORAGE_KEYS) throw new TypeError("Access list has too many storage keys");
         return { address: item.address, storageKeys: [...item.storageKeys] };
       });
     }
