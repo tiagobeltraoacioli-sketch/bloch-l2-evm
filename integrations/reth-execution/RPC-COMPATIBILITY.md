@@ -49,6 +49,14 @@ not enabled by registering these HTTP filter methods.
 
 ## Bloch block identity
 
+The synthetic developer node also exposes the read-only
+`bloch_chainIdentity` method. It returns the versioned
+`bloch-chain-identity-v1` tuple (`chainId`, `domain`, `genesisHash` and
+`headerFormat`) derived from its immutable chain specification. The method
+accepts no parameters. Its response is not a trust root: clients must compare
+every field with an independently reviewed deployment manifest before enabling
+privileged actions.
+
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
 by the tested client, consistently with the Reth header traits. Reconstructing an

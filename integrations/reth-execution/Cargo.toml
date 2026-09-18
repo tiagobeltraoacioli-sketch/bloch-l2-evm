@@ -20,7 +20,7 @@ alloy-primitives = { version = "=1.6.1", default-features = false }
 alloy-rlp = "=0.3.16"
 reth-primitives-traits = { version = "=0.5.2", features = ["serde", "reth-codec"] }
 reth-codecs = "=0.5.2"
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }
 alloy-genesis = "=2.1.1"

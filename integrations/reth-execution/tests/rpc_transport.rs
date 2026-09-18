@@ -3,8 +3,9 @@
 use alloy_primitives::{B256, U256};
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    build_eth_api, prepare_genesis, start_http_rpc, BlochChainSpec, BlochEvmConfig, BlochNodeTypes, BlochTables,
-    BlochTransactionValidator, RPC_MAX_REQUEST_BYTES,
+    build_eth_api, chain_identity_rpc, prepare_genesis, start_http_rpc, BlochChainIdentity, BlochChainSpec,
+    BlochEvmConfig, BlochNodeTypes, BlochTables, BlochTransactionValidator, CHAIN_IDENTITY_FORMAT, HEADER_FORMAT,
+    RPC_MAX_REQUEST_BYTES,
 };
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder, rpc_params};
 use reth_chainspec::EthChainSpec;
@@ -72,7 +73,9 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
         ),
         reth_tasks::Runtime::test(),
     );
-    let handle = start_http_rpc(api.into_rpc().remove_context(), 0).await.unwrap();
+    let mut module = api.into_rpc().remove_context();
+    module.merge(chain_identity_rpc(spec.clone())).unwrap();
+    let handle = start_http_rpc(module, 0).await.unwrap();
     let address = handle.http_local_addr().unwrap();
     assert!(address.ip().is_loopback());
     assert_ne!(address.port(), 0);
@@ -88,6 +91,16 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
         .unwrap();
     assert_eq!(block["hash"], serde_json::json!(spec.genesis_hash()));
     assert_eq!(block["domain"], serde_json::json!(spec.domain()));
+    let identity: BlochChainIdentity = client.request("bloch_chainIdentity", rpc_params![]).await.unwrap();
+    assert_eq!(identity.format, CHAIN_IDENTITY_FORMAT);
+    assert_eq!(identity.chain_id, format!("0x{:x}", kernel.chain_id));
+    assert_eq!(identity.domain, spec.domain());
+    assert_eq!(identity.genesis_hash, spec.genesis_hash());
+    assert_eq!(identity.header_format, HEADER_FORMAT);
+    assert!(client
+        .request::<BlochChainIdentity, _>("bloch_chainIdentity", rpc_params!["unexpected"])
+        .await
+        .is_err());
     let flag: B256 = client
         .request("eth_getStorageAt", rpc_params![kernel.block_info, "0x0", "latest"])
         .await
