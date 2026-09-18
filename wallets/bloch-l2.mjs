@@ -24,6 +24,14 @@ function isAddress(value) {
   return typeof value === "string" && address.test(value);
 }
 
+function arraySome(values, predicate) {
+  return Array.prototype.some.call(values, predicate);
+}
+
+function arrayCopy(values) {
+  return Array.prototype.slice.call(values);
+}
+
 function chainHex(value) {
   if (typeof value === "number" && !Number.isSafeInteger(value)) throw new TypeError("Unsafe chain ID");
   if (!["string", "number", "bigint"].includes(typeof value)) throw new TypeError("Invalid chain ID");
@@ -86,11 +94,11 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     await assertNetwork();
     const accounts = await provider.request({ method: "eth_requestAccounts" });
     if (!Array.isArray(accounts) || !accounts.length || accounts.length > MAX_ACCOUNT_COUNT ||
-        accounts.some(account => !isAddress(account))) {
+        arraySome(accounts, account => !isAddress(account))) {
       throw new Error("Wallet did not return valid Ethereum accounts");
     }
     await assertNetwork(); // The user may change chains while approving accounts.
-    return Object.freeze({ accounts: Object.freeze([...accounts]), chainId: id, security: BLOCH_L2_SECURITY });
+    return Object.freeze({ accounts: Object.freeze(arrayCopy(accounts)), chainId: id, security: BLOCH_L2_SECURITY });
   }
 
   async function sendTransaction(transaction) {
@@ -131,21 +139,21 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
         throw new TypeError("Invalid access list");
       }
       let storageKeyCount = 0;
-      tx.accessList = tx.accessList.map(item => {
+      tx.accessList = Array.prototype.map.call(tx.accessList, item => {
         if (!item || !isAddress(item.address) || !Array.isArray(item.storageKeys) ||
             item.storageKeys.length > MAX_ACCESS_LIST_STORAGE_KEYS - storageKeyCount ||
-            item.storageKeys.some(key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
+            arraySome(item.storageKeys, key => typeof key !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(key))) {
           throw new TypeError("Invalid access list entry");
         }
         storageKeyCount += item.storageKeys.length;
-        return { address: item.address, storageKeys: [...item.storageKeys] };
+        return { address: item.address, storageKeys: arrayCopy(item.storageKeys) };
       });
     }
     tx.chainId = id; // The signing request carries the configured replay domain.
     await assertNetwork();
     const accounts = await provider.request({ method: "eth_accounts" });
     if (!Array.isArray(accounts) || accounts.length > MAX_ACCOUNT_COUNT ||
-        !accounts.some(account => typeof account === "string" && account.toLowerCase() === tx.from.toLowerCase())) {
+        !arraySome(accounts, account => typeof account === "string" && account.toLowerCase() === tx.from.toLowerCase())) {
       throw new Error("Transaction sender is not an authorized wallet account");
     }
     await assertNetwork();

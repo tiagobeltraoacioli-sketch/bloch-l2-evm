@@ -117,3 +117,23 @@ test("bounds untrusted provider responses and transaction collections", async ()
   const invalidHash = mock({ eth_sendTransaction: () => "0x01" });
   await assert.rejects(createBlochL2Wallet(invalidHash, options).sendTransaction({ from: account }), /invalid transaction hash/);
 });
+
+test("does not trust array instance methods or iterators from provider data", async () => {
+  const deceptiveConnectAccounts = [{}];
+  deceptiveConnectAccounts.some = () => false;
+  deceptiveConnectAccounts[Symbol.iterator] = function* () { yield account; };
+  const connectProvider = mock({ eth_requestAccounts: () => deceptiveConnectAccounts });
+  await assert.rejects(createBlochL2Wallet(connectProvider, options).connect(), /valid Ethereum accounts/);
+
+  const deceptiveAuthorizedAccounts = [`0x${"22".repeat(20)}`];
+  deceptiveAuthorizedAccounts.some = () => true;
+  const authorizationProvider = mock({ eth_accounts: () => deceptiveAuthorizedAccounts });
+  await assert.rejects(createBlochL2Wallet(authorizationProvider, options).sendTransaction({ from: account }), /not an authorized/);
+  assert.ok(!authorizationProvider.calls.some(call => call.method === "eth_sendTransaction"));
+
+  const storageKeys = ["not-a-storage-key"];
+  storageKeys.some = () => false;
+  const accessList = [{ address: account, storageKeys }];
+  accessList.map = () => [];
+  await assert.rejects(createBlochL2Wallet(mock(), options).sendTransaction({ from: account, accessList }), /Invalid access list entry/);
+});
