@@ -8,29 +8,29 @@ use serde::{
     Deserialize, Deserializer,
 };
 
-struct BoundedBytes<const N: usize>;
-impl<'de, const N: usize> DeserializeSeed<'de> for BoundedBytes<N> {
-    type Value = Bytes;
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Bytes, D::Error> {
+struct BoundedByteVector<const N: usize>;
+impl<'de, const N: usize> DeserializeSeed<'de> for BoundedByteVector<N> {
+    type Value = Vec<u8>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<u8>, D::Error> {
         struct BytesVisitor<const N: usize>;
         impl<'de, const N: usize> Visitor<'de> for BytesVisitor<N> {
-            type Value = Bytes;
+            type Value = Vec<u8>;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, "at most {N} bytes")
             }
-            fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Bytes, E> {
+            fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Vec<u8>, E> {
                 if value.len() > N {
                     return Err(E::custom("byte sequence exceeds allocation limit"));
                 }
-                Ok(Bytes::copy_from_slice(value))
+                Ok(value.to_vec())
             }
-            fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Bytes, E> {
+            fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Vec<u8>, E> {
                 if value.len() > N {
                     return Err(E::custom("byte sequence exceeds allocation limit"));
                 }
-                Ok(value.into())
+                Ok(value)
             }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Bytes, A::Error> {
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
                 if seq.size_hint().is_some_and(|size| size > N) {
                     return Err(de::Error::custom("byte sequence exceeds allocation limit"));
                 }
@@ -38,17 +38,20 @@ impl<'de, const N: usize> DeserializeSeed<'de> for BoundedBytes<N> {
                 while bytes.len() < N {
                     match seq.next_element()? {
                         Some(byte) => bytes.push(byte),
-                        None => return Ok(bytes.into()),
+                        None => return Ok(bytes),
                     }
                 }
                 seq.next_element_seed(Reject)?;
-                Ok(bytes.into())
+                Ok(bytes)
             }
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<Bytes, E> {
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Vec<u8>, E> {
                 if value.len() > N.saturating_mul(2).saturating_add(2) {
                     return Err(E::custom("hex byte sequence exceeds allocation limit"));
                 }
-                value.parse().map_err(|_| E::custom("invalid hex byte sequence"))
+                value
+                    .parse::<Bytes>()
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| E::custom("invalid hex byte sequence"))
             }
         }
         if deserializer.is_human_readable() {
@@ -57,6 +60,14 @@ impl<'de, const N: usize> DeserializeSeed<'de> for BoundedBytes<N> {
             deserializer.deserialize_byte_buf(BytesVisitor::<N>)
         }
     }
+}
+
+/// Decode one byte vector without reserving beyond its protocol limit.
+pub fn byte_vector<'de, D, const N: usize>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    BoundedByteVector::<N>.deserialize(deserializer)
 }
 
 struct Reject;
@@ -120,14 +131,14 @@ where
             let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(COUNT));
             let mut total = 0usize;
             while items.len() < COUNT {
-                let Some(value) = seq.next_element_seed(BoundedBytes::<ITEM>)? else {
+                let Some(value) = seq.next_element_seed(BoundedByteVector::<ITEM>)? else {
                     return Ok(items);
                 };
                 total = total
                     .checked_add(value.len())
                     .filter(|total| *total <= TOTAL)
                     .ok_or_else(|| de::Error::custom("byte sequence total exceeds allocation limit"))?;
-                items.push(value);
+                items.push(value.into());
             }
             seq.next_element_seed(Reject)?;
             Ok(items)

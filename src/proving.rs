@@ -91,9 +91,15 @@ pub struct WitnessAccount {
     /// Nonce.
     pub nonce: u64,
     /// Contract code (empty for EOAs).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_witness_code"))]
     pub code: Vec<u8>,
     /// Non-zero storage slots, sorted by slot.
     pub storage: Vec<(U256, U256)>,
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_witness_code<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    crate::serde_bounded::byte_vector::<_, { revm::primitives::eip170::MAX_CODE_SIZE }>(deserializer)
 }
 
 /// A read that the witness does not cover. Raised by [`WitnessBacking`] so the
@@ -1048,6 +1054,13 @@ mod tests {
             serde_json::to_string(&back).unwrap(),
             json,
             "canonical: re-serialization is identical"
+        );
+        let mut oversized_code = serde_json::to_value(&w).unwrap();
+        oversized_code["pre_accounts"][0]["code"] =
+            serde_json::json!(vec![0u8; revm::primitives::eip170::MAX_CODE_SIZE + 1]);
+        assert!(
+            serde_json::from_value::<BatchWitness>(oversized_code).is_err(),
+            "witness code above Cancun's EIP-170 limit must fail during decoding"
         );
         verify_batch(&spec, &back, &batch).expect("the deserialized witness verifies");
         // The full state snapshot round-trips too (the commitment cache is
