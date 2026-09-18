@@ -37,7 +37,7 @@ pub use maintenance::{pool_maintenance, MaintenanceConfigError};
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
 pub use pool::{pooled_from_raw, BlochPoolError, BlochTransactionValidator};
 pub use rpc::{build_eth_api, rpc_converter, BlochRpcComponents, BlochRpcConverter, NoDerivedPending};
-pub use rpc_transport::{start_http_rpc, start_ws_rpc};
+pub use rpc_transport::{start_http_rpc, start_ws_rpc, RPC_MAX_REQUEST_BYTES, RPC_MAX_RESPONSE_BYTES};
 pub use rpc_types::{BlochHeaderConverter, BlochRpcHeader, BlochRpcTypes};
 /// Complete type selection for a provider; does not launch a node or Engine API.
 #[derive(Clone, Debug, Default)]

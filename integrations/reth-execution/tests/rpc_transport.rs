@@ -4,7 +4,7 @@ use alloy_primitives::{B256, U256};
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
     build_eth_api, prepare_genesis, start_http_rpc, BlochChainSpec, BlochEvmConfig, BlochNodeTypes, BlochTables,
-    BlochTransactionValidator,
+    BlochTransactionValidator, RPC_MAX_REQUEST_BYTES,
 };
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder, rpc_params};
 use reth_chainspec::EthChainSpec;
@@ -25,6 +25,7 @@ use reth_transaction_pool::{
 };
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type Factory = ProviderFactory<NodeTypesWithDBAdapter<BlochNodeTypes, Arc<DatabaseEnv>>>;
 #[tokio::test]
@@ -92,6 +93,37 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
         .await
         .unwrap();
     assert_eq!(flag, B256::from(U256::from(2)));
+
+    // Transport preflight must reject a body over the explicit budget before
+    // the RPC method receives or deserializes its attacker-sized parameter.
+    let oversized_body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":["{}"]}}"#,
+        "x".repeat(RPC_MAX_REQUEST_BYTES as usize)
+    );
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        oversized_body.len(),
+        oversized_body
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => response.extend_from_slice(&chunk[..read]),
+            // macOS may reset a connection after rejecting an unread request
+            // body. Keep the already received HTTP error for the assertion.
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(error) => panic!("failed to read oversized RPC response: {error}"),
+        }
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 413"),
+        "oversized RPC response: {response}"
+    );
     handle.stop().unwrap();
     drop(client);
     // The public upstream stop is asynchronous. Observe actual listener release,
