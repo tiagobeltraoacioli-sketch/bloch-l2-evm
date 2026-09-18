@@ -158,9 +158,23 @@ pub struct SignedBlockInput {
     pub context: BlockContext,
     /// Trusted finalized-L1 derivation input; NEVER accepted from a wallet RPC.
     /// Signature recovery does not authenticate escrow provenance.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_deposits"))]
     pub deposits: Vec<DepositMint>,
     /// Canonical signed Ethereum envelopes in sequencer order.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_transactions"))]
     pub transactions: Vec<Bytes>,
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_deposits<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<DepositMint>, D::Error> {
+    crate::serde_bounded::vector::<_, _, { crate::node_primitives::MAX_NODE_DEPOSITS }>(deserializer)
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_transactions<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Bytes>, D::Error> {
+    crate::serde_bounded::byte_vectors::<_, MAX_SIGNED_TRANSACTIONS, MAX_RAW_TRANSACTION_BYTES, MAX_SIGNED_BLOCK_BYTES>(
+        deserializer,
+    )
 }
 
 /// Authentication failure or the existing executor/proving error.
