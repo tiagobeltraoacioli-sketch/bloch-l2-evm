@@ -53,6 +53,11 @@ use crate::executor::{
 use crate::state::{account_exists, merge_account, L2State};
 use crate::stateroot::{account_key, account_leaf, account_leaves, account_leaves_of, SparseTrieView, WitnessError};
 
+// A canonical fixed-key account/storage trie node is far smaller than this:
+// branch children are hashes or <32-byte inline nodes, and leaf values have
+// fixed account/U256 widths. Keep headroom while bounding hostile wire input.
+const MAX_WITNESS_TRIE_NODE_BYTES: usize = 1024;
+
 /// Everything a guest needs to re-derive a batch's post-state root without the
 /// full state. All vectors are sorted (canonical form). With the `serde`
 /// feature this is the host→guest wire format (round-trip tested).
@@ -67,6 +72,7 @@ pub struct BatchWitness {
     /// Multiproof (trie-node path → RLP) against `prev_state_root`, exposing
     /// every pre-account, every absent address' position, every changed key
     /// and the key-order neighbours a restructure can touch.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_witness_proof"))]
     pub proof: BTreeMap<Nibbles, Bytes>,
     /// Every pre-state account the batch READS or WRITES that existed before it,
     /// keyed by address (the trie stores only `keccak(address)`), with its
@@ -76,6 +82,13 @@ pub struct BatchWitness {
     /// (recipients created in-block, cold precompiles, ...). Each must be
     /// provably absent from `prev_state_root`. Sorted.
     pub absent_accounts: Vec<Address>,
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_witness_proof<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<Nibbles, Bytes>, D::Error> {
+    crate::serde_bounded::nibble_byte_map::<_, MAX_WITNESS_TRIE_NODE_BYTES>(deserializer)
 }
 
 /// A touched pre-state account (the fields a revm `AccountInfo` + its storage

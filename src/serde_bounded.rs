@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Allocation-bounded sequence decoding shared by experimental integrations.
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use alloy_primitives::Bytes;
+use alloy_trie::Nibbles;
 use core::{fmt, marker::PhantomData};
 use serde::{
-    de::{self, DeserializeSeed, SeqAccess, Visitor},
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
 
@@ -68,6 +69,52 @@ where
     D: Deserializer<'de>,
 {
     BoundedByteVector::<N>.deserialize(deserializer)
+}
+
+struct NibblesSeed;
+impl<'de> DeserializeSeed<'de> for NibblesSeed {
+    type Value = Nibbles;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Nibbles, D::Error> {
+        struct NibblesVisitor;
+        impl Visitor<'_> for NibblesVisitor {
+            type Value = Nibbles;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a trie path of at most 64 hexadecimal nibbles")
+            }
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Nibbles, E> {
+                if value.len() > 66 {
+                    return Err(E::custom("trie path exceeds 64 nibbles"));
+                }
+                value.parse().map_err(|_| E::custom("invalid trie path"))
+            }
+        }
+        deserializer.deserialize_str(NibblesVisitor)
+    }
+}
+
+/// Decode a trie proof map with bounded paths/nodes and unique keys.
+pub fn nibble_byte_map<'de, D, const NODE: usize>(deserializer: D) -> Result<BTreeMap<Nibbles, Bytes>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Bounded<const NODE: usize>;
+    impl<'de, const NODE: usize> Visitor<'de> for Bounded<NODE> {
+        type Value = BTreeMap<Nibbles, Bytes>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "a trie proof with unique paths and nodes of at most {NODE} bytes")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut nodes = BTreeMap::new();
+            while let Some(path) = map.next_key_seed(NibblesSeed)? {
+                let node = map.next_value_seed(BoundedByteVector::<NODE>)?;
+                if nodes.insert(path, node.into()).is_some() {
+                    return Err(de::Error::custom("duplicate trie proof path"));
+                }
+            }
+            Ok(nodes)
+        }
+    }
+    deserializer.deserialize_map(Bounded::<NODE>)
 }
 
 struct Reject;
@@ -157,6 +204,12 @@ mod tests {
         values: Vec<Bytes>,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct ProofWire {
+        #[serde(deserialize_with = "nibble_byte_map::<_, 2>")]
+        values: BTreeMap<Nibbles, Bytes>,
+    }
+
     #[test]
     fn byte_vectors_preserve_format_and_enforce_every_budget() {
         let wire: Wire = serde_json::from_str(r#"{"values":["0x01","0x0203"]}"#).unwrap();
@@ -168,6 +221,19 @@ mod tests {
             r#"{"values":["0x0001","0x0203"]}"#,
         ] {
             assert!(serde_json::from_str::<Wire>(json).is_err(), "accepted {json}");
+        }
+    }
+
+    #[test]
+    fn proof_map_rejects_oversized_nodes_paths_and_duplicates() {
+        let valid: ProofWire = serde_json::from_str(r#"{"values":{"0x":"0x0102"}}"#).unwrap();
+        assert_eq!(valid.values[&Nibbles::default()], Bytes::from_static(&[1, 2]));
+        for json in [
+            r#"{"values":{"0x":"0x010203"}}"#,
+            r#"{"values":{"0x11111111111111111111111111111111111111111111111111111111111111111":"0x"}}"#,
+            r#"{"values":{"0x":"0x01","0x":"0x02"}}"#,
+        ] {
+            assert!(serde_json::from_str::<ProofWire>(json).is_err(), "accepted {json}");
         }
     }
 }
