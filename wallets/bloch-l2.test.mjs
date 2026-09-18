@@ -142,6 +142,13 @@ test("bounds untrusted provider responses and transaction collections", async ()
 
   const invalidHash = mock({ eth_sendTransaction: () => "0x01" });
   await assert.rejects(createBlochL2Wallet(invalidHash, options).sendTransaction({ from: account }), /invalid transaction hash/);
+
+  const oversizedAuthorizedAccount = mock({ eth_accounts: () => ["A".repeat(1_000_000)] });
+  await assert.rejects(
+    createBlochL2Wallet(oversizedAuthorizedAccount, options).sendTransaction({ from: account }),
+    /not an authorized/,
+  );
+  assert.ok(!oversizedAuthorizedAccount.calls.some(call => call.method === "eth_sendTransaction"));
 });
 
 test("does not trust array instance methods or iterators from provider data", async () => {

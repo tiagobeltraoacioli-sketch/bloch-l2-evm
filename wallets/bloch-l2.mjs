@@ -204,7 +204,9 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     if (accountCount >= 0) {
       for (let i = 0; i < accountCount; i += 1) {
         const account = accounts[i];
-        if (typeof account === "string" && account.toLowerCase() === tx.from.toLowerCase()) {
+        // Treat provider responses as untrusted: validating the fixed-width
+        // address before case-folding also bounds work on hostile strings.
+        if (isAddress(account) && account.toLowerCase() === tx.from.toLowerCase()) {
           authorized = true;
           break;
         }
