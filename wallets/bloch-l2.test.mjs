@@ -159,3 +159,13 @@ test("snapshots collection lengths before validating and copying", async () => {
   assert.equal(accessLengthReads, 1);
   assert.equal(keyLengthReads, 1);
 });
+
+test("keeps all requests on the provider implementation selected at construction", async () => {
+  const provider = mock();
+  const wallet = createBlochL2Wallet(provider, options);
+  provider.request = async () => { throw new Error("replacement request method ran"); };
+  const session = await wallet.connect();
+  assert.deepEqual(session.accounts, [account]);
+  await wallet.sendTransaction({ from: account });
+  assert.ok(provider.calls.some(call => call.method === "eth_sendTransaction"));
+});

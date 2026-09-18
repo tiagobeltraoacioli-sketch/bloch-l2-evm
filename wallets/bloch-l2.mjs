@@ -60,7 +60,12 @@ function checkedRpcUrl(value) {
  * No endpoint is guessed and no secret key is requested or stored here.
  */
 export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTNET_CHAIN_ID } = {}) {
-  if (typeof provider?.request !== "function") throw new TypeError("An EIP-1193 provider is required");
+  const requestMethod = provider?.request;
+  if (typeof requestMethod !== "function") throw new TypeError("An EIP-1193 provider is required");
+  // The selected provider is part of this wallet's identity. Capture its request
+  // method once so later page-side property replacement cannot split network
+  // checks and signing across different implementations.
+  const request = requestMethod.bind(provider);
   const id = chainHex(chainId);
   const rpc = checkedRpcUrl(rpcUrl);
   const network = Object.freeze({
@@ -71,7 +76,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
   });
 
   async function assertNetwork() {
-    const current = await provider.request({ method: "eth_chainId" });
+    const current = await request({ method: "eth_chainId" });
     if (typeof current !== "string" || current.length > U64_HEX_LENGTH ||
         !quantity.test(current) || chainHex(current) !== id) {
       throw new Error("Wallet is not connected to the configured Bloch L2");
@@ -80,17 +85,17 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
 
   async function connect() {
     try {
-      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
+      await request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
     } catch (error) {
       if (error?.code !== 4902) throw error; // Includes user rejection: do not retry it.
-      await provider.request({ method: "wallet_addEthereumChain", params: [{
+      await request({ method: "wallet_addEthereumChain", params: [{
         ...network, nativeCurrency: { ...network.nativeCurrency }, rpcUrls: [...network.rpcUrls],
       }] });
       // EIP-3085 does not guarantee that adding a chain also selects it.
-      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
+      await request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
     }
     await assertNetwork();
-    const accounts = await provider.request({ method: "eth_requestAccounts" });
+    const accounts = await request({ method: "eth_requestAccounts" });
     const accountCount = boundedArrayLength(accounts, MAX_ACCOUNT_COUNT);
     if (accountCount <= 0) {
       throw new Error("Wallet did not return valid Ethereum accounts");
@@ -168,7 +173,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
     }
     tx.chainId = id; // The signing request carries the configured replay domain.
     await assertNetwork();
-    const accounts = await provider.request({ method: "eth_accounts" });
+    const accounts = await request({ method: "eth_accounts" });
     let authorized = false;
     const accountCount = boundedArrayLength(accounts, MAX_ACCOUNT_COUNT);
     if (accountCount >= 0) {
@@ -184,7 +189,7 @@ export function createBlochL2Wallet(provider, { rpcUrl, chainId = BLOCH_L2_TESTN
       throw new Error("Transaction sender is not an authorized wallet account");
     }
     await assertNetwork();
-    const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [tx] });
+    const transactionHash = await request({ method: "eth_sendTransaction", params: [tx] });
     if (typeof transactionHash !== "string" || transactionHash.length !== 66 ||
         !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) {
       throw new Error("Wallet returned an invalid transaction hash");
