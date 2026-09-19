@@ -68,7 +68,11 @@ need authenticated transport and an independently trusted deployment manifest.
 The reference EIP-1193 adapter generates a fresh 256-bit challenge for every
 network check, requires the exact status schema and cross-checks its head hash
 and state root against `eth_getBlockByNumber`. It refuses account access or
-signing when secure randomness is unavailable or either view disagrees.
+signing when secure randomness is unavailable or either view disagrees. Within
+one wallet instance, the highest checked head is a monotonic session checkpoint:
+a lower height or a different hash/state root at the same height fails closed.
+This intentionally treats reorganization as a new-session/review event; it is
+not a durable checkpoint across browser reloads and does not prove finality.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

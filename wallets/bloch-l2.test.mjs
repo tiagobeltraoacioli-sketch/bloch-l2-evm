@@ -199,6 +199,47 @@ test("requires a fresh challenge-bound canonical status and cross-checks its sel
   assert.equal(getterCalls, 0);
 });
 
+test("rejects canonical head rollback and same-height equivocation within one wallet session", async () => {
+  const headOne = `0x${"41".repeat(32)}`;
+  const rootOne = `0x${"51".repeat(32)}`;
+  let reads = 0;
+  const rollback = mock({
+    bloch_chainStatus: request => ++reads === 1 ? {
+      format: BLOCH_L2_STATUS_FORMAT, challenge: request.params[0], identity: { ...identity },
+      headNumber: "0x1", headHash: headOne, stateRoot: rootOne,
+    } : {
+      format: BLOCH_L2_STATUS_FORMAT, challenge: request.params[0], identity: { ...identity },
+      headNumber: "0x0", headHash: genesisHash, stateRoot,
+    },
+    eth_getBlockByNumber: request => request.params[0] === "0x1"
+      ? { number: "0x1", hash: headOne, stateRoot: rootOne }
+      : { number: "0x0", hash: genesisHash, stateRoot },
+  });
+  await assert.rejects(createBlochL2Wallet(rollback, options).connect(), /rolled back/);
+
+  const headTwo = `0x${"42".repeat(32)}`;
+  const rootTwo = `0x${"52".repeat(32)}`;
+  reads = 0;
+  let selectedHash = headOne;
+  let selectedRoot = rootOne;
+  const equivocation = mock({
+    bloch_chainStatus: request => {
+      if (++reads === 2) {
+        selectedHash = headTwo;
+        selectedRoot = rootTwo;
+      }
+      return {
+        format: BLOCH_L2_STATUS_FORMAT, challenge: request.params[0], identity: { ...identity },
+        headNumber: "0x1", headHash: selectedHash, stateRoot: selectedRoot,
+      };
+    },
+    eth_getBlockByNumber: request => request.params[0] === "0x1"
+      ? { number: "0x1", hash: selectedHash, stateRoot: selectedRoot }
+      : { number: "0x0", hash: genesisHash, stateRoot },
+  });
+  await assert.rejects(createBlochL2Wallet(equivocation, options).connect(), /equivocated/);
+});
+
 test("sends via the wallet with an explicit chain domain and connected sender", async () => {
   const provider = mock();
   const wallet = createBlochL2Wallet(provider, options);

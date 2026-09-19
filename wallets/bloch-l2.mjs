@@ -186,6 +186,12 @@ export function createBlochL2Wallet(provider, {
     nativeCurrency: Object.freeze({ name: "Bridged BLCH", symbol: "BLCH", decimals: 18 }),
     rpcUrls: Object.freeze([rpc]),
   });
+  // A wallet instance is one trust session. Once it has observed a canonical
+  // head, later checks may advance or repeat that exact view, but may never
+  // move backward or equivocate at the same height.
+  let observedHeadNumber = null;
+  let observedHeadHash;
+  let observedStateRoot;
 
   async function assertNetwork() {
     const current = await request({ method: "eth_chainId" });
@@ -219,6 +225,21 @@ export function createBlochL2Wallet(provider, {
         checkedHash(head.hash, "RPC selected head hash") !== status.headHash ||
         checkedHash(head.stateRoot, "RPC selected state root") !== status.stateRoot) {
       throw new Error("RPC canonical Bloch L2 status does not match its selected block");
+    }
+    const headNumber = BigInt(status.headNumber);
+    if (observedHeadNumber !== null) {
+      if (headNumber < observedHeadNumber) {
+        throw new Error("RPC canonical Bloch L2 head rolled back during this wallet session");
+      }
+      if (headNumber === observedHeadNumber &&
+          (status.headHash !== observedHeadHash || status.stateRoot !== observedStateRoot)) {
+        throw new Error("RPC canonical Bloch L2 head equivocated during this wallet session");
+      }
+    }
+    if (observedHeadNumber === null || headNumber > observedHeadNumber) {
+      observedHeadNumber = headNumber;
+      observedHeadHash = status.headHash;
+      observedStateRoot = status.stateRoot;
     }
   }
 
