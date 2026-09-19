@@ -73,11 +73,14 @@ node wallets/finality-quorum-custodian-authority-cli.mjs transition \
 
 # Run separately under the retiring and incoming authorities:
 node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity \
-  --transition <transition.json> --role <authorization|acceptance> \
+  --transition <transition.json> \
+  --expected-transition-sha256 <hash-retained-out-of-band> \
+  --role <authorization|acceptance> \
   --private-key <role-ed25519-private.pem> --output <role-share.json>
 
 node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity \
   --transition <transition.json> \
+  --expected-transition-sha256 <hash-retained-out-of-band> \
   --previous-authority-public-key <current-ed25519-public.pem> \
   --next-authority-public-key <next-ed25519-public.pem> \
   --authorization <authorization-share.json> --acceptance <acceptance-share.json> \
@@ -134,6 +137,11 @@ remains an explicit operator action.
 This file-byte convention is intentionally different from the reconciliation
 receipt digest, which is the protocol's SHA-256 of the canonical JSON value
 without the file newline.
+Likewise, `transition` prints the SHA-256 of its exact canonical output file.
+Each authority must receive that digest independently and supply it through
+`--expected-transition-sha256` when signing. Assembly requires the same digest,
+so a different well-formed transition cannot be inserted before either signing
+or final continuity construction.
 The `advance`, `reconcile-record`, and `verify-reconciliation` commands also
 require the exact `checkpointHash` retained in the independent control plane.
 An internally valid checkpoint file is not accepted as its own rollback floor;

@@ -26,8 +26,8 @@ function usage() {
   return `Usage:
   node wallets/finality-quorum-custodian-authority-cli.mjs approve --record <record.json> --deployment-id <sha256> --private-key <ed25519-private.pem> --output <approval.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs transition --previous-record <record.json> --next-record <record.json> --deployment-id <sha256> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --output <transition.json>
-  node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity --transition <transition.json> --role <authorization|acceptance> --private-key <ed25519-private.pem> --output <share.json>
-  node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity --transition <transition.json> --expected-transition-sha256 <sha256> --role <authorization|acceptance> --private-key <ed25519-private.pem> --output <share.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --expected-transition-sha256 <sha256> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs initial --approval <approval.json> --expected-approval-sha256 <sha256> --deployment-id <sha256> --authority-public-key <ed25519-public.pem> --output <checkpoint.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs advance --checkpoint <checkpoint.json> --expected-checkpoint-hash <hash> --continuity <continuity.json> --expected-continuity-sha256 <sha256> --next-authority-public-key <ed25519-public.pem> --output <next-checkpoint.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record --store <store.json> --checkpoint <checkpoint.json> --expected-checkpoint-hash <hash> --continuity <continuity.json> --expected-continuity-sha256 <sha256> --next-authority-public-key <ed25519-public.pem> --output <reconciliation.json>
@@ -209,21 +209,27 @@ async function main() {
     });
     path = values["--output"];
   } else if (command === "sign-continuity") {
-    const values = parse(args, ["--transition", "--role", "--private-key", "--output"]);
+    const values = parse(args, ["--transition", "--expected-transition-sha256",
+      "--role", "--private-key", "--output"]);
     if (!["authorization", "acceptance"].includes(values["--role"])) {
       throw new Error("Continuity role must be authorization or acceptance");
     }
     output = signFinalityCustodianStoreContinuity(
-      await readCanonicalJson(values["--transition"], "Continuity transition"),
+      expectedArtifact(
+        await readCanonicalJson(values["--transition"], "Continuity transition"),
+        values["--expected-transition-sha256"], "Continuity transition"),
       values["--role"],
       await readEd25519PrivateKey(values["--private-key"], "Authority private key"),
     );
     path = values["--output"];
   } else if (command === "assemble-continuity") {
-    const values = parse(args, ["--transition", "--previous-authority-public-key",
-      "--next-authority-public-key", "--authorization", "--acceptance", "--output"]);
+    const values = parse(args, ["--transition", "--expected-transition-sha256",
+      "--previous-authority-public-key", "--next-authority-public-key",
+      "--authorization", "--acceptance", "--output"]);
     output = assembleFinalityCustodianStoreContinuity({
-      transition: await readCanonicalJson(values["--transition"], "Continuity transition"),
+      transition: expectedArtifact(
+        await readCanonicalJson(values["--transition"], "Continuity transition"),
+        values["--expected-transition-sha256"], "Continuity transition"),
       previousAuthorityPublicKey: await readEd25519PublicKey(
         values["--previous-authority-public-key"], "Previous authority public key"),
       nextAuthorityPublicKey: await readEd25519PublicKey(
@@ -306,6 +312,8 @@ async function main() {
   await writeNewCanonicalJson(path, output);
   console.log(JSON.stringify(command === "approve" ? {
     created: true, approvalSha256: canonicalArtifactSha256(output),
+  } : command === "transition" ? {
+    created: true, transitionSha256: canonicalArtifactSha256(output),
   } : command === "assemble-continuity" ? {
     created: true, continuitySha256: canonicalArtifactSha256(output),
   } : command === "reconcile-record" ? {

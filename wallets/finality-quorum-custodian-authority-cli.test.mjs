@@ -67,17 +67,36 @@ test("offline CLI creates approval, role-separated shares, and canonical continu
     acceptance = join(f.root, "acceptance.json"), continuity = join(f.root, "continuity.json");
   const approvalResult = await execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
     "--deployment-id", DEPLOYMENT, "--private-key", f.previousPrivateKey, "--output", approval]);
-  await execute(process.execPath, [CLI, "transition", "--previous-record", f.recordPath,
+  const transitionResult = await execute(process.execPath,
+    [CLI, "transition", "--previous-record", f.recordPath,
     "--next-record", f.recordPath, "--deployment-id", DEPLOYMENT,
     "--previous-authority-public-key", f.previousKey,
     "--next-authority-public-key", f.nextKey, "--output", transition]);
+  const transitionBytes = await readFile(transition);
+  const transitionSha256 = createHash("sha256").update(transitionBytes).digest("hex");
+  assert.equal(JSON.parse(transitionResult.stdout).transitionSha256, transitionSha256);
+  await assert.rejects(execute(process.execPath, [CLI, "sign-continuity",
+    "--transition", transition, "--expected-transition-sha256", "0".repeat(64),
+    "--role", "authorization", "--private-key", join(f.root, "must-not-be-read.pem"),
+    "--output", join(f.root, "never-authorization.json")]),
+  error => /externally approved/.test(error.stderr));
   await execute(process.execPath, [CLI, "sign-continuity", "--transition", transition,
+    "--expected-transition-sha256", transitionSha256,
     "--role", "authorization", "--private-key", f.previousPrivateKey,
     "--output", authorization]);
   await execute(process.execPath, [CLI, "sign-continuity", "--transition", transition,
+    "--expected-transition-sha256", transitionSha256,
     "--role", "acceptance", "--private-key", f.nextPrivateKey, "--output", acceptance]);
+  await assert.rejects(execute(process.execPath,
+    [CLI, "assemble-continuity", "--transition", transition,
+    "--expected-transition-sha256", "bad",
+    "--previous-authority-public-key", f.previousKey,
+    "--next-authority-public-key", f.nextKey, "--authorization", authorization,
+    "--acceptance", acceptance, "--output", join(f.root, "never-continuity.json")]),
+  error => /externally approved/.test(error.stderr));
   const continuityResult = await execute(process.execPath,
     [CLI, "assemble-continuity", "--transition", transition,
+    "--expected-transition-sha256", transitionSha256,
     "--previous-authority-public-key", f.previousKey,
     "--next-authority-public-key", f.nextKey, "--authorization", authorization,
     "--acceptance", acceptance, "--output", continuity]);
