@@ -76,7 +76,8 @@ test("offline CLI creates approval, role-separated shares, and canonical continu
     "--output", authorization]);
   await execute(process.execPath, [CLI, "sign-continuity", "--transition", transition,
     "--role", "acceptance", "--private-key", f.nextPrivateKey, "--output", acceptance]);
-  await execute(process.execPath, [CLI, "assemble-continuity", "--transition", transition,
+  const continuityResult = await execute(process.execPath,
+    [CLI, "assemble-continuity", "--transition", transition,
     "--previous-authority-public-key", f.previousKey,
     "--next-authority-public-key", f.nextKey, "--authorization", authorization,
     "--acceptance", acceptance, "--output", continuity]);
@@ -85,6 +86,8 @@ test("offline CLI creates approval, role-separated shares, and canonical continu
   assert.equal(assembled.acceptance.role, "acceptance");
   assert.equal(assembled.transition.previousRecord.recordHash, f.record.recordHash);
   assert.equal(assembled.transition.nextRecord.recordHash, f.record.recordHash);
+  assert.equal(JSON.parse(continuityResult.stdout).continuitySha256,
+    createHash("sha256").update(await readFile(continuity)).digest("hex"));
   const approvalBytes = await readFile(approval);
   const generatedApproval = JSON.parse(approvalBytes.toString("utf8"));
   assert.equal(generatedApproval.deploymentId, DEPLOYMENT);
@@ -113,9 +116,17 @@ test("offline CLI creates the exact initial checkpoint and advances key-only con
     acceptance: signFinalityCustodianStoreContinuity(
       transition, "acceptance", f.next.privateKey) });
   await json(continuityPath, continuity);
+  const continuitySha256 = artifactSha256(continuity);
+  await assert.rejects(execute(process.execPath, [CLI, "advance", "--checkpoint", initial,
+    "--expected-checkpoint-hash", retained.checkpointHash,
+    "--continuity", continuityPath, "--expected-continuity-sha256", "0".repeat(64),
+    "--next-authority-public-key", f.nextKey,
+    "--output", join(f.root, "never-advanced.json")]),
+  error => /externally approved/.test(error.stderr));
   await execute(process.execPath, [CLI, "advance", "--checkpoint", initial,
     "--expected-checkpoint-hash", retained.checkpointHash,
-    "--continuity", continuityPath, "--next-authority-public-key", f.nextKey,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
+    "--next-authority-public-key", f.nextKey,
     "--output", advanced]);
   const next = JSON.parse(await readFile(advanced, "utf8"));
   assert.equal(next.transitionIndex, "1");
@@ -143,6 +154,7 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
     acceptance: signFinalityCustodianStoreContinuity(
       transition, "acceptance", f.next.privateKey) });
   await json(continuityPath, continuity);
+  const continuitySha256 = artifactSha256(continuity);
   await execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
     "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
@@ -150,7 +162,7 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
   const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
   const result = await execute(process.execPath, [CLI, "reconcile-record", "--store", storePath,
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
-    "--continuity", continuityPath,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
     "--next-authority-public-key", f.nextKey, "--output", receiptPath]);
   const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
   assert.equal(receipt.status, "successor-record-observed");
@@ -160,20 +172,33 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
   const verified = await execute(process.execPath, [CLI, "verify-reconciliation",
     "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
-    "--continuity", continuityPath,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
     "--next-authority-public-key", f.nextKey]);
   assert.equal(JSON.parse(verified.stdout).receiptSha256, receiptSha256);
   await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
+    "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
+    "--continuity", continuityPath, "--expected-continuity-sha256", "bad",
+    "--next-authority-public-key", f.nextKey]),
+  error => /externally approved/.test(error.stderr));
+  await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
     "--receipt", receiptPath, "--expected-receipt-sha256", "0".repeat(64),
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
-    "--continuity", continuityPath,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
     "--next-authority-public-key", f.nextKey]),
   error => /externally approved/.test(error.stderr));
   await assert.rejects(execute(process.execPath, [CLI, "reconcile-record", "--store", storePath,
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", "e".repeat(64),
-    "--continuity", continuityPath, "--next-authority-public-key", f.nextKey,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
+    "--next-authority-public-key", f.nextKey,
     "--output", join(f.root, "never-reconciled.json")]),
   error => /externally retained hash/.test(error.stderr));
+  await assert.rejects(execute(process.execPath, [CLI, "reconcile-record", "--store", storePath,
+    "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
+    "--continuity", continuityPath, "--expected-continuity-sha256", "f".repeat(64),
+    "--next-authority-public-key", f.nextKey,
+    "--output", join(f.root, "never-substituted.json")]),
+  error => /externally approved/.test(error.stderr));
 });
 
 test("offline CLI refuses substitution, unsafe input and output overwrite", async t => {

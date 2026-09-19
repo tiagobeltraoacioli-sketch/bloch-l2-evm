@@ -94,6 +94,7 @@ node wallets/finality-quorum-custodian-authority-cli.mjs advance \
   --checkpoint <independently-retained-prior-checkpoint.json> \
   --expected-checkpoint-hash <hash-retained-out-of-band> \
   --continuity <dual-signed-continuity.json> \
+  --expected-continuity-sha256 <hash-retained-out-of-band> \
   --next-authority-public-key <next-ed25519-public.pem> \
   --output <new-authority-checkpoint.json>
 
@@ -103,6 +104,7 @@ node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record \
   --checkpoint <independently-retained-prior-checkpoint.json> \
   --expected-checkpoint-hash <hash-retained-out-of-band> \
   --continuity <dual-signed-continuity.json> \
+  --expected-continuity-sha256 <hash-retained-out-of-band> \
   --next-authority-public-key <next-ed25519-public.pem> \
   --output <new-reconciliation-receipt.json>
 
@@ -113,6 +115,7 @@ node wallets/finality-quorum-custodian-authority-cli.mjs verify-reconciliation \
   --checkpoint <independently-retained-prior-checkpoint.json> \
   --expected-checkpoint-hash <hash-retained-out-of-band> \
   --continuity <dual-signed-continuity.json> \
+  --expected-continuity-sha256 <hash-retained-out-of-band> \
   --next-authority-public-key <next-ed25519-public.pem>
 ```
 
@@ -136,6 +139,11 @@ require the exact `checkpointHash` retained in the independent control plane.
 An internally valid checkpoint file is not accepted as its own rollback floor;
 the expected hash must arrive over an authenticated channel and must not be
 copied from that file during the command invocation.
+`assemble-continuity` prints the SHA-256 of the exact canonical continuity file,
+including its terminating newline. Retain that digest independently as well;
+all three commands require it through `--expected-continuity-sha256`. This
+prevents a different internally valid, dual-signed transition from being
+silently substituted for the transition approved by the operator.
 
 `reconcile-record` takes the same exact retained checkpoint and dual-signed
 transition, derives the only valid successor, and reads the filesystem store
