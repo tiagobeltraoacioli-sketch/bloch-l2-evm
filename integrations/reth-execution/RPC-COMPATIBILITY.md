@@ -93,7 +93,14 @@ lookup with two identical fresh `bloch_chainStatus` snapshots. This proves
 continuity within the authenticated RPC view and fails closed on a concurrent
 canonical change. It is not independent native-finality evidence: a dishonest
 or unauthenticated RPC can still fabricate a self-consistent history, and higher
-heads remain unfinalized.
+heads remain unfinalized. Accordingly, read-only `connect()` may expose that
+view but `sendTransaction()` requires a caller-supplied
+`trustedFinalityVerifier.verify(identity, checkpoint)` boundary. The exact
+fresh, immutable checkpoint is passed immediately before signing, and only the
+literal result `true` permits `eth_sendTransaction`; absence, rejection,
+exceptions and ambiguous results fail closed. The verifier must independently
+authenticate native settlement/finality. Merely asking the same L2 RPC whether
+its own head is final does not satisfy this trust boundary.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

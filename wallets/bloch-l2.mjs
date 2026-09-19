@@ -189,6 +189,7 @@ export function createBlochL2Wallet(provider, {
   domain,
   minimumCheckpoint,
   trustedCheckpointStore,
+  trustedFinalityVerifier,
 } = {}) {
   const requestMethod = provider?.request;
   if (typeof requestMethod !== "function") throw new TypeError("An EIP-1193 provider is required");
@@ -211,6 +212,17 @@ export function createBlochL2Wallet(provider, {
     }
     loadTrustedCheckpoint = Function.prototype.bind.call(trustedCheckpointStore.load, trustedCheckpointStore);
     advanceTrustedCheckpoint = Function.prototype.bind.call(trustedCheckpointStore.advance, trustedCheckpointStore);
+  }
+  let verifyTrustedFinality;
+  if (trustedFinalityVerifier !== undefined) {
+    if (!trustedFinalityVerifier || typeof trustedFinalityVerifier !== "object" ||
+        typeof trustedFinalityVerifier.verify !== "function") {
+      throw new TypeError("A trusted finality verifier must provide a verify method");
+    }
+    verifyTrustedFinality = Function.prototype.bind.call(
+      trustedFinalityVerifier.verify,
+      trustedFinalityVerifier,
+    );
   }
   const identity = Object.freeze({
     format: BLOCH_L2_IDENTITY_FORMAT,
@@ -292,7 +304,7 @@ export function createBlochL2Wallet(provider, {
     await checkpointStoreAdvance;
   }
 
-  async function assertNetwork() {
+  async function assertNetwork(requireFinality = false) {
     await prepareTrustedCheckpointStore();
     const current = await request({ method: "eth_chainId" });
     if (typeof current !== "string" || current.length > U64_HEX_LENGTH ||
@@ -370,6 +382,23 @@ export function createBlochL2Wallet(provider, {
       observedHeadNumber = headNumber;
       observedHeadHash = status.headHash;
       observedStateRoot = status.stateRoot;
+    }
+    if (requireFinality) {
+      const candidate = Object.freeze({
+        format: BLOCH_L2_CHECKPOINT_FORMAT,
+        headNumber: status.headNumber,
+        headHash: status.headHash,
+        stateRoot: status.stateRoot,
+      });
+      let verified;
+      try {
+        verified = await verifyTrustedFinality(identity, candidate);
+      } catch {
+        throw new Error("Trusted Bloch L2 finality verification failed");
+      }
+      if (verified !== true) {
+        throw new Error("Trusted Bloch L2 finality verification failed");
+      }
     }
     await persistTrustedCheckpoint();
   }
@@ -492,6 +521,9 @@ export function createBlochL2Wallet(provider, {
       throw new RangeError("Transaction exceeds the encoded L2 size limit");
     }
     tx.chainId = id; // The signing request carries the configured replay domain.
+    if (!verifyTrustedFinality) {
+      throw new Error("A trusted Bloch L2 finality verifier is required before signing");
+    }
     await assertNetwork();
     const accounts = await request({ method: "eth_accounts" });
     let authorized = false;
@@ -510,7 +542,7 @@ export function createBlochL2Wallet(provider, {
     if (!authorized) {
       throw new Error("Transaction sender is not an authorized wallet account");
     }
-    await assertNetwork();
+    await assertNetwork(true);
     const transactionHash = await request({ method: "eth_sendTransaction", params: [tx] });
     if (typeof transactionHash !== "string" || transactionHash.length !== 66 ||
         !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) {

@@ -22,7 +22,10 @@ const identity = Object.freeze({
   genesisHash,
   headerFormat: BLOCH_L2_HEADER_FORMAT,
 });
-const options = { rpcUrl: "http://127.0.0.1:8545", genesisHash, domain };
+const trustedFinalityVerifier = Object.freeze({ verify: async () => true });
+const options = {
+  rpcUrl: "http://127.0.0.1:8545", genesisHash, domain, trustedFinalityVerifier,
+};
 function mock(handlers = {}) {
   const calls = [];
   return { calls, request: async request => {
@@ -103,6 +106,12 @@ test("requires a real configured endpoint and rejects unsafe chain IDs", () => {
   }
   for (const configuredDomain of [undefined, "0x1", `0x${"g".repeat(64)}`, `0x${"00".repeat(33)}`]) {
     assert.throws(() => createBlochL2Wallet(mock(), { ...options, domain: configuredDomain }));
+  }
+  for (const trustedFinalityVerifier of [null, {}, { verify: true }]) {
+    assert.throws(
+      () => createBlochL2Wallet(mock(), { ...options, trustedFinalityVerifier }),
+      /trusted finality verifier/i,
+    );
   }
 });
 
@@ -447,6 +456,50 @@ test("sends via the wallet with an explicit chain domain and connected sender", 
   assert.equal(sent.method, "eth_sendTransaction");
   assert.equal(sent.params[0].chainId, chainId);
   assert.equal(sent.params[0].from, account);
+});
+
+test("requires external finality for signing and verifies the exact fresh checkpoint", async () => {
+  const withoutVerifier = mock();
+  await assert.rejects(
+    createBlochL2Wallet(withoutVerifier, {
+      ...options, trustedFinalityVerifier: undefined,
+    }).sendTransaction({ from: account }),
+    /finality verifier is required/,
+  );
+  assert.equal(withoutVerifier.calls.length, 0);
+
+  const verified = [];
+  const provider = mock();
+  await createBlochL2Wallet(provider, {
+    ...options,
+    trustedFinalityVerifier: { verify: async (selectedIdentity, checkpoint) => {
+      verified.push([selectedIdentity, checkpoint]);
+      return true;
+    } },
+  }).sendTransaction({ from: account });
+  assert.equal(verified.length, 1);
+  assert.deepEqual(verified[0][0], identity);
+  assert.deepEqual(verified[0][1], {
+    format: BLOCH_L2_CHECKPOINT_FORMAT,
+    headNumber: "0x0",
+    headHash: genesisHash,
+    stateRoot,
+  });
+  assert.ok(Object.isFrozen(verified[0][0]));
+  assert.ok(Object.isFrozen(verified[0][1]));
+
+  for (const verify of [async () => false, async () => ({ verified: true }), async () => {
+    throw new Error("offline");
+  }]) {
+    const rejected = mock();
+    await assert.rejects(
+      createBlochL2Wallet(rejected, {
+        ...options, trustedFinalityVerifier: { verify },
+      }).sendTransaction({ from: account }),
+      /finality verification failed/,
+    );
+    assert.ok(!rejected.calls.some(call => call.method === "eth_sendTransaction"));
+  }
 });
 
 test("accepts transaction quantities exactly at the node field widths", async () => {
