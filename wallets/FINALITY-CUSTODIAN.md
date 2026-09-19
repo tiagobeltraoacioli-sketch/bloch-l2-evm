@@ -23,6 +23,16 @@ Loads and conflict observations take the same interprocess lock as transitions
 and compare the exact retained record hash; a stale process therefore fails
 closed instead of returning a cached custodian head.
 
+For machine-checked startup approval, the store also supports an Ed25519-signed
+envelope over the complete canonical record, an independently assigned 32-byte
+deployment ID and the approver key ID. `initializeApproved...` verifies that
+envelope before creating anything and accepts only generation zero;
+`createApproved...` requires a fresh approval matching the exact current record
+on each restart. The server receives only the pinned public key. The private key
+belongs on an offline/HSM review path, and the deployment ID and public key must
+not arrive with the local store. This approval authenticates operator intent;
+it does not make ordinary disk or colocated backups rollback-resistant.
+
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an
 independent CAS anchor before the transport receives a frame. Only a valid,

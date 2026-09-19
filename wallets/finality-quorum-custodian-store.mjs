@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 
 export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_FORMAT =
   "bloch-l2-finality-custodian-store-v1";
+export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_APPROVAL_FORMAT =
+  "bloch-l2-finality-custodian-store-approval-v1";
 
 const HASH = /^[0-9a-f]{64}$/;
+const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
 const U64 = /^(?:0|[1-9][0-9]{0,19})$/;
 const MAX_FILE_BYTES = 16 * 1024;
 const FIELDS = ["format", "generation", "stateHash", "previousRecordHash", "recordHash"];
+const APPROVAL_FIELDS = ["format", "deploymentId", "authorityKeyId", "record", "signature"];
+const APPROVAL_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-STORE-APPROVAL-v1\0";
 
 function exact(value, fields, message) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(message);
@@ -50,6 +55,67 @@ function checkedRecord(value) {
     throw new Error("Finality custodian store record is invalid");
   }
   return Object.freeze({ ...value });
+}
+
+function approvalKey(value, privateKey) {
+  let key;
+  try {
+    if (value?.type === (privateKey ? "private" : "public")) key = value;
+    else if (value?.type) throw new Error("wrong key type");
+    else key = privateKey ? createPrivateKey(value) : createPublicKey(value);
+  }
+  catch (cause) { throw new Error("Finality custodian store approval key is invalid", { cause }); }
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error("Finality custodian store approval key must be Ed25519");
+  }
+  const publicKey = privateKey ? createPublicKey(key) : key;
+  const encoded = publicKey.export({ format: "der", type: "spki" });
+  return { key, keyId: createHash("sha256").update(encoded).digest("hex") };
+}
+
+function approvalBytes(deploymentId, authorityKeyId, record) {
+  return Buffer.from(APPROVAL_DOMAIN + JSON.stringify({ deploymentId, authorityKeyId, record }), "utf8");
+}
+
+function decodedSignature(value) {
+  if (typeof value !== "string" || !SIGNATURE.test(value)) {
+    throw new Error("Finality custodian store approval signature is invalid");
+  }
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.length !== 64 || decoded.toString("base64url") !== value) {
+    throw new Error("Finality custodian store approval signature is invalid");
+  }
+  return decoded;
+}
+
+export function approveFinalityCustodianStoreRecord({ deploymentId, record, privateKey } = {}) {
+  if (typeof deploymentId !== "string" || !HASH.test(deploymentId) || deploymentId === "0".repeat(64)) {
+    throw new Error("Finality custodian store approval deployment is invalid");
+  }
+  const approved = checkedRecord(record), authority = approvalKey(privateKey, true);
+  return Object.freeze({ format: BLOCH_L2_FINALITY_CUSTODIAN_STORE_APPROVAL_FORMAT,
+    deploymentId, authorityKeyId: authority.keyId, record: approved,
+    signature: sign(null, approvalBytes(deploymentId, authority.keyId, approved), authority.key)
+      .toString("base64url") });
+}
+
+export function verifyFinalityCustodianStoreApproval({ approval, expectedDeploymentId,
+  authorityPublicKey } = {}) {
+  exact(approval, APPROVAL_FIELDS, "Finality custodian store approval is invalid");
+  if (typeof expectedDeploymentId !== "string" || !HASH.test(expectedDeploymentId) ||
+      expectedDeploymentId === "0".repeat(64) || approval.format !==
+      BLOCH_L2_FINALITY_CUSTODIAN_STORE_APPROVAL_FORMAT || approval.deploymentId !==
+      expectedDeploymentId || typeof approval.authorityKeyId !== "string" ||
+      !HASH.test(approval.authorityKeyId)) {
+    throw new Error("Finality custodian store approval is invalid");
+  }
+  const record = checkedRecord(approval.record), authority = approvalKey(authorityPublicKey, false);
+  if (authority.keyId !== approval.authorityKeyId || !verify(null,
+    approvalBytes(approval.deploymentId, approval.authorityKeyId, record), authority.key,
+    decodedSignature(approval.signature))) {
+    throw new Error("Finality custodian store approval signature is invalid");
+  }
+  return record;
 }
 
 export function createInitialFinalityCustodianStoreRecord({ stateHash = null } = {}) {
@@ -166,6 +232,17 @@ export async function initializeFilesystemFinalityCustodianStore({ storePath, re
     await directory.sync();
   } finally { await directory.close(); }
   return initial;
+}
+
+export async function initializeApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+  expectedDeploymentId, authorityPublicKey } = {}) {
+  const record = verifyFinalityCustodianStoreApproval({ approval, expectedDeploymentId,
+    authorityPublicKey });
+  if (record.generation !== "0") {
+    throw new Error("Finality custodian initial store approval is not generation zero");
+  }
+  return initializeFilesystemFinalityCustodianStore({ storePath, record,
+    expectedRecordHash: record.recordHash });
 }
 
 export async function inspectFilesystemFinalityCustodianStore(storePath) {
@@ -289,4 +366,11 @@ export async function createFilesystemFinalityCustodianStore({ storePath, expect
     },
     record: () => retained,
   });
+}
+
+export async function createApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+  expectedDeploymentId, authorityPublicKey } = {}) {
+  const record = verifyFinalityCustodianStoreApproval({ approval, expectedDeploymentId,
+    authorityPublicKey });
+  return createFilesystemFinalityCustodianStore({ storePath, expectedRecordHash: record.recordHash });
 }

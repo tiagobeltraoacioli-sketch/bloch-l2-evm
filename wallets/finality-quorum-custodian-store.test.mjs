@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 import test from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { chmod, link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  approveFinalityCustodianStoreRecord,
+  createApprovedFilesystemFinalityCustodianStore,
   createFilesystemFinalityCustodianStore,
   createInitialFinalityCustodianStoreRecord,
+  initializeApprovedFilesystemFinalityCustodianStore,
   initializeFilesystemFinalityCustodianStore,
   inspectFilesystemFinalityCustodianStore,
 } from "./finality-quorum-custodian-store.mjs";
 
 const HASH_A = "a".repeat(64), HASH_B = "b".repeat(64);
+const DEPLOYMENT = "d".repeat(64);
 
 async function fixture(t, stateHash = null) {
   const root = await mkdtemp(join(tmpdir(), "bloch-l2-custodian-store-"));
@@ -88,4 +93,37 @@ test("store rejects corruption, exposed files, links and orphan locks", async t 
   const corrupt = await fixture(t);
   await writeFile(corrupt.storePath, "{}\n", { mode: 0o600 });
   await assert.rejects(inspectFilesystemFinalityCustodianStore(corrupt.storePath), /record is invalid/);
+});
+
+test("offline approval binds deployment, authority and exact store record", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bloch-l2-custodian-approved-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await chmod(root, 0o700);
+  const storePath = join(root, "store.json"), record = createInitialFinalityCustodianStoreRecord();
+  const authority = generateKeyPairSync("ed25519"), other = generateKeyPairSync("ed25519");
+  const approval = approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT, record,
+    privateKey: authority.privateKey });
+  await initializeApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: authority.publicKey });
+  let store = await createApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: authority.publicKey });
+  assert.equal(await store.load(), null);
+  await assert.rejects(createApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+    expectedDeploymentId: "e".repeat(64), authorityPublicKey: authority.publicKey }), /approval/);
+  await assert.rejects(createApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: other.publicKey }), /signature/);
+  const tampered = { ...approval, record: { ...approval.record, stateHash: HASH_A } };
+  await assert.rejects(createApprovedFilesystemFinalityCustodianStore({ storePath, approval: tampered,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: authority.publicKey }), /record|signature/);
+
+  await store.compareAndSwap(null, HASH_A);
+  const current = store.record();
+  await assert.rejects(createApprovedFilesystemFinalityCustodianStore({ storePath, approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: authority.publicKey }), /externally retained/);
+  const currentApproval = approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: current, privateKey: authority.privateKey });
+  store = await createApprovedFilesystemFinalityCustodianStore({ storePath,
+    approval: currentApproval, expectedDeploymentId: DEPLOYMENT,
+    authorityPublicKey: authority.publicKey });
+  assert.equal(await store.load(), HASH_A);
 });
