@@ -11,6 +11,14 @@ client adapter and an unbound server; an operator must still supply process
 isolation, firewall policy, secret custody, monitoring, and independently
 retained client checkpoints. No repository command starts the server.
 
+`finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
+client lifecycle. It writes a hash-chained `pending` state and advances an
+independent CAS anchor before the transport receives a frame. Only a valid,
+authenticated, non-uncertain response advances both anchor and local state back
+to `ready`. A crash, malformed response, transport error, authenticated
+`uncertain` result, ambiguous anchor update, or ambiguous local replacement
+leaves a pending state or a retained lock and blocks restart.
+
 ## Transport invariants
 
 - Both endpoints require TLS 1.3, CA validation, and an explicit SHA-256 leaf
@@ -38,15 +46,23 @@ through an offline, independently approved procedure.
 
 1. Provision distinct client and custodian identities and exchange CA roots and
    leaf pins out of band.
-2. Persist a fresh random protocol session and its next sequence outside the
-   application database before the first request.
+2. Build the initial filesystem checkpoint with a fresh random protocol session,
+   approve its deterministic state hash out of band, create it once, and
+   provision that same hash into an independent CAS anchor. This explicit hash
+   is required at every client open; there is no trust on first use.
 3. Start the custodian behind a firewall that permits only the pinned client IP
    and bind the returned server explicitly; the library never calls `listen`.
-4. After every attempted exchange, durably persist the client's advanced
-   sequence before performing another exchange.
-5. On an uncertain result, freeze checkpoint advancement and compare the
+4. Use `createFilesystemFinalityCustodian` so each consumed sequence is first
+   committed locally and to the independent anchor. Do not use the in-memory
+   client directly in a restartable process.
+5. On an uncertain result or retained lock, freeze checkpoint advancement and compare the
    independently retained custodian head. Resume only through a documented
    reconciliation decision.
+
+The module deliberately does not automate pending-state reconciliation or
+session replacement. Those actions require independently authenticated
+evidence from the custodian and an approved session-rotation procedure; blindly
+clearing the file or lock would reintroduce sequence reuse after a crash.
 
 The HMAC protocol protects request identity and replay ordering even inside the
 mTLS channel. mTLS protects the carrier and peer endpoints. Neither control

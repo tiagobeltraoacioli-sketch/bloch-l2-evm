@@ -160,18 +160,24 @@ function checkedCheckpoint(value) {
 }
 
 export class AuthenticatedFinalityQuorumCustodian {
-  #auth; #transport; #session; #nextSequence; #closed = false;
+  #auth; #transport; #lifecycle; #session; #nextSequence; #closed = false; #busy = false;
 
-  constructor({ authentication: configured, transport, checkpoint } = {}) {
+  constructor({ authentication: configured, transport, checkpoint, lifecycle = null } = {}) {
     this.#auth = authentication(configured);
     if (!transport || typeof transport !== "object" || typeof transport.exchange !== "function") {
       this.#auth.key.fill(0);
       throw new Error("Finality custodian transport is invalid");
     }
+    if (lifecycle !== null && (!lifecycle || typeof lifecycle !== "object" ||
+        typeof lifecycle.begin !== "function" || typeof lifecycle.complete !== "function")) {
+      this.#auth.key.fill(0);
+      throw new Error("Finality custodian lifecycle is invalid");
+    }
     let retained;
     try { retained = checkedCheckpoint(checkpoint); }
     catch (error) { this.#auth.key.fill(0); throw error; }
     this.#transport = transport;
+    this.#lifecycle = lifecycle;
     this.#session = retained.session;
     this.#nextSequence = BigInt(retained.nextSequence);
   }
@@ -184,14 +190,25 @@ export class AuthenticatedFinalityQuorumCustodian {
 
   async #exchange(operation, expectedStateHash, nextStateHash) {
     if (this.#closed) throw new Error("Finality custodian client is closed");
+    if (this.#busy) throw new Error("Finality custodian client already has an exchange in progress");
     if (this.#nextSequence === 0xffffffffffffffffn) throw new Error("Finality custodian sequence exhausted");
-    const body = requestBody({ clientId: this.#auth.clientId, custodianId: this.#auth.custodianId,
-      session: this.#session, sequence: this.#nextSequence.toString(), operation,
-      expectedStateHash, nextStateHash });
-    const encoded = encode(authenticated(body, this.#auth.key));
-    this.#nextSequence += 1n;
-    const response = await this.#transport.exchange(encoded);
-    return checkedResponse(decode(response), body, this.#auth);
+    this.#busy = true;
+    try {
+      const body = requestBody({ clientId: this.#auth.clientId, custodianId: this.#auth.custodianId,
+        session: this.#session, sequence: this.#nextSequence.toString(), operation,
+        expectedStateHash, nextStateHash });
+      const encoded = encode(authenticated(body, this.#auth.key));
+      const digest = requestHash(body);
+      this.#nextSequence += 1n;
+      await this.#lifecycle?.begin(Object.freeze({ requestHash: digest, operation,
+        checkpoint: this.checkpoint() }));
+      const response = checkedResponse(decode(await this.#transport.exchange(encoded)), body, this.#auth);
+      await this.#lifecycle?.complete(Object.freeze({ requestHash: digest, operation,
+        checkpoint: this.checkpoint(), response }));
+      return response;
+    } finally {
+      this.#busy = false;
+    }
   }
 
   async load() {
