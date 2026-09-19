@@ -57,6 +57,28 @@ new authority is accepted; keeping it beside the store is not rollback
 protection, and supplying an older internally valid checkpoint validates the
 older state by design.
 
+The offline CLI creates these objects without loading private material:
+
+```sh
+node wallets/finality-quorum-custodian-authority-cli.mjs initial \
+  --approval <approved-initial-record.json> \
+  --deployment-id <64-hex> \
+  --authority-public-key <current-ed25519-public.pem> \
+  --output <new-authority-checkpoint.json>
+
+node wallets/finality-quorum-custodian-authority-cli.mjs advance \
+  --checkpoint <independently-retained-prior-checkpoint.json> \
+  --continuity <dual-signed-continuity.json> \
+  --next-authority-public-key <next-ed25519-public.pem> \
+  --output <new-authority-checkpoint.json>
+```
+
+Inputs must be absolute, canonical, owned, single-link files without
+group/world write permission. Output uses exclusive creation, is synced before
+success and is never overwritten. The CLI verifies the initial signature or
+both continuity roles before producing a successor, but moving that output to
+the independent control plane remains an explicit operator action.
+
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an
 independent CAS anchor before the transport receives a frame. Only a valid,
