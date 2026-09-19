@@ -13,6 +13,8 @@ export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT =
   "bloch-l2-finality-custodian-store-continuity-v1";
 export const BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_CHECKPOINT_FORMAT =
   "bloch-l2-finality-custodian-authority-checkpoint-v1";
+export const BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_RECONCILIATION_FORMAT =
+  "bloch-l2-finality-custodian-authority-reconciliation-v1";
 
 const HASH = /^[0-9a-f]{64}$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
@@ -332,6 +334,36 @@ export async function createAuthorityCheckpointFilesystemFinalityCustodianStore(
   const retained = checkedAuthorityCheckpoint(checkpoint);
   return createFilesystemFinalityCustodianStore({ storePath,
     expectedRecordHash: retained.record.recordHash });
+}
+
+/** Classifies one quiescent filesystem store against an exact dual-signed
+ * record-advancing authority transition. This does not determine whether the
+ * independently operated checkpoint control plane committed its successor. */
+export async function reconcileFinalityCustodianAuthorityStoreRecord({ storePath, checkpoint,
+  continuity, nextAuthorityPublicKey } = {}) {
+  const previous = checkedAuthorityCheckpoint(checkpoint);
+  const next = advanceFinalityCustodianAuthorityCheckpoint({ checkpoint: previous, continuity,
+    nextAuthorityPublicKey });
+  if (previous.record.recordHash === next.record.recordHash) {
+    throw new Error("Finality custodian key-only authority transition cannot be reconciled from the store record");
+  }
+  const observed = await readUnderLock(storePath);
+  let status;
+  if (JSON.stringify(observed) === JSON.stringify(previous.record)) {
+    status = "prior-record-observed";
+  } else if (JSON.stringify(observed) === JSON.stringify(next.record)) {
+    status = "successor-record-observed";
+  } else {
+    throw new Error("Finality custodian store is neither the retained authority record nor its approved successor");
+  }
+  return Object.freeze({
+    format: BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_RECONCILIATION_FORMAT,
+    status,
+    deploymentId: previous.deploymentId,
+    previousCheckpointHash: previous.checkpointHash,
+    nextCheckpointHash: next.checkpointHash,
+    observedRecordHash: observed.recordHash,
+  });
 }
 
 export function createInitialFinalityCustodianStoreRecord({ stateHash = null } = {}) {

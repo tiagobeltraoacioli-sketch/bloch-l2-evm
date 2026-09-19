@@ -94,6 +94,14 @@ node wallets/finality-quorum-custodian-authority-cli.mjs advance \
   --continuity <dual-signed-continuity.json> \
   --next-authority-public-key <next-ed25519-public.pem> \
   --output <new-authority-checkpoint.json>
+
+# With the custodian stopped, classify an ambiguous record-advancing operation:
+node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record \
+  --store <custodian-store.json> \
+  --checkpoint <independently-retained-prior-checkpoint.json> \
+  --continuity <dual-signed-continuity.json> \
+  --next-authority-public-key <next-ed25519-public.pem> \
+  --output <new-reconciliation-receipt.json>
 ```
 
 Inputs must be absolute, canonical, owned, single-link files without
@@ -103,6 +111,17 @@ permissions and are opened only by the `approve` or `sign-continuity` process.
 The CLI verifies the initial signature or both continuity roles before
 producing a successor, but moving that output to the independent control plane
 remains an explicit operator action.
+
+`reconcile-record` takes the same exact retained checkpoint and dual-signed
+transition, derives the only valid successor, and reads the filesystem store
+under its create-once lock. It emits a canonical receipt only when the complete
+observed record is exactly the retained prior record or the approved successor;
+an orphan lock or any third state fails closed. Run it only while the custodian
+is quiescent. The receipt classifies the local store at one instant; it does not
+prove that the independent checkpoint control plane committed either value and
+must not be used to adopt a value discovered from disk. A key-only authority
+rotation cannot be distinguished from the store record and is therefore
+rejected by this command.
 
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an

@@ -11,6 +11,7 @@ import {
   assembleFinalityCustodianStoreContinuity,
   createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianAuthorityCheckpoint,
+  reconcileFinalityCustodianAuthorityStoreRecord,
   signFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
 
@@ -26,7 +27,8 @@ function usage() {
   node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity --transition <transition.json> --role <authorization|acceptance> --private-key <ed25519-private.pem> --output <share.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs initial --approval <approval.json> --deployment-id <sha256> --authority-public-key <ed25519-public.pem> --output <checkpoint.json>
-  node wallets/finality-quorum-custodian-authority-cli.mjs advance --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <next-checkpoint.json>`;
+  node wallets/finality-quorum-custodian-authority-cli.mjs advance --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <next-checkpoint.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record --store <store.json> --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <reconciliation.json>`;
 }
 
 function parse(args, expected) {
@@ -204,9 +206,26 @@ async function main() {
         values["--next-authority-public-key"], "Next authority public key"),
     });
     path = values["--output"];
+  } else if (command === "reconcile-record") {
+    const values = parse(args, ["--store", "--checkpoint", "--continuity",
+      "--next-authority-public-key", "--output"]);
+    if (resolve(values["--store"]) !== values["--store"]) {
+      throw new Error("Custodian store path must be absolute");
+    }
+    output = await reconcileFinalityCustodianAuthorityStoreRecord({
+      storePath: values["--store"],
+      checkpoint: await readCanonicalJson(values["--checkpoint"], "Authority checkpoint"),
+      continuity: await readCanonicalJson(values["--continuity"], "Continuity approval"),
+      nextAuthorityPublicKey: await readEd25519PublicKey(
+        values["--next-authority-public-key"], "Next authority public key"),
+    });
+    path = values["--output"];
   } else throw new Error(usage());
   await writeNewCanonicalJson(path, output);
-  console.log(JSON.stringify({ created: true, transitionIndex: output.transitionIndex,
+  console.log(JSON.stringify(command === "reconcile-record" ? {
+    created: true, status: output.status, observedRecordHash: output.observedRecordHash,
+    nextCheckpointHash: output.nextCheckpointHash,
+  } : { created: true, transitionIndex: output.transitionIndex,
     checkpointHash: output.checkpointHash, authorityKeyId: output.authorityKeyId }));
 }
 

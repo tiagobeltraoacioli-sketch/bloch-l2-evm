@@ -19,6 +19,7 @@ import {
   initializeApprovedFilesystemFinalityCustodianStore,
   initializeFilesystemFinalityCustodianStore,
   inspectFilesystemFinalityCustodianStore,
+  reconcileFinalityCustodianAuthorityStoreRecord,
   signFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
 
@@ -205,6 +206,9 @@ test("one canonical authority checkpoint retains deployment key and record conti
   const store = await createAuthorityCheckpointFilesystemFinalityCustodianStore({
     storePath: f.storePath, checkpoint: rotated });
   assert.equal(await store.load(), null);
+  await assert.rejects(reconcileFinalityCustodianAuthorityStoreRecord({
+    storePath: f.storePath, checkpoint: initial, continuity,
+    nextAuthorityPublicKey: next.publicKey }), /key-only/);
 
   assert.throws(() => advanceFinalityCustodianAuthorityCheckpoint({ checkpoint: initial, continuity,
     nextAuthorityPublicKey: substituted.publicKey }), /share/);
@@ -215,4 +219,49 @@ test("one canonical authority checkpoint retains deployment key and record conti
     checkpoint: { ...initial, authorityPublicKeyBase64Url:
       rotated.authorityPublicKeyBase64Url }, continuity, nextAuthorityPublicKey: next.publicKey }),
   /checkpoint/);
+});
+
+test("authority reconciliation classifies only the exact prior or approved successor record", async t => {
+  const priorStore = await fixture(t), successorStore = await fixture(t);
+  const previousAuthority = generateKeyPairSync("ed25519"),
+    nextAuthority = generateKeyPairSync("ed25519");
+  const approval = approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: priorStore.record, privateKey: previousAuthority.privateKey });
+  const checkpoint = createInitialFinalityCustodianAuthorityCheckpoint({ approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: previousAuthority.publicKey });
+  const writable = await createFilesystemFinalityCustodianStore({
+    storePath: successorStore.storePath, expectedRecordHash: successorStore.record.recordHash });
+  await writable.compareAndSwap(null, HASH_A);
+  const successor = writable.record();
+  const transition = createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: priorStore.record, nextRecord: successor,
+    previousAuthorityPublicKey: previousAuthority.publicKey,
+    nextAuthorityPublicKey: nextAuthority.publicKey });
+  const continuity = assembleFinalityCustodianStoreContinuity({ transition,
+    previousAuthorityPublicKey: previousAuthority.publicKey,
+    nextAuthorityPublicKey: nextAuthority.publicKey,
+    authorization: signFinalityCustodianStoreContinuity(
+      transition, "authorization", previousAuthority.privateKey),
+    acceptance: signFinalityCustodianStoreContinuity(
+      transition, "acceptance", nextAuthority.privateKey) });
+
+  const before = await reconcileFinalityCustodianAuthorityStoreRecord({
+    storePath: priorStore.storePath, checkpoint, continuity,
+    nextAuthorityPublicKey: nextAuthority.publicKey });
+  assert.equal(before.status, "prior-record-observed");
+  assert.equal(before.observedRecordHash, priorStore.record.recordHash);
+  const after = await reconcileFinalityCustodianAuthorityStoreRecord({
+    storePath: successorStore.storePath, checkpoint, continuity,
+    nextAuthorityPublicKey: nextAuthority.publicKey });
+  assert.equal(after.status, "successor-record-observed");
+  assert.equal(after.observedRecordHash, successor.recordHash);
+
+  await writable.compareAndSwap(HASH_A, HASH_B);
+  await assert.rejects(reconcileFinalityCustodianAuthorityStoreRecord({
+    storePath: successorStore.storePath, checkpoint, continuity,
+    nextAuthorityPublicKey: nextAuthority.publicKey }), /neither/);
+  await writeFile(`${priorStore.storePath}.lock`, "orphan\n", { mode: 0o600, flag: "wx" });
+  await assert.rejects(reconcileFinalityCustodianAuthorityStoreRecord({
+    storePath: priorStore.storePath, checkpoint, continuity,
+    nextAuthorityPublicKey: nextAuthority.publicKey }), /locked/);
 });

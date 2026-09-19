@@ -11,7 +11,9 @@ import {
   approveFinalityCustodianStoreRecord,
   assembleFinalityCustodianStoreContinuity,
   createFinalityCustodianStoreContinuityTransition,
+  createFilesystemFinalityCustodianStore,
   createInitialFinalityCustodianStoreRecord,
+  initializeFilesystemFinalityCustodianStore,
   signFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
 
@@ -108,6 +110,38 @@ test("offline CLI creates the exact initial checkpoint and advances key-only con
   assert.equal(next.transitionIndex, "1");
   assert.equal(next.previousCheckpointHash, retained.checkpointHash);
   assert.equal(next.record.recordHash, retained.record.recordHash);
+});
+
+test("offline CLI writes a canonical record reconciliation receipt", async t => {
+  const f = await fixture(t), storePath = join(f.root, "store.json"),
+    checkpointPath = join(f.root, "initial.json"), continuityPath = join(f.root, "continuity.json"),
+    receiptPath = join(f.root, "reconciliation.json");
+  await initializeFilesystemFinalityCustodianStore({ storePath, record: f.record,
+    expectedRecordHash: f.record.recordHash });
+  const store = await createFilesystemFinalityCustodianStore({ storePath,
+    expectedRecordHash: f.record.recordHash });
+  await store.compareAndSwap(null, "a".repeat(64));
+  const transition = createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: f.record, nextRecord: store.record(),
+    previousAuthorityPublicKey: f.previous.publicKey,
+    nextAuthorityPublicKey: f.next.publicKey });
+  const continuity = assembleFinalityCustodianStoreContinuity({ transition,
+    previousAuthorityPublicKey: f.previous.publicKey, nextAuthorityPublicKey: f.next.publicKey,
+    authorization: signFinalityCustodianStoreContinuity(
+      transition, "authorization", f.previous.privateKey),
+    acceptance: signFinalityCustodianStoreContinuity(
+      transition, "acceptance", f.next.privateKey) });
+  await json(continuityPath, continuity);
+  await execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
+    "--output", checkpointPath]);
+  const result = await execute(process.execPath, [CLI, "reconcile-record", "--store", storePath,
+    "--checkpoint", checkpointPath, "--continuity", continuityPath,
+    "--next-authority-public-key", f.nextKey, "--output", receiptPath]);
+  const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+  assert.equal(receipt.status, "successor-record-observed");
+  assert.equal(receipt.observedRecordHash, store.record().recordHash);
+  assert.equal(JSON.parse(result.stdout).status, receipt.status);
 });
 
 test("offline CLI refuses substitution, unsafe input and output overwrite", async t => {
