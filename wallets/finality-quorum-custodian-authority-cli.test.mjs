@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -305,4 +305,37 @@ test("offline CLI requires canonical owned absolute inputs", async t => {
     "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", join(f.root, "never-either.json")]), error => /absolute/.test(error.stderr));
+
+  const approvalAlias = join(f.root, "approval-hardlink.json");
+  await link(f.approvalPath, approvalAlias);
+  await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
+    "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
+    "--output", join(f.root, "never-hardlinked.json")]), error => /unsafe/.test(error.stderr));
+  await unlink(approvalAlias);
+
+  const keySymlink = join(f.root, "previous-symlink.pem");
+  await symlink(f.previousKey, keySymlink);
+  await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
+    "--deployment-id", DEPLOYMENT, "--authority-public-key", keySymlink,
+    "--output", join(f.root, "never-symlinked.json")]), error => /links/.test(error.stderr));
+
 });
+
+for (const attack of ["same-inode-rewrite", "pathname-replacement", "growth"]) {
+  test(`offline CLI rejects ${attack} during its bounded pinned read`, async t => {
+    const f = await fixture(t);
+    const loader = new URL("./fixtures/authority-input-race-loader.mjs", import.meta.url);
+    await assert.rejects(execute(process.execPath, ["--experimental-loader", loader.href,
+      CLI, "initial", "--approval", f.approvalPath,
+      "--expected-approval-sha256", f.approvalSha256,
+      "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
+      "--output", join(f.root, `never-${attack}.json`)], {
+      env: { ...process.env, BLOCH_AUTHORITY_RACE_TARGET: f.approvalPath,
+        BLOCH_AUTHORITY_RACE_ATTACK: attack },
+    }), error => attack === "growth"
+      ? /exceeds its size limit/.test(error.stderr)
+      : /file changed/.test(error.stderr));
+  });
+}

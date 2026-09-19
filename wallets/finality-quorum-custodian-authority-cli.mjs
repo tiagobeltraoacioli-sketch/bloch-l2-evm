@@ -48,35 +48,55 @@ function parse(args, expected) {
   return values;
 }
 
+async function readBounded(handle, maximum, description) {
+  const buffer = Buffer.alloc(maximum + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset > maximum) throw new Error(`${description} file exceeds its size limit`);
+  return buffer.subarray(0, offset);
+}
+
 async function readSafe(path, maximum, description, privateFile = false) {
   if (typeof path !== "string" || resolve(path) !== path) {
     throw new Error(`${description} path must be absolute`);
   }
   if (await realpath(path) !== path) throw new Error(`${description} path must not traverse links`);
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
-      before.size < 1 || before.size > maximum ||
-      (privateFile ? (before.mode & 0o077) !== 0 : (before.mode & 0o022) !== 0) ||
-      typeof process.getuid === "function" && before.uid !== process.getuid()) {
+  const before = await lstat(path, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
+      before.size < 1n || before.size > BigInt(maximum) ||
+      (privateFile ? (before.mode & 0o077n) !== 0n : (before.mode & 0o022n) !== 0n) ||
+      typeof process.getuid === "function" && before.uid !== BigInt(process.getuid())) {
     throw new Error(`${description} file is unsafe`);
   }
   const handle = await open(path, fsConstants.O_RDONLY | NOFOLLOW);
   try {
-    const actual = await handle.stat();
-    if (!actual.isFile() || actual.dev !== before.dev || actual.ino !== before.ino ||
-        actual.nlink !== 1 || actual.size !== before.size || actual.mode !== before.mode ||
-        actual.uid !== before.uid || actual.gid !== before.gid) {
+    const actual = await handle.stat({ bigint: true });
+    if (!actual.isFile() || actual.nlink !== 1n || actual.size < 1n ||
+        actual.size > BigInt(maximum) ||
+        (privateFile ? (actual.mode & 0o077n) !== 0n : (actual.mode & 0o022n) !== 0n) ||
+        typeof process.getuid === "function" && actual.uid !== BigInt(process.getuid()) ||
+        !sameFileSnapshot(before, actual)) {
       throw new Error(`${description} file changed`);
     }
-    const bytes = await handle.readFile();
-    const after = await handle.stat();
-    if (after.dev !== actual.dev || after.ino !== actual.ino || after.size !== actual.size ||
-        after.mtimeMs !== actual.mtimeMs || after.ctimeMs !== actual.ctimeMs ||
-        bytes.length !== after.size) {
+    const bytes = await readBounded(handle, maximum, description);
+    const after = await handle.stat({ bigint: true });
+    const namedAfter = await lstat(path, { bigint: true });
+    if (!sameFileSnapshot(actual, after) || !sameFileSnapshot(actual, namedAfter) ||
+        BigInt(bytes.length) !== after.size || await realpath(path) !== path) {
       throw new Error(`${description} file changed`);
     }
     return bytes;
   } finally { await handle.close(); }
+}
+
+function sameFileSnapshot(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
 async function readCanonicalJson(path, description) {

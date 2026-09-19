@@ -128,6 +128,11 @@ Inputs must be absolute, canonical, owned, single-link files without
 group/world write permission. Output uses exclusive creation, is synced before
 success and is never overwritten. Private keys additionally require owner-only
 permissions and are opened only by the `approve` or `sign-continuity` process.
+Each input read pins the complete integral inode snapshot (device, inode, mode,
+owner, group, link count, size, nanosecond mtime and ctime) before opening,
+through the bounded descriptor read, and against the final pathname. A hardlink,
+same-inode rewrite, permission change or pathname replacement therefore fails
+closed before the artifact is used.
 Before opening the authority private key, `approve` requires the record's exact
 `recordHash` from the independent control plane. This prevents a different
 internally valid store record from being substituted at the signing boundary.
