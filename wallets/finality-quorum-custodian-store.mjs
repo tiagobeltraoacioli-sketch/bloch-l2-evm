@@ -11,6 +11,8 @@ export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_APPROVAL_FORMAT =
   "bloch-l2-finality-custodian-store-approval-v1";
 export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT =
   "bloch-l2-finality-custodian-store-continuity-v1";
+export const BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_CHECKPOINT_FORMAT =
+  "bloch-l2-finality-custodian-authority-checkpoint-v1";
 
 const HASH = /^[0-9a-f]{64}$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
@@ -22,7 +24,11 @@ const CONTINUITY_TRANSITION_FIELDS = ["format", "deploymentId", "previousAuthori
   "nextAuthorityKeyId", "previousRecord", "nextRecord"];
 const CONTINUITY_SHARE_FIELDS = ["role", "keyId", "signature"];
 const CONTINUITY_FIELDS = ["format", "transition", "authorization", "acceptance"];
+const AUTHORITY_CHECKPOINT_FIELDS = ["format", "transitionIndex", "deploymentId", "authorityKeyId",
+  "authorityPublicKeyBase64Url", "record", "previousCheckpointHash", "checkpointHash"];
 const APPROVAL_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-STORE-APPROVAL-v1\0";
+const AUTHORITY_CHECKPOINT_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-AUTHORITY-CHECKPOINT-v1\0";
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 function exact(value, fields, message) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(message);
@@ -77,6 +83,33 @@ function approvalKey(value, privateKey) {
   const publicKey = privateKey ? createPublicKey(key) : key;
   const encoded = publicKey.export({ format: "der", type: "spki" });
   return { key, keyId: createHash("sha256").update(encoded).digest("hex") };
+}
+
+function authorityPublicKey(value) {
+  const authority = approvalKey(value, false);
+  const encoded = authority.key.export({ format: "der", type: "spki" });
+  if (encoded.length !== ED25519_SPKI_PREFIX.length + 32 ||
+      !encoded.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)) {
+    throw new Error("Finality custodian authority public key encoding is invalid");
+  }
+  return { ...authority,
+    publicKeyBase64Url: encoded.subarray(ED25519_SPKI_PREFIX.length).toString("base64url") };
+}
+
+function authorityPublicKeyFromRaw(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw new Error("Finality custodian authority checkpoint public key is invalid");
+  }
+  const raw = Buffer.from(value, "base64url");
+  if (raw.length !== 32 || raw.toString("base64url") !== value) {
+    throw new Error("Finality custodian authority checkpoint public key is invalid");
+  }
+  try {
+    return createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, raw]),
+      format: "der", type: "spki" });
+  } catch (cause) {
+    throw new Error("Finality custodian authority checkpoint public key is invalid", { cause });
+  }
 }
 
 function approvalBytes(deploymentId, authorityKeyId, record) {
@@ -213,6 +246,92 @@ export function verifyFinalityCustodianStoreContinuity({ continuity, expectedDep
     throw new Error("Finality custodian store continuity is not canonical");
   }
   return transition.nextRecord;
+}
+
+function authorityCheckpointBody(value) {
+  return Object.fromEntries(AUTHORITY_CHECKPOINT_FIELDS.slice(0, -1)
+    .map(field => [field, value[field]]));
+}
+
+function authorityCheckpointDigest(value) {
+  return createHash("sha256").update(AUTHORITY_CHECKPOINT_DOMAIN)
+    .update(JSON.stringify(value)).digest("hex");
+}
+
+function checkedAuthorityCheckpoint(value) {
+  exact(value, AUTHORITY_CHECKPOINT_FIELDS,
+    "Finality custodian authority checkpoint is invalid");
+  if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_CHECKPOINT_FORMAT ||
+      typeof value.transitionIndex !== "string" || !U64.test(value.transitionIndex) ||
+      BigInt(value.transitionIndex) > 0xffffffffffffffffn ||
+      typeof value.deploymentId !== "string" || !HASH.test(value.deploymentId) ||
+      value.deploymentId === "0".repeat(64) || typeof value.authorityKeyId !== "string" ||
+      !HASH.test(value.authorityKeyId) ||
+      value.previousCheckpointHash !== null && !HASH.test(value.previousCheckpointHash) ||
+      typeof value.checkpointHash !== "string" || !HASH.test(value.checkpointHash)) {
+    throw new Error("Finality custodian authority checkpoint is invalid");
+  }
+  const record = checkedRecord(value.record);
+  const authority = authorityPublicKey(authorityPublicKeyFromRaw(value.authorityPublicKeyBase64Url));
+  if (authority.keyId !== value.authorityKeyId ||
+      authorityCheckpointDigest(authorityCheckpointBody(value)) !== value.checkpointHash ||
+      (value.transitionIndex === "0") !== (value.previousCheckpointHash === null)) {
+    throw new Error("Finality custodian authority checkpoint is invalid");
+  }
+  return Object.freeze({ format: value.format, transitionIndex: value.transitionIndex,
+    deploymentId: value.deploymentId,
+    authorityKeyId: value.authorityKeyId,
+    authorityPublicKeyBase64Url: value.authorityPublicKeyBase64Url, record,
+    previousCheckpointHash: value.previousCheckpointHash, checkpointHash: value.checkpointHash });
+}
+
+function buildAuthorityCheckpoint(transitionIndex, deploymentId, publicKey, record,
+  previousCheckpointHash) {
+  const authority = authorityPublicKey(publicKey);
+  const body = { format: BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_CHECKPOINT_FORMAT, transitionIndex,
+    deploymentId, authorityKeyId: authority.keyId,
+    authorityPublicKeyBase64Url: authority.publicKeyBase64Url, record: checkedRecord(record),
+    previousCheckpointHash };
+  return checkedAuthorityCheckpoint({ ...body,
+    checkpointHash: authorityCheckpointDigest(body) });
+}
+
+/** Creates the first independently retainable authority tuple after verifying
+ * the offline approval. The returned public checkpoint contains no secret. */
+export function createInitialFinalityCustodianAuthorityCheckpoint({ approval,
+  expectedDeploymentId, authorityPublicKey: publicKey } = {}) {
+  const record = verifyFinalityCustodianStoreApproval({ approval, expectedDeploymentId,
+    authorityPublicKey: publicKey });
+  if (record.generation !== "0") {
+    throw new Error("Finality custodian initial authority checkpoint is not generation zero");
+  }
+  return buildAuthorityCheckpoint("0", expectedDeploymentId, publicKey, record, null);
+}
+
+/** Verifies a dual-signed transition against one exact retained tuple and
+ * derives its only canonical successor. */
+export function advanceFinalityCustodianAuthorityCheckpoint({ checkpoint, continuity,
+  nextAuthorityPublicKey } = {}) {
+  const previous = checkedAuthorityCheckpoint(checkpoint);
+  const previousPublicKey = authorityPublicKeyFromRaw(previous.authorityPublicKeyBase64Url);
+  const nextRecord = verifyFinalityCustodianStoreContinuity({ continuity,
+    expectedDeploymentId: previous.deploymentId, expectedPreviousRecord: previous.record,
+    previousAuthorityPublicKey: previousPublicKey, nextAuthorityPublicKey });
+  const nextIndex = BigInt(previous.transitionIndex) + 1n;
+  if (nextIndex > 0xffffffffffffffffn) {
+    throw new Error("Finality custodian authority checkpoint transition index exhausted");
+  }
+  return buildAuthorityCheckpoint(nextIndex.toString(), previous.deploymentId,
+    nextAuthorityPublicKey, nextRecord, previous.checkpointHash);
+}
+
+/** Opens the local durability store only after validating the complete
+ * independently retained authority tuple. */
+export async function createAuthorityCheckpointFilesystemFinalityCustodianStore({ storePath,
+  checkpoint } = {}) {
+  const retained = checkedAuthorityCheckpoint(checkpoint);
+  return createFilesystemFinalityCustodianStore({ storePath,
+    expectedRecordHash: retained.record.recordHash });
 }
 
 export function createInitialFinalityCustodianStoreRecord({ stateHash = null } = {}) {

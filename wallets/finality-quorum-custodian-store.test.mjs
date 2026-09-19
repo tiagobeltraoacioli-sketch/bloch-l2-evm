@@ -7,12 +7,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   approveFinalityCustodianStoreRecord,
+  advanceFinalityCustodianAuthorityCheckpoint,
   assembleFinalityCustodianStoreContinuity,
   createApprovedFilesystemFinalityCustodianStore,
   createContinuityApprovedFilesystemFinalityCustodianStore,
+  createAuthorityCheckpointFilesystemFinalityCustodianStore,
   createFilesystemFinalityCustodianStore,
   createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianStoreRecord,
+  createInitialFinalityCustodianAuthorityCheckpoint,
   initializeApprovedFilesystemFinalityCustodianStore,
   initializeFilesystemFinalityCustodianStore,
   inspectFilesystemFinalityCustodianStore,
@@ -174,4 +177,42 @@ test("dual-signed continuity binds prior authority, next authority and exact rec
   assert.throws(() => createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
     previousRecord: advanced, nextRecord: advanced, previousAuthorityPublicKey: prior.publicKey,
     nextAuthorityPublicKey: prior.publicKey }), /not an advance/);
+});
+
+test("one canonical authority checkpoint retains deployment key and record continuity", async t => {
+  const f = await fixture(t), prior = generateKeyPairSync("ed25519"),
+    next = generateKeyPairSync("ed25519"), substituted = generateKeyPairSync("ed25519");
+  const approval = approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: f.record, privateKey: prior.privateKey });
+  const initial = createInitialFinalityCustodianAuthorityCheckpoint({ approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: prior.publicKey });
+  assert.equal(initial.transitionIndex, "0");
+  assert.equal(initial.previousCheckpointHash, null);
+  assert.equal(initial.record.recordHash, f.record.recordHash);
+
+  const transition = createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: f.record, nextRecord: f.record, previousAuthorityPublicKey: prior.publicKey,
+    nextAuthorityPublicKey: next.publicKey });
+  const continuity = assembleFinalityCustodianStoreContinuity({ transition,
+    previousAuthorityPublicKey: prior.publicKey, nextAuthorityPublicKey: next.publicKey,
+    authorization: signFinalityCustodianStoreContinuity(transition, "authorization", prior.privateKey),
+    acceptance: signFinalityCustodianStoreContinuity(transition, "acceptance", next.privateKey) });
+  const rotated = advanceFinalityCustodianAuthorityCheckpoint({ checkpoint: initial, continuity,
+    nextAuthorityPublicKey: next.publicKey });
+  assert.equal(rotated.transitionIndex, "1");
+  assert.equal(rotated.previousCheckpointHash, initial.checkpointHash);
+  assert.equal(rotated.record.recordHash, initial.record.recordHash);
+  const store = await createAuthorityCheckpointFilesystemFinalityCustodianStore({
+    storePath: f.storePath, checkpoint: rotated });
+  assert.equal(await store.load(), null);
+
+  assert.throws(() => advanceFinalityCustodianAuthorityCheckpoint({ checkpoint: initial, continuity,
+    nextAuthorityPublicKey: substituted.publicKey }), /share/);
+  assert.throws(() => advanceFinalityCustodianAuthorityCheckpoint({
+    checkpoint: { ...initial, deploymentId: "e".repeat(64) }, continuity,
+    nextAuthorityPublicKey: next.publicKey }), /checkpoint/);
+  assert.throws(() => advanceFinalityCustodianAuthorityCheckpoint({
+    checkpoint: { ...initial, authorityPublicKeyBase64Url:
+      rotated.authorityPublicKeyBase64Url }, continuity, nextAuthorityPublicKey: next.publicKey }),
+  /checkpoint/);
 });

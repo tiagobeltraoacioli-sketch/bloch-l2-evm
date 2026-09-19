@@ -43,6 +43,20 @@ record. The verified next record and public key must then be retained in the
 independent operator control plane; the local file remains only a durability
 mechanism, not the anti-rollback authority.
 
+`createInitialFinalityCustodianAuthorityCheckpoint` and
+`advanceFinalityCustodianAuthorityCheckpoint` make that retained input one
+canonical public object instead of two loosely associated values. It binds the
+deployment ID, exact Ed25519 public key, exact store record, a separate
+monotonic transition index, the previous checkpoint hash and its own hash.
+The separate index means a key-only rotation at an unchanged store record is
+still an observable authority transition. Opening through
+`createAuthorityCheckpointFilesystemFinalityCustodianStore` validates the
+whole object before trusting its record hash. The checkpoint must be committed
+atomically in an independent monotonic or append-only control plane before the
+new authority is accepted; keeping it beside the store is not rollback
+protection, and supplying an older internally valid checkpoint validates the
+older state by design.
+
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an
 independent CAS anchor before the transport receives a frame. Only a valid,
