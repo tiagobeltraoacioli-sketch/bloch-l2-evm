@@ -118,6 +118,10 @@ node wallets/finality-attestation-cli.mjs sign \
 node wallets/finality-attestation-cli.mjs verify \
   --public-key finality-ed25519-public.pem \
   --protocol bloch-native-checkpoint-v1 --input finality-envelope.json
+node wallets/finality-attestation-cli.mjs verify-advance \
+  --public-key finality-ed25519-public.pem \
+  --protocol bloch-native-checkpoint-v1 --input finality-envelope.json \
+  --store retained-finality-state.json --expected-state-hash none
 ```
 
 Signing refuses group/world-readable, linked or non-regular private-key files
@@ -125,6 +129,20 @@ and creates the envelope once with read-only permissions. This is release
 tooling, not a finality oracle: the offline operator must construct the payload
 only after independently validating native settlement and must protect the key
 outside the L2 RPC and web application failure domains.
+
+`verify-advance` additionally verifies the envelope and atomically creates or
+advances a protected checkpoint state. Each successful invocation prints a
+`stateHash`; the next invocation must receive that exact value through
+`--expected-state-hash`. It rejects a missing or substituted external anchor,
+non-increasing height, replay, same-height equivocation, authority/identity
+changes, a corrupt or writable state file, an unsafe writable/symlinked store
+directory, and concurrent writers. The update
+uses an exclusive lock, a synced temporary file, atomic rename and directory
+sync. `none` is valid only for the first checkpoint. Retain the printed hash in
+an independent privileged or append-only system before accepting the next
+advance. A file and hash kept on the same rollback-capable disk are not an
+anti-rollback boundary; the CLI does not replace HSM-backed signing policy,
+native-finality verification or replicated witness consensus.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
