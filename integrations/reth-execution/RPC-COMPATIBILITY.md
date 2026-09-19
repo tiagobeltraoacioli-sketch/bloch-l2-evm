@@ -108,6 +108,24 @@ reference. Its caller still has to operate an independent attestor whose signing
 policy derives from real native settlement; the helper intentionally contains no
 private key and treats its transport callback as untrusted.
 
+The companion offline CLI uses the same canonical payload bytes and verifier:
+
+```sh
+chmod 600 finality-ed25519-private.pem
+node wallets/finality-attestation-cli.mjs sign \
+  --private-key finality-ed25519-private.pem \
+  --input finality-payload.json --output finality-envelope.json
+node wallets/finality-attestation-cli.mjs verify \
+  --public-key finality-ed25519-public.pem \
+  --protocol bloch-native-checkpoint-v1 --input finality-envelope.json
+```
+
+Signing refuses group/world-readable, linked or non-regular private-key files
+and creates the envelope once with read-only permissions. This is release
+tooling, not a finality oracle: the offline operator must construct the payload
+only after independently validating native settlement and must protect the key
+outside the L2 RPC and web application failure domains.
+
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
 by the tested client, consistently with the Reth header traits. Reconstructing an

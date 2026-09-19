@@ -121,6 +121,11 @@ export function blochL2FinalitySigningBytes(value) {
   return encoder.encode(SIGNING_DOMAIN + canonicalPayload(payload));
 }
 
+/** Canonical JSON retained inside signed envelopes and audit archives. */
+export function canonicalBlochL2FinalityPayloadJson(value) {
+  return canonicalPayload(checkedPayload(value));
+}
+
 /**
  * Build the trusted boundary consumed by `createBlochL2Wallet`.
  * `getAttestation` may use any transport, but the returned object is untrusted
