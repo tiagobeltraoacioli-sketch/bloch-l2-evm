@@ -181,8 +181,11 @@ threshold, exact identity/checkpoint and canonical bundle hash behind an
 exclusive lock and expected external state hash, then uses file sync, atomic
 rename, directory sync and readback. It rejects authority changes, rollback,
 replay, same-height equivocation, corruption, unsafe paths and concurrent
-writers. Retain each returned `stateHash` and the referenced bundle outside the
-rollback domain. An orphan lock or ambiguous cleanup requires operator
+writers. The store directory and every path ancestor must resolve without
+symlinks, remain owned by the invoking account and deny group/world writes;
+state, temporary and lock files must also remain private, current-user-owned
+regular files with exactly one link. Retain each returned `stateHash` and the
+referenced bundle outside the rollback domain. An orphan lock or ambiguous cleanup requires operator
 inspection; automatic lock deletion or blind retry is intentionally absent.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.

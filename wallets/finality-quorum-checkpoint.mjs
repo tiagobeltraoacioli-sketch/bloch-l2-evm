@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
+import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { canonicalBlochL2FinalityPayloadJson } from "./finality-attestation.mjs";
 
 const FORMAT = "bloch-l2-finality-quorum-checkpoint-state-v1";
@@ -55,15 +55,19 @@ function checkedState(value) {
 }
 
 async function protectedDirectory(path) {
-  const directoryPath = dirname(path), before = await lstat(directoryPath);
+  const directoryPath = resolve(dirname(path)), before = await lstat(directoryPath);
   if (!before.isDirectory() || before.isSymbolicLink() || (before.mode & 0o022) !== 0 ||
       typeof process.getuid === "function" && before.uid !== process.getuid()) {
     throw new Error("Finality quorum checkpoint directory is unsafe");
   }
+  if (await realpath(directoryPath) !== directoryPath) {
+    throw new Error("Finality quorum checkpoint directory traverses a symlink");
+  }
   const handle = await open(directoryPath,
     fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_DIRECTORY ?? 0));
   const after = await handle.stat();
-  if (!after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino || (after.mode & 0o022) !== 0) {
+  if (!after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino || (after.mode & 0o022) !== 0 ||
+      typeof process.getuid === "function" && after.uid !== process.getuid()) {
     await handle.close();
     throw new Error("Finality quorum checkpoint directory changed");
   }
@@ -71,22 +75,27 @@ async function protectedDirectory(path) {
 }
 
 async function readState(path) {
-  let before;
-  try { before = await lstat(path); } catch (error) {
+  let handle;
+  try { handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw error;
   }
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o077) !== 0 ||
-      typeof process.getuid === "function" && before.uid !== process.getuid() ||
-      before.size <= 0 || before.size > MAX_FILE_BYTES) throw new Error("Finality quorum checkpoint file is unsafe");
-  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o077) !== 0 ||
+        typeof process.getuid === "function" && before.uid !== process.getuid() ||
+        before.size <= 0 || before.size > MAX_FILE_BYTES) {
+      throw new Error("Finality quorum checkpoint file is unsafe");
+    }
+    let parsed, encoded;
+    try { encoded = await handle.readFile("utf8"); parsed = JSON.parse(encoded); }
+    catch (cause) { throw new Error("Finality quorum checkpoint is not valid JSON", { cause }); }
     const after = await handle.stat();
     if (!after.isFile() || after.nlink !== 1 || after.dev !== before.dev || after.ino !== before.ino ||
-        after.size !== before.size || after.mtimeMs !== before.mtimeMs) throw new Error("Finality quorum checkpoint changed");
-    let parsed, encoded;
-    try { encoded = await readFile(handle, "utf8"); parsed = JSON.parse(encoded); }
-    catch (cause) { throw new Error("Finality quorum checkpoint is not valid JSON", { cause }); }
+        after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
+        (after.mode & 0o077) !== 0 || typeof process.getuid === "function" && after.uid !== process.getuid()) {
+      throw new Error("Finality quorum checkpoint changed while being read");
+    }
     if (encoded !== `${JSON.stringify(parsed)}\n`) throw new Error("Finality quorum checkpoint is not canonical");
     return checkedState(parsed);
   } finally { await handle.close(); }
@@ -95,27 +104,33 @@ async function readState(path) {
 async function replaceState(path, state, expectedHash) {
   const lockPath = `${path}.lock`, temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const directory = await protectedDirectory(path);
-  let lock, lockStat, lockInitialized = false, replacementAttempted = false, replacementVerified = false;
-  try { lock = await open(lockPath, "wx", 0o600); }
+  let lock, lockStat, temporaryStat, lockInitialized = false, replacementAttempted = false,
+    replacementVerified = false;
+  try { lock = await open(lockPath,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600); }
   catch (cause) { await directory.close(); throw new Error("Finality quorum checkpoint is locked; inspect before retrying", { cause }); }
   try {
     await lock.writeFile(`${JSON.stringify({ format: "bloch-l2-finality-quorum-checkpoint-lock-v1",
       pid: process.pid, token: randomBytes(32).toString("hex") })}\n`, "utf8");
     await lock.sync(); await directory.sync();
     lockStat = await lock.stat();
-    if (!lockStat.isFile() || lockStat.nlink !== 1 || (lockStat.mode & 0o077) !== 0) {
+    if (!lockStat.isFile() || lockStat.nlink !== 1 || (lockStat.mode & 0o077) !== 0 ||
+        typeof process.getuid === "function" && lockStat.uid !== process.getuid()) {
       throw new Error("Finality quorum checkpoint lock is unsafe");
     }
     lockInitialized = true;
     const observed = await readState(path);
     if ((observed?.stateHash ?? null) !== expectedHash) throw new Error("Finality quorum checkpoint changed before CAS");
-    const output = await open(temporary, "wx", 0o600);
+    const output = await open(temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
     try {
       await output.writeFile(`${JSON.stringify(state)}\n`, "utf8"); await output.sync();
       const stat = await output.stat();
-      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) {
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||
+          typeof process.getuid === "function" && stat.uid !== process.getuid()) {
         throw new Error("Finality quorum checkpoint temporary file is unsafe");
       }
+      temporaryStat = stat;
     }
     finally { await output.close(); }
     replacementAttempted = true;
@@ -126,17 +141,27 @@ async function replaceState(path, state, expectedHash) {
     replacementVerified = true;
   } finally {
     let cleanup = null;
-    try { await unlink(temporary); } catch (error) { if (error?.code !== "ENOENT") cleanup = error; }
+    try {
+      const linked = await lstat(temporary);
+      if (!temporaryStat || !linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1 ||
+          linked.dev !== temporaryStat.dev || linked.ino !== temporaryStat.ino ||
+          typeof process.getuid === "function" && linked.uid !== process.getuid()) {
+        throw new Error("Finality quorum checkpoint temporary path changed; refusing removal");
+      }
+      await unlink(temporary);
+    } catch (error) { if (error?.code !== "ENOENT") cleanup = error; }
     try {
       if (lockInitialized) {
         const pathStat = await lstat(lockPath), handleStat = await lock.stat();
-        if (!pathStat.isFile() || pathStat.nlink !== 1 || pathStat.dev !== lockStat.dev ||
-            pathStat.ino !== lockStat.ino || handleStat.dev !== lockStat.dev || handleStat.ino !== lockStat.ino) {
+        if (!pathStat.isFile() || pathStat.isSymbolicLink() || pathStat.nlink !== 1 ||
+            pathStat.dev !== lockStat.dev || pathStat.ino !== lockStat.ino ||
+            handleStat.dev !== lockStat.dev || handleStat.ino !== lockStat.ino ||
+            (pathStat.mode & 0o077) !== 0 ||
+            typeof process.getuid === "function" && pathStat.uid !== process.getuid()) {
           throw new Error("Finality quorum checkpoint lock changed; refusing removal");
         }
       }
     } catch (error) { cleanup ??= error; }
-    try { await lock.close(); } catch (error) { cleanup ??= error; }
     if (!lockInitialized) cleanup ??= new Error("Finality quorum checkpoint lock initialization is ambiguous");
     if (replacementAttempted && !replacementVerified) {
       cleanup ??= new Error("Finality quorum checkpoint replacement is ambiguous");
@@ -144,6 +169,7 @@ async function replaceState(path, state, expectedHash) {
     if (!cleanup) {
       try { await unlink(lockPath); await directory.sync(); } catch (error) { cleanup ??= error; }
     }
+    try { await lock.close(); } catch (error) { cleanup ??= error; }
     await directory.close().catch(error => { cleanup ??= error; });
     if (cleanup) throw new Error("Finality quorum checkpoint cleanup is ambiguous; inspect before retrying", { cause: cleanup });
   }

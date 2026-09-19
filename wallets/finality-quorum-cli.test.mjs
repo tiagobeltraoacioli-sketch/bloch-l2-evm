@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { canonicalBlochL2FinalityQuorumConfig } from "./finality-quorum.mjs";
@@ -187,4 +187,31 @@ test("quorum checkpoint rejects stale anchor, replay, corruption and an orphan l
   await assert.rejects(advance(files, higherBundle, store, first.stateHash, higherExpected),
     error => /locked; inspect before retrying/.test(error.stderr));
   assert.equal(JSON.parse(await readFile(store, "utf8")).stateHash, first.stateHash);
+});
+
+test("quorum checkpoint rejects symlinked ancestors and linked or exposed state", async t => {
+  const files = await fixture(t);
+  const a = await signEnvelope(files, 0), b = await signEnvelope(files, 1);
+  const input = await bundle(files, [a.envelope, b.envelope]);
+
+  const realParent = join(files.directory, "real-parent");
+  const aliasParent = join(files.directory, "alias-parent");
+  const realDirectory = join(realParent, "store");
+  await mkdir(realParent, { mode: 0o700 });
+  await mkdir(realDirectory, { mode: 0o700 });
+  await symlink(realParent, aliasParent, "dir");
+  await assert.rejects(advance(files, input, join(aliasParent, "store", "state.json"), "none"),
+    error => /traverses a symlink/.test(error.stderr));
+
+  const store = join(realDirectory, "state.json");
+  const first = JSON.parse((await advance(files, input, store, "none")).stdout);
+  const linked = join(realDirectory, "linked-state.json");
+  await link(store, linked);
+  await assert.rejects(advance(files, input, store, first.stateHash),
+    error => /file is unsafe/.test(error.stderr));
+  await rm(linked);
+
+  await chmod(store, 0o644);
+  await assert.rejects(advance(files, input, store, first.stateHash),
+    error => /file is unsafe/.test(error.stderr));
 });
