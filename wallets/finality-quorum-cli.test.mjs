@@ -14,12 +14,12 @@ const cli = new URL("./finality-quorum-cli.mjs", import.meta.url).pathname;
 const protocol = "bloch-native-checkpoint-v1";
 const spkiPrefixBytes = 12;
 
-function payload(headHash = "62") {
+function payload(headHash = "62", headNumber = "0x2") {
   const now = Math.floor(Date.now() / 1_000);
   return { format: "bloch-l2-finality-attestation-v1",
     identity: { format: "bloch-chain-identity-v1", chainId: "0xab163", domain: `0x${"71".repeat(32)}`,
       genesisHash: `0x${"42".repeat(32)}`, headerFormat: "bloch-node-header-v2-fixed-width" },
-    checkpoint: { format: "bloch-wallet-checkpoint-v1", headNumber: "0x2",
+    checkpoint: { format: "bloch-wallet-checkpoint-v1", headNumber,
       headHash: `0x${headHash.repeat(32)}`, stateRoot: `0x${"72".repeat(32)}` },
     issuedAt: now, expiresAt: now + 300, finalityProtocol: protocol,
     finalityReference: `0x${"91".repeat(32)}` };
@@ -44,12 +44,12 @@ async function fixture(t) {
   return { directory, signers, config, configPath, expected };
 }
 
-async function signEnvelope(files, index) {
-  const output = join(files.directory, `envelope-${index}.json`);
+async function signEnvelope(files, index, input = files.expected, suffix = "") {
+  const output = join(files.directory, `envelope-${index}${suffix}.json`);
   const signer = files.signers[index];
   const result = await execute(process.execPath, [cli, "sign", "--config", files.configPath,
     "--signer-id", signer.signerId, "--private-key", signer.privateKey,
-    "--input", files.expected, "--output", output]);
+    "--input", input, "--output", output]);
   return { output, result: JSON.parse(result.stdout), envelope: JSON.parse(await readFile(output, "utf8")) };
 }
 
@@ -64,6 +64,12 @@ async function bundle(files, envelopes, name = "bundle.json") {
 async function verify(files, input, expected = files.expected, config = files.configPath) {
   return execute(process.execPath, [cli, "verify", "--config", config, "--protocol", protocol,
     "--expected", expected, "--input", input]);
+}
+
+async function advance(files, input, store, retained, expected = files.expected) {
+  return execute(process.execPath, [cli, "verify-advance", "--config", files.configPath,
+    "--protocol", protocol, "--expected", expected, "--input", input, "--store", store,
+    "--expected-state-hash", retained]);
 }
 
 test("offline finality quorum signs with independent pinned keys and verifies threshold", async t => {
@@ -127,4 +133,58 @@ test("quorum config and signer key handling fail closed", async t => {
     "--signer-id", files.signers[0].signerId, "--private-key", files.signers[1].privateKey,
     "--input", files.expected, "--output", join(files.directory, "wrong-key.json")]),
   error => /does not match/.test(error.stderr));
+});
+
+test("verified quorum durably advances a checkpoint chained to an external state hash", async t => {
+  const files = await fixture(t), store = join(files.directory, "quorum-state.json");
+  const a = await signEnvelope(files, 0), b = await signEnvelope(files, 1);
+  const firstBundle = await bundle(files, [a.envelope, b.envelope], "first-bundle.json");
+  const first = JSON.parse((await advance(files, firstBundle, store, "none")).stdout);
+  assert.equal(first.advanced, true);
+  assert.equal(first.generation, "1");
+  assert.equal(first.headNumber, "0x2");
+  assert.match(first.stateHash, /^[0-9a-f]{64}$/);
+  assert.match(first.bundleHash, /^[0-9a-f]{64}$/);
+  assert.equal((await stat(store)).mode & 0o777, 0o600);
+  const firstState = JSON.parse(await readFile(store, "utf8"));
+  assert.equal(firstState.previousStateHash, null);
+  assert.equal(firstState.stateHash, first.stateHash);
+
+  const nextExpected = join(files.directory, "next-payload.json");
+  await writeFile(nextExpected, JSON.stringify(payload("63", "0x3")));
+  const nextA = await signEnvelope(files, 0, nextExpected, "-next");
+  const nextB = await signEnvelope(files, 1, nextExpected, "-next");
+  const nextBundle = await bundle(files, [nextB.envelope, nextA.envelope], "next-bundle.json");
+  const second = JSON.parse((await advance(files, nextBundle, store, first.stateHash, nextExpected)).stdout);
+  assert.equal(second.generation, "2");
+  assert.equal(second.headNumber, "0x3");
+  const secondState = JSON.parse(await readFile(store, "utf8"));
+  assert.equal(secondState.previousStateHash, first.stateHash);
+  assert.equal(secondState.stateHash, second.stateHash);
+});
+
+test("quorum checkpoint rejects stale anchor, replay, corruption and an orphan lock", async t => {
+  const files = await fixture(t), store = join(files.directory, "quorum-state.json");
+  const a = await signEnvelope(files, 0), b = await signEnvelope(files, 1);
+  const input = await bundle(files, [a.envelope, b.envelope]);
+  const first = JSON.parse((await advance(files, input, store, "none")).stdout);
+  await assert.rejects(advance(files, input, store, "0".repeat(64)),
+    error => /externally retained state hash/.test(error.stderr));
+  await assert.rejects(advance(files, input, store, first.stateHash),
+    error => /replay or same-height equivocation/.test(error.stderr));
+
+  const retained = JSON.parse(await readFile(store, "utf8"));
+  await writeFile(store, `${JSON.stringify({ ...retained, bundleHash: "f".repeat(64) })}\n`, { mode: 0o600 });
+  await assert.rejects(advance(files, input, store, first.stateHash),
+    error => /state is invalid/.test(error.stderr));
+  await writeFile(store, `${JSON.stringify(retained)}\n`, { mode: 0o600 });
+  await writeFile(`${store}.lock`, "operator inspection required\n", { mode: 0o600 });
+  const higherExpected = join(files.directory, "higher-payload.json");
+  await writeFile(higherExpected, JSON.stringify(payload("64", "0x4")));
+  const higherA = await signEnvelope(files, 0, higherExpected, "-higher");
+  const higherB = await signEnvelope(files, 1, higherExpected, "-higher");
+  const higherBundle = await bundle(files, [higherA.envelope, higherB.envelope], "higher-bundle.json");
+  await assert.rejects(advance(files, higherBundle, store, first.stateHash, higherExpected),
+    error => /locked; inspect before retrying/.test(error.stderr));
+  assert.equal(JSON.parse(await readFile(store, "utf8")).stateHash, first.stateHash);
 });

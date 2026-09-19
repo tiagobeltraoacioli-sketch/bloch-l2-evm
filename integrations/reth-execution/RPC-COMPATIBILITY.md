@@ -161,6 +161,10 @@ node wallets/finality-quorum-cli.mjs sign \
 node wallets/finality-quorum-cli.mjs verify \
   --config finality-quorum.json --protocol bloch-native-checkpoint-v1 \
   --expected finality-payload.json --input finality-quorum-bundle.json
+node wallets/finality-quorum-cli.mjs verify-advance \
+  --config finality-quorum.json --protocol bloch-native-checkpoint-v1 \
+  --expected finality-payload.json --input finality-quorum-bundle.json \
+  --store retained-quorum-state.json --expected-state-hash none
 ```
 
 The bundle verifier rejects unknown or duplicate signers, threshold shortfall,
@@ -171,7 +175,15 @@ failure domain. Threshold signatures reduce single-key compromise risk; they
 do not prove that the signers are independent, that their native-finality
 policy is correct, or that the bundle was globally published. Key/config
 rotation and durable quorum checkpoint advancement remain explicit operational
-steps rather than implicit browser authority.
+steps rather than implicit browser authority. The `verify-advance` form performs
+that advancement after threshold verification. It stores the quorum ID,
+threshold, exact identity/checkpoint and canonical bundle hash behind an
+exclusive lock and expected external state hash, then uses file sync, atomic
+rename, directory sync and readback. It rejects authority changes, rollback,
+replay, same-height equivocation, corruption, unsafe paths and concurrent
+writers. Retain each returned `stateHash` and the referenced bundle outside the
+rollback domain. An orphan lock or ambiguous cleanup requires operator
+inspection; automatic lock deletion or blind retry is intentionally absent.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

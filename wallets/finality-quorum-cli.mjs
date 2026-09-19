@@ -13,6 +13,7 @@ import {
   canonicalBlochL2FinalityQuorumPayloadJson,
   createEd25519FinalityQuorumVerifier,
 } from "./finality-quorum.mjs";
+import { advanceFinalityQuorumCheckpoint } from "./finality-quorum-checkpoint.mjs";
 
 const MAX_JSON_BYTES = 512 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
@@ -21,7 +22,8 @@ const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 function usage() {
   return `Usage:
   node wallets/finality-quorum-cli.mjs sign --config <quorum.json> --signer-id <id> --private-key <ed25519-private.pem> --input <payload.json> --output <envelope.json>
-  node wallets/finality-quorum-cli.mjs verify --config <quorum.json> --protocol <protocol> --expected <payload.json> --input <bundle.json>`;
+  node wallets/finality-quorum-cli.mjs verify --config <quorum.json> --protocol <protocol> --expected <payload.json> --input <bundle.json>
+  node wallets/finality-quorum-cli.mjs verify-advance --config <quorum.json> --protocol <protocol> --expected <payload.json> --input <bundle.json> --store <state.json> --expected-state-hash <none|sha256>`;
 }
 
 function parse(args, expected) {
@@ -84,6 +86,16 @@ async function writeNewJson(path, value) {
   finally { await handle.close(); }
 }
 
+function canonicalBundle(bundle) {
+  const envelopes = bundle.envelopes.map(envelope => ({
+    format: envelope.format, quorumId: envelope.quorumId, signerId: envelope.signerId,
+    keyId: envelope.keyId,
+    payload: JSON.parse(canonicalBlochL2FinalityQuorumPayloadJson(envelope.payload)),
+    signature: envelope.signature,
+  })).sort((left, right) => left.signerId < right.signerId ? -1 : left.signerId > right.signerId ? 1 : 0);
+  return { format: bundle.format, quorumId: bundle.quorumId, envelopes };
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "sign") {
@@ -122,6 +134,31 @@ async function main() {
       finalityProtocol: values["--protocol"], getBundle: async () => bundle });
     await verifier.verify(expected.identity, expected.checkpoint);
     console.log(JSON.stringify({ verified: true, quorumId: verifier.quorumId, threshold: verifier.threshold }));
+    return;
+  }
+  if (command === "verify-advance") {
+    const values = parse(args, ["--config", "--protocol", "--expected", "--input", "--store",
+      "--expected-state-hash"]);
+    const retained = values["--expected-state-hash"];
+    if (retained !== "none" && !/^[0-9a-f]{64}$/.test(retained)) {
+      throw new Error("Expected state hash must be none or SHA-256");
+    }
+    const config = await readJson(values["--config"]);
+    const expected = JSON.parse(canonicalBlochL2FinalityPayloadJson(await readJson(values["--expected"])));
+    if (expected.finalityProtocol !== values["--protocol"]) throw new Error("Expected payload protocol mismatch");
+    const bundle = await readJson(values["--input"]);
+    const verifier = await createEd25519FinalityQuorumVerifier({ config,
+      finalityProtocol: values["--protocol"], getBundle: async () => bundle });
+    await verifier.verify(expected.identity, expected.checkpoint);
+    const bundleHash = createHash("sha256").update("BLOCH-L2-FINALITY-QUORUM-BUNDLE-v1\0")
+      .update(JSON.stringify(canonicalBundle(bundle))).digest("hex");
+    const state = await advanceFinalityQuorumCheckpoint({ storePath: values["--store"],
+      expectedStateHash: retained === "none" ? null : retained, quorumId: verifier.quorumId,
+      threshold: verifier.threshold, finalityProtocol: values["--protocol"], identity: expected.identity,
+      checkpoint: expected.checkpoint, bundleHash });
+    console.log(JSON.stringify({ advanced: true, quorumId: verifier.quorumId, threshold: verifier.threshold,
+      generation: state.generation, stateHash: state.stateHash, headNumber: state.checkpoint.headNumber,
+      bundleHash }));
     return;
   }
   throw new Error(usage());
