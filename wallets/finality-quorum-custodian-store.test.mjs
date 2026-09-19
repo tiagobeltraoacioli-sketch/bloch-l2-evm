@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { chmod, link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   approveFinalityCustodianStoreRecord,
   advanceFinalityCustodianAuthorityCheckpoint,
@@ -27,6 +30,7 @@ import {
 
 const HASH_A = "a".repeat(64), HASH_B = "b".repeat(64);
 const DEPLOYMENT = "d".repeat(64);
+const execute = promisify(execFile);
 
 async function fixture(t, stateHash = null) {
   const root = await mkdtemp(join(tmpdir(), "bloch-l2-custodian-store-"));
@@ -104,6 +108,23 @@ test("store rejects corruption, exposed files, links and orphan locks", async t 
   await writeFile(corrupt.storePath, "{}\n", { mode: 0o600 });
   await assert.rejects(inspectFilesystemFinalityCustodianStore(corrupt.storePath), /record is invalid/);
 });
+
+for (const attack of ["same-inode-rewrite", "pathname-replacement", "growth"]) {
+  test(`store rejects ${attack} during its bounded pinned read`, async t => {
+    const f = await fixture(t);
+    const loader = new URL("./fixtures/custodian-store-race-loader.mjs", import.meta.url);
+    const runner = new URL("./fixtures/inspect-custodian-store.mjs", import.meta.url);
+    const result = await execute(process.execPath,
+      ["--experimental-loader", loader.href, fileURLToPath(runner), f.storePath], {
+        env: { ...process.env, BLOCH_STORE_RACE_TARGET: f.storePath,
+          BLOCH_STORE_RACE_ATTACK: attack },
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 64 * 1024,
+      });
+    assert.equal(result.stdout, "rejected custodian store mutation\n");
+  });
+}
 
 test("offline approval binds deployment, authority and exact store record", async t => {
   const root = await mkdtemp(join(tmpdir(), "bloch-l2-custodian-approved-"));

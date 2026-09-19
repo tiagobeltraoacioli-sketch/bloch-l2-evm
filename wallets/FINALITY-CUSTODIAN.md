@@ -22,6 +22,10 @@ independent backup or replicated witness of the retained record hash.
 Loads and conflict observations take the same interprocess lock as transitions
 and compare the exact retained record hash; a stale process therefore fails
 closed instead of returning a cached custodian head.
+Store reads are bounded to the protocol maximum and pin the complete file and
+parent-directory inode snapshots through EOF and final pathname resolution.
+Concurrent growth, same-inode rewrite, pathname replacement, or directory
+substitution fails closed before a record is returned.
 
 For machine-checked startup approval, the store also supports an Ed25519-signed
 envelope over the complete canonical record, an independently assigned 32-byte

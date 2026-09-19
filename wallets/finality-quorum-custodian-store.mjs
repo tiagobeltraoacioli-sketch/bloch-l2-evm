@@ -424,8 +424,8 @@ export function createInitialFinalityCustodianStoreRecord({ stateHash = null } =
 }
 
 async function protectedDirectory(path) {
-  if (typeof path !== "string" || !path) throw new Error("Finality custodian store path is invalid");
-  const directoryPath = resolve(dirname(path)), before = await lstat(directoryPath);
+  path = absoluteStorePath(path);
+  const directoryPath = dirname(path), before = await lstat(directoryPath);
   if (!before.isDirectory() || before.isSymbolicLink() || (before.mode & 0o022) !== 0 ||
       typeof process.getuid === "function" && before.uid !== process.getuid() ||
       await realpath(directoryPath) !== directoryPath) {
@@ -443,21 +443,42 @@ async function protectedDirectory(path) {
 }
 
 async function readRecord(path) {
+  path = absoluteStorePath(path);
   const directory = await protectedDirectory(path);
   let handle;
   try {
+    const directoryPath = dirname(path);
+    const directoryBefore = await directory.stat({ bigint: true });
     handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const before = await handle.stat();
-    if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o077) !== 0 || before.size < 2 ||
-        before.size > MAX_FILE_BYTES || typeof process.getuid === "function" && before.uid !== process.getuid()) {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || (before.mode & 0o077n) !== 0n ||
+        before.size < 2n || before.size > BigInt(MAX_FILE_BYTES) ||
+        typeof process.getuid === "function" && before.uid !== BigInt(process.getuid())) {
       throw new Error("Finality custodian store file is unsafe");
     }
-    const encoded = await handle.readFile("utf8"), after = await handle.stat();
-    if (!after.isFile() || after.nlink !== 1 || after.dev !== before.dev || after.ino !== before.ino ||
-        after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
-        (after.mode & 0o077) !== 0 || typeof process.getuid === "function" && after.uid !== process.getuid()) {
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_FILE_BYTES) {
+      throw new Error("Finality custodian store exceeds its size limit");
+    }
+    const after = await handle.stat({ bigint: true });
+    const namedAfter = await lstat(path, { bigint: true });
+    const directoryAfter = await directory.stat({ bigint: true });
+    const namedDirectoryAfter = await lstat(directoryPath, { bigint: true });
+    if (!after.isFile() || after.nlink !== 1n || (after.mode & 0o077n) !== 0n ||
+        typeof process.getuid === "function" && after.uid !== BigInt(process.getuid()) ||
+        !sameIntegralSnapshot(before, after) || !sameIntegralSnapshot(after, namedAfter) ||
+        BigInt(offset) !== after.size || !sameIntegralSnapshot(directoryBefore, directoryAfter) ||
+        !sameIntegralSnapshot(directoryAfter, namedDirectoryAfter) ||
+        await realpath(directoryPath) !== directoryPath) {
       throw new Error("Finality custodian store changed while being read");
     }
+    const encoded = buffer.subarray(0, offset).toString("utf8");
     let parsed;
     try { parsed = JSON.parse(encoded); } catch (cause) {
       throw new Error("Finality custodian store is not valid JSON", { cause });
@@ -470,7 +491,19 @@ async function readRecord(path) {
   }
 }
 
+function sameIntegralSnapshot(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function absoluteStorePath(path) {
+  if (typeof path !== "string" || !path) throw new Error("Finality custodian store path is invalid");
+  return resolve(path);
+}
+
 async function lockPresent(path) {
+  path = absoluteStorePath(path);
   return lstat(`${path}.lock`).then(() => true, error => {
     if (error?.code === "ENOENT") return false;
     throw error;
@@ -478,6 +511,7 @@ async function lockPresent(path) {
 }
 
 async function readUnderLock(path) {
+  path = absoluteStorePath(path);
   const lockPath = `${path}.lock`, directory = await protectedDirectory(path);
   let lock, lockStat, result, failure = null;
   try {
@@ -517,6 +551,7 @@ async function readUnderLock(path) {
 
 export async function initializeFilesystemFinalityCustodianStore({ storePath, record,
   expectedRecordHash } = {}) {
+  storePath = absoluteStorePath(storePath);
   const initial = checkedRecord(record);
   if (initial.generation !== "0" || initial.recordHash !== expectedRecordHash) {
     throw new Error("Finality custodian store does not match its externally approved initial record");
@@ -544,6 +579,7 @@ export async function initializeApprovedFilesystemFinalityCustodianStore({ store
 }
 
 export async function inspectFilesystemFinalityCustodianStore(storePath) {
+  storePath = absoluteStorePath(storePath);
   const record = await readRecord(storePath);
   return Object.freeze({ ...record, lockPresent: await lockPresent(storePath) });
 }
@@ -557,6 +593,7 @@ function nextRecord(current, stateHash) {
 }
 
 async function replaceRecord(path, current, next) {
+  path = absoluteStorePath(path);
   const lockPath = `${path}.lock`, temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const directory = await protectedDirectory(path);
   let lock, lockStat, temporaryStat, replacementVerified = false, safeFailure = false;
@@ -623,6 +660,7 @@ async function replaceRecord(path, current, next) {
 }
 
 export async function createFilesystemFinalityCustodianStore({ storePath, expectedRecordHash } = {}) {
+  storePath = absoluteStorePath(storePath);
   checkedHash(expectedRecordHash, false, "Finality custodian externally retained record hash is invalid");
   if (await lockPresent(storePath)) throw new Error("Finality custodian store is locked; inspect before retrying");
   let retained = await readRecord(storePath);
