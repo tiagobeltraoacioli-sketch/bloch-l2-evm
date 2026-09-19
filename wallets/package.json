@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test bloch-l2.test.mjs",
+    "test:status": "node --test devnode-status.test.mjs",
     "test:devnode": "node --test devnode-ethers.test.mjs",
     "test:browser": "node --test browser/devnode-metamask.test.mjs",
     "test:solidity": "node --test devnode-solidity.test.mjs",

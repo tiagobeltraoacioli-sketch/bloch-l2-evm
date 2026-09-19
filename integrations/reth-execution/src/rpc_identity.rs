@@ -64,7 +64,13 @@ pub fn chain_identity_rpc(spec: Arc<BlochChainSpec>) -> RpcModule<()> {
     let mut module = RpcModule::new(());
     module
         .register_method("bloch_chainIdentity", move |params, _, _| {
-            let _: () = params.parse()?;
+            if !matches!(params.as_str(), None | Some("[]")) {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "chain identity accepts no parameters",
+                    None::<()>,
+                ));
+            }
             Ok::<_, ErrorObjectOwned>(identity.clone())
         })
         .expect("the static identity method name is unique in a new module");

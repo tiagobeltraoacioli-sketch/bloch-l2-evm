@@ -203,7 +203,7 @@ export function createBlochL2Wallet(provider, {
     if (block.number !== "0x0" || checkedHash(block.hash, "RPC genesis hash") !== genesis) {
       throw new Error("Wallet is not connected to the configured Bloch L2 genesis");
     }
-    const reportedIdentity = await request({ method: "bloch_chainIdentity", params: [] });
+    const reportedIdentity = await request({ method: "bloch_chainIdentity" });
     checkedIdentityResponse(reportedIdentity, identity);
     const challenge = freshChallenge();
     const reportedStatus = await request({ method: "bloch_chainStatus", params: [challenge] });
