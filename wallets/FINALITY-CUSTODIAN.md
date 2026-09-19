@@ -33,6 +33,16 @@ belongs on an offline/HSM review path, and the deployment ID and public key must
 not arrive with the local store. This approval authenticates operator intent;
 it does not make ordinary disk or colocated backups rollback-resistant.
 
+Approval-authority continuity is dual-signed and role-separated. A canonical
+transition binds the deployment, independently retained prior record and key,
+next record and next key. The prior key signs `authorization`; the next key
+signs `acceptance`; both are mandatory and use distinct signing domains. This
+supports a monotonic record advance, a key rotation at the exact same record,
+or both, while rejecting a no-op, downgrade, key substitution or stale prior
+record. The verified next record and public key must then be retained in the
+independent operator control plane; the local file remains only a durability
+mechanism, not the anti-rollback authority.
+
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an
 independent CAS anchor before the transport receives a frame. Only a valid,

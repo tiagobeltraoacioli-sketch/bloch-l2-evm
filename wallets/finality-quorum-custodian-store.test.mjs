@@ -7,12 +7,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   approveFinalityCustodianStoreRecord,
+  assembleFinalityCustodianStoreContinuity,
   createApprovedFilesystemFinalityCustodianStore,
+  createContinuityApprovedFilesystemFinalityCustodianStore,
   createFilesystemFinalityCustodianStore,
+  createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianStoreRecord,
   initializeApprovedFilesystemFinalityCustodianStore,
   initializeFilesystemFinalityCustodianStore,
   inspectFilesystemFinalityCustodianStore,
+  signFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
 
 const HASH_A = "a".repeat(64), HASH_B = "b".repeat(64);
@@ -126,4 +130,48 @@ test("offline approval binds deployment, authority and exact store record", asyn
     approval: currentApproval, expectedDeploymentId: DEPLOYMENT,
     authorityPublicKey: authority.publicKey });
   assert.equal(await store.load(), HASH_A);
+});
+
+test("dual-signed continuity binds prior authority, next authority and exact records", async t => {
+  const f = await fixture(t), prior = generateKeyPairSync("ed25519"), next = generateKeyPairSync("ed25519");
+  let store = await createFilesystemFinalityCustodianStore({ storePath: f.storePath,
+    expectedRecordHash: f.record.recordHash });
+  await store.compareAndSwap(null, HASH_A);
+  const advanced = store.record();
+  const transition = createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: f.record, nextRecord: advanced, previousAuthorityPublicKey: prior.publicKey,
+    nextAuthorityPublicKey: next.publicKey });
+  const authorization = signFinalityCustodianStoreContinuity(transition, "authorization",
+    prior.privateKey);
+  const acceptance = signFinalityCustodianStoreContinuity(transition, "acceptance", next.privateKey);
+  const continuity = assembleFinalityCustodianStoreContinuity({ transition,
+    previousAuthorityPublicKey: prior.publicKey, nextAuthorityPublicKey: next.publicKey,
+    authorization, acceptance });
+  store = await createContinuityApprovedFilesystemFinalityCustodianStore({ storePath: f.storePath,
+    continuity, expectedDeploymentId: DEPLOYMENT, expectedPreviousRecord: f.record,
+    previousAuthorityPublicKey: prior.publicKey, nextAuthorityPublicKey: next.publicKey });
+  assert.equal(await store.load(), HASH_A);
+
+  await assert.rejects(createContinuityApprovedFilesystemFinalityCustodianStore({ storePath: f.storePath,
+    continuity, expectedDeploymentId: "e".repeat(64), expectedPreviousRecord: f.record,
+    previousAuthorityPublicKey: prior.publicKey, nextAuthorityPublicKey: next.publicKey }), /retained/);
+  const substituted = generateKeyPairSync("ed25519");
+  await assert.rejects(createContinuityApprovedFilesystemFinalityCustodianStore({ storePath: f.storePath,
+    continuity, expectedDeploymentId: DEPLOYMENT, expectedPreviousRecord: f.record,
+    previousAuthorityPublicKey: prior.publicKey, nextAuthorityPublicKey: substituted.publicKey }), /share/);
+  assert.throws(() => signFinalityCustodianStoreContinuity(transition, "acceptance", prior.privateKey),
+    /does not match/);
+  const tampered = { ...continuity, transition: { ...continuity.transition,
+    deploymentId: "e".repeat(64) } };
+  await assert.rejects(createContinuityApprovedFilesystemFinalityCustodianStore({ storePath: f.storePath,
+    continuity: tampered, expectedDeploymentId: DEPLOYMENT, expectedPreviousRecord: f.record,
+    previousAuthorityPublicKey: prior.publicKey, nextAuthorityPublicKey: next.publicKey }), /retained/);
+
+  const keyOnly = createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: advanced, nextRecord: advanced, previousAuthorityPublicKey: prior.publicKey,
+    nextAuthorityPublicKey: next.publicKey });
+  assert.equal(keyOnly.nextRecord.recordHash, advanced.recordHash);
+  assert.throws(() => createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: advanced, nextRecord: advanced, previousAuthorityPublicKey: prior.publicKey,
+    nextAuthorityPublicKey: prior.publicKey }), /not an advance/);
 });

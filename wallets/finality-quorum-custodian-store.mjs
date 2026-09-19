@@ -9,6 +9,8 @@ export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_FORMAT =
   "bloch-l2-finality-custodian-store-v1";
 export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_APPROVAL_FORMAT =
   "bloch-l2-finality-custodian-store-approval-v1";
+export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT =
+  "bloch-l2-finality-custodian-store-continuity-v1";
 
 const HASH = /^[0-9a-f]{64}$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
@@ -16,6 +18,10 @@ const U64 = /^(?:0|[1-9][0-9]{0,19})$/;
 const MAX_FILE_BYTES = 16 * 1024;
 const FIELDS = ["format", "generation", "stateHash", "previousRecordHash", "recordHash"];
 const APPROVAL_FIELDS = ["format", "deploymentId", "authorityKeyId", "record", "signature"];
+const CONTINUITY_TRANSITION_FIELDS = ["format", "deploymentId", "previousAuthorityKeyId",
+  "nextAuthorityKeyId", "previousRecord", "nextRecord"];
+const CONTINUITY_SHARE_FIELDS = ["role", "keyId", "signature"];
+const CONTINUITY_FIELDS = ["format", "transition", "authorization", "acceptance"];
 const APPROVAL_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-STORE-APPROVAL-v1\0";
 
 function exact(value, fields, message) {
@@ -116,6 +122,97 @@ export function verifyFinalityCustodianStoreApproval({ approval, expectedDeploym
     throw new Error("Finality custodian store approval signature is invalid");
   }
   return record;
+}
+
+function checkedContinuityTransition(value) {
+  exact(value, CONTINUITY_TRANSITION_FIELDS,
+    "Finality custodian store continuity transition is invalid");
+  if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT ||
+      typeof value.deploymentId !== "string" || !HASH.test(value.deploymentId) ||
+      value.deploymentId === "0".repeat(64) ||
+      typeof value.previousAuthorityKeyId !== "string" || !HASH.test(value.previousAuthorityKeyId) ||
+      typeof value.nextAuthorityKeyId !== "string" || !HASH.test(value.nextAuthorityKeyId)) {
+    throw new Error("Finality custodian store continuity transition is invalid");
+  }
+  const previousRecord = checkedRecord(value.previousRecord), nextRecord = checkedRecord(value.nextRecord);
+  const sameRecord = previousRecord.recordHash === nextRecord.recordHash;
+  if (sameRecord && value.previousAuthorityKeyId === value.nextAuthorityKeyId ||
+      !sameRecord && BigInt(nextRecord.generation) <= BigInt(previousRecord.generation)) {
+    throw new Error("Finality custodian store continuity transition is not an advance");
+  }
+  return Object.freeze({ format: value.format, deploymentId: value.deploymentId,
+    previousAuthorityKeyId: value.previousAuthorityKeyId, nextAuthorityKeyId: value.nextAuthorityKeyId,
+    previousRecord, nextRecord });
+}
+
+function continuityBytes(transition, role) {
+  return Buffer.from(`BLOCH-L2-FINALITY-CUSTODIAN-STORE-CONTINUITY-${role}-v1\0` +
+    JSON.stringify(transition), "utf8");
+}
+
+export function createFinalityCustodianStoreContinuityTransition({ deploymentId, previousRecord,
+  nextRecord, previousAuthorityPublicKey, nextAuthorityPublicKey } = {}) {
+  const previous = approvalKey(previousAuthorityPublicKey, false);
+  const next = approvalKey(nextAuthorityPublicKey, false);
+  return checkedContinuityTransition({ format: BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT,
+    deploymentId, previousAuthorityKeyId: previous.keyId, nextAuthorityKeyId: next.keyId,
+    previousRecord, nextRecord });
+}
+
+export function signFinalityCustodianStoreContinuity(transitionValue, role, privateKey) {
+  const transition = checkedContinuityTransition(transitionValue);
+  if (!['authorization', 'acceptance'].includes(role)) {
+    throw new Error("Finality custodian store continuity role is invalid");
+  }
+  const authority = approvalKey(privateKey, true);
+  const expected = role === "authorization" ? transition.previousAuthorityKeyId :
+    transition.nextAuthorityKeyId;
+  if (authority.keyId !== expected) {
+    throw new Error("Finality custodian store continuity signer does not match its role");
+  }
+  return Object.freeze({ role, keyId: authority.keyId,
+    signature: sign(null, continuityBytes(transition, role), authority.key).toString("base64url") });
+}
+
+function checkedContinuityShare(value, role, keyId, publicKey, transition) {
+  exact(value, CONTINUITY_SHARE_FIELDS, "Finality custodian store continuity share is invalid");
+  const authority = approvalKey(publicKey, false);
+  if (value.role !== role || value.keyId !== keyId || authority.keyId !== keyId ||
+      !verify(null, continuityBytes(transition, role), authority.key, decodedSignature(value.signature))) {
+    throw new Error("Finality custodian store continuity share is invalid");
+  }
+  return Object.freeze({ role: value.role, keyId: value.keyId, signature: value.signature });
+}
+
+export function assembleFinalityCustodianStoreContinuity({ transition: transitionValue,
+  previousAuthorityPublicKey, nextAuthorityPublicKey, authorization, acceptance } = {}) {
+  const transition = checkedContinuityTransition(transitionValue);
+  return Object.freeze({ format: BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT, transition,
+    authorization: checkedContinuityShare(authorization, "authorization",
+      transition.previousAuthorityKeyId, previousAuthorityPublicKey, transition),
+    acceptance: checkedContinuityShare(acceptance, "acceptance",
+      transition.nextAuthorityKeyId, nextAuthorityPublicKey, transition) });
+}
+
+export function verifyFinalityCustodianStoreContinuity({ continuity, expectedDeploymentId,
+  expectedPreviousRecord, previousAuthorityPublicKey, nextAuthorityPublicKey } = {}) {
+  exact(continuity, CONTINUITY_FIELDS, "Finality custodian store continuity is invalid");
+  if (continuity.format !== BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT) {
+    throw new Error("Finality custodian store continuity is invalid");
+  }
+  const transition = checkedContinuityTransition(continuity.transition);
+  const previous = checkedRecord(expectedPreviousRecord);
+  if (transition.deploymentId !== expectedDeploymentId ||
+      transition.previousRecord.recordHash !== previous.recordHash) {
+    throw new Error("Finality custodian store continuity does not match retained authority state");
+  }
+  const checked = assembleFinalityCustodianStoreContinuity({ transition,
+    previousAuthorityPublicKey, nextAuthorityPublicKey,
+    authorization: continuity.authorization, acceptance: continuity.acceptance });
+  if (JSON.stringify(checked) !== JSON.stringify(continuity)) {
+    throw new Error("Finality custodian store continuity is not canonical");
+  }
+  return transition.nextRecord;
 }
 
 export function createInitialFinalityCustodianStoreRecord({ stateHash = null } = {}) {
@@ -372,5 +469,13 @@ export async function createApprovedFilesystemFinalityCustodianStore({ storePath
   expectedDeploymentId, authorityPublicKey } = {}) {
   const record = verifyFinalityCustodianStoreApproval({ approval, expectedDeploymentId,
     authorityPublicKey });
+  return createFilesystemFinalityCustodianStore({ storePath, expectedRecordHash: record.recordHash });
+}
+
+export async function createContinuityApprovedFilesystemFinalityCustodianStore({ storePath,
+  continuity, expectedDeploymentId, expectedPreviousRecord, previousAuthorityPublicKey,
+  nextAuthorityPublicKey } = {}) {
+  const record = verifyFinalityCustodianStoreContinuity({ continuity, expectedDeploymentId,
+    expectedPreviousRecord, previousAuthorityPublicKey, nextAuthorityPublicKey });
   return createFilesystemFinalityCustodianStore({ storePath, expectedRecordHash: record.recordHash });
 }
