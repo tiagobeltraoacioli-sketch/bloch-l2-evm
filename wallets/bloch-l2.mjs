@@ -335,6 +335,36 @@ export function createBlochL2Wallet(provider, {
           (status.headHash !== observedHeadHash || status.stateRoot !== observedStateRoot)) {
         throw new Error("RPC canonical Bloch L2 head equivocated during this wallet session");
       }
+      if (headNumber > observedHeadNumber) {
+        const checkpointNumber = `0x${observedHeadNumber.toString(16)}`;
+        try {
+          const ancestorValue = await request({
+            method: "eth_getBlockByNumber", params: [checkpointNumber, false],
+          });
+          const ancestor = checkedBlockFields(ancestorValue, ["number", "hash", "stateRoot"]);
+          if (ancestor.number !== checkpointNumber ||
+              checkedHash(ancestor.hash, "RPC checkpoint ancestor hash") !== observedHeadHash ||
+              checkedHash(ancestor.stateRoot, "RPC checkpoint ancestor state root") !== observedStateRoot) {
+            throw new Error();
+          }
+        } catch {
+          throw new Error("RPC canonical Bloch L2 head does not descend from the trusted checkpoint");
+        }
+        // Bracket the historical lookup with two fresh canonical snapshots. A
+        // concurrent reorganization must fail instead of combining an old head
+        // with a checkpoint block from a different canonical view.
+        const confirmationChallenge = freshChallenge();
+        const confirmedStatus = checkedStatusResponse(
+          await request({ method: "bloch_chainStatus", params: [confirmationChallenge] }),
+          identity,
+          confirmationChallenge,
+        );
+        if (confirmedStatus.headNumber !== status.headNumber ||
+            confirmedStatus.headHash !== status.headHash ||
+            confirmedStatus.stateRoot !== status.stateRoot) {
+          throw new Error("RPC canonical Bloch L2 head changed while proving checkpoint ancestry");
+        }
+      }
     }
     if (observedHeadNumber === null || headNumber > observedHeadNumber) {
       observedHeadNumber = headNumber;

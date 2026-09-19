@@ -86,8 +86,14 @@ before account access or signing can continue. Store rollback below an explicit
 `minimumCheckpoint`, same-height equivocation, malformed data, failed writes and
 ambiguous write results all fail closed. The store remains a caller-supplied trust
 boundary: it must authenticate the chain-identity namespace and durably prevent
-rollback; ordinary `localStorage` is insufficient. Higher heads remain
-unfinalized and the checkpoint alone does not prove ancestry.
+rollback; ordinary `localStorage` is insufficient. Before accepting a higher
+head, the adapter also reads the canonical block at the trusted checkpoint
+height, requires its exact hash and state root, and brackets that historical
+lookup with two identical fresh `bloch_chainStatus` snapshots. This proves
+continuity within the authenticated RPC view and fails closed on a concurrent
+canonical change. It is not independent native-finality evidence: a dishonest
+or unauthenticated RPC can still fabricate a self-consistent history, and higher
+heads remain unfinalized.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

@@ -388,6 +388,57 @@ test("trusted checkpoint storage fails closed on rollback, malformed state or am
   }
 });
 
+test("proves a higher canonical head retains the trusted checkpoint ancestry", async () => {
+  const headOne = `0x${"61".repeat(32)}`;
+  const rootOne = `0x${"71".repeat(32)}`;
+  const headTwo = `0x${"62".repeat(32)}`;
+  const rootTwo = `0x${"72".repeat(32)}`;
+  const checkpoint = {
+    format: BLOCH_L2_CHECKPOINT_FORMAT,
+    headNumber: "0x1",
+    headHash: headOne,
+    stateRoot: rootOne,
+  };
+  const block = request => {
+    if (request.params[0] === "0x0") return { number: "0x0", hash: genesisHash, stateRoot };
+    if (request.params[0] === "0x1") return { number: "0x1", hash: headOne, stateRoot: rootOne };
+    return { number: "0x2", hash: headTwo, stateRoot: rootTwo };
+  };
+  const status = request => ({
+    format: BLOCH_L2_STATUS_FORMAT, challenge: request.params[0], identity: { ...identity },
+    headNumber: "0x2", headHash: headTwo, stateRoot: rootTwo,
+  });
+  const provider = mock({ eth_getBlockByNumber: block, bloch_chainStatus: status });
+  const session = await createBlochL2Wallet(provider, { ...options, minimumCheckpoint: checkpoint }).connect();
+  assert.equal(session.checkpoint.headNumber, "0x2");
+  assert.ok(provider.calls.some(call => call.method === "eth_getBlockByNumber" && call.params[0] === "0x1"));
+
+  const foreign = mock({
+    eth_getBlockByNumber: request => request.params[0] === "0x1"
+      ? { number: "0x1", hash: `0x${"ff".repeat(32)}`, stateRoot: rootOne }
+      : block(request),
+    bloch_chainStatus: status,
+  });
+  await assert.rejects(
+    createBlochL2Wallet(foreign, { ...options, minimumCheckpoint: checkpoint }).connect(),
+    /does not descend from the trusted checkpoint/,
+  );
+  assert.ok(!foreign.calls.some(call => call.method === "eth_requestAccounts"));
+
+  let statusReads = 0;
+  const moving = mock({
+    eth_getBlockByNumber: block,
+    bloch_chainStatus: request => ++statusReads === 1 ? status(request) : {
+      ...status(request), headNumber: "0x3", headHash: `0x${"63".repeat(32)}`,
+    },
+  });
+  await assert.rejects(
+    createBlochL2Wallet(moving, { ...options, minimumCheckpoint: checkpoint }).connect(),
+    /changed while proving checkpoint ancestry/,
+  );
+  assert.ok(!moving.calls.some(call => call.method === "eth_requestAccounts"));
+});
+
 test("sends via the wallet with an explicit chain domain and connected sender", async () => {
   const provider = mock();
   const wallet = createBlochL2Wallet(provider, options);
