@@ -29,6 +29,11 @@ async function publicKey(path, key) {
   await chmod(path, 0o444);
 }
 
+async function privateKey(path, key) {
+  await writeFile(path, key.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "bloch-l2-authority-cli-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -38,11 +43,44 @@ async function fixture(t) {
   const approval = approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT, record,
     privateKey: previous.privateKey });
   const approvalPath = join(root, "approval.json"), previousKey = join(root, "previous.pem"),
-    nextKey = join(root, "next.pem");
+    nextKey = join(root, "next.pem"), previousPrivateKey = join(root, "previous-private.pem"),
+    nextPrivateKey = join(root, "next-private.pem"), recordPath = join(root, "record.json");
   await json(approvalPath, approval); await publicKey(previousKey, previous.publicKey);
   await publicKey(nextKey, next.publicKey);
-  return { root, previous, next, record, approvalPath, previousKey, nextKey };
+  await privateKey(previousPrivateKey, previous.privateKey);
+  await privateKey(nextPrivateKey, next.privateKey); await json(recordPath, record);
+  return { root, previous, next, record, approvalPath, previousKey, nextKey,
+    previousPrivateKey, nextPrivateKey, recordPath };
 }
+
+test("offline CLI creates approval, role-separated shares, and canonical continuity", async t => {
+  const f = await fixture(t), approval = join(f.root, "cli-approval.json"),
+    transition = join(f.root, "transition.json"), authorization = join(f.root, "authorization.json"),
+    acceptance = join(f.root, "acceptance.json"), continuity = join(f.root, "continuity.json");
+  await execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
+    "--deployment-id", DEPLOYMENT, "--private-key", f.previousPrivateKey, "--output", approval]);
+  await execute(process.execPath, [CLI, "transition", "--previous-record", f.recordPath,
+    "--next-record", f.recordPath, "--deployment-id", DEPLOYMENT,
+    "--previous-authority-public-key", f.previousKey,
+    "--next-authority-public-key", f.nextKey, "--output", transition]);
+  await execute(process.execPath, [CLI, "sign-continuity", "--transition", transition,
+    "--role", "authorization", "--private-key", f.previousPrivateKey,
+    "--output", authorization]);
+  await execute(process.execPath, [CLI, "sign-continuity", "--transition", transition,
+    "--role", "acceptance", "--private-key", f.nextPrivateKey, "--output", acceptance]);
+  await execute(process.execPath, [CLI, "assemble-continuity", "--transition", transition,
+    "--previous-authority-public-key", f.previousKey,
+    "--next-authority-public-key", f.nextKey, "--authorization", authorization,
+    "--acceptance", acceptance, "--output", continuity]);
+  const assembled = JSON.parse(await readFile(continuity, "utf8"));
+  assert.equal(assembled.authorization.role, "authorization");
+  assert.equal(assembled.acceptance.role, "acceptance");
+  assert.equal(assembled.transition.previousRecord.recordHash, f.record.recordHash);
+  assert.equal(assembled.transition.nextRecord.recordHash, f.record.recordHash);
+  const generatedApproval = JSON.parse(await readFile(approval, "utf8"));
+  assert.equal(generatedApproval.deploymentId, DEPLOYMENT);
+  assert.equal(generatedApproval.record.recordHash, f.record.recordHash);
+});
 
 test("offline CLI creates the exact initial checkpoint and advances key-only continuity", async t => {
   const f = await fixture(t), initial = join(f.root, "initial.json"),
@@ -74,6 +112,11 @@ test("offline CLI creates the exact initial checkpoint and advances key-only con
 
 test("offline CLI refuses substitution, unsafe input and output overwrite", async t => {
   const f = await fixture(t), output = join(f.root, "checkpoint.json");
+  await chmod(f.previousPrivateKey, 0o644);
+  await assert.rejects(execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
+    "--deployment-id", DEPLOYMENT, "--private-key", f.previousPrivateKey,
+    "--output", join(f.root, "unsafe-approval.json")]), error => /unsafe/.test(error.stderr));
+  await chmod(f.previousPrivateKey, 0o600);
   await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
     "--deployment-id", "e".repeat(64), "--authority-public-key", f.previousKey,
     "--output", output]), error => /approval/.test(error.stderr));

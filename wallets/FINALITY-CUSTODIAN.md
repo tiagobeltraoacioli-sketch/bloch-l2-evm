@@ -60,6 +60,29 @@ older state by design.
 The offline CLI creates these objects without loading private material:
 
 ```sh
+node wallets/finality-quorum-custodian-authority-cli.mjs approve \
+  --record <initial-record.json> --deployment-id <64-hex> \
+  --private-key <current-ed25519-private.pem> --output <approval.json>
+
+node wallets/finality-quorum-custodian-authority-cli.mjs transition \
+  --previous-record <prior-record.json> --next-record <next-record.json> \
+  --deployment-id <64-hex> \
+  --previous-authority-public-key <current-ed25519-public.pem> \
+  --next-authority-public-key <next-ed25519-public.pem> \
+  --output <transition.json>
+
+# Run separately under the retiring and incoming authorities:
+node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity \
+  --transition <transition.json> --role <authorization|acceptance> \
+  --private-key <role-ed25519-private.pem> --output <role-share.json>
+
+node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity \
+  --transition <transition.json> \
+  --previous-authority-public-key <current-ed25519-public.pem> \
+  --next-authority-public-key <next-ed25519-public.pem> \
+  --authorization <authorization-share.json> --acceptance <acceptance-share.json> \
+  --output <continuity.json>
+
 node wallets/finality-quorum-custodian-authority-cli.mjs initial \
   --approval <approved-initial-record.json> \
   --deployment-id <64-hex> \
@@ -75,9 +98,11 @@ node wallets/finality-quorum-custodian-authority-cli.mjs advance \
 
 Inputs must be absolute, canonical, owned, single-link files without
 group/world write permission. Output uses exclusive creation, is synced before
-success and is never overwritten. The CLI verifies the initial signature or
-both continuity roles before producing a successor, but moving that output to
-the independent control plane remains an explicit operator action.
+success and is never overwritten. Private keys additionally require owner-only
+permissions and are opened only by the `approve` or `sign-continuity` process.
+The CLI verifies the initial signature or both continuity roles before
+producing a successor, but moving that output to the independent control plane
+remains an explicit operator action.
 
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an

@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { createPublicKey } from "node:crypto";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   advanceFinalityCustodianAuthorityCheckpoint,
+  approveFinalityCustodianStoreRecord,
+  assembleFinalityCustodianStoreContinuity,
+  createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianAuthorityCheckpoint,
+  signFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
 
 const MAX_JSON_BYTES = 64 * 1024;
@@ -17,6 +21,10 @@ const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 
 function usage() {
   return `Usage:
+  node wallets/finality-quorum-custodian-authority-cli.mjs approve --record <record.json> --deployment-id <sha256> --private-key <ed25519-private.pem> --output <approval.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs transition --previous-record <record.json> --next-record <record.json> --deployment-id <sha256> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --output <transition.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity --transition <transition.json> --role <authorization|acceptance> --private-key <ed25519-private.pem> --output <share.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs initial --approval <approval.json> --deployment-id <sha256> --authority-public-key <ed25519-public.pem> --output <checkpoint.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs advance --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <next-checkpoint.json>`;
 }
@@ -34,14 +42,15 @@ function parse(args, expected) {
   return values;
 }
 
-async function readSafe(path, maximum, description) {
+async function readSafe(path, maximum, description, privateFile = false) {
   if (typeof path !== "string" || resolve(path) !== path) {
     throw new Error(`${description} path must be absolute`);
   }
   if (await realpath(path) !== path) throw new Error(`${description} path must not traverse links`);
   const before = await lstat(path);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
-      before.size < 1 || before.size > maximum || (before.mode & 0o022) !== 0 ||
+      before.size < 1 || before.size > maximum ||
+      (privateFile ? (before.mode & 0o077) !== 0 : (before.mode & 0o022) !== 0) ||
       typeof process.getuid === "function" && before.uid !== process.getuid()) {
     throw new Error(`${description} file is unsafe`);
   }
@@ -82,6 +91,23 @@ async function readEd25519PublicKey(path, description) {
   return key;
 }
 
+async function readEd25519PrivateKey(path, description) {
+  const encoded = await readSafe(path, MAX_KEY_BYTES, description, true);
+  let key;
+  try { key = createPrivateKey(encoded); }
+  catch (cause) { throw new Error(`${description} is invalid`, { cause }); }
+  finally { encoded.fill(0); }
+  if (key.asymmetricKeyType !== "ed25519") throw new Error(`${description} must be Ed25519`);
+  return key;
+}
+
+function deploymentId(value) {
+  if (!HASH.test(value) || value === "0".repeat(64)) {
+    throw new Error("Deployment ID must be a nonzero SHA-256 value");
+  }
+  return value;
+}
+
 async function writeNewCanonicalJson(path, value) {
   if (typeof path !== "string" || resolve(path) !== path) {
     throw new Error("Output path must be absolute");
@@ -113,15 +139,57 @@ async function writeNewCanonicalJson(path, value) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   let output, path;
-  if (command === "initial") {
+  if (command === "approve") {
+    const values = parse(args, ["--record", "--deployment-id", "--private-key", "--output"]);
+    output = approveFinalityCustodianStoreRecord({
+      deploymentId: deploymentId(values["--deployment-id"]),
+      record: await readCanonicalJson(values["--record"], "Custodian store record"),
+      privateKey: await readEd25519PrivateKey(values["--private-key"], "Authority private key"),
+    });
+    path = values["--output"];
+  } else if (command === "transition") {
+    const values = parse(args, ["--previous-record", "--next-record", "--deployment-id",
+      "--previous-authority-public-key", "--next-authority-public-key", "--output"]);
+    output = createFinalityCustodianStoreContinuityTransition({
+      deploymentId: deploymentId(values["--deployment-id"]),
+      previousRecord: await readCanonicalJson(values["--previous-record"], "Previous record"),
+      nextRecord: await readCanonicalJson(values["--next-record"], "Next record"),
+      previousAuthorityPublicKey: await readEd25519PublicKey(
+        values["--previous-authority-public-key"], "Previous authority public key"),
+      nextAuthorityPublicKey: await readEd25519PublicKey(
+        values["--next-authority-public-key"], "Next authority public key"),
+    });
+    path = values["--output"];
+  } else if (command === "sign-continuity") {
+    const values = parse(args, ["--transition", "--role", "--private-key", "--output"]);
+    if (!["authorization", "acceptance"].includes(values["--role"])) {
+      throw new Error("Continuity role must be authorization or acceptance");
+    }
+    output = signFinalityCustodianStoreContinuity(
+      await readCanonicalJson(values["--transition"], "Continuity transition"),
+      values["--role"],
+      await readEd25519PrivateKey(values["--private-key"], "Authority private key"),
+    );
+    path = values["--output"];
+  } else if (command === "assemble-continuity") {
+    const values = parse(args, ["--transition", "--previous-authority-public-key",
+      "--next-authority-public-key", "--authorization", "--acceptance", "--output"]);
+    output = assembleFinalityCustodianStoreContinuity({
+      transition: await readCanonicalJson(values["--transition"], "Continuity transition"),
+      previousAuthorityPublicKey: await readEd25519PublicKey(
+        values["--previous-authority-public-key"], "Previous authority public key"),
+      nextAuthorityPublicKey: await readEd25519PublicKey(
+        values["--next-authority-public-key"], "Next authority public key"),
+      authorization: await readCanonicalJson(values["--authorization"], "Authorization share"),
+      acceptance: await readCanonicalJson(values["--acceptance"], "Acceptance share"),
+    });
+    path = values["--output"];
+  } else if (command === "initial") {
     const values = parse(args,
       ["--approval", "--deployment-id", "--authority-public-key", "--output"]);
-    if (!HASH.test(values["--deployment-id"]) || values["--deployment-id"] === "0".repeat(64)) {
-      throw new Error("Deployment ID must be a nonzero SHA-256 value");
-    }
     output = createInitialFinalityCustodianAuthorityCheckpoint({
       approval: await readCanonicalJson(values["--approval"], "Approval"),
-      expectedDeploymentId: values["--deployment-id"],
+      expectedDeploymentId: deploymentId(values["--deployment-id"]),
       authorityPublicKey: await readEd25519PublicKey(
         values["--authority-public-key"], "Authority public key"),
     });
