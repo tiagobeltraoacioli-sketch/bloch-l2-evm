@@ -12,7 +12,7 @@ async function attackCheckpoint() {
   const target = process.env.BLOCH_CHECKPOINT_RACE_TARGET;
   const attack = process.env.BLOCH_CHECKPOINT_RACE_ATTACK;
   if (!target || !["same-inode-rewrite", "pathname-replacement", "parent-directory-replacement",
-    "parent-directory-metadata-change", "growth"].includes(attack)) {
+    "parent-directory-metadata-change", "growth", "post-rename-pathname-replacement"].includes(attack)) {
     throw new Error("Custodian checkpoint race test configuration is invalid");
   }
   const original = await fs.readFile(target);
@@ -62,6 +62,9 @@ function wrap(handle) {
       if (property === "read") {
         return async (...args) => {
           const result = await target.read(...args);
+          if (process.env.BLOCH_CHECKPOINT_RACE_ATTACK === "post-rename-pathname-replacement") {
+            return result;
+          }
           const growth = process.env.BLOCH_CHECKPOINT_RACE_ATTACK === "growth";
           if (growth ? result.bytesRead > 0 : result.bytesRead === 0) await attackCheckpoint();
           return result;
@@ -74,8 +77,21 @@ function wrap(handle) {
 }
 
 export const lstat = (...args) => fs.lstat(...args);
+export const readFile = (...args) => fs.readFile(...args);
 export const realpath = (...args) => fs.realpath(...args);
-export const rename = (...args) => fs.rename(...args);
+export async function rename(source, destination, ...args) {
+  await fs.rename(source, destination, ...args);
+  const target = process.env.BLOCH_CHECKPOINT_RACE_TARGET;
+  const targetName = target?.slice(target.lastIndexOf("/") + 1);
+  if (!attacked && targetName && String(destination).endsWith("/" + targetName) &&
+      String(source).includes(".tmp-") &&
+      process.env.BLOCH_CHECKPOINT_RACE_ATTACK === "post-rename-pathname-replacement") {
+    attacked = true;
+    const bytes = await fs.readFile(destination);
+    await fs.rename(destination, destination + ".race-installed");
+    await fs.writeFile(destination, bytes, { mode: 0o600, flag: "wx" });
+  }
+}
 export const unlink = (...args) => fs.unlink(...args);
 export async function open(path, ...args) {
   const handle = await fs.open(path, ...args);

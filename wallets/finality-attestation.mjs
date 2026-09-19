@@ -37,7 +37,8 @@ function exactRecord(value, fields, message) {
 function checkedIdentity(value) {
   const identity = exactRecord(value, identityFields, "Invalid finality attestation identity");
   if (identity.format !== "bloch-chain-identity-v1" ||
-      typeof identity.chainId !== "string" || !QUANTITY.test(identity.chainId) ||
+      typeof identity.chainId !== "string" || identity.chainId.length > 66 ||
+      !QUANTITY.test(identity.chainId) || BigInt(identity.chainId) >= (1n << 256n) ||
       !HASH.test(identity.domain) || !HASH.test(identity.genesisHash) ||
       identity.headerFormat !== "bloch-node-header-v2-fixed-width") {
     throw new TypeError("Invalid finality attestation identity");

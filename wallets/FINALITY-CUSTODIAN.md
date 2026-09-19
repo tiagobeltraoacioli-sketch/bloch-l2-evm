@@ -204,6 +204,20 @@ deterministic boundary. If any pathname is displaced after an independent
 anchor attempt, local replacement stops and retains the lock, temporary state,
 and prior checkpoint for reconciliation.
 
+The outer quorum checkpoint uses the same fail-closed filesystem boundary.
+Reads are capped before parsing and retain an exact descriptor, pathname, and
+parent-directory snapshot through EOF. During an externally custodied advance,
+the process keeps the lock, candidate, and any predecessor open, verifies their
+exact snapshots and bytes on both sides of the external CAS, and verifies the
+installed candidate plus the unlinked predecessor after directory sync. A
+substituted pathname or an externally committed but locally ambiguous result
+retains the lock and evidence for operator reconciliation. Mutating child paths
+are resolved through the pinned Linux directory descriptor rather than the
+ambient pathname. Before replacement, an immutable named copy of the exact
+predecessor is synced in that directory; it is removed only after the candidate
+and canonical pathname have both been verified. Deploy this checkpoint writer
+only on Linux systems that expose `/proc/self/fd`.
+
 ## Transport invariants
 
 - Both endpoints require TLS 1.3, CA validation, and an explicit SHA-256 leaf

@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink,
+  writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { canonicalBlochL2FinalityQuorumConfig } from "./finality-quorum.mjs";
@@ -218,6 +219,54 @@ test("quorum checkpoint rejects symlinked ancestors and linked or exposed state"
     error => /file is unsafe/.test(error.stderr));
 });
 
+test("quorum checkpoint rejects bounded-read and pathname races", async t => {
+  const files = await fixture(t), store = join(files.directory, "quorum-race-state.json");
+  const a = await signEnvelope(files, 0), b = await signEnvelope(files, 1);
+  const input = await bundle(files, [a.envelope, b.envelope]);
+  await advance(files, input, store, "none");
+  const runner = new URL("./fixtures/inspect-finality-quorum-checkpoint.mjs", import.meta.url);
+  const register = new URL("./fixtures/register-custodian-checkpoint-race-loader.mjs", import.meta.url);
+  for (const attack of ["same-inode-rewrite", "pathname-replacement",
+    "parent-directory-replacement", "parent-directory-metadata-change", "growth"]) {
+    const isolated = join(files.directory, `race-${attack}`);
+    await mkdir(isolated, { mode: 0o700 });
+    const target = join(isolated, "state.json");
+    await writeFile(target, await readFile(store), { mode: 0o600 });
+    const result = await execute(process.execPath, ["--import", register.pathname, runner.pathname, target], {
+      env: { ...process.env, BLOCH_CHECKPOINT_RACE_TARGET: target,
+        BLOCH_CHECKPOINT_RACE_ATTACK: attack },
+    });
+    assert.match(result.stdout, /rejected finality quorum checkpoint mutation/, attack);
+  }
+});
+
+test("quorum checkpoint retains named predecessor evidence after a post-rename race", async t => {
+  const files = await fixture(t), store = join(files.directory, "quorum-post-rename-state.json");
+  const a = await signEnvelope(files, 0), b = await signEnvelope(files, 1);
+  const input = await bundle(files, [a.envelope, b.envelope]);
+  const first = JSON.parse((await advance(files, input, store, "none")).stdout);
+  const firstBytes = await readFile(store);
+  const nextExpected = join(files.directory, "post-rename-payload.json");
+  await writeFile(nextExpected, JSON.stringify(payload("64", "0x4")));
+  const nextA = await signEnvelope(files, 0, nextExpected, "-post-rename");
+  const nextB = await signEnvelope(files, 1, nextExpected, "-post-rename");
+  const nextBundle = await bundle(files, [nextA.envelope, nextB.envelope], "post-rename-bundle.json");
+  const register = new URL("./fixtures/register-custodian-checkpoint-race-loader.mjs", import.meta.url);
+  await assert.rejects(execute(process.execPath, ["--import", register.pathname, cli,
+    "verify-advance", "--config", files.configPath, "--protocol", protocol,
+    "--expected", nextExpected, "--input", nextBundle, "--store", store,
+    "--expected-state-hash", first.stateHash], {
+    env: { ...process.env, BLOCH_CHECKPOINT_RACE_TARGET: store,
+      BLOCH_CHECKPOINT_RACE_ATTACK: "post-rename-pathname-replacement" },
+  }), error => /cleanup is ambiguous/.test(error.stderr));
+  const evidenceName = (await readdir(files.directory))
+    .find(name => name.startsWith("quorum-post-rename-state.json.previous-"));
+  assert.ok(evidenceName);
+  assert.deepEqual(await readFile(join(files.directory, evidenceName)), firstBytes);
+  assert.equal((await stat(`${store}.lock`)).isFile(), true);
+  assert.equal((await stat(`${store}.race-installed`)).isFile(), true);
+});
+
 function memoryCustodian(initial = null, mode = "normal") {
   let current = initial;
   return {
@@ -308,4 +357,97 @@ test("external commit followed by local failure remains locked for reconciliatio
   assert.match(retained, /^[0-9a-f]{64}$/);
   await assert.rejects(stat(store), error => error.code === "ENOENT");
   assert.equal((await stat(`${store}.lock`)).isFile(), true);
+});
+
+test("custodied advance retains evidence when lock, predecessor or candidate is substituted", async t => {
+  const files = await fixture(t);
+  const quorum = await canonicalBlochL2FinalityQuorumConfig(files.config);
+  for (const attack of ["lock", "candidate"]) {
+    const store = join(files.directory, `${attack}-authority-state.json`);
+    let retained = null;
+    const custodian = {
+      async load() { return retained; },
+      async compareAndSwap(expected, replacement) {
+        const lockPath = `${store}.lock`;
+        if (attack === "lock") {
+          const bytes = await readFile(lockPath);
+          await rename(lockPath, `${lockPath}.displaced`);
+          await writeFile(lockPath, bytes, { mode: 0o600, flag: "wx" });
+        } else {
+          const candidateName = (await readdir(files.directory))
+            .find(name => name.startsWith(`${attack}-authority-state.json.tmp-`));
+          assert.ok(candidateName);
+          const candidate = join(files.directory, candidateName), bytes = await readFile(candidate);
+          await rename(candidate, `${candidate}.displaced`);
+          await writeFile(candidate, bytes, { mode: 0o600, flag: "wx" });
+        }
+        retained = replacement;
+        return { status: "committed" };
+      },
+    };
+    await assert.rejects(advanceCustodiedFinalityQuorumCheckpoint({ storePath: store,
+      expectedStateHash: null, quorumId: quorum.quorumId, threshold: quorum.threshold,
+      finalityProtocol: protocol, identity: payload().identity, checkpoint: payload().checkpoint,
+      bundleHash: "a".repeat(64), custodian }), /cleanup is ambiguous/);
+    assert.match(retained, /^[0-9a-f]{64}$/);
+    await assert.rejects(stat(store), error => error.code === "ENOENT");
+    assert.equal((await stat(`${store}.lock`)).isFile(), true);
+  }
+
+  const store = join(files.directory, "predecessor-authority-state.json");
+  const first = await custodiedAdvance(files, store, memoryCustodian());
+  let retained = first.stateHash;
+  const higher = payload("64", "0x4");
+  const custodian = {
+    async load() { return retained; },
+    async compareAndSwap(expected, replacement) {
+      const bytes = await readFile(store);
+      await rename(store, `${store}.displaced`);
+      await writeFile(store, bytes, { mode: 0o600, flag: "wx" });
+      retained = replacement;
+      return { status: "committed" };
+    },
+  };
+  await assert.rejects(custodiedAdvance(files, store, custodian, first.stateHash, higher),
+    /cleanup is ambiguous/);
+  assert.notEqual(JSON.parse(await readFile(store, "utf8")).stateHash, retained);
+  assert.equal((await stat(`${store}.lock`)).isFile(), true);
+});
+
+test("custodied advance mutates only the pinned directory if its pathname is replaced", async t => {
+  const files = await fixture(t), storeDirectory = join(files.directory, "anchored-store");
+  await mkdir(storeDirectory, { mode: 0o700 });
+  const store = join(storeDirectory, "state.json"), displaced = `${storeDirectory}.displaced`;
+  let retained = null;
+  const custodian = {
+    async load() { return retained; },
+    async compareAndSwap(expected, replacement) {
+      assert.equal(expected, null);
+      await rename(storeDirectory, displaced);
+      await mkdir(storeDirectory, { mode: 0o700 });
+      retained = replacement;
+      return { status: "committed" };
+    },
+  };
+  await assert.rejects(custodiedAdvance(files, store, custodian), /cleanup is ambiguous/);
+  assert.match(retained, /^[0-9a-f]{64}$/);
+  await assert.rejects(stat(store), error => error.code === "ENOENT");
+  assert.equal((await stat(join(displaced, "state.json.lock"))).isFile(), true);
+  assert.equal((await readdir(displaced)).some(name => name.startsWith("state.json.tmp-")), true);
+});
+
+test("oversized chain identity is rejected before external custody", async t => {
+  const files = await fixture(t), quorum = await canonicalBlochL2FinalityQuorumConfig(files.config);
+  let compareCalls = 0;
+  const custodian = { async load() { return null; }, async compareAndSwap() { compareCalls += 1; } };
+  const next = payload();
+  next.identity.chainId = `0x1${"0".repeat(64)}`;
+  await assert.rejects(advanceCustodiedFinalityQuorumCheckpoint({
+    storePath: join(files.directory, "oversized-state.json"), expectedStateHash: null,
+    quorumId: quorum.quorumId, threshold: quorum.threshold, finalityProtocol: protocol,
+    identity: next.identity, checkpoint: next.checkpoint, bundleHash: "a".repeat(64), custodian,
+  }), /identity/);
+  assert.equal(compareCalls, 0);
+  await assert.rejects(stat(join(files.directory, "oversized-state.json.lock")),
+    error => error.code === "ENOENT");
 });
