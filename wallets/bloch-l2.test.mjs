@@ -291,6 +291,103 @@ test("exports a verified checkpoint and imports it as a cross-session rollback f
   assert.equal(getterCalls, 0);
 });
 
+test("loads and atomically advances a trusted checkpoint store before account access", async () => {
+  const headOne = `0x${"61".repeat(32)}`;
+  const rootOne = `0x${"71".repeat(32)}`;
+  const checkpoint = Object.freeze({
+    format: BLOCH_L2_CHECKPOINT_FORMAT,
+    headNumber: "0x1",
+    headHash: headOne,
+    stateRoot: rootOne,
+  });
+  const events = [];
+  const store = {
+    async load(selectedIdentity) {
+      events.push(["load", selectedIdentity]);
+      return null;
+    },
+    async advance(selectedIdentity, previous, next) {
+      events.push(["advance", selectedIdentity, previous, next]);
+      return true;
+    },
+  };
+  const provider = mock({
+    bloch_chainStatus: request => ({
+      format: BLOCH_L2_STATUS_FORMAT, challenge: request.params[0], identity: { ...identity },
+      headNumber: "0x1", headHash: headOne, stateRoot: rootOne,
+    }),
+    eth_getBlockByNumber: request => request.params[0] === "0x1"
+      ? { number: "0x1", hash: headOne, stateRoot: rootOne }
+      : { number: "0x0", hash: genesisHash, stateRoot },
+  });
+  const originalRequest = provider.request;
+  provider.request = async request => {
+    assert.equal(events[0]?.[0], "load");
+    return originalRequest(request);
+  };
+  const session = await createBlochL2Wallet(provider, {
+    ...options, trustedCheckpointStore: store,
+  }).connect();
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[0][1], identity);
+  assert.deepEqual(events[1][1], identity);
+  assert.equal(events[1][2], null);
+  assert.deepEqual(events[1][3], checkpoint);
+  assert.ok(Object.isFrozen(events[1][3]));
+  assert.deepEqual(session.checkpoint, checkpoint);
+});
+
+test("trusted checkpoint storage fails closed on rollback, malformed state or ambiguous advance", async () => {
+  const headOne = `0x${"61".repeat(32)}`;
+  const rootOne = `0x${"71".repeat(32)}`;
+  const checkpoint = {
+    format: BLOCH_L2_CHECKPOINT_FORMAT,
+    headNumber: "0x1",
+    headHash: headOne,
+    stateRoot: rootOne,
+  };
+  for (const trustedCheckpointStore of [
+    null, {}, { load() {}, advance: true }, { load: true, advance() {} },
+  ]) assert.throws(
+    () => createBlochL2Wallet(mock(), { ...options, trustedCheckpointStore }),
+    /trusted checkpoint store/i,
+  );
+
+  let getterCalls = 0;
+  const accessor = { ...checkpoint };
+  Object.defineProperty(accessor, "stateRoot", {
+    get() { getterCalls += 1; return rootOne; }, enumerable: true,
+  });
+  for (const loaded of [{ ...checkpoint, headNumber: "0x01" }, accessor]) {
+    const provider = mock();
+    const wallet = createBlochL2Wallet(provider, {
+      ...options,
+      trustedCheckpointStore: { load: async () => loaded, advance: async () => true },
+    });
+    await assert.rejects(wallet.connect(), /Invalid trusted Bloch L2 wallet checkpoint/);
+    assert.equal(provider.calls.length, 0);
+  }
+  assert.equal(getterCalls, 0);
+
+  const lower = { ...checkpoint, headNumber: "0x0", headHash: genesisHash, stateRoot };
+  const rollbackProvider = mock();
+  await assert.rejects(createBlochL2Wallet(rollbackProvider, {
+    ...options,
+    minimumCheckpoint: checkpoint,
+    trustedCheckpointStore: { load: async () => lower, advance: async () => true },
+  }).connect(), /store rolled back/);
+  assert.ok(!rollbackProvider.calls.some(call => call.method === "eth_chainId"));
+
+  for (const result of [false, undefined]) {
+    const provider = mock();
+    await assert.rejects(createBlochL2Wallet(provider, {
+      ...options,
+      trustedCheckpointStore: { load: async () => null, advance: async () => result },
+    }).connect(), /did not durably advance/);
+    assert.ok(!provider.calls.some(call => call.method === "eth_requestAccounts"));
+  }
+});
+
 test("sends via the wallet with an explicit chain domain and connected sender", async () => {
   const provider = mock();
   const wallet = createBlochL2Wallet(provider, options);

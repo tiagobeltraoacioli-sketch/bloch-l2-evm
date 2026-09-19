@@ -141,7 +141,7 @@ function checkedCheckpoint(value) {
         !quantity.test(checkpoint.headNumber) || BigInt(checkpoint.headNumber) > MAX_U64) throw new Error();
     checkpoint.headHash = checkedHash(checkpoint.headHash, "Checkpoint head hash");
     checkpoint.stateRoot = checkedHash(checkpoint.stateRoot, "Checkpoint state root");
-    return checkpoint;
+    return Object.freeze(checkpoint);
   } catch {
     throw new Error("Invalid trusted Bloch L2 wallet checkpoint");
   }
@@ -188,6 +188,7 @@ export function createBlochL2Wallet(provider, {
   genesisHash,
   domain,
   minimumCheckpoint,
+  trustedCheckpointStore,
 } = {}) {
   const requestMethod = provider?.request;
   if (typeof requestMethod !== "function") throw new TypeError("An EIP-1193 provider is required");
@@ -200,6 +201,17 @@ export function createBlochL2Wallet(provider, {
   const genesis = checkedHash(genesisHash, "Genesis hash");
   const executionDomain = checkedHash(domain, "Execution domain");
   const trustedCheckpoint = minimumCheckpoint === undefined ? null : checkedCheckpoint(minimumCheckpoint);
+  let loadTrustedCheckpoint;
+  let advanceTrustedCheckpoint;
+  if (trustedCheckpointStore !== undefined) {
+    if (!trustedCheckpointStore || typeof trustedCheckpointStore !== "object" ||
+        typeof trustedCheckpointStore.load !== "function" ||
+        typeof trustedCheckpointStore.advance !== "function") {
+      throw new TypeError("A trusted checkpoint store must provide load and advance methods");
+    }
+    loadTrustedCheckpoint = Function.prototype.bind.call(trustedCheckpointStore.load, trustedCheckpointStore);
+    advanceTrustedCheckpoint = Function.prototype.bind.call(trustedCheckpointStore.advance, trustedCheckpointStore);
+  }
   const identity = Object.freeze({
     format: BLOCH_L2_IDENTITY_FORMAT,
     chainId: id,
@@ -219,6 +231,9 @@ export function createBlochL2Wallet(provider, {
   let observedHeadNumber = trustedCheckpoint === null ? null : BigInt(trustedCheckpoint.headNumber);
   let observedHeadHash = trustedCheckpoint?.headHash;
   let observedStateRoot = trustedCheckpoint?.stateRoot;
+  let storedCheckpoint = null;
+  let checkpointStoreReady;
+  let checkpointStoreAdvance = Promise.resolve();
 
   function exportCheckpoint() {
     if (observedHeadNumber === null) return null;
@@ -230,7 +245,55 @@ export function createBlochL2Wallet(provider, {
     });
   }
 
+  async function prepareTrustedCheckpointStore() {
+    if (!loadTrustedCheckpoint) return;
+    if (!checkpointStoreReady) checkpointStoreReady = (async () => {
+      const loadedValue = await loadTrustedCheckpoint(identity);
+      if (loadedValue === null) return;
+      const loaded = checkedCheckpoint(loadedValue);
+      const loadedNumber = BigInt(loaded.headNumber);
+      if (observedHeadNumber !== null) {
+        if (loadedNumber < observedHeadNumber) {
+          throw new Error("Trusted checkpoint store rolled back below the configured minimum");
+        }
+        if (loadedNumber === observedHeadNumber &&
+            (loaded.headHash !== observedHeadHash || loaded.stateRoot !== observedStateRoot)) {
+          throw new Error("Trusted checkpoint store equivocated at the configured minimum");
+        }
+      }
+      if (observedHeadNumber === null || loadedNumber > observedHeadNumber) {
+        observedHeadNumber = loadedNumber;
+        observedHeadHash = loaded.headHash;
+        observedStateRoot = loaded.stateRoot;
+      }
+      storedCheckpoint = loaded;
+    })();
+    await checkpointStoreReady;
+  }
+
+  async function persistTrustedCheckpoint() {
+    if (!advanceTrustedCheckpoint) return;
+    const next = exportCheckpoint();
+    if (next === null) return;
+    checkpointStoreAdvance = checkpointStoreAdvance.then(async () => {
+      if (storedCheckpoint !== null &&
+          BigInt(storedCheckpoint.headNumber) >= BigInt(next.headNumber)) return;
+      // `advance` is the authenticated store's compare-and-set boundary. It
+      // must atomically accept `previous` (or null on first use) and durably
+      // retain `next`; an ambiguous result cannot unlock account access or
+      // signing. Serialize calls so concurrent wallet operations cannot race
+      // two advances from the same prior value.
+      const advanced = await advanceTrustedCheckpoint(identity, storedCheckpoint, next);
+      if (advanced !== true) {
+        throw new Error("Trusted checkpoint store did not durably advance");
+      }
+      storedCheckpoint = next;
+    });
+    await checkpointStoreAdvance;
+  }
+
   async function assertNetwork() {
+    await prepareTrustedCheckpointStore();
     const current = await request({ method: "eth_chainId" });
     if (typeof current !== "string" || current.length > U64_HEX_LENGTH ||
         !quantity.test(current) || chainHex(current) !== id) {
@@ -278,9 +341,11 @@ export function createBlochL2Wallet(provider, {
       observedHeadHash = status.headHash;
       observedStateRoot = status.stateRoot;
     }
+    await persistTrustedCheckpoint();
   }
 
   async function connect() {
+    await prepareTrustedCheckpointStore();
     try {
       await request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
     } catch (error) {

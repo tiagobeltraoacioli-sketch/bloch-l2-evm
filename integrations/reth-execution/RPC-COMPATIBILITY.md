@@ -77,8 +77,17 @@ immutable checkpoint. A caller may persist it in an independently authenticated
 store and pass it back as `minimumCheckpoint` to reject rollback or same-height
 equivocation across wallet instances. The adapter deliberately does not trust or
 write browser storage automatically; an unauthenticated checkpoint store would
-not strengthen the RPC trust boundary. Higher heads remain unfinalized and the
-checkpoint alone does not prove ancestry.
+not strengthen the RPC trust boundary. Applications may instead provide a
+`trustedCheckpointStore` with asynchronous `load(identity)` and
+`advance(identity, previous, next)` methods. The adapter loads it before making
+any provider request, validates the exact checkpoint schema, and requires
+`advance` to return exactly `true` after an atomic authenticated compare-and-set
+before account access or signing can continue. Store rollback below an explicit
+`minimumCheckpoint`, same-height equivocation, malformed data, failed writes and
+ambiguous write results all fail closed. The store remains a caller-supplied trust
+boundary: it must authenticate the chain-identity namespace and durably prevent
+rollback; ordinary `localStorage` is insufficient. Higher heads remain
+unfinalized and the checkpoint alone does not prove ancestry.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
