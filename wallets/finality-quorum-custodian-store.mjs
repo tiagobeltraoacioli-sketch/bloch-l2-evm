@@ -28,6 +28,8 @@ const CONTINUITY_SHARE_FIELDS = ["role", "keyId", "signature"];
 const CONTINUITY_FIELDS = ["format", "transition", "authorization", "acceptance"];
 const AUTHORITY_CHECKPOINT_FIELDS = ["format", "transitionIndex", "deploymentId", "authorityKeyId",
   "authorityPublicKeyBase64Url", "record", "previousCheckpointHash", "checkpointHash"];
+const AUTHORITY_RECONCILIATION_FIELDS = ["format", "status", "deploymentId",
+  "previousCheckpointHash", "nextCheckpointHash", "observedRecordHash"];
 const APPROVAL_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-STORE-APPROVAL-v1\0";
 const AUTHORITY_CHECKPOINT_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-AUTHORITY-CHECKPOINT-v1\0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -356,7 +358,7 @@ export async function reconcileFinalityCustodianAuthorityStoreRecord({ storePath
   } else {
     throw new Error("Finality custodian store is neither the retained authority record nor its approved successor");
   }
-  return Object.freeze({
+  return checkedAuthorityReconciliation({
     format: BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_RECONCILIATION_FORMAT,
     status,
     deploymentId: previous.deploymentId,
@@ -364,6 +366,48 @@ export async function reconcileFinalityCustodianAuthorityStoreRecord({ storePath
     nextCheckpointHash: next.checkpointHash,
     observedRecordHash: observed.recordHash,
   });
+}
+
+function checkedAuthorityReconciliation(value) {
+  exact(value, AUTHORITY_RECONCILIATION_FIELDS,
+    "Finality custodian authority reconciliation receipt is invalid");
+  if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_RECONCILIATION_FORMAT ||
+      !["prior-record-observed", "successor-record-observed"].includes(value.status) ||
+      typeof value.deploymentId !== "string" || !HASH.test(value.deploymentId) ||
+      value.deploymentId === "0".repeat(64) ||
+      typeof value.previousCheckpointHash !== "string" ||
+      !HASH.test(value.previousCheckpointHash) ||
+      typeof value.nextCheckpointHash !== "string" || !HASH.test(value.nextCheckpointHash) ||
+      typeof value.observedRecordHash !== "string" || !HASH.test(value.observedRecordHash)) {
+    throw new Error("Finality custodian authority reconciliation receipt is invalid");
+  }
+  return Object.freeze(Object.fromEntries(AUTHORITY_RECONCILIATION_FIELDS
+    .map(field => [field, value[field]])));
+}
+
+export function verifyFinalityCustodianAuthorityStoreReconciliation({ receipt, checkpoint,
+  continuity, nextAuthorityPublicKey } = {}) {
+  const previous = checkedAuthorityCheckpoint(checkpoint);
+  const next = advanceFinalityCustodianAuthorityCheckpoint({ checkpoint: previous, continuity,
+    nextAuthorityPublicKey });
+  if (previous.record.recordHash === next.record.recordHash) {
+    throw new Error("Finality custodian key-only authority transition cannot have a store reconciliation receipt");
+  }
+  const checked = checkedAuthorityReconciliation(receipt);
+  const expectedObserved = checked.status === "prior-record-observed"
+    ? previous.record.recordHash : next.record.recordHash;
+  if (checked.deploymentId !== previous.deploymentId ||
+      checked.previousCheckpointHash !== previous.checkpointHash ||
+      checked.nextCheckpointHash !== next.checkpointHash ||
+      checked.observedRecordHash !== expectedObserved) {
+    throw new Error("Finality custodian authority reconciliation receipt does not match the approved transition");
+  }
+  return checked;
+}
+
+export function finalityCustodianAuthorityReconciliationSha256(receipt) {
+  return createHash("sha256").update(JSON.stringify(checkedAuthorityReconciliation(receipt)))
+    .digest("hex");
 }
 
 export function createInitialFinalityCustodianStoreRecord({ stateHash = null } = {}) {

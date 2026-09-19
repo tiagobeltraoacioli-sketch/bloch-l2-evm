@@ -16,11 +16,13 @@ import {
   createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianStoreRecord,
   createInitialFinalityCustodianAuthorityCheckpoint,
+  finalityCustodianAuthorityReconciliationSha256,
   initializeApprovedFilesystemFinalityCustodianStore,
   initializeFilesystemFinalityCustodianStore,
   inspectFilesystemFinalityCustodianStore,
   reconcileFinalityCustodianAuthorityStoreRecord,
   signFinalityCustodianStoreContinuity,
+  verifyFinalityCustodianAuthorityStoreReconciliation,
 } from "./finality-quorum-custodian-store.mjs";
 
 const HASH_A = "a".repeat(64), HASH_B = "b".repeat(64);
@@ -255,6 +257,14 @@ test("authority reconciliation classifies only the exact prior or approved succe
     nextAuthorityPublicKey: nextAuthority.publicKey });
   assert.equal(after.status, "successor-record-observed");
   assert.equal(after.observedRecordHash, successor.recordHash);
+  assert.deepEqual(verifyFinalityCustodianAuthorityStoreReconciliation({ receipt: after,
+    checkpoint, continuity, nextAuthorityPublicKey: nextAuthority.publicKey }), after);
+  assert.match(finalityCustodianAuthorityReconciliationSha256(after), /^[0-9a-f]{64}$/);
+  assert.throws(() => verifyFinalityCustodianAuthorityStoreReconciliation({
+    receipt: { ...after, observedRecordHash: priorStore.record.recordHash },
+    checkpoint, continuity, nextAuthorityPublicKey: nextAuthority.publicKey }), /does not match/);
+  assert.throws(() => finalityCustodianAuthorityReconciliationSha256({
+    ...after, unexpected: true }), /receipt is invalid/);
 
   await writable.compareAndSwap(HASH_A, HASH_B);
   await assert.rejects(reconcileFinalityCustodianAuthorityStoreRecord({

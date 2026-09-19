@@ -11,8 +11,10 @@ import {
   assembleFinalityCustodianStoreContinuity,
   createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianAuthorityCheckpoint,
+  finalityCustodianAuthorityReconciliationSha256,
   reconcileFinalityCustodianAuthorityStoreRecord,
   signFinalityCustodianStoreContinuity,
+  verifyFinalityCustodianAuthorityStoreReconciliation,
 } from "./finality-quorum-custodian-store.mjs";
 
 const MAX_JSON_BYTES = 64 * 1024;
@@ -28,7 +30,8 @@ function usage() {
   node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs initial --approval <approval.json> --deployment-id <sha256> --authority-public-key <ed25519-public.pem> --output <checkpoint.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs advance --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <next-checkpoint.json>
-  node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record --store <store.json> --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <reconciliation.json>`;
+  node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record --store <store.json> --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <reconciliation.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs verify-reconciliation --receipt <reconciliation.json> --expected-receipt-sha256 <sha256> --checkpoint <checkpoint.json> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem>`;
 }
 
 function parse(args, expected) {
@@ -220,11 +223,31 @@ async function main() {
         values["--next-authority-public-key"], "Next authority public key"),
     });
     path = values["--output"];
+  } else if (command === "verify-reconciliation") {
+    const values = parse(args, ["--receipt", "--expected-receipt-sha256", "--checkpoint",
+      "--continuity", "--next-authority-public-key"]);
+    const receipt = verifyFinalityCustodianAuthorityStoreReconciliation({
+      receipt: await readCanonicalJson(values["--receipt"], "Reconciliation receipt"),
+      checkpoint: await readCanonicalJson(values["--checkpoint"], "Authority checkpoint"),
+      continuity: await readCanonicalJson(values["--continuity"], "Continuity approval"),
+      nextAuthorityPublicKey: await readEd25519PublicKey(
+        values["--next-authority-public-key"], "Next authority public key"),
+    });
+    const receiptSha256 = finalityCustodianAuthorityReconciliationSha256(receipt);
+    if (!HASH.test(values["--expected-receipt-sha256"]) ||
+        receiptSha256 !== values["--expected-receipt-sha256"]) {
+      throw new Error("Reconciliation receipt does not match the externally approved SHA-256");
+    }
+    console.log(JSON.stringify({ verified: true, status: receipt.status, receiptSha256,
+      observedRecordHash: receipt.observedRecordHash,
+      nextCheckpointHash: receipt.nextCheckpointHash }));
+    return;
   } else throw new Error(usage());
   await writeNewCanonicalJson(path, output);
   console.log(JSON.stringify(command === "reconcile-record" ? {
     created: true, status: output.status, observedRecordHash: output.observedRecordHash,
     nextCheckpointHash: output.nextCheckpointHash,
+    receiptSha256: finalityCustodianAuthorityReconciliationSha256(output),
   } : { created: true, transitionIndex: output.transitionIndex,
     checkpointHash: output.checkpointHash, authorityKeyId: output.authorityKeyId }));
 }

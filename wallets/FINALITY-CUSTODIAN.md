@@ -102,6 +102,14 @@ node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record \
   --continuity <dual-signed-continuity.json> \
   --next-authority-public-key <next-ed25519-public.pem> \
   --output <new-reconciliation-receipt.json>
+
+# On an independent review host, require the receipt digest received out of band:
+node wallets/finality-quorum-custodian-authority-cli.mjs verify-reconciliation \
+  --receipt <reconciliation-receipt.json> \
+  --expected-receipt-sha256 <externally-approved-sha256> \
+  --checkpoint <independently-retained-prior-checkpoint.json> \
+  --continuity <dual-signed-continuity.json> \
+  --next-authority-public-key <next-ed25519-public.pem>
 ```
 
 Inputs must be absolute, canonical, owned, single-link files without
@@ -121,7 +129,12 @@ is quiescent. The receipt classifies the local store at one instant; it does not
 prove that the independent checkpoint control plane committed either value and
 must not be used to adopt a value discovered from disk. A key-only authority
 rotation cannot be distinguished from the store record and is therefore
-rejected by this command.
+rejected by this command. The command prints the canonical receipt SHA-256;
+transfer that digest over an authenticated channel. `verify-reconciliation`
+strictly rederives both checkpoint hashes and the only record hash permitted by
+the claimed status, then requires that external digest instead of trusting the
+receipt file. Verification authenticates consistency with the approved
+transition, not the truth or freshness of the original filesystem observation.
 
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an

@@ -13,6 +13,7 @@ import {
   createFinalityCustodianStoreContinuityTransition,
   createFilesystemFinalityCustodianStore,
   createInitialFinalityCustodianStoreRecord,
+  finalityCustodianAuthorityReconciliationSha256,
   initializeFilesystemFinalityCustodianStore,
   signFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
@@ -142,6 +143,17 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
   assert.equal(receipt.status, "successor-record-observed");
   assert.equal(receipt.observedRecordHash, store.record().recordHash);
   assert.equal(JSON.parse(result.stdout).status, receipt.status);
+  const receiptSha256 = finalityCustodianAuthorityReconciliationSha256(receipt);
+  const verified = await execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
+    "--checkpoint", checkpointPath, "--continuity", continuityPath,
+    "--next-authority-public-key", f.nextKey]);
+  assert.equal(JSON.parse(verified.stdout).receiptSha256, receiptSha256);
+  await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", receiptPath, "--expected-receipt-sha256", "0".repeat(64),
+    "--checkpoint", checkpointPath, "--continuity", continuityPath,
+    "--next-authority-public-key", f.nextKey]),
+  error => /externally approved/.test(error.stderr));
 });
 
 test("offline CLI refuses substitution, unsafe input and output overwrite", async t => {
