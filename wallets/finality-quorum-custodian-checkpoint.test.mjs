@@ -159,7 +159,9 @@ test("anchor failure occurs before transport and ambiguous anchor outcome retain
   await assert.rejects(blocked.load(), /requires inspection/);
   assert.equal(calls, 0);
   assert.equal((await inspectFinalityCustodianCheckpoint(ambiguous.storePath)).lockPresent, true);
-  assert.ok((await readdir(ambiguous.root)).some(name => name.startsWith("client.json.tmp-")));
+  const ambiguousNames = await readdir(ambiguous.root);
+  assert.ok(ambiguousNames.some(name => name.startsWith("client.json.tmp-")));
+  assert.ok(ambiguousNames.some(name => name.startsWith("client.json.previous-")));
 });
 
 test("anchor commit cannot overwrite a substituted predecessor", async t => {
@@ -177,7 +179,9 @@ test("anchor commit cannot overwrite a substituted predecessor", async t => {
   assert.equal(calls, 0);
   assert.deepEqual(await readFile(displaced), original);
   assert.deepEqual(await readFile(f.storePath), original);
-  assert.ok((await readdir(f.root)).some(name => name.startsWith("client.json.tmp-")));
+  const names = await readdir(f.root);
+  assert.ok(names.some(name => name.startsWith("client.json.tmp-")));
+  assert.ok(names.some(name => name.startsWith("client.json.previous-")));
 });
 
 test("anchor commit cannot mutate through a replaced lock pathname", async t => {
@@ -197,6 +201,7 @@ test("anchor commit cannot mutate through a replaced lock pathname", async t => 
   assert.ok(names.includes("client.json.lock"));
   assert.ok(names.includes("client.json.lock.displaced"));
   assert.ok(names.some(name => name.startsWith("client.json.tmp-")));
+  assert.ok(names.some(name => name.startsWith("client.json.previous-")));
 });
 
 test("anchor commit cannot mutate through a displaced checkpoint directory", async t => {
@@ -217,6 +222,19 @@ test("anchor commit cannot mutate through a displaced checkpoint directory", asy
   assert.ok(names.includes("client.json"));
   assert.ok(names.includes("client.json.lock"));
   assert.ok(names.some(name => name.startsWith("client.json.tmp-")));
+  assert.ok(names.some(name => name.startsWith("client.json.previous-")));
+});
+
+test("anchor commit cannot overwrite a final-window checkpoint substitution", async t => {
+  const f = await fixture(t);
+  const runner = new URL("./fixtures/mutate-custodian-checkpoint.mjs", import.meta.url);
+  const result = await execute(process.execPath,
+    [...checkpointRaceLoaderArguments(), fileURLToPath(runner), f.storePath], {
+      env: { ...process.env, BLOCH_CHECKPOINT_RACE_TARGET: f.storePath,
+        BLOCH_CHECKPOINT_RACE_ATTACK: "post-rename-pathname-replacement" },
+      timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+    });
+  assert.equal(result.stdout, "rejected final-window checkpoint substitution\n");
 });
 
 test("rollback, concurrent exchange, unsafe files, links and TOFU fail closed", async t => {

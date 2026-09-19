@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import { canonicalBlochL2FinalityPayloadJson } from "./finality-attestation.mjs";
@@ -333,13 +333,17 @@ async function validatePredecessor(path, predecessor) {
   await validatePredecessorEvidence(predecessor);
 }
 
-async function validateDisplacedPredecessor(predecessor) {
+async function validateDisplacedPredecessor(path, predecessor) {
   if (!predecessor) return;
   const actual = await predecessor.handle.stat({ bigint: true });
   if (actual.dev !== predecessor.snapshot.dev || actual.ino !== predecessor.snapshot.ino ||
       actual.mode !== predecessor.snapshot.mode || actual.uid !== predecessor.snapshot.uid ||
       actual.gid !== predecessor.snapshot.gid || actual.size !== predecessor.snapshot.size ||
-      actual.mtimeNs !== predecessor.snapshot.mtimeNs || actual.nlink !== 0n) {
+      actual.mtimeNs !== predecessor.snapshot.mtimeNs || actual.nlink !== 1n) {
+    throw new Error("Finality quorum checkpoint displaced predecessor changed");
+  }
+  const named = await lstat(path, { bigint: true });
+  if (!sameIntegralSnapshot(actual, named)) {
     throw new Error("Finality quorum checkpoint displaced predecessor changed");
   }
   await validatePredecessorEvidence(predecessor);
@@ -352,6 +356,20 @@ async function validateDisplacedPredecessor(predecessor) {
   }
   if (offset !== predecessor.bytes.length || !buffer.subarray(0, offset).equals(predecessor.bytes)) {
     throw new Error("Finality quorum checkpoint displaced predecessor bytes changed");
+  }
+}
+
+async function releaseDisplacedPredecessor(path, predecessor) {
+  if (!predecessor) return;
+  await validateDisplacedPredecessor(path, predecessor);
+  await unlink(path);
+  const actual = await predecessor.handle.stat({ bigint: true });
+  if (actual.dev !== predecessor.snapshot.dev || actual.ino !== predecessor.snapshot.ino ||
+      actual.mode !== predecessor.snapshot.mode || actual.uid !== predecessor.snapshot.uid ||
+      actual.gid !== predecessor.snapshot.gid || actual.size !== predecessor.snapshot.size ||
+      actual.mtimeNs !== predecessor.snapshot.mtimeNs || actual.nlink !== 0n ||
+      !await readExactHandle(predecessor.handle, predecessor.bytes)) {
+    throw new Error("Finality quorum checkpoint predecessor cleanup is ambiguous");
   }
 }
 
@@ -373,11 +391,13 @@ async function replaceState(path, state, expectedHash, retainExternally = null) 
   const token = randomBytes(12).toString("hex");
   const lockPath = `${path}.lock`, temporary = `${path}.tmp-${process.pid}-${token}`;
   const evidencePath = `${path}.previous-${process.pid}-${token}`;
+  const displacedPath = `${path}.displaced-${process.pid}-${token}`;
   const directory = await protectedDirectory(path);
   const anchoredState = anchoredChild(directory, path);
   const anchoredLock = anchoredChild(directory, lockPath);
   const anchoredTemporary = anchoredChild(directory, temporary);
   const anchoredEvidence = anchoredChild(directory, evidencePath);
+  const anchoredDisplaced = anchoredChild(directory, displacedPath);
   let lock, lockStat, lockBytes, temporaryHandle, temporaryStat, temporaryBytes, predecessor,
     authorityDirectoryStat, lockInitialized = false, replacementAttempted = false,
     replacementVerified = false, externalAttempted = false, externalCommitConfirmed = false,
@@ -449,16 +469,39 @@ async function replaceState(path, state, expectedHash, retainExternally = null) 
     }
     await validateTemporary(anchoredTemporary, temporaryHandle, temporaryStat, temporaryBytes);
     await validatePredecessor(anchoredState, predecessor);
-    await rename(anchoredTemporary, anchoredState);
+    if (predecessor) {
+      await rename(anchoredState, anchoredDisplaced); await directory.sync();
+      await validateDisplacedPredecessor(anchoredDisplaced, predecessor);
+      await validateTemporary(anchoredTemporary, temporaryHandle, temporaryStat, temporaryBytes);
+    }
+    await link(anchoredTemporary, anchoredState);
     await directory.sync();
     await validateDirectoryName(path, directory);
-    await validateTemporary(anchoredState, temporaryHandle, temporaryStat, temporaryBytes, true, true);
-    await validateDisplacedPredecessor(predecessor);
+    const installed = await temporaryHandle.stat({ bigint: true });
+    const namedInstalled = await lstat(anchoredState, { bigint: true });
+    const namedTemporary = await lstat(anchoredTemporary, { bigint: true });
+    if (installed.dev !== temporaryStat.dev || installed.ino !== temporaryStat.ino ||
+        installed.nlink !== 2n || !sameIntegralSnapshot(installed, namedInstalled) ||
+        !sameIntegralSnapshot(installed, namedTemporary) ||
+        !await readExactHandle(temporaryHandle, temporaryBytes)) {
+      throw new Error("Finality quorum checkpoint replacement is ambiguous");
+    }
+    await validateDisplacedPredecessor(anchoredDisplaced, predecessor);
+    await unlink(anchoredTemporary); await directory.sync();
+    const installedAfterUnlink = await temporaryHandle.stat({ bigint: true });
+    const namedAfterUnlink = await lstat(anchoredState, { bigint: true });
+    if (installedAfterUnlink.nlink !== 1n ||
+        !sameIntegralSnapshot(installedAfterUnlink, namedAfterUnlink) ||
+        !await readExactHandle(temporaryHandle, temporaryBytes)) {
+      throw new Error("Finality quorum checkpoint replacement is ambiguous");
+    }
+    await validateDisplacedPredecessor(anchoredDisplaced, predecessor);
     const retained = await readState(path);
     if (retained.stateHash !== state.stateHash) throw new Error("Finality quorum checkpoint readback is ambiguous");
     await validateMutationAuthority(path, directory, lock, lockStat, lockBytes);
     await validateDirectoryName(path, directory);
     replacementVerified = true;
+    await releaseDisplacedPredecessor(anchoredDisplaced, predecessor);
     await releasePredecessorEvidence(predecessor);
     await directory.sync();
   } finally {

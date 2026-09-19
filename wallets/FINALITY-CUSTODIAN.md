@@ -203,6 +203,15 @@ single-link lock inode and the authorized predecessor checkpoint at the final
 deterministic boundary. If any pathname is displaced after an independent
 anchor attempt, local replacement stops and retains the lock, temporary state,
 and prior checkpoint for reconciliation.
+All child mutations use Linux descriptor-relative paths. Before advancing the
+independent anchor, the client syncs the directory namespace containing the
+lock, exact candidate, and a separate immutable copy of the predecessor. A
+committed anchor followed by any local ambiguity therefore retains named
+reconciliation evidence. Lock removal is accepted only when the pinned lock
+descriptor becomes unlinked with unchanged bytes and metadata before and after
+the final directory sync. Replacement moves the exact predecessor to a unique
+retained name and then links the candidate create-only into `STATE`; a
+final-window pathname insertion is rejected instead of overwritten.
 
 The outer quorum checkpoint uses the same fail-closed filesystem boundary.
 Reads are capped before parsing and retain an exact descriptor, pathname, and
@@ -216,7 +225,9 @@ are resolved through the pinned Linux directory descriptor rather than the
 ambient pathname. Before replacement, an immutable named copy of the exact
 predecessor is synced in that directory; it is removed only after the candidate
 and canonical pathname have both been verified. Deploy this checkpoint writer
-only on Linux systems that expose `/proc/self/fd`.
+only on Linux systems that expose `/proc/self/fd`. Existing states are likewise
+moved to a retained unique name before the candidate is linked create-only into
+`STATE`, closing the final validate-then-overwrite window.
 
 ## Transport invariants
 

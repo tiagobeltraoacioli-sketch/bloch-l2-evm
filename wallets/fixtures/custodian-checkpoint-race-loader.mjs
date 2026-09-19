@@ -78,7 +78,21 @@ function wrap(handle) {
 
 export const lstat = (...args) => fs.lstat(...args);
 export const readFile = (...args) => fs.readFile(...args);
+export const readdir = (...args) => fs.readdir(...args);
 export const realpath = (...args) => fs.realpath(...args);
+export async function link(source, destination, ...args) {
+  await fs.link(source, destination, ...args);
+  const target = process.env.BLOCH_CHECKPOINT_RACE_TARGET;
+  const targetName = target?.slice(target.lastIndexOf("/") + 1);
+  if (!attacked && targetName && String(destination).endsWith("/" + targetName) &&
+      String(source).includes(".tmp-") &&
+      process.env.BLOCH_CHECKPOINT_RACE_ATTACK === "post-rename-pathname-replacement") {
+    attacked = true;
+    const bytes = await fs.readFile(destination);
+    await fs.rename(destination, destination + ".race-installed");
+    await fs.writeFile(destination, bytes, { mode: 0o600, flag: "wx" });
+  }
+}
 export async function rename(source, destination, ...args) {
   await fs.rename(source, destination, ...args);
   const target = process.env.BLOCH_CHECKPOINT_RACE_TARGET;
