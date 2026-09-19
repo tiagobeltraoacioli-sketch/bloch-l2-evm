@@ -169,10 +169,12 @@ must not be used to adopt a value discovered from disk. A key-only authority
 rotation cannot be distinguished from the store record and is therefore
 rejected by this command. The command prints the canonical receipt SHA-256;
 transfer that digest over an authenticated channel. `verify-reconciliation`
-strictly rederives both checkpoint hashes and the only record hash permitted by
-the claimed status, then requires that external digest instead of trusting the
-receipt file. Verification authenticates consistency with the approved
-transition, not the truth or freshness of the original filesystem observation.
+requires and semantically validates that external digest before opening the
+checkpoint, continuity, or authority-key files, then strictly rederives both
+checkpoint hashes and the only record hash permitted by the claimed status.
+It never trusts the receipt file as its own approval. Verification authenticates
+consistency with the approved transition, not the truth or freshness of the
+original filesystem observation.
 
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an

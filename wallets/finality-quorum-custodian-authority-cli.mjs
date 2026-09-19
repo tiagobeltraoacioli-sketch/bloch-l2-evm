@@ -142,6 +142,14 @@ function expectedRecord(value, expectedHash) {
   return value;
 }
 
+function expectedReconciliationReceipt(value, expectedHash) {
+  if (!HASH.test(expectedHash) || expectedHash === "0".repeat(64) ||
+      finalityCustodianAuthorityReconciliationSha256(value) !== expectedHash) {
+    throw new Error("Reconciliation receipt does not match the externally approved SHA-256");
+  }
+  return value;
+}
+
 async function writeNewCanonicalJson(path, value) {
   if (typeof path !== "string" || resolve(path) !== path) {
     throw new Error("Output path must be absolute");
@@ -301,7 +309,9 @@ async function main() {
       "--expected-checkpoint-hash", "--continuity", "--expected-continuity-sha256",
       "--next-authority-public-key"]);
     const receipt = verifyFinalityCustodianAuthorityStoreReconciliation({
-      receipt: await readCanonicalJson(values["--receipt"], "Reconciliation receipt"),
+      receipt: expectedReconciliationReceipt(
+        await readCanonicalJson(values["--receipt"], "Reconciliation receipt"),
+        values["--expected-receipt-sha256"]),
       checkpoint: expectedCheckpoint(
         await readCanonicalJson(values["--checkpoint"], "Authority checkpoint"),
         values["--expected-checkpoint-hash"]),
@@ -312,10 +322,6 @@ async function main() {
         values["--next-authority-public-key"], "Next authority public key"),
     });
     const receiptSha256 = finalityCustodianAuthorityReconciliationSha256(receipt);
-    if (!HASH.test(values["--expected-receipt-sha256"]) ||
-        receiptSha256 !== values["--expected-receipt-sha256"]) {
-      throw new Error("Reconciliation receipt does not match the externally approved SHA-256");
-    }
     console.log(JSON.stringify({ verified: true, status: receipt.status, receiptSha256,
       observedRecordHash: receipt.observedRecordHash,
       nextCheckpointHash: receipt.nextCheckpointHash }));

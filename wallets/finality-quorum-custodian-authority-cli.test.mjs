@@ -201,6 +201,24 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
   assert.equal(receipt.observedRecordHash, store.record().recordHash);
   assert.equal(JSON.parse(result.stdout).status, receipt.status);
   const receiptSha256 = finalityCustodianAuthorityReconciliationSha256(receipt);
+  await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", receiptPath, "--expected-receipt-sha256", "0".repeat(64),
+    "--checkpoint", join(f.root, "must-not-be-read-checkpoint.json"),
+    "--expected-checkpoint-hash", checkpoint.checkpointHash,
+    "--continuity", join(f.root, "must-not-be-read-continuity.json"),
+    "--expected-continuity-sha256", continuitySha256,
+    "--next-authority-public-key", join(f.root, "must-not-be-read-key.pem")]),
+  error => /externally approved/.test(error.stderr));
+  const tamperedReceiptPath = join(f.root, "tampered-reconciliation.json");
+  await json(tamperedReceiptPath, { ...receipt, status: "invented-status" });
+  await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", tamperedReceiptPath, "--expected-receipt-sha256", receiptSha256,
+    "--checkpoint", join(f.root, "must-not-be-read-checkpoint.json"),
+    "--expected-checkpoint-hash", checkpoint.checkpointHash,
+    "--continuity", join(f.root, "must-not-be-read-continuity.json"),
+    "--expected-continuity-sha256", continuitySha256,
+    "--next-authority-public-key", join(f.root, "must-not-be-read-key.pem")]),
+  error => /receipt is invalid/.test(error.stderr));
   const verified = await execute(process.execPath, [CLI, "verify-reconciliation",
     "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
