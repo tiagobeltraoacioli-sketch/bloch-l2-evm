@@ -73,6 +73,12 @@ function checkedRecord(value) {
   return Object.freeze({ ...value });
 }
 
+/** Validate one canonical custodian record value and return its authenticated
+ * record hash without requiring or touching authority key material. */
+export function finalityCustodianStoreRecordHash(record) {
+  return checkedRecord(record).recordHash;
+}
+
 function approvalKey(value, privateKey) {
   let key;
   try {

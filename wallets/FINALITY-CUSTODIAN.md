@@ -61,7 +61,9 @@ The offline CLI creates these objects without loading private material:
 
 ```sh
 node wallets/finality-quorum-custodian-authority-cli.mjs approve \
-  --record <initial-record.json> --deployment-id <64-hex> \
+  --record <initial-record.json> \
+  --expected-record-hash <hash-retained-out-of-band> \
+  --deployment-id <64-hex> \
   --private-key <current-ed25519-private.pem> --output <approval.json>
 
 node wallets/finality-quorum-custodian-authority-cli.mjs transition \
@@ -126,7 +128,10 @@ Inputs must be absolute, canonical, owned, single-link files without
 group/world write permission. Output uses exclusive creation, is synced before
 success and is never overwritten. Private keys additionally require owner-only
 permissions and are opened only by the `approve` or `sign-continuity` process.
-The `approve` command prints the SHA-256 of the exact canonical approval file,
+Before opening the authority private key, `approve` requires the record's exact
+`recordHash` from the independent control plane. This prevents a different
+internally valid store record from being substituted at the signing boundary.
+The command then prints the SHA-256 of the exact canonical approval file,
 including its terminating newline, so the value matches `sha256sum approval.json`;
 transfer and retain that digest through an authenticated independent channel.
 The `initial` command requires this digest, so a different old but valid

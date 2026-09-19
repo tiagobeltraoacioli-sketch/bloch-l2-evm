@@ -12,6 +12,7 @@ import {
   createFinalityCustodianStoreContinuityTransition,
   createInitialFinalityCustodianAuthorityCheckpoint,
   finalityCustodianAuthorityReconciliationSha256,
+  finalityCustodianStoreRecordHash,
   reconcileFinalityCustodianAuthorityStoreRecord,
   signFinalityCustodianStoreContinuity,
   verifyFinalityCustodianAuthorityStoreReconciliation,
@@ -24,7 +25,7 @@ const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 
 function usage() {
   return `Usage:
-  node wallets/finality-quorum-custodian-authority-cli.mjs approve --record <record.json> --deployment-id <sha256> --private-key <ed25519-private.pem> --output <approval.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs approve --record <record.json> --expected-record-hash <sha256> --deployment-id <sha256> --private-key <ed25519-private.pem> --output <approval.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs transition --previous-record <record.json> --next-record <record.json> --deployment-id <sha256> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --output <transition.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity --transition <transition.json> --expected-transition-sha256 <sha256> --role <authorization|acceptance> --private-key <ed25519-private.pem> --output <share.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --expected-transition-sha256 <sha256> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
@@ -133,6 +134,14 @@ function expectedCheckpoint(value, expectedHash) {
   return value;
 }
 
+function expectedRecord(value, expectedHash) {
+  if (!HASH.test(expectedHash) || expectedHash === "0".repeat(64) ||
+      finalityCustodianStoreRecordHash(value) !== expectedHash) {
+    throw new Error("Custodian store record does not match the externally retained hash");
+  }
+  return value;
+}
+
 async function writeNewCanonicalJson(path, value) {
   if (typeof path !== "string" || resolve(path) !== path) {
     throw new Error("Output path must be absolute");
@@ -188,10 +197,13 @@ async function main() {
   const [command, ...args] = process.argv.slice(2);
   let output, path;
   if (command === "approve") {
-    const values = parse(args, ["--record", "--deployment-id", "--private-key", "--output"]);
+    const values = parse(args, ["--record", "--expected-record-hash", "--deployment-id",
+      "--private-key", "--output"]);
     output = approveFinalityCustodianStoreRecord({
       deploymentId: deploymentId(values["--deployment-id"]),
-      record: await readCanonicalJson(values["--record"], "Custodian store record"),
+      record: expectedRecord(
+        await readCanonicalJson(values["--record"], "Custodian store record"),
+        values["--expected-record-hash"]),
       privateKey: await readEd25519PrivateKey(values["--private-key"], "Authority private key"),
     });
     path = values["--output"];

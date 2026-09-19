@@ -65,7 +65,20 @@ test("offline CLI creates approval, role-separated shares, and canonical continu
   const f = await fixture(t), approval = join(f.root, "cli-approval.json"),
     transition = join(f.root, "transition.json"), authorization = join(f.root, "authorization.json"),
     acceptance = join(f.root, "acceptance.json"), continuity = join(f.root, "continuity.json");
+  await assert.rejects(execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
+    "--expected-record-hash", "0".repeat(64), "--deployment-id", DEPLOYMENT,
+    "--private-key", join(f.root, "must-not-be-read.pem"),
+    "--output", join(f.root, "never-approved.json")]),
+  error => /externally retained hash/.test(error.stderr));
+  const tamperedRecord = join(f.root, "tampered-record.json");
+  await json(tamperedRecord, { ...f.record, stateHash: "a".repeat(64) });
+  await assert.rejects(execute(process.execPath, [CLI, "approve", "--record", tamperedRecord,
+    "--expected-record-hash", f.record.recordHash, "--deployment-id", DEPLOYMENT,
+    "--private-key", join(f.root, "must-not-be-read.pem"),
+    "--output", join(f.root, "never-tampered-approval.json")]),
+  error => /store record is invalid/.test(error.stderr));
   const approvalResult = await execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
+    "--expected-record-hash", f.record.recordHash,
     "--deployment-id", DEPLOYMENT, "--private-key", f.previousPrivateKey, "--output", approval]);
   const transitionResult = await execute(process.execPath,
     [CLI, "transition", "--previous-record", f.recordPath,
@@ -224,6 +237,7 @@ test("offline CLI refuses substitution, unsafe input and output overwrite", asyn
   const f = await fixture(t), output = join(f.root, "checkpoint.json");
   await chmod(f.previousPrivateKey, 0o644);
   await assert.rejects(execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
+    "--expected-record-hash", f.record.recordHash,
     "--deployment-id", DEPLOYMENT, "--private-key", f.previousPrivateKey,
     "--output", join(f.root, "unsafe-approval.json")]), error => /unsafe/.test(error.stderr));
   await chmod(f.previousPrivateKey, 0o600);
