@@ -85,6 +85,7 @@ node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity \
 
 node wallets/finality-quorum-custodian-authority-cli.mjs initial \
   --approval <approved-initial-record.json> \
+  --expected-approval-sha256 <hash-retained-out-of-band> \
   --deployment-id <64-hex> \
   --authority-public-key <current-ed25519-public.pem> \
   --output <new-authority-checkpoint.json>
@@ -119,9 +120,17 @@ Inputs must be absolute, canonical, owned, single-link files without
 group/world write permission. Output uses exclusive creation, is synced before
 success and is never overwritten. Private keys additionally require owner-only
 permissions and are opened only by the `approve` or `sign-continuity` process.
-The CLI verifies the initial signature or both continuity roles before
+The `approve` command prints the SHA-256 of the exact canonical approval file,
+including its terminating newline, so the value matches `sha256sum approval.json`;
+transfer and retain that digest through an authenticated independent channel.
+The `initial` command requires this digest, so a different old but valid
+approval cannot silently become the bootstrap record. The CLI verifies the
+initial signature or both continuity roles before
 producing a successor, but moving that output to the independent control plane
 remains an explicit operator action.
+This file-byte convention is intentionally different from the reconciliation
+receipt digest, which is the protocol's SHA-256 of the canonical JSON value
+without the file newline.
 The `advance`, `reconcile-record`, and `verify-reconciliation` commands also
 require the exact `checkpointHash` retained in the independent control plane.
 An internally valid checkpoint file is not accepted as its own rollback floor;

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { createPrivateKey, createPublicKey } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -28,7 +28,7 @@ function usage() {
   node wallets/finality-quorum-custodian-authority-cli.mjs transition --previous-record <record.json> --next-record <record.json> --deployment-id <sha256> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --output <transition.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs sign-continuity --transition <transition.json> --role <authorization|acceptance> --private-key <ed25519-private.pem> --output <share.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs assemble-continuity --transition <transition.json> --previous-authority-public-key <ed25519-public.pem> --next-authority-public-key <ed25519-public.pem> --authorization <share.json> --acceptance <share.json> --output <continuity.json>
-  node wallets/finality-quorum-custodian-authority-cli.mjs initial --approval <approval.json> --deployment-id <sha256> --authority-public-key <ed25519-public.pem> --output <checkpoint.json>
+  node wallets/finality-quorum-custodian-authority-cli.mjs initial --approval <approval.json> --expected-approval-sha256 <sha256> --deployment-id <sha256> --authority-public-key <ed25519-public.pem> --output <checkpoint.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs advance --checkpoint <checkpoint.json> --expected-checkpoint-hash <hash> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <next-checkpoint.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs reconcile-record --store <store.json> --checkpoint <checkpoint.json> --expected-checkpoint-hash <hash> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem> --output <reconciliation.json>
   node wallets/finality-quorum-custodian-authority-cli.mjs verify-reconciliation --receipt <reconciliation.json> --expected-receipt-sha256 <sha256> --checkpoint <checkpoint.json> --expected-checkpoint-hash <hash> --continuity <continuity.json> --next-authority-public-key <ed25519-public.pem>`;
@@ -87,6 +87,18 @@ async function readCanonicalJson(path, description) {
   return value;
 }
 
+function canonicalArtifactSha256(value) {
+  return createHash("sha256").update(`${JSON.stringify(value)}\n`, "utf8").digest("hex");
+}
+
+function expectedArtifact(value, expectedHash, description) {
+  if (!HASH.test(expectedHash) || expectedHash === "0".repeat(64) ||
+      canonicalArtifactSha256(value) !== expectedHash) {
+    throw new Error(`${description} does not match the externally approved SHA-256`);
+  }
+  return value;
+}
+
 async function readEd25519PublicKey(path, description) {
   const encoded = await readSafe(path, MAX_KEY_BYTES, description);
   let key;
@@ -134,15 +146,38 @@ async function writeNewCanonicalJson(path, value) {
   const directory = await open(parent,
     fsConstants.O_RDONLY | NOFOLLOW | (fsConstants.O_DIRECTORY ?? 0));
   let output;
+  const validateBinding = async () => {
+    const namedParentReal = await realpath(parent);
+    const namedParent = await lstat(parent);
+    const openedParent = await directory.stat();
+    if (namedParentReal !== resolve(parent) || !namedParent.isDirectory() ||
+        namedParent.isSymbolicLink() || namedParent.dev !== openedParent.dev ||
+        namedParent.ino !== openedParent.ino || (namedParent.mode & 0o022) !== 0 ||
+        typeof process.getuid === "function" && namedParent.uid !== process.getuid()) {
+      throw new Error("Output directory changed");
+    }
+    if (output) {
+      const namedOutput = await lstat(path);
+      const openedOutput = await output.stat();
+      if (!namedOutput.isFile() || namedOutput.isSymbolicLink() || namedOutput.nlink !== 1 ||
+          namedOutput.dev !== openedOutput.dev || namedOutput.ino !== openedOutput.ino ||
+          namedOutput.size !== openedOutput.size || namedOutput.mode !== openedOutput.mode ||
+          namedOutput.uid !== openedOutput.uid || namedOutput.gid !== openedOutput.gid ||
+          (namedOutput.mode & 0o222) !== 0) throw new Error("Output path changed");
+    }
+  };
   try {
     const actual = await directory.stat();
     if (!actual.isDirectory() || actual.dev !== metadata.dev || actual.ino !== metadata.ino ||
         (actual.mode & 0o022) !== 0) throw new Error("Output directory changed");
     output = await open(path,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NOFOLLOW, 0o444);
+    await validateBinding();
     await output.writeFile(`${JSON.stringify(value)}\n`, "utf8");
     await output.sync();
+    await validateBinding();
     await directory.sync();
+    await validateBinding();
   } finally {
     await output?.close();
     await directory.close();
@@ -199,9 +234,12 @@ async function main() {
     path = values["--output"];
   } else if (command === "initial") {
     const values = parse(args,
-      ["--approval", "--deployment-id", "--authority-public-key", "--output"]);
+      ["--approval", "--expected-approval-sha256", "--deployment-id",
+        "--authority-public-key", "--output"]);
     output = createInitialFinalityCustodianAuthorityCheckpoint({
-      approval: await readCanonicalJson(values["--approval"], "Approval"),
+      approval: expectedArtifact(
+        await readCanonicalJson(values["--approval"], "Approval"),
+        values["--expected-approval-sha256"], "Approval"),
       expectedDeploymentId: deploymentId(values["--deployment-id"]),
       authorityPublicKey: await readEd25519PublicKey(
         values["--authority-public-key"], "Authority public key"),
@@ -259,7 +297,9 @@ async function main() {
     return;
   } else throw new Error(usage());
   await writeNewCanonicalJson(path, output);
-  console.log(JSON.stringify(command === "reconcile-record" ? {
+  console.log(JSON.stringify(command === "approve" ? {
+    created: true, approvalSha256: canonicalArtifactSha256(output),
+  } : command === "reconcile-record" ? {
     created: true, status: output.status, observedRecordHash: output.observedRecordHash,
     nextCheckpointHash: output.nextCheckpointHash,
     receiptSha256: finalityCustodianAuthorityReconciliationSha256(output),

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,10 @@ import {
 const execute = promisify(execFile);
 const CLI = join(import.meta.dirname, "finality-quorum-custodian-authority-cli.mjs");
 const DEPLOYMENT = "d".repeat(64);
+
+function artifactSha256(value) {
+  return createHash("sha256").update(`${JSON.stringify(value)}\n`).digest("hex");
+}
 
 async function json(path, value, mode = 0o444) {
   await writeFile(path, `${JSON.stringify(value)}\n`, { mode });
@@ -52,7 +56,8 @@ async function fixture(t) {
   await publicKey(nextKey, next.publicKey);
   await privateKey(previousPrivateKey, previous.privateKey);
   await privateKey(nextPrivateKey, next.privateKey); await json(recordPath, record);
-  return { root, previous, next, record, approvalPath, previousKey, nextKey,
+  return { root, previous, next, record, approvalPath,
+    approvalSha256: artifactSha256(approval), previousKey, nextKey,
     previousPrivateKey, nextPrivateKey, recordPath };
 }
 
@@ -60,7 +65,7 @@ test("offline CLI creates approval, role-separated shares, and canonical continu
   const f = await fixture(t), approval = join(f.root, "cli-approval.json"),
     transition = join(f.root, "transition.json"), authorization = join(f.root, "authorization.json"),
     acceptance = join(f.root, "acceptance.json"), continuity = join(f.root, "continuity.json");
-  await execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
+  const approvalResult = await execute(process.execPath, [CLI, "approve", "--record", f.recordPath,
     "--deployment-id", DEPLOYMENT, "--private-key", f.previousPrivateKey, "--output", approval]);
   await execute(process.execPath, [CLI, "transition", "--previous-record", f.recordPath,
     "--next-record", f.recordPath, "--deployment-id", DEPLOYMENT,
@@ -80,15 +85,19 @@ test("offline CLI creates approval, role-separated shares, and canonical continu
   assert.equal(assembled.acceptance.role, "acceptance");
   assert.equal(assembled.transition.previousRecord.recordHash, f.record.recordHash);
   assert.equal(assembled.transition.nextRecord.recordHash, f.record.recordHash);
-  const generatedApproval = JSON.parse(await readFile(approval, "utf8"));
+  const approvalBytes = await readFile(approval);
+  const generatedApproval = JSON.parse(approvalBytes.toString("utf8"));
   assert.equal(generatedApproval.deploymentId, DEPLOYMENT);
   assert.equal(generatedApproval.record.recordHash, f.record.recordHash);
+  assert.equal(JSON.parse(approvalResult.stdout).approvalSha256,
+    createHash("sha256").update(approvalBytes).digest("hex"));
 });
 
 test("offline CLI creates the exact initial checkpoint and advances key-only continuity", async t => {
   const f = await fixture(t), initial = join(f.root, "initial.json"),
     continuityPath = join(f.root, "continuity.json"), advanced = join(f.root, "advanced.json");
   await execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", initial]);
   const retained = JSON.parse(await readFile(initial, "utf8"));
@@ -135,6 +144,7 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
       transition, "acceptance", f.next.privateKey) });
   await json(continuityPath, continuity);
   await execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", checkpointPath]);
   const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
@@ -174,17 +184,34 @@ test("offline CLI refuses substitution, unsafe input and output overwrite", asyn
     "--output", join(f.root, "unsafe-approval.json")]), error => /unsafe/.test(error.stderr));
   await chmod(f.previousPrivateKey, 0o600);
   await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", "e".repeat(64),
+    "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
+    "--output", output]), error => /externally approved/.test(error.stderr));
+  for (const digest of ["0".repeat(64), "E".repeat(64), "e".repeat(63)]) {
+    await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+      "--expected-approval-sha256", digest,
+      "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
+      "--output", output]), error => /externally approved/.test(error.stderr));
+  }
+  await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
+    "--output", output]), error => /Usage/.test(error.stderr));
+  await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", "e".repeat(64), "--authority-public-key", f.previousKey,
     "--output", output]), error => /approval/.test(error.stderr));
   await chmod(f.previousKey, 0o666);
   await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", output]), error => /unsafe/.test(error.stderr));
   await chmod(f.previousKey, 0o444);
   await execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", output]);
   await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", f.approvalPath,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", output]), error => /EEXIST|exist/.test(error.stderr));
 });
@@ -195,9 +222,11 @@ test("offline CLI requires canonical owned absolute inputs", async t => {
     null, 2), { mode: 0o444 });
   await chmod(noncanonical, 0o444);
   await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", noncanonical,
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", join(f.root, "never.json")]), error => /not canonical/.test(error.stderr));
   await assert.rejects(execute(process.execPath, [CLI, "initial", "--approval", "relative.json",
+    "--expected-approval-sha256", f.approvalSha256,
     "--deployment-id", DEPLOYMENT, "--authority-public-key", f.previousKey,
     "--output", join(f.root, "never-either.json")]), error => /absolute/.test(error.stderr));
 });
