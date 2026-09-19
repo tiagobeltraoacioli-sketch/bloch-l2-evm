@@ -113,6 +113,44 @@ async function lockPresent(path) {
   });
 }
 
+async function readUnderLock(path) {
+  const lockPath = `${path}.lock`, directory = await protectedDirectory(path);
+  let lock, lockStat, result, failure = null;
+  try {
+    try {
+      lock = await open(lockPath,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    } catch (cause) {
+      throw new Error("Finality custodian store is locked; inspect before retrying", { cause });
+    }
+    await lock.writeFile(`${JSON.stringify({ format: "bloch-l2-finality-custodian-store-lock-v1",
+      token: randomBytes(32).toString("hex") })}\n`);
+    await lock.sync(); await directory.sync();
+    lockStat = await lock.stat();
+    if (!lockStat.isFile() || lockStat.nlink !== 1 || (lockStat.mode & 0o077) !== 0) {
+      throw new Error("Finality custodian store lock is unsafe");
+    }
+    result = await readRecord(path);
+  } catch (error) { failure = error; }
+  let cleanup = null;
+  if (lock && lockStat) {
+    try {
+      const linked = await lstat(lockPath), actual = await lock.stat();
+      if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1 ||
+          linked.dev !== lockStat.dev || linked.ino !== lockStat.ino ||
+          actual.dev !== lockStat.dev || actual.ino !== lockStat.ino) {
+        throw new Error("Finality custodian store lock changed; refusing removal");
+      }
+      await unlink(lockPath); await directory.sync();
+    } catch (error) { cleanup = error; }
+  }
+  await lock?.close().catch(error => { cleanup ??= error; });
+  await directory.close().catch(error => { cleanup ??= error; });
+  if (cleanup) throw new Error("Finality custodian store requires inspection before retrying", { cause: cleanup });
+  if (failure) throw failure;
+  return result;
+}
+
 export async function initializeFilesystemFinalityCustodianStore({ storePath, record,
   expectedRecordHash } = {}) {
   const initial = checkedRecord(record);
@@ -218,7 +256,17 @@ export async function createFilesystemFinalityCustodianStore({ storePath, expect
   }
   let busy = false;
   return Object.freeze({
-    async load() { return retained.stateHash; },
+    async load() {
+      if (busy) throw new Error("Finality custodian store already has an operation in progress");
+      busy = true;
+      try {
+        const observed = await readUnderLock(storePath);
+        if (observed.recordHash !== retained.recordHash) {
+          throw new Error("Finality custodian store changed outside this process");
+        }
+        return observed.stateHash;
+      } finally { busy = false; }
+    },
     async compareAndSwap(expected, replacement) {
       checkedHash(expected, true, "Finality custodian store expected hash is invalid");
       checkedHash(replacement, false, "Finality custodian store replacement hash is invalid");
@@ -226,7 +274,7 @@ export async function createFilesystemFinalityCustodianStore({ storePath, expect
       if (busy) throw new Error("Finality custodian store already has an operation in progress");
       busy = true;
       try {
-        const observed = await readRecord(storePath);
+        const observed = await readUnderLock(storePath);
         if (observed.recordHash !== retained.recordHash) {
           throw new Error("Finality custodian store changed outside this process");
         }

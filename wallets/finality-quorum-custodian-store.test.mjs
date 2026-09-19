@@ -53,6 +53,7 @@ test("store refuses TOFU, rollback, conflict and concurrent instances", async t 
   assert.deepEqual(await first.compareAndSwap(HASH_B, "c".repeat(64)),
     { status: "conflict", currentStateHash: HASH_A });
   await first.compareAndSwap(HASH_A, HASH_B);
+  await assert.rejects(stale.load(), /outside this process/);
   await assert.rejects(stale.compareAndSwap(HASH_A, "c".repeat(64)), /outside this process/);
 });
 
@@ -76,6 +77,13 @@ test("store rejects corruption, exposed files, links and orphan locks", async t 
   assert.equal(inspected.lockPresent, true);
   await assert.rejects(createFilesystemFinalityCustodianStore({ storePath: locked.storePath,
     expectedRecordHash: locked.record.recordHash }), /locked/);
+
+  const live = await fixture(t);
+  const store = await createFilesystemFinalityCustodianStore({ storePath: live.storePath,
+    expectedRecordHash: live.record.recordHash });
+  await writeFile(`${live.storePath}.lock`, "held\n", { mode: 0o600, flag: "wx" });
+  await assert.rejects(store.load(), /locked/);
+  await rm(`${live.storePath}.lock`);
 
   const corrupt = await fixture(t);
   await writeFile(corrupt.storePath, "{}\n", { mode: 0o600 });

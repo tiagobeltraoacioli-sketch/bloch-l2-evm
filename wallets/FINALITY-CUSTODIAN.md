@@ -19,6 +19,9 @@ or replaced file cannot silently become trusted. An orphan lock or ambiguous
 write blocks reopening for operator inspection; the module never removes one
 based on age. This is a local durability boundary, not a substitute for an
 independent backup or replicated witness of the retained record hash.
+Loads and conflict observations take the same interprocess lock as transitions
+and compare the exact retained record hash; a stale process therefore fails
+closed instead of returning a cached custodian head.
 
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an
