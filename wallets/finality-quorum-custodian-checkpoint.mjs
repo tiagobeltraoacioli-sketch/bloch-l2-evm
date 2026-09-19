@@ -94,8 +94,8 @@ export function createInitialFinalityCustodianCheckpoint({ clientId, custodianId
 }
 
 async function protectedDirectory(path) {
-  if (typeof path !== "string" || !path) throw new Error("Finality custodian checkpoint path is invalid");
-  const directoryPath = resolve(dirname(path)), before = await lstat(directoryPath);
+  path = absoluteCheckpointPath(path);
+  const directoryPath = dirname(path), before = await lstat(directoryPath);
   if (!before.isDirectory() || before.isSymbolicLink() || (before.mode & 0o022) !== 0 ||
       typeof process.getuid === "function" && before.uid !== process.getuid() ||
       await realpath(directoryPath) !== directoryPath) {
@@ -113,21 +113,40 @@ async function protectedDirectory(path) {
 }
 
 async function readState(path) {
+  path = absoluteCheckpointPath(path);
   const directory = await protectedDirectory(path);
   let handle;
   try {
+    const directoryPath = dirname(path);
+    const directoryBefore = await directory.stat({ bigint: true });
     handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const before = await handle.stat();
-    if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o077) !== 0 || before.size < 2 ||
-        before.size > MAX_FILE_BYTES || typeof process.getuid === "function" && before.uid !== process.getuid()) {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || (before.mode & 0o077n) !== 0n || before.size < 2n ||
+        before.size > BigInt(MAX_FILE_BYTES) || typeof process.getuid === "function" &&
+        before.uid !== BigInt(process.getuid())) {
       throw new Error("Finality custodian checkpoint file is unsafe");
     }
-    const encoded = await handle.readFile("utf8"), after = await handle.stat();
-    if (!after.isFile() || after.nlink !== 1 || after.dev !== before.dev || after.ino !== before.ino ||
-        after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
-        (after.mode & 0o077) !== 0 || typeof process.getuid === "function" && after.uid !== process.getuid()) {
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_FILE_BYTES) throw new Error("Finality custodian checkpoint exceeds its size limit");
+    const after = await handle.stat({ bigint: true });
+    const namedAfter = await lstat(path, { bigint: true });
+    const directoryAfter = await directory.stat({ bigint: true });
+    const namedDirectoryAfter = await lstat(directoryPath, { bigint: true });
+    if (!after.isFile() || after.nlink !== 1n || (after.mode & 0o077n) !== 0n ||
+        typeof process.getuid === "function" && after.uid !== BigInt(process.getuid()) ||
+        !sameIntegralSnapshot(before, after) || !sameIntegralSnapshot(after, namedAfter) ||
+        BigInt(offset) !== after.size || !sameIntegralSnapshot(directoryBefore, directoryAfter) ||
+        !sameIntegralSnapshot(directoryAfter, namedDirectoryAfter) ||
+        await realpath(directoryPath) !== directoryPath) {
       throw new Error("Finality custodian checkpoint changed while being read");
     }
+    const encoded = buffer.subarray(0, offset).toString("utf8");
     let parsed;
     try { parsed = JSON.parse(encoded); } catch (cause) {
       throw new Error("Finality custodian checkpoint is not valid JSON", { cause });
@@ -140,6 +159,17 @@ async function readState(path) {
     await handle?.close();
     await directory.close();
   }
+}
+
+function sameIntegralSnapshot(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink &&
+    left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function absoluteCheckpointPath(path) {
+  if (typeof path !== "string" || !path) throw new Error("Finality custodian checkpoint path is invalid");
+  return resolve(path);
 }
 
 function checkedAnchor(anchor) {
@@ -172,6 +202,7 @@ async function anchorAdvance(anchor, expected, replacement) {
 }
 
 async function replaceState(path, current, next, anchor) {
+  path = absoluteCheckpointPath(path);
   const lockPath = `${path}.lock`, temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const directory = await protectedDirectory(path);
   let lock, lockStat, temporaryStat, replacementAttempted = false, replacementVerified = false,
@@ -246,6 +277,7 @@ async function replaceState(path, current, next, anchor) {
 
 export async function initializeFinalityCustodianCheckpoint({ storePath, checkpoint,
   expectedStateHash } = {}) {
+  storePath = absoluteCheckpointPath(storePath);
   const initial = checkedState(checkpoint);
   if (initial.generation !== "0" || expectedStateHash !== initial.stateHash) {
     throw new Error("Finality custodian checkpoint does not match its externally approved initial hash");
@@ -270,6 +302,7 @@ function nextState(current, fields) {
 }
 
 export async function inspectFinalityCustodianCheckpoint(storePath) {
+  storePath = absoluteCheckpointPath(storePath);
   const state = await readState(storePath);
   const lock = await lstat(`${storePath}.lock`).then(() => true, error => {
     if (error?.code === "ENOENT") return false;
@@ -280,6 +313,7 @@ export async function inspectFinalityCustodianCheckpoint(storePath) {
 
 export async function createFilesystemFinalityCustodian({ storePath, expectedStateHash, authentication,
   transport, anchor } = {}) {
+  storePath = absoluteCheckpointPath(storePath);
   if (typeof expectedStateHash !== "string" || !HASH.test(expectedStateHash)) {
     throw new Error("Finality custodian externally retained checkpoint hash is invalid");
   }

@@ -192,6 +192,12 @@ authenticated, non-uncertain response advances both anchor and local state back
 to `ready`. A crash, malformed response, transport error, authenticated
 `uncertain` result, ambiguous anchor update, or ambiguous local replacement
 leaves a pending state or a retained lock and blocks restart.
+Checkpoint reads are bounded to the protocol maximum and pin the complete file
+and parent-directory inode snapshots through EOF and final pathname resolution.
+Concurrent growth, same-inode rewrite, pathname replacement, directory
+substitution fails closed before state is returned, while relative paths are
+resolved once before any asynchronous filesystem operation can reinterpret
+them.
 
 ## Transport invariants
 

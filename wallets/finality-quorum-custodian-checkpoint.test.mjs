@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, link, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   AuthenticatedFinalityQuorumCustodianServer,
 } from "./finality-quorum-custodian.mjs";
@@ -15,6 +18,24 @@ import {
 } from "./finality-quorum-custodian-checkpoint.mjs";
 
 const HASH_A = "a".repeat(64), HASH_B = "b".repeat(64);
+const execute = promisify(execFile);
+
+function supportsModuleRegister(version) {
+  const match = /^(\d+)\.(\d+)\./.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]), minor = Number(match[2]);
+  return major >= 21 || major === 20 && minor >= 6 || major === 18 && minor >= 19;
+}
+
+function checkpointRaceLoaderArguments() {
+  if (supportsModuleRegister(process.versions.node)) {
+    const registerLoader = new URL("./fixtures/register-custodian-checkpoint-race-loader.mjs",
+      import.meta.url);
+    return ["--import", registerLoader.href];
+  }
+  const loader = new URL("./fixtures/custodian-checkpoint-race-loader.mjs", import.meta.url);
+  return ["--experimental-loader", loader.href];
+}
 
 function authentication() {
   return { key: new Uint8Array(32).fill(0x41), clientId: "wallet-finality",
@@ -167,3 +188,23 @@ test("rollback, concurrent exchange, unsafe files, links and TOFU fail closed", 
   await assert.rejects(inspectFinalityCustodianCheckpoint(symlinkPath));
   assert.equal(retained.status, "ready");
 });
+
+for (const attack of ["same-inode-rewrite", "pathname-replacement", "parent-directory-replacement",
+  "parent-directory-metadata-change", "growth"]) {
+  test(`client checkpoint rejects ${attack} during its bounded pinned read`, async t => {
+    const f = await fixture(t);
+    if (attack === "parent-directory-replacement") {
+      t.after(() => rm(`${f.root}.race-moved`, { recursive: true, force: true }));
+    }
+    const runner = new URL("./fixtures/inspect-custodian-checkpoint.mjs", import.meta.url);
+    const result = await execute(process.execPath,
+      [...checkpointRaceLoaderArguments(), fileURLToPath(runner), f.storePath], {
+        env: { ...process.env, BLOCH_CHECKPOINT_RACE_TARGET: f.storePath,
+          BLOCH_CHECKPOINT_RACE_ATTACK: attack },
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 64 * 1024,
+      });
+    assert.equal(result.stdout, "rejected custodian checkpoint mutation\n");
+  });
+}
