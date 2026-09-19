@@ -6,12 +6,14 @@ import {
   BLOCH_L2_HEADER_FORMAT,
   BLOCH_L2_IDENTITY_FORMAT,
   BLOCH_L2_SECURITY,
+  BLOCH_L2_STATUS_FORMAT,
 } from "./bloch-l2.mjs";
 
 const account = `0x${"11".repeat(20)}`;
 const chainId = `0x${700771n.toString(16)}`;
 const genesisHash = `0x${"42".repeat(32)}`;
 const domain = `0x${"71".repeat(32)}`;
+const stateRoot = `0x${"31".repeat(32)}`;
 const identity = Object.freeze({
   format: BLOCH_L2_IDENTITY_FORMAT,
   chainId,
@@ -26,8 +28,16 @@ function mock(handlers = {}) {
     calls.push(request);
     if (handlers[request.method]) return handlers[request.method](request);
     if (request.method === "eth_chainId") return chainId;
-    if (request.method === "eth_getBlockByNumber") return { number: "0x0", hash: genesisHash };
+    if (request.method === "eth_getBlockByNumber") return { number: "0x0", hash: genesisHash, stateRoot };
     if (request.method === "bloch_chainIdentity") return { ...identity };
+    if (request.method === "bloch_chainStatus") return {
+      format: BLOCH_L2_STATUS_FORMAT,
+      challenge: request.params[0],
+      identity: { ...identity },
+      headNumber: "0x0",
+      headHash: genesisHash,
+      stateRoot,
+    };
     if (["eth_requestAccounts", "eth_accounts"].includes(request.method)) return [account];
     if (request.method === "eth_sendTransaction") return `0x${"aa".repeat(32)}`;
     return null;
@@ -138,6 +148,57 @@ test("does not execute identity accessors and rechecks identity immediately befo
   assert.ok(!changed.calls.some(call => call.method === "eth_sendTransaction"));
 });
 
+test("requires a fresh challenge-bound canonical status and cross-checks its selected block", async () => {
+  const challenges = [];
+  const provider = mock({ bloch_chainStatus: request => {
+    challenges.push(request.params[0]);
+    return {
+      format: BLOCH_L2_STATUS_FORMAT,
+      challenge: request.params[0],
+      identity: { ...identity },
+      headNumber: "0x0",
+      headHash: genesisHash,
+      stateRoot,
+    };
+  } });
+  await createBlochL2Wallet(provider, options).connect();
+  assert.equal(challenges.length, 2);
+  assert.match(challenges[0], /^0x[0-9a-f]{64}$/);
+  assert.notEqual(challenges[0], challenges[1]);
+
+  for (const changed of [
+    null,
+    [],
+    { format: BLOCH_L2_STATUS_FORMAT, challenge: `0x${"ff".repeat(32)}`, identity: { ...identity }, headNumber: "0x0", headHash: genesisHash, stateRoot },
+    { format: "bloch-chain-status-v2", challenge: "dynamic", identity: { ...identity }, headNumber: "0x0", headHash: genesisHash, stateRoot },
+    { format: BLOCH_L2_STATUS_FORMAT, challenge: "dynamic", identity: { ...identity }, headNumber: "0x00", headHash: genesisHash, stateRoot },
+    { format: BLOCH_L2_STATUS_FORMAT, challenge: "dynamic", identity: { ...identity }, headNumber: "0x0", headHash: "0x1", stateRoot },
+  ]) {
+    const stale = mock({ bloch_chainStatus: request => changed && {
+      ...changed,
+      challenge: changed.challenge === "dynamic" ? request.params[0] : changed.challenge,
+    } });
+    await assert.rejects(createBlochL2Wallet(stale, options).connect(), /fresh canonical Bloch L2 status/);
+    assert.ok(!stale.calls.some(call => call.method === "eth_requestAccounts"));
+  }
+
+  const mismatchedHead = mock({ eth_getBlockByNumber: request => request.params[0] === "0x0"
+    ? { number: "0x0", hash: genesisHash, stateRoot: `0x${"32".repeat(32)}` }
+    : null });
+  await assert.rejects(createBlochL2Wallet(mismatchedHead, options).connect(), /status does not match/);
+  assert.ok(!mismatchedHead.calls.some(call => call.method === "eth_requestAccounts"));
+
+  let getterCalls = 0;
+  const accessorHead = { number: "0x0", hash: genesisHash, stateRoot };
+  Object.defineProperty(accessorHead, "stateRoot", {
+    get() { getterCalls += 1; return stateRoot; },
+    enumerable: true,
+  });
+  const accessorProvider = mock({ eth_getBlockByNumber: () => accessorHead });
+  await assert.rejects(createBlochL2Wallet(accessorProvider, options).connect());
+  assert.equal(getterCalls, 0);
+});
+
 test("sends via the wallet with an explicit chain domain and connected sender", async () => {
   const provider = mock();
   const wallet = createBlochL2Wallet(provider, options);
@@ -200,7 +261,7 @@ test("chain/account changes and unsupported authorization cannot reach signing",
   });
   await assert.rejects(
     createBlochL2Wallet(changedGenesis, options).sendTransaction({ from: account }),
-    /configured Bloch L2 genesis/,
+    /configured Bloch L2 genesis|status does not match/,
   );
   assert.ok(!changedGenesis.calls.some(call => call.method === "eth_sendTransaction"));
 });

@@ -65,6 +65,10 @@ canonical change fails rather than returning a torn tuple. A fresh challenge
 prevents ordinary intermediary caches from replaying another request's response,
 but the response is not signed and does not prove native finality. Clients still
 need authenticated transport and an independently trusted deployment manifest.
+The reference EIP-1193 adapter generates a fresh 256-bit challenge for every
+network check, requires the exact status schema and cross-checks its head hash
+and state root against `eth_getBlockByNumber`. It refuses account access or
+signing when secure randomness is unavailable or either view disagrees.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

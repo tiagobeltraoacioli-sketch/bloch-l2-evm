@@ -11,6 +11,7 @@ export const BLOCH_L2_SECURITY = Object.freeze({
 export const BLOCH_L2_TESTNET_CHAIN_ID = 700771n; // Placeholder, not a registered/public network.
 export const BLOCH_L2_IDENTITY_FORMAT = "bloch-chain-identity-v1";
 export const BLOCH_L2_HEADER_FORMAT = "bloch-node-header-v2-fixed-width";
+export const BLOCH_L2_STATUS_FORMAT = "bloch-chain-status-v1";
 
 const address = /^0x[0-9a-fA-F]{40}$/;
 const hash = /^0x[0-9a-fA-F]{64}$/;
@@ -29,8 +30,13 @@ const MAX_ACCESS_LIST_STORAGE_KEYS = 8192;
 const MAX_U64 = 0xffffffffffffffffn;
 const MAX_U128 = 0xffffffffffffffffffffffffffffffffn;
 const identityFields = Object.freeze(["format", "chainId", "domain", "genesisHash", "headerFormat"]);
+const statusFields = Object.freeze(["format", "challenge", "identity", "headNumber", "headHash", "stateRoot"]);
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const ownKeys = Reflect.ownKeys;
+const cryptoSource = globalThis.crypto;
+const getRandomValues = typeof cryptoSource?.getRandomValues === "function"
+  ? Function.prototype.bind.call(cryptoSource.getRandomValues, cryptoSource)
+  : null;
 
 function isAddress(value) {
   return typeof value === "string" && value.length === 42 && address.test(value);
@@ -60,6 +66,59 @@ function checkedIdentityResponse(value, expected) {
         response.genesisHash !== expected.genesisHash) throw new Error();
   } catch {
     throw new Error("RPC does not match the configured Bloch L2 identity");
+  }
+}
+
+function checkedBlockFields(value, fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+  const response = Object.create(null);
+  for (let i = 0; i < fields.length; i += 1) {
+    const key = fields[i];
+    const descriptor = getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) throw new Error();
+    response[key] = descriptor.value;
+  }
+  return response;
+}
+
+function freshChallenge() {
+  if (!getRandomValues) throw new Error("Secure randomness is required for Bloch L2 status checks");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const bytes = new Uint8Array(32);
+    getRandomValues(bytes);
+    let encoded = "0x";
+    let nonzero = false;
+    for (let i = 0; i < bytes.length; i += 1) {
+      const byte = bytes[i];
+      nonzero ||= byte !== 0;
+      encoded += byte.toString(16).padStart(2, "0");
+    }
+    if (nonzero) return encoded;
+  }
+  throw new Error("Secure randomness returned an invalid Bloch L2 challenge");
+}
+
+function checkedStatusResponse(value, expectedIdentity, challenge) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    const keys = ownKeys(value);
+    if (keys.length !== statusFields.length) throw new Error();
+    const response = Object.create(null);
+    for (let i = 0; i < statusFields.length; i += 1) {
+      const key = statusFields[i];
+      const descriptor = getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) throw new Error();
+      response[key] = descriptor.value;
+    }
+    if (response.format !== BLOCH_L2_STATUS_FORMAT || response.challenge !== challenge) throw new Error();
+    checkedIdentityResponse(response.identity, expectedIdentity);
+    if (typeof response.headNumber !== "string" || response.headNumber.length > U64_HEX_LENGTH ||
+        !quantity.test(response.headNumber) || BigInt(response.headNumber) > MAX_U64) throw new Error();
+    response.headHash = checkedHash(response.headHash, "RPC canonical head hash");
+    response.stateRoot = checkedHash(response.stateRoot, "RPC canonical state root");
+    return response;
+  } catch {
+    throw new Error("RPC did not return a fresh canonical Bloch L2 status");
   }
 }
 
@@ -134,13 +193,33 @@ export function createBlochL2Wallet(provider, {
         !quantity.test(current) || chainHex(current) !== id) {
       throw new Error("Wallet is not connected to the configured Bloch L2");
     }
-    const block = await request({ method: "eth_getBlockByNumber", params: ["0x0", false] });
-    if (!block || typeof block !== "object" || Array.isArray(block) ||
-        block.number !== "0x0" || checkedHash(block.hash, "RPC genesis hash") !== genesis) {
+    const blockValue = await request({ method: "eth_getBlockByNumber", params: ["0x0", false] });
+    let block;
+    try {
+      block = checkedBlockFields(blockValue, ["number", "hash"]);
+    } catch {
+      throw new Error("Wallet is not connected to the configured Bloch L2 genesis");
+    }
+    if (block.number !== "0x0" || checkedHash(block.hash, "RPC genesis hash") !== genesis) {
       throw new Error("Wallet is not connected to the configured Bloch L2 genesis");
     }
     const reportedIdentity = await request({ method: "bloch_chainIdentity", params: [] });
     checkedIdentityResponse(reportedIdentity, identity);
+    const challenge = freshChallenge();
+    const reportedStatus = await request({ method: "bloch_chainStatus", params: [challenge] });
+    const status = checkedStatusResponse(reportedStatus, identity, challenge);
+    const headValue = await request({ method: "eth_getBlockByNumber", params: [status.headNumber, false] });
+    let head;
+    try {
+      head = checkedBlockFields(headValue, ["number", "hash", "stateRoot"]);
+    } catch {
+      throw new Error("RPC canonical Bloch L2 status does not match its selected block");
+    }
+    if (head.number !== status.headNumber ||
+        checkedHash(head.hash, "RPC selected head hash") !== status.headHash ||
+        checkedHash(head.stateRoot, "RPC selected state root") !== status.stateRoot) {
+      throw new Error("RPC canonical Bloch L2 status does not match its selected block");
+    }
   }
 
   async function connect() {
