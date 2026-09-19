@@ -100,7 +100,13 @@ fresh, immutable checkpoint is passed immediately before signing, and only the
 literal result `true` permits `eth_sendTransaction`; absence, rejection,
 exceptions and ambiguous results fail closed. The verifier must independently
 authenticate native settlement/finality. Merely asking the same L2 RPC whether
-its own head is final does not satisfy this trust boundary.
+its own head is final does not satisfy this trust boundary. The reference
+`createEd25519FinalityVerifier` helper pins a raw Ed25519 public key and an
+expected finality protocol, then verifies an exact, short-lived signed envelope
+covering the complete chain identity, checkpoint and an auditable finality
+reference. Its caller still has to operate an independent attestor whose signing
+policy derives from real native settlement; the helper intentionally contains no
+private key and treats its transport callback as untrusted.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

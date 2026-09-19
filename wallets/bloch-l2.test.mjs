@@ -9,6 +9,12 @@ import {
   BLOCH_L2_SECURITY,
   BLOCH_L2_STATUS_FORMAT,
 } from "./bloch-l2.mjs";
+import {
+  BLOCH_L2_FINALITY_ATTESTATION_FORMAT,
+  BLOCH_L2_FINALITY_ENVELOPE_FORMAT,
+  blochL2FinalitySigningBytes,
+  createEd25519FinalityVerifier,
+} from "./finality-attestation.mjs";
 
 const account = `0x${"11".repeat(20)}`;
 const chainId = `0x${700771n.toString(16)}`;
@@ -500,6 +506,107 @@ test("requires external finality for signing and verifies the exact fresh checkp
     );
     assert.ok(!rejected.calls.some(call => call.method === "eth_sendTransaction"));
   }
+});
+
+test("verifies a pinned Ed25519 finality attestation for the exact checkpoint", async () => {
+  const keys = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const rawPublicKey = new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey));
+  const publicKeyBase64Url = Buffer.from(rawPublicKey).toString("base64url");
+  const finalityProtocol = "bloch-native-checkpoint-v1";
+  const now = Math.floor(Date.now() / 1_000);
+  const payload = {
+    format: BLOCH_L2_FINALITY_ATTESTATION_FORMAT,
+    identity: { ...identity },
+    checkpoint: {
+      format: BLOCH_L2_CHECKPOINT_FORMAT,
+      headNumber: "0x0",
+      headHash: genesisHash,
+      stateRoot,
+    },
+    issuedAt: now,
+    expiresAt: now + 300,
+    finalityProtocol,
+    finalityReference: `0x${"91".repeat(32)}`,
+  };
+  const signature = Buffer.from(await crypto.subtle.sign(
+    { name: "Ed25519" }, keys.privateKey, blochL2FinalitySigningBytes(payload),
+  )).toString("base64url");
+  let request;
+  let envelope;
+  const verifier = await createEd25519FinalityVerifier({
+    publicKeyBase64Url,
+    finalityProtocol,
+    getAttestation: async value => {
+      request = value;
+      return envelope;
+    },
+  });
+  envelope = {
+    format: BLOCH_L2_FINALITY_ENVELOPE_FORMAT,
+    keyId: verifier.keyId,
+    payload,
+    signature,
+  };
+  const provider = mock();
+  await createBlochL2Wallet(provider, {
+    ...options, trustedFinalityVerifier: verifier,
+  }).sendTransaction({ from: account });
+  assert.deepEqual({ ...request.identity }, identity);
+  assert.deepEqual({ ...request.checkpoint }, payload.checkpoint);
+  assert.equal(request.finalityProtocol, finalityProtocol);
+  assert.equal(request.keyId, verifier.keyId);
+  assert.ok(Object.isFrozen(request));
+  assert.ok(provider.calls.some(call => call.method === "eth_sendTransaction"));
+});
+
+test("Ed25519 finality envelopes reject stale, foreign, malformed and tampered claims", async () => {
+  const keys = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const rawPublicKey = new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey));
+  const publicKeyBase64Url = Buffer.from(rawPublicKey).toString("base64url");
+  const finalityProtocol = "bloch-native-checkpoint-v1";
+  const checkpoint = {
+    format: BLOCH_L2_CHECKPOINT_FORMAT, headNumber: "0x0", headHash: genesisHash, stateRoot,
+  };
+  const signedEnvelope = async overrides => {
+    const now = Math.floor(Date.now() / 1_000);
+    const payload = {
+      format: BLOCH_L2_FINALITY_ATTESTATION_FORMAT,
+      identity: { ...identity }, checkpoint: { ...checkpoint }, issuedAt: now,
+      expiresAt: now + 300, finalityProtocol, finalityReference: `0x${"92".repeat(32)}`,
+      ...overrides,
+    };
+    const signature = Buffer.from(await crypto.subtle.sign(
+      { name: "Ed25519" }, keys.privateKey, blochL2FinalitySigningBytes(payload),
+    )).toString("base64url");
+    return { payload, signature };
+  };
+  let envelope;
+  const verifier = await createEd25519FinalityVerifier({
+    publicKeyBase64Url, finalityProtocol, getAttestation: async () => envelope,
+  });
+  const verify = () => verifier.verify(identity, checkpoint);
+  const staleNow = Math.floor(Date.now() / 1_000);
+  let signed = await signedEnvelope({ issuedAt: staleNow - 600, expiresAt: staleNow - 300 });
+  envelope = { format: BLOCH_L2_FINALITY_ENVELOPE_FORMAT, keyId: verifier.keyId, ...signed };
+  await assert.rejects(verify(), /not fresh/);
+
+  signed = await signedEnvelope({ checkpoint: { ...checkpoint, headHash: `0x${"ff".repeat(32)}` } });
+  envelope = { format: BLOCH_L2_FINALITY_ENVELOPE_FORMAT, keyId: verifier.keyId, ...signed };
+  await assert.rejects(verify(), /does not match/);
+
+  signed = await signedEnvelope({});
+  envelope = { format: BLOCH_L2_FINALITY_ENVELOPE_FORMAT, keyId: verifier.keyId,
+    ...signed, signature: `${signed.signature[0] === "A" ? "B" : "A"}${signed.signature.slice(1)}` };
+  await assert.rejects(verify(), /signature verification failed/);
+  envelope = { format: BLOCH_L2_FINALITY_ENVELOPE_FORMAT, keyId: "00".repeat(32), ...signed };
+  await assert.rejects(verify(), /untrusted key/);
+  envelope = { format: BLOCH_L2_FINALITY_ENVELOPE_FORMAT, keyId: verifier.keyId, ...signed, extra: true };
+  await assert.rejects(verify(), /Invalid Bloch L2 finality envelope/);
+
+  await assert.rejects(
+    createEd25519FinalityVerifier({ publicKeyBase64Url: "bad", finalityProtocol, getAttestation() {} }),
+    /Invalid Ed25519/,
+  );
 });
 
 test("accepts transaction quantities exactly at the node field widths", async () => {
