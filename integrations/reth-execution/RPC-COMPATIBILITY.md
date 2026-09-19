@@ -199,6 +199,17 @@ The interface deliberately provides no in-process or same-disk production
 default: operators must connect it to a separately administered rollback
 domain and authenticate that transport.
 
+`AuthenticatedFinalityQuorumCustodian` and its server adapter provide the
+transport-neutral authenticated protocol for that connection. Canonical
+bounded frames use HMAC-SHA-256 with fixed client/custodian identities, an
+unpredictable session, a monotonically consumed request sequence and a digest
+binding every response to its exact request. Exact duplicate CAS delivery is
+idempotent at the server; malformed, replayed or tampered responses are never
+retried by the client. The returned client checkpoint must itself be retained
+outside the wallet/L2 rollback domain, or a fresh unpredictable session must
+be explicitly authorized after restart. This layer does not create a socket,
+mTLS policy, HSM key or independent host; those remain deployment inputs.
+
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
 by the tested client, consistently with the Reth header traits. Reconstructing an
