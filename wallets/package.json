@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test bloch-l2.test.mjs finality-attestation-cli.test.mjs finality-quorum-cli.test.mjs finality-quorum-custodian.test.mjs finality-quorum-custodian-mtls.test.mjs finality-quorum-custodian-checkpoint.test.mjs",
+    "test": "node --test bloch-l2.test.mjs finality-attestation-cli.test.mjs finality-quorum-cli.test.mjs finality-quorum-custodian.test.mjs finality-quorum-custodian-mtls.test.mjs finality-quorum-custodian-checkpoint.test.mjs finality-quorum-custodian-store.test.mjs",
     "test:status": "node --test devnode-status.test.mjs",
     "test:devnode": "node --test devnode-ethers.test.mjs",
     "test:browser": "node --test browser/devnode-metamask.test.mjs",

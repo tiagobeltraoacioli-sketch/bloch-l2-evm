@@ -11,6 +11,15 @@ client adapter and an unbound server; an operator must still supply process
 isolation, firewall policy, secret custody, monitoring, and independently
 retained client checkpoints. No repository command starts the server.
 
+`finality-quorum-custodian-store.mjs` provides the server-side durable CAS
+store. Its canonical records form a hash chain, updates use a create-once lock,
+temporary-file `fsync`, atomic rename, directory `fsync`, and readback. Opening
+the store requires its independently retained exact record hash, so a restored
+or replaced file cannot silently become trusted. An orphan lock or ambiguous
+write blocks reopening for operator inspection; the module never removes one
+based on age. This is a local durability boundary, not a substitute for an
+independent backup or replicated witness of the retained record hash.
+
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an
 independent CAS anchor before the transport receives a frame. Only a valid,
@@ -52,6 +61,8 @@ through an offline, independently approved procedure.
    is required at every client open; there is no trust on first use.
 3. Start the custodian behind a firewall that permits only the pinned client IP
    and bind the returned server explicitly; the library never calls `listen`.
+   Create the server-side store once from an externally approved initial record
+   and require its latest record hash on every restart.
 4. Use `createFilesystemFinalityCustodian` so each consumed sequence is first
    committed locally and to the independent anchor. Do not use the in-memory
    client directly in a restartable process.
