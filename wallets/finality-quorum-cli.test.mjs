@@ -8,6 +8,8 @@ import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { canonicalBlochL2FinalityQuorumConfig } from "./finality-quorum.mjs";
+import { advanceCustodiedFinalityQuorumCheckpoint,
+  FinalityQuorumCustodianError } from "./finality-quorum-checkpoint.mjs";
 
 const execute = promisify(execFile);
 const cli = new URL("./finality-quorum-cli.mjs", import.meta.url).pathname;
@@ -214,4 +216,96 @@ test("quorum checkpoint rejects symlinked ancestors and linked or exposed state"
   await chmod(store, 0o644);
   await assert.rejects(advance(files, input, store, first.stateHash),
     error => /file is unsafe/.test(error.stderr));
+});
+
+function memoryCustodian(initial = null, mode = "normal") {
+  let current = initial;
+  return {
+    get current() { return current; },
+    async load() { return current; },
+    async compareAndSwap(expected, replacement) {
+      if (mode === "throw") throw new Error("lost response");
+      if (mode === "uncertain") return { status: "uncertain" };
+      if (mode === "conflict") return { status: "conflict", currentStateHash: current };
+      if (mode === "malformed-conflict") return { status: "conflict" };
+      if (mode === "invalid-readback") { current = {}; return { status: "committed" }; }
+      if (mode === "false-commit") return { status: "committed" };
+      if (current !== expected) return { status: "conflict", currentStateHash: current };
+      current = replacement;
+      return { status: "committed" };
+    },
+  };
+}
+
+async function custodiedAdvance(files, store, custodian, expectedStateHash = null, next = payload()) {
+  const quorum = await canonicalBlochL2FinalityQuorumConfig(files.config);
+  return advanceCustodiedFinalityQuorumCheckpoint({ storePath: store, expectedStateHash,
+    quorumId: quorum.quorumId, threshold: quorum.threshold, finalityProtocol: protocol,
+    identity: next.identity, checkpoint: next.checkpoint, bundleHash: "a".repeat(64), custodian });
+}
+
+test("independent custodian commits and reads back before the local checkpoint", async t => {
+  const files = await fixture(t), store = join(files.directory, "custodied-state.json");
+  let retained = null, compareCalls = 0;
+  const custodian = {
+    async load() { return retained; },
+    async compareAndSwap(expected, replacement) {
+      compareCalls += 1;
+      assert.equal(expected, null);
+      await assert.rejects(readFile(store), error => error.code === "ENOENT");
+      retained = replacement;
+      return { status: "committed" };
+    },
+  };
+  const state = await custodiedAdvance(files, store, custodian);
+  assert.equal(compareCalls, 1);
+  assert.equal(retained, state.stateHash);
+  assert.equal(JSON.parse(await readFile(store, "utf8")).stateHash, state.stateHash);
+});
+
+test("custodian mismatch and definite conflict leave no local checkpoint or lock", async t => {
+  const files = await fixture(t);
+  const mismatchStore = join(files.directory, "mismatch-state.json");
+  await assert.rejects(custodiedAdvance(files, mismatchStore, memoryCustodian("f".repeat(64))),
+    error => error instanceof FinalityQuorumCustodianError && /does not match/.test(error.message));
+  await assert.rejects(stat(`${mismatchStore}.lock`), error => error.code === "ENOENT");
+
+  const conflictStore = join(files.directory, "conflict-state.json");
+  await assert.rejects(custodiedAdvance(files, conflictStore, memoryCustodian(null, "conflict")),
+    error => error instanceof FinalityQuorumCustodianError && !error.uncertain && /conflict/.test(error.message));
+  await assert.rejects(stat(conflictStore), error => error.code === "ENOENT");
+  await assert.rejects(stat(`${conflictStore}.lock`), error => error.code === "ENOENT");
+});
+
+test("uncertain or dishonest custody preserves the lock and never commits locally", async t => {
+  const files = await fixture(t);
+  for (const mode of ["uncertain", "throw", "false-commit", "malformed-conflict", "invalid-readback"]) {
+    const store = join(files.directory, `${mode}-state.json`);
+    await assert.rejects(custodiedAdvance(files, store, memoryCustodian(null, mode)),
+      error => error instanceof Error && /custod|cleanup is ambiguous/i.test(error.message), mode);
+    await assert.rejects(stat(store), error => error.code === "ENOENT", mode);
+    assert.equal((await stat(`${store}.lock`)).isFile(), true, mode);
+  }
+});
+
+test("external commit followed by local failure remains locked for reconciliation", async t => {
+  const files = await fixture(t), store = join(files.directory, "post-custody-failure.json");
+  let retained = null;
+  const custodian = {
+    async load() { return retained; },
+    async compareAndSwap(expected, replacement) {
+      assert.equal(expected, null);
+      retained = replacement;
+      await chmod(files.directory, 0o500);
+      return { status: "committed" };
+    },
+  };
+  try {
+    await assert.rejects(custodiedAdvance(files, store, custodian), /cleanup is ambiguous/);
+  } finally {
+    await chmod(files.directory, 0o700);
+  }
+  assert.match(retained, /^[0-9a-f]{64}$/);
+  await assert.rejects(stat(store), error => error.code === "ENOENT");
+  assert.equal((await stat(`${store}.lock`)).isFile(), true);
 });

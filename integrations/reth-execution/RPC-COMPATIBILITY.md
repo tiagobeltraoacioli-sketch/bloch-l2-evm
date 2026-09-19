@@ -188,6 +188,17 @@ regular files with exactly one link. Retain each returned `stateHash` and the
 referenced bundle outside the rollback domain. An orphan lock or ambiguous cleanup requires operator
 inspection; automatic lock deletion or blind retry is intentionally absent.
 
+Runtime integrations should use `advanceCustodiedFinalityQuorumCheckpoint`
+instead of treating CLI stdout as external retention. Its custodian contract
+loads the currently retained state hash and performs an exact compare-and-swap
+to the new hash. The custodian must confirm that write with an independent
+readback before the local atomic rename is attempted. A definite CAS conflict
+leaves no local transaction, while a lost response, dishonest confirmation or
+failure after external commit preserves the local lock for reconciliation.
+The interface deliberately provides no in-process or same-disk production
+default: operators must connect it to a separately administered rollback
+domain and authenticate that transport.
+
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
 by the tested client, consistently with the Reth header traits. Reconstructing an

@@ -14,6 +14,15 @@ const MAX_FILE_BYTES = 64 * 1024;
 const FIELDS = ["format", "quorumId", "threshold", "finalityProtocol", "identity", "checkpoint",
   "generation", "previousStateHash", "bundleHash", "stateHash"];
 
+export class FinalityQuorumCustodianError extends Error {
+  constructor(message, { uncertain = false, currentStateHash = undefined, cause = undefined } = {}) {
+    super(message, { cause });
+    this.name = "FinalityQuorumCustodianError";
+    this.uncertain = uncertain;
+    this.currentStateHash = currentStateHash;
+  }
+}
+
 function exact(value, fields, message) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(message);
   const keys = Object.keys(value);
@@ -101,11 +110,11 @@ async function readState(path) {
   } finally { await handle.close(); }
 }
 
-async function replaceState(path, state, expectedHash) {
+async function replaceState(path, state, expectedHash, retainExternally = null) {
   const lockPath = `${path}.lock`, temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const directory = await protectedDirectory(path);
   let lock, lockStat, temporaryStat, lockInitialized = false, replacementAttempted = false,
-    replacementVerified = false;
+    replacementVerified = false, externalCommitConfirmed = false, externalOutcomeUncertain = false;
   try { lock = await open(lockPath,
     fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600); }
   catch (cause) { await directory.close(); throw new Error("Finality quorum checkpoint is locked; inspect before retrying", { cause }); }
@@ -133,6 +142,15 @@ async function replaceState(path, state, expectedHash) {
       temporaryStat = stat;
     }
     finally { await output.close(); }
+    if (retainExternally) {
+      try {
+        await retainExternally();
+        externalCommitConfirmed = true;
+      } catch (error) {
+        externalOutcomeUncertain = error instanceof FinalityQuorumCustodianError && error.uncertain;
+        throw error;
+      }
+    }
     replacementAttempted = true;
     await rename(temporary, path);
     await directory.sync();
@@ -166,6 +184,9 @@ async function replaceState(path, state, expectedHash) {
     if (replacementAttempted && !replacementVerified) {
       cleanup ??= new Error("Finality quorum checkpoint replacement is ambiguous");
     }
+    if (externalOutcomeUncertain || externalCommitConfirmed && !replacementVerified) {
+      cleanup ??= new Error("External checkpoint custody outcome requires reconciliation");
+    }
     if (!cleanup) {
       try { await unlink(lockPath); await directory.sync(); } catch (error) { cleanup ??= error; }
     }
@@ -175,17 +196,8 @@ async function replaceState(path, state, expectedHash) {
   }
 }
 
-export async function advanceFinalityQuorumCheckpoint({ storePath, expectedStateHash, quorumId, threshold,
-  finalityProtocol, identity, checkpoint, bundleHash } = {}) {
-  if (typeof storePath !== "string" || !storePath || expectedStateHash !== null && !HASH.test(expectedStateHash) ||
-      !HASH.test(quorumId) || !Number.isSafeInteger(threshold) || threshold < 2 || !PROTOCOL.test(finalityProtocol) ||
-      !HASH.test(bundleHash)) throw new Error("Finality quorum checkpoint advance is invalid");
+function deriveNextState({ current, quorumId, threshold, finalityProtocol, identity, checkpoint, bundleHash }) {
   const canonical = canonicalIdentityCheckpoint(identity, checkpoint, finalityProtocol);
-  const directory = await protectedDirectory(storePath); await directory.close();
-  const current = await readState(storePath);
-  if ((current?.stateHash ?? null) !== expectedStateHash) {
-    throw new Error("Finality quorum checkpoint does not match the externally retained state hash");
-  }
   if (current) {
     if (current.quorumId !== quorumId || current.threshold !== threshold ||
         current.finalityProtocol !== finalityProtocol || JSON.stringify(current.identity) !== JSON.stringify(canonical.identity)) {
@@ -200,8 +212,118 @@ export async function advanceFinalityQuorumCheckpoint({ storePath, expectedState
   const nextBody = { format: FORMAT, quorumId, threshold, finalityProtocol, identity: canonical.identity,
     checkpoint: canonical.checkpoint, generation: generation.toString(), previousStateHash: current?.stateHash ?? null,
     bundleHash };
-  const next = Object.freeze({ ...nextBody, stateHash: hashBody(nextBody) });
+  return Object.freeze({ ...nextBody, stateHash: hashBody(nextBody) });
+}
+
+function validateAdvance({ storePath, expectedStateHash, quorumId, threshold, finalityProtocol, bundleHash }) {
+  if (typeof storePath !== "string" || !storePath || expectedStateHash !== null && !HASH.test(expectedStateHash) ||
+      !HASH.test(quorumId) || !Number.isSafeInteger(threshold) || threshold < 2 || !PROTOCOL.test(finalityProtocol) ||
+      !HASH.test(bundleHash)) throw new Error("Finality quorum checkpoint advance is invalid");
+}
+
+function checkedCustodian(custodian) {
+  if (!custodian || typeof custodian !== "object" || Array.isArray(custodian) ||
+      typeof custodian.load !== "function" || typeof custodian.compareAndSwap !== "function") {
+    throw new TypeError("Finality quorum checkpoint custodian is invalid");
+  }
+  return custodian;
+}
+
+function checkedCustodianHash(value) {
+  if (value !== null && (typeof value !== "string" || !HASH.test(value))) {
+    throw new FinalityQuorumCustodianError("External checkpoint custodian returned an invalid state");
+  }
+  return value;
+}
+
+async function loadCustodian(custodian, message, uncertain = false) {
+  try { return checkedCustodianHash(await custodian.load()); }
+  catch (cause) {
+    if (cause instanceof FinalityQuorumCustodianError && !uncertain) throw cause;
+    throw new FinalityQuorumCustodianError(message, { uncertain, cause });
+  }
+}
+
+async function retainWithCustodian(custodian, expectedStateHash, nextStateHash) {
+  let outcome;
+  try { outcome = await custodian.compareAndSwap(expectedStateHash, nextStateHash); }
+  catch (cause) {
+    throw new FinalityQuorumCustodianError(
+      "External checkpoint custody outcome is uncertain; inspect before retrying", { uncertain: true, cause });
+  }
+  let status, keys;
+  try {
+    if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) throw new Error("invalid outcome");
+    keys = Object.keys(outcome);
+    if (!Object.hasOwn(outcome, "status") || keys.some(key => !["status", "currentStateHash"].includes(key))) {
+      throw new Error("invalid outcome");
+    }
+    status = outcome.status;
+  } catch (cause) {
+    throw new FinalityQuorumCustodianError(
+      "External checkpoint custodian returned an ambiguous outcome", { uncertain: true, cause });
+  }
+  if (status === "conflict") {
+    if (!Object.hasOwn(outcome, "currentStateHash")) {
+      throw new FinalityQuorumCustodianError(
+        "External checkpoint custodian returned an ambiguous conflict", { uncertain: true });
+    }
+    let currentStateHash;
+    try { currentStateHash = checkedCustodianHash(outcome.currentStateHash); }
+    catch (cause) {
+      throw new FinalityQuorumCustodianError(
+        "External checkpoint custodian returned an ambiguous conflict", { uncertain: true, cause });
+    }
+    throw new FinalityQuorumCustodianError("External checkpoint custodian CAS conflict", { currentStateHash });
+  }
+  if (status === "uncertain") {
+    throw new FinalityQuorumCustodianError(
+      "External checkpoint custody outcome is uncertain; inspect before retrying", { uncertain: true });
+  }
+  if (status !== "committed" || Object.hasOwn(outcome, "currentStateHash")) {
+    throw new FinalityQuorumCustodianError(
+      "External checkpoint custodian returned an ambiguous outcome", { uncertain: true });
+  }
+  const retained = await loadCustodian(custodian,
+    "External checkpoint custody readback is uncertain; inspect before retrying", true);
+  if (retained !== nextStateHash) {
+    throw new FinalityQuorumCustodianError(
+      "External checkpoint custodian did not retain the committed state exactly", { uncertain: true,
+        currentStateHash: retained });
+  }
+}
+
+export async function advanceFinalityQuorumCheckpoint({ storePath, expectedStateHash, quorumId, threshold,
+  finalityProtocol, identity, checkpoint, bundleHash } = {}) {
+  validateAdvance({ storePath, expectedStateHash, quorumId, threshold, finalityProtocol, bundleHash });
+  const directory = await protectedDirectory(storePath); await directory.close();
+  const current = await readState(storePath);
+  if ((current?.stateHash ?? null) !== expectedStateHash) {
+    throw new Error("Finality quorum checkpoint does not match the externally retained state hash");
+  }
+  const next = deriveNextState({ current, quorumId, threshold, finalityProtocol, identity, checkpoint, bundleHash });
   await replaceState(storePath, next, current?.stateHash ?? null);
+  return next;
+}
+
+export async function advanceCustodiedFinalityQuorumCheckpoint({ custodian, ...options } = {}) {
+  validateAdvance(options);
+  const external = checkedCustodian(custodian);
+  const retained = await loadCustodian(external, "External checkpoint custodian could not be read");
+  if (retained !== options.expectedStateHash) {
+    throw new FinalityQuorumCustodianError(
+      "External checkpoint custodian does not match the trusted state hash", { currentStateHash: retained });
+  }
+  const directory = await protectedDirectory(options.storePath); await directory.close();
+  const current = await readState(options.storePath);
+  if ((current?.stateHash ?? null) !== options.expectedStateHash) {
+    throw new Error("Finality quorum checkpoint does not match the externally retained state hash");
+  }
+  const next = deriveNextState({ current, quorumId: options.quorumId, threshold: options.threshold,
+    finalityProtocol: options.finalityProtocol, identity: options.identity, checkpoint: options.checkpoint,
+    bundleHash: options.bundleHash });
+  await replaceState(options.storePath, next, current?.stateHash ?? null,
+    () => retainWithCustodian(external, current?.stateHash ?? null, next.stateHash));
   return next;
 }
 
