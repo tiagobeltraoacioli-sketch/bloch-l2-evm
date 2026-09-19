@@ -12,7 +12,8 @@ async function attackCheckpoint() {
   const target = process.env.BLOCH_CHECKPOINT_RACE_TARGET;
   const attack = process.env.BLOCH_CHECKPOINT_RACE_ATTACK;
   if (!target || !["same-inode-rewrite", "pathname-replacement", "parent-directory-replacement",
-    "parent-directory-metadata-change", "growth", "post-rename-pathname-replacement"].includes(attack)) {
+    "parent-directory-metadata-change", "growth", "post-rename-pathname-replacement",
+    "post-read-parent-directory-replacement"].includes(attack)) {
     throw new Error("Custodian checkpoint race test configuration is invalid");
   }
   const original = await fs.readFile(target);
@@ -38,7 +39,7 @@ async function attackCheckpoint() {
     }
     return;
   }
-  if (attack === "parent-directory-replacement") {
+  if (["parent-directory-replacement", "post-read-parent-directory-replacement"].includes(attack)) {
     const directory = dirname(target);
     const moved = directory + ".race-moved";
     await fs.rename(directory, moved);
@@ -62,7 +63,8 @@ function wrap(handle) {
       if (property === "read") {
         return async (...args) => {
           const result = await target.read(...args);
-          if (process.env.BLOCH_CHECKPOINT_RACE_ATTACK === "post-rename-pathname-replacement") {
+          if (["post-rename-pathname-replacement", "post-read-parent-directory-replacement"]
+            .includes(process.env.BLOCH_CHECKPOINT_RACE_ATTACK)) {
             return result;
           }
           const growth = process.env.BLOCH_CHECKPOINT_RACE_ATTACK === "growth";
@@ -76,7 +78,20 @@ function wrap(handle) {
   });
 }
 
-export const lstat = (...args) => fs.lstat(...args);
+function isTargetPath(path) {
+  const target = process.env.BLOCH_CHECKPOINT_RACE_TARGET;
+  const value = String(path);
+  return Boolean(target) && (value === target ||
+    value.startsWith("/proc/self/fd/") && value.endsWith("/" + basename(target)));
+}
+
+export async function lstat(path, ...args) {
+  if (!attacked && process.env.BLOCH_CHECKPOINT_RACE_ATTACK ===
+      "post-read-parent-directory-replacement" && String(path).endsWith(".lock")) {
+    await attackCheckpoint();
+  }
+  return fs.lstat(path, ...args);
+}
 export const readFile = (...args) => fs.readFile(...args);
 export const readdir = (...args) => fs.readdir(...args);
 export const realpath = (...args) => fs.realpath(...args);
@@ -109,7 +124,7 @@ export async function rename(source, destination, ...args) {
 export const unlink = (...args) => fs.unlink(...args);
 export async function open(path, ...args) {
   const handle = await fs.open(path, ...args);
-  return path === process.env.BLOCH_CHECKPOINT_RACE_TARGET ? wrap(handle) : handle;
+  return isTargetPath(path) ? wrap(handle) : handle;
 }
 `;
 

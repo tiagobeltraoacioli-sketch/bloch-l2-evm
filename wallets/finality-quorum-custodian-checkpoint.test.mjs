@@ -268,10 +268,10 @@ test("rollback, concurrent exchange, unsafe files, links and TOFU fail closed", 
 });
 
 for (const attack of ["same-inode-rewrite", "pathname-replacement", "parent-directory-replacement",
-  "parent-directory-metadata-change", "growth"]) {
+  "parent-directory-metadata-change", "growth", "post-read-parent-directory-replacement"]) {
   test(`client checkpoint rejects ${attack} during its bounded pinned read`, async t => {
     const f = await fixture(t);
-    if (attack === "parent-directory-replacement") {
+    if (["parent-directory-replacement", "post-read-parent-directory-replacement"].includes(attack)) {
       t.after(() => rm(`${f.root}.race-moved`, { recursive: true, force: true }));
     }
     const runner = new URL("./fixtures/inspect-custodian-checkpoint.mjs", import.meta.url);

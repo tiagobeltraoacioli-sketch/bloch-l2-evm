@@ -112,14 +112,16 @@ async function protectedDirectory(path) {
   return handle;
 }
 
-async function readState(path) {
+async function readState(path, retainedDirectory = null) {
   path = absoluteCheckpointPath(path);
-  const directory = await protectedDirectory(path);
+  const directory = retainedDirectory ?? await protectedDirectory(path);
+  const ownsDirectory = retainedDirectory === null;
   let handle;
   try {
     const directoryPath = dirname(path);
     const directoryBefore = await directory.stat({ bigint: true });
-    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    handle = await open(process.platform === "linux" ? anchoredChild(directory, path) : path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || before.nlink !== 1n || (before.mode & 0o077n) !== 0n || before.size < 2n ||
         before.size > BigInt(MAX_FILE_BYTES) || typeof process.getuid === "function" &&
@@ -157,7 +159,7 @@ async function readState(path) {
     return checkedState(parsed);
   } finally {
     await handle?.close();
-    await directory.close();
+    if (ownsDirectory) await directory.close();
   }
 }
 
@@ -592,12 +594,25 @@ function nextState(current, fields) {
 
 export async function inspectFinalityCustodianCheckpoint(storePath) {
   storePath = absoluteCheckpointPath(storePath);
-  const state = await readState(storePath);
-  const lock = await lstat(`${storePath}.lock`).then(() => true, error => {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  });
-  return Object.freeze({ ...state, lockPresent: lock });
+  const directory = await protectedDirectory(storePath);
+  try {
+    const before = await directory.stat({ bigint: true });
+    const state = await readState(storePath, directory);
+    const lockPath = process.platform === "linux"
+      ? anchoredChild(directory, `${storePath}.lock`) : `${storePath}.lock`;
+    const lock = await lstat(lockPath).then(() => true, error => {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    });
+    const after = await directory.stat({ bigint: true });
+    if (!sameIntegralSnapshot(before, after)) {
+      throw new Error("Finality custodian checkpoint directory changed during inspection");
+    }
+    await validateDirectoryName(storePath, directory);
+    return Object.freeze({ ...state, lockPresent: lock });
+  } finally {
+    await directory.close();
+  }
 }
 
 export async function createFilesystemFinalityCustodian({ storePath, expectedStateHash, authentication,
