@@ -136,13 +136,42 @@ advances a protected checkpoint state. Each successful invocation prints a
 `--expected-state-hash`. It rejects a missing or substituted external anchor,
 non-increasing height, replay, same-height equivocation, authority/identity
 changes, a corrupt or writable state file, an unsafe writable/symlinked store
-directory, and concurrent writers. The update
-uses an exclusive lock, a synced temporary file, atomic rename and directory
+directory, and concurrent writers. The update uses an exclusive lock, a synced
+temporary file, atomic rename and directory
 sync. `none` is valid only for the first checkpoint. Retain the printed hash in
 an independent privileged or append-only system before accepting the next
 advance. A file and hash kept on the same rollback-capable disk are not an
 anti-rollback boundary; the CLI does not replace HSM-backed signing policy,
 native-finality verification or replicated witness consensus.
+
+For deployments that must not trust one finality key, the separate
+`createEd25519FinalityQuorumVerifier` accepts a canonical, sorted configuration
+of 2–32 distinct Ed25519 public keys and a threshold of at least two. The
+domain-separated `quorumId` commits to the complete key set and threshold.
+Every signer signs that ID, its stable signer ID, the exact chain identity and
+checkpoint, freshness interval, protocol and evidence reference. Consequently,
+an otherwise valid signature cannot be moved to another quorum, signer or
+checkpoint, and duplicate keys never count twice.
+
+```sh
+node wallets/finality-quorum-cli.mjs sign \
+  --config finality-quorum.json --signer-id settlement-a \
+  --private-key settlement-a.pem --input finality-payload.json \
+  --output settlement-a-envelope.json
+node wallets/finality-quorum-cli.mjs verify \
+  --config finality-quorum.json --protocol bloch-native-checkpoint-v1 \
+  --expected finality-payload.json --input finality-quorum-bundle.json
+```
+
+The bundle verifier rejects unknown or duplicate signers, threshold shortfall,
+config substitution, stale claims, foreign checkpoints and any malformed or
+invalid signature. Operators must assemble the bundle out of independently
+obtained envelopes and pin the public configuration outside the L2 RPC/web
+failure domain. Threshold signatures reduce single-key compromise risk; they
+do not prove that the signers are independent, that their native-finality
+policy is correct, or that the bundle was globally published. Key/config
+rotation and durable quorum checkpoint advancement remain explicit operational
+steps rather than implicit browser authority.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable
