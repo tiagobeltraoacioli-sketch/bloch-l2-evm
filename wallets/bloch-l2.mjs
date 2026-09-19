@@ -12,6 +12,7 @@ export const BLOCH_L2_TESTNET_CHAIN_ID = 700771n; // Placeholder, not a register
 export const BLOCH_L2_IDENTITY_FORMAT = "bloch-chain-identity-v1";
 export const BLOCH_L2_HEADER_FORMAT = "bloch-node-header-v2-fixed-width";
 export const BLOCH_L2_STATUS_FORMAT = "bloch-chain-status-v1";
+export const BLOCH_L2_CHECKPOINT_FORMAT = "bloch-wallet-checkpoint-v1";
 
 const address = /^0x[0-9a-fA-F]{40}$/;
 const hash = /^0x[0-9a-fA-F]{64}$/;
@@ -31,6 +32,7 @@ const MAX_U64 = 0xffffffffffffffffn;
 const MAX_U128 = 0xffffffffffffffffffffffffffffffffn;
 const identityFields = Object.freeze(["format", "chainId", "domain", "genesisHash", "headerFormat"]);
 const statusFields = Object.freeze(["format", "challenge", "identity", "headNumber", "headHash", "stateRoot"]);
+const checkpointFields = Object.freeze(["format", "headNumber", "headHash", "stateRoot"]);
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const ownKeys = Reflect.ownKeys;
 const cryptoSource = globalThis.crypto;
@@ -122,6 +124,29 @@ function checkedStatusResponse(value, expectedIdentity, challenge) {
   }
 }
 
+function checkedCheckpoint(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    const keys = ownKeys(value);
+    if (keys.length !== checkpointFields.length) throw new Error();
+    const checkpoint = Object.create(null);
+    for (let i = 0; i < checkpointFields.length; i += 1) {
+      const key = checkpointFields[i];
+      const descriptor = getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) throw new Error();
+      checkpoint[key] = descriptor.value;
+    }
+    if (checkpoint.format !== BLOCH_L2_CHECKPOINT_FORMAT ||
+        typeof checkpoint.headNumber !== "string" || checkpoint.headNumber.length > U64_HEX_LENGTH ||
+        !quantity.test(checkpoint.headNumber) || BigInt(checkpoint.headNumber) > MAX_U64) throw new Error();
+    checkpoint.headHash = checkedHash(checkpoint.headHash, "Checkpoint head hash");
+    checkpoint.stateRoot = checkedHash(checkpoint.stateRoot, "Checkpoint state root");
+    return checkpoint;
+  } catch {
+    throw new Error("Invalid trusted Bloch L2 wallet checkpoint");
+  }
+}
+
 function boundedArrayLength(value, maximum) {
   if (!Array.isArray(value)) return -1;
   const length = value.length;
@@ -162,6 +187,7 @@ export function createBlochL2Wallet(provider, {
   chainId = BLOCH_L2_TESTNET_CHAIN_ID,
   genesisHash,
   domain,
+  minimumCheckpoint,
 } = {}) {
   const requestMethod = provider?.request;
   if (typeof requestMethod !== "function") throw new TypeError("An EIP-1193 provider is required");
@@ -173,6 +199,7 @@ export function createBlochL2Wallet(provider, {
   const rpc = checkedRpcUrl(rpcUrl);
   const genesis = checkedHash(genesisHash, "Genesis hash");
   const executionDomain = checkedHash(domain, "Execution domain");
+  const trustedCheckpoint = minimumCheckpoint === undefined ? null : checkedCheckpoint(minimumCheckpoint);
   const identity = Object.freeze({
     format: BLOCH_L2_IDENTITY_FORMAT,
     chainId: id,
@@ -189,9 +216,19 @@ export function createBlochL2Wallet(provider, {
   // A wallet instance is one trust session. Once it has observed a canonical
   // head, later checks may advance or repeat that exact view, but may never
   // move backward or equivocate at the same height.
-  let observedHeadNumber = null;
-  let observedHeadHash;
-  let observedStateRoot;
+  let observedHeadNumber = trustedCheckpoint === null ? null : BigInt(trustedCheckpoint.headNumber);
+  let observedHeadHash = trustedCheckpoint?.headHash;
+  let observedStateRoot = trustedCheckpoint?.stateRoot;
+
+  function exportCheckpoint() {
+    if (observedHeadNumber === null) return null;
+    return Object.freeze({
+      format: BLOCH_L2_CHECKPOINT_FORMAT,
+      headNumber: `0x${observedHeadNumber.toString(16)}`,
+      headHash: observedHeadHash,
+      stateRoot: observedStateRoot,
+    });
+  }
 
   async function assertNetwork() {
     const current = await request({ method: "eth_chainId" });
@@ -272,6 +309,7 @@ export function createBlochL2Wallet(provider, {
       chainId: id,
       genesisHash: genesis,
       identity,
+      checkpoint: exportCheckpoint(),
       security: BLOCH_L2_SECURITY,
     });
   }
@@ -386,5 +424,8 @@ export function createBlochL2Wallet(provider, {
     return transactionHash;
   }
 
-  return Object.freeze({ network, genesisHash: genesis, identity, security: BLOCH_L2_SECURITY, connect, sendTransaction });
+  return Object.freeze({
+    network, genesisHash: genesis, identity, security: BLOCH_L2_SECURITY,
+    connect, sendTransaction, exportCheckpoint,
+  });
 }

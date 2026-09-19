@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import { createBlochL2Wallet } from "./bloch-l2.mjs";
+import { BLOCH_L2_CHECKPOINT_FORMAT, createBlochL2Wallet } from "./bloch-l2.mjs";
 
 const binary = process.env.BLOCH_DEVNODE_BIN ?? fileURLToPath(new URL(
   "../integrations/reth-execution/target/debug/bloch-evm-dev", import.meta.url,
@@ -104,8 +104,19 @@ test("EIP-1193 adapter verifies fresh canonical status against the real devnode"
     });
     const session = await wallet.connect();
     assert.deepEqual(session.accounts, [account]);
+    assert.equal(session.checkpoint.format, BLOCH_L2_CHECKPOINT_FORMAT);
+    assert.ok(Object.isFrozen(session.checkpoint));
     assert.equal(challenges.length, 2);
     assert.notEqual(challenges[0], challenges[1]);
+    const resumed = createBlochL2Wallet(provider, {
+      rpcUrl: node.url,
+      chainId: identity.chainId,
+      domain: identity.domain,
+      genesisHash: genesis.hash,
+      minimumCheckpoint: session.checkpoint,
+    });
+    assert.equal((await resumed.connect()).checkpoint.format, BLOCH_L2_CHECKPOINT_FORMAT);
+    assert.equal(challenges.length, 4);
   } finally {
     try { if (node) await stop(node); }
     finally { await rm(temporary, { recursive: true, force: true }); }

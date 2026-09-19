@@ -72,7 +72,13 @@ signing when secure randomness is unavailable or either view disagrees. Within
 one wallet instance, the highest checked head is a monotonic session checkpoint:
 a lower height or a different hash/state root at the same height fails closed.
 This intentionally treats reorganization as a new-session/review event; it is
-not a durable checkpoint across browser reloads and does not prove finality.
+not itself finality. After a successful check the adapter exposes a versioned,
+immutable checkpoint. A caller may persist it in an independently authenticated
+store and pass it back as `minimumCheckpoint` to reject rollback or same-height
+equivocation across wallet instances. The adapter deliberately does not trust or
+write browser storage automatically; an unauthenticated checkpoint store would
+not strengthen the RPC trust boundary. Higher heads remain unfinalized and the
+checkpoint alone does not prove ancestry.
 
 RPC blocks preserve the tagged Bloch V2 header hash and domain commitments.
 Neutral `difficulty = 0` and empty `extraData` fields make the projection parseable

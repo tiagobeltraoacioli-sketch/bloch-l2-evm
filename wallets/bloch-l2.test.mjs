@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   createBlochL2Wallet,
   BLOCH_L2_HEADER_FORMAT,
+  BLOCH_L2_CHECKPOINT_FORMAT,
   BLOCH_L2_IDENTITY_FORMAT,
   BLOCH_L2_SECURITY,
   BLOCH_L2_STATUS_FORMAT,
@@ -238,6 +239,56 @@ test("rejects canonical head rollback and same-height equivocation within one wa
       : { number: "0x0", hash: genesisHash, stateRoot },
   });
   await assert.rejects(createBlochL2Wallet(equivocation, options).connect(), /equivocated/);
+});
+
+test("exports a verified checkpoint and imports it as a cross-session rollback floor", async () => {
+  const headOne = `0x${"61".repeat(32)}`;
+  const rootOne = `0x${"71".repeat(32)}`;
+  const atOne = mock({
+    bloch_chainStatus: request => ({
+      format: BLOCH_L2_STATUS_FORMAT, challenge: request.params[0], identity: { ...identity },
+      headNumber: "0x1", headHash: headOne, stateRoot: rootOne,
+    }),
+    eth_getBlockByNumber: request => request.params[0] === "0x1"
+      ? { number: "0x1", hash: headOne, stateRoot: rootOne }
+      : { number: "0x0", hash: genesisHash, stateRoot },
+  });
+  const first = createBlochL2Wallet(atOne, options);
+  assert.equal(first.exportCheckpoint(), null);
+  const session = await first.connect();
+  const checkpoint = {
+    format: BLOCH_L2_CHECKPOINT_FORMAT,
+    headNumber: "0x1",
+    headHash: headOne,
+    stateRoot: rootOne,
+  };
+  assert.deepEqual(session.checkpoint, checkpoint);
+  assert.deepEqual(first.exportCheckpoint(), checkpoint);
+  assert.ok(Object.isFrozen(session.checkpoint));
+  assert.ok(Object.isFrozen(first.exportCheckpoint()));
+
+  const rollback = mock();
+  const resumed = createBlochL2Wallet(rollback, { ...options, minimumCheckpoint: checkpoint });
+  await assert.rejects(resumed.connect(), /rolled back/);
+  assert.ok(!rollback.calls.some(call => call.method === "eth_requestAccounts"));
+
+  const exact = createBlochL2Wallet(atOne, { ...options, minimumCheckpoint: checkpoint });
+  assert.deepEqual((await exact.connect()).checkpoint, checkpoint);
+
+  let getterCalls = 0;
+  const accessor = { ...checkpoint };
+  Object.defineProperty(accessor, "headHash", {
+    get() { getterCalls += 1; return headOne; }, enumerable: true,
+  });
+  for (const invalid of [
+    null, [], { ...checkpoint, format: "bloch-wallet-checkpoint-v2" },
+    { ...checkpoint, headNumber: "0x01" }, { ...checkpoint, headHash: "0x1" },
+    { ...checkpoint, extra: true }, accessor,
+  ]) assert.throws(
+    () => createBlochL2Wallet(mock(), { ...options, minimumCheckpoint: invalid }),
+    /Invalid trusted Bloch L2 wallet checkpoint/,
+  );
+  assert.equal(getterCalls, 0);
 });
 
 test("sends via the wallet with an explicit chain domain and connected sender", async () => {
