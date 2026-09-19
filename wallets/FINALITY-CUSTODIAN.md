@@ -198,6 +198,11 @@ Concurrent growth, same-inode rewrite, pathname replacement, directory
 substitution fails closed before state is returned, while relative paths are
 resolved once before any asynchronous filesystem operation can reinterpret
 them.
+Every local mutation also revalidates the pinned directory and the exact
+single-link lock inode and the authorized predecessor checkpoint at the final
+deterministic boundary. If any pathname is displaced after an independent
+anchor attempt, local replacement stops and retains the lock, temporary state,
+and prior checkpoint for reconciliation.
 
 ## Transport invariants
 

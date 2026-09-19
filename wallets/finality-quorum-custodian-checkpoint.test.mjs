@@ -2,7 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, link, mkdtemp, rm, symlink } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile }
+  from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +48,7 @@ function initial() {
     custodianId: "independent-finality", session: Buffer.alloc(32, 0x71).toString("base64url") });
 }
 
-function memoryAnchor(value) {
+function memoryAnchor(value, beforeCommit = null) {
   let current = value, mode = "normal";
   return { get current() { return current; }, set mode(value) { mode = value; },
     async load() { return current; },
@@ -55,6 +56,7 @@ function memoryAnchor(value) {
       if (mode === "throw") throw new Error("anchor unavailable");
       if (mode === "uncertain") return { status: "uncertain" };
       if (mode === "conflict" || current !== expected) return { status: "conflict", currentStateHash: current };
+      await beforeCommit?.();
       current = replacement;
       return { status: "committed" };
     } };
@@ -157,6 +159,64 @@ test("anchor failure occurs before transport and ambiguous anchor outcome retain
   await assert.rejects(blocked.load(), /requires inspection/);
   assert.equal(calls, 0);
   assert.equal((await inspectFinalityCustodianCheckpoint(ambiguous.storePath)).lockPresent, true);
+  assert.ok((await readdir(ambiguous.root)).some(name => name.startsWith("client.json.tmp-")));
+});
+
+test("anchor commit cannot overwrite a substituted predecessor", async t => {
+  const f = await fixture(t), displaced = `${f.storePath}.displaced`;
+  const original = await readFile(f.storePath);
+  let calls = 0;
+  const anchor = memoryAnchor(f.checkpoint.stateHash, async () => {
+    await rename(f.storePath, displaced);
+    await writeFile(f.storePath, original, { mode: 0o600, flag: "wx" });
+  });
+  const client = await createFilesystemFinalityCustodian({ storePath: f.storePath,
+    expectedStateHash: f.checkpoint.stateHash, authentication: authentication(),
+    transport: { async exchange() { calls += 1; } }, anchor });
+  await assert.rejects(client.load(), /requires inspection/);
+  assert.equal(calls, 0);
+  assert.deepEqual(await readFile(displaced), original);
+  assert.deepEqual(await readFile(f.storePath), original);
+  assert.ok((await readdir(f.root)).some(name => name.startsWith("client.json.tmp-")));
+});
+
+test("anchor commit cannot mutate through a replaced lock pathname", async t => {
+  const f = await fixture(t), displaced = `${f.storePath}.lock.displaced`;
+  let calls = 0;
+  const anchor = memoryAnchor(f.checkpoint.stateHash, async () => {
+    await rename(`${f.storePath}.lock`, displaced);
+    await writeFile(`${f.storePath}.lock`, "replacement lock\n", { mode: 0o600, flag: "wx" });
+  });
+  const client = await createFilesystemFinalityCustodian({ storePath: f.storePath,
+    expectedStateHash: f.checkpoint.stateHash, authentication: authentication(),
+    transport: { async exchange() { calls += 1; } }, anchor });
+  await assert.rejects(client.load(), /requires inspection/);
+  assert.equal(calls, 0);
+  const names = await readdir(f.root);
+  assert.ok(names.includes("client.json"));
+  assert.ok(names.includes("client.json.lock"));
+  assert.ok(names.includes("client.json.lock.displaced"));
+  assert.ok(names.some(name => name.startsWith("client.json.tmp-")));
+});
+
+test("anchor commit cannot mutate through a displaced checkpoint directory", async t => {
+  const f = await fixture(t), moved = `${f.root}.displaced`;
+  t.after(() => rm(moved, { recursive: true, force: true }));
+  let calls = 0;
+  const anchor = memoryAnchor(f.checkpoint.stateHash, async () => {
+    await rename(f.root, moved);
+    await mkdir(f.root, { mode: 0o700 });
+  });
+  const client = await createFilesystemFinalityCustodian({ storePath: f.storePath,
+    expectedStateHash: f.checkpoint.stateHash, authentication: authentication(),
+    transport: { async exchange() { calls += 1; } }, anchor });
+  await assert.rejects(client.load(), /requires inspection/);
+  assert.equal(calls, 0);
+  assert.deepEqual(await readdir(f.root), []);
+  const names = await readdir(moved);
+  assert.ok(names.includes("client.json"));
+  assert.ok(names.includes("client.json.lock"));
+  assert.ok(names.some(name => name.startsWith("client.json.tmp-")));
 });
 
 test("rollback, concurrent exchange, unsafe files, links and TOFU fail closed", async t => {

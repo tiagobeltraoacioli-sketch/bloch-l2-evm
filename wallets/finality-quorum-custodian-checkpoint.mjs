@@ -172,6 +172,112 @@ function absoluteCheckpointPath(path) {
   return resolve(path);
 }
 
+async function validateDirectoryName(path, directory) {
+  const directoryPath = dirname(absoluteCheckpointPath(path));
+  const actual = await directory.stat({ bigint: true });
+  const named = await lstat(directoryPath, { bigint: true });
+  if (!actual.isDirectory() || !named.isDirectory() || named.isSymbolicLink() ||
+      actual.dev !== named.dev || actual.ino !== named.ino ||
+      (actual.mode & 0o022n) !== 0n || (named.mode & 0o022n) !== 0n ||
+      typeof process.getuid === "function" &&
+        (actual.uid !== BigInt(process.getuid()) || named.uid !== BigInt(process.getuid())) ||
+      await realpath(directoryPath) !== directoryPath) {
+    throw new Error("Finality custodian checkpoint directory changed");
+  }
+}
+
+async function validateMutationAuthority(path, directory, lock, lockStat) {
+  await validateDirectoryName(path, directory);
+  const linked = await lstat(`${path}.lock`, { bigint: true });
+  const actual = await lock.stat({ bigint: true });
+  if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1n ||
+      (linked.mode & 0o077n) !== 0n || linked.dev !== lockStat.dev || linked.ino !== lockStat.ino ||
+      actual.dev !== lockStat.dev || actual.ino !== lockStat.ino ||
+      !sameIntegralSnapshot(lockStat, actual) || !sameIntegralSnapshot(actual, linked)) {
+    throw new Error("Finality custodian checkpoint lock changed; refusing mutation");
+  }
+}
+
+async function validateTemporary(path, temporaryStat) {
+  const linked = await lstat(path, { bigint: true });
+  if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1n ||
+      !sameIntegralSnapshot(temporaryStat, linked)) {
+    throw new Error("Finality custodian checkpoint temporary path changed; refusing mutation");
+  }
+}
+
+async function pinPredecessor(path, expectedStateHash) {
+  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || (before.mode & 0o077n) !== 0n ||
+        before.size < 2n || before.size > BigInt(MAX_FILE_BYTES) ||
+        typeof process.getuid === "function" && before.uid !== BigInt(process.getuid())) {
+      throw new Error("Finality custodian checkpoint predecessor is unsafe");
+    }
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_FILE_BYTES) {
+      throw new Error("Finality custodian checkpoint predecessor exceeds its size limit");
+    }
+    const after = await handle.stat({ bigint: true });
+    const named = await lstat(path, { bigint: true });
+    if (!sameIntegralSnapshot(before, after) || !sameIntegralSnapshot(after, named) ||
+        BigInt(offset) !== after.size) {
+      throw new Error("Finality custodian checkpoint predecessor changed while being pinned");
+    }
+    const encoded = buffer.subarray(0, offset).toString("utf8");
+    let parsed;
+    try { parsed = JSON.parse(encoded); } catch (cause) {
+      throw new Error("Finality custodian checkpoint predecessor is not valid JSON", { cause });
+    }
+    if (encoded !== `${JSON.stringify(parsed)}\n` || checkedState(parsed).stateHash !== expectedStateHash) {
+      throw new Error("Finality custodian checkpoint predecessor does not match the authorized state");
+    }
+    return { handle, snapshot: after, bytes: Buffer.from(buffer.subarray(0, offset)) };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+async function validatePredecessor(path, predecessor) {
+  const actual = await predecessor.handle.stat({ bigint: true });
+  const named = await lstat(path, { bigint: true });
+  if (!sameIntegralSnapshot(predecessor.snapshot, actual) ||
+      !sameIntegralSnapshot(actual, named)) {
+    throw new Error("Finality custodian checkpoint predecessor changed; refusing replacement");
+  }
+}
+
+async function validateDisplacedPredecessor(predecessor) {
+  const actual = await predecessor.handle.stat({ bigint: true });
+  if (actual.dev !== predecessor.snapshot.dev || actual.ino !== predecessor.snapshot.ino ||
+      actual.mode !== predecessor.snapshot.mode || actual.uid !== predecessor.snapshot.uid ||
+      actual.gid !== predecessor.snapshot.gid || actual.size !== predecessor.snapshot.size ||
+      actual.mtimeNs !== predecessor.snapshot.mtimeNs || actual.nlink !== 0n) {
+    throw new Error("Finality custodian checkpoint displaced predecessor changed");
+  }
+  const buffer = Buffer.alloc(predecessor.bytes.length + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await predecessor.handle.read(
+      buffer, offset, buffer.length - offset, offset,
+    );
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset !== predecessor.bytes.length ||
+      !buffer.subarray(0, offset).equals(predecessor.bytes)) {
+    throw new Error("Finality custodian checkpoint displaced predecessor bytes changed");
+  }
+}
+
 function checkedAnchor(anchor) {
   if (!anchor || typeof anchor !== "object" || Array.isArray(anchor) || typeof anchor.load !== "function" ||
       typeof anchor.compareAndSwap !== "function") throw new Error("Finality custodian checkpoint anchor is invalid");
@@ -205,10 +311,12 @@ async function replaceState(path, current, next, anchor) {
   path = absoluteCheckpointPath(path);
   const lockPath = `${path}.lock`, temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   const directory = await protectedDirectory(path);
-  let lock, lockStat, temporaryStat, replacementAttempted = false, replacementVerified = false,
-    anchorCommitted = false, safeFailure = false;
+  let lock, lockStat, temporaryHandle, temporaryStat, predecessor, replacementAttempted = false,
+    replacementVerified = false, anchorAttempted = false, anchorCommitted = false,
+    safeFailure = false;
   try {
     try {
+      await validateDirectoryName(path, directory);
       lock = await open(lockPath,
         fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
     } catch (cause) {
@@ -217,8 +325,8 @@ async function replaceState(path, current, next, anchor) {
     await lock.writeFile(`${JSON.stringify({ format: "bloch-l2-finality-custodian-client-lock-v1",
       token: randomBytes(32).toString("hex") })}\n`);
     await lock.sync(); await directory.sync();
-    lockStat = await lock.stat();
-    if (!lockStat.isFile() || lockStat.nlink !== 1 || (lockStat.mode & 0o077) !== 0) {
+    lockStat = await lock.stat({ bigint: true });
+    if (!lockStat.isFile() || lockStat.nlink !== 1n || (lockStat.mode & 0o077n) !== 0n) {
       throw new Error("Finality custodian checkpoint lock is unsafe");
     }
     const observed = await readState(path);
@@ -226,16 +334,17 @@ async function replaceState(path, current, next, anchor) {
       safeFailure = true;
       throw new Error("Finality custodian checkpoint changed before CAS");
     }
-    const output = await open(temporary,
+    predecessor = await pinPredecessor(path, current.stateHash);
+    await validateMutationAuthority(path, directory, lock, lockStat);
+    temporaryHandle = await open(temporary,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    await temporaryHandle.writeFile(`${JSON.stringify(next)}\n`); await temporaryHandle.sync();
+    temporaryStat = await temporaryHandle.stat({ bigint: true });
+    if (!temporaryStat.isFile() || temporaryStat.nlink !== 1n || (temporaryStat.mode & 0o077n) !== 0n) {
+      throw new Error("Finality custodian checkpoint temporary file is unsafe");
+    }
     try {
-      await output.writeFile(`${JSON.stringify(next)}\n`); await output.sync();
-      temporaryStat = await output.stat();
-      if (!temporaryStat.isFile() || temporaryStat.nlink !== 1 || (temporaryStat.mode & 0o077) !== 0) {
-        throw new Error("Finality custodian checkpoint temporary file is unsafe");
-      }
-    } finally { await output.close(); }
-    try {
+      anchorAttempted = true;
       await anchorAdvance(anchor, current.stateHash, next.stateHash);
       anchorCommitted = true;
     } catch (error) {
@@ -243,33 +352,44 @@ async function replaceState(path, current, next, anchor) {
       throw error;
     }
     replacementAttempted = true;
+    await validateMutationAuthority(path, directory, lock, lockStat);
+    await validateTemporary(temporary, temporaryStat);
+    await validatePredecessor(path, predecessor);
     await rename(temporary, path); await directory.sync();
+    const installed = await temporaryHandle.stat({ bigint: true });
+    const namedInstalled = await lstat(path, { bigint: true });
+    if (installed.dev !== temporaryStat.dev || installed.ino !== temporaryStat.ino ||
+        !sameIntegralSnapshot(installed, namedInstalled)) {
+      throw new Error("Finality custodian checkpoint replacement is ambiguous");
+    }
+    await validateDisplacedPredecessor(predecessor);
     const retained = await readState(path);
     if (retained.stateHash !== next.stateHash) throw new Error("Finality custodian checkpoint readback is ambiguous");
     replacementVerified = true;
   } finally {
     let cleanup = null;
-    try {
-      const linked = await lstat(temporary);
-      if (!temporaryStat || !linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1 ||
-          linked.dev !== temporaryStat.dev || linked.ino !== temporaryStat.ino) {
-        throw new Error("Finality custodian checkpoint temporary path changed; refusing removal");
-      }
-      await unlink(temporary);
-    } catch (error) { if (error?.code !== "ENOENT") cleanup = error; }
+    if (!anchorAttempted || safeFailure && !anchorCommitted) {
+      try {
+        if (!temporaryStat) {
+          await lstat(temporary);
+          throw new Error("Finality custodian checkpoint temporary path is unverified");
+        }
+        await validateTemporary(temporary, temporaryStat);
+        await validateMutationAuthority(path, directory, lock, lockStat);
+        await unlink(temporary);
+      } catch (error) { if (error?.code !== "ENOENT") cleanup = error; }
+    }
     if (lock && lockStat && (replacementVerified || safeFailure && !anchorCommitted && !replacementAttempted)) {
       try {
-        const linked = await lstat(lockPath), actual = await lock.stat();
-        if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1 || linked.dev !== lockStat.dev ||
-            linked.ino !== lockStat.ino || actual.dev !== lockStat.dev || actual.ino !== lockStat.ino) {
-          throw new Error("Finality custodian checkpoint lock changed; refusing removal");
-        }
+        await validateMutationAuthority(path, directory, lock, lockStat);
         await unlink(lockPath); await directory.sync();
       } catch (error) { cleanup ??= error; }
     } else if (lock) {
       cleanup ??= new Error("Finality custodian checkpoint transition is ambiguous; lock retained");
     }
+    await temporaryHandle?.close().catch(error => { cleanup ??= error; });
     await lock?.close().catch(error => { cleanup ??= error; });
+    await predecessor?.handle.close().catch(error => { cleanup ??= error; });
     await directory.close().catch(error => { cleanup ??= error; });
     if (cleanup) throw new Error("Finality custodian checkpoint requires inspection before retrying", { cause: cleanup });
   }
@@ -283,13 +403,30 @@ export async function initializeFinalityCustodianCheckpoint({ storePath, checkpo
     throw new Error("Finality custodian checkpoint does not match its externally approved initial hash");
   }
   const directory = await protectedDirectory(storePath);
+  let output;
   try {
-    const output = await open(storePath,
+    await validateDirectoryName(storePath, directory);
+    output = await open(storePath,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
-    try { await output.writeFile(`${JSON.stringify(initial)}\n`); await output.sync(); }
-    finally { await output.close(); }
+    await output.writeFile(`${JSON.stringify(initial)}\n`); await output.sync();
+    let actual = await output.stat({ bigint: true });
+    let named = await lstat(storePath, { bigint: true });
+    await validateDirectoryName(storePath, directory);
+    if (!actual.isFile() || actual.nlink !== 1n || (actual.mode & 0o077n) !== 0n ||
+        !sameIntegralSnapshot(actual, named)) {
+      throw new Error("Finality custodian checkpoint initialization is ambiguous");
+    }
     await directory.sync();
-  } finally { await directory.close(); }
+    await validateDirectoryName(storePath, directory);
+    actual = await output.stat({ bigint: true });
+    named = await lstat(storePath, { bigint: true });
+    if (!sameIntegralSnapshot(actual, named)) {
+      throw new Error("Finality custodian checkpoint initialization is ambiguous");
+    }
+  } finally {
+    await output?.close();
+    await directory.close();
+  }
   return initial;
 }
 
