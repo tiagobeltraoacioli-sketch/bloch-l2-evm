@@ -286,3 +286,54 @@ for (const attack of ["same-inode-rewrite", "pathname-replacement", "parent-dire
     assert.equal(result.stdout, "rejected custodian checkpoint mutation\n");
   });
 }
+
+test("client startup binds checkpoint and lock inspection to one directory snapshot", async t => {
+  const f = await fixture(t);
+  t.after(() => rm(`${f.root}.race-moved`, { recursive: true, force: true }));
+  const runner = new URL("./fixtures/open-custodian-checkpoint.mjs", import.meta.url);
+  const result = await execute(process.execPath,
+    [...checkpointRaceLoaderArguments(), fileURLToPath(runner), f.storePath, f.checkpoint.stateHash], {
+      env: { ...process.env, BLOCH_CHECKPOINT_RACE_TARGET: f.storePath,
+        BLOCH_CHECKPOINT_RACE_ATTACK: "post-read-parent-directory-replacement" },
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024,
+    });
+  assert.equal(result.stdout, "rejected custodian checkpoint startup race\n");
+});
+
+test("client startup revalidates checkpoint and lock after independent anchor I/O", async t => {
+  const locked = await fixture(t);
+  await assert.rejects(createFilesystemFinalityCustodian({ storePath: locked.storePath,
+    expectedStateHash: locked.checkpoint.stateHash, authentication: authentication(),
+    transport: transport(memoryCustody()), anchor: {
+      async load() {
+        await writeFile(`${locked.storePath}.lock`, "raced\n", { mode: 0o600, flag: "wx" });
+        return locked.checkpoint.stateHash;
+      },
+      async compareAndSwap() { throw new Error("unexpected anchor mutation"); },
+    } }), /changed during independent anchor verification/);
+
+  const replaced = await fixture(t), bytes = await readFile(replaced.storePath);
+  await assert.rejects(createFilesystemFinalityCustodian({ storePath: replaced.storePath,
+    expectedStateHash: replaced.checkpoint.stateHash, authentication: authentication(),
+    transport: transport(memoryCustody()), anchor: {
+      async load() {
+        await rename(replaced.storePath, `${replaced.storePath}.during-anchor`);
+        await writeFile(replaced.storePath, bytes, { mode: 0o600, flag: "wx" });
+        return replaced.checkpoint.stateHash;
+      },
+      async compareAndSwap() { throw new Error("unexpected anchor mutation"); },
+    } }), /changed during independent anchor verification/);
+
+  const rewritten = await fixture(t), rewrittenBytes = await readFile(rewritten.storePath);
+  await assert.rejects(createFilesystemFinalityCustodian({ storePath: rewritten.storePath,
+    expectedStateHash: rewritten.checkpoint.stateHash, authentication: authentication(),
+    transport: transport(memoryCustody()), anchor: {
+      async load() {
+        await writeFile(rewritten.storePath, rewrittenBytes, { flag: "r+" });
+        return rewritten.checkpoint.stateHash;
+      },
+      async compareAndSwap() { throw new Error("unexpected anchor mutation"); },
+    } }), /changed during independent anchor verification/);
+});

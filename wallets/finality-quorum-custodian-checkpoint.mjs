@@ -112,7 +112,7 @@ async function protectedDirectory(path) {
   return handle;
 }
 
-async function readState(path, retainedDirectory = null) {
+async function readState(path, retainedDirectory = null, retainedEvidence = null) {
   path = absoluteCheckpointPath(path);
   const directory = retainedDirectory ?? await protectedDirectory(path);
   const ownsDirectory = retainedDirectory === null;
@@ -155,6 +155,10 @@ async function readState(path, retainedDirectory = null) {
     }
     if (encoded !== `${JSON.stringify(parsed)}\n`) {
       throw new Error("Finality custodian checkpoint is not canonical");
+    }
+    if (retainedEvidence) {
+      retainedEvidence.snapshot = after;
+      retainedEvidence.bytes = Buffer.from(buffer.subarray(0, offset));
     }
     return checkedState(parsed);
   } finally {
@@ -592,12 +596,13 @@ function nextState(current, fields) {
   return checkedState({ ...body, stateHash: stateHash(body) });
 }
 
-export async function inspectFinalityCustodianCheckpoint(storePath) {
+async function readCheckpointSnapshot(storePath) {
   storePath = absoluteCheckpointPath(storePath);
   const directory = await protectedDirectory(storePath);
   try {
     const before = await directory.stat({ bigint: true });
-    const state = await readState(storePath, directory);
+    const evidence = {};
+    const state = await readState(storePath, directory, evidence);
     const lockPath = process.platform === "linux"
       ? anchoredChild(directory, `${storePath}.lock`) : `${storePath}.lock`;
     const lock = await lstat(lockPath).then(() => true, error => {
@@ -609,10 +614,16 @@ export async function inspectFinalityCustodianCheckpoint(storePath) {
       throw new Error("Finality custodian checkpoint directory changed during inspection");
     }
     await validateDirectoryName(storePath, directory);
-    return Object.freeze({ ...state, lockPresent: lock });
+    return { state, lockPresent: lock, directorySnapshot: after,
+      stateSnapshot: evidence.snapshot, stateBytes: evidence.bytes };
   } finally {
     await directory.close();
   }
+}
+
+export async function inspectFinalityCustodianCheckpoint(storePath) {
+  const { state, lockPresent } = await readCheckpointSnapshot(storePath);
+  return Object.freeze({ ...state, lockPresent });
 }
 
 export async function createFilesystemFinalityCustodian({ storePath, expectedStateHash, authentication,
@@ -622,13 +633,19 @@ export async function createFilesystemFinalityCustodian({ storePath, expectedSta
     throw new Error("Finality custodian externally retained checkpoint hash is invalid");
   }
   const retainedAnchor = checkedAnchor(anchor);
-  const lockPresent = await lstat(`${storePath}.lock`).then(() => true, error => {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  });
+  const snapshot = await readCheckpointSnapshot(storePath);
+  const { lockPresent } = snapshot;
   if (lockPresent) throw new Error("Finality custodian checkpoint is locked; inspect before retrying");
-  let retained = await readState(storePath);
-  if (retained.stateHash !== expectedStateHash || await anchorLoad(retainedAnchor) !== expectedStateHash) {
+  let retained = snapshot.state;
+  const anchoredStateHash = await anchorLoad(retainedAnchor);
+  const confirmed = await readCheckpointSnapshot(storePath);
+  if (confirmed.lockPresent || !sameIntegralSnapshot(snapshot.directorySnapshot,
+    confirmed.directorySnapshot) || !sameIntegralSnapshot(snapshot.stateSnapshot,
+    confirmed.stateSnapshot) || !snapshot.stateBytes.equals(confirmed.stateBytes)) {
+    throw new Error("Finality custodian checkpoint changed during independent anchor verification");
+  }
+  retained = confirmed.state;
+  if (retained.stateHash !== expectedStateHash || anchoredStateHash !== expectedStateHash) {
     throw new Error("Finality custodian checkpoint does not match the independent anchor");
   }
   if (retained.status !== "ready") {
