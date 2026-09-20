@@ -4,6 +4,7 @@ import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verif
 import { constants as fsConstants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { types as utilTypes } from "node:util";
 
 export const BLOCH_L2_FINALITY_CUSTODIAN_STORE_FORMAT =
   "bloch-l2-finality-custodian-store-v1";
@@ -34,6 +35,93 @@ const APPROVAL_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-STORE-APPROVAL-v1\0";
 const AUTHORITY_CHECKPOINT_DOMAIN = "BLOCH-L2-FINALITY-CUSTODIAN-AUTHORITY-CHECKPOINT-v1\0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
+function sameIntrinsicFunction(candidate, expected) {
+  if (typeof candidate !== "function" || utilTypes.isProxy(candidate)) return false;
+  const candidateName = Object.getOwnPropertyDescriptor(candidate, "name");
+  const expectedName = Object.getOwnPropertyDescriptor(expected, "name");
+  const candidateLength = Object.getOwnPropertyDescriptor(candidate, "length");
+  const expectedLength = Object.getOwnPropertyDescriptor(expected, "length");
+  return sameIntrinsicDescriptor(candidateName, expectedName) &&
+    sameIntrinsicDescriptor(candidateLength, expectedLength) &&
+    Function.prototype.toString.call(candidate) === Function.prototype.toString.call(expected);
+}
+
+function sameIntrinsicDescriptor(candidate, expected) {
+  if (!candidate || candidate.enumerable !== expected.enumerable ||
+      candidate.configurable !== expected.configurable) return false;
+  if (Object.hasOwn(expected, "value")) {
+    if (!Object.hasOwn(candidate, "value") || candidate.writable !== expected.writable) return false;
+    return typeof expected.value === "function"
+      ? sameIntrinsicFunction(candidate.value, expected.value) : candidate.value === expected.value;
+  }
+  return !Object.hasOwn(candidate, "value") &&
+    (expected.get === undefined ? candidate.get === undefined :
+      sameIntrinsicFunction(candidate.get, expected.get)) &&
+    (expected.set === undefined ? candidate.set === undefined :
+      sameIntrinsicFunction(candidate.set, expected.set));
+}
+
+function sameIntrinsicPrototype(candidate, expected) {
+  if (candidate === expected) return true;
+  if (!candidate || utilTypes.isProxy(candidate) || Array.isArray(candidate) !== Array.isArray(expected)) {
+    return false;
+  }
+  const candidateDescriptors = Object.getOwnPropertyDescriptors(candidate);
+  const expectedDescriptors = Object.getOwnPropertyDescriptors(expected);
+  const candidateKeys = Reflect.ownKeys(candidateDescriptors), expectedKeys = Reflect.ownKeys(expectedDescriptors);
+  if (candidateKeys.length !== expectedKeys.length || expectedKeys.some(key =>
+    !Object.hasOwn(candidateDescriptors, key) ||
+    !sameIntrinsicDescriptor(candidateDescriptors[key], expectedDescriptors[key]))) return false;
+  const expectedParent = Object.getPrototypeOf(expected), candidateParent = Object.getPrototypeOf(candidate);
+  return expectedParent === null ? candidateParent === null :
+    sameIntrinsicPrototype(candidateParent, expectedParent);
+}
+
+function hasInertJsonPrototype(value, array) {
+  return sameIntrinsicPrototype(Object.getPrototypeOf(value),
+    array ? Array.prototype : Object.prototype);
+}
+
+function snapshotPlainJsonData(value, message, ancestors = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean" ||
+      typeof value === "number" && Number.isSafeInteger(value)) return value;
+  if (!value || typeof value !== "object" || utilTypes.isProxy(value) || ancestors.has(value)) {
+    throw new Error(message);
+  }
+  const array = Array.isArray(value);
+  if (!hasInertJsonPrototype(value, array)) throw new Error(message);
+  let descriptors;
+  try { descriptors = Object.getOwnPropertyDescriptors(value); }
+  catch (cause) { throw new Error(message, { cause }); }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some(key => typeof key !== "string")) throw new Error(message);
+  ancestors.add(value);
+  try {
+    if (array) {
+      if (!Object.hasOwn(descriptors, "length") || keys.length !== value.length + 1) {
+        throw new Error(message);
+      }
+      const output = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !Object.hasOwn(descriptor, "value") || !descriptor.enumerable) {
+          throw new Error(message);
+        }
+        output.push(snapshotPlainJsonData(descriptor.value, message, ancestors));
+      }
+      return Object.freeze(output);
+    }
+    const output = {};
+    for (const key of keys) {
+      const descriptor = descriptors[key];
+      if (!Object.hasOwn(descriptor, "value") || !descriptor.enumerable) throw new Error(message);
+      Object.defineProperty(output, key, { enumerable: true, configurable: false, writable: false,
+        value: snapshotPlainJsonData(descriptor.value, message, ancestors) });
+    }
+    return Object.freeze(output);
+  } finally { ancestors.delete(value); }
+}
+
 function exact(value, fields, message) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(message);
   const keys = Object.keys(value);
@@ -59,6 +147,7 @@ function digest(value) {
 }
 
 function checkedRecord(value) {
+  value = snapshotPlainJsonData(value, "Finality custodian store record is invalid");
   exact(value, FIELDS, "Finality custodian store record is invalid");
   if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_STORE_FORMAT ||
       typeof value.generation !== "string" || !U64.test(value.generation) ||
@@ -150,6 +239,7 @@ export function approveFinalityCustodianStoreRecord({ deploymentId, record, priv
 
 export function verifyFinalityCustodianStoreApproval({ approval, expectedDeploymentId,
   authorityPublicKey } = {}) {
+  approval = snapshotPlainJsonData(approval, "Finality custodian store approval is invalid");
   exact(approval, APPROVAL_FIELDS, "Finality custodian store approval is invalid");
   if (typeof expectedDeploymentId !== "string" || !HASH.test(expectedDeploymentId) ||
       expectedDeploymentId === "0".repeat(64) || approval.format !==
@@ -168,6 +258,8 @@ export function verifyFinalityCustodianStoreApproval({ approval, expectedDeploym
 }
 
 function checkedContinuityTransition(value) {
+  value = snapshotPlainJsonData(value,
+    "Finality custodian store continuity transition is invalid");
   exact(value, CONTINUITY_TRANSITION_FIELDS,
     "Finality custodian store continuity transition is invalid");
   if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT ||
@@ -218,6 +310,7 @@ export function signFinalityCustodianStoreContinuity(transitionValue, role, priv
 }
 
 function checkedContinuityShare(value, role, keyId, publicKey, transition) {
+  value = snapshotPlainJsonData(value, "Finality custodian store continuity share is invalid");
   exact(value, CONTINUITY_SHARE_FIELDS, "Finality custodian store continuity share is invalid");
   const authority = approvalKey(publicKey, false);
   if (value.role !== role || value.keyId !== keyId || authority.keyId !== keyId ||
@@ -239,6 +332,7 @@ export function assembleFinalityCustodianStoreContinuity({ transition: transitio
 
 export function verifyFinalityCustodianStoreContinuity({ continuity, expectedDeploymentId,
   expectedPreviousRecord, previousAuthorityPublicKey, nextAuthorityPublicKey } = {}) {
+  continuity = snapshotPlainJsonData(continuity, "Finality custodian store continuity is invalid");
   exact(continuity, CONTINUITY_FIELDS, "Finality custodian store continuity is invalid");
   if (continuity.format !== BLOCH_L2_FINALITY_CUSTODIAN_STORE_CONTINUITY_FORMAT) {
     throw new Error("Finality custodian store continuity is invalid");
@@ -269,6 +363,7 @@ function authorityCheckpointDigest(value) {
 }
 
 function checkedAuthorityCheckpoint(value) {
+  value = snapshotPlainJsonData(value, "Finality custodian authority checkpoint is invalid");
   exact(value, AUTHORITY_CHECKPOINT_FIELDS,
     "Finality custodian authority checkpoint is invalid");
   if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_CHECKPOINT_FORMAT ||
@@ -375,6 +470,8 @@ export async function reconcileFinalityCustodianAuthorityStoreRecord({ storePath
 }
 
 function checkedAuthorityReconciliation(value) {
+  value = snapshotPlainJsonData(value,
+    "Finality custodian authority reconciliation receipt is invalid");
   exact(value, AUTHORITY_RECONCILIATION_FIELDS,
     "Finality custodian authority reconciliation receipt is invalid");
   if (value.format !== BLOCH_L2_FINALITY_CUSTODIAN_AUTHORITY_RECONCILIATION_FORMAT ||

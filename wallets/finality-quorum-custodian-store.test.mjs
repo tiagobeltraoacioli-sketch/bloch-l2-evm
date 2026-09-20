@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import {
   approveFinalityCustodianStoreRecord,
   advanceFinalityCustodianAuthorityCheckpoint,
@@ -26,6 +27,8 @@ import {
   reconcileFinalityCustodianAuthorityStoreRecord,
   signFinalityCustodianStoreContinuity,
   verifyFinalityCustodianAuthorityStoreReconciliation,
+  verifyFinalityCustodianStoreApproval,
+  verifyFinalityCustodianStoreContinuity,
 } from "./finality-quorum-custodian-store.mjs";
 
 const HASH_A = "a".repeat(64), HASH_B = "b".repeat(64);
@@ -295,4 +298,93 @@ test("authority reconciliation classifies only the exact prior or approved succe
   await assert.rejects(reconcileFinalityCustodianAuthorityStoreRecord({
     storePath: priorStore.storePath, checkpoint, continuity,
     nextAuthorityPublicKey: nextAuthority.publicKey }), /locked/);
+});
+
+test("authority APIs snapshot plain data and reject active object graphs", async t => {
+  const f = await fixture(t), previous = generateKeyPairSync("ed25519"),
+    next = generateKeyPairSync("ed25519");
+  const approval = approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: f.record, privateKey: previous.privateKey });
+  let reads = 0;
+  const accessorApproval = { format: approval.format, deploymentId: approval.deploymentId,
+    authorityKeyId: approval.authorityKeyId,
+    get record() { reads += 1; return approval.record; }, signature: approval.signature };
+  assert.throws(() => verifyFinalityCustodianStoreApproval({ approval: accessorApproval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: previous.publicKey }), /approval is invalid/);
+  assert.equal(reads, 0);
+
+  let traps = 0;
+  const proxyApproval = new Proxy(approval, { ownKeys(target) { traps += 1; return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, key) { traps += 1; return Reflect.getOwnPropertyDescriptor(target, key); },
+    get(target, key, receiver) { traps += 1; return Reflect.get(target, key, receiver); } });
+  assert.throws(() => verifyFinalityCustodianStoreApproval({ approval: proxyApproval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: previous.publicKey }), /approval is invalid/);
+  assert.equal(traps, 0);
+  const nestedProxyApproval = { ...approval,
+    record: new Proxy(approval.record, { get() { traps += 1; return undefined; } }) };
+  assert.throws(() => verifyFinalityCustodianStoreApproval({ approval: nestedProxyApproval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: previous.publicKey }), /approval is invalid/);
+  assert.equal(traps, 0);
+
+  const crossRealmApproval = runInNewContext(`JSON.parse(${JSON.stringify(JSON.stringify(approval))})`);
+  assert.equal(verifyFinalityCustodianStoreApproval({ approval: crossRealmApproval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: previous.publicKey }).recordHash,
+  f.record.recordHash);
+
+  const inheritedRecord = Object.assign(Object.create({ inherited: true }), f.record);
+  assert.throws(() => approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: inheritedRecord, privateKey: previous.privateKey }), /record is invalid/);
+  const hiddenActivePrototype = Object.create(null);
+  Object.defineProperty(hiddenActivePrototype, "active", { get() { reads += 1; } });
+  const hiddenPrototypeRecord = Object.assign(Object.create(hiddenActivePrototype), f.record);
+  assert.throws(() => approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: hiddenPrototypeRecord, privateKey: previous.privateKey }), /record is invalid/);
+  assert.equal(reads, 0);
+  const forgedPrototype = Object.create(null);
+  Object.defineProperties(forgedPrototype, Object.getOwnPropertyDescriptors(Object.prototype));
+  const activeConstructor = function activeConstructor() {};
+  Object.defineProperty(activeConstructor, "name", { configurable: true,
+    get() { reads += 1; return "Object"; } });
+  Object.defineProperty(forgedPrototype, "constructor", { configurable: true, writable: true,
+    value: activeConstructor });
+  const activePrototypeRecord = Object.assign(Object.create(forgedPrototype), f.record);
+  assert.throws(() => approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: activePrototypeRecord, privateKey: previous.privateKey }), /record is invalid/);
+  assert.equal(reads, 0);
+  const cyclicRecord = { ...f.record };
+  cyclicRecord.format = cyclicRecord;
+  assert.throws(() => approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: cyclicRecord, privateKey: previous.privateKey }), /record is invalid/);
+  const symbolRecord = { ...f.record, [Symbol("active")]: true };
+  assert.throws(() => approveFinalityCustodianStoreRecord({ deploymentId: DEPLOYMENT,
+    record: symbolRecord, privateKey: previous.privateKey }), /record is invalid/);
+
+  const transition = createFinalityCustodianStoreContinuityTransition({ deploymentId: DEPLOYMENT,
+    previousRecord: f.record, nextRecord: f.record,
+    previousAuthorityPublicKey: previous.publicKey, nextAuthorityPublicKey: next.publicKey });
+  const continuity = assembleFinalityCustodianStoreContinuity({ transition,
+    previousAuthorityPublicKey: previous.publicKey, nextAuthorityPublicKey: next.publicKey,
+    authorization: signFinalityCustodianStoreContinuity(
+      transition, "authorization", previous.privateKey),
+    acceptance: signFinalityCustodianStoreContinuity(transition, "acceptance", next.privateKey) });
+  reads = 0;
+  const activeContinuity = { format: continuity.format,
+    get transition() { reads += 1; return continuity.transition; },
+    authorization: continuity.authorization, acceptance: continuity.acceptance };
+  assert.throws(() => verifyFinalityCustodianStoreContinuity({ continuity: activeContinuity,
+    expectedDeploymentId: DEPLOYMENT, expectedPreviousRecord: f.record,
+    previousAuthorityPublicKey: previous.publicKey, nextAuthorityPublicKey: next.publicKey }),
+  /continuity is invalid/);
+  assert.equal(reads, 0);
+
+  const checkpoint = createInitialFinalityCustodianAuthorityCheckpoint({ approval,
+    expectedDeploymentId: DEPLOYMENT, authorityPublicKey: previous.publicKey });
+  reads = 0;
+  const activeCheckpoint = { ...checkpoint };
+  Object.defineProperty(activeCheckpoint, "record", { enumerable: true,
+    get() { reads += 1; return checkpoint.record; } });
+  assert.throws(() => advanceFinalityCustodianAuthorityCheckpoint({
+    checkpoint: activeCheckpoint, continuity, nextAuthorityPublicKey: next.publicKey }),
+  /checkpoint is invalid/);
+  assert.equal(reads, 0);
 });
