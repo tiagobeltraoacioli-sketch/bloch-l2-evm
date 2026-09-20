@@ -125,7 +125,8 @@ node wallets/finality-quorum-custodian-authority-cli.mjs verify-reconciliation \
   --expected-checkpoint-hash <hash-retained-out-of-band> \
   --continuity <dual-signed-continuity.json> \
   --expected-continuity-sha256 <hash-retained-out-of-band> \
-  --next-authority-public-key <next-ed25519-public.pem>
+  --next-authority-public-key <next-ed25519-public.pem> \
+  --output <create-only-verification.json>
 ```
 
 Inputs must be absolute, canonical, owned, single-link files without
@@ -183,7 +184,12 @@ checkpoint, continuity, or authority-key files, then strictly rederives both
 checkpoint hashes and the only record hash permitted by the claimed status.
 It never trusts the receipt file as its own approval. Verification authenticates
 consistency with the approved transition, not the truth or freshness of the
-original filesystem observation.
+original filesystem observation. With `--output`, the verifier publishes a
+create-only, synced verification artifact that binds the exact receipt and
+continuity digests, both checkpoint hashes and the observed record. The
+artifact explicitly keeps `adoptionAuthorized` and `cleanupAuthorized` false;
+it is durable audit evidence, not permission to mutate the store. Omitting
+`--output` retains the legacy stdout-only behavior.
 
 `finality-quorum-custodian-checkpoint.mjs` supplies the filesystem-backed
 client lifecycle. It writes a hash-chained `pending` state and advances an

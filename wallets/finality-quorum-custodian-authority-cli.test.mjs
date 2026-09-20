@@ -224,7 +224,33 @@ test("offline CLI writes a canonical record reconciliation receipt", async t => 
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
     "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
     "--next-authority-public-key", f.nextKey]);
-  assert.equal(JSON.parse(verified.stdout).receiptSha256, receiptSha256);
+  assert.deepEqual(JSON.parse(verified.stdout), {
+    verified: true,
+    status: receipt.status,
+    receiptSha256,
+    observedRecordHash: receipt.observedRecordHash,
+    nextCheckpointHash: receipt.nextCheckpointHash,
+  });
+  const verificationPath = join(f.root, "reconciliation-verification.json");
+  const published = await execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
+    "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
+    "--next-authority-public-key", f.nextKey, "--output", verificationPath]);
+  const verification = JSON.parse(await readFile(verificationPath, "utf8"));
+  assert.equal(verification.format,
+    "bloch-l2-finality-custodian-authority-reconciliation-verification-v1");
+  assert.equal(verification.receiptSha256, receiptSha256);
+  assert.equal(verification.continuitySha256, continuitySha256);
+  assert.equal(verification.adoptionAuthorized, false);
+  assert.equal(verification.cleanupAuthorized, false);
+  assert.equal(JSON.parse(published.stdout).verificationSha256,
+    createHash("sha256").update(await readFile(verificationPath)).digest("hex"));
+  await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
+    "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
+    "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
+    "--continuity", continuityPath, "--expected-continuity-sha256", continuitySha256,
+    "--next-authority-public-key", f.nextKey, "--output", verificationPath]), /EEXIST/);
   await assert.rejects(execute(process.execPath, [CLI, "verify-reconciliation",
     "--receipt", receiptPath, "--expected-receipt-sha256", receiptSha256,
     "--checkpoint", checkpointPath, "--expected-checkpoint-hash", checkpoint.checkpointHash,
