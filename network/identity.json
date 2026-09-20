@@ -1,0 +1,32 @@
+{
+  "schema": "bloch.l2.network-identity.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "caip2": "eip155:700771",
+  "decision": {
+    "status": "selected-pending-registration",
+    "selectedAt": "2026-09-20",
+    "supersedes": [8400, 84001],
+    "reason": "The execution chain, signed-transaction domain, block headers, proof statements and bridge envelopes already bind 700771. Migrating inactive clients is safer than changing the consensus domain."
+  },
+  "registration": {
+    "registry": "https://github.com/ethereum-lists/chains",
+    "path": "_data/chains/eip155-700771.json",
+    "name": "Bloch L2 Testnet",
+    "shortName": "blochl2t",
+    "chain": "BLOCH",
+    "nativeCurrency": {
+      "name": "Bridged BLCH",
+      "symbol": "BLCH",
+      "decimals": 18
+    },
+    "status": "incubating"
+  },
+  "activation": {
+    "registered": false,
+    "genesisFrozen": false,
+    "finalizedRpcVerified": false,
+    "clientMigrationVerified": false,
+    "productionReady": false
+  }
+}

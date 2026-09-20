@@ -1,0 +1,16 @@
+{
+  "name": "Bloch L2 Testnet",
+  "chain": "BLOCH",
+  "rpc": [],
+  "faucets": [],
+  "nativeCurrency": {
+    "name": "Bridged BLCH",
+    "symbol": "BLCH",
+    "decimals": 18
+  },
+  "infoURL": "https://posternlabs.com",
+  "shortName": "blochl2t",
+  "chainId": 700771,
+  "networkId": 700771,
+  "status": "incubating"
+}

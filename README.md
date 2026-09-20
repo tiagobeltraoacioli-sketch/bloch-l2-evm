@@ -106,8 +106,9 @@ backends and unknown sources.
   wallet signing requests; `node --test wallets/bloch-l2.test.mjs` tests it.
 
 * **`ChainSpec`** (`src/chainspec.rs`) — the design's genesis knobs:
-  `chain_id = 700771` (testnet placeholder pending ethereum-lists/chains
-  registration), `gas_limit = 30_000_000`, EIP-1559 `elasticity = 2` /
+  `chain_id = 700771` (the selected testnet identity, still blocked on public
+  registration and a frozen production genesis; see
+  [`docs/NETWORK-IDENTITY.md`](docs/NETWORK-IDENTITY.md)), `gas_limit = 30_000_000`, EIP-1559 `elasticity = 2` /
   `denominator = 250`, initial base fee 1 gwei, **block reward = 0**,
   COINBASE = fee-vault address, the supply-ledger and block-info system
   accounts, the EIP-4788 predeploy (canonical bytecode), the L1 supply cap

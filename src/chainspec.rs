@@ -2,8 +2,8 @@
 //! Chain specification — the design's genesis knobs (BLOCH-L2-EVM-DESIGN §1).
 //!
 //! **SCAFFOLD, UNAUDITED, not a working L2.** These are the testnet /
-//! zero-value parameters; chain id 700771 is a placeholder pending
-//! ethereum-lists/chains registration.
+//! zero-value parameters; chain id 700771 is the selected testnet identity but
+//! remains blocked on public registration and a frozen production genesis.
 
 use alloy_primitives::{address, hex, Address, U256};
 use revm::primitives::hardfork::SpecId;
@@ -84,8 +84,8 @@ pub const MAX_L1_SATS: u64 = 100_000_000_000 * SATS_PER_BLCH;
 /// non-semantic knobs below (chain id, fee routing, zero issuance).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainSpec {
-    /// EIP-155 chain id. 700771 = proposed Bloch L2 **testnet** id
-    /// (placeholder pending ethereum-lists/chains registration).
+    /// EIP-155 chain id. 700771 is the selected Bloch L2 **testnet** id.
+    /// Selection does not establish public registration or production readiness.
     pub chain_id: u64,
     /// The pinned revm hardfork. CANCUN at genesis; Prague only via a
     /// coordinated, height-gated upgrade (out of scope for this scaffold).
