@@ -110,6 +110,7 @@ pub mod chainspec;
 pub mod domain;
 pub mod executor;
 pub mod l1;
+pub mod l1_context;
 pub mod l1_transfer;
 pub mod mpt;
 pub mod node_execution;

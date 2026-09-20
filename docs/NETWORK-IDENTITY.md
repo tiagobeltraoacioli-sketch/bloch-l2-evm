@@ -22,6 +22,10 @@ keeps every activation gate false. In particular:
 4. Bridge, DEX and wallet manifests must migrate together and be verified
    against the frozen genesis before any service or liquidity is enabled.
 
+The exact finality boundary and the evidence still required are specified in
+[L2-FINALITY.md](L2-FINALITY.md). An authenticated native anchor alone does not
+close the `finalizedRpcVerified` gate.
+
 [`network/eip155-700771.json`](../network/eip155-700771.json) is the proposed
 registry record. Its empty RPC list is intentional while there is no qualified
 public endpoint. Do not publish an unqualified IP address merely to satisfy a

@@ -42,6 +42,36 @@ pub enum L1Error {
     BodyRoot,
 }
 
+/// A target header proved to be on the complete parent path to an externally
+/// authenticated checkpoint. This proves ancestry only: it does not prove the
+/// checkpoint's consensus authority or that any L2 commitment was settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedAncestry {
+    block: B256,
+    slot: u64,
+    state_root: B256,
+    body_root: B256,
+    checkpoint: FinalizedCheckpoint,
+}
+impl AuthenticatedAncestry {
+    /// Canonical ID of the target block.
+    pub fn block(&self) -> B256 {
+        self.block
+    }
+    /// Target slot; this must never be substituted for a block height.
+    pub fn slot(&self) -> u64 {
+        self.slot
+    }
+    /// State root committed by the target header.
+    pub fn state_root(&self) -> B256 {
+        self.state_root
+    }
+    /// External checkpoint that terminates the authenticated path.
+    pub fn checkpoint(&self) -> FinalizedCheckpoint {
+        self.checkpoint
+    }
+}
+
 /// Full ordered transaction body authenticated below an external checkpoint.
 /// Fields are private: values can only be obtained through verification.
 #[derive(Debug, Clone)]
@@ -131,16 +161,15 @@ fn body_root(transactions: &[Bytes]) -> Result<B256, L1Error> {
     Ok(level[0])
 }
 
-/// Verify a target body and its forward ancestry path ending at the checkpoint.
-/// Include BOTH target and checkpoint headers; adjacent slots may have gaps.
-/// The host must cap transport bytes before decoding/allocating input vectors.
-/// Successful inclusion proves neither bridge ownership nor semantic validity
-/// independently of the external checkpoint's consensus authentication.
-pub fn authenticate_body(
+/// Verify a complete target-to-checkpoint header path without requiring the
+/// target body. Include both target and checkpoint headers. This is useful for
+/// authenticating an L2 header's native anchor while keeping that fact distinct
+/// from L2 settlement/finality. Checkpoint consensus authentication remains an
+/// external obligation of the embedding application.
+pub fn authenticate_ancestry(
     checkpoint: FinalizedCheckpoint,
     headers: &[Bytes],
-    transactions: &[Bytes],
-) -> Result<AuthenticatedBody, L1Error> {
+) -> Result<AuthenticatedAncestry, L1Error> {
     if headers.is_empty() || headers.len() > MAX_HEADERS {
         return Err(L1Error::PathLimit);
     }
@@ -161,14 +190,34 @@ pub fn authenticate_body(
     if previous_id != checkpoint.block || previous_slot != checkpoint.slot {
         return Err(L1Error::Checkpoint);
     }
-    if body_root(transactions)? != target.body {
-        return Err(L1Error::BodyRoot);
-    }
-    Ok(AuthenticatedBody {
+    Ok(AuthenticatedAncestry {
         block: target.id,
         slot: target.slot,
         state_root: target.state,
+        body_root: target.body,
         checkpoint,
+    })
+}
+
+/// Verify a target body and its forward ancestry path ending at the checkpoint.
+/// Include BOTH target and checkpoint headers; adjacent slots may have gaps.
+/// The host must cap transport bytes before decoding/allocating input vectors.
+/// Successful inclusion proves neither bridge ownership nor semantic validity
+/// independently of the external checkpoint's consensus authentication.
+pub fn authenticate_body(
+    checkpoint: FinalizedCheckpoint,
+    headers: &[Bytes],
+    transactions: &[Bytes],
+) -> Result<AuthenticatedBody, L1Error> {
+    let ancestry = authenticate_ancestry(checkpoint, headers)?;
+    if body_root(transactions)? != ancestry.body_root {
+        return Err(L1Error::BodyRoot);
+    }
+    Ok(AuthenticatedBody {
+        block: ancestry.block,
+        slot: ancestry.slot,
+        state_root: ancestry.state_root,
+        checkpoint: ancestry.checkpoint,
         transactions: transactions.to_vec(),
     })
 }

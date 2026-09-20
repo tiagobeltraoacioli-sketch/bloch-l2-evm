@@ -56,6 +56,7 @@ use crate::stateroot::{account_key, account_leaf, account_leaves, account_leaves
 // A canonical fixed-key account/storage trie node is far smaller than this:
 // branch children are hashes or <32-byte inline nodes, and leaf values have
 // fixed account/U256 widths. Keep headroom while bounding hostile wire input.
+#[cfg(feature = "serde")]
 const MAX_WITNESS_TRIE_NODE_BYTES: usize = 1024;
 
 /// Everything a guest needs to re-derive a batch's post-state root without the

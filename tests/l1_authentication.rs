@@ -1,5 +1,5 @@
 use alloy_primitives::{Bytes, B256};
-use bloch_l2_evm::l1::{authenticate_body, FinalizedCheckpoint, L1Error};
+use bloch_l2_evm::l1::{authenticate_ancestry, authenticate_body, FinalizedCheckpoint, L1Error};
 use serde_json::Value;
 use std::str::FromStr;
 fn decode(s: &str) -> Bytes {
@@ -44,6 +44,38 @@ fn official_consensus_vectors_cover_empty_even_and_odd_trees() {
         assert_eq!(verified.checkpoint(), cp);
         assert_eq!(verified.transactions(), txs);
     }
+}
+#[test]
+fn ancestry_authenticates_the_anchor_without_claiming_body_or_finality() {
+    let (cp, headers, _) = fixture(4);
+    let verified = authenticate_ancestry(cp, &headers).unwrap();
+    assert_eq!(
+        verified.block(),
+        B256::from_str(fixtures()[4]["target"].as_str().unwrap()).unwrap()
+    );
+    assert_eq!(verified.slot(), 100);
+    assert_eq!(verified.state_root(), B256::repeat_byte(11));
+    assert_eq!(verified.checkpoint(), cp);
+}
+
+#[test]
+fn ancestry_rejects_incomplete_paths_and_false_checkpoints() {
+    let (cp, headers, _) = fixture(4);
+    assert_eq!(
+        authenticate_ancestry(cp, &[headers[0].clone(), headers[2].clone()]).unwrap_err(),
+        L1Error::Ancestry
+    );
+    assert_eq!(
+        authenticate_ancestry(
+            FinalizedCheckpoint {
+                block: B256::repeat_byte(0xff),
+                slot: cp.slot,
+            },
+            &headers,
+        )
+        .unwrap_err(),
+        L1Error::Checkpoint
+    );
 }
 #[test]
 fn omission_reorder_duplication_and_byte_tampering_fail() {
