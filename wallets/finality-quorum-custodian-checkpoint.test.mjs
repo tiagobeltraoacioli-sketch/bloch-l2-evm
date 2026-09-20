@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile }
   from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -336,4 +337,30 @@ test("client startup revalidates checkpoint and lock after independent anchor I/
       },
       async compareAndSwap() { throw new Error("unexpected anchor mutation"); },
     } }), /changed during independent anchor verification/);
+});
+
+test("client startup snapshots hostile configuration getters before filesystem authority", async t => {
+  const authRace = await fixture(t), configured = authentication();
+  const racedAuthentication = {
+    get key() {
+      writeFileSync(`${authRace.storePath}.lock`, "raced\n", { mode: 0o600, flag: "wx" });
+      return configured.key;
+    },
+    clientId: configured.clientId,
+    custodianId: configured.custodianId,
+  };
+  await assert.rejects(createFilesystemFinalityCustodian({ storePath: authRace.storePath,
+    expectedStateHash: authRace.checkpoint.stateHash, authentication: racedAuthentication,
+    transport: transport(memoryCustody()), anchor: memoryAnchor(authRace.checkpoint.stateHash) }),
+  /checkpoint is locked/);
+
+  const transportRace = await fixture(t);
+  const racedTransport = { get exchange() {
+    writeFileSync(`${transportRace.storePath}.lock`, "raced\n", { mode: 0o600, flag: "wx" });
+    return async () => { throw new Error("unexpected exchange"); };
+  } };
+  await assert.rejects(createFilesystemFinalityCustodian({ storePath: transportRace.storePath,
+    expectedStateHash: transportRace.checkpoint.stateHash, authentication: authentication(),
+    transport: racedTransport, anchor: memoryAnchor(transportRace.checkpoint.stateHash) }),
+  /checkpoint is locked/);
 });

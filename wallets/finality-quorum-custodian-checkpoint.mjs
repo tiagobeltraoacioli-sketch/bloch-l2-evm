@@ -380,9 +380,32 @@ async function releasePredecessorEvidence(predecessor) {
 }
 
 function checkedAnchor(anchor) {
-  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor) || typeof anchor.load !== "function" ||
-      typeof anchor.compareAndSwap !== "function") throw new Error("Finality custodian checkpoint anchor is invalid");
-  return anchor;
+  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) {
+    throw new Error("Finality custodian checkpoint anchor is invalid");
+  }
+  const load = anchor.load, compareAndSwap = anchor.compareAndSwap;
+  if (typeof load !== "function" || typeof compareAndSwap !== "function") {
+    throw new Error("Finality custodian checkpoint anchor is invalid");
+  }
+  return Object.freeze({
+    load: (...args) => Reflect.apply(load, anchor, args),
+    compareAndSwap: (...args) => Reflect.apply(compareAndSwap, anchor, args),
+  });
+}
+
+function snapshotClientConfiguration(authentication, transport) {
+  if (!authentication || typeof authentication !== "object" || Array.isArray(authentication) ||
+      Object.keys(authentication).length !== 3 ||
+      !["key", "clientId", "custodianId"].every(field => Object.hasOwn(authentication, field))) {
+    throw new Error("Finality custodian authentication is invalid");
+  }
+  const key = authentication?.key;
+  const configuredAuthentication = { key: key instanceof Uint8Array ? new Uint8Array(key) : key,
+    clientId: authentication.clientId, custodianId: authentication.custodianId };
+  const exchange = transport?.exchange;
+  const configuredTransport = transport && typeof transport === "object" && typeof exchange === "function"
+    ? Object.freeze({ exchange: (...args) => Reflect.apply(exchange, transport, args) }) : transport;
+  return { authentication: configuredAuthentication, transport: configuredTransport };
 }
 
 async function anchorLoad(anchor) {
@@ -632,6 +655,7 @@ export async function createFilesystemFinalityCustodian({ storePath, expectedSta
   if (typeof expectedStateHash !== "string" || !HASH.test(expectedStateHash)) {
     throw new Error("Finality custodian externally retained checkpoint hash is invalid");
   }
+  const configured = snapshotClientConfiguration(authentication, transport);
   const retainedAnchor = checkedAnchor(anchor);
   const snapshot = await readCheckpointSnapshot(storePath);
   const { lockPresent } = snapshot;
@@ -651,7 +675,8 @@ export async function createFilesystemFinalityCustodian({ storePath, expectedSta
   if (retained.status !== "ready") {
     throw new Error("Finality custodian checkpoint has an unresolved pending exchange");
   }
-  if (authentication?.clientId !== retained.clientId || authentication?.custodianId !== retained.custodianId) {
+  if (configured.authentication?.clientId !== retained.clientId ||
+      configured.authentication?.custodianId !== retained.custodianId) {
     throw new Error("Finality custodian checkpoint identity does not match authentication");
   }
   const lifecycle = {
@@ -686,7 +711,8 @@ export async function createFilesystemFinalityCustodian({ storePath, expectedSta
       retained = next;
     },
   };
-  const client = new AuthenticatedFinalityQuorumCustodian({ authentication, transport,
+  const client = new AuthenticatedFinalityQuorumCustodian({ authentication: configured.authentication,
+    transport: configured.transport,
     checkpoint: { session: retained.session, nextSequence: retained.nextSequence }, lifecycle });
   return Object.freeze({
     load: () => client.load(),
