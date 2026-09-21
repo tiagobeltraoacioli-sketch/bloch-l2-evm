@@ -165,6 +165,7 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
             B256::repeat_byte(0xa2),
             B256::repeat_byte(0xa3),
             B256::repeat_byte(0xa4),
+            B256::repeat_byte(0xa5),
         )
         .unwrap();
         assert_eq!(settlement.l2_header_hash, statement.header_hash);
@@ -185,6 +186,7 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
             B256::repeat_byte(0xa2),
             B256::repeat_byte(0xa3),
             B256::repeat_byte(0xa4),
+            B256::repeat_byte(0xa5),
         )
         .is_err());
         let outcome = execute_node_block(&spec, domain, &mut state, &context, &body).unwrap();

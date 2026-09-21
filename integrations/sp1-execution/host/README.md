@@ -21,8 +21,11 @@ The SDK is pinned to 6.8.0 without `network`, `cuda`, `native-gnark` or
 execution and standalone verification use the SDK's `LightProver`, which performs
 real execution and full cryptographic verification without initializing the
 proof-generation engine. `SP1_PROVER` cannot switch these explicit constructors
-to a remote or mock prover. Only `SP1Proof::Core`
-is accepted. No Groth16, Plonk or compressed proof is requested or accepted.
+to a remote or mock prover. Core remains the only proof type accepted by the
+local settlement capability. Separate `prove-groth16` and `verify-groth16`
+commands admit only a bounded SP1 6.8.0 Groth16 wrapper and return a distinct
+offline-qualification capability that settlement cannot consume. Plonk,
+compressed and TEE-attached proofs remain rejected.
 
 ## Commands
 
@@ -36,6 +39,8 @@ RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host execute empty "$BLOCH_GUES
 RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host execute contract "$BLOCH_GUEST_ELF"
 RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host prove empty "$BLOCH_GUEST_ELF" target/empty.proof
 RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host verify empty "$BLOCH_GUEST_ELF" target/empty.proof
+RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-host prove-groth16 empty "$BLOCH_GUEST_ELF" target/empty.groth16.proof
+target/release/bloch-evm-sp1-host verify-groth16 empty "$BLOCH_GUEST_ELF" target/empty.groth16.proof
 ```
 
 The SDK also needs a protobuf compiler. Put `protoc` on `PATH` or set `PROTOC`
@@ -59,6 +64,11 @@ for a false post-state root and trailing body bytes. `prove` creates a core
 proof, verifies it, rejects a missing final shard, changed public values and a changed trusted
 expectation, persists it, reloads it and verifies it again. `verify` independently
 rebuilds the fixture expectation and verification key from the trusted ELF.
+The Groth16 modes apply the same independent expectation and program identity,
+require a real SDK verification, reject other proof variants, trailing data,
+TEE attachments, noncanonical public inputs and an encoded proof other than
+352 bytes, and cap the complete artifact at 64 KiB. They never return the Core
+capability used by settlement.
 These describe the implemented checks, not successful run evidence; validation
 results must be recorded after running them.
 
@@ -94,6 +104,12 @@ release `execute` commands also passed for the same ELF:
 
 These are successful execution-request timings with `RAYON_NUM_THREADS=2`,
 not proof costs.
+
+The dormant Groth16 route has compile-time and adversarial codec coverage, but
+no real Bloch Groth16 artifact has yet been produced: the current checkout has
+neither a built guest ELF nor the SP1 Groth16 circuit artifacts required for an
+offline proving run. Its existence therefore does not satisfy the production
+proof-transport gate.
 
 The release CPU prover subsequently generated and cryptographically verified
 **real core proofs for both fixtures**. The driver rejected a changed trusted
@@ -171,7 +187,9 @@ with `CORE_LOG_BLOWUP = 2` and the upstream query-count/grinding configuration.
 Its inner context is
 [`KoalaBearDegree4Duplex`](https://github.com/succinctlabs/sp1/blob/v6.8.0/crates/primitives/src/lib.rs).
 Those are implementation parameters, not security guarantees derived by this
-project. No recursion, compressed proof or pairing-based wrapper is accepted.
+project. No compressed or Plonk proof is accepted. A Groth16 wrapper is
+accepted only by the separate offline-qualification path described above; it
+is not a native consensus verifier or settlement capability.
 
 The operator supplies the trusted ELF, not the prover. A different arbitrary
 program could simply publish a claimed statement, so an ELF obtained alongside

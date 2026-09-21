@@ -5,7 +5,7 @@ mod source_fixture;
 
 use bloch_evm_sp1_host::{
     settlement::{SettlementCursor, SettlementJournal, SettlementMark},
-    verification::{load_proof, TrustedProgram},
+    verification::{load_groth16_proof, load_proof, TrustedProgram},
 };
 use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Proof, SP1PublicValues, SP1Stdin};
 use std::{error::Error, fs, io, time::Instant};
@@ -23,7 +23,7 @@ fn inputs(fixture: &fixture::Fixture) -> SP1Stdin {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "source-settlement feature also accepts fixture source-contract and verify-source source-contract TRUSTED_ELF PROOF_FILE; usage: bloch-evm-sp1-host fixture <empty|contract> | execute <empty|contract> TRUSTED_ELF | <prove|verify> <empty|contract> TRUSTED_ELF PROOF_FILE | settle <empty|contract> TRUSTED_ELF PROOF_FILE NEW_JOURNAL | verify-settlement <empty|contract> TRUSTED_ELF JOURNAL";
+    let usage = "source-settlement feature also accepts fixture source-contract and verify-source source-contract TRUSTED_ELF PROOF_FILE; usage: bloch-evm-sp1-host fixture <empty|contract> | execute <empty|contract> TRUSTED_ELF | <prove|verify|prove-groth16|verify-groth16> <empty|contract> TRUSTED_ELF PROOF_FILE | settle <empty|contract> TRUSTED_ELF PROOF_FILE NEW_JOURNAL | verify-settlement <empty|contract> TRUSTED_ELF JOURNAL";
     let mode = args.first().map(String::as_str).ok_or(usage)?;
     let fixture = match args.get(1).map(String::as_str) {
         Some("empty") => fixture::fixture_empty()?,
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let expected_args = match mode {
         "fixture" => 2,
         "execute" => 3,
-        "prove" | "verify" | "verify-settlement" => 4,
+        "prove" | "verify" | "prove-groth16" | "verify-groth16" | "verify-settlement" => 4,
         #[cfg(feature = "source-settlement")]
         "verify-source" => 4,
         "settle" => 5,
@@ -159,6 +159,11 @@ async fn main() -> Result<()> {
         println!("Core proof verified against trusted ELF and independently executed fixture");
         return Ok(());
     }
+    if mode == "verify-groth16" {
+        trusted.verify_groth16_qualification_file(&args[3], &fixture.expected)?;
+        println!("Groth16 proof verified for offline qualification only; settlement remains disabled");
+        return Ok(());
+    }
 
     // Refuse replacement before starting an expensive proving job.
     if fs::exists(&args[3])? {
@@ -169,15 +174,37 @@ async fn main() -> Result<()> {
     let client = ProverClient::builder().cpu().build().await;
     println!("Setting up trusted guest key");
     let key = client.setup(elf).await?;
-    println!("Generating core proof");
+    println!(
+        "Generating {} proof",
+        if mode == "prove-groth16" {
+            "Groth16 qualification"
+        } else {
+            "core"
+        }
+    );
     let started = Instant::now();
-    let proof = client.prove(&key, inputs(&fixture)).core().await?;
+    let proof = if mode == "prove-groth16" {
+        client.prove(&key, inputs(&fixture)).groth16().await?
+    } else {
+        client.prove(&key, inputs(&fixture)).core().await?
+    };
     let prove_time = started.elapsed();
-    trusted.verify(proof.clone(), &fixture.expected)?;
+    if mode == "prove-groth16" {
+        trusted.verify_groth16_qualification(proof.clone(), &fixture.expected)?;
+    } else {
+        trusted.verify(proof.clone(), &fixture.expected)?;
+    }
 
     let mut wrong_expected = fixture.expected;
     wrong_expected.domain[0] ^= 1;
-    if trusted.verify(proof.clone(), &wrong_expected).is_ok() {
+    let wrong_accepted = if mode == "prove-groth16" {
+        trusted
+            .verify_groth16_qualification(proof.clone(), &wrong_expected)
+            .is_ok()
+    } else {
+        trusted.verify(proof.clone(), &wrong_expected).is_ok()
+    };
+    if wrong_accepted {
         return Err(io::Error::other("accepted wrong trusted expectation").into());
     }
     let mut tampered = proof.clone();
@@ -188,23 +215,37 @@ async fn main() -> Result<()> {
         return Err(io::Error::other("accepted tampered proof public values").into());
     }
     drop(tampered);
-    let mut truncated = proof.clone();
-    if let SP1Proof::Core(shards) = &mut truncated.proof {
-        shards.pop().ok_or("prover returned an empty core proof")?;
+    if mode != "prove-groth16" {
+        let mut truncated = proof.clone();
+        if let SP1Proof::Core(shards) = &mut truncated.proof {
+            shards.pop().ok_or("prover returned an empty core proof")?;
+        }
+        if client.verify(&truncated, key.verifying_key(), None).is_ok() {
+            return Err(io::Error::other("accepted a core proof missing its final shard").into());
+        }
     }
-    if client.verify(&truncated, key.verifying_key(), None).is_ok() {
-        return Err(io::Error::other("accepted a core proof missing its final shard").into());
-    }
-    drop(truncated);
     let file = fs::OpenOptions::new().write(true).create_new(true).open(&args[3])?;
     bincode::serialize_into(&file, &proof)?;
     file.sync_all()?;
-    let loaded = load_proof(&args[3])?;
-    trusted.verify(loaded, &fixture.expected)?;
-    println!(
-        "Core proof accepted; altered expectation, public values and truncated core proof rejected; prove {:?}, {} bytes persisted",
-        prove_time,
-        file.metadata()?.len()
-    );
+    if mode == "prove-groth16" {
+        let loaded = load_groth16_proof(&args[3])?;
+        trusted.verify_groth16_qualification(loaded, &fixture.expected)?;
+    } else {
+        let loaded = load_proof(&args[3])?;
+        trusted.verify(loaded, &fixture.expected)?;
+    }
+    if mode == "prove-groth16" {
+        println!(
+            "Groth16 proof accepted for offline qualification only; altered expectation and public values rejected; prove {:?}, {} bytes persisted; settlement remains disabled",
+            prove_time,
+            file.metadata()?.len()
+        );
+    } else {
+        println!(
+            "Core proof accepted; altered expectation, public values and truncated core proof rejected; prove {:?}, {} bytes persisted",
+            prove_time,
+            file.metadata()?.len()
+        );
+    }
     Ok(())
 }

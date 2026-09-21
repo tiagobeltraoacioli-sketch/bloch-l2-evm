@@ -6,7 +6,7 @@ use bloch_l2_evm::node_primitives::NodeHeaderV2;
 
 // This is a codec discriminator, not an assigned native transaction or state tag.
 const CODEC_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SETTLEMENT-PAYLOAD:1";
-const HASH_FIELDS: usize = 16;
+const HASH_FIELDS: usize = 17;
 const INTEGER_FIELDS: usize = 7;
 /// Exact size of the only supported settlement payload version.
 pub const SETTLEMENT_PAYLOAD_BYTES: usize = CODEC_TAG.len() + HASH_FIELDS * 32 + INTEGER_FIELDS * 8;
@@ -43,7 +43,8 @@ pub struct SettlementPayload {
     pub domain: B256,
     pub configuration: B256,
     pub program_elf_keccak: B256,
-    pub program_verifying_key_hash: B256,
+    pub program_vkey_koalabear: B256,
+    pub program_vkey_bn254: B256,
     pub proof_digest: B256,
     pub previous_settlement: B256,
     pub chain_id: u64,
@@ -71,7 +72,8 @@ impl SettlementPayload {
             self.domain,
             self.configuration,
             self.program_elf_keccak,
-            self.program_verifying_key_hash,
+            self.program_vkey_koalabear,
+            self.program_vkey_bn254,
             self.proof_digest,
             self.l2_parent_hash,
             self.l2_previous_state_root,
@@ -105,7 +107,8 @@ impl SettlementPayload {
         selected: &ValidatedV2Prefix,
         header: &NodeHeaderV2,
         program_elf_keccak: B256,
-        program_verifying_key_hash: B256,
+        program_vkey_koalabear: B256,
+        program_vkey_bn254: B256,
         proof_digest: B256,
         previous_settlement: B256,
     ) -> Result<Self, Error> {
@@ -125,7 +128,8 @@ impl SettlementPayload {
             domain: statement.domain,
             configuration: statement.configuration,
             program_elf_keccak,
-            program_verifying_key_hash,
+            program_vkey_koalabear,
+            program_vkey_bn254,
             proof_digest,
             previous_settlement,
             chain_id: header.chain_id,
@@ -165,7 +169,8 @@ impl SettlementPayload {
             self.domain,
             self.configuration,
             self.program_elf_keccak,
-            self.program_verifying_key_hash,
+            self.program_vkey_koalabear,
+            self.program_vkey_bn254,
             self.proof_digest,
             self.previous_settlement,
         ] {
@@ -207,7 +212,8 @@ impl SettlementPayload {
         let domain = read_hash(&mut reader)?;
         let configuration = read_hash(&mut reader)?;
         let program_elf_keccak = read_hash(&mut reader)?;
-        let program_verifying_key_hash = read_hash(&mut reader)?;
+        let program_vkey_koalabear = read_hash(&mut reader)?;
+        let program_vkey_bn254 = read_hash(&mut reader)?;
         let proof_digest = read_hash(&mut reader)?;
         let previous_settlement = read_hash(&mut reader)?;
         let chain_id = u64::from_le_bytes(reader.take()?);
@@ -234,7 +240,8 @@ impl SettlementPayload {
             domain,
             configuration,
             program_elf_keccak,
-            program_verifying_key_hash,
+            program_vkey_koalabear,
+            program_vkey_bn254,
             proof_digest,
             previous_settlement,
             chain_id,

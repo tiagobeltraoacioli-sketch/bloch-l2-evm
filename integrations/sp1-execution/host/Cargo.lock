@@ -960,6 +960,7 @@ dependencies = [
  "libc",
  "sha3",
  "sp1-sdk",
+ "sp1-verifier",
  "tokio",
 ]
 

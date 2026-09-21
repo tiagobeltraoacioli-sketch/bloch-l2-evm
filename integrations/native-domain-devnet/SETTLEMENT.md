@@ -23,7 +23,7 @@ The byte sequence starts with ASCII
 | --- | --- |
 | native network, native genesis | Two raw 32-byte identities |
 | execution domain, configuration commitment | Two raw 32-byte commitments |
-| program ELF Keccak, raw verifying-key hash | Two raw 32-byte commitments |
+| program ELF Keccak, KoalaBear verifying-key hash, BN254 verifying-key projection | Three raw 32-byte commitments |
 | verified-proof digest | Raw 32 bytes |
 | previous settlement commitment | Raw 32 bytes |
 | EVM chain ID | Little-endian u64 |
@@ -55,7 +55,8 @@ a payload is a replay.
 ## Construction boundary
 
 `from_validated_prefix(selected, header, program_elf_keccak,
-program_verifying_key_hash, proof_digest, previous_settlement)` copies the
+program_vkey_koalabear, program_vkey_bn254, proof_digest,
+previous_settlement)` copies the
 existing read-only source selection and checks:
 
 - the full canonical V2 header hash equals the selected execution statement;
@@ -64,9 +65,11 @@ existing read-only source selection and checks:
 - the explicit nonzero chain ID is copied from that same validated header;
 - all payload structural and cursor invariants hold.
 
-The two program identities match the current SP1 host policy: Keccak-256 of the
-complete selected ELF and the SDK `HashableKey::hash_bytes` digest of its
-verifying key. The proof digest algorithm is exactly
+The three program identities match the current SP1 host policy: Keccak-256 of
+the complete selected ELF, the SDK `HashableKey::hash_bytes` KoalaBear digest,
+and the separate `HashableKey::bytes32_raw` BN254 projection required by the
+Groth16 verifier. Those two verifying-key values are not interchangeable. The
+proof digest algorithm is exactly
 `Keccak-256(canonical_proof_bytes)`. `proof_digest(bytes)` rejects empty input and
 input above 32 MiB before hashing. Canonical proof bytes are the strict SDK 6.8.0
 fixed-integer bincode bytes retained by the verifier; this crate deliberately
@@ -95,6 +98,16 @@ publish the L2 head and consumed cursor. Only a reviewed consensus transition
 can give this payload settlement effect. A later checkpoint/finality policy must
 separately prove what accepted settlements qualify; this codec never labels an
 L2 block safe or finalized.
+
+The current SP1 guest statement is only the 149-byte `ExecutionStatement`; it
+does not cryptographically bind the additional fields carried here, including
+the L2 number/parent/post-state, native anchor, network/genesis, source snapshot,
+inbox roots or cursor range. `from_validated_prefix` is a host-side consistency
+check and cannot replace consensus verification. Activation therefore requires
+either a versioned guest statement that commits the complete settlement record,
+or canonical header and inclusion proofs from which native consensus can
+reconstruct and authenticate it. A proof of the current statement plus this
+payload is insufficient and must remain rejected.
 
 ## Conformance
 

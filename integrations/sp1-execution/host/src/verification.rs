@@ -10,12 +10,17 @@ use std::{io::Read, path::Path};
 /// Local file admission bound, not a network-proof protocol parameter.
 pub const MAX_PROOF_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_CORE_SHARDS: usize = 256;
+/// Deliberately narrow admission bound for the dormant Groth16 qualification
+/// path. This is not a consensus block-size decision.
+pub const MAX_GROTH16_ARTIFACT_BYTES: usize = 64 * 1024;
+const GROTH16_ENCODED_HEX_LEN: usize = 352 * 2;
 
 /// Identity of the exact operator-selected ELF and its SP1 verifying key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProgramIdentity {
     elf_keccak: B256,
     verifying_key_hash: B256,
+    verifying_key_bn254: B256,
 }
 
 impl ProgramIdentity {
@@ -25,6 +30,11 @@ impl ProgramIdentity {
     /// SDK `HashableKey::hash_bytes`, not the BN254/on-chain projection.
     pub fn verifying_key_hash(&self) -> B256 {
         self.verifying_key_hash
+    }
+    /// SDK `HashableKey::bytes32_raw`, the BN254/on-chain projection.
+    /// This is deliberately distinct from `hash_bytes` above.
+    pub fn verifying_key_bn254(&self) -> B256 {
+        self.verifying_key_bn254
     }
 }
 
@@ -45,6 +55,7 @@ impl TrustedProgram {
         let identity = ProgramIdentity {
             elf_keccak,
             verifying_key_hash: B256::from(key.hash_bytes()),
+            verifying_key_bn254: B256::from(key.bytes32_raw()),
         };
         Ok(Self { client, key, identity })
     }
@@ -88,6 +99,61 @@ impl TrustedProgram {
         expected: &ExecutionStatement,
     ) -> Result<VerifiedExecutionStatement> {
         self.verify(load_proof(path)?, expected)
+    }
+
+    /// Verify a real SP1 Groth16 wrapper for offline qualification only.
+    ///
+    /// This intentionally returns a different capability from the Core-proof
+    /// settlement path. Nothing accepting `VerifiedExecutionStatement` can
+    /// consume it, so merely producing a wrapper cannot activate settlement.
+    pub fn verify_groth16_qualification(
+        &self,
+        proof: SP1ProofWithPublicValues,
+        expected: &ExecutionStatement,
+    ) -> Result<QualifiedGroth16Execution> {
+        validate_groth16_envelope(&proof)?;
+        self.client.verify(&proof, &self.key, None)?;
+        expected.check_expected(proof.public_values.as_slice())?;
+        Ok(QualifiedGroth16Execution {
+            statement: *expected,
+            program: self.identity,
+            proof,
+        })
+    }
+
+    pub fn verify_groth16_qualification_file(
+        &self,
+        path: impl AsRef<Path>,
+        expected: &ExecutionStatement,
+    ) -> Result<QualifiedGroth16Execution> {
+        self.verify_groth16_qualification(load_groth16_proof(path)?, expected)
+    }
+}
+
+/// Offline evidence that the pinned SDK verified a genuine Groth16 wrapper.
+/// This type has no conversion into the active Core settlement capability.
+pub struct QualifiedGroth16Execution {
+    statement: ExecutionStatement,
+    program: ProgramIdentity,
+    proof: SP1ProofWithPublicValues,
+}
+
+impl QualifiedGroth16Execution {
+    pub fn statement(&self) -> ExecutionStatement {
+        self.statement
+    }
+
+    pub fn program(&self) -> ProgramIdentity {
+        self.program
+    }
+
+    /// Exact SDK 6.8.0 bincode artifact that was cryptographically verified.
+    pub fn artifact_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = bincode::serialize(&self.proof)?;
+        if bytes.is_empty() || bytes.len() > MAX_GROTH16_ARTIFACT_BYTES {
+            return Err(invalid("Groth16 artifact outside qualification bound"));
+        }
+        Ok(bytes)
     }
 }
 
@@ -147,4 +213,137 @@ pub fn load_proof(path: impl AsRef<Path>) -> Result<SP1ProofWithPublicValues> {
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_PROOF_BYTES as u64 + 1).read_to_end(&mut bytes)?;
     decode_proof(&bytes)
+}
+
+fn canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 78
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn validate_groth16_envelope(proof: &SP1ProofWithPublicValues) -> Result<()> {
+    let SP1Proof::Groth16(inner) = &proof.proof else {
+        return Err(invalid("only SP1 Groth16 proofs are permitted"));
+    };
+    if proof.tee_proof.is_some() {
+        return Err(invalid("TEE attachments are not permitted in Groth16 qualification"));
+    }
+    if proof.public_values.as_slice().len() != STATEMENT_LEN {
+        return Err(invalid("wrong execution statement length"));
+    }
+    if !inner.public_inputs.iter().all(|value| canonical_decimal(value)) {
+        return Err(invalid("Groth16 public inputs are not canonical bounded decimals"));
+    }
+    if inner.encoded_proof.len() != GROTH16_ENCODED_HEX_LEN
+        || !inner
+            .encoded_proof
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid("Groth16 encoded proof must be exactly 352 hexadecimal bytes"));
+    }
+    if inner.raw_proof.is_empty() || inner.raw_proof.len() > 16 * 1024 {
+        return Err(invalid("Groth16 raw proof outside qualification bound"));
+    }
+    Ok(())
+}
+
+/// Strict SDK 6.8.0 fixed-integer bincode decoder for the opt-in Groth16
+/// qualification artifact. Other proof modes and trailing bytes are rejected.
+pub fn decode_groth16_proof(bytes: &[u8]) -> Result<SP1ProofWithPublicValues> {
+    if bytes.len() < 4 || bytes.len() > MAX_GROTH16_ARTIFACT_BYTES {
+        return Err(invalid("Groth16 artifact length outside qualification bound"));
+    }
+    // SP1Proof enum variant 3 is Groth16 in the pinned SDK 6.8.0 format.
+    if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != 3 {
+        return Err(invalid("encoded proof is not SP1 Groth16"));
+    }
+    let proof: SP1ProofWithPublicValues = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)?;
+    validate_groth16_envelope(&proof)?;
+    Ok(proof)
+}
+
+pub fn load_groth16_proof(path: impl AsRef<Path>) -> Result<SP1ProofWithPublicValues> {
+    let file = crate::open_regular(path.as_ref(), false)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_GROTH16_ARTIFACT_BYTES as u64 {
+        return Err(invalid("Groth16 proof must be a bounded nonempty regular file"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_GROTH16_ARTIFACT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    decode_groth16_proof(&bytes)
+}
+
+#[cfg(test)]
+mod groth16_tests {
+    use super::*;
+    use sp1_sdk::{SP1PublicValues, SP1_CIRCUIT_VERSION};
+    use sp1_verifier::Groth16Bn254Proof;
+
+    fn fake_envelope() -> SP1ProofWithPublicValues {
+        SP1ProofWithPublicValues {
+            proof: SP1Proof::Groth16(Groth16Bn254Proof {
+                public_inputs: std::array::from_fn(|_| "0".to_owned()),
+                encoded_proof: "00".repeat(352),
+                raw_proof: "not-a-proof".to_owned(),
+                groth16_vkey_hash: [0; 32],
+            }),
+            public_values: SP1PublicValues::from(vec![0; STATEMENT_LEN].as_slice()),
+            sp1_version: SP1_CIRCUIT_VERSION.to_owned(),
+            tee_proof: None,
+        }
+    }
+
+    #[test]
+    fn groth16_decoder_is_fail_closed_before_deserialization() {
+        assert!(decode_groth16_proof(&[]).is_err());
+        assert!(decode_groth16_proof(&0_u32.to_le_bytes()).is_err());
+        assert!(decode_groth16_proof(&3_u32.to_le_bytes()).is_err());
+        assert!(decode_groth16_proof(&vec![0; MAX_GROTH16_ARTIFACT_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn decimal_admission_is_canonical_and_bounded() {
+        assert!(canonical_decimal("0"));
+        assert!(canonical_decimal("123456789"));
+        assert!(!canonical_decimal(""));
+        assert!(!canonical_decimal("00"));
+        assert!(!canonical_decimal("+1"));
+        assert!(!canonical_decimal(&"9".repeat(79)));
+    }
+
+    #[test]
+    fn groth16_decoder_accepts_only_the_bounded_canonical_envelope() {
+        let proof = fake_envelope();
+        let bytes = bincode::serialize(&proof).unwrap();
+        assert!(decode_groth16_proof(&bytes).is_ok());
+
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_groth16_proof(&trailing).is_err());
+
+        let mut tee = fake_envelope();
+        tee.tee_proof = Some(vec![1]);
+        assert!(decode_groth16_proof(&bincode::serialize(&tee).unwrap()).is_err());
+
+        let SP1Proof::Groth16(inner) = &mut tee.proof else {
+            unreachable!();
+        };
+        tee.tee_proof = None;
+        inner.public_inputs[0] = "00".to_owned();
+        assert!(decode_groth16_proof(&bincode::serialize(&tee).unwrap()).is_err());
+
+        let mut uppercase = fake_envelope();
+        let SP1Proof::Groth16(inner) = &mut uppercase.proof else {
+            unreachable!();
+        };
+        inner.encoded_proof = "AA".repeat(352);
+        assert!(decode_groth16_proof(&bincode::serialize(&uppercase).unwrap()).is_err());
+    }
 }
