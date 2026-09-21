@@ -2,14 +2,25 @@
 //! Dormant settlement payload; no native tag, transition or finality claim.
 use crate::{Error, Reader, ValidatedV2Prefix};
 use alloy_primitives::{keccak256, B256};
-use bloch_l2_evm::node_primitives::NodeHeaderV2;
+use bloch_l2_evm::{node_primitives::NodeHeaderV2, proof_statement::SettlementStatementV2};
 
 // This is a codec discriminator, not an assigned native transaction or state tag.
 const CODEC_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SETTLEMENT-PAYLOAD:1";
+const CODEC_V2_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SETTLEMENT-PAYLOAD:2";
+const PROOF_POLICY_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SETTLEMENT-PROOF-POLICY:1";
+const PROOF_SCHEME: &[u8] = b"SP1_GROTH16";
+const FULL_WRAPPER_VK_HASH_POLICY: &[u8] = b"SHA256:FULL-WRAPPER-VK";
+const PUBLIC_VALUES_POLICY: &[u8] = b"PUBLIC-VALUES:EXACT-SETTLEMENT-V2-BYTES";
+const MAX_SP1_CIRCUIT_VERSION_BYTES: usize = 64;
 const HASH_FIELDS: usize = 17;
 const INTEGER_FIELDS: usize = 7;
 /// Exact size of the only supported settlement payload version.
 pub const SETTLEMENT_PAYLOAD_BYTES: usize = CODEC_TAG.len() + HASH_FIELDS * 32 + INTEGER_FIELDS * 8;
+/// Exact canonical SP1 Groth16 verifier input: four-byte full-VK selector and
+/// the 352-byte encoded proof. Public values remain in the statement.
+pub const SP1_GROTH16_TRANSPORT_BYTES: u64 = 356;
+/// Exact size of [`SettlementPayloadV2`]. V1 remains byte-for-byte unchanged.
+pub const SETTLEMENT_PAYLOAD_V2_BYTES: usize = CODEC_V2_TAG.len() + 32 + (SETTLEMENT_PAYLOAD_BYTES - CODEC_TAG.len());
 /// Host proof-file admission bound. Proof bytes are not embedded in this payload.
 pub const MAX_SETTLEMENT_PROOF_BYTES: usize = 32 * 1024 * 1024;
 
@@ -30,6 +41,52 @@ pub fn proof_digest(canonical_proof_bytes: &[u8]) -> Result<B256, Error> {
         return Err(Error::Limit);
     }
     Ok(keccak256(canonical_proof_bytes))
+}
+
+/// Commitment to the complete proof policy selected by a verifier-facing host.
+///
+/// The scheme, canonical transport length, settlement statement tag and exact
+/// public-values comparison policy are fixed here. The host must supply the exact
+/// pinned SDK circuit version and SHA-256 of the complete Groth16 wrapper
+/// verifying key, not the four-byte selector carried in a proof.
+///
+/// This proof-policy commitment is distinct from [`SettlementPayloadV2::commitment`],
+/// which is Keccak-256 of the complete canonical PAYLOAD:2 encoding.
+pub fn settlement_v2_groth16_proof_policy_commitment(
+    sp1_circuit_version: &str,
+    full_wrapper_vk_sha256: B256,
+) -> Result<B256, Error> {
+    let version = sp1_circuit_version.as_bytes();
+    if version.is_empty()
+        || version.len() > MAX_SP1_CIRCUIT_VERSION_BYTES
+        || !version.iter().all(|byte| byte.is_ascii_graphic())
+        || full_wrapper_vk_sha256 == B256::ZERO
+    {
+        return Err(Error::Configuration);
+    }
+    let mut encoded = Vec::with_capacity(
+        PROOF_POLICY_TAG.len()
+            + PROOF_SCHEME.len()
+            + 8
+            + 2
+            + version.len()
+            + FULL_WRAPPER_VK_HASH_POLICY.len()
+            + 32
+            + 2
+            + bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG.len()
+            + PUBLIC_VALUES_POLICY.len(),
+    );
+    encoded.extend_from_slice(PROOF_POLICY_TAG);
+    encoded.extend_from_slice(PROOF_SCHEME);
+    encoded.extend_from_slice(&SP1_GROTH16_TRANSPORT_BYTES.to_le_bytes());
+    encoded.extend_from_slice(&(version.len() as u16).to_le_bytes());
+    encoded.extend_from_slice(version);
+    encoded.extend_from_slice(FULL_WRAPPER_VK_HASH_POLICY);
+    encoded.extend_from_slice(full_wrapper_vk_sha256.as_slice());
+    encoded.extend_from_slice(&(bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG.len() as u16).to_le_bytes());
+    encoded.extend_from_slice(bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG);
+    encoded.extend_from_slice(PUBLIC_VALUES_POLICY);
+    Ok(keccak256(encoded))
 }
 
 /// Canonical candidate input to a future native settlement transition.
@@ -152,6 +209,41 @@ impl SettlementPayload {
         Ok(payload)
     }
 
+    /// Low-level value conversion from a V2 statement plus a claimed proof
+    /// digest. This function does not establish that either input was verified.
+    /// A verifier-facing crate must restrict its safe API to a private proof
+    /// capability and derive `proof_digest` from canonical verified bytes.
+    pub fn from_unverified_statement_v2(statement: SettlementStatementV2, proof_digest: B256) -> Result<Self, Error> {
+        let payload = Self {
+            network: statement.network,
+            genesis: statement.genesis,
+            domain: statement.domain,
+            configuration: statement.configuration,
+            program_elf_keccak: statement.program_elf_keccak,
+            program_vkey_koalabear: statement.program_vkey_koalabear,
+            program_vkey_bn254: statement.program_vkey_bn254,
+            proof_digest,
+            previous_settlement: statement.previous_settlement,
+            chain_id: statement.chain_id,
+            l2_number: statement.l2_number,
+            l2_parent_hash: statement.l2_parent_hash,
+            l2_previous_state_root: statement.l2_previous_state_root,
+            l2_header_hash: statement.l2_header_hash,
+            l2_state_root: statement.l2_state_root,
+            l1_block: statement.l1_block,
+            l1_slot: statement.l1_slot,
+            l1_height: statement.l1_height,
+            source_commitment: statement.source_commitment,
+            inbox_root: statement.inbox_root,
+            inbox_count: statement.inbox_count,
+            consumed_start: statement.consumed_start,
+            consumed_end: statement.consumed_end,
+            body_commitment: statement.body_commitment,
+        };
+        payload.check()?;
+        Ok(payload)
+    }
+
     /// Exact fixed-width little-endian transport encoding.
     pub fn encode(&self) -> Result<[u8; SETTLEMENT_PAYLOAD_BYTES], Error> {
         self.check()?;
@@ -265,6 +357,84 @@ impl SettlementPayload {
     }
 
     /// Candidate payload commitment only; not a native transaction or receipt.
+    pub fn commitment(&self) -> Result<B256, Error> {
+        Ok(keccak256(self.encode()?))
+    }
+}
+
+/// Version-2 settlement transport. It preserves every V1 field and adds the
+/// independently derived proof-policy commitment under a distinct wire tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementPayloadV2 {
+    pub payload: SettlementPayload,
+    pub proof_policy: B256,
+}
+
+impl SettlementPayloadV2 {
+    /// Low-level conversion only. The verifier-facing host is responsible for
+    /// deriving both digests from its private verified capability and pinned SDK.
+    pub fn from_unverified_statement_v2(
+        statement: SettlementStatementV2,
+        proof_digest: B256,
+        proof_policy: B256,
+    ) -> Result<Self, Error> {
+        let value = Self {
+            payload: SettlementPayload::from_unverified_statement_v2(statement, proof_digest)?,
+            proof_policy,
+        };
+        value.check()?;
+        Ok(value)
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        self.payload.check()?;
+        if self.proof_policy == B256::ZERO {
+            return Err(Error::Configuration);
+        }
+        Ok(())
+    }
+
+    pub fn encode(&self) -> Result<[u8; SETTLEMENT_PAYLOAD_V2_BYTES], Error> {
+        self.check()?;
+        let v1 = self.payload.encode()?;
+        let mut out = [0u8; SETTLEMENT_PAYLOAD_V2_BYTES];
+        let mut offset = 0;
+        let mut write = |bytes: &[u8]| {
+            let end = offset + bytes.len();
+            out[offset..end].copy_from_slice(bytes);
+            offset = end;
+        };
+        write(CODEC_V2_TAG);
+        write(self.proof_policy.as_slice());
+        write(&v1[CODEC_TAG.len()..]);
+        debug_assert_eq!(offset, SETTLEMENT_PAYLOAD_V2_BYTES);
+        Ok(out)
+    }
+
+    /// Decode the canonical structure and require a nonzero proof-policy field.
+    ///
+    /// This low-level codec cannot authenticate that policy. A verifier-facing
+    /// boundary must recompute the policy from its pinned Groth16 proof and full
+    /// wrapper key, then require exact equality before accepting this value.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != SETTLEMENT_PAYLOAD_V2_BYTES || !bytes.starts_with(CODEC_V2_TAG) {
+            return Err(Error::Codec);
+        }
+        let mut reader = Reader(&bytes[CODEC_V2_TAG.len()..]);
+        let proof_policy = read_hash(&mut reader)?;
+        let mut v1 = Vec::with_capacity(SETTLEMENT_PAYLOAD_BYTES);
+        v1.extend_from_slice(CODEC_TAG);
+        v1.extend_from_slice(reader.0);
+        let value = Self {
+            payload: SettlementPayload::decode(&v1)?,
+            proof_policy,
+        };
+        value.check()?;
+        Ok(value)
+    }
+
+    /// Keccak-256 of the complete canonical PAYLOAD:2 encoding. This is a
+    /// candidate payload commitment only, not a native transaction or receipt.
     pub fn commitment(&self) -> Result<B256, Error> {
         Ok(keccak256(self.encode()?))
     }

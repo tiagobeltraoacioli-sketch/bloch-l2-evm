@@ -30,6 +30,34 @@ fn vector() -> SettlementPayload {
     }
 }
 
+fn statement(payload: SettlementPayload) -> SettlementStatementV2 {
+    SettlementStatementV2 {
+        network: payload.network,
+        genesis: payload.genesis,
+        domain: payload.domain,
+        configuration: payload.configuration,
+        program_elf_keccak: payload.program_elf_keccak,
+        program_vkey_koalabear: payload.program_vkey_koalabear,
+        program_vkey_bn254: payload.program_vkey_bn254,
+        previous_settlement: payload.previous_settlement,
+        chain_id: payload.chain_id,
+        l2_number: payload.l2_number,
+        l2_parent_hash: payload.l2_parent_hash,
+        l2_previous_state_root: payload.l2_previous_state_root,
+        l2_header_hash: payload.l2_header_hash,
+        l2_state_root: payload.l2_state_root,
+        l1_block: payload.l1_block,
+        l1_slot: payload.l1_slot,
+        l1_height: payload.l1_height,
+        source_commitment: payload.source_commitment,
+        inbox_root: payload.inbox_root,
+        inbox_count: payload.inbox_count,
+        consumed_start: payload.consumed_start,
+        consumed_end: payload.consumed_end,
+        body_commitment: payload.body_commitment,
+    }
+}
+
 #[test]
 fn canonical_fixed_width_layout_and_strict_decode() {
     let payload = vector();
@@ -168,5 +196,89 @@ fn proof_digest_is_exact_bounded_keccak_without_verification_claim() {
     assert_eq!(
         proof_digest(&vec![0; MAX_SETTLEMENT_PROOF_BYTES + 1]),
         Err(Error::Limit)
+    );
+}
+
+#[test]
+fn settlement_statement_v2_maps_one_for_one_into_payload() {
+    let expected = vector();
+    let statement = statement(expected);
+    assert_eq!(
+        SettlementPayload::from_unverified_statement_v2(statement, expected.proof_digest).unwrap(),
+        expected
+    );
+
+    let mutations: [fn(&mut SettlementStatementV2); 5] = [
+        |s: &mut SettlementStatementV2| s.chain_id += 1,
+        |s: &mut SettlementStatementV2| s.l2_number += 1,
+        |s: &mut SettlementStatementV2| s.l2_parent_hash[0] ^= 1,
+        |s: &mut SettlementStatementV2| s.l2_previous_state_root[0] ^= 1,
+        |s: &mut SettlementStatementV2| s.l2_header_hash[0] ^= 1,
+    ];
+    for mutate in mutations {
+        let mut changed = statement;
+        mutate(&mut changed);
+        let payload = SettlementPayload::from_unverified_statement_v2(changed, expected.proof_digest).unwrap();
+        assert_ne!(payload, expected);
+        assert_ne!(payload.commitment().unwrap(), expected.commitment().unwrap());
+    }
+}
+
+#[test]
+fn payload_v2_is_separate_strict_and_commits_the_proof_policy() {
+    let payload = vector();
+    let policy = settlement_v2_groth16_proof_policy_commitment("v6.1.0", B256::repeat_byte(42)).unwrap();
+    let value =
+        SettlementPayloadV2::from_unverified_statement_v2(statement(payload), payload.proof_digest, policy).unwrap();
+    let bytes = value.encode().unwrap();
+    assert_eq!(bytes.len(), SETTLEMENT_PAYLOAD_V2_BYTES);
+    assert_eq!(SettlementPayloadV2::decode(&bytes).unwrap(), value);
+    assert!(SettlementPayload::decode(&bytes).is_err());
+    assert!(SettlementPayloadV2::decode(&payload.encode().unwrap()).is_err());
+    for end in 0..bytes.len() {
+        assert!(SettlementPayloadV2::decode(&bytes[..end]).is_err(), "prefix {end}");
+    }
+    let mut trailing = bytes.to_vec();
+    trailing.push(0);
+    assert_eq!(SettlementPayloadV2::decode(&trailing), Err(Error::Codec));
+
+    let changed_policy = settlement_v2_groth16_proof_policy_commitment("v6.1.1", B256::repeat_byte(42)).unwrap();
+    let changed = SettlementPayloadV2 {
+        proof_policy: changed_policy,
+        ..value
+    };
+    assert_ne!(changed.commitment().unwrap(), value.commitment().unwrap());
+}
+
+#[test]
+fn proof_policy_binds_circuit_version_and_full_vk_digest() {
+    let vk = B256::repeat_byte(42);
+    let expected = settlement_v2_groth16_proof_policy_commitment("v6.1.0", vk).unwrap();
+    assert_ne!(
+        settlement_v2_groth16_proof_policy_commitment("v6.1.1", vk).unwrap(),
+        expected
+    );
+    assert_ne!(
+        settlement_v2_groth16_proof_policy_commitment("v6.1.0", B256::repeat_byte(43)).unwrap(),
+        expected
+    );
+    assert_eq!(
+        settlement_v2_groth16_proof_policy_commitment("", vk),
+        Err(Error::Configuration)
+    );
+    assert_eq!(
+        settlement_v2_groth16_proof_policy_commitment("v6.1.0", B256::ZERO),
+        Err(Error::Configuration)
+    );
+}
+
+#[test]
+fn proof_policy_commitment_has_a_stable_golden_vector() {
+    assert_eq!(
+        settlement_v2_groth16_proof_policy_commitment("v6.1.0", B256::repeat_byte(42)).unwrap(),
+        B256::from([
+            0xee, 0x1d, 0xe4, 0xc4, 0x37, 0x82, 0xfa, 0xd7, 0x93, 0xfd, 0x78, 0x03, 0xa4, 0x0e, 0x4a, 0x58, 0xc2, 0x99,
+            0x01, 0x26, 0x74, 0xbf, 0x62, 0x47, 0xf8, 0x78, 0x23, 0x21, 0x59, 0x5f, 0xcc, 0xf4,
+        ]),
     );
 }

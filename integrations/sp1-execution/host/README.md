@@ -22,10 +22,17 @@ execution and standalone verification use the SDK's `LightProver`, which perform
 real execution and full cryptographic verification without initializing the
 proof-generation engine. `SP1_PROVER` cannot switch these explicit constructors
 to a remote or mock prover. Core remains the only proof type accepted by the
-local settlement capability. Separate `prove-groth16` and `verify-groth16`
+legacy execution journal. Separate `prove-groth16` and `verify-groth16`
 commands admit only a bounded SP1 6.8.0 Groth16 wrapper and return a distinct
 offline-qualification capability that settlement cannot consume. Plonk,
 compressed and TEE-attached proofs remain rejected.
+
+The separate `settlement_v2` guest and
+`bloch-evm-sp1-settlement-v2` CLI exercise the complete settlement statement.
+Its Groth16 capability is type-distinct from both the legacy Core token and the
+legacy Groth16 qualification token. It may advance only an explicitly supplied
+local V2 cursor after exact expectation and header-continuity checks; it does
+not write the legacy journal or any native consensus state.
 
 ## Commands
 
@@ -72,6 +79,28 @@ capability used by settlement.
 These describe the implemented checks, not successful run evidence; validation
 results must be recorded after running them.
 
+### Settlement V2 offline harness
+
+Build the separate `settlement_v2` guest ELF first, then use:
+
+```sh
+SETTLEMENT_V2_ELF=../guest/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/settlement_v2
+target/release/bloch-evm-sp1-settlement-v2 execute "$SETTLEMENT_V2_ELF"
+RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-settlement-v2 prove-groth16 "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
+target/release/bloch-evm-sp1-settlement-v2 verify-groth16 "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
+```
+
+The harness uses the empty synthetic execution fixture and fixed non-production
+network, genesis, anchor, source and inbox values. It validates the four guest
+frames, exact program identities, full 590-byte public statement, real SDK
+Groth16 verification, expectation tampering, public-value tampering, persistence
+and the canonical 356-byte minimal-verifier representation. It does not read a
+native RPC, authenticate an inbox, establish finality, activate settlement or
+authorize deposits, withdrawals or liquidity. Proof generation can be long and
+resource intensive. Source code and successful compilation are not evidence of
+a completed proving run; record artifact hashes, timings and negative-test
+results separately after the command finishes.
+
 ## Qualification results
 
 On 2026-09-17, the debug host built successfully with Rust 1.98.1, and both
@@ -105,11 +134,12 @@ release `execute` commands also passed for the same ELF:
 These are successful execution-request timings with `RAYON_NUM_THREADS=2`,
 not proof costs.
 
-The dormant Groth16 route has compile-time and adversarial codec coverage, but
-no real Bloch Groth16 artifact has yet been produced: the current checkout has
-neither a built guest ELF nor the SP1 Groth16 circuit artifacts required for an
-offline proving run. Its existence therefore does not satisfy the production
-proof-transport gate.
+The Groth16 routes have compile-time and adversarial codec coverage. The
+settlement V2 guest and isolated offline harness are now present, but their
+existence does not itself record a completed proving run or satisfy the
+production proof-transport gate. Only retained artifact hashes, timing/resource
+measurements and successful replay/tamper verification may be cited as run
+evidence.
 
 The release CPU prover subsequently generated and cryptographically verified
 **real core proofs for both fixtures**. The driver rejected a changed trusted

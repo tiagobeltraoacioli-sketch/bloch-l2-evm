@@ -71,9 +71,10 @@ and the separate `HashableKey::bytes32_raw` BN254 projection required by the
 Groth16 verifier. Those two verifying-key values are not interchangeable. The
 proof digest algorithm is exactly
 `Keccak-256(canonical_proof_bytes)`. `proof_digest(bytes)` rejects empty input and
-input above 32 MiB before hashing. Canonical proof bytes are the strict SDK 6.8.0
-fixed-integer bincode bytes retained by the verifier; this crate deliberately
-does not parse, canonicalize or verify them.
+input above 32 MiB before hashing. Legacy Core prototypes retain strict SDK
+fixed-integer bincode bytes. Settlement V2 Groth16 uses the SDK's exact 356-byte
+on-chain verifier encoding. This crate deliberately does not parse, canonicalize
+or verify either representation.
 
 Both program hashes and the proof digest must therefore come from a future
 verifier operating under independently accepted policy. The payload constructor
@@ -82,14 +83,15 @@ is supplied. Likewise,
 `ValidatedV2Prefix` establishes exact source/body selection under the current
 experimental registry; it is not a single-use authorization token.
 
-The existing SP1 host permits proof artifacts up to 32 MiB, while the audited
-native block limit is 512 KiB. Its current Core artifacts are approximately 2.8
-MiB. The pinned SDK also exposes a much smaller Groth16 wrapper, but the host
-does not currently generate it and the native consensus path has no qualified
-verifier for it. This payload embeds only the 32-byte proof digest and makes no
-claim that any proof bytes are transported in a native transaction or block.
-Proof data availability and validator-side deterministic verification need a
-separate reviewed implementation before activation.
+The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
+native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.
+The isolated settlement V2 harness can generate and reverify the smaller
+Groth16 wrapper offline, and its capability exports the exact 356-byte verifier
+input. Native consensus still has no activated transaction, retained state or
+qualified verifier path. This payload embeds only the 32-byte proof digest and
+makes no claim that proof bytes are transported in a native transaction or
+block. Proof data availability and validator-side deterministic verification
+still require separate reviewed integration before activation.
 
 A native implementation must still verify the configured program and proof,
 authenticate source/state inclusion and native ancestry, check the exact
@@ -99,20 +101,41 @@ can give this payload settlement effect. A later checkpoint/finality policy must
 separately prove what accepted settlements qualify; this codec never labels an
 L2 block safe or finalized.
 
-The current SP1 guest statement is only the 149-byte `ExecutionStatement`; it
-does not cryptographically bind the additional fields carried here, including
-the L2 number/parent/post-state, native anchor, network/genesis, source snapshot,
-inbox roots or cursor range. `from_validated_prefix` is a host-side consistency
-check and cannot replace consensus verification. Activation therefore requires
-either a versioned guest statement that commits the complete settlement record,
-or canonical header and inclusion proofs from which native consensus can
-reconstruct and authenticate it. A proof of the current statement plus this
-payload is insufficient and must remain rejected.
+The legacy SP1 guest statement remains the 149-byte `ExecutionStatement` and is
+insufficient for native settlement. The separate settlement guest publishes the
+fixed-width, version-tagged `SettlementStatementV2`. It binds every payload field
+except `proof_digest`, which cannot be included in the proof's own public input
+without a circular dependency. `SettlementPayload::from_unverified_statement_v2`
+is deliberately named as a low-level value conversion: it does not establish
+that either the public statement or digest was verified. The SP1 host's
+aggregated V2 transition is the safe composition boundary and derives the digest
+from its private Groth16 capability.
+
+`BLOCH:EXPERIMENTAL:SETTLEMENT-PAYLOAD:2` is now a separate inert codec; V1 is
+unchanged. V2 adds a proof-policy commitment fixing `SP1_GROTH16`, the exact
+356-byte verifier input, the SP1 circuit-version string, SHA-256 of the complete
+wrapper verifying key, the settlement-statement V2 tag and Keccak-256 of its
+canonical bytes. The host derives the version and full 492-byte key directly
+from the pinned SP1 6.8.0 crates. The four-byte wrapper-key prefix remains only
+a selector and is not accepted as the full key identity.
+
+This closes the codec/composition gap only. Consensus activation still requires
+the native verifier, authenticated inputs, durable atomic cursor and retained
+qualification evidence described above.
+
+The settlement V2 guest commits, but does not authenticate, native-origin
+network/genesis, anchor, source snapshot, inbox and cursor inputs. The host must
+compare all public bytes with an independently selected expectation, and native
+consensus must authenticate those same inputs and enforce predecessor continuity.
+The Core and Groth16 verification capabilities are distinct; only the dedicated
+Groth16 settlement V2 capability exports the exact 356-byte verifier input. None
+of these additions assigns a native tag, activates settlement or establishes
+native finality.
 
 ## Conformance
 
 Tests cover the canonical field order, exact round trip, every truncated prefix,
-unknown prefix, trailing bytes, mutation of every committed field, both program
+unknown prefix, trailing bytes, mutation of every committed field, all three program
 identities, explicit chain ID, exact proof hashing and byte bound, zero identity,
 invalid slot/cursor ranges, and construction from an actually validated V2
 source prefix. A mutated header is rejected even when all caller-supplied

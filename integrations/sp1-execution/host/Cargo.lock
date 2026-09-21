@@ -958,6 +958,7 @@ dependencies = [
  "bloch-native-domain-devnet",
  "k256",
  "libc",
+ "sha2",
  "sha3",
  "sp1-sdk",
  "sp1-verifier",

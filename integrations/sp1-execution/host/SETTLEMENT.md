@@ -30,6 +30,35 @@ expected statement. Header selection remains the application's responsibility.
 parent hash/root, height and V2 parent rules before publishing the new head.
 Replay, sibling-fork submission and mismatched statements leave it unchanged.
 
+## Settlement V2 capabilities
+
+The legacy `ExecutionStatement` and journal remain unchanged. The separate
+`SettlementStatementV2` commits the complete settlement record except the
+post-verification proof digest. `TrustedProgram` exposes distinct Core and
+Groth16 settlement V2 capabilities; neither converts into the other. Both bind
+the exact ELF, KoalaBear digest, BN254 projection and every public statement
+byte. Only the Groth16 capability exports the canonical 356-byte proof consumed
+by the minimal verifier.
+
+The raw cursor V2 advance is crate-private. The public
+`SourceSettlement::advance_groth16_settlement_v2` derives the predecessor from
+its retained tip, the expectation from its retained source registry, and the
+proof digest from the qualified 356-byte proof. It checks the selected header's
+configuration, chain ID, number, parent hash/root, full hash, post-state and
+anchor, then publishes the execution head, consumed source cursor and settlement
+tip together after all fallible checks succeed. These APIs do
+not add a journal format, native transaction, source authority or finality rule.
+The isolated CLI documented in [README.md](README.md#settlement-v2-offline-harness)
+uses fixed synthetic inputs and is qualification only.
+
+The separate experimental payload V2 now includes a proof-policy commitment
+covering `SP1_GROTH16`, the exact 356-byte verifier input, the pinned circuit
+version, SHA-256 of the complete 492-byte wrapper verifying key, and the
+statement V2 tag/canonical Keccak policy. The qualified capability derives it
+from the pinned SDK/verifier constants; callers cannot supply a four-byte key
+selector as policy. This is still local composition evidence, not consensus
+activation, a native verifier or proof-transport qualification.
+
 ## Durable local acknowledgment
 
 `SettlementJournal::create` exclusively creates a new file, locks it, writes the

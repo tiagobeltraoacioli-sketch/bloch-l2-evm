@@ -27,7 +27,10 @@ mod payload;
 pub use payload::{SourcePayload, MAX_SOURCE_PAYLOAD_BYTES};
 
 mod settlement;
-pub use settlement::{proof_digest, SettlementPayload, MAX_SETTLEMENT_PROOF_BYTES, SETTLEMENT_PAYLOAD_BYTES};
+pub use settlement::{
+    proof_digest, settlement_v2_groth16_proof_policy_commitment, SettlementPayload, SettlementPayloadV2,
+    MAX_SETTLEMENT_PROOF_BYTES, SETTLEMENT_PAYLOAD_BYTES, SETTLEMENT_PAYLOAD_V2_BYTES, SP1_GROTH16_TRANSPORT_BYTES,
+};
 
 const TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SOURCE:1";
 /// Entire retained inbox limit, not a per-page limit. No truncation is permitted.

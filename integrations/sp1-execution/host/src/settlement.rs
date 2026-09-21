@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Local V2 settlement cursor and append-only proof journal.
 //! No native liabilities, native state component, finality or payouts are changed.
+#[cfg(feature = "source-settlement")]
+use crate::verification::QualifiedGroth16SettlementV2;
 use crate::{
     invalid,
     verification::{decode_proof, ProgramIdentity, TrustedProgram, VerifiedExecutionStatement, MAX_PROOF_BYTES},
@@ -8,6 +10,8 @@ use crate::{
 };
 use alloy_primitives::{keccak256, B256};
 use alloy_rlp::Decodable;
+#[cfg(feature = "source-settlement")]
+use bloch_l2_evm::proof_statement::SettlementStatementV2;
 use bloch_l2_evm::{
     node_primitives::NodeHeaderV2,
     proof_statement::{configuration_commitment, ExecutionStatement},
@@ -103,6 +107,48 @@ impl SettlementCursor {
         }
         self.head = header.clone();
         Ok(self.mark())
+    }
+
+    /// Publish one successor authenticated by a genuine Groth16 settlement V2
+    /// capability. This method never accepts the Core-proof capability.
+    #[cfg(feature = "source-settlement")]
+    pub(crate) fn advance_groth16_settlement_v2(
+        &mut self,
+        verified: &QualifiedGroth16SettlementV2,
+        expected: &SettlementStatementV2,
+        header: &NodeHeaderV2,
+    ) -> Result<SettlementMark> {
+        if verified.program() != self.program {
+            return Err(invalid(
+                "Groth16 settlement V2 proof belongs to another trusted program",
+            ));
+        }
+        self.check_settlement_v2_successor(expected, header)?;
+        if verified.statement() != *expected {
+            return Err(invalid(
+                "verified Groth16 settlement V2 statement does not match successor",
+            ));
+        }
+        self.head = header.clone();
+        Ok(self.mark())
+    }
+
+    #[cfg(feature = "source-settlement")]
+    fn check_settlement_v2_successor(&self, expected: &SettlementStatementV2, header: &NodeHeaderV2) -> Result<()> {
+        self.expected_for_selected_header(header)?;
+        if expected.configuration != self.configuration
+            || expected.domain != self.domain
+            || expected.chain_id != header.chain_id
+            || expected.l2_number != header.number
+            || expected.l2_parent_hash != header.parent_hash
+            || expected.l2_previous_state_root != header.parent_state_root
+            || expected.l2_header_hash != header.hash()
+            || expected.l2_state_root != header.state_root
+            || expected.l1_block != header.anchor_root
+        {
+            return Err(invalid("settlement V2 statement is not the selected L2 successor"));
+        }
+        Ok(())
     }
 
     fn journal_header(&self) -> Vec<u8> {

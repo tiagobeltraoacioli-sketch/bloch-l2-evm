@@ -36,6 +36,11 @@ The executable is produced at
 `target/elf-compilation/riscv64im-succinct-zkvm-elf/release/bloch-evm-synthetic-guest`.
 Build output is ignored by version control; the source and lockfile are tracked.
 
+The same build also produces the separate settlement program at
+`target/elf-compilation/riscv64im-succinct-zkvm-elf/release/settlement_v2`.
+These are different programs with different verification keys. A proof or key
+for one must never be accepted for the other.
+
 ## Input frames
 
 The caller supplies exactly these three SP1 input frames in order:
@@ -54,6 +59,25 @@ they are not a stable independent network protocol. The body uses the tagged
 execution. Witness deserialization is not a separately bounded network ingress;
 prover services must enforce resource limits before accepting untrusted jobs.
 Unused extra SP1 input frames are not public commitments or authorization.
+
+### Settlement V2 program
+
+`src/bin/settlement_v2.rs` is a separate four-frame guest. Its first three
+frames are identical to those above; frame four is the serde encoding of
+`SettlementContextV2`. The context carries native network/genesis, exact ELF
+and both SP1 key identities, predecessor, native anchor metadata, source/inbox
+commitments and the consumed cursor range.
+
+The guest checks the range shape and deposit count, re-executes the block, and
+publishes the fixed 590-byte `SettlementStatementV2`. That statement binds all
+settlement payload fields except `proof_digest`: a proof cannot include a digest
+of its own final bytes without a circular dependency. The host adds that digest
+only after successful verification.
+
+Native-origin context remains prover input until a verifier compares every
+public byte with an independently authorized expectation. The guest does not
+prove native ancestry, checkpoint finality, source-state inclusion, custody or
+single-use consumption merely by committing those values.
 
 The guest runs the actual `execute_statement` / `verify_node_batch` path:
 authenticate sparse pre-state, authenticate signed transactions, re-execute,
@@ -83,8 +107,10 @@ itself supplies its guest runtime support with its explicit `lib` feature.
 SP1 still enables `std` and auxiliary features on some shared dependencies
 (including rand, SHA-2 and tracing); disabling the core's `std` feature does not
 mean the entire guest dependency graph is `no_std`.
-Any eventual proof integration must retain the project's core FRI proof policy;
-no Groth16 or Plonk wrapper is configured here.
+Proof mode is selected by the host, not by either guest. The legacy local
+journal continues to accept Core proofs only. The isolated settlement V2 host
+harness can request and verify a Groth16 wrapper for offline qualification;
+Plonk remains unsupported and no proof mode activates native consensus.
 
 The committed guest lockfile was seeded from the core lockfile before resolving
 SP1. Target-filtered metadata confirmed that every package identity/version in

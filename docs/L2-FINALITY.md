@@ -51,11 +51,13 @@ inclusion.
 The pinned SP1 6.8.0 SDK exposes a Groth16 wrapper whose encoded proof is 352
 bytes (356 bytes with the verifier-key prefix), so a succinct in-block route is
 plausible without raising the native block cap. It is not qualified here: the
-Bloch host currently requests Core proofs only, no real Groth16 Bloch artifact
-has been produced, and the native consensus path has no reviewed deterministic
-verifier. The `settlement-proof-transport-qualified` requirement therefore
-remains false until generation, tamper, replay, resource and validator tests are
-recorded as evidence.
+legacy journal requests Core proofs only, while a separate synthetic settlement
+V2 harness can request and verify a Groth16 wrapper offline. The harness is not
+a native transaction or consensus verifier, and its fixed source/anchor inputs
+are not authenticated native state. The native consensus path still has no
+activated deterministic verifier. The `settlement-proof-transport-qualified`
+requirement therefore remains false until completed generation, tamper, replay,
+resource and validator tests are retained as evidence.
 
 The machine-readable gate is [`network/finality.json`](../network/finality.json).
 Every satisfied requirement must carry a dated SHA-256 evidence reference;

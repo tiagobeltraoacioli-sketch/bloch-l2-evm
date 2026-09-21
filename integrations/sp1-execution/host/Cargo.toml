@@ -11,7 +11,7 @@ default-run = "bloch-evm-sp1-host"
 
 [features]
 default = []
-source-settlement = ["dep:bloch-native-domain-devnet", "dep:sha3"]
+source-settlement = ["dep:bloch-native-domain-devnet", "dep:sha2", "dep:sha3", "dep:sp1-verifier"]
 node-artifact = ["dep:bloch-execution-artifact"]
 
 [[bin]]
@@ -29,6 +29,8 @@ bloch-execution-artifact = { path = "../../execution-artifact", optional = true 
 bloch-native-domain-devnet = { path = "../../native-domain-devnet", optional = true }
 libc = "=0.2.189"
 sha3 = { version = "=0.11.0", default-features = false, optional = true }
+sha2 = { version = "=0.10.9", default-features = false, optional = true }
+sp1-verifier = { version = "=6.8.0", default-features = false, optional = true }
 bloch-l2-evm = { path = "../../..", features = ["serde"] }
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-eips = { version = "=2.2.0", default-features = false }
