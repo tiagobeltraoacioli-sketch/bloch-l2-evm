@@ -86,7 +86,7 @@ Build the separate `settlement_v2` guest ELF first, then use:
 ```sh
 SETTLEMENT_V2_ELF=../guest/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/settlement_v2
 target/release/bloch-evm-sp1-settlement-v2 execute "$SETTLEMENT_V2_ELF"
-SP1_GNARK_IMAGE=ghcr.io/succinctlabs/sp1-gnark@sha256:<reviewed-64-hex-digest> \
+SP1_GNARK_IMAGE=ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d \
   RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-settlement-v2 prove-groth16 \
   "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
 target/release/bloch-evm-sp1-settlement-v2 verify-groth16 "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
@@ -94,9 +94,9 @@ target/release/bloch-evm-sp1-settlement-v2 verify-groth16 "$SETTLEMENT_V2_ELF" t
 
 Proof generation is release-circuit-only. The harness rejects
 `SP1_CIRCUIT_MODE=dev`, an unpinned/tag-only Gnark image and an unavailable
-Docker daemon before the expensive setup begins. The reviewed image digest must
-be recorded with the qualification evidence; the placeholder above is not a
-valid command until replaced.
+Docker daemon before the expensive setup begins. The command pins the reviewed
+SP1 v6.1.0 Gnark image digest; qualification evidence must record and recheck
+that exact digest.
 
 The harness uses the empty synthetic execution fixture and fixed non-production
 network, genesis, anchor, source and inbox values. It validates the four guest

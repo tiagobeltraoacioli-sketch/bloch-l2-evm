@@ -29,6 +29,8 @@ use bloch_native_domain_devnet::{
     journal::{SourceJournal, SourceMark, MARK_BYTES},
     SettlementPayloadV2, SourceRegistry, SETTLEMENT_PAYLOAD_V2_BYTES,
 };
+#[cfg(test)]
+use std::io;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -223,6 +225,18 @@ pub struct SourceSettlementJournalV2 {
     expected_len: u64,
     records: usize,
     poisoned: bool,
+    // Fault injection is deliberately unavailable outside this module's unit
+    // tests. Production always writes through the File implementation below.
+    #[cfg(test)]
+    io_fault: Option<TestIoFault>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum TestIoFault {
+    ShortWrite,
+    Write,
+    Sync,
 }
 
 impl Drop for SourceSettlementJournalV2 {
@@ -257,6 +271,8 @@ impl SourceSettlementJournalV2 {
             expected_len: bytes.len() as u64,
             records: 0,
             poisoned: false,
+            #[cfg(test)]
+            io_fault: None,
         })
     }
 
@@ -376,6 +392,8 @@ impl SourceSettlementJournalV2 {
             expected_len,
             records,
             poisoned: false,
+            #[cfg(test)]
+            io_fault: None,
         })
     }
 
@@ -444,12 +462,7 @@ impl SourceSettlementJournalV2 {
             settlement: Some(mark.settlement_commitment()),
         };
         self.check_length()?;
-        self.poisoned = true;
-        self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&(frame.len() as u32).to_be_bytes())?;
-        self.file.write_all(&frame)?;
-        self.file.write_all(keccak256(&frame).as_slice())?;
-        self.file.sync_all()?;
+        self.persist_frame(&frame)?;
         self.cursor = cursor;
         self.next_sequence = mark.next_sequence();
         self.last_source = current;
@@ -458,6 +471,52 @@ impl SourceSettlementJournalV2 {
         self.records += 1;
         self.poisoned = false;
         Ok(next_floor)
+    }
+
+    /// Enter the irreversible I/O phase. The caller must not publish any
+    /// candidate state until this returns successfully. Once I/O begins, every
+    /// error deliberately leaves the handle poisoned; recovery requires a
+    /// fresh, fully verified replay through `open`.
+    fn persist_frame(&mut self, frame: &[u8]) -> Result<()> {
+        let mut record = Vec::with_capacity(frame.len() + RECORD_OVERHEAD as usize);
+        record.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        record.extend_from_slice(frame);
+        record.extend_from_slice(keccak256(frame).as_slice());
+
+        self.poisoned = true;
+        self.file.seek(SeekFrom::End(0))?;
+
+        #[cfg(test)]
+        if let Some(fault) = self.io_fault.take() {
+            return self.persist_test_fault(&record, fault);
+        }
+
+        self.file.write_all(&record)?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn persist_test_fault(&mut self, record: &[u8], fault: TestIoFault) -> Result<()> {
+        match fault {
+            TestIoFault::ShortWrite => {
+                // Persist a strict prefix and model a writer that cannot make
+                // further progress. `write_all` would surface WriteZero.
+                let short = record.len().min(3);
+                self.file.write_all(&record[..short])?;
+                Err(io::Error::new(io::ErrorKind::WriteZero, "injected short write").into())
+            }
+            TestIoFault::Write => {
+                // The frame length has reached the file, then the following
+                // write fails. This is a post-I/O-start write failure.
+                self.file.write_all(&record[..4])?;
+                Err(io::Error::other("injected write failure").into())
+            }
+            TestIoFault::Sync => {
+                self.file.write_all(record)?;
+                Err(io::Error::other("injected sync failure").into())
+            }
+        }
     }
 
     fn ensure_healthy(&self) -> Result<()> {
@@ -856,5 +915,47 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(SourceSettlementJournalV2::create(&link, policy(&source), &mut source).is_err());
         assert_eq!(fs::read(target).unwrap(), b"do not replace");
+    }
+
+    #[test]
+    fn post_io_faults_poison_without_publishing_candidate_state() {
+        for fault in [TestIoFault::ShortWrite, TestIoFault::Write, TestIoFault::Sync] {
+            let temp = Temp::new();
+            let mut source = create_source(&temp.0.join("source"));
+            let journal_path = temp.0.join("settlement-v2");
+            let mut journal = SourceSettlementJournalV2::create(&journal_path, policy(&source), &mut source).unwrap();
+            let initial_cursor = journal.cursor.mark();
+            let initial_sequence = journal.next_sequence;
+            let initial_source = journal.last_source;
+            let initial_payload = journal.last_payload;
+            let initial_len = journal.expected_len;
+            let initial_records = journal.records;
+            let frame = transport_frame();
+
+            journal.io_fault = Some(fault);
+            let error = journal.persist_frame(&frame).unwrap_err();
+            assert!(error.to_string().contains("injected"), "{fault:?}: {error}");
+            assert!(journal.is_poisoned(), "{fault:?}");
+
+            // Candidate publication is strictly after successful durability.
+            assert_eq!(journal.cursor.mark(), initial_cursor, "{fault:?}");
+            assert_eq!(journal.next_sequence, initial_sequence, "{fault:?}");
+            assert_eq!(journal.last_source, initial_source, "{fault:?}");
+            assert_eq!(journal.last_payload, initial_payload, "{fault:?}");
+            assert_eq!(journal.expected_len, initial_len, "{fault:?}");
+            assert_eq!(journal.records, initial_records, "{fault:?}");
+
+            // I/O really started for all injected modes; the durable handle is
+            // unusable until replay, even if the complete frame reached cache.
+            let persisted = match fault {
+                TestIoFault::ShortWrite => 3,
+                TestIoFault::Write => 4,
+                TestIoFault::Sync => frame.len() as u64 + RECORD_OVERHEAD,
+            };
+            assert_eq!(fs::metadata(&journal_path).unwrap().len(), initial_len + persisted, "{fault:?}");
+            assert!(journal.floor().is_err(), "{fault:?}");
+            assert!(journal.cursor().is_err(), "{fault:?}");
+            assert!(journal.last_payload().is_err(), "{fault:?}");
+        }
     }
 }
