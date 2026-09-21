@@ -26,6 +26,9 @@ pub use v2::ValidatedV2Prefix;
 mod payload;
 pub use payload::{SourcePayload, MAX_SOURCE_PAYLOAD_BYTES};
 
+mod settlement;
+pub use settlement::{proof_digest, SettlementPayload, MAX_SETTLEMENT_PROOF_BYTES, SETTLEMENT_PAYLOAD_BYTES};
+
 const TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SOURCE:1";
 /// Entire retained inbox limit, not a per-page limit. No truncation is permitted.
 pub const MAX_LOCKS: usize = 4096;
@@ -170,9 +173,9 @@ impl SourceBatch {
     }
 }
 
-struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
 impl Reader<'_> {
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], Error> {
+    pub(crate) fn take<const N: usize>(&mut self) -> Result<[u8; N], Error> {
         let value = self
             .0
             .get(..N)

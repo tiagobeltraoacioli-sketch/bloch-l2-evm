@@ -12,7 +12,7 @@ use bloch_l2_evm::{
     scale::sats_to_wei,
     BlockContext, ChainSpec, DepositMint, DepositPosition, DepositProvenance,
 };
-use bloch_native_domain_devnet::{SourceAnchor, SourceBatch, SourceRegistry, MAX_LOCKS};
+use bloch_native_domain_devnet::{SettlementPayload, SourceAnchor, SourceBatch, SourceRegistry, MAX_LOCKS};
 
 #[test]
 fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
@@ -158,6 +158,35 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
         assert_eq!(selected.inbox_count(), 3);
         assert_eq!(selected.anchor().block, position.block());
         assert_eq!(statement.header_hash, recorded.header.hash());
+        let settlement = SettlementPayload::from_validated_prefix(
+            &selected,
+            &recorded.header,
+            B256::repeat_byte(0xa1),
+            B256::repeat_byte(0xa2),
+            B256::repeat_byte(0xa3),
+            B256::repeat_byte(0xa4),
+        )
+        .unwrap();
+        assert_eq!(settlement.l2_header_hash, statement.header_hash);
+        assert_eq!(settlement.l2_state_root, recorded.header.state_root);
+        assert_eq!(settlement.chain_id, spec.chain_id);
+        assert_eq!(settlement.l1_block, selected.anchor().block);
+        assert_eq!(settlement.consumed_start..settlement.consumed_end, consumed..end);
+        assert_eq!(
+            SettlementPayload::decode(&settlement.encode().unwrap()).unwrap(),
+            settlement
+        );
+        let mut mismatched = recorded.header.clone();
+        mismatched.state_root[0] ^= 1;
+        assert!(SettlementPayload::from_validated_prefix(
+            &selected,
+            &mismatched,
+            B256::repeat_byte(0xa1),
+            B256::repeat_byte(0xa2),
+            B256::repeat_byte(0xa3),
+            B256::repeat_byte(0xa4),
+        )
+        .is_err());
         let outcome = execute_node_block(&spec, domain, &mut state, &context, &body).unwrap();
         assert_eq!(outcome.header, recorded.header);
         assert_eq!(state.balance_of(&recipient), sats_to_wei(end * 100));

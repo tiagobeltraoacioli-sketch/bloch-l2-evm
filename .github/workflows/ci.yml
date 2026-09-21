@@ -33,6 +33,8 @@ jobs:
       - run: cargo test --locked --features serde
       - name: Test the fail-closed network identity decision
         run: python3 tools/test-network-identity.py
+      - name: Test the fail-closed L2 finality permission gate
+        run: python3 tools/test-finality-readiness.py
       - name: Run the signed developer contract lifecycle
         run: cargo run --locked --example developer_contract
       - name: Rehearse durable signed contract execution and recovery

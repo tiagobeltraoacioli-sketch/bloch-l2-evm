@@ -1,0 +1,48 @@
+{
+  "schema": "bloch.l2.finality-readiness.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "requirements": [
+    {
+      "id": "native-checkpoint-authenticated",
+      "satisfied": false,
+      "evidence": []
+    },
+    {
+      "id": "raw-header-ancestry-verified",
+      "satisfied": false,
+      "evidence": []
+    },
+    {
+      "id": "settlement-proof-transport-qualified",
+      "satisfied": false,
+      "evidence": []
+    },
+    {
+      "id": "native-settlement-consensus-active",
+      "satisfied": false,
+      "evidence": []
+    },
+    {
+      "id": "l2-settlement-inclusion-verified",
+      "satisfied": false,
+      "evidence": []
+    },
+    {
+      "id": "settlement-cursor-durable",
+      "satisfied": false,
+      "evidence": []
+    },
+    {
+      "id": "reth-finalized-tag-verified",
+      "satisfied": false,
+      "evidence": []
+    }
+  ],
+  "productionFinalityReady": false,
+  "permissions": {
+    "bridgeMintRelease": false,
+    "dexLiquidity": false,
+    "aggregatorExecution": false
+  }
+}

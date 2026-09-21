@@ -82,6 +82,15 @@ any new settlement or consumption state:
    source commitment, inbox root/count and consumed range.
 5. Atomic publication of the execution head and consumed inbox position.
 
+The [dormant settlement payload](../integrations/native-domain-devnet/SETTLEMENT.md)
+provides a canonical bounded message binding all of those inputs, including the
+program/proof identities and predecessor. It assigns no native tag or activation
+and implements none of the checks or atomic publication described above.
+Only a proof digest is present: the current host permits 32 MiB proof artifacts,
+which exceed the audited 512 KiB native block limit. Proof availability and
+validator verification therefore remain an unresolved activation requirement;
+the payload does not imply that proof bytes are carried by a native block.
+
 An accepted proof for another program, domain, configuration, parent, source,
 body or consumed range must fail without advancing either cursor. Replaying the
 same proof must fail after its first acceptance. A local append-only proof

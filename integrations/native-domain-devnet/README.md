@@ -137,3 +137,9 @@ The separate [post-genesis source payload](PAYLOAD.md) codec omits the current
 anchor block hash to avoid a self-referential header commitment. Binding a typed
 position reconstructs the anchored envelope; native state inclusion and source
 authority remain external and no native component tag is assigned.
+
+The [dormant settlement payload](SETTLEMENT.md) gives a strict fixed-width
+encoding to the complete candidate settlement record: policy/program/proof,
+predecessor and L2 result, native anchor, source/inbox/cursor and body. It is
+derived from the read-only validated V2 prefix but performs no proof verification,
+state transition, activation or finality classification.
