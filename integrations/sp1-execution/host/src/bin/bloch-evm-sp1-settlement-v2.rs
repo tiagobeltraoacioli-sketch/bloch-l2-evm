@@ -11,7 +11,7 @@ use bloch_l2_evm::{
     ChainSpec,
 };
 use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, SP1PublicValues, SP1Stdin};
-use std::{error::Error, fs, io, time::Instant};
+use std::{error::Error, ffi::OsStr, fs, io, process::Command, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -32,6 +32,25 @@ async fn main() -> Result<()> {
     let expected_args = if mode == "execute" { 2 } else { 3 };
     if !matches!(mode, "execute" | "prove-groth16" | "verify-groth16") || args.len() != expected_args {
         return Err(usage.into());
+    }
+    if mode == "prove-groth16" {
+        require_release_gnark_environment(
+            std::env::var_os("SP1_CIRCUIT_MODE").as_deref(),
+            std::env::var_os("SP1_GNARK_IMAGE").as_deref(),
+        )?;
+        let docker = Command::new("docker").arg("info").output().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Docker is required by the pinned SP1 Gnark backend: {error}"),
+            )
+        })?;
+        if !docker.status.success() {
+            return Err(io::Error::other(format!(
+                "Docker is not ready for the pinned SP1 Gnark backend: {}",
+                String::from_utf8_lossy(&docker.stderr).trim()
+            ))
+            .into());
+        }
     }
 
     let elf = Elf::from(fs::read(&args[1])?);
@@ -133,4 +152,52 @@ async fn main() -> Result<()> {
         reopened.canonical_proof_bytes()?.len()
     );
     Ok(())
+}
+
+fn require_release_gnark_environment(circuit_mode: Option<&OsStr>, image: Option<&OsStr>) -> Result<()> {
+    if circuit_mode.is_some_and(|mode| mode != "release") {
+        return Err(io::Error::other(
+            "settlement V2 Groth16 qualification requires release circuits; unset SP1_CIRCUIT_MODE or set it to release",
+        )
+        .into());
+    }
+    let image = image
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| io::Error::other("SP1_GNARK_IMAGE must pin the qualification image by sha256 digest"))?;
+    let prefix = "ghcr.io/succinctlabs/sp1-gnark@sha256:";
+    let digest = image
+        .strip_prefix(prefix)
+        .ok_or_else(|| io::Error::other("SP1_GNARK_IMAGE must pin ghcr.io/succinctlabs/sp1-gnark by digest"))?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(io::Error::other("SP1_GNARK_IMAGE contains a non-canonical sha256 digest").into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PINNED: &str =
+        "ghcr.io/succinctlabs/sp1-gnark@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn proving_environment_is_release_only_and_digest_pinned() {
+        assert!(require_release_gnark_environment(None, Some(OsStr::new(PINNED))).is_ok());
+        assert!(require_release_gnark_environment(Some(OsStr::new("release")), Some(OsStr::new(PINNED))).is_ok());
+        assert!(require_release_gnark_environment(Some(OsStr::new("dev")), Some(OsStr::new(PINNED))).is_err());
+        assert!(require_release_gnark_environment(None, None).is_err());
+        assert!(require_release_gnark_environment(
+            None,
+            Some(OsStr::new("ghcr.io/succinctlabs/sp1-gnark:v6.1.0"))
+        )
+        .is_err());
+        assert!(require_release_gnark_environment(
+            None,
+            Some(OsStr::new(
+                "ghcr.io/succinctlabs/sp1-gnark@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            ))
+        )
+        .is_err());
+    }
 }

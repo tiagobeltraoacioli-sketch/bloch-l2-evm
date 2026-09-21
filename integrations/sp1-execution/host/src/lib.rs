@@ -8,6 +8,8 @@ pub mod artifact;
 pub mod settlement;
 #[cfg(all(feature = "source-settlement", unix))]
 pub mod source_journal;
+#[cfg(all(feature = "source-settlement", unix))]
+pub mod source_journal_v2;
 #[cfg(feature = "source-settlement")]
 pub mod source_settlement;
 pub mod verification;

@@ -2,7 +2,7 @@
 //! Local V2 settlement cursor and append-only proof journal.
 //! No native liabilities, native state component, finality or payouts are changed.
 #[cfg(feature = "source-settlement")]
-use crate::verification::QualifiedGroth16SettlementV2;
+use crate::source_settlement::CheckedGroth16SettlementV2;
 use crate::{
     invalid,
     verification::{decode_proof, ProgramIdentity, TrustedProgram, VerifiedExecutionStatement, MAX_PROOF_BYTES},
@@ -109,12 +109,12 @@ impl SettlementCursor {
         Ok(self.mark())
     }
 
-    /// Publish one successor authenticated by a genuine Groth16 settlement V2
-    /// capability. This method never accepts the Core-proof capability.
+    /// Internal transition after the source coordinator has extracted and
+    /// checked an unforgeable verifier capability.
     #[cfg(feature = "source-settlement")]
-    pub(crate) fn advance_groth16_settlement_v2(
+    pub(crate) fn advance_checked_settlement_v2(
         &mut self,
-        verified: &QualifiedGroth16SettlementV2,
+        verified: &CheckedGroth16SettlementV2,
         expected: &SettlementStatementV2,
         header: &NodeHeaderV2,
     ) -> Result<SettlementMark> {

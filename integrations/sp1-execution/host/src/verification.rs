@@ -46,6 +46,17 @@ impl ProgramIdentity {
     pub fn verifying_key_bn254(&self) -> B256 {
         self.verifying_key_bn254
     }
+
+    /// Unit-test identity only. Production identities remain obtainable solely
+    /// from `TrustedProgram::from_trusted_elf`.
+    #[cfg(all(test, feature = "source-settlement"))]
+    pub(crate) fn test_fixture(byte: u8) -> Self {
+        Self {
+            elf_keccak: B256::repeat_byte(byte),
+            verifying_key_hash: B256::repeat_byte(byte.wrapping_add(1)),
+            verifying_key_bn254: B256::repeat_byte(byte.wrapping_add(2)),
+        }
+    }
 }
 
 /// An operator-selected program. The concrete LightProver always performs real
@@ -459,6 +470,13 @@ fn decode_groth16_proof_for_public_len(bytes: &[u8], public_len: usize) -> Resul
         .deserialize(bytes)?;
     validate_groth16_envelope(&proof, public_len)?;
     Ok(proof)
+}
+
+/// Fixed V2 journal decoder. Callers cannot choose a shorter public-values
+/// schema or reuse the legacy execution-statement decoder.
+#[cfg(feature = "source-settlement")]
+pub(crate) fn decode_groth16_settlement_v2_proof(bytes: &[u8]) -> Result<SP1ProofWithPublicValues> {
+    decode_groth16_proof_for_public_len(bytes, SETTLEMENT_STATEMENT_V2_LEN)
 }
 
 pub fn load_groth16_proof(path: impl AsRef<Path>) -> Result<SP1ProofWithPublicValues> {

@@ -1,11 +1,13 @@
 # Source settlement V2 journal design
 
-## Status: not implemented — activation blocker
+## Status: implemented locally, not qualified — activation blocker
 
-This document specifies a separate durable journal for source-bound settlement
-V2. It is a design only. No code in this repository currently provides durable
-or crash-recoverable publication of a V2 execution head, consumed source cursor
-and settlement predecessor as one state transition.
+This document specifies the separate durable journal for source-bound settlement
+V2 implemented in `src/source_journal_v2.rs`. The implementation coordinates a
+V2 execution head, consumed source cursor and settlement predecessor as one
+fsync-before-publication transition, but it is not qualified for activation.
+The repository still lacks the mandatory genuine nonempty source-bound Groth16
+artifact and the complete crash/fault-injection qualification matrix below.
 
 The existing `SourceSettlementJournal` and its version-1 file format remain
 legacy Core-proof infrastructure. They must not be reinterpreted, migrated in
@@ -39,9 +41,9 @@ published only after the complete record and checksum have been synchronized.
 
 ## Separate version and policy
 
-The implementation should use a new module, for example
-`source_journal_v2.rs`, under the existing Unix and `source-settlement` feature
-gates. It must use tags distinct from every legacy format, such as:
+The implementation uses the new `source_journal_v2.rs` module under the
+existing Unix and `source-settlement` feature gates. It uses tags distinct from
+every legacy format:
 
 ```text
 BLOCH:LOCAL:SP1:SOURCE:SETTLEMENT:2

@@ -46,8 +46,16 @@ its retained tip, the expectation from its retained source registry, and the
 proof digest from the qualified 356-byte proof. It checks the selected header's
 configuration, chain ID, number, parent hash/root, full hash, post-state and
 anchor, then publishes the execution head, consumed source cursor and settlement
-tip together after all fallible checks succeed. These APIs do
-not add a journal format, native transaction, source authority or finality rule.
+tip together after all fallible checks succeed.
+
+The separate `SourceSettlementJournalV2` persists that coordinated state under
+distinct V2 tags. Its immutable policy binds both program-key representations
+and the complete Groth16 proof-policy commitment; replay re-verifies every proof
+and authenticated source snapshot from canonical genesis. The journal publishes
+memory only after the bounded record and checksum are synchronized. It remains
+unqualified until the genuine nonempty source-bound proof and crash/fault matrix
+in [SOURCE-JOURNAL-V2-DESIGN.md](SOURCE-JOURNAL-V2-DESIGN.md) pass. These APIs do
+not add a native transaction, source authority or finality rule.
 The isolated CLI documented in [README.md](README.md#settlement-v2-offline-harness)
 uses fixed synthetic inputs and is qualification only.
 

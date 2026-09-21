@@ -51,8 +51,11 @@ inclusion.
 The pinned SP1 6.8.0 SDK exposes a Groth16 wrapper whose encoded proof is 352
 bytes (356 bytes with the verifier-key prefix), so a succinct in-block route is
 plausible without raising the native block cap. It is not qualified here: the
-legacy journal requests Core proofs only, while a separate synthetic settlement
-V2 harness can request and verify a Groth16 wrapper offline. The harness is not
+legacy journal requests Core proofs only. A separate V2 journal now provides
+bounded fsync-before-publication framing and full Groth16/source replay, while
+the synthetic settlement V2 harness can request and verify a wrapper offline.
+Neither has passed the required genuine nonempty source-bound proof and complete
+crash/fault qualification. The harness is not
 a native transaction or consensus verifier, and its fixed source/anchor inputs
 are not authenticated native state. The native consensus path still has no
 activated deterministic verifier. The `settlement-proof-transport-qualified`
