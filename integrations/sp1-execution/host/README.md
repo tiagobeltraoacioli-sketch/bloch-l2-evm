@@ -85,12 +85,21 @@ Build the separate `settlement_v2` guest ELF first, then use:
 
 ```sh
 SETTLEMENT_V2_ELF=../guest/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/settlement_v2
-target/release/bloch-evm-sp1-settlement-v2 execute "$SETTLEMENT_V2_ELF"
+target/release/bloch-evm-sp1-settlement-v2 execute empty "$SETTLEMENT_V2_ELF"
 SP1_GNARK_IMAGE=ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d \
   RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-settlement-v2 prove-groth16 \
-  "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
-target/release/bloch-evm-sp1-settlement-v2 verify-groth16 "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
+  empty "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
+target/release/bloch-evm-sp1-settlement-v2 verify-groth16 empty "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
 ```
+
+The fixture-less form remains an alias for `empty`. A separate build with
+`--features source-settlement` accepts `source-contract` in the same position.
+That fixture applies a synthetic escrow batch and inbox proof to its retained
+source registry, derives a mandatory `0..1` prefix, and independently compares
+the coordinator's V2 statement with host execution. After cryptographic
+verification, the same coordinator derives the inert settlement payload and
+checks that its consumption remains nonempty. This is source binding for an
+offline synthetic qualification, not native source authentication.
 
 Proof generation is release-circuit-only. The harness rejects
 `SP1_CIRCUIT_MODE=dev`, an unpinned/tag-only Gnark image and an unavailable
@@ -98,9 +107,11 @@ Docker daemon before the expensive setup begins. The command pins the reviewed
 SP1 v6.1.0 Gnark image digest; qualification evidence must record and recheck
 that exact digest.
 
-The harness uses the empty synthetic execution fixture and fixed non-production
-network, genesis, anchor, source and inbox values. It validates the four guest
-frames, exact program identities, full 590-byte public statement, real SDK
+The default harness uses the empty synthetic execution fixture and fixed
+non-production network, genesis, anchor, source and inbox values. The optional
+`source-contract` fixture uses a synthetic but internally authenticated batch,
+inbox proof, deposit and source cursor. Both validate the four guest frames,
+exact program identities, full 590-byte public statement, real SDK
 Groth16 verification, expectation tampering, public-value tampering, persistence
 and the canonical 356-byte minimal-verifier representation. It does not read a
 native RPC, authenticate an inbox, establish finality, activate settlement or
