@@ -62,6 +62,14 @@ activated deterministic verifier. The `settlement-proof-transport-qualified`
 requirement therefore remains false until completed generation, tamper, replay,
 resource and validator tests are retained as evidence.
 
+On 2026-09-21 the release-only local CPU harness generated, persisted and
+independently reverified a real Groth16 wrapper for the exact reviewed host
+revision with a digest-pinned Gnark container. The non-authorizing artifact
+record is retained in
+[`network/evidence/settlement-v2-synthetic-groth16-20260921.json`](../network/evidence/settlement-v2-synthetic-groth16-20260921.json).
+It improves toolchain evidence only: the fixture has an empty synthetic source,
+so it does not satisfy any readiness requirement or permit activation.
+
 The machine-readable gate is [`network/finality.json`](../network/finality.json).
 Every satisfied requirement must carry a dated SHA-256 evidence reference;
 product permissions cannot become true while any requirement is open. Validate

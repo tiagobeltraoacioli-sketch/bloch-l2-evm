@@ -1,0 +1,44 @@
+{
+  "schema": "bloch.l2.synthetic-settlement-v2-groth16-evidence.v1",
+  "recordedAt": "2026-09-21",
+  "classification": "synthetic-offline-non-authorizing",
+  "sourceRevision": "d64bd55cfca4737b366c584e43c28edb02ee89b8",
+  "chainId": 700771,
+  "toolchain": {
+    "rust": "1.98.1",
+    "sp1Sdk": "6.8.0",
+    "dockerServer": "29.1.3",
+    "gnarkImage": "ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d"
+  },
+  "artifacts": {
+    "hostBinarySha256": "fd67ec67087f50f1111371e2effea1e83ffb1f297da4aa760ad7eec8b2054e85",
+    "guestElfSha256": "8e24512ffa42d7c7e87db8c10df8c2a1d09c3977170e6615d559f9b5f9da8c4b",
+    "guestElfKeccak256": "ba7207dad5dafe22f2f8c2dd0705f3acbb5b20886d5c05c528372bc88b4d4828",
+    "programVkeyKoalaBear": "7a3fec8175a17a171d82f74027d9bdba59fa8e17397e4b01716bc07926c3a41a",
+    "programVkeyBn254": "00f47fd903d685e85cec17ba027d9bdbab3f51c2ee5f92c078b5e03ca6c3a41a",
+    "proofSha256": "44190caf2236796b0deaedb93dbfdac9ef62bc89546953c38070447f4d8d7099",
+    "proofBytes": 2284,
+    "canonicalVerifierBytes": 356
+  },
+  "run": {
+    "circuitMode": "release",
+    "prover": "local-cpu",
+    "rayonThreads": 16,
+    "generationAndReverificationSeconds": "356.662605787",
+    "independentVerificationRepeated": true,
+    "dockerContainersAfterRun": 0,
+    "dockerTcpApiExposed": false
+  },
+  "limitations": {
+    "emptySyntheticSource": true,
+    "nativeCheckpointAuthenticated": false,
+    "nativeSettlementConsensusActive": false,
+    "l2SettlementInclusionVerified": false,
+    "productionFinalityEstablished": false
+  },
+  "permissions": {
+    "bridgeMintRelease": false,
+    "dexLiquidity": false,
+    "aggregatorExecution": false
+  }
+}
