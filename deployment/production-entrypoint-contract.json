@@ -1,0 +1,136 @@
+{
+  "schema": "bloch.l2.production-entrypoint-contract.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "required-interface-non-authorizing",
+  "entrypoint": {
+    "binary": null,
+    "image": null,
+    "arguments": [],
+    "serviceUser": null,
+    "dataDirectory": null,
+    "genesisArtifact": null
+  },
+  "capabilities": [
+    {
+      "id": "p2p-networking",
+      "required": true,
+      "acceptance": [
+        "authenticated-peer-identity",
+        "chain-domain-separation",
+        "fork-choice-input-validation"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "authenticated-native-l1-derivation",
+      "required": true,
+      "acceptance": [
+        "authenticated-native-checkpoint",
+        "raw-header-ancestry",
+        "deposit-source-conservation"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "production-consensus",
+      "required": true,
+      "acceptance": [
+        "deterministic-block-production",
+        "fork-choice-policy",
+        "reorganization-policy"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "finalized-head",
+      "required": true,
+      "acceptance": [
+        "non-regressing-finalized-above-genesis",
+        "canonical-finalized-reread",
+        "settlement-bound-finality"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "frozen-genesis",
+      "required": true,
+      "acceptance": [
+        "exact-genesis-bytes-sha256",
+        "reviewed-genesis-state-root",
+        "chain-id-700771"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "gated-json-rpc",
+      "required": true,
+      "acceptance": [
+        "readiness-gated-bind",
+        "chain-id-700771",
+        "safe-finalized-tag-semantics",
+        "bounded-method-policy"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "durable-persistence",
+      "required": true,
+      "acceptance": [
+        "canonical-head-durability",
+        "state-root-durability",
+        "receipt-durability",
+        "settlement-cursor-durability"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "graceful-shutdown",
+      "required": true,
+      "acceptance": [
+        "stop-transaction-admission",
+        "drain-pending-writes",
+        "close-storage",
+        "restart-integrity-check"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    },
+    {
+      "id": "crash-recovery",
+      "required": true,
+      "acceptance": [
+        "interrupted-write-detection",
+        "deterministic-replay-or-rollback",
+        "no-unreviewed-auto-repair",
+        "qualified-fault-matrix"
+      ],
+      "status": "missing",
+      "evidence": null,
+      "sha256": null
+    }
+  ],
+  "permissions": {
+    "build": false,
+    "start": false,
+    "bindRpc": false,
+    "bindP2p": false,
+    "publishFinalized": false
+  },
+  "productionReady": false
+}

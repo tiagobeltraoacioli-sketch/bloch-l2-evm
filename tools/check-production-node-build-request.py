@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 TOP_FIELDS = {
-    "schema", "network", "chainId", "classification", "reviewedSourceRevision",
+    "schema", "network", "chainId", "classification", "inspectionBaselineRevision",
     "candidate", "auditedInputs", "externalReth", "requiredDecisions", "outputs",
     "buildPermitted",
 }
@@ -26,6 +26,7 @@ DECISION_FIELDS = {"id", "status", "artifact", "sha256"}
 ROLES = [
     "candidate-manifest", "candidate-lockfile", "candidate-toolchain",
     "synthetic-entrypoint", "external-source-verifier", "external-source-patch",
+    "production-entrypoint-contract",
 ]
 DECISIONS = [
     "production-node-entrypoint", "frozen-production-genesis",
@@ -87,9 +88,9 @@ def validate(value: Any, root: Path = ROOT) -> dict[str, Any]:
             "build request chainId must be 700771")
     require(request["classification"] == "constraints-only-non-authorizing",
             "build request must remain non-authorizing")
-    require(type(request["reviewedSourceRevision"]) is str
-            and HEX40.fullmatch(request["reviewedSourceRevision"]) is not None,
-            "reviewed source revision is invalid")
+    require(type(request["inspectionBaselineRevision"]) is str
+            and HEX40.fullmatch(request["inspectionBaselineRevision"]) is not None,
+            "inspection baseline revision is invalid")
 
     candidate = exact_object(
         request["candidate"],

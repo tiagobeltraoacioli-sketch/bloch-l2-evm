@@ -41,6 +41,8 @@ jobs:
         run: python3 tools/test-node-provisioning.py
       - name: Test the blocked production-node build request
         run: python3 tools/test-production-node-build-request.py
+      - name: Test the production entrypoint capability contract
+        run: python3 tools/test-production-entrypoint-contract.py
       - name: Test source-bound production-node qualification packages
         run: python3 tools/test-node-qualification-package.py
       - name: Test authenticated operational evidence intake

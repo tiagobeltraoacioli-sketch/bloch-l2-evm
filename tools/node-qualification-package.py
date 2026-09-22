@@ -25,9 +25,10 @@ CORE_FILES = (
     "network/node-production.json",
     "deployment/l2-node.json",
     "deployment/production-node-build-request.json",
+    "deployment/production-entrypoint-contract.json",
 )
 MANIFEST_NAME = "qualification-package.json"
-SCHEMA = "bloch.l2.node-qualification-package.v4"
+SCHEMA = "bloch.l2.node-qualification-package.v5"
 VERIFIER_SCHEMA = "bloch.l2.node-qualification-verifier.v1"
 VERIFIER_FILES = (
     "tools/node-qualification-package.py",
@@ -36,6 +37,7 @@ VERIFIER_FILES = (
     "tools/check-node-production.py",
     "tools/check-node-provisioning.py",
     "tools/check-production-node-build-request.py",
+    "tools/check-production-entrypoint-contract.py",
 )
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 SECRET_PATTERNS = (
@@ -68,7 +70,7 @@ def load_module(name: str, path: Path) -> Any:
     return module
 
 
-def validator_modules() -> tuple[Any, Any, Any, Any, Any]:
+def validator_modules() -> tuple[Any, Any, Any, Any, Any, Any]:
     """Load semantic validators only after verifier provenance is checked."""
     return (
         load_module("network_identity", ROOT / "tools/check-network-identity.py"),
@@ -78,6 +80,10 @@ def validator_modules() -> tuple[Any, Any, Any, Any, Any]:
         load_module(
             "production_node_build_request",
             ROOT / "tools/check-production-node-build-request.py",
+        ),
+        load_module(
+            "production_entrypoint_contract",
+            ROOT / "tools/check-production-entrypoint-contract.py",
         ),
     )
 
@@ -204,7 +210,7 @@ def validate_sources(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     (
         identity_validator, finality_validator, node_validator,
-        provisioning_validator, build_request_validator,
+        provisioning_validator, build_request_validator, entrypoint_validator,
     ) = validator_modules()
     identity = read_json(root / CORE_FILES[0])
     proposal = read_json(root / CORE_FILES[1])
@@ -212,6 +218,7 @@ def validate_sources(
     node = read_json(root / CORE_FILES[3])
     provisioning = read_json(root / CORE_FILES[4])
     build_request = read_json(root / CORE_FILES[5])
+    entrypoint_contract = read_json(root / CORE_FILES[6])
     try:
         identity_validator.validate_identity(identity)
         identity_validator.validate_proposal(identity, proposal)
@@ -219,12 +226,14 @@ def validate_sources(
         node_report = node_validator.validate(node, root)
         provisioning_report = provisioning_validator.validate(provisioning, root)
         build_report = build_request_validator.validate(build_request, root)
+        entrypoint_report = entrypoint_validator.validate(entrypoint_contract)
     except (
         identity_validator.IdentityError,
         finality_validator.FinalityError,
         node_validator.NodeProductionError,
         provisioning_validator.ProvisioningError,
         build_request_validator.BuildRequestError,
+        entrypoint_validator.EntrypointContractError,
     ) as error:
         raise PackageError(str(error)) from error
     identity_ready = identity["activation"]["productionReady"]
@@ -234,12 +243,14 @@ def validate_sources(
         "node": node_report,
         "provisioning": provisioning_report,
         "productionBuild": build_report,
+        "productionEntrypoint": entrypoint_report,
         "activationPermitted": bool(
             identity_ready
             and finality_report["productionFinalityReady"]
             and node_report["bindPermitted"]
             and provisioning_report["startPermitted"]
             and build_report["buildPermitted"]
+            and entrypoint_report["productionReady"]
         ),
     }
     return finality, node, build_request, report

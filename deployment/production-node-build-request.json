@@ -3,7 +3,7 @@
   "network": "bloch-l2-testnet",
   "chainId": 700771,
   "classification": "constraints-only-non-authorizing",
-  "reviewedSourceRevision": "727bfa4f50fb3e81988fee3e6c2e3c03ec07ae0f",
+  "inspectionBaselineRevision": "ccdcc20d5b08a7a2a0773b465e4eacb0e0029d7a",
   "candidate": {
     "package": "bloch-reth-execution",
     "binary": "bloch-evm-dev",
@@ -40,6 +40,11 @@
       "path": "integrations/reth-execution/reth-snapshot.patch",
       "role": "external-source-patch",
       "sha256": "fe1f293c58cf45281c208e90950c1b9221887459640c031d61c5aed9489d0977"
+    },
+    {
+      "path": "deployment/production-entrypoint-contract.json",
+      "role": "production-entrypoint-contract",
+      "sha256": "783c401d244c7519452e0909c6547c0adde2612d5f6ffb318a442c5613195c26"
     }
   ],
   "externalReth": {
