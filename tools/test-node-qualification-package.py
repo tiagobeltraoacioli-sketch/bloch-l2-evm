@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -23,6 +24,11 @@ REVISION = "1" * 40
 
 
 class NodeQualificationPackageTest(unittest.TestCase):
+    def verify(self, package: Path, revision: str = REVISION):
+        return MODULE.verify_package(
+            package, revision, MODULE.verifier_identity(ROOT)["sha256"]
+        )
+
     def build(self, directory: str) -> Path:
         output = Path(directory) / "qualification.zip"
         MODULE.write_package(output, MODULE.package_contents(ROOT, REVISION))
@@ -41,7 +47,7 @@ class NodeQualificationPackageTest(unittest.TestCase):
             one = self.build(first)
             two = self.build(second)
             self.assertEqual(one.read_bytes(), two.read_bytes())
-            report = MODULE.verify_package(one)
+            report = self.verify(one)
             self.assertEqual(report["sourceRevision"], REVISION)
             self.assertEqual(report["filesVerified"], 4)
             self.assertFalse(report["identityProductionReady"])
@@ -62,14 +68,14 @@ class NodeQualificationPackageTest(unittest.TestCase):
                 "network/identity.json", files["network/identity.json"] + b"\n"
             ))
             with self.assertRaisesRegex(MODULE.PackageError, "(?:size|digest) mismatch"):
-                MODULE.verify_package(package)
+                self.verify(package)
 
     def test_unlisted_file_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = self.build(directory)
             self.rewrite(package, lambda files: files.__setitem__("notes.txt", b"extra"))
             with self.assertRaisesRegex(MODULE.PackageError, "unlisted files"):
-                MODULE.verify_package(package)
+                self.verify(package)
 
     def test_symlink_member_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -84,7 +90,7 @@ class NodeQualificationPackageTest(unittest.TestCase):
                     ) << 16
                     archive.writestr(info, data)
             with self.assertRaisesRegex(MODULE.PackageError, "regular file"):
-                MODULE.verify_package(package)
+                self.verify(package)
 
     def test_report_cannot_claim_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -97,7 +103,7 @@ class NodeQualificationPackageTest(unittest.TestCase):
 
             self.rewrite(package, mutate)
             with self.assertRaisesRegex(MODULE.PackageError, "report does not match"):
-                MODULE.verify_package(package)
+                self.verify(package)
 
     def test_secret_material_and_path_escape_are_rejected(self) -> None:
         for payload in (
@@ -120,6 +126,51 @@ class NodeQualificationPackageTest(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.PackageError, "refusing to overwrite"):
                 MODULE.write_package(package, MODULE.package_contents(ROOT, REVISION))
             self.assertEqual(package.read_bytes(), before)
+
+    def test_self_declared_revision_is_not_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = self.build(directory)
+            with self.assertRaisesRegex(MODULE.PackageError, "externally expected revision"):
+                self.verify(package, "2" * 40)
+
+    def test_untrusted_local_verifier_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = self.build(directory)
+            with self.assertRaisesRegex(MODULE.PackageError, "externally trusted"):
+                MODULE.verify_package(package, REVISION, "0" * 64)
+
+    def test_self_declared_verifier_identity_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = self.build(directory)
+
+            def mutate(files):
+                manifest = json.loads(files[MODULE.MANIFEST_NAME])
+                manifest["verifier"]["sha256"] = "0" * 64
+                files[MODULE.MANIFEST_NAME] = MODULE.canonical_json(manifest)
+
+            self.rewrite(package, mutate)
+            with self.assertRaisesRegex(MODULE.PackageError, "verifier identity"):
+                self.verify(package)
+
+    def test_checkout_provenance_rejects_uncommitted_and_wrong_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "test"], check=True)
+            tracked = root / "evidence.json"
+            tracked.write_text("reviewed\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "evidence.json"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"], check=True)
+            revision = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                stdout=subprocess.PIPE, text=True,
+            ).stdout.strip()
+            MODULE.assert_files_match_revision(root, revision, {"evidence.json": b"reviewed\n"})
+            with self.assertRaisesRegex(MODULE.PackageError, "source differs"):
+                MODULE.assert_files_match_revision(root, revision, {"evidence.json": b"tampered\n"})
+            with self.assertRaisesRegex(MODULE.PackageError, "not a commit"):
+                MODULE.assert_files_match_revision(root, "0" * 40, {"evidence.json": b"reviewed\n"})
 
 
 if __name__ == "__main__":

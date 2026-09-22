@@ -9,6 +9,7 @@ import importlib.util
 import json
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -24,7 +25,14 @@ CORE_FILES = (
     "network/node-production.json",
 )
 MANIFEST_NAME = "qualification-package.json"
-SCHEMA = "bloch.l2.node-qualification-package.v1"
+SCHEMA = "bloch.l2.node-qualification-package.v2"
+VERIFIER_SCHEMA = "bloch.l2.node-qualification-verifier.v1"
+VERIFIER_FILES = (
+    "tools/node-qualification-package.py",
+    "tools/check-network-identity.py",
+    "tools/check-finality-readiness.py",
+    "tools/check-node-production.py",
+)
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 SECRET_PATTERNS = (
     re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
@@ -56,9 +64,13 @@ def load_module(name: str, path: Path) -> Any:
     return module
 
 
-IDENTITY = load_module("network_identity", ROOT / "tools/check-network-identity.py")
-FINALITY = load_module("finality_readiness", ROOT / "tools/check-finality-readiness.py")
-NODE = load_module("node_production", ROOT / "tools/check-node-production.py")
+def validator_modules() -> tuple[Any, Any, Any]:
+    """Load semantic validators only after verifier provenance is checked."""
+    return (
+        load_module("network_identity", ROOT / "tools/check-network-identity.py"),
+        load_module("finality_readiness", ROOT / "tools/check-finality-readiness.py"),
+        load_module("node_production", ROOT / "tools/check-node-production.py"),
+    )
 
 
 def canonical_json(value: Any) -> bytes:
@@ -67,6 +79,63 @@ def canonical_json(value: Any) -> bytes:
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def verifier_identity(root: Path = ROOT) -> dict[str, Any]:
+    records = []
+    for relative in VERIFIER_FILES:
+        path = root / relative
+        require(path.is_file() and not path.is_symlink(),
+                f"verifier source is missing or not a regular file: {relative}")
+        data = path.read_bytes()
+        records.append({"path": relative, "sha256": digest(data), "bytes": len(data)})
+    identity = {"schema": VERIFIER_SCHEMA, "files": records}
+    identity["sha256"] = digest(json_bytes(identity, "verifier identity"))
+    return identity
+
+
+def git_file(root: Path, revision: str, relative: str) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(root), "show", f"{revision}:{relative}"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PackageError(
+            f"cannot read {relative} from expected source revision {revision}"
+        ) from error
+    return result.stdout
+
+
+def assert_files_match_revision(
+    root: Path, revision: str, expected_files: dict[str, bytes]
+) -> None:
+    require(REVISION_PATTERN.fullmatch(revision) is not None,
+            "source revision must be a lowercase 40-character git SHA")
+    try:
+        result = subprocess.run(
+            [
+                "git", "--no-replace-objects", "-C", str(root),
+                "rev-parse", "--verify", f"{revision}^{{commit}}",
+            ],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PackageError(f"source revision is not a commit in checkout: {revision}") from error
+    require(result.stdout.strip() == revision,
+            "source revision does not resolve to the exact expected commit")
+    for relative, data in expected_files.items():
+        require(data == git_file(root, revision, relative),
+                f"package source differs from source revision: {relative}")
+
+
+def assert_checkout_provenance(
+    root: Path, revision: str, packaged_files: dict[str, bytes]
+) -> None:
+    assert_files_match_revision(root, revision, packaged_files)
+    for relative in VERIFIER_FILES:
+        require((root / relative).read_bytes() == git_file(root, revision, relative),
+                f"verifier source differs from source revision: {relative}")
 
 
 def safe_relative_path(value: str) -> PurePosixPath:
@@ -117,16 +186,21 @@ def referenced_files(finality: dict[str, Any], node: dict[str, Any]) -> set[str]
 
 
 def validate_sources(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    identity_validator, finality_validator, node_validator = validator_modules()
     identity = read_json(root / CORE_FILES[0])
     proposal = read_json(root / CORE_FILES[1])
     finality = read_json(root / CORE_FILES[2])
     node = read_json(root / CORE_FILES[3])
     try:
-        IDENTITY.validate_identity(identity)
-        IDENTITY.validate_proposal(identity, proposal)
-        finality_report = FINALITY.validate(finality, identity, root)
-        node_report = NODE.validate(node, root)
-    except (IDENTITY.IdentityError, FINALITY.FinalityError, NODE.NodeProductionError) as error:
+        identity_validator.validate_identity(identity)
+        identity_validator.validate_proposal(identity, proposal)
+        finality_report = finality_validator.validate(finality, identity, root)
+        node_report = node_validator.validate(node, root)
+    except (
+        identity_validator.IdentityError,
+        finality_validator.FinalityError,
+        node_validator.NodeProductionError,
+    ) as error:
         raise PackageError(str(error)) from error
     identity_ready = identity["activation"]["productionReady"]
     report = {
@@ -160,6 +234,7 @@ def package_contents(root: Path, revision: str) -> dict[str, bytes]:
         "network": "bloch-l2-testnet",
         "chainId": 700_771,
         "sourceRevision": revision,
+        "verifier": verifier_identity(root),
         "files": [
             {"path": path, "sha256": digest(data), "bytes": len(data)}
             for path, data in files.items()
@@ -167,6 +242,14 @@ def package_contents(root: Path, revision: str) -> dict[str, bytes]:
         "report": report,
     }
     files[MANIFEST_NAME] = json_bytes(manifest, "package manifest")
+    return files
+
+
+def package_contents_from_checkout(root: Path, revision: str) -> dict[str, bytes]:
+    files = package_contents(root, revision)
+    assert_checkout_provenance(
+        root, revision, {name: data for name, data in files.items() if name != MANIFEST_NAME}
+    )
     return files
 
 
@@ -212,9 +295,13 @@ def read_package(package: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
     return manifest, files
 
 
-def verify_package(package: Path) -> dict[str, Any]:
+def verify_package(
+    package: Path, expected_source_revision: str, trusted_verifier_sha256: str
+) -> dict[str, Any]:
     manifest, files = read_package(package)
-    fields = {"schema", "network", "chainId", "sourceRevision", "files", "report"}
+    fields = {
+        "schema", "network", "chainId", "sourceRevision", "verifier", "files", "report"
+    }
     require(type(manifest) is dict and set(manifest) == fields,
             "package manifest fields are not exact")
     require(manifest["schema"] == SCHEMA, "unsupported package schema")
@@ -223,6 +310,17 @@ def verify_package(package: Path) -> dict[str, Any]:
     require(type(manifest["sourceRevision"]) is str
             and REVISION_PATTERN.fullmatch(manifest["sourceRevision"]) is not None,
             "invalid package source revision")
+    require(REVISION_PATTERN.fullmatch(expected_source_revision) is not None,
+            "expected source revision must be a lowercase 40-character git SHA")
+    require(manifest["sourceRevision"] == expected_source_revision,
+            "package source revision does not match the externally expected revision")
+    require(re.fullmatch(r"[0-9a-f]{64}", trusted_verifier_sha256) is not None,
+            "trusted verifier SHA-256 must be 64 lowercase hexadecimal characters")
+    local_verifier = verifier_identity(ROOT)
+    require(local_verifier["sha256"] == trusted_verifier_sha256,
+            "local verifier suite does not match the externally trusted SHA-256")
+    require(manifest["verifier"] == local_verifier,
+            "package verifier identity does not match the trusted local verifier suite")
     records = manifest["files"]
     require(type(records) is list and records, "package file inventory is empty")
     expected_names: list[str] = []
@@ -256,6 +354,7 @@ def verify_package(package: Path) -> dict[str, Any]:
     require(manifest["report"] == report, "package qualification report does not match its sources")
     return {
         "sourceRevision": manifest["sourceRevision"],
+        "verifierSha256": local_verifier["sha256"],
         "filesVerified": len(files),
         **report,
     }
@@ -269,18 +368,27 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--revision", required=True)
     verify = subparsers.add_parser("verify")
     verify.add_argument("package", type=Path)
+    verify.add_argument("--expected-source-revision", required=True)
+    verify.add_argument("--trusted-verifier-sha256", required=True)
     verify.add_argument("--require-activation-permitted", action="store_true")
+    subparsers.add_parser("verifier-id")
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
-            files = package_contents(ROOT, args.revision)
+            files = package_contents_from_checkout(ROOT, args.revision)
             write_package(args.output, files)
-            report = verify_package(args.output)
+            report = verify_package(
+                args.output, args.revision, verifier_identity(ROOT)["sha256"]
+            )
             report["packageSha256"] = digest(args.output.read_bytes())
-        else:
-            report = verify_package(args.package)
+        elif args.command == "verify":
+            report = verify_package(
+                args.package, args.expected_source_revision, args.trusted_verifier_sha256
+            )
             if args.require_activation_permitted and not report["activationPermitted"]:
                 raise PackageError("node activation is not permitted by this package")
+        else:
+            report = verifier_identity(ROOT)
     except PackageError as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))
         return 1
