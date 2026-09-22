@@ -1,0 +1,97 @@
+{
+  "schema": "bloch.l2.synthetic-source-bound-settlement-v2-groth16-evidence.v1",
+  "recordedAt": "2026-09-22",
+  "classification": "synthetic-offline-non-authorizing",
+  "sourceRevision": "67dae92098afcbaac424cb1ad4c728f9de137f8e",
+  "sourceTreeCleanBeforeRun": true,
+  "chainId": 700771,
+  "fixture": {
+    "name": "source-contract",
+    "syntheticNativeAncestry": true,
+    "locallyAllocatedEscrow": true,
+    "nativeNetwork": "5151515151515151515151515151515151515151515151515151515151515151",
+    "nativeGenesis": "23f597b677a7ba2cc2ba1889b4e3b9b5467cca532ed24e2522e1f2b41f0c8f5a",
+    "nativeAnchorBlock": "4dde28c50495524efe79bd6c3252c62ef767f06458d3c56c686f1455722dbb82",
+    "nativeAnchorSlot": 150,
+    "nativeAnchorHeight": 1,
+    "sourceCommitment": "eee59dccd0de3e22e45fc18a5aba52d0314fdfe892e194db92f59093063fb901",
+    "inboxRoot": "37f4c25cc5fead1e344909ac4bb2bb1131a2a2ce875d91cb2576be16bf9f7c37",
+    "inboxCount": 1,
+    "consumedStart": 0,
+    "consumedEnd": 1,
+    "l2HeaderHash": "422676f406aa4cee089aff87b5a55c9f1e61faa9a47419ffc4e8e0b2dcdfa02a",
+    "l2StateRoot": "19673c14004e5ce250f839fe94b59544dedeae89aea0c3bbb1b3566e335e5ca7",
+    "bodyCommitment": "d3825ad70d363c1f389b088065b61f97e4d93e6490df127699a5ccdb766e6ee6",
+    "previousSettlement": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "toolchain": {
+    "rust": "1.98.1",
+    "sp1Sdk": "6.8.0",
+    "dockerServer": "29.1.3",
+    "gnarkImage": "ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d",
+    "gnarkImageInspectedId": "sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d"
+  },
+  "artifacts": {
+    "hostBinarySha256": "3466d7e7a7184dc993b5a7b78b69a673ea211d8805f47b4ab27fd6d4158a79b8",
+    "hostBinaryBytes": 70648336,
+    "guestElfSha256": "8e24512ffa42d7c7e87db8c10df8c2a1d09c3977170e6615d559f9b5f9da8c4b",
+    "guestElfBytes": 3120888,
+    "guestElfKeccak256": "ba7207dad5dafe22f2f8c2dd0705f3acbb5b20886d5c05c528372bc88b4d4828",
+    "programVkeyKoalaBear": "7a3fec8175a17a171d82f74027d9bdba59fa8e17397e4b01716bc07926c3a41a",
+    "programVkeyBn254": "00f47fd903d685e85cec17ba027d9bdbab3f51c2ee5f92c078b5e03ca6c3a41a",
+    "proofSha256": "d22c6673ae6d21aa57dda874138d205236c52064c5a6fd3a6c7d71ac20cb0bd6",
+    "proofBytes": 2284,
+    "canonicalVerifierBytes": 356
+  },
+  "payload": {
+    "sourceCommitment": "eee59dccd0de3e22e45fc18a5aba52d0314fdfe892e194db92f59093063fb901",
+    "consumedStart": 0,
+    "consumedEnd": 1,
+    "settlementCommitment": "15c71a50748084bca17ee45c04a2d1bf562041a91e3b82d9da2912f0e1b67f46"
+  },
+  "run": {
+    "buildFeatures": ["source-settlement"],
+    "circuitMode": "release",
+    "prover": "local-cpu",
+    "rayonThreads": 16,
+    "generationCommand": "SP1_GNARK_IMAGE=<PINNED_IMAGE> RAYON_NUM_THREADS=16 <HOST> prove-groth16 source-contract <ELF> <PROOF>",
+    "generationAndReverificationSeconds": "415.721900537",
+    "externalWallSeconds": "447.38",
+    "generationExitCode": 0,
+    "independentVerificationCommand": "SP1_GNARK_IMAGE=<PINNED_IMAGE> <HOST> verify-groth16 source-contract <ELF> <PROOF>",
+    "independentVerificationExitCode": 0,
+    "independentVerificationRepeated": true,
+    "dockerContainersAfterRun": 0,
+    "dockerSocket": "/run/docker.sock",
+    "dockerTcpApiExposed": false
+  },
+  "negativeChecks": {
+    "wrongTrustedExpectationRejected": true,
+    "tamperedPublicValuesRejected": true,
+    "persistedArtifactReopenedAndReverified": true,
+    "sourcePayloadDerivedDuringGeneration": true,
+    "sourcePayloadDerivedDuringIndependentVerification": true,
+    "alteredSourceBatchRejectedByUnitTest": true,
+    "alteredDepositBodyRejectedByUnitTest": true,
+    "incorrectConsumptionCursorRejectedByUnitTest": true
+  },
+  "limitations": {
+    "emptySyntheticSource": false,
+    "syntheticSource": true,
+    "nativeCheckpointAuthenticated": false,
+    "nativeSettlementConsensusActive": false,
+    "l2SettlementInclusionVerified": false,
+    "multiBlockSourceChainQualified": false,
+    "completeCrashFaultMatrixQualified": false,
+    "validatorReplayQualified": false,
+    "settlementProofTransportQualified": false,
+    "productionFinalityEstablished": false
+  },
+  "permissions": {
+    "nativeSettlementActivation": false,
+    "bridgeMintRelease": false,
+    "withdrawalRelease": false,
+    "dexLiquidity": false,
+    "aggregatorExecution": false
+  }
+}
