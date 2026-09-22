@@ -90,6 +90,13 @@ SP1_GNARK_IMAGE=ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c2
   RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-settlement-v2 prove-groth16 \
   empty "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
 target/release/bloch-evm-sp1-settlement-v2 verify-groth16 empty "$SETTLEMENT_V2_ELF" target/settlement-v2.groth16.proof
+
+# Build the host with --features source-settlement before this qualification.
+SP1_GNARK_IMAGE=ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d \
+  RAYON_NUM_THREADS=2 target/release/bloch-evm-sp1-settlement-v2 prove-groth16 \
+  source-contract "$SETTLEMENT_V2_ELF" target/settlement-v2.source-contract.groth16.proof
+target/release/bloch-evm-sp1-settlement-v2 verify-groth16 source-contract \
+  "$SETTLEMENT_V2_ELF" target/settlement-v2.source-contract.groth16.proof
 ```
 
 The fixture-less form remains an alias for `empty`. A separate build with
@@ -103,9 +110,9 @@ offline synthetic qualification, not native source authentication.
 
 Proof generation is release-circuit-only. The harness rejects
 `SP1_CIRCUIT_MODE=dev`, an unpinned/tag-only Gnark image and an unavailable
-Docker daemon before the expensive setup begins. The command pins the reviewed
-SP1 v6.1.0 Gnark image digest; qualification evidence must record and recheck
-that exact digest.
+Docker daemon before the expensive setup begins. The harness accepts only the
+reviewed Gnark image digest shown above; qualification evidence must also record
+and independently inspect that exact image identity.
 
 The default harness uses the empty synthetic execution fixture and fixed
 non-production network, genesis, anchor, source and inbox values. The optional

@@ -19,6 +19,8 @@ use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, SP1PublicVal
 use std::{error::Error, ffi::OsStr, fs, io, process::Command, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+const QUALIFICATION_GNARK_IMAGE: &str =
+    "ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d";
 
 struct Qualification {
     execution: fixture::Fixture,
@@ -310,16 +312,11 @@ fn require_release_gnark_environment(circuit_mode: Option<&OsStr>, image: Option
     let image = image
         .and_then(OsStr::to_str)
         .ok_or_else(|| io::Error::other("SP1_GNARK_IMAGE must pin the qualification image by sha256 digest"))?;
-    let prefix = "ghcr.io/succinctlabs/sp1-gnark@sha256:";
-    let digest = image
-        .strip_prefix(prefix)
-        .ok_or_else(|| io::Error::other("SP1_GNARK_IMAGE must pin ghcr.io/succinctlabs/sp1-gnark by digest"))?;
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(io::Error::other("SP1_GNARK_IMAGE contains a non-canonical sha256 digest").into());
+    if image != QUALIFICATION_GNARK_IMAGE {
+        return Err(io::Error::other(
+            "SP1_GNARK_IMAGE does not match the reviewed qualification image digest",
+        )
+        .into());
     }
     Ok(())
 }
@@ -328,8 +325,7 @@ fn require_release_gnark_environment(circuit_mode: Option<&OsStr>, image: Option
 mod tests {
     use super::*;
 
-    const PINNED: &str =
-        "ghcr.io/succinctlabs/sp1-gnark@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PINNED: &str = QUALIFICATION_GNARK_IMAGE;
 
     #[test]
     fn proving_environment_is_release_only_and_digest_pinned() {
@@ -340,6 +336,13 @@ mod tests {
         assert!(
             require_release_gnark_environment(None, Some(OsStr::new("ghcr.io/succinctlabs/sp1-gnark:v6.1.0"))).is_err()
         );
+        assert!(require_release_gnark_environment(
+            None,
+            Some(OsStr::new(
+                "ghcr.io/succinctlabs/sp1-gnark@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))
+        )
+        .is_err());
         assert!(require_release_gnark_environment(
             None,
             Some(OsStr::new(
