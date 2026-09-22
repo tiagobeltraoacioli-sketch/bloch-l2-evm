@@ -71,12 +71,41 @@ systemd, a node binary or a firewall tool. Do not create a service definition
 until a real image, frozen production genesis and all eight node requirements
 have passed independent review.
 
+### Production build request
+
+`deployment/production-node-build-request.json` records the result of inspecting
+the available build sources. The only runnable node entrypoint is
+`bloch-evm-dev`; its source makes `--synthetic-dev` mandatory and explicitly has
+no P2P, native/L1 derivation or finality. It is not a production image candidate.
+The Reth integration does pin an upstream base revision, patch, Rust toolchain and
+Cargo lockfile, and the request hash-binds those selected inputs. This is enough
+to reproduce the tested synthetic candidate with the prepared sibling checkout,
+not enough to define a production node or its container.
+
+The machine-readable request lists nine unresolved inputs: a production
+entrypoint, frozen genesis, authenticated native derivation, production
+consensus/finality, builder and runtime image digests, container build definition,
+complete source SBOM and build-provenance policy. It deliberately contains no
+image, SBOM or provenance output and cannot authorize a build.
+
+```sh
+python3 tools/check-production-node-build-request.py
+python3 tools/check-production-node-build-request.py --require-build-permitted
+```
+
+The first command verifies the six hash-bound inputs and reports all nine missing
+decisions. The second always fails for this constraints-only schema. Do not turn
+the synthetic executable into a production container by merely renaming it or
+supplying a Dockerfile; the missing protocol inputs must first be implemented and
+reviewed in a new production-build manifest.
+
 ## Portable qualification package
 
 `tools/node-qualification-package.py` creates a deterministic ZIP containing
 the network identity, registration proposal, finality gate, node gate,
-provisioning preflight, and the exact transitive set of evidence files referenced
-by the two readiness gates. Every file
+provisioning preflight, blocked production-build request, and the exact transitive
+set of evidence files referenced by the two readiness gates plus all six audited
+build inputs. Every file
 is inventoried by path, byte length and SHA-256. Verification uses the trusted,
 externally pinned validator suite to re-check the packaged sources; trusting
 only the inventory or a reported boolean is insufficient.
@@ -93,8 +122,8 @@ Package fields are not trust roots. In particular, `sourceRevision` and the
 verifier identity inside the ZIP are self-declarations. Before handoff, record
 the reviewed commit and the verifier-suite SHA-256 through an independent,
 authenticated channel. The suite identity covers this packager, all three
-semantic readiness validators, and the provisioning preflight. Obtain it from
-the exact reviewed checkout with:
+semantic readiness validators, provisioning preflight and build-request checker.
+Obtain it from the exact reviewed checkout with:
 
 ```sh
 python3 tools/node-qualification-package.py verifier-id

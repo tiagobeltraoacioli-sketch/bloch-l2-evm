@@ -1,0 +1,113 @@
+{
+  "schema": "bloch.l2.production-node-build-request.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "constraints-only-non-authorizing",
+  "reviewedSourceRevision": "727bfa4f50fb3e81988fee3e6c2e3c03ec07ae0f",
+  "candidate": {
+    "package": "bloch-reth-execution",
+    "binary": "bloch-evm-dev",
+    "classification": "synthetic-development-only",
+    "productionEligible": false
+  },
+  "auditedInputs": [
+    {
+      "path": "integrations/reth-execution/Cargo.toml",
+      "role": "candidate-manifest",
+      "sha256": "35134ff9b51b2d9af73f234a982b951fd419266dacd25eee4b91ec65c449b2ed"
+    },
+    {
+      "path": "integrations/reth-execution/Cargo.lock",
+      "role": "candidate-lockfile",
+      "sha256": "58a82781724bb8942dcc194c2ecfeba88fb3d29b77305c0881b56fe013382f03"
+    },
+    {
+      "path": "integrations/reth-execution/rust-toolchain.toml",
+      "role": "candidate-toolchain",
+      "sha256": "7553618f800829444096beea3dce84c3d07585efda504c19adb6787369bbd9e8"
+    },
+    {
+      "path": "integrations/reth-execution/src/bin/bloch-evm-dev.rs",
+      "role": "synthetic-entrypoint",
+      "sha256": "f149595d75169b026e5606c8ded422af94ff08e8ed8d99c76c204a533d34d95f"
+    },
+    {
+      "path": "integrations/reth-execution/prepare-reth.py",
+      "role": "external-source-verifier",
+      "sha256": "f50f802f6956279d8d55ee77e5c615114257cf4905599206dc364b5f4166a512"
+    },
+    {
+      "path": "integrations/reth-execution/reth-snapshot.patch",
+      "role": "external-source-patch",
+      "sha256": "fe1f293c58cf45281c208e90950c1b9221887459640c031d61c5aed9489d0977"
+    }
+  ],
+  "externalReth": {
+    "repository": "https://github.com/paradigmxyz/reth",
+    "baseRevision": "8eb210175687c9f0c889a3b6795c16781d830e3a",
+    "preparedTreeVerified": false,
+    "preparedTreeDigest": null
+  },
+  "requiredDecisions": [
+    {
+      "id": "production-node-entrypoint",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "frozen-production-genesis",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "authenticated-native-derivation",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "production-consensus-finality",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "builder-image-digest",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "runtime-image-digest",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "container-build-definition",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "complete-source-sbom",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "build-provenance-policy",
+      "status": "missing",
+      "artifact": null,
+      "sha256": null
+    }
+  ],
+  "outputs": {
+    "image": null,
+    "sbom": null,
+    "provenance": null
+  },
+  "buildPermitted": false
+}

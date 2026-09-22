@@ -24,9 +24,10 @@ CORE_FILES = (
     "network/finality.json",
     "network/node-production.json",
     "deployment/l2-node.json",
+    "deployment/production-node-build-request.json",
 )
 MANIFEST_NAME = "qualification-package.json"
-SCHEMA = "bloch.l2.node-qualification-package.v3"
+SCHEMA = "bloch.l2.node-qualification-package.v4"
 VERIFIER_SCHEMA = "bloch.l2.node-qualification-verifier.v1"
 VERIFIER_FILES = (
     "tools/node-qualification-package.py",
@@ -34,6 +35,7 @@ VERIFIER_FILES = (
     "tools/check-finality-readiness.py",
     "tools/check-node-production.py",
     "tools/check-node-provisioning.py",
+    "tools/check-production-node-build-request.py",
 )
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 SECRET_PATTERNS = (
@@ -66,12 +68,17 @@ def load_module(name: str, path: Path) -> Any:
     return module
 
 
-def validator_modules() -> tuple[Any, Any, Any]:
+def validator_modules() -> tuple[Any, Any, Any, Any, Any]:
     """Load semantic validators only after verifier provenance is checked."""
     return (
         load_module("network_identity", ROOT / "tools/check-network-identity.py"),
         load_module("finality_readiness", ROOT / "tools/check-finality-readiness.py"),
         load_module("node_production", ROOT / "tools/check-node-production.py"),
+        load_module("node_provisioning", ROOT / "tools/check-node-provisioning.py"),
+        load_module(
+            "production_node_build_request",
+            ROOT / "tools/check-production-node-build-request.py",
+        ),
     )
 
 
@@ -173,7 +180,9 @@ def read_json(path: Path) -> Any:
         raise PackageError(f"cannot read {path}: {error}") from error
 
 
-def referenced_files(finality: dict[str, Any], node: dict[str, Any]) -> set[str]:
+def referenced_files(
+    finality: dict[str, Any], node: dict[str, Any], build_request: dict[str, Any]
+) -> set[str]:
     paths: set[str] = set(CORE_FILES)
     for requirement in finality.get("requirements", []):
         for evidence in requirement.get("evidence", []):
@@ -182,26 +191,40 @@ def referenced_files(finality: dict[str, Any], node: dict[str, Any]) -> set[str]
     for requirement in node.get("requirements", []):
         if isinstance(requirement, dict) and isinstance(requirement.get("artifact"), str):
             paths.add(requirement["artifact"])
+    for item in build_request.get("auditedInputs", []):
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            paths.add(item["path"])
     for path in paths:
         safe_relative_path(path)
     return paths
 
 
-def validate_sources(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    identity_validator, finality_validator, node_validator = validator_modules()
+def validate_sources(
+    root: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    (
+        identity_validator, finality_validator, node_validator,
+        provisioning_validator, build_request_validator,
+    ) = validator_modules()
     identity = read_json(root / CORE_FILES[0])
     proposal = read_json(root / CORE_FILES[1])
     finality = read_json(root / CORE_FILES[2])
     node = read_json(root / CORE_FILES[3])
+    provisioning = read_json(root / CORE_FILES[4])
+    build_request = read_json(root / CORE_FILES[5])
     try:
         identity_validator.validate_identity(identity)
         identity_validator.validate_proposal(identity, proposal)
         finality_report = finality_validator.validate(finality, identity, root)
         node_report = node_validator.validate(node, root)
+        provisioning_report = provisioning_validator.validate(provisioning, root)
+        build_report = build_request_validator.validate(build_request, root)
     except (
         identity_validator.IdentityError,
         finality_validator.FinalityError,
         node_validator.NodeProductionError,
+        provisioning_validator.ProvisioningError,
+        build_request_validator.BuildRequestError,
     ) as error:
         raise PackageError(str(error)) from error
     identity_ready = identity["activation"]["productionReady"]
@@ -209,21 +232,25 @@ def validate_sources(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[s
         "identityProductionReady": identity_ready,
         "finality": finality_report,
         "node": node_report,
+        "provisioning": provisioning_report,
+        "productionBuild": build_report,
         "activationPermitted": bool(
             identity_ready
             and finality_report["productionFinalityReady"]
             and node_report["bindPermitted"]
+            and provisioning_report["startPermitted"]
+            and build_report["buildPermitted"]
         ),
     }
-    return finality, node, report
+    return finality, node, build_request, report
 
 
 def package_contents(root: Path, revision: str) -> dict[str, bytes]:
     require(REVISION_PATTERN.fullmatch(revision) is not None,
             "source revision must be a lowercase 40-character git SHA")
-    finality, node, report = validate_sources(root)
+    finality, node, build_request, report = validate_sources(root)
     files: dict[str, bytes] = {}
-    for relative in sorted(referenced_files(finality, node)):
+    for relative in sorted(referenced_files(finality, node, build_request)):
         path = (root / relative).resolve()
         require(path.is_relative_to(root.resolve()) and path.is_file(),
                 f"package source is missing: {relative}")
@@ -350,8 +377,8 @@ def verify_package(
             target = root.joinpath(*PurePosixPath(name).parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-        finality, node, report = validate_sources(root)
-        require(set(expected_names) == referenced_files(finality, node),
+        finality, node, build_request, report = validate_sources(root)
+        require(set(expected_names) == referenced_files(finality, node, build_request),
                 "package does not contain the exact evidence closure")
     require(manifest["report"] == report, "package qualification report does not match its sources")
     return {
