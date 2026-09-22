@@ -34,7 +34,7 @@ finalized L2 block.
    `null` and disables bridge mint/release, DEX liquidity and aggregator
    execution.
 
-## Current status (2026-09-20)
+## Current status (2026-09-22)
 
 The public Genesis-4 RPC reports a corroborated finalized block and exposes its
 ID, slot, height and header commitments. Its `getblockbyid` response does not
@@ -43,10 +43,13 @@ of the checkpoint authority required by the local verifier. More importantly,
 no active native transaction/state transition currently settles the L2 header
 and proof. Operational RPC agreement therefore remains diagnostic evidence only.
 
-The Reth development node continues to return `null` for `finalized`. This is the
-correct fail-closed behavior. Do not replace it with `latest`, a fixed depth, an
-L1 anchor classification, or a threshold signature that lacks native settlement
-inclusion.
+The currently published `https://blochdex.com/rpc` endpoint identifies chain
+84001 and remains at block zero. It returns the same genesis block for `latest`,
+`safe` and `finalized`; that is not progress or production finality. The server
+reserved for chain 700771 has no L2 node or RPC listener running. Do not replace
+authenticated settlement with `latest`, a fixed depth, an L1 anchor
+classification, a genesis-only tag or a threshold signature that lacks native
+settlement inclusion.
 
 The pinned SP1 6.8.0 SDK exposes a Groth16 wrapper whose encoded proof is 352
 bytes (356 bytes with the verifier-key prefix), so a succinct in-block route is
@@ -70,6 +73,14 @@ record is retained in
 It improves toolchain evidence only: the fixture has an empty synthetic source,
 so it does not satisfy any readiness requirement or permit activation.
 
+On 2026-09-22 the pinned harness also generated and independently verified a
+nonempty synthetic `source-contract` proof with one inbox item and consumed
+cursor `0..1`. Its record is retained in
+[`network/evidence/settlement-v2-synthetic-source-contract-groth16-20260922.json`](../network/evidence/settlement-v2-synthetic-source-contract-groth16-20260922.json).
+The source, ancestry and escrow remain synthetic, so this still does not satisfy
+native authentication, proof transport, inclusion, validator replay or public
+finality requirements.
+
 The machine-readable gate is [`network/finality.json`](../network/finality.json).
 Every satisfied requirement must carry a dated SHA-256 evidence reference;
 product permissions cannot become true while any requirement is open. Validate
@@ -79,3 +90,18 @@ the checked-in state with:
 python3 tools/check-finality-readiness.py
 python3 tools/check-finality-readiness.py --require-ready  # expected to fail now
 ```
+## RPC tag qualification
+
+The presence of `safe` or `finalized` tags is not finality evidence by itself.
+A static or genesis-only endpoint can return block zero for all three tags while
+making no progress and authenticating no settlement. The diagnostic probe:
+
+```sh
+python3 tools/check-finalized-rpc.py --rpc-url https://example.invalid/rpc
+```
+
+requires the reviewed chain ID, a finalized block strictly above genesis,
+`latest >= safe >= finalized`, and a stable reread of the finalized block by
+number. It never changes `network/finality.json`, always reports
+`permissionsOpened: false`, and does not replace native checkpoint,
+settlement-proof, inclusion or consensus evidence.
