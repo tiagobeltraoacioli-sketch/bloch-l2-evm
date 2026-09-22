@@ -35,11 +35,48 @@ The strict command intentionally fails for the checked-in manifest. No service
 manager, container runtime, node binary, or firewall rule should treat the
 non-strict structural check as authorization to bind.
 
+## Reproducible provisioning preflight
+
+`deployment/l2-node.json` is the side-effect-free handoff before any Compose or
+systemd unit is generated. It fixes chain ID 700771 and the Docker runtime, but
+intentionally leaves the production image, genesis, storage and listeners null.
+Those values are not present in the reviewed repository and must not be invented.
+
+The preflight requires a content-addressed image reference ending in
+`@sha256:<digest>`, a repository-contained genesis with its exact SHA-256, a
+narrow absolute data directory, and listeners that exactly match the qualified
+node readiness manifest. The image reference and genesis digest must also arrive
+through independent trusted inputs; values copied only from the deployment
+manifest are self-declarations. The readiness manifest itself is hash-bound and
+must permit binding before `startPermitted` can become true.
+
+Inspect the pending plan without side effects:
+
+```sh
+python3 tools/check-node-provisioning.py
+```
+
+An eventual reviewed start workflow must supply the independently recorded pins
+and use the strict form immediately before generating or starting a service:
+
+```sh
+python3 tools/check-node-provisioning.py \
+  --trusted-image '<registry>/<repository>@sha256:<64-hex-digest>' \
+  --trusted-genesis-sha256 '<64-hex-digest>' \
+  --require-start-permitted
+```
+
+The checked-in plan makes that command fail. The preflight never calls Docker,
+systemd, a node binary or a firewall tool. Do not create a service definition
+until a real image, frozen production genesis and all eight node requirements
+have passed independent review.
+
 ## Portable qualification package
 
 `tools/node-qualification-package.py` creates a deterministic ZIP containing
-the network identity, registration proposal, finality gate, node gate, and the
-exact transitive set of evidence files referenced by the two gates. Every file
+the network identity, registration proposal, finality gate, node gate,
+provisioning preflight, and the exact transitive set of evidence files referenced
+by the two readiness gates. Every file
 is inventoried by path, byte length and SHA-256. Verification uses the trusted,
 externally pinned validator suite to re-check the packaged sources; trusting
 only the inventory or a reported boolean is insufficient.
@@ -55,8 +92,9 @@ format, not a secret store.
 Package fields are not trust roots. In particular, `sourceRevision` and the
 verifier identity inside the ZIP are self-declarations. Before handoff, record
 the reviewed commit and the verifier-suite SHA-256 through an independent,
-authenticated channel. The suite identity covers this packager and all three
-semantic validators. Obtain it from the exact reviewed checkout with:
+authenticated channel. The suite identity covers this packager, all three
+semantic readiness validators, and the provisioning preflight. Obtain it from
+the exact reviewed checkout with:
 
 ```sh
 python3 tools/node-qualification-package.py verifier-id

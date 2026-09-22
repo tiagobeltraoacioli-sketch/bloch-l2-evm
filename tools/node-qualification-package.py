@@ -23,15 +23,17 @@ CORE_FILES = (
     "network/eip155-700771.json",
     "network/finality.json",
     "network/node-production.json",
+    "deployment/l2-node.json",
 )
 MANIFEST_NAME = "qualification-package.json"
-SCHEMA = "bloch.l2.node-qualification-package.v2"
+SCHEMA = "bloch.l2.node-qualification-package.v3"
 VERIFIER_SCHEMA = "bloch.l2.node-qualification-verifier.v1"
 VERIFIER_FILES = (
     "tools/node-qualification-package.py",
     "tools/check-network-identity.py",
     "tools/check-finality-readiness.py",
     "tools/check-node-production.py",
+    "tools/check-node-provisioning.py",
 )
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 SECRET_PATTERNS = (

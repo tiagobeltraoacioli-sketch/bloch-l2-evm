@@ -1,0 +1,26 @@
+{
+  "schema": "bloch.l2.node-provisioning.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "pending-non-authorizing",
+  "runtime": {
+    "engine": "docker",
+    "image": null
+  },
+  "genesis": {
+    "artifact": null,
+    "sha256": null
+  },
+  "storage": {
+    "dataDirectory": null
+  },
+  "listeners": {
+    "rpc": null,
+    "p2p": null
+  },
+  "readiness": {
+    "artifact": "network/node-production.json",
+    "sha256": "d5000ac05545a5c988c973743d24d513f8d54ab293864e600a4b8acfabcb7724"
+  },
+  "startPermitted": false
+}
