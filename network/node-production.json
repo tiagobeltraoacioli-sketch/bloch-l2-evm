@@ -1,0 +1,61 @@
+{
+  "schema": "bloch.l2.node-production-readiness.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "requirements": [
+    {
+      "id": "chain-identity",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "production-genesis",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "execution-domain",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "p2p-policy",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "checkpoint-policy",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "source-derivation-policy",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "settlement-policy",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    },
+    {
+      "id": "finality-policy",
+      "satisfied": false,
+      "artifact": null,
+      "sha256": null
+    }
+  ],
+  "productionReady": false,
+  "bind": {
+    "enabled": false,
+    "rpcListen": null,
+    "p2pListen": null
+  }
+}
