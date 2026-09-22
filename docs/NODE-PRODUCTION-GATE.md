@@ -123,14 +123,30 @@ Authenticate it using the independently provisioned public-key policy:
 ```sh
 python3 tools/intake-operational-evidence.py authenticate \
   --observation /secure/intake/canonical-observation.json \
+  --details /secure/intake/finality-probe.json \
   --signature /secure/intake/canonical-observation.json.sig \
   --allowed-signers /secure/trust/bloch-l2-allowed-signers \
   --trusted-allowed-signers-sha256 <independently-recorded-64-hex-sha256> \
   --output /secure/review/authenticated-observation.json
 ```
 
-The immutable output binds the observation, signature and trust-root hashes,
-but is deliberately marked `effect: observation-only` and `qualified: false`.
+The intake refuses missing or changed detail bytes: their SHA-256 must equal the
+signed observation's `detailsSha256`. The immutable output binds the observation,
+detail bytes, signature and trust-root hashes. A reviewer can reproduce the
+verification without writing another artifact:
+
+```sh
+python3 tools/intake-operational-evidence.py verify \
+  --artifact /secure/review/authenticated-observation.json \
+  --observation /secure/intake/canonical-observation.json \
+  --details /secure/intake/finality-probe.json \
+  --signature /secure/intake/canonical-observation.json.sig \
+  --allowed-signers /secure/trust/bloch-l2-allowed-signers \
+  --trusted-allowed-signers-sha256 <independently-recorded-64-hex-sha256>
+```
+
+The artifact is deliberately marked `effect: observation-only` and
+`qualified: false`.
 A `pass` result is a signed observation, not a qualified requirement. Reviewers
 must separately validate the referenced detail bytes, freshness, independence,
 scope and the requirement-specific acceptance policy before changing either

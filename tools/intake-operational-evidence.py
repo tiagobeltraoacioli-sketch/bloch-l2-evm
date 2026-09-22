@@ -18,6 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 NAMESPACE = "bloch-l2-operational-evidence-v1"
 MAX_INPUT_BYTES = 64 * 1024
+MAX_DETAILS_BYTES = 1024 * 1024
 REQUIREMENTS = {
     "native-checkpoint-authenticated", "raw-header-ancestry-verified",
     "settlement-proof-transport-qualified", "native-settlement-consensus-active",
@@ -41,17 +42,15 @@ def require(condition: bool, message: str) -> None:
         raise IntakeError(message)
 
 
-def read_regular(path: Path, label: str) -> bytes:
+def read_regular(path: Path, label: str, limit: int = MAX_INPUT_BYTES) -> bytes:
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(descriptor, "rb") as source:
             metadata = os.fstat(source.fileno())
             require(stat.S_ISREG(metadata.st_mode), f"{label} must be a regular file")
-            require(metadata.st_size <= MAX_INPUT_BYTES,
-                    f"{label} exceeds {MAX_INPUT_BYTES} bytes")
-            content = source.read(MAX_INPUT_BYTES + 1)
-            require(len(content) <= MAX_INPUT_BYTES,
-                    f"{label} exceeds {MAX_INPUT_BYTES} bytes")
+            require(metadata.st_size <= limit, f"{label} exceeds {limit} bytes")
+            content = source.read(limit + 1)
+            require(len(content) <= limit, f"{label} exceeds {limit} bytes")
             return content
     except OSError as error:
         if path.is_symlink():
@@ -139,8 +138,12 @@ def normalize(args: argparse.Namespace) -> dict[str, Any]:
             "output": str(args.output)}
 
 
-def authenticate(args: argparse.Namespace) -> dict[str, Any]:
+def authenticated_artifact(args: argparse.Namespace) -> dict[str, Any]:
     observation, payload = load_observation(args.observation, True)
+    details = read_regular(args.details, "observation details", MAX_DETAILS_BYTES)
+    actual_details_digest = hashlib.sha256(details).hexdigest()
+    require(actual_details_digest == observation["detailsSha256"],
+            "observation details do not match detailsSha256")
     require(outside_repository(args.allowed_signers),
             "allowed-signers trust root must be outside the repository")
     trust = read_regular(args.allowed_signers, "allowed-signers trust root")
@@ -170,18 +173,41 @@ def authenticate(args: argparse.Namespace) -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired) as error:
         raise IntakeError(f"SSH signature verification could not run: {error}") from error
     require(result.returncode == 0, "SSH signature verification failed")
-    artifact = {
+    return {
         "schema": "bloch.l2.authenticated-operational-observation.v1",
         "effect": "observation-only", "authenticated": True, "qualified": False,
         "namespace": NAMESPACE,
         "observationSha256": hashlib.sha256(payload).hexdigest(),
+        "detailsSha256": actual_details_digest,
+        "detailsBytes": len(details),
+        "detailsBoundAtIntake": True,
         "trustRootSha256": actual_trust_digest,
         "signatureSha256": hashlib.sha256(signature).hexdigest(),
         "observation": observation,
     }
+
+
+def authenticate(args: argparse.Namespace) -> dict[str, Any]:
+    artifact = authenticated_artifact(args)
     write_new(args.output, canonical(artifact))
     return {"authenticated": True, "qualified": False,
-            "requirementId": observation["requirementId"], "output": str(args.output)}
+            "detailsBoundAtIntake": True,
+            "requirementId": artifact["observation"]["requirementId"],
+            "output": str(args.output)}
+
+
+def verify(args: argparse.Namespace) -> dict[str, Any]:
+    expected = authenticated_artifact(args)
+    raw = read_regular(args.artifact, "authenticated artifact")
+    try:
+        actual = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise IntakeError(f"authenticated artifact is not valid UTF-8 JSON: {error}") from error
+    require(raw == canonical(actual), "authenticated artifact is not canonical")
+    require(actual == expected, "authenticated artifact does not match verified inputs")
+    return {"authenticated": True, "qualified": False, "detailsBoundAtIntake": True,
+            "requirementId": expected["observation"]["requirementId"],
+            "artifact": str(args.artifact)}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -190,19 +216,29 @@ def parser() -> argparse.ArgumentParser:
     normalizer = commands.add_parser("normalize")
     normalizer.add_argument("--input", type=Path, required=True)
     normalizer.add_argument("--output", type=Path, required=True)
-    verifier = commands.add_parser("authenticate")
-    verifier.add_argument("--observation", type=Path, required=True)
-    verifier.add_argument("--signature", type=Path, required=True)
-    verifier.add_argument("--allowed-signers", type=Path, required=True)
-    verifier.add_argument("--trusted-allowed-signers-sha256", required=True)
-    verifier.add_argument("--output", type=Path, required=True)
+    for command in ("authenticate", "verify"):
+        verifier = commands.add_parser(command)
+        verifier.add_argument("--observation", type=Path, required=True)
+        verifier.add_argument("--details", type=Path, required=True)
+        verifier.add_argument("--signature", type=Path, required=True)
+        verifier.add_argument("--allowed-signers", type=Path, required=True)
+        verifier.add_argument("--trusted-allowed-signers-sha256", required=True)
+        if command == "authenticate":
+            verifier.add_argument("--output", type=Path, required=True)
+        else:
+            verifier.add_argument("--artifact", type=Path, required=True)
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        report = normalize(args) if args.command == "normalize" else authenticate(args)
+        if args.command == "normalize":
+            report = normalize(args)
+        elif args.command == "authenticate":
+            report = authenticate(args)
+        else:
+            report = verify(args)
     except IntakeError as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))
         return 1

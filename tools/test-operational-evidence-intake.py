@@ -32,12 +32,14 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
         public = self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()
         self.allowed = self.root / "allowed_signers"
         self.allowed.write_text(f"operator@example.test {public}\n", encoding="utf-8")
+        self.details = self.root / "details.json"
+        self.details.write_bytes(b'{"probe":"finalized","result":"unavailable"}\n')
         self.value = {
             "schema": "bloch.l2.operational-observation.v1", "network": "bloch-l2-testnet",
             "chainId": 700771, "requirementId": "reth-finalized-tag-verified",
             "observedAt": "2026-09-22T12:34:56Z", "observer": "operator@example.test",
             "source": "l2-node-a/offline-finality-probe", "result": "pass",
-            "detailsSha256": "a" * 64,
+            "detailsSha256": hashlib.sha256(self.details.read_bytes()).hexdigest(),
         }
 
     def tearDown(self) -> None:
@@ -62,6 +64,7 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
     def authenticate(self, observation: Path, signature: Path, output=None, allowed=None):
         args = type("Args", (), {
             "observation": observation, "signature": signature,
+            "details": self.details,
             "allowed_signers": allowed or self.allowed,
             "trusted_allowed_signers_sha256": hashlib.sha256(
                 self.allowed.read_bytes()
@@ -78,7 +81,38 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
         self.assertFalse(report["qualified"])
         self.assertEqual(artifact["effect"], "observation-only")
         self.assertFalse(artifact["qualified"])
+        self.assertTrue(artifact["detailsBoundAtIntake"])
+        self.assertEqual(artifact["detailsBytes"], len(self.details.read_bytes()))
         self.assertEqual(artifact["observation"], self.value)
+
+    def test_authenticated_artifact_can_be_independently_reverified(self) -> None:
+        observation = self.write_observation()
+        signature = self.sign(observation)
+        self.authenticate(observation, signature)
+        args = type("Args", (), {
+            "observation": observation, "details": self.details, "signature": signature,
+            "allowed_signers": self.allowed,
+            "trusted_allowed_signers_sha256": hashlib.sha256(
+                self.allowed.read_bytes()
+            ).hexdigest(),
+            "artifact": self.root / "authenticated.json",
+        })
+        report = MODULE.verify(args)
+        self.assertTrue(report["authenticated"])
+        self.assertFalse(report["qualified"])
+
+        artifact = json.loads(args.artifact.read_text())
+        artifact["qualified"] = True
+        args.artifact.write_bytes(MODULE.canonical(artifact))
+        with self.assertRaisesRegex(MODULE.IntakeError, "does not match"):
+            MODULE.verify(args)
+
+    def test_changed_details_are_rejected(self) -> None:
+        observation = self.write_observation()
+        signature = self.sign(observation)
+        self.details.write_bytes(b'{"probe":"finalized","result":"pass"}\n')
+        with self.assertRaisesRegex(MODULE.IntakeError, "do not match"):
+            self.authenticate(observation, signature)
 
     def test_tamper_wrong_namespace_and_wrong_principal_are_rejected(self) -> None:
         observation = self.write_observation()
@@ -139,6 +173,7 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
         signature = self.sign(observation, key=attacker_key)
         args = type("Args", (), {
             "observation": observation, "signature": signature,
+            "details": self.details,
             "allowed_signers": attacker_policy,
             "trusted_allowed_signers_sha256": hashlib.sha256(
                 self.allowed.read_bytes()
