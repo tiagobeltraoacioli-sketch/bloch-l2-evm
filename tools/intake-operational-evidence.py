@@ -144,6 +144,13 @@ def authenticate(args: argparse.Namespace) -> dict[str, Any]:
     require(outside_repository(args.allowed_signers),
             "allowed-signers trust root must be outside the repository")
     trust = read_regular(args.allowed_signers, "allowed-signers trust root")
+    trusted_digest = args.trusted_allowed_signers_sha256
+    require(type(trusted_digest) is str and len(trusted_digest) == 64
+            and all(character in "0123456789abcdef" for character in trusted_digest),
+            "trusted allowed-signers SHA-256 must be 64 lowercase hexadecimal characters")
+    actual_trust_digest = hashlib.sha256(trust).hexdigest()
+    require(actual_trust_digest == trusted_digest,
+            "allowed-signers policy does not match the externally trusted SHA-256")
     signature = read_regular(args.signature, "signature")
     require(b"BEGIN SSH SIGNATURE" in signature, "signature is not an SSH signature")
     try:
@@ -168,7 +175,7 @@ def authenticate(args: argparse.Namespace) -> dict[str, Any]:
         "effect": "observation-only", "authenticated": True, "qualified": False,
         "namespace": NAMESPACE,
         "observationSha256": hashlib.sha256(payload).hexdigest(),
-        "trustRootSha256": hashlib.sha256(trust).hexdigest(),
+        "trustRootSha256": actual_trust_digest,
         "signatureSha256": hashlib.sha256(signature).hexdigest(),
         "observation": observation,
     }
@@ -187,6 +194,7 @@ def parser() -> argparse.ArgumentParser:
     verifier.add_argument("--observation", type=Path, required=True)
     verifier.add_argument("--signature", type=Path, required=True)
     verifier.add_argument("--allowed-signers", type=Path, required=True)
+    verifier.add_argument("--trusted-allowed-signers-sha256", required=True)
     verifier.add_argument("--output", type=Path, required=True)
     return result
 

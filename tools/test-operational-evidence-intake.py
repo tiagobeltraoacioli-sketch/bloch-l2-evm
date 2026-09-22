@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -49,11 +50,11 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
-    def sign(self, observation: Path, namespace=MODULE.NAMESPACE) -> Path:
+    def sign(self, observation: Path, namespace=MODULE.NAMESPACE, key=None) -> Path:
         signature = Path(str(observation) + ".sig")
         signature.unlink(missing_ok=True)
         subprocess.run(
-            ["ssh-keygen", "-Y", "sign", "-q", "-f", str(self.key),
+            ["ssh-keygen", "-Y", "sign", "-q", "-f", str(key or self.key),
              "-n", namespace, str(observation)], check=True,
         )
         return signature
@@ -62,6 +63,9 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
         args = type("Args", (), {
             "observation": observation, "signature": signature,
             "allowed_signers": allowed or self.allowed,
+            "trusted_allowed_signers_sha256": hashlib.sha256(
+                self.allowed.read_bytes()
+            ).hexdigest(),
             "output": output or self.root / "authenticated.json",
         })
         return MODULE.authenticate(args)
@@ -119,6 +123,30 @@ class OperationalEvidenceIntakeTests(unittest.TestCase):
                 self.authenticate(observation, signature, allowed=local)
         finally:
             local.unlink(missing_ok=True)
+
+    def test_self_created_policy_is_rejected_against_trusted_digest(self) -> None:
+        observation = self.write_observation()
+        attacker_key = self.root / "attacker"
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(attacker_key)],
+            check=True,
+        )
+        attacker_public = attacker_key.with_suffix(".pub").read_text().strip()
+        attacker_policy = self.root / "attacker_allowed_signers"
+        attacker_policy.write_text(
+            f"operator@example.test {attacker_public}\n", encoding="utf-8"
+        )
+        signature = self.sign(observation, key=attacker_key)
+        args = type("Args", (), {
+            "observation": observation, "signature": signature,
+            "allowed_signers": attacker_policy,
+            "trusted_allowed_signers_sha256": hashlib.sha256(
+                self.allowed.read_bytes()
+            ).hexdigest(),
+            "output": self.root / "attacker-output.json",
+        })
+        with self.assertRaisesRegex(MODULE.IntakeError, "externally trusted SHA-256"):
+            MODULE.authenticate(args)
 
     def test_symlink_inputs_and_existing_output_are_rejected(self) -> None:
         observation = self.write_observation()

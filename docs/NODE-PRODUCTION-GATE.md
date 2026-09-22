@@ -101,10 +101,11 @@ authenticates the canonical bytes with an SSH signature. Signatures use the
 `bloch-l2-operational-evidence-v1` namespace; the signer principal must match
 the observation's `observer` field.
 
-The `allowed_signers` file is an external trust root. The tool refuses one
-inside this repository: obtain it through an independently authenticated
-operator/reviewer channel and do not copy it from the submitted evidence. No
-private key is accepted or stored by the intake tool.
+The `allowed_signers` file and its SHA-256 are external trust inputs. The tool
+refuses a policy inside this repository and refuses one that differs from the
+independently pinned digest. Obtain the policy and digest through an
+authenticated operator/reviewer channel; never copy either from the submitted
+evidence. No private key is accepted or stored by the intake tool.
 
 Prepare and sign an observation:
 
@@ -124,6 +125,7 @@ python3 tools/intake-operational-evidence.py authenticate \
   --observation /secure/intake/canonical-observation.json \
   --signature /secure/intake/canonical-observation.json.sig \
   --allowed-signers /secure/trust/bloch-l2-allowed-signers \
+  --trusted-allowed-signers-sha256 <independently-recorded-64-hex-sha256> \
   --output /secure/review/authenticated-observation.json
 ```
 
