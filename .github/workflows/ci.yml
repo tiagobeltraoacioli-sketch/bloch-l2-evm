@@ -39,6 +39,8 @@ jobs:
         run: python3 tools/test-node-production.py
       - name: Test source-bound production-node qualification packages
         run: python3 tools/test-node-qualification-package.py
+      - name: Test authenticated operational evidence intake
+        run: python3 tools/test-operational-evidence-intake.py
       - name: Run the signed developer contract lifecycle
         run: cargo run --locked --example developer_contract
       - name: Rehearse durable signed contract execution and recovery

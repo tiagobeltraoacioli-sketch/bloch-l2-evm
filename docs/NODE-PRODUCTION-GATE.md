@@ -92,3 +92,45 @@ The checked-in pending manifests produce a valid audit package whose
 `activationPermitted` value is false. The strict command therefore fails, as it
 must. Packaging pending evidence does not satisfy a requirement, qualify an
 endpoint, start a node, or authorize a listener.
+
+## Authenticated observation intake
+
+`tools/intake-operational-evidence.py` provides a narrow handoff boundary for
+real operational observations. It normalizes an exact, bounded JSON schema and
+authenticates the canonical bytes with an SSH signature. Signatures use the
+`bloch-l2-operational-evidence-v1` namespace; the signer principal must match
+the observation's `observer` field.
+
+The `allowed_signers` file is an external trust root. The tool refuses one
+inside this repository: obtain it through an independently authenticated
+operator/reviewer channel and do not copy it from the submitted evidence. No
+private key is accepted or stored by the intake tool.
+
+Prepare and sign an observation:
+
+```sh
+python3 tools/intake-operational-evidence.py normalize \
+  --input /secure/intake/raw-observation.json \
+  --output /secure/intake/canonical-observation.json
+ssh-keygen -Y sign -f /secure/operator/key \
+  -n bloch-l2-operational-evidence-v1 \
+  /secure/intake/canonical-observation.json
+```
+
+Authenticate it using the independently provisioned public-key policy:
+
+```sh
+python3 tools/intake-operational-evidence.py authenticate \
+  --observation /secure/intake/canonical-observation.json \
+  --signature /secure/intake/canonical-observation.json.sig \
+  --allowed-signers /secure/trust/bloch-l2-allowed-signers \
+  --output /secure/review/authenticated-observation.json
+```
+
+The immutable output binds the observation, signature and trust-root hashes,
+but is deliberately marked `effect: observation-only` and `qualified: false`.
+A `pass` result is a signed observation, not a qualified requirement. Reviewers
+must separately validate the referenced detail bytes, freshness, independence,
+scope and the requirement-specific acceptance policy before changing either
+readiness manifest. This tool never edits those manifests, never opens a
+permission and never starts or binds a node.
