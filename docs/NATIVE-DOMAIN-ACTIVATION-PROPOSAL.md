@@ -91,6 +91,28 @@ which exceed the audited 512 KiB native block limit. Proof availability and
 validator verification therefore remain an unresolved activation requirement;
 the payload does not imply that proof bytes are carried by a native block.
 
+The main execution crate now also contains a dormant `native_settlement` V1
+transition kernel. It frames exactly one fixed 356-byte Groth16 transport with
+the exact settlement statement and a separately pinned proof-policy commitment.
+Its immutable policy binds network, genesis, domain, configuration, all three
+program identities, chain ID, first accepted L2 height, and the initial L2
+parent header and state root. The transition requires exact equality with a
+consensus-selected expectation, a deterministic
+verifier result, contiguous settlement/L2/source predecessors, a non-regressing
+authenticated native anchor and an exact inbox cursor. It publishes the head
+only after every fallible check and exposes a canonical domain-separated
+registry-state commitment. Settlement cannot mutate escrow coins, liabilities,
+fees or releases through this API.
+
+This is still an inert transition kernel, not a Genesis-4 integration. Its
+experimental discriminator is not a native transaction tag, its registry
+commitment has no assigned native component key, and
+`SettlementExpectationV1` is deliberately plain data rather than proof of
+native authentication. A native adapter must derive that expectation from
+committed source/ancestry state, implement the pinned proof verifier, include
+the registry under the native state root and reject invalid blocks. Until then
+the kernel supplies conformance logic only and authorizes no activation.
+
 An accepted proof for another program, domain, configuration, parent, source,
 body or consumed range must fail without advancing either cursor. Replaying the
 same proof must fail after its first acceptance. A local append-only proof

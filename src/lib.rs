@@ -113,6 +113,7 @@ pub mod l1;
 pub mod l1_context;
 pub mod l1_transfer;
 pub mod mpt;
+pub mod native_settlement;
 pub mod node_execution;
 pub mod node_primitives;
 pub mod proof_statement;

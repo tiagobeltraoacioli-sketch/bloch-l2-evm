@@ -65,7 +65,10 @@ transaction-body commitments against an externally trusted checkpoint; finality
 authentication and escrow derivation remain pending. From that verified body,
 `l1::authenticate_exact_transaction` can prove the position of one exact,
 unique native transaction without treating its bytes as a settlement or
-finalized-L2 certificate.
+finalized-L2 certificate. The dormant `native_settlement` kernel defines a
+fixed, policy-pinned and replay-safe transition shape for an isolated devnet,
+but has no Genesis-4 tag/state key, SP1 verifier adapter, durable commit or
+validator activation and therefore cannot publish finality.
 See [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) for the trust boundary, tested
 behavior and remaining L1 integration.
 

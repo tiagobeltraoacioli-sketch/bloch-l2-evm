@@ -118,7 +118,7 @@ impl AuthenticatedBody {
 /// This proves byte inclusion below the externally authenticated checkpoint. It
 /// does not interpret the transaction, prove that native consensus assigns it a
 /// settlement transition, verify an execution proof or finalize an L2 block.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AuthenticatedTransactionInclusion {
     block: B256,
     slot: u64,

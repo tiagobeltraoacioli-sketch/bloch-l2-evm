@@ -97,7 +97,9 @@ python3 tools/check-finality-readiness.py --require-ready  # expected to fail no
 `AuthenticatedTransactionInclusion` only from a complete body already checked
 by `authenticate_body`. It requires nonempty exact bytes, one and only one
 occurrence, and retains the committed block, slot, transaction index and
-checkpoint. Missing bytes, duplicates and bodies changed by omission, reorder
+checkpoint. The capability is deliberately non-cloneable; durable replay
+prevention still requires a consensus-owned settlement nullifier. Missing
+bytes, duplicates and bodies changed by omission, reorder
 or mutation fail closed.
 
 This closes only the byte-inclusion subproblem. The primitive deliberately does
@@ -107,6 +109,16 @@ reviewed settlement transaction/state transition and validators execute its
 proof, inclusion of arbitrary bytes is not `native-settlement-consensus-active`
 or `l2-settlement-inclusion-verified`, cannot advance a finality cursor and must
 not populate Reth's `finalized` head.
+
+The dormant `native_settlement` V1 kernel now closes a narrower transition-shape
+gap: it has fixed canonical framing, pinned policy/program identities, exact
+consensus-selected statement comparison, deterministic proof-verifier input,
+replay-safe predecessor/cursor checks and atomic in-memory publication. It does
+not supply the Genesis-4 transaction decoder, state-component inclusion,
+authenticated expectation construction, SP1 verifier implementation, durable
+commit, reorg handling or validator conformance evidence. Consequently it does
+not satisfy `native-settlement-consensus-active` or
+`l2-settlement-inclusion-verified`, and RPC `finalized` remains `null`.
 
 ## RPC tag qualification
 
