@@ -62,7 +62,10 @@ re-execution. Run `cargo run --locked --example modular_evm` for a zero-value lo
 demonstration. This is not an on-chain verifier, proof backend or working rollup.
 `l1::authenticate_body` additionally checks Genesis-4 header ancestry and full
 transaction-body commitments against an externally trusted checkpoint; finality
-authentication and escrow derivation remain pending.
+authentication and escrow derivation remain pending. From that verified body,
+`l1::authenticate_exact_transaction` can prove the position of one exact,
+unique native transaction without treating its bytes as a settlement or
+finalized-L2 certificate.
 See [MODULAR-EXECUTION.md](MODULAR-EXECUTION.md) for the trust boundary, tested
 behavior and remaining L1 integration.
 

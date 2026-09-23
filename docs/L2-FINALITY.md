@@ -90,6 +90,24 @@ the checked-in state with:
 python3 tools/check-finality-readiness.py
 python3 tools/check-finality-readiness.py --require-ready  # expected to fail now
 ```
+
+## Exact native transaction inclusion primitive
+
+`l1::authenticate_exact_transaction` now derives an
+`AuthenticatedTransactionInclusion` only from a complete body already checked
+by `authenticate_body`. It requires nonempty exact bytes, one and only one
+occurrence, and retains the committed block, slot, transaction index and
+checkpoint. Missing bytes, duplicates and bodies changed by omission, reorder
+or mutation fail closed.
+
+This closes only the byte-inclusion subproblem. The primitive deliberately does
+not hash the bytes under an invented transaction-ID rule and does not interpret
+the dormant experimental settlement payload. Until native consensus assigns a
+reviewed settlement transaction/state transition and validators execute its
+proof, inclusion of arbitrary bytes is not `native-settlement-consensus-active`
+or `l2-settlement-inclusion-verified`, cannot advance a finality cursor and must
+not populate Reth's `finalized` head.
+
 ## RPC tag qualification
 
 The presence of `safe` or `finalized` tags is not finality evidence by itself.

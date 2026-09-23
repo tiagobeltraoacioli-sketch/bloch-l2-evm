@@ -40,6 +40,12 @@ pub enum L1Error {
     BodyLimit,
     /// Transaction bytes/order do not match the header's body commitment.
     BodyRoot,
+    /// An empty byte string cannot identify a native transaction.
+    TransactionEmpty,
+    /// The exact native transaction is not present in the authenticated body.
+    TransactionMissing,
+    /// The exact native transaction occurs more than once, so its position is ambiguous.
+    TransactionAmbiguous,
 }
 
 /// A target header proved to be on the complete parent path to an externally
@@ -103,6 +109,74 @@ impl AuthenticatedBody {
     pub fn transactions(&self) -> &[Bytes] {
         &self.transactions
     }
+}
+
+/// Exact transaction bytes and position proved inside an authenticated native
+/// block body. Private fields prevent callers from manufacturing an inclusion
+/// capability from an RPC response or a transaction hash alone.
+///
+/// This proves byte inclusion below the externally authenticated checkpoint. It
+/// does not interpret the transaction, prove that native consensus assigns it a
+/// settlement transition, verify an execution proof or finalize an L2 block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedTransactionInclusion {
+    block: B256,
+    slot: u64,
+    checkpoint: FinalizedCheckpoint,
+    transaction_index: u32,
+    transaction: Bytes,
+}
+impl AuthenticatedTransactionInclusion {
+    /// Native block whose complete body contains the transaction.
+    pub fn block(&self) -> B256 {
+        self.block
+    }
+    /// Consensus slot of that native block; this is not a block height.
+    pub fn slot(&self) -> u64 {
+        self.slot
+    }
+    /// External checkpoint terminating the authenticated ancestry path.
+    pub fn checkpoint(&self) -> FinalizedCheckpoint {
+        self.checkpoint
+    }
+    /// Zero-based position in the complete canonical body.
+    pub fn transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
+    /// Exact committed transaction bytes, without an invented transaction-ID rule.
+    pub fn transaction(&self) -> &[u8] {
+        &self.transaction
+    }
+}
+
+/// Select one exact, unique transaction from a previously authenticated body.
+///
+/// Requiring uniqueness prevents a later settlement adapter from accidentally
+/// binding a commitment to an unspecified occurrence. The complete-body bounds
+/// enforced by [`authenticate_body`] guarantee the index fits in `u32`.
+pub fn authenticate_exact_transaction(
+    body: &AuthenticatedBody,
+    exact_transaction: &[u8],
+) -> Result<AuthenticatedTransactionInclusion, L1Error> {
+    if exact_transaction.is_empty() {
+        return Err(L1Error::TransactionEmpty);
+    }
+    let mut matches = body
+        .transactions
+        .iter()
+        .enumerate()
+        .filter(|(_, transaction)| transaction.as_ref() == exact_transaction);
+    let (index, transaction) = matches.next().ok_or(L1Error::TransactionMissing)?;
+    if matches.next().is_some() {
+        return Err(L1Error::TransactionAmbiguous);
+    }
+    Ok(AuthenticatedTransactionInclusion {
+        block: body.block,
+        slot: body.slot,
+        checkpoint: body.checkpoint,
+        transaction_index: index as u32,
+        transaction: transaction.clone(),
+    })
 }
 
 struct Header {
@@ -220,4 +294,28 @@ pub fn authenticate_body(
         checkpoint: ancestry.checkpoint,
         transactions: transactions.to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_exact_bytes_are_not_an_inclusion_capability() {
+        let transaction = Bytes::from_static(b"same canonical transaction");
+        let body = AuthenticatedBody {
+            block: B256::repeat_byte(1),
+            slot: 2,
+            state_root: B256::repeat_byte(3),
+            checkpoint: FinalizedCheckpoint {
+                block: B256::repeat_byte(4),
+                slot: 5,
+            },
+            transactions: vec![transaction.clone(), transaction.clone()],
+        };
+        assert_eq!(
+            authenticate_exact_transaction(&body, &transaction).unwrap_err(),
+            L1Error::TransactionAmbiguous
+        );
+    }
 }

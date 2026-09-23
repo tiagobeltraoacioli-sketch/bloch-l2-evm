@@ -1,5 +1,7 @@
 use alloy_primitives::{Bytes, B256};
-use bloch_l2_evm::l1::{authenticate_ancestry, authenticate_body, FinalizedCheckpoint, L1Error};
+use bloch_l2_evm::l1::{
+    authenticate_ancestry, authenticate_body, authenticate_exact_transaction, FinalizedCheckpoint, L1Error,
+};
 use serde_json::Value;
 use std::str::FromStr;
 fn decode(s: &str) -> Bytes {
@@ -44,6 +46,32 @@ fn official_consensus_vectors_cover_empty_even_and_odd_trees() {
         assert_eq!(verified.checkpoint(), cp);
         assert_eq!(verified.transactions(), txs);
     }
+}
+
+#[test]
+fn exact_unique_transaction_inclusion_is_position_bound() {
+    let (checkpoint, headers, transactions) = fixture(4);
+    let body = authenticate_body(checkpoint, &headers, &transactions).unwrap();
+    let included = authenticate_exact_transaction(&body, &transactions[2]).unwrap();
+    assert_eq!(included.block(), body.block());
+    assert_eq!(included.slot(), body.slot());
+    assert_eq!(included.checkpoint(), checkpoint);
+    assert_eq!(included.transaction_index(), 2);
+    assert_eq!(included.transaction(), transactions[2].as_ref());
+}
+
+#[test]
+fn transaction_selection_rejects_empty_and_missing_bytes() {
+    let (checkpoint, headers, transactions) = fixture(4);
+    let body = authenticate_body(checkpoint, &headers, &transactions).unwrap();
+    assert_eq!(
+        authenticate_exact_transaction(&body, &[]).unwrap_err(),
+        L1Error::TransactionEmpty
+    );
+    assert_eq!(
+        authenticate_exact_transaction(&body, b"not in the committed body").unwrap_err(),
+        L1Error::TransactionMissing
+    );
 }
 #[test]
 fn ancestry_authenticates_the_anchor_without_claiming_body_or_finality() {
