@@ -248,10 +248,17 @@ evidence. Restart remains blocked until the stopped host independently verifies 
 exact durable identity/head and explicitly acknowledges recovery. A head ahead of
 or behind the journal is never repaired or guessed. The journal is local consistency
 evidence—not genesis authentication, fork choice, L1 finality or a production node.
-The monotonically increasing generation detects out-of-order writes during one
-observed lifecycle, but a single local file and unkeyed checksum cannot detect an
-attacker restoring an entire older valid record. Operators must retain an external
-minimum generation or authenticated audit copy when rollback resistance is required.
+Every snapshot transition also appends an exact-record receipt containing its
+sequence, previous receipt digest and domain-separated digest. Full-chain verification
+rejects truncation, gaps, reordering, forks and a snapshot that differs from the tip.
+Operators may retain a `(sequence, digest)` floor externally and require it during
+startup; this detects restoration of both an older valid snapshot and its matching
+old receipt log. The node does not authenticate that floor. Without independently
+protected floor provenance, a coordinated rollback of both local files remains valid.
+Each transition fsyncs its receipt before replacing the snapshot. This is deliberately
+not claimed as a cross-file transaction: interruption in that window leaves the log
+ahead of the snapshot, and verification blocks startup for forensic recovery rather
+than discarding the receipt or guessing which state should win.
 
 Attachment also checks configured genesis accounts, code and storage through
 historical reads; missing allocation indices reject startup without repair.

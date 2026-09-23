@@ -8,12 +8,15 @@ use alloy_primitives::{keccak256, B256};
 use reth_primitives_traits::SealedHeader;
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAGIC: &str = "bloch-l2-runtime-v1";
+const RECEIPT_MAGIC: &[u8] = b"BLOCH-L2-RUNTIME-RECEIPTS-V1\n";
+const RECEIPT_DOMAIN: &[u8] = b"bloch-l2-runtime-receipt-v1\0";
+const MAX_RECEIPT_RECORD_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurableHead {
@@ -67,6 +70,14 @@ pub struct RuntimeRecord {
     pub status: RuntimeStatus,
 }
 
+/// Externally retained minimum receipt. Supplying this value authenticates
+/// nothing by itself; the caller is responsible for the floor's provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeReceiptFloor {
+    pub sequence: u64,
+    pub digest: B256,
+}
+
 /// Exclusive lifecycle lease. Dropping it without [`Self::shutdown`] deliberately
 /// leaves both a `running` record and the lock file as crash evidence.
 pub struct RuntimeLease {
@@ -82,8 +93,28 @@ impl RuntimeLease {
     /// The existing record must be clean and must exactly match the independently
     /// checked storage head. First use requires [`initialize_runtime_record`].
     pub fn acquire(path: impl AsRef<Path>, identity: RuntimeIdentity, head: DurableHead) -> io::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let existing = read_runtime_record(&path)?;
+        Self::acquire_inner(path.as_ref(), identity, head, None)
+    }
+
+    /// Acquire only if the complete local chain contains the externally retained
+    /// floor at its exact sequence. The floor's authenticity remains a host input.
+    pub fn acquire_with_floor(
+        path: impl AsRef<Path>,
+        identity: RuntimeIdentity,
+        head: DurableHead,
+        floor: RuntimeReceiptFloor,
+    ) -> io::Result<Self> {
+        Self::acquire_inner(path.as_ref(), identity, head, Some(floor))
+    }
+
+    fn acquire_inner(
+        path: &Path,
+        identity: RuntimeIdentity,
+        head: DurableHead,
+        floor: Option<RuntimeReceiptFloor>,
+    ) -> io::Result<Self> {
+        let path = path.to_path_buf();
+        let (existing, _) = read_runtime_record_inner(&path, floor)?;
         verify_identity_and_head(existing, identity, head)?;
         if existing.status != RuntimeStatus::Clean {
             return Err(invalid("unclean runtime record requires explicit recovery"));
@@ -203,6 +234,7 @@ pub fn initialize_runtime_record(
         status: RuntimeStatus::Clean,
     };
     let bytes = encode_record(record);
+    initialize_receipts(path, record, bytes.as_bytes())?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -254,11 +286,34 @@ pub fn acknowledge_recovered_runtime(
 }
 
 pub fn read_runtime_record(path: impl AsRef<Path>) -> io::Result<RuntimeRecord> {
+    read_runtime_record_inner(path.as_ref(), None).map(|(record, _)| record)
+}
+
+/// Read the current record and require the append-only receipt chain to include
+/// the caller's externally retained floor at its exact sequence.
+pub fn read_runtime_record_with_floor(path: impl AsRef<Path>, floor: RuntimeReceiptFloor) -> io::Result<RuntimeRecord> {
+    read_runtime_record_inner(path.as_ref(), Some(floor)).map(|(record, _)| record)
+}
+
+/// Verify the snapshot and full local receipt chain, returning its current tip.
+pub fn runtime_receipt_tip(
+    path: impl AsRef<Path>,
+    floor: Option<RuntimeReceiptFloor>,
+) -> io::Result<RuntimeReceiptFloor> {
+    read_runtime_record_inner(path.as_ref(), floor).map(|(_, tip)| tip)
+}
+
+fn read_runtime_record_inner(
+    path: &Path,
+    floor: Option<RuntimeReceiptFloor>,
+) -> io::Result<(RuntimeRecord, RuntimeReceiptFloor)> {
     let path = path.as_ref();
     verify_parent(path)?;
     verify_regular_single_link(path)?;
     let bytes = fs::read(path)?;
-    parse_record(&bytes)
+    let record = parse_record(&bytes)?;
+    let tip = verify_receipts(path, record, &bytes, floor)?;
+    Ok((record, tip))
 }
 
 fn verify_identity_and_head(record: RuntimeRecord, identity: RuntimeIdentity, head: DurableHead) -> io::Result<()> {
@@ -309,6 +364,11 @@ fn write_record(path: &Path, record: RuntimeRecord) -> io::Result<()> {
     verify_parent(path)?;
     verify_regular_single_link(path)?;
     let bytes = encode_record(record);
+    let current = read_runtime_record(path)?;
+    if current.generation.checked_add(1) != Some(record.generation) {
+        return Err(invalid("runtime receipt sequence must advance exactly once"));
+    }
+    append_receipt(path, record, bytes.as_bytes())?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| invalid("system clock predates Unix epoch"))?
@@ -332,6 +392,140 @@ fn write_record(path: &Path, record: RuntimeRecord) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn receipt_path(path: &Path) -> io::Result<PathBuf> {
+    sidecar(path, "receipts")
+}
+
+fn receipt_frame(record: RuntimeRecord, previous: B256, bytes: &[u8]) -> io::Result<(Vec<u8>, B256)> {
+    let length: u32 = bytes
+        .len()
+        .try_into()
+        .map_err(|_| invalid("runtime receipt record is too large"))?;
+    if bytes.len() > MAX_RECEIPT_RECORD_BYTES {
+        return Err(invalid("runtime receipt record is too large"));
+    }
+    let mut body = Vec::with_capacity(8 + 32 + 4 + bytes.len());
+    body.extend_from_slice(&record.generation.to_be_bytes());
+    body.extend_from_slice(previous.as_slice());
+    body.extend_from_slice(&length.to_be_bytes());
+    body.extend_from_slice(bytes);
+    let mut committed = Vec::with_capacity(RECEIPT_DOMAIN.len() + body.len());
+    committed.extend_from_slice(RECEIPT_DOMAIN);
+    committed.extend_from_slice(&body);
+    let digest = keccak256(committed);
+    body.extend_from_slice(digest.as_slice());
+    Ok((body, digest))
+}
+
+fn initialize_receipts(path: &Path, record: RuntimeRecord, bytes: &[u8]) -> io::Result<()> {
+    let receipts = receipt_path(path)?;
+    let (frame, _) = receipt_frame(record, B256::ZERO, bytes)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&receipts)?;
+    file.write_all(RECEIPT_MAGIC)?;
+    file.write_all(&frame)?;
+    file.sync_all()?;
+    verify_regular_single_link(&receipts)?;
+    sync_parent(path)
+}
+
+fn append_receipt(path: &Path, record: RuntimeRecord, bytes: &[u8]) -> io::Result<()> {
+    let receipts = receipt_path(path)?;
+    verify_regular_single_link(&receipts)?;
+    let tip = runtime_receipt_tip(path, None)?;
+    if tip.sequence.checked_add(1) != Some(record.generation) {
+        return Err(invalid("runtime receipt tip does not precede new record"));
+    }
+    let (frame, _) = receipt_frame(record, tip.digest, bytes)?;
+    let mut file = OpenOptions::new().append(true).open(receipts)?;
+    file.write_all(&frame)?;
+    file.sync_all()
+}
+
+fn verify_receipts(
+    path: &Path,
+    expected: RuntimeRecord,
+    expected_bytes: &[u8],
+    floor: Option<RuntimeReceiptFloor>,
+) -> io::Result<RuntimeReceiptFloor> {
+    let receipts = receipt_path(path)?;
+    verify_regular_single_link(&receipts)?;
+    let mut file = File::open(receipts)?;
+    let mut magic = vec![0; RECEIPT_MAGIC.len()];
+    file.read_exact(&mut magic)?;
+    if magic != RECEIPT_MAGIC {
+        return Err(invalid("runtime receipt log version disagrees"));
+    }
+    let mut previous = B256::ZERO;
+    let mut expected_sequence = 0u64;
+    let mut tip = None;
+    let mut floor_seen = floor.is_none();
+    loop {
+        let mut sequence_bytes = [0u8; 8];
+        match file.read(&mut sequence_bytes[..1])? {
+            0 => break,
+            1 => file.read_exact(&mut sequence_bytes[1..])?,
+            _ => unreachable!(),
+        }
+        let sequence = u64::from_be_bytes(sequence_bytes);
+        let mut previous_bytes = [0u8; 32];
+        file.read_exact(&mut previous_bytes)?;
+        let mut length_bytes = [0u8; 4];
+        file.read_exact(&mut length_bytes)?;
+        let length = u32::from_be_bytes(length_bytes) as usize;
+        if length > MAX_RECEIPT_RECORD_BYTES {
+            return Err(invalid("runtime receipt record is too large"));
+        }
+        let mut record_bytes = vec![0; length];
+        file.read_exact(&mut record_bytes)?;
+        let mut digest_bytes = [0u8; 32];
+        file.read_exact(&mut digest_bytes)?;
+        let digest = B256::from(digest_bytes);
+        let linked_previous = B256::from(previous_bytes);
+        if sequence != expected_sequence || linked_previous != previous {
+            return Err(invalid("runtime receipt chain has a gap, reorder or fork"));
+        }
+        let record = parse_record(&record_bytes)?;
+        if record.generation != sequence {
+            return Err(invalid("runtime receipt sequence disagrees with exact record"));
+        }
+        if encode_record(record).as_bytes() != record_bytes {
+            return Err(invalid("runtime receipt record encoding is not canonical"));
+        }
+        let (_, computed) = receipt_frame(record, linked_previous, &record_bytes)?;
+        if computed != digest {
+            return Err(invalid("runtime receipt digest disagrees"));
+        }
+        if let Some(required) = floor {
+            if sequence == required.sequence {
+                if digest != required.digest {
+                    return Err(invalid("runtime receipt floor digest disagrees"));
+                }
+                floor_seen = true;
+            }
+        }
+        tip = Some((RuntimeReceiptFloor { sequence, digest }, record, record_bytes));
+        previous = digest;
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid("runtime receipt sequence overflow"))?;
+    }
+    let (tip, record, record_bytes) = tip.ok_or_else(|| invalid("runtime receipt log is empty"))?;
+    if !floor_seen {
+        return Err(invalid("runtime receipt chain is below external floor"));
+    }
+    if record != expected || record_bytes != expected_bytes {
+        return Err(invalid("runtime snapshot disagrees with receipt tip"));
+    }
+    Ok(tip)
 }
 
 fn encode_record(record: RuntimeRecord) -> String {

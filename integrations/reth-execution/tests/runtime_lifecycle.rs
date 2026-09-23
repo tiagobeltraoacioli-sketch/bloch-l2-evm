@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use alloy_primitives::B256;
 use bloch_reth_execution::{
-    acknowledge_recovered_runtime, initialize_runtime_record, read_runtime_record, DurableHead, RuntimeIdentity,
-    RuntimeLease, RuntimeStatus, SettlementCursor,
+    acknowledge_recovered_runtime, initialize_runtime_record, read_runtime_record, read_runtime_record_with_floor,
+    runtime_receipt_tip, DurableHead, RuntimeIdentity, RuntimeLease, RuntimeReceiptFloor, RuntimeStatus,
+    SettlementCursor,
 };
 use std::fs;
 
@@ -133,4 +134,88 @@ fn recovery_completes_a_clean_record_with_a_leftover_lock() {
     acknowledge_recovered_runtime(&path, identity(), head(0)).unwrap();
     assert!(!lock.exists());
     assert_eq!(read_runtime_record(&path).unwrap().status, RuntimeStatus::Clean);
+}
+
+fn receipt_frames(bytes: &[u8]) -> (&[u8], Vec<Vec<u8>>) {
+    const HEADER: &[u8] = b"BLOCH-L2-RUNTIME-RECEIPTS-V1\n";
+    assert!(bytes.starts_with(HEADER));
+    let mut offset = HEADER.len();
+    let mut frames = Vec::new();
+    while offset < bytes.len() {
+        let start = offset;
+        let length_offset = start + 8 + 32;
+        let length = u32::from_be_bytes(bytes[length_offset..length_offset + 4].try_into().unwrap()) as usize;
+        offset = length_offset + 4 + length + 32;
+        frames.push(bytes[start..offset].to_vec());
+    }
+    (HEADER, frames)
+}
+
+fn three_receipt_fixture() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>, RuntimeReceiptFloor) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.state");
+    initialize_runtime_record(&path, identity(), head(0)).unwrap();
+    let lease = RuntimeLease::acquire(&path, identity(), head(0)).unwrap();
+    drop(lease);
+    acknowledge_recovered_runtime(&path, identity(), head(0)).unwrap();
+    let floor = runtime_receipt_tip(&path, None).unwrap();
+    let bytes = fs::read(directory.path().join("runtime.state.receipts")).unwrap();
+    (directory, path, bytes, floor)
+}
+
+#[test]
+fn receipt_truncation_gap_reorder_and_fork_fail_closed() {
+    let (directory, path, valid, _) = three_receipt_fixture();
+    let receipts = directory.path().join("runtime.state.receipts");
+    let (header, frames) = receipt_frames(&valid);
+    assert_eq!(frames.len(), 3);
+
+    fs::write(&receipts, &valid[..valid.len() - 1]).unwrap();
+    assert!(read_runtime_record(&path).is_err(), "truncated digest must fail");
+
+    let gap = [header, frames[0].as_slice(), frames[2].as_slice()].concat();
+    fs::write(&receipts, gap).unwrap();
+    assert!(read_runtime_record(&path).is_err(), "missing sequence must fail");
+
+    let reordered = [header, frames[0].as_slice(), frames[2].as_slice(), frames[1].as_slice()].concat();
+    fs::write(&receipts, reordered).unwrap();
+    assert!(read_runtime_record(&path).is_err(), "reordered receipts must fail");
+
+    let mut fork = valid.clone();
+    let second_start = header.len() + frames[0].len();
+    fork[second_start + 8] ^= 1; // Change the linked previous digest.
+    fs::write(&receipts, fork).unwrap();
+    assert!(read_runtime_record(&path).is_err(), "forked previous digest must fail");
+}
+
+#[test]
+fn external_floor_detects_valid_old_record_and_log_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.state");
+    let receipts = directory.path().join("runtime.state.receipts");
+    initialize_runtime_record(&path, identity(), head(0)).unwrap();
+    let old_record = fs::read(&path).unwrap();
+    let old_receipts = fs::read(&receipts).unwrap();
+
+    let lease = RuntimeLease::acquire(&path, identity(), head(0)).unwrap();
+    drop(lease);
+    acknowledge_recovered_runtime(&path, identity(), head(0)).unwrap();
+    let floor = runtime_receipt_tip(&path, None).unwrap();
+    assert_eq!(floor.sequence, 2);
+
+    fs::write(&path, old_record).unwrap();
+    assert!(
+        read_runtime_record(&path).is_err(),
+        "snapshot-only rollback must disagree with receipt tip"
+    );
+    fs::write(&receipts, old_receipts).unwrap();
+    assert_eq!(read_runtime_record(&path).unwrap().generation, 0);
+    assert!(read_runtime_record_with_floor(&path, floor).is_err());
+    assert!(RuntimeLease::acquire_with_floor(&path, identity(), head(0), floor).is_err());
+
+    let wrong = RuntimeReceiptFloor {
+        digest: B256::repeat_byte(0xee),
+        ..runtime_receipt_tip(&path, None).unwrap()
+    };
+    assert!(read_runtime_record_with_floor(&path, wrong).is_err());
 }

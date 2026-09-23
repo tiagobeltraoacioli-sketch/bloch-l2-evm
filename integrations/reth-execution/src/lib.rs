@@ -36,8 +36,9 @@ pub mod rpc_identity;
 pub mod rpc_transport;
 pub mod rpc_types;
 pub use lifecycle::{
-    acknowledge_recovered_runtime, initialize_runtime_record, read_runtime_record, DurableHead, RuntimeIdentity,
-    RuntimeLease, RuntimeRecord, RuntimeStatus, SettlementCursor,
+    acknowledge_recovered_runtime, initialize_runtime_record, read_runtime_record, read_runtime_record_with_floor,
+    runtime_receipt_tip, DurableHead, RuntimeIdentity, RuntimeLease, RuntimeReceiptFloor, RuntimeRecord, RuntimeStatus,
+    SettlementCursor,
 };
 pub use maintenance::{pool_maintenance, MaintenanceConfigError};
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
