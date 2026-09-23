@@ -133,17 +133,23 @@ to accept the exact public bytes.
 is deliberately read-only and repeatable; possession of a token is not a
 single-use permit. A settlement host must atomically verify proof identity and
 public values, ensure that token source/configuration/parent/cursor still match
-its own state, and advance consumption exactly once. No such persistent host is
-implemented by this module.
+its own state, and advance consumption exactly once. The Unix-only
+`verify_and_commit` composition now routes the token and exact proof transport
+through the local settlement store's CAS, kernel verifier and create-once durable
+record, returning a mark for independent retention. It persists the settlement
+cursor only: source-journal durability, native inclusion, checkpoint authority,
+cross-store crash coordination and validator consensus remain external.
 
 The V2 integration test demonstrates why the distinction matters: altered
 recipient, amount and omitted deposits can produce valid real EVM/witness
 execution statements, but this source selector rejects them. Successful chunks
 and an empty suffix match actual V2 execution statements, conserved minted
 balances and three contiguous settlement-kernel transitions. Cross-policy
-composition, a stale registry and empty proof transport are rejected. Unit
-negatives also bind header/post-state changes, malformed signed bytes,
-domain/anchor, cursor bounds and unchanged registry state.
+composition, a stale registry, forged CAS mark, verifier-rejected proof and empty
+proof transport are rejected without advancing the store. Restart recovers the
+exact third settlement from the retained floor. Unit negatives also bind
+header/post-state changes, malformed signed bytes, domain/anchor, cursor bounds
+and unchanged registry state.
 
 The separate [post-genesis source payload](PAYLOAD.md) codec omits the current
 anchor block hash to avoid a self-referential header commitment. Binding a typed

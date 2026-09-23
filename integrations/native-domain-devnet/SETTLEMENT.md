@@ -97,8 +97,14 @@ repeats policy, successor and cryptographic proof verification.
 
 This composer does not strengthen the authority behind `ValidatedV2Prefix` and
 does not make a proof valid. It assigns no Genesis-4 wire tag or state component,
-does not persist either cursor, and cannot replace checkpoint/source
-authentication or validator execution.
+and cannot replace checkpoint/source authentication or validator execution.
+On Unix, `ValidatedSettlementSelectionV1::verify_and_commit` frames the exact
+proof bytes and sends the matching transaction/expectation directly through
+`SettlementStoreV1`'s CAS and durable publication path. The returned mark must
+be retained independently for rollback detection. This persists only the local
+settlement head and consumed cursor; it does not persist the source registry,
+the selection proof, native transaction inclusion or checkpoint authority, and
+it provides no atomic transaction spanning the separate source journal.
 
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.
@@ -158,8 +164,11 @@ invalid slot/cursor ranges, and construction from an actually validated V2
 source prefix. The integration path composes three consecutive selected L2
 blocks through the actual settlement registry, including an empty deposit
 suffix, and rejects cross-domain policy, a stale registry and empty proof
-transport. A mutated header is rejected even when all caller-supplied identities
-remain unchanged.
+transport. The Unix path also rejects a forged CAS mark and a verifier-rejected
+proof without advancing, durably commits all three valid successors, then
+reopens from an independently retainable earlier floor and recovers the exact
+tip. A mutated header is rejected even when all caller-supplied identities remain
+unchanged.
 
 ```sh
 cargo +1.94.1 test --locked --offline \

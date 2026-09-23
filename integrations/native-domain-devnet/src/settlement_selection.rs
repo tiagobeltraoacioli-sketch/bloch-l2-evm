@@ -15,6 +15,43 @@ use bloch_l2_evm::{
     proof_statement::SettlementStatementV2,
 };
 
+#[cfg(unix)]
+use bloch_l2_evm::native_settlement::store::{
+    SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1,
+};
+#[cfg(unix)]
+use bloch_l2_evm::native_settlement::{AcceptedSettlementV1, SettlementProofVerifierV1};
+
+/// Failure while framing or durably publishing one validated selection.
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum SettlementSelectionCommitErrorV1 {
+    /// Exact proof bytes could not form the fixed settlement transaction.
+    Candidate(Error),
+    /// The CAS, kernel verification or durable store publication failed.
+    Store(SettlementStoreErrorV1),
+}
+
+#[cfg(unix)]
+impl core::fmt::Display for SettlementSelectionCommitErrorV1 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Candidate(error) => write!(f, "settlement selection candidate rejected: {error}"),
+            Self::Store(error) => write!(f, "settlement selection commit rejected: {error}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for SettlementSelectionCommitErrorV1 {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Candidate(error) => Some(error),
+            Self::Store(error) => Some(error),
+        }
+    }
+}
+
 /// Independently derived candidate input for the dormant settlement kernel.
 ///
 /// There is no public field constructor. The exact expectation and transaction
@@ -40,6 +77,27 @@ impl ValidatedSettlementSelectionV1 {
     ) -> Result<SettlementTransactionV1, Error> {
         SettlementTransactionV1::new(self.proof_policy, self.expectation.statement, proof)
             .map_err(|_| Error::Codec)
+    }
+
+    /// Verify and publish this exact selection through the durable CAS store.
+    ///
+    /// The caller must independently retain every returned mark. This method
+    /// does not persist the source registry, authenticate a checkpoint or make
+    /// the resulting local head finalized.
+    #[cfg(unix)]
+    pub fn verify_and_commit<V: SettlementProofVerifierV1>(
+        &self,
+        store: &mut SettlementStoreV1,
+        expected: SettlementStoreMarkV1,
+        proof: [u8; SETTLEMENT_PROOF_V1_BYTES],
+        verifier: &V,
+    ) -> Result<(AcceptedSettlementV1, SettlementStoreMarkV1), SettlementSelectionCommitErrorV1> {
+        let transaction = self
+            .transaction(proof)
+            .map_err(SettlementSelectionCommitErrorV1::Candidate)?;
+        store
+            .verify_and_commit(expected, &transaction.encode(), &self.expectation, verifier)
+            .map_err(SettlementSelectionCommitErrorV1::Store)
     }
 }
 

@@ -9,14 +9,22 @@ use bloch_l2_evm::{
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
     node_primitives::NodeBodyV2,
     native_settlement::{
-        SettlementPolicyV1, SettlementProofVerifierV1, SettlementRegistryV1,
+        store::{SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
+        SettlementError, SettlementPolicyV1, SettlementProofVerifierV1, SettlementRegistryV1,
         SETTLEMENT_PROOF_V1_BYTES,
     },
     proof_statement::execute_statement,
     scale::sats_to_wei,
     BlockContext, ChainSpec, DepositMint, DepositPosition, DepositProvenance,
 };
-use bloch_native_domain_devnet::{SettlementPayload, SourceAnchor, SourceBatch, SourceRegistry, MAX_LOCKS};
+use bloch_native_domain_devnet::{
+    SettlementPayload, SettlementSelectionCommitErrorV1, SourceAnchor, SourceBatch, SourceRegistry, MAX_LOCKS,
+};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 struct ExactSettlementVerifier {
     policy: B256,
@@ -26,6 +34,14 @@ impl SettlementProofVerifierV1 for ExactSettlementVerifier {
     fn verify(&self, proof_policy: B256, _: &[u8], proof: &[u8]) -> bool {
         proof_policy == self.policy && proof == [0x5a; SETTLEMENT_PROOF_V1_BYTES]
     }
+}
+
+fn temporary_store() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "bloch-selection-store-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ))
 }
 
 #[test]
@@ -137,7 +153,10 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
         initial_l2_parent_hash: initial_head.hash(),
         initial_l2_state_root: initial_head.state_root,
     };
-    let mut settlement_registry = SettlementRegistryV1::new(settlement_policy).unwrap();
+    let store_path = temporary_store();
+    let mut settlement_store = SettlementStoreV1::create(&store_path, settlement_policy).unwrap();
+    let initial_store_mark = settlement_store.mark();
+    let mut store_mark = initial_store_mark;
     let settlement_verifier = ExactSettlementVerifier {
         policy: settlement_policy.proof_policy,
     };
@@ -195,7 +214,7 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
             let mut wrong_policy = settlement_policy;
             wrong_policy.domain = B256::repeat_byte(0xee);
             assert_eq!(
-                selected.select_settlement_v1(&recorded.header, wrong_policy, &settlement_registry),
+                selected.select_settlement_v1(&recorded.header, wrong_policy, settlement_store.registry()),
                 Err(bloch_native_domain_devnet::Error::Identity)
             );
         } else {
@@ -206,17 +225,50 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
             );
         }
         let selection = selected
-            .select_settlement_v1(&recorded.header, settlement_policy, &settlement_registry)
+            .select_settlement_v1(&recorded.header, settlement_policy, settlement_store.registry())
             .unwrap();
         let expectation = selection.expectation();
         assert_eq!(expectation.statement.l2_header_hash, recorded.header.hash());
         assert_eq!(expectation.statement.consumed_start..expectation.statement.consumed_end, consumed..end);
         assert_eq!(expectation.statement.source_commitment, source.commitment());
         assert!(selection.transaction([0; SETTLEMENT_PROOF_V1_BYTES]).is_err());
-        let transaction = selection.transaction([0x5a; SETTLEMENT_PROOF_V1_BYTES]).unwrap();
-        let accepted_settlement = settlement_registry
-            .verify_and_apply(&transaction.encode(), &expectation, &settlement_verifier)
+        if consumed == 0 {
+            let forged_mark = SettlementStoreMarkV1 {
+                record_digest: B256::repeat_byte(0xff),
+                ..store_mark
+            };
+            assert!(matches!(
+                selection.verify_and_commit(
+                    &mut settlement_store,
+                    forged_mark,
+                    [0x5a; SETTLEMENT_PROOF_V1_BYTES],
+                    &settlement_verifier,
+                ),
+                Err(SettlementSelectionCommitErrorV1::Store(SettlementStoreErrorV1::Cas))
+            ));
+            assert_eq!(settlement_store.mark(), store_mark);
+            assert!(matches!(
+                selection.verify_and_commit(
+                    &mut settlement_store,
+                    store_mark,
+                    [0x5b; SETTLEMENT_PROOF_V1_BYTES],
+                    &settlement_verifier,
+                ),
+                Err(SettlementSelectionCommitErrorV1::Store(
+                    SettlementStoreErrorV1::Settlement(SettlementError::Proof)
+                ))
+            ));
+            assert_eq!(settlement_store.mark(), store_mark);
+        }
+        let (accepted_settlement, next_mark) = selection
+            .verify_and_commit(
+                &mut settlement_store,
+                store_mark,
+                [0x5a; SETTLEMENT_PROOF_V1_BYTES],
+                &settlement_verifier,
+            )
             .unwrap();
+        store_mark = next_mark;
         assert_eq!(accepted_settlement.l2_number, recorded.header.number);
         assert_eq!(accepted_settlement.consumed_end, end);
         let settlement = SettlementPayload::from_validated_prefix(
@@ -259,4 +311,11 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
         // The consuming coordinator owns advancement; validation never consumes.
         consumed = end;
     }
+    drop(settlement_store);
+    let recovered = SettlementStoreV1::open(&store_path, settlement_policy, initial_store_mark).unwrap();
+    assert_eq!(recovered.mark(), store_mark);
+    assert_eq!(recovered.registry().head().unwrap().l2_number, 3);
+    assert_eq!(recovered.registry().head().unwrap().consumed_end, 3);
+    drop(recovered);
+    fs::remove_dir_all(store_path).unwrap();
 }
