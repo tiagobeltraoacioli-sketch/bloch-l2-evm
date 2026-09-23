@@ -63,6 +63,7 @@ impl reth_node_types::NodeTypes for BlochNodeTypes {
 pub mod node_factory;
 pub mod primitives;
 pub mod storage;
+pub mod supervisor;
 pub use block::{
     BlochBlockExecutionCtx, BlochBlockExecutor, BlochBlockExecutorFactory, BlochBlockFinish,
     BlochNodeBlockExecutorFactory, BlochNodeBlockFinish, BlochTxResult,
@@ -73,6 +74,7 @@ pub use primitives::{
     BlochNodeBlock, BlochNodeBody, BlochNodeHeader, BlochNodePrimitives, BlochRethReceipt, BlochRethTransaction,
 };
 pub use storage::{BlochChainStorage, BlochTables, BlochV2Deposits, StoredBlochDeposits};
+pub use supervisor::DurableCanonicalSupervisor;
 
 pub mod context;
 pub mod factory;

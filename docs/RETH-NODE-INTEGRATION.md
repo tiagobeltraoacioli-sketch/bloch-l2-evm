@@ -260,6 +260,18 @@ not claimed as a cross-file transaction: interruption in that window leaves the 
 ahead of the snapshot, and verification blocks startup for forensic recovery rather
 than discarding the receipt or guessing which state should win.
 
+`DurableCanonicalSupervisor` is the composed sole-writer boundary. Attach derives
+chain ID and genesis hash from the configured provider, attaches the canonical
+coordinator, captures the sealed head/state/receipt commitments, and requires an
+exact lifecycle record for the host-supplied settlement cursor (optionally above an
+external receipt floor). Extend rejects stale parents and regressing/conflicting
+cursors before writing, commits through `CanonicalCoordinator` exactly once, then
+checkpoints the resulting sealed header. Every extension attempt remains poisoned
+unless both steps succeed. In particular, a database success followed by journal
+failure is not retried or reported as success; restart must reconcile the database
+and journal independently. The supervisor compares a cursor but does not authenticate
+its L1 provenance, and it does not make the database and journal atomic together.
+
 Attachment also checks configured genesis accounts, code and storage through
 historical reads; missing allocation indices reject startup without repair.
 `rpc_developer_flow` exercises real HTTP signed deploy/call through the coordinator
