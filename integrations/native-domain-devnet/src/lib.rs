@@ -32,6 +32,9 @@ pub use settlement::{
     MAX_SETTLEMENT_PROOF_BYTES, SETTLEMENT_PAYLOAD_BYTES, SETTLEMENT_PAYLOAD_V2_BYTES, SP1_GROTH16_TRANSPORT_BYTES,
 };
 
+mod settlement_selection;
+pub use settlement_selection::ValidatedSettlementSelectionV1;
+
 const TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SOURCE:1";
 /// Entire retained inbox limit, not a per-page limit. No truncation is permitted.
 pub const MAX_LOCKS: usize = 4096;

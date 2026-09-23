@@ -85,7 +85,7 @@ cargo +1.94.1 test --offline --locked --manifest-path integrations/native-domain
 cargo +1.94.1 clippy --offline --locked --manifest-path integrations/native-domain-devnet/Cargo.toml --all-targets -- -D warnings
 ```
 
-Validation on 2026-09-17: **21 unit tests and 2 execution integration tests passed**,
+Validation on 2026-09-23: **33 unit tests and 2 execution integration tests passed**,
 with no ignored cases; all-target Clippy with warnings denied also passed.
 
 The standalone lockfile starts from the portable core's dependency versions;
@@ -119,6 +119,16 @@ SP1 guest need not change: a host can compare authenticated proof public values
 to `token.statement()`. This does not by itself verify a proof, receipt execution,
 parent canonicality, native finality or source authority.
 
+`select_settlement_v1` composes that private-field token with the exact L2
+header, immutable native settlement policy and the actual settlement registry. It
+derives the public settlement statement and both predecessor values rather than
+accepting them or an accepted-shaped head from a coordinator. It also requires
+the registry's immutable policy commitment to match. Initial parent/cursor rules,
+successor continuity, inbox monotonicity and native-anchor progression fail
+before a canonical settlement candidate is exposed. The settlement kernel
+still rechecks the same transition and the configured proof verifier still has
+to accept the exact public bytes.
+
 `next_sequence` must come from a separately retained settlement cursor. Selection
 is deliberately read-only and repeatable; possession of a token is not a
 single-use permit. A settlement host must atomically verify proof identity and
@@ -129,9 +139,11 @@ implemented by this module.
 The V2 integration test demonstrates why the distinction matters: altered
 recipient, amount and omitted deposits can produce valid real EVM/witness
 execution statements, but this source selector rejects them. Successful chunks
-and an empty suffix match actual V2 execution statements and conserved minted
-balances. Unit negatives also bind header/post-state changes, malformed signed
-bytes, domain/anchor, cursor bounds and unchanged registry state.
+and an empty suffix match actual V2 execution statements, conserved minted
+balances and three contiguous settlement-kernel transitions. Cross-policy
+composition, a stale registry and empty proof transport are rejected. Unit
+negatives also bind header/post-state changes, malformed signed bytes,
+domain/anchor, cursor bounds and unchanged registry state.
 
 The separate [post-genesis source payload](PAYLOAD.md) codec omits the current
 anchor block hash to avoid a self-referential header commitment. Binding a typed

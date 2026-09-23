@@ -257,6 +257,11 @@ impl SettlementRegistryV1 {
         self.head.as_ref()
     }
 
+    /// Immutable policy identity pinned when this registry was created.
+    pub const fn policy_commitment(&self) -> B256 {
+        self.policy_commitment
+    }
+
     /// Canonical commitment to this registry component. This does not assign a
     /// native state key or prove inclusion under a native state root.
     pub fn state_commitment(&self) -> B256 {

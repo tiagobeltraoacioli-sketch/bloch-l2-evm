@@ -83,6 +83,23 @@ is supplied. Likewise,
 `ValidatedV2Prefix` establishes exact source/body selection under the current
 experimental registry; it is not a single-use authorization token.
 
+`ValidatedV2Prefix::select_settlement_v1` is the stricter bridge to the dormant
+native kernel. It derives the complete `SettlementStatementV2` from the selected
+source, exact L2 header, immutable `SettlementPolicyV1` and the supplied
+`SettlementRegistryV1`; callers cannot inject individual statement or accepted
+head fields. The registry's policy commitment must match. For the first settlement it
+requires the configured initial L2 parent/state and cursor zero. For successors
+it derives both predecessor commitments and requires contiguous L2 height,
+parent header/state, consumed cursor, nonregressing inbox and native anchor.
+Only then does it return a private-field `ValidatedSettlementSelectionV1`, which
+can frame exact proof bytes for the kernel. The kernel still independently
+repeats policy, successor and cryptographic proof verification.
+
+This composer does not strengthen the authority behind `ValidatedV2Prefix` and
+does not make a proof valid. It assigns no Genesis-4 wire tag or state component,
+does not persist either cursor, and cannot replace checkpoint/source
+authentication or validator execution.
+
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.
 The isolated settlement V2 harness can generate and reverify the smaller
@@ -138,8 +155,11 @@ Tests cover the canonical field order, exact round trip, every truncated prefix,
 unknown prefix, trailing bytes, mutation of every committed field, all three program
 identities, explicit chain ID, exact proof hashing and byte bound, zero identity,
 invalid slot/cursor ranges, and construction from an actually validated V2
-source prefix. A mutated header is rejected even when all caller-supplied
-identities remain unchanged.
+source prefix. The integration path composes three consecutive selected L2
+blocks through the actual settlement registry, including an empty deposit
+suffix, and rejects cross-domain policy, a stale registry and empty proof
+transport. A mutated header is rejected even when all caller-supplied identities
+remain unchanged.
 
 ```sh
 cargo +1.94.1 test --locked --offline \
