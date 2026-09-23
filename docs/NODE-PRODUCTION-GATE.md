@@ -93,7 +93,7 @@ python3 tools/check-production-node-build-request.py
 python3 tools/check-production-node-build-request.py --require-build-permitted
 ```
 
-The first command verifies the eight hash-bound inputs and reports all nine missing
+The first command verifies the nine hash-bound inputs and reports all nine missing
 decisions. The second always fails for this constraints-only schema. Do not turn
 the synthetic executable into a production container by merely renaming it or
 supplying a Dockerfile; the missing protocol inputs must first be implemented and
@@ -144,14 +144,59 @@ evidence, an adapter without the `synthetic` identity, weakened/reordered covera
 hash drift or any permission. This harness is a future adapter contract and test
 fixture; it does not launch a node or replace authenticated operational evidence.
 
+### Workspace implementation audit and compile-time boundary
+
+`deployment/workspace-production-node-gap-report.json` records a symbol-level
+inspection of four source families at exact Git revisions: the L2 execution
+scaffold, Bloch Genesis-4 L1, the bridge observer and upstream Reth. Each selected
+source file is hash-bound. An optional strict mode re-reads every byte with
+`git show <revision>:<path>` from the local workspace, so dirty worktrees cannot
+silently alter the provenance result.
+
+The audit found useful nearby components but no compatible production entrypoint:
+
+- `BlochConsensus` validates L2 headers but explicitly does not select fork choice
+  or establish native deposit provenance.
+- Genesis-4 `p2p::start`, `engine::run`, `lmd_ghost_head`, genesis and FFG/RPC are
+  the L1 protocol, not chain-700771 L2 consensus or finality.
+- Bridge `BlockSource`/`DepositWatcher` observes custody inputs but does not build,
+  persist or finalize L2 blocks.
+- Reth fork-choice and finalized notifications are generic infrastructure that
+  consume an external authority; they do not define Bloch native derivation or
+  settlement-bound finality.
+
+The report also preserves the read-only observation of legacy
+`bloch-l2.service`: its binary hash is recorded, but it reports chain ID 8400 and
+uses a single local devnet RPC. Its `finalized` tag is therefore observation-only,
+not evidence for chain 700771 or independent production finality.
+
+`integrations/production-entrypoint-api` is a dependency-free Rust interface for
+the nine capabilities. It compiles and tests, but exports
+`PRODUCTION_ENTRYPOINT_REGISTERED = false`, has no concrete implementation and
+keeps all nine capabilities in `MissingCompatibleImplementation` state.
+
+```sh
+cargo test --locked \
+  --manifest-path integrations/production-entrypoint-api/Cargo.toml
+python3 tools/check-workspace-production-node-gap.py \
+  --workspace-root /path/to/repos/github \
+  --require-workspace-provenance
+python3 tools/check-workspace-production-node-gap.py --require-production-ready
+```
+
+The provenance check succeeds only where the exact repositories and revisions
+are available. The production-ready command fails everywhere until a separately
+reviewed type actually implements the composite interface and all operational
+gates are closed with authenticated evidence.
+
 ## Portable qualification package
 
 `tools/node-qualification-package.py` creates a deterministic ZIP containing
 the network identity, registration proposal, finality gate, node gate,
 provisioning preflight, blocked production-build request, production entrypoint
 contract, synthetic conformance plan and fixture, and the exact transitive set of
-evidence files referenced by the two readiness gates plus all eight audited build
-inputs. Every file
+evidence files referenced by the two readiness gates plus all nine audited build
+inputs, the workspace gap report and the three compile-time interface files. Every file
 is inventoried by path, byte length and SHA-256. Verification uses the trusted,
 externally pinned validator suite to re-check the packaged sources; trusting
 only the inventory or a reported boolean is insufficient.
@@ -169,7 +214,8 @@ verifier identity inside the ZIP are self-declarations. Before handoff, record
 the reviewed commit and the verifier-suite SHA-256 through an independent,
 authenticated channel. The suite identity covers this packager, all three
 semantic readiness validators, provisioning preflight, build-request checker and
-entrypoint-contract/conformance checkers. Obtain it from the exact reviewed checkout with:
+entrypoint-contract/conformance checkers, and the workspace-gap checker. Obtain it
+from the exact reviewed checkout with:
 
 ```sh
 python3 tools/node-qualification-package.py verifier-id

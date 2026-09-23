@@ -30,7 +30,7 @@ class ProductionNodeBuildRequestTests(unittest.TestCase):
     def test_checked_in_request_verifies_inputs_but_refuses_build(self) -> None:
         report = MODULE.validate(self.request)
         self.assertEqual(report["chainId"], 700_771)
-        self.assertEqual(report["auditedInputsVerified"], 8)
+        self.assertEqual(report["auditedInputsVerified"], 9)
         self.assertEqual(report["requiredDecisionsMissing"], 9)
         self.assertFalse(report["candidateProductionEligible"])
         self.assertFalse(report["preparedRethTreeVerified"])

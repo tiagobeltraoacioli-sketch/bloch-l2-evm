@@ -1,0 +1,237 @@
+{
+  "schema": "bloch.l2.workspace-production-node-gap-report.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "workspace-audit-non-authorizing",
+  "inspectionBaselineRevision": "8d5032bb5d10968d36cc96e4751e3efb126398e2",
+  "interface": {
+    "crate": "bloch-production-entrypoint-api",
+    "registeredCandidate": false,
+    "files": [
+      {
+        "path": "integrations/production-entrypoint-api/Cargo.toml",
+        "sha256": "783c3c4a2e739335eb492e9306049a8578d42528b7bb34eb4e65fad2845da23a"
+      },
+      {
+        "path": "integrations/production-entrypoint-api/Cargo.lock",
+        "sha256": "d5e413d6ae0daf8747b493900fb6441bc51132d2e7bab37c49da5840ab6a328f"
+      },
+      {
+        "path": "integrations/production-entrypoint-api/src/lib.rs",
+        "sha256": "3d07eb33c0c5b21256b9bec338f7f49166bcc3b139789e7e05b35c7b7516df68"
+      }
+    ]
+  },
+  "runtimeObservations": [
+    {
+      "id": "legacy-bloch-l2-devnet-8400",
+      "provenance": "orchestrator-read-only-observation",
+      "host": "192.248.190.123",
+      "service": "bloch-l2.service",
+      "binary": "/home/ubuntu/bloch-l2-node",
+      "arguments": [
+        "--listen",
+        "127.0.0.1:8545",
+        "--block-time-ms",
+        "2000",
+        "--data-dir",
+        "/home/ubuntu/bloch-l2-data"
+      ],
+      "reportedChainId": 8400,
+      "reportedFinalizedBlock": "0x231836",
+      "binarySha256": "5383794e11e45275a9f23cea20a42befab88d491cc6352c20777751c68471c2a",
+      "buildId": "5abd7f8261fa055876859de5c045f10d2290cacd",
+      "classification": "legacy-single-rpc-devnet",
+      "compatibility": "incompatible-chain-id-and-unproven-finality",
+      "effect": "observation-only"
+    }
+  ],
+  "sources": [
+    {
+      "id": "bloch-l2-execution",
+      "repository": "bloch-l2-evm",
+      "origin": "git@github.com:tiagobeltraoacioli-sketch/bloch-l2-evm.git",
+      "revision": "8d5032bb5d10968d36cc96e4751e3efb126398e2",
+      "protocol": "bloch-l2-execution-scaffold",
+      "sourceChainId": 700771,
+      "compatibility": "partial-l2-non-entrypoint",
+      "symbols": [
+        {
+          "path": "integrations/reth-execution/src/consensus.rs",
+          "sha256": "29302ac342a6de1dd7a0db9f5f6ca2da8f944bc327ba9221fd5030a5961e52cd",
+          "names": ["BlochConsensus"]
+        },
+        {
+          "path": "integrations/reth-execution/src/chainspec.rs",
+          "sha256": "eadae565f345164ad75b56801fe2c67cdbb63d3963ba95b048d5615d308a1813",
+          "names": ["BlochChainSpec"]
+        },
+        {
+          "path": "integrations/native-state-proof/src/checkpoint_reader.rs",
+          "sha256": "8aee9e086c53371b7547f78c252229c2f8b21a57cb8e295817d22b0ba7ea8693",
+          "names": ["read_utxos_with_height", "read_evm_commitment"]
+        },
+        {
+          "path": "src/l1.rs",
+          "sha256": "287cea3144f5cdec019f0b01a419cf5f931fa92d82c708f79b39884ad15b285e",
+          "names": ["FinalizedCheckpoint", "AuthenticatedAncestry", "authenticate_ancestry"]
+        },
+        {
+          "path": "integrations/reth-execution/src/canonical.rs",
+          "sha256": "5a580e1aa7d1d7130fa8b1e67ecc2ad3ade7e4895e602c5e6f240f7295b5ce80",
+          "names": ["CanonicalCoordinator"]
+        },
+        {
+          "path": "integrations/reth-execution/src/rpc.rs",
+          "sha256": "f9ad34d689f26ff9345aeee87beb36c9fb4f2a3f91f4cc5ff865c77bfa2aa9e7",
+          "names": ["NoDerivedPending", "build_eth_api"]
+        },
+        {
+          "path": "integrations/reth-execution/src/recovery.rs",
+          "sha256": "41dcf9880c810361243962725c8e57ad80472ba8b95ed11ab550e1ed95bbbb71",
+          "names": ["replay_canonical_prefix"]
+        },
+        {
+          "path": "integrations/reth-execution/src/bin/bloch-evm-dev.rs",
+          "sha256": "f149595d75169b026e5606c8ded422af94ff08e8ed8d99c76c204a533d34d95f",
+          "names": ["bloch-evm-dev"]
+        }
+      ]
+    },
+    {
+      "id": "bloch-genesis4-l1",
+      "repository": "bloch-wave58-storage",
+      "origin": "https://github.com/tiagobeltraoacioli-sketch/bloch-sis-pow.git",
+      "revision": "ece2a6f8f5778dd835fba7e2000a41ed93879adc",
+      "protocol": "bloch-genesis4-l1-pos",
+      "sourceChainId": null,
+      "compatibility": "l1-only",
+      "symbols": [
+        {
+          "path": "crates/bloch-pos-node/src/p2p.rs",
+          "sha256": "9da7d9cd0540699b07f8824c8740ac8dc4ad1d96fe747678350a6a0d8c5f0488",
+          "names": ["p2p::Config", "p2p::start"]
+        },
+        {
+          "path": "crates/bloch-pos-node/src/engine.rs",
+          "sha256": "5862dd39b28830283b761f4d6f6d94e8cfffa79addef72a4e8baa057f63e5c29",
+          "names": ["engine::Config", "engine::run", "lmd_ghost_head"]
+        },
+        {
+          "path": "crates/bloch-pos-node/src/genesis.rs",
+          "sha256": "d276e1e757447f1a54b8ba4a86870bde2ac9150d319e3063ad1292498c58e76e",
+          "names": ["Manifest", "GenesisAllocation", "load_carryover"]
+        },
+        {
+          "path": "crates/bloch-pos-node/src/rpc.rs",
+          "sha256": "e71c3fee642f856193bd22465bab3452bafd009cd1cb5f4d5c7c058b2e86153b",
+          "names": ["RpcBackend", "EngineBackend", "Finality"]
+        }
+      ]
+    },
+    {
+      "id": "bloch-l2-bridge-observer",
+      "repository": "bloch-l2-bridge",
+      "origin": "git@github.com:tiagobeltraoacioli-sketch/bloch-l2-bridge.git",
+      "revision": "f80883cb9c79baecf26704ca53696fe667534487",
+      "protocol": "bridge-custody-and-observation",
+      "sourceChainId": 700771,
+      "compatibility": "bridge-only",
+      "symbols": [
+        {
+          "path": "src/watcher.rs",
+          "sha256": "7cd89124bb6d578aecb755685303e268cfdb5ef56d0c0ff1c899252a8251bfd5",
+          "names": ["BlockSource", "DepositWatcher", "SourceCheckpoint"]
+        }
+      ]
+    },
+    {
+      "id": "upstream-reth",
+      "repository": "reth-bloch-rpc-snapshot",
+      "origin": "https://github.com/paradigmxyz/reth.git",
+      "revision": "8eb210175687c9f0c889a3b6795c16781d830e3a",
+      "protocol": "generic-ethereum-reth",
+      "sourceChainId": null,
+      "compatibility": "generic-ethereum-only",
+      "symbols": [
+        {
+          "path": "crates/engine/primitives/src/forkchoice.rs",
+          "sha256": "ddcffa88d56bdb45c5405e70e830c49de7dc92b61480348692c3932bc412ab64",
+          "names": ["ForkchoiceStateTracker", "ForkchoiceStatus"]
+        },
+        {
+          "path": "crates/chain-state/src/notifications.rs",
+          "sha256": "604d9512f8c132001cb44ce414561004b3753e4b360eb8dbc3237b27f0f7f5a6",
+          "names": ["ForkChoiceSubscriptions", "subscribe_finalized_block"]
+        }
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "capabilityId": "p2p-networking",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-genesis4-l1", "upstream-reth"],
+      "requiredProtocol": "chain-700771-authenticated-l2-peer-domain",
+      "incompatibility": "Bloch P2P is the Genesis-4 L1 protocol; Reth P2P is not wired to Bloch V2 primitives or an authenticated L2 fork choice."
+    },
+    {
+      "capabilityId": "authenticated-native-l1-derivation",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution", "bloch-l2-bridge-observer"],
+      "requiredProtocol": "continuous-authenticated-native-checkpoint-ancestry-deposit-pipeline",
+      "incompatibility": "Readers and pure authentication helpers exist, but no production service feeds authenticated native inputs into L2 block construction and persists the cursor."
+    },
+    {
+      "capabilityId": "production-consensus",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution", "bloch-genesis4-l1", "upstream-reth"],
+      "requiredProtocol": "l2-block-production-fork-choice-reorg-policy",
+      "incompatibility": "BlochConsensus validates headers only; LMD-GHOST/FFG belongs to L1; upstream Reth expects an external Ethereum fork-choice authority."
+    },
+    {
+      "capabilityId": "finalized-head",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution", "bloch-genesis4-l1", "upstream-reth"],
+      "requiredProtocol": "native-settlement-bound-non-regressing-l2-finality",
+      "incompatibility": "L1 FFG cannot be reused as L2 finality, the L2 checkpoint type trusts its host, and Reth notifications consume rather than establish finality."
+    },
+    {
+      "capabilityId": "frozen-genesis",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution", "bloch-genesis4-l1"],
+      "requiredProtocol": "reviewed-chain-700771-genesis-bytes-state-root-and-domain",
+      "incompatibility": "The L2 code generates test/developer genesis state; the reviewed frozen production artifact does not exist, while the available Genesis-4 manifest is for L1."
+    },
+    {
+      "capabilityId": "gated-json-rpc",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution", "bloch-genesis4-l1", "upstream-reth"],
+      "requiredProtocol": "readiness-gated-chain-700771-rpc-with-finalized-semantics",
+      "incompatibility": "The L2 RPC composition is exercised only by the synthetic developer process; L1 RPC is a different protocol and generic Reth has no Bloch readiness gate."
+    },
+    {
+      "capabilityId": "durable-persistence",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution", "upstream-reth"],
+      "requiredProtocol": "atomic-l2-head-state-receipts-and-settlement-cursor",
+      "incompatibility": "Synthetic canonical persistence exists, but it is not atomically bound to authenticated derivation/finality and its multi-store crash matrix is unqualified."
+    },
+    {
+      "capabilityId": "graceful-shutdown",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution"],
+      "requiredProtocol": "production-admission-drain-storage-close-restart-verification",
+      "incompatibility": "The developer binary performs orderly runtime shutdown only in mandatory synthetic mode; no production admission or derivation services exist to drain."
+    },
+    {
+      "capabilityId": "crash-recovery",
+      "status": "missing-compatible-implementation",
+      "nearbySourceIds": ["bloch-l2-execution"],
+      "requiredProtocol": "authenticated-deterministic-replay-or-reviewed-rollback",
+      "incompatibility": "replay_canonical_prefix trusts recorded local canonical selection and explicitly does not authenticate L1 derivation or establish finality."
+    }
+  ],
+  "productionEntrypointCandidate": null,
+  "productionReady": false
+}

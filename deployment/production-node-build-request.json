@@ -50,6 +50,11 @@
       "path": "deployment/production-entrypoint-conformance.json",
       "role": "production-entrypoint-conformance-plan",
       "sha256": "3b24cc8492828162a88af595667326c9f97609ec4be639f7ea03bd71860f4d98"
+    },
+    {
+      "path": "deployment/workspace-production-node-gap-report.json",
+      "role": "workspace-production-node-gap-report",
+      "sha256": "f568bf9f61b4d77ba98cb1b18c544527eaa1ff06a8820190566f30c6a0d9a2fe"
     }
   ],
   "externalReth": {

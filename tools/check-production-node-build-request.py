@@ -28,6 +28,7 @@ ROLES = [
     "synthetic-entrypoint", "external-source-verifier", "external-source-patch",
     "production-entrypoint-contract",
     "production-entrypoint-conformance-plan",
+    "workspace-production-node-gap-report",
 ]
 DECISIONS = [
     "production-node-entrypoint", "frozen-production-genesis",

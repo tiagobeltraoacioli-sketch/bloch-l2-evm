@@ -1,0 +1,13 @@
+[package]
+name = "bloch-production-entrypoint-api"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94.1"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Non-authorizing interface contract for a future Bloch L2 production entrypoint"
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"

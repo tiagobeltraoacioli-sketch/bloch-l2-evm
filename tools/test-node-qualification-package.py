@@ -49,7 +49,7 @@ class NodeQualificationPackageTest(unittest.TestCase):
             self.assertEqual(one.read_bytes(), two.read_bytes())
             report = self.verify(one)
             self.assertEqual(report["sourceRevision"], REVISION)
-            self.assertEqual(report["filesVerified"], 15)
+            self.assertEqual(report["filesVerified"], 19)
             with zipfile.ZipFile(one, "r") as archive:
                 self.assertIn("deployment/l2-node.json", archive.namelist())
                 self.assertIn(
@@ -65,6 +65,12 @@ class NodeQualificationPackageTest(unittest.TestCase):
                     "tests/fixtures/production-entrypoint-synthetic-observations.json",
                     archive.namelist(),
                 )
+                self.assertIn(
+                    "deployment/workspace-production-node-gap-report.json", archive.namelist()
+                )
+                self.assertIn(
+                    "integrations/production-entrypoint-api/src/lib.rs", archive.namelist()
+                )
             self.assertFalse(report["identityProductionReady"])
             self.assertFalse(report["finality"]["productionFinalityReady"])
             self.assertFalse(report["node"]["bindPermitted"])
@@ -72,6 +78,7 @@ class NodeQualificationPackageTest(unittest.TestCase):
             self.assertFalse(report["productionBuild"]["buildPermitted"])
             self.assertFalse(report["productionEntrypoint"]["productionReady"])
             self.assertFalse(report["entrypointConformance"]["productionQualified"])
+            self.assertFalse(report["workspaceGapReport"]["productionReady"])
             self.assertFalse(report["activationPermitted"])
 
     def test_revision_must_be_exact_lowercase_git_sha(self) -> None:
