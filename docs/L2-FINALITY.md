@@ -34,7 +34,7 @@ finalized L2 block.
    `null` and disables bridge mint/release, DEX liquidity and aggregator
    execution.
 
-## Current status (2026-09-22)
+## Current status (2026-09-23)
 
 The public Genesis-4 RPC reports a corroborated finalized block and exposes its
 ID, slot, height and header commitments. Its `getblockbyid` response does not
@@ -53,17 +53,19 @@ settlement inclusion.
 
 The pinned SP1 6.8.0 SDK exposes a Groth16 wrapper whose encoded proof is 352
 bytes (356 bytes with the verifier-key prefix), so a succinct in-block route is
-plausible without raising the native block cap. It is not qualified here: the
-legacy journal requests Core proofs only. A separate V2 journal now provides
+plausible without raising the native block cap. The optional host now contains
+a concrete `SettlementProofVerifierV1` adapter that pins the complete wrapper
+key, trusted guest identity, exact 590-byte public values and canonical proof
+transport, and invokes the real Groth16 verifier. A separate V2 journal provides
 bounded fsync-before-publication framing and full Groth16/source replay, while
 the synthetic settlement V2 harness can request and verify a wrapper offline.
-Neither has passed the required genuine nonempty source-bound proof and complete
-crash/fault qualification. The harness is not
-a native transaction or consensus verifier, and its fixed source/anchor inputs
-are not authenticated native state. The native consensus path still has no
-activated deterministic verifier. The `settlement-proof-transport-qualified`
-requirement therefore remains false until completed generation, tamper, replay,
-resource and validator tests are retained as evidence.
+These pieces have not passed the required genuine native source, validator and
+complete operational qualification. The harness is not a native transaction or
+consensus verifier, and its fixed source/anchor inputs are not authenticated
+native state. The native consensus path still has no activated deterministic
+transition. The `settlement-proof-transport-qualified` requirement therefore
+remains false until completed generation, tamper, replay, resource and validator
+tests are retained as reviewed production evidence.
 
 On 2026-09-21 the release-only local CPU harness generated, persisted and
 independently reverified a real Groth16 wrapper for the exact reviewed host
@@ -110,15 +112,19 @@ proof, inclusion of arbitrary bytes is not `native-settlement-consensus-active`
 or `l2-settlement-inclusion-verified`, cannot advance a finality cursor and must
 not populate Reth's `finalized` head.
 
-The dormant `native_settlement` V1 kernel now closes a narrower transition-shape
+The dormant `native_settlement` V1 kernel closes a narrower transition-shape
 gap: it has fixed canonical framing, pinned policy/program identities, exact
 consensus-selected statement comparison, deterministic proof-verifier input,
-replay-safe predecessor/cursor checks and atomic in-memory publication. It does
-not supply the Genesis-4 transaction decoder, state-component inclusion,
-authenticated expectation construction, SP1 verifier implementation, durable
-commit, reorg handling or validator conformance evidence. Consequently it does
-not satisfy `native-settlement-consensus-active` or
-`l2-settlement-inclusion-verified`, and RPC `finalized` remains `null`.
+replay-safe predecessor/cursor checks and atomic in-memory publication. The
+`settlement_admission` adapter composes that kernel with exact authenticated body
+inclusion and binds the distinct earlier source anchor to the later containing
+block. The optional Unix store adds single-writer, create-once snapshots, CAS
+marks and an externally retained rollback floor. Neither component supplies a
+Genesis-4 transaction decoder/state key, checkpoint authority, consensus-owned
+expectation construction, validator execution, distributed durability, reorg
+handling or conformance evidence. Consequently they do not satisfy
+`native-settlement-consensus-active`, `l2-settlement-inclusion-verified` or
+`settlement-cursor-durable`, and RPC `finalized` remains `null`.
 
 ## RPC tag qualification
 

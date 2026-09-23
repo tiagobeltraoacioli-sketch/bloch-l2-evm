@@ -91,6 +91,10 @@ impl TrustedProgram {
         self.identity
     }
 
+    pub(crate) fn verifying_key_bn254_string(&self) -> String {
+        self.key.bytes32()
+    }
+
     /// `expected` is independently trusted selection, never decoded from the
     /// proof itself. The returned capability retains the exact verified proof.
     pub fn verify(

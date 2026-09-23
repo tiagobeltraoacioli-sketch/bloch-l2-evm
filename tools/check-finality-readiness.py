@@ -29,6 +29,11 @@ TOP_FIELDS = {
 REQUIREMENT_FIELDS = {"id", "satisfied", "evidence"}
 EVIDENCE_FIELDS = {"artifact", "sha256", "verifiedAt"}
 PERMISSION_FIELDS = {"bridgeMintRelease", "dexLiquidity", "aggregatorExecution"}
+ATTESTATION_FIELDS = {
+    "schema", "network", "chainId", "requirementId", "classification",
+    "conclusion", "reviewedAt", "support", "limitations",
+}
+SUPPORT_FIELDS = {"artifact", "sha256"}
 
 
 class FinalityError(ValueError):
@@ -40,10 +45,20 @@ def require(condition: bool, message: str) -> None:
         raise FinalityError(message)
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        require(key not in result, f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def load(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        return json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise FinalityError(f"cannot read {path}: {error}") from error
 
 
@@ -87,6 +102,67 @@ def validate_evidence(
             ) from error
         require(parsed_date.isoformat() == verified_at,
                 f"{requirement_id} evidence verifiedAt is invalid")
+        validate_attestation(
+            artifact_path, artifact, requirement_id, verified_at, evidence_root
+        )
+
+
+def validate_attestation(
+    artifact_path: Path,
+    artifact: Path,
+    requirement_id: str,
+    verified_at: str,
+    evidence_root: Path,
+) -> None:
+    require(
+        artifact.parts[:3] == ("network", "evidence", "requirements")
+        and artifact.suffix == ".json",
+        f"{requirement_id} evidence must be a requirement envelope under network/evidence/requirements",
+    )
+    value = exact_object(load(artifact_path), ATTESTATION_FIELDS,
+                         f"{requirement_id} evidence envelope")
+    require(value["schema"] == "bloch.l2.finality-requirement-evidence.v1",
+            f"{requirement_id} evidence schema is unsupported")
+    require(value["network"] == "bloch-l2-testnet"
+            and type(value["chainId"]) is int and value["chainId"] == 700_771,
+            f"{requirement_id} evidence network identity is invalid")
+    require(value["requirementId"] == requirement_id,
+            f"{requirement_id} evidence audience is invalid")
+    require(value["classification"] == "production-operational-reviewed"
+            and value["conclusion"] == "satisfied",
+            f"{requirement_id} evidence is not a reviewed production satisfaction")
+    require(value["reviewedAt"] == verified_at,
+            f"{requirement_id} evidence review date differs from the manifest")
+    require(value["limitations"] == [],
+            f"{requirement_id} evidence has unresolved limitations")
+    support = value["support"]
+    require(type(support) is list and 1 <= len(support) <= 32,
+            f"{requirement_id} evidence support is invalid")
+    previous: str | None = None
+    repository_root = evidence_root.resolve()
+    for index, item in enumerate(support):
+        record = exact_object(item, SUPPORT_FIELDS,
+                              f"{requirement_id} support {index}")
+        support_name = record["artifact"]
+        require(type(support_name) is str,
+                f"{requirement_id} support path is invalid")
+        support_artifact = Path(support_name)
+        require(not support_artifact.is_absolute()
+                and ".." not in support_artifact.parts
+                and support_artifact.parts[:2] == ("network", "evidence")
+                and support_artifact != artifact
+                and (previous is None or previous < support_name),
+                f"{requirement_id} support paths must be unique, ordered repository evidence")
+        support_path = (repository_root / support_artifact).resolve()
+        require(support_path.is_relative_to(repository_root) and support_path.is_file(),
+                f"{requirement_id} support artifact does not exist")
+        support_digest = record["sha256"]
+        require(type(support_digest) is str and len(support_digest) == 64
+                and all(char in "0123456789abcdef" for char in support_digest),
+                f"{requirement_id} support sha256 is invalid")
+        require(hashlib.sha256(support_path.read_bytes()).hexdigest() == support_digest,
+                f"{requirement_id} support sha256 does not match its artifact")
+        previous = support_name
 
 
 def validate(finality: Any, identity: Any, evidence_root: Path = ROOT) -> dict[str, Any]:

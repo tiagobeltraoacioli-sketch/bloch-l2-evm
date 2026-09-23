@@ -9,8 +9,13 @@ The gate covers the selected chain identity, frozen production genesis,
 execution domain, P2P policy, authenticated checkpoint policy, source
 derivation policy, settlement policy, and finality policy. Marking a requirement
 satisfied requires a repository-relative artifact and its exact SHA-256 digest.
-This hash binding records the reviewed input; it does not replace review of the
-artifact or operational qualification.
+For the finality gate, that artifact must now be a strict requirement envelope
+under `network/evidence/requirements/`. It binds the exact requirement, network,
+chain ID, reviewed conclusion/date and an ordered, hash-bound set of supporting
+artifacts under `network/evidence/`; unresolved limitations fail closed. This
+prevents an arbitrary repository file from satisfying a finality requirement.
+The envelope remains a reviewed record, not self-authenticating proof: reviewer
+authority and its retained hash still require an independent trust channel.
 
 `productionReady` and `bind.enabled` are derived values. Both must equal the
 conjunction of every requirement. A disabled bind must not publish endpoints;

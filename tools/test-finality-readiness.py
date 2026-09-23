@@ -63,10 +63,27 @@ class FinalityReadinessTest(unittest.TestCase):
             evidence_root = Path(directory)
             ready = deepcopy(self.finality)
             for item in ready["requirements"]:
-                artifact = Path("evidence") / f"{item['id']}.json"
+                support = Path("network/evidence/support") / f"{item['id']}.log"
+                support_path = evidence_root / support
+                support_path.parent.mkdir(parents=True, exist_ok=True)
+                support_path.write_text(f"reviewed support for {item['id']}", encoding="utf-8")
+                artifact = Path("network/evidence/requirements") / f"{item['id']}.json"
                 artifact_path = evidence_root / artifact
-                artifact_path.parent.mkdir(exist_ok=True)
-                artifact_path.write_text(item["id"], encoding="utf-8")
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(json.dumps({
+                    "schema": "bloch.l2.finality-requirement-evidence.v1",
+                    "network": "bloch-l2-testnet",
+                    "chainId": 700_771,
+                    "requirementId": item["id"],
+                    "classification": "production-operational-reviewed",
+                    "conclusion": "satisfied",
+                    "reviewedAt": "2026-09-20",
+                    "support": [{
+                        "artifact": support.as_posix(),
+                        "sha256": hashlib.sha256(support_path.read_bytes()).hexdigest(),
+                    }],
+                    "limitations": [],
+                }), encoding="utf-8")
                 item["satisfied"] = True
                 item["evidence"] = [{
                     "artifact": artifact.as_posix(),
@@ -80,6 +97,23 @@ class FinalityReadinessTest(unittest.TestCase):
             identity["activation"]["finalizedRpcVerified"] = True
             report = MODULE.validate(ready, identity, evidence_root)
             self.assertTrue(report["productionFinalityReady"])
+
+    def test_arbitrary_hash_bound_file_cannot_satisfy_a_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_root = Path(directory)
+            artifact = evidence_root / "network/evidence/requirements/checkpoint.json"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("not a requirement evidence envelope", encoding="utf-8")
+            changed = deepcopy(self.finality)
+            item = changed["requirements"][0]
+            item["satisfied"] = True
+            item["evidence"] = [{
+                "artifact": "network/evidence/requirements/checkpoint.json",
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "verifiedAt": "2026-09-20",
+            }]
+            with self.assertRaises(MODULE.FinalityError):
+                MODULE.validate(changed, self.identity, evidence_root)
 
     def test_missing_duplicate_reordered_and_foreign_requirements_are_rejected(self) -> None:
         cases = []

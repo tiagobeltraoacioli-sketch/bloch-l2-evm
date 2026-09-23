@@ -34,6 +34,17 @@ legacy Groth16 qualification token. It may advance only an explicitly supplied
 local V2 cursor after exact expectation and header-continuity checks; it does
 not write the legacy journal or any native consensus state.
 
+With `source-settlement`, `Sp1SettlementProofVerifierV1` is the concrete,
+fail-closed implementation of the dormant native kernel's proof-verifier
+boundary. It accepts only the fixed 356-byte SP1 Groth16 transport, exact
+590-byte settlement V2 public values, the program identity derived from the
+trusted ELF, and the proof-policy commitment derived from SP1 6.8.0 plus the
+SHA-256 digest of the complete compiled-in wrapper verification key. It invokes
+`sp1_verifier::Groth16Verifier` directly; malformed inputs and cryptographic
+failure return `false`. This adapter does not authenticate
+`SettlementExpectationV1`, assign consensus tags or state keys, persist a
+registry, or enable any RPC or production gate.
+
 ## Commands
 
 Build the guest first. Run these from this directory, setting `BLOCH_GUEST_ELF`

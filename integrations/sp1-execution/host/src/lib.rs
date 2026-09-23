@@ -5,6 +5,8 @@
 //! consensus selection or withdrawal authority.
 #[cfg(feature = "node-artifact")]
 pub mod artifact;
+#[cfg(feature = "source-settlement")]
+pub mod native_settlement_verifier;
 pub mod settlement;
 #[cfg(all(feature = "source-settlement", unix))]
 pub mod source_journal;

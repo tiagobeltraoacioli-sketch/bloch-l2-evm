@@ -108,10 +108,13 @@ This is still an inert transition kernel, not a Genesis-4 integration. Its
 experimental discriminator is not a native transaction tag, its registry
 commitment has no assigned native component key, and
 `SettlementExpectationV1` is deliberately plain data rather than proof of
-native authentication. A native adapter must derive that expectation from
-committed source/ancestry state, implement the pinned proof verifier, include
-the registry under the native state root and reject invalid blocks. Until then
-the kernel supplies conformance logic only and authorizes no activation.
+native authentication. The optional SP1 host now implements its narrow
+`SettlementProofVerifierV1` boundary with the pinned SP1 6.8.0 Groth16 verifier,
+complete wrapper-key policy commitment, exact public values and canonical
+356-byte transport. A native adapter must still derive the expectation from
+committed source/ancestry state, include the registry under the native state
+root and reject invalid blocks. Until then the kernel supplies conformance logic
+only and authorizes no activation.
 
 An accepted proof for another program, domain, configuration, parent, source,
 body or consumed range must fail without advancing either cursor. Replaying the

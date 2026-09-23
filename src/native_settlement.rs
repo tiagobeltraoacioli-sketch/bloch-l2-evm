@@ -13,6 +13,9 @@ use crate::proof_statement::{SettlementStatementV2, SettlementStatementV2Error, 
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 
+#[cfg(feature = "std")]
+pub mod store;
+
 /// Experimental wire discriminator. It is not an assigned native transaction tag.
 pub const EXPERIMENTAL_SETTLEMENT_TX_V1_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-TX:1";
 /// The only proof transport admitted by this version: SP1 Groth16's canonical
