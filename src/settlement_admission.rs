@@ -11,7 +11,7 @@
 use crate::l1::{AuthenticatedTransactionInclusion, FinalizedCheckpoint};
 use crate::native_settlement::{
     AcceptedSettlementV1, SettlementError, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
-    SettlementRegistryV1, SettlementTransactionV1,
+    SettlementRegistryV1, SettlementTransactionV1, SETTLEMENT_TX_V1_BYTES,
 };
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
@@ -33,6 +33,97 @@ pub struct SettlementAdmissionExpectationV1 {
     pub checkpoint: FinalizedCheckpoint,
     /// Exact zero-based transaction position in the complete body.
     pub transaction_index: u32,
+}
+
+/// Exact canonical settlement bytes proven present in an authenticated body.
+///
+/// This capability is intentionally non-cloneable and has no public
+/// constructor. It proves inclusion below the supplied checkpoint, not that the
+/// checkpoint itself is authoritative or that validators executed settlement.
+#[derive(Debug)]
+pub struct AuthenticatedSettlementInclusionV1 {
+    transaction: [u8; SETTLEMENT_TX_V1_BYTES],
+    statement: crate::proof_statement::SettlementStatementV2,
+    block: B256,
+    slot: u64,
+    checkpoint: FinalizedCheckpoint,
+    transaction_index: u32,
+    admission_commitment: B256,
+}
+
+impl AuthenticatedSettlementInclusionV1 {
+    /// Exact canonical transaction bytes authenticated in the native body.
+    pub const fn transaction(&self) -> &[u8; SETTLEMENT_TX_V1_BYTES] {
+        &self.transaction
+    }
+
+    /// Exact proof public statement decoded from the authenticated bytes.
+    pub const fn statement(&self) -> &crate::proof_statement::SettlementStatementV2 {
+        &self.statement
+    }
+
+    /// Native block containing the transaction.
+    pub const fn block(&self) -> B256 {
+        self.block
+    }
+
+    /// Native consensus slot of the containing block.
+    pub const fn slot(&self) -> u64 {
+        self.slot
+    }
+
+    /// Checkpoint terminating the authenticated ancestry path.
+    pub const fn checkpoint(&self) -> FinalizedCheckpoint {
+        self.checkpoint
+    }
+
+    /// Exact transaction position in the complete body.
+    pub const fn transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
+
+    /// Commitment to the exact transaction and all inclusion coordinates.
+    pub const fn admission_commitment(&self) -> B256 {
+        self.admission_commitment
+    }
+}
+
+/// Consume a generic exact-byte inclusion and refine it into a settlement-only
+/// capability after checking coordinates, codec, statement and source timing.
+pub fn authenticate_settlement_inclusion(
+    inclusion: AuthenticatedTransactionInclusion,
+    expectation: &SettlementAdmissionExpectationV1,
+) -> Result<AuthenticatedSettlementInclusionV1, SettlementAdmissionErrorV1> {
+    if inclusion.block() != expectation.block
+        || inclusion.slot() != expectation.slot
+        || inclusion.checkpoint() != expectation.checkpoint
+        || inclusion.transaction_index() != expectation.transaction_index
+    {
+        return Err(SettlementAdmissionErrorV1::InclusionExpectation);
+    }
+
+    let transaction =
+        SettlementTransactionV1::decode(inclusion.transaction()).map_err(SettlementAdmissionErrorV1::Codec)?;
+    let canonical = transaction.encode();
+    if canonical.as_slice() != inclusion.transaction() {
+        return Err(SettlementAdmissionErrorV1::NonCanonicalEncoding);
+    }
+    if transaction.statement() != &expectation.settlement.statement {
+        return Err(SettlementAdmissionErrorV1::SettlementExpectation);
+    }
+    if transaction.statement().l1_block == inclusion.block() || transaction.statement().l1_slot >= inclusion.slot() {
+        return Err(SettlementAdmissionErrorV1::SourceAnchor);
+    }
+    let admission_commitment = admission_commitment(transaction.commitment(), &inclusion);
+    Ok(AuthenticatedSettlementInclusionV1 {
+        transaction: canonical,
+        statement: *transaction.statement(),
+        block: inclusion.block(),
+        slot: inclusion.slot(),
+        checkpoint: inclusion.checkpoint(),
+        transaction_index: inclusion.transaction_index(),
+        admission_commitment,
+    })
 }
 
 /// Accepted composition record retained by [`SettlementAdmissionRegistryV1`].
@@ -137,39 +228,19 @@ impl SettlementAdmissionRegistryV1 {
         expectation: &SettlementAdmissionExpectationV1,
         verifier: &V,
     ) -> Result<&AcceptedSettlementAdmissionV1, SettlementAdmissionErrorV1> {
-        if inclusion.block() != expectation.block
-            || inclusion.slot() != expectation.slot
-            || inclusion.checkpoint() != expectation.checkpoint
-            || inclusion.transaction_index() != expectation.transaction_index
-        {
-            return Err(SettlementAdmissionErrorV1::InclusionExpectation);
-        }
-
-        let transaction =
-            SettlementTransactionV1::decode(inclusion.transaction()).map_err(SettlementAdmissionErrorV1::Codec)?;
-        // The V1 codec is fixed-width today. Keep the explicit round-trip check
-        // here so a future decoder relaxation cannot silently weaken admission.
-        if transaction.encode().as_slice() != inclusion.transaction() {
-            return Err(SettlementAdmissionErrorV1::NonCanonicalEncoding);
-        }
-        if transaction.statement().l1_block == inclusion.block() || transaction.statement().l1_slot >= inclusion.slot()
-        {
-            return Err(SettlementAdmissionErrorV1::SourceAnchor);
-        }
-        let exact_transaction = inclusion.transaction();
+        let authenticated = authenticate_settlement_inclusion(inclusion, expectation)?;
         let accepted = self
             .settlement
-            .verify_and_apply(exact_transaction, &expectation.settlement, verifier)
+            .verify_and_apply(authenticated.transaction(), &expectation.settlement, verifier)
             .map_err(SettlementAdmissionErrorV1::Settlement)?;
 
-        let admission_commitment = admission_commitment(&accepted, &inclusion);
         self.head = Some(AcceptedSettlementAdmissionV1 {
             settlement: accepted,
-            block: inclusion.block(),
-            slot: inclusion.slot(),
-            checkpoint: inclusion.checkpoint(),
-            transaction_index: inclusion.transaction_index(),
-            admission_commitment,
+            block: authenticated.block,
+            slot: authenticated.slot,
+            checkpoint: authenticated.checkpoint,
+            transaction_index: authenticated.transaction_index,
+            admission_commitment: authenticated.admission_commitment,
         });
         // Assignment above and borrowing below are infallible; kernel and
         // adapter publication therefore occur as one logical operation.
@@ -177,10 +248,10 @@ impl SettlementAdmissionRegistryV1 {
     }
 }
 
-fn admission_commitment(accepted: &AcceptedSettlementV1, inclusion: &AuthenticatedTransactionInclusion) -> B256 {
+fn admission_commitment(transaction_commitment: B256, inclusion: &AuthenticatedTransactionInclusion) -> B256 {
     let mut hasher = Sha3_256::new();
     hasher.update(b"BLOCH:EXPERIMENTAL:SETTLEMENT-ADMISSION:1");
-    hasher.update(accepted.commitment);
+    hasher.update(transaction_commitment);
     hasher.update(inclusion.block());
     hasher.update(inclusion.slot().to_le_bytes());
     hasher.update(inclusion.checkpoint().block);
@@ -200,6 +271,8 @@ pub enum SettlementAdmissionErrorV1 {
     Codec(SettlementError),
     /// Decode/re-encode changed bytes, so the transaction is not canonical.
     NonCanonicalEncoding,
+    /// Included statement differs from independently selected public values.
+    SettlementExpectation,
     /// The source anchor is not strictly earlier than the containing block.
     SourceAnchor,
     /// The settlement kernel rejected policy, expectation, transition or proof.
@@ -212,6 +285,9 @@ impl core::fmt::Display for SettlementAdmissionErrorV1 {
             Self::InclusionExpectation => f.write_str("authenticated inclusion differs from admission expectation"),
             Self::Codec(error) => write!(f, "included bytes are not canonical settlement V1: {error}"),
             Self::NonCanonicalEncoding => f.write_str("settlement V1 decode/re-encode mismatch"),
+            Self::SettlementExpectation => {
+                f.write_str("included settlement statement differs from admission expectation")
+            }
             Self::SourceAnchor => f.write_str("settlement source anchor must precede the containing native block"),
             Self::Settlement(error) => write!(f, "settlement kernel rejected admission: {error}"),
         }

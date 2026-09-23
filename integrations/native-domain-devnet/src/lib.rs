@@ -35,7 +35,7 @@ pub use settlement::{
 mod settlement_selection;
 pub use settlement_selection::ValidatedSettlementSelectionV1;
 #[cfg(unix)]
-pub use settlement_selection::SettlementSelectionCommitErrorV1;
+pub use settlement_selection::{PersistedSettlementAdmissionV1, SettlementSelectionCommitErrorV1};
 
 const TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SOURCE:1";
 /// Entire retained inbox limit, not a per-page limit. No truncation is permitted.

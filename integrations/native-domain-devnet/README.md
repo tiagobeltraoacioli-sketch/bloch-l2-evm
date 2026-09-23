@@ -140,6 +140,14 @@ record, returning a mark for independent retention. It persists the settlement
 cursor only: source-journal durability, native inclusion, checkpoint authority,
 cross-store crash coordination and validator consensus remain external.
 
+`verify_inclusion_and_commit` is the narrower live path: it consumes a
+non-cloneable settlement capability derived from exact bytes in a complete
+authenticated Genesis-4 body and commits those same bytes. The returned receipt
+keeps inclusion coordinates beside the accepted head and mark while in memory.
+The store does not retain that complete receipt, header/body proof or checkpoint
+artifact, so restart recovery of the settlement cursor is not yet durable
+inclusion evidence.
+
 The V2 integration test demonstrates why the distinction matters: altered
 recipient, amount and omitted deposits can produce valid real EVM/witness
 execution statements, but this source selector rejects them. Successful chunks
@@ -149,7 +157,8 @@ composition, a stale registry, forged CAS mark, verifier-rejected proof and empt
 proof transport are rejected without advancing the store. Restart recovers the
 exact third settlement from the retained floor. Unit negatives also bind
 header/post-state changes, malformed signed bytes, domain/anchor, cursor bounds
-and unchanged registry state.
+and unchanged registry state. Every successful durable transition consumes an
+exact-index inclusion capability from a complete synthetic native body.
 
 The separate [post-genesis source payload](PAYLOAD.md) codec omits the current
 anchor block hash to avoid a self-referential header commitment. Binding a typed

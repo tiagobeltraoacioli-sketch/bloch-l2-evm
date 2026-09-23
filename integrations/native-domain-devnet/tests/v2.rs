@@ -2,12 +2,13 @@
 //! Execution validity and source authorization are independent requirements.
 mod support;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use bloch_l2_evm::{
     escrow::{Coin, EscrowLedger, LockIntent, Outpoint},
     escrow_execution::TrustedLockLocation,
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
     node_primitives::NodeBodyV2,
+    l1::{authenticate_body, authenticate_exact_transaction, FinalizedCheckpoint},
     native_settlement::{
         store::{SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
         SettlementError, SettlementPolicyV1, SettlementProofVerifierV1, SettlementRegistryV1,
@@ -15,11 +16,17 @@ use bloch_l2_evm::{
     },
     proof_statement::execute_statement,
     scale::sats_to_wei,
+    settlement_admission::{
+        authenticate_settlement_inclusion, AuthenticatedSettlementInclusionV1,
+        SettlementAdmissionExpectationV1,
+    },
     BlockContext, ChainSpec, DepositMint, DepositPosition, DepositProvenance,
 };
 use bloch_native_domain_devnet::{
-    SettlementPayload, SettlementSelectionCommitErrorV1, SourceAnchor, SourceBatch, SourceRegistry, MAX_LOCKS,
+    SettlementPayload, SettlementSelectionCommitErrorV1, SourceAnchor, SourceBatch, SourceRegistry,
+    ValidatedSettlementSelectionV1, MAX_LOCKS,
 };
+use sha3::{Digest, Sha3_256};
 use std::{
     fs,
     path::PathBuf,
@@ -42,6 +49,77 @@ fn temporary_store() -> PathBuf {
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
     ))
+}
+
+fn native_hash(parts: &[&[u8]]) -> B256 {
+    let mut hasher = Sha3_256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    B256::from_slice(&hasher.finalize())
+}
+
+fn native_body_root(transactions: &[Bytes]) -> B256 {
+    let tag = b"BLCH4:BODY\0\0\0\0\0\0";
+    let mut level: Vec<B256> = transactions
+        .iter()
+        .map(|transaction| {
+            native_hash(&[
+                tag,
+                &[0, 1],
+                &(transaction.len() as u64).to_le_bytes(),
+                transaction,
+            ])
+        })
+        .collect();
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|pair| {
+                if pair.len() == 2 {
+                    native_hash(&[tag, &[1, 1], pair[0].as_slice(), pair[1].as_slice()])
+                } else {
+                    pair[0]
+                }
+            })
+            .collect();
+    }
+    level[0]
+}
+
+fn authenticate_selection(
+    selection: &ValidatedSettlementSelectionV1,
+    proof: [u8; SETTLEMENT_PROOF_V1_BYTES],
+    containing_slot: u64,
+) -> AuthenticatedSettlementInclusionV1 {
+    let transaction = selection.transaction(proof).unwrap().encode();
+    let transactions = vec![
+        Bytes::from_static(b"unrelated canonical native transaction"),
+        Bytes::copy_from_slice(&transaction),
+    ];
+    let mut header = [0u8; 304];
+    header[..4].copy_from_slice(&0xb10c_0005u32.to_le_bytes());
+    header[36..68].copy_from_slice(B256::repeat_byte(0x90).as_slice());
+    header[68..100].copy_from_slice(native_body_root(&transactions).as_slice());
+    header[100..108].copy_from_slice(&containing_slot.to_le_bytes());
+    let block = native_hash(&[b"BLCH4:BLOCK\0\0\0\0\0", &header]);
+    let checkpoint = FinalizedCheckpoint {
+        block,
+        slot: containing_slot,
+    };
+    let body = authenticate_body(checkpoint, &[Bytes::copy_from_slice(&header)], &transactions).unwrap();
+    let inclusion = authenticate_exact_transaction(&body, &transaction).unwrap();
+    authenticate_settlement_inclusion(
+        inclusion,
+        &SettlementAdmissionExpectationV1 {
+            settlement: selection.expectation(),
+            block,
+            slot: containing_slot,
+            checkpoint,
+            transaction_index: 1,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -232,26 +310,35 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
         assert_eq!(expectation.statement.consumed_start..expectation.statement.consumed_end, consumed..end);
         assert_eq!(expectation.statement.source_commitment, source.commitment());
         assert!(selection.transaction([0; SETTLEMENT_PROOF_V1_BYTES]).is_err());
+        let containing_slot = position.slot() + 1_000 + recorded.header.number;
         if consumed == 0 {
             let forged_mark = SettlementStoreMarkV1 {
                 record_digest: B256::repeat_byte(0xff),
                 ..store_mark
             };
             assert!(matches!(
-                selection.verify_and_commit(
+                selection.verify_inclusion_and_commit(
                     &mut settlement_store,
                     forged_mark,
-                    [0x5a; SETTLEMENT_PROOF_V1_BYTES],
+                    authenticate_selection(
+                        &selection,
+                        [0x5a; SETTLEMENT_PROOF_V1_BYTES],
+                        containing_slot,
+                    ),
                     &settlement_verifier,
                 ),
                 Err(SettlementSelectionCommitErrorV1::Store(SettlementStoreErrorV1::Cas))
             ));
             assert_eq!(settlement_store.mark(), store_mark);
             assert!(matches!(
-                selection.verify_and_commit(
+                selection.verify_inclusion_and_commit(
                     &mut settlement_store,
                     store_mark,
-                    [0x5b; SETTLEMENT_PROOF_V1_BYTES],
+                    authenticate_selection(
+                        &selection,
+                        [0x5b; SETTLEMENT_PROOF_V1_BYTES],
+                        containing_slot,
+                    ),
                     &settlement_verifier,
                 ),
                 Err(SettlementSelectionCommitErrorV1::Store(
@@ -260,17 +347,24 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
             ));
             assert_eq!(settlement_store.mark(), store_mark);
         }
-        let (accepted_settlement, next_mark) = selection
-            .verify_and_commit(
+        let persisted = selection
+            .verify_inclusion_and_commit(
                 &mut settlement_store,
                 store_mark,
-                [0x5a; SETTLEMENT_PROOF_V1_BYTES],
+                authenticate_selection(
+                    &selection,
+                    [0x5a; SETTLEMENT_PROOF_V1_BYTES],
+                    containing_slot,
+                ),
                 &settlement_verifier,
             )
             .unwrap();
-        store_mark = next_mark;
-        assert_eq!(accepted_settlement.l2_number, recorded.header.number);
-        assert_eq!(accepted_settlement.consumed_end, end);
+        store_mark = persisted.mark();
+        assert_eq!(persisted.accepted().l2_number, recorded.header.number);
+        assert_eq!(persisted.accepted().consumed_end, end);
+        assert_eq!(persisted.inclusion().transaction_index(), 1);
+        assert_eq!(persisted.inclusion().slot(), containing_slot);
+        assert_ne!(persisted.inclusion().admission_commitment(), B256::ZERO);
         let settlement = SettlementPayload::from_validated_prefix(
             &selected,
             &recorded.header,

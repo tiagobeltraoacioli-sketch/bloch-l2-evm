@@ -17,6 +17,15 @@ and only then invokes the settlement kernel. Its admission commitment binds all
 those coordinates and the exact transaction bytes to the accepted settlement
 commitment.
 
+The reusable first half is exposed as `authenticate_settlement_inclusion`. It
+consumes the generic `AuthenticatedTransactionInclusion`, requires the exact
+independently selected settlement statement and returns a non-cloneable
+`AuthenticatedSettlementInclusionV1`. This refined capability owns the exact
+fixed-width transaction bytes and retains block, slot, checkpoint, body index
+and their admission commitment. It cannot be constructed from decoded/RPC data
+alone. The in-memory registry and the devnet durable composer both consume this
+same boundary, avoiding a second interpretation of included settlement bytes.
+
 The proof statement's `l1_block`/`l1_slot` identify the source anchor selected
 for L2 execution, while the admission block/slot identify the later native
 block containing the settlement transaction. They are intentionally distinct:
@@ -34,8 +43,11 @@ before or inside verification leave both heads unchanged.
 The checkpoint is an external trust input. Inclusion under it does not prove
 the checkpoint's voting authority, validator-set transitions or non-regression.
 This in-memory adapter also provides no Genesis-4 transaction tag or state key,
-validator execution, durable atomic commit, reorg recovery, SP1 verifier
-implementation, RPC finality or product permission. It must not populate
+validator execution, reorg recovery, SP1 verifier implementation, RPC finality
+or product permission. The Unix devnet composer can durably commit the accepted
+settlement head after consuming the refined inclusion capability, but its local
+store does not persist the complete inclusion receipt or its source artifacts.
+Neither path may populate
 `eth_getBlockByNumber("finalized")`, open bridge/DEX permissions or be described
 as production settlement evidence.
 

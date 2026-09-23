@@ -21,15 +21,48 @@ use bloch_l2_evm::native_settlement::store::{
 };
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::{AcceptedSettlementV1, SettlementProofVerifierV1};
+#[cfg(unix)]
+use bloch_l2_evm::settlement_admission::AuthenticatedSettlementInclusionV1;
 
 /// Failure while framing or durably publishing one validated selection.
 #[cfg(unix)]
 #[derive(Debug)]
 pub enum SettlementSelectionCommitErrorV1 {
-    /// Exact proof bytes could not form the fixed settlement transaction.
+    /// Candidate proof framing or included statement did not match selection.
     Candidate(Error),
     /// The CAS, kernel verification or durable store publication failed.
     Store(SettlementStoreErrorV1),
+}
+
+/// One locally persisted settlement tied to its consumed inclusion capability.
+///
+/// The store persists the settlement head, not this complete receipt. Callers
+/// that need inclusion audit history must retain its source artifacts
+/// separately and reauthenticate them after restart.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct PersistedSettlementAdmissionV1 {
+    accepted: AcceptedSettlementV1,
+    mark: SettlementStoreMarkV1,
+    inclusion: AuthenticatedSettlementInclusionV1,
+}
+
+#[cfg(unix)]
+impl PersistedSettlementAdmissionV1 {
+    /// Settlement accepted by the deterministic kernel and local store.
+    pub const fn accepted(&self) -> &AcceptedSettlementV1 {
+        &self.accepted
+    }
+
+    /// New mark which must be retained independently before acknowledgement.
+    pub const fn mark(&self) -> SettlementStoreMarkV1 {
+        self.mark
+    }
+
+    /// Exact native inclusion consumed by this local commit.
+    pub const fn inclusion(&self) -> &AuthenticatedSettlementInclusionV1 {
+        &self.inclusion
+    }
 }
 
 #[cfg(unix)]
@@ -98,6 +131,32 @@ impl ValidatedSettlementSelectionV1 {
         store
             .verify_and_commit(expected, &transaction.encode(), &self.expectation, verifier)
             .map_err(SettlementSelectionCommitErrorV1::Store)
+    }
+
+    /// Durably commit only the exact transaction carried by a previously
+    /// authenticated native inclusion capability.
+    ///
+    /// This consumes the capability. The store independently repeats policy,
+    /// successor and proof verification before publication.
+    #[cfg(unix)]
+    pub fn verify_inclusion_and_commit<V: SettlementProofVerifierV1>(
+        &self,
+        store: &mut SettlementStoreV1,
+        expected: SettlementStoreMarkV1,
+        inclusion: AuthenticatedSettlementInclusionV1,
+        verifier: &V,
+    ) -> Result<PersistedSettlementAdmissionV1, SettlementSelectionCommitErrorV1> {
+        if inclusion.statement() != &self.expectation.statement {
+            return Err(SettlementSelectionCommitErrorV1::Candidate(Error::Identity));
+        }
+        let (accepted, mark) = store
+            .verify_and_commit(expected, inclusion.transaction(), &self.expectation, verifier)
+            .map_err(SettlementSelectionCommitErrorV1::Store)?;
+        Ok(PersistedSettlementAdmissionV1 {
+            accepted,
+            mark,
+            inclusion,
+        })
     }
 }
 

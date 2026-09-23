@@ -106,6 +106,15 @@ settlement head and consumed cursor; it does not persist the source registry,
 the selection proof, native transaction inclusion or checkpoint authority, and
 it provides no atomic transaction spanning the separate source journal.
 
+The stricter `verify_inclusion_and_commit` path accepts no free proof bytes. It
+consumes an `AuthenticatedSettlementInclusionV1` previously refined from a
+complete authenticated Genesis-4 body, requires its statement to equal this
+selection and passes those exact included bytes to the same store/kernel. Its
+`PersistedSettlementAdmissionV1` result keeps the accepted head, new external
+mark and consumed inclusion receipt together in memory. Only the head/cursor is
+stored: the containing block, slot, checkpoint, transaction index, header path
+and body must be retained independently and reauthenticated for audit/recovery.
+
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.
 The isolated settlement V2 harness can generate and reverify the smaller
@@ -167,8 +176,9 @@ suffix, and rejects cross-domain policy, a stale registry and empty proof
 transport. The Unix path also rejects a forged CAS mark and a verifier-rejected
 proof without advancing, durably commits all three valid successors, then
 reopens from an independently retainable earlier floor and recovers the exact
-tip. A mutated header is rejected even when all caller-supplied identities remain
-unchanged.
+tip. Each valid successor uses exact bytes at index one of a complete synthetic
+Genesis-4 body whose containing slot strictly follows the source anchor. A
+mutated header is rejected even when all caller-supplied identities remain unchanged.
 
 ```sh
 cargo +1.94.1 test --locked --offline \

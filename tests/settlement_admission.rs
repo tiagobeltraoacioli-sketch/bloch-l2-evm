@@ -8,7 +8,8 @@ use bloch_l2_evm::native_settlement::{
 };
 use bloch_l2_evm::proof_statement::SettlementStatementV2;
 use bloch_l2_evm::settlement_admission::{
-    SettlementAdmissionErrorV1, SettlementAdmissionExpectationV1, SettlementAdmissionRegistryV1,
+    authenticate_settlement_inclusion, SettlementAdmissionErrorV1, SettlementAdmissionExpectationV1,
+    SettlementAdmissionRegistryV1,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -171,6 +172,29 @@ fn exact_inclusion_coordinates_are_bound_to_kernel_acceptance() {
     assert_eq!(accepted.settlement().l1_block, statement().l1_block);
     assert_ne!(accepted.settlement().l1_block, accepted.block());
     assert_ne!(accepted.admission_commitment(), B256::ZERO);
+}
+
+#[test]
+fn generic_inclusion_refines_into_a_non_fungible_settlement_capability() {
+    let transaction = settlement_bytes();
+    let (inclusion, checkpoint) = authenticate_at_index(&transaction, 1);
+    let expected = expectation(&inclusion);
+    let authenticated = authenticate_settlement_inclusion(inclusion, &expected).unwrap();
+    assert_eq!(authenticated.transaction().as_slice(), transaction);
+    assert_eq!(authenticated.statement(), &statement());
+    assert_eq!(authenticated.block(), expected.block);
+    assert_eq!(authenticated.slot(), expected.slot);
+    assert_eq!(authenticated.checkpoint(), checkpoint);
+    assert_eq!(authenticated.transaction_index(), 1);
+    assert_ne!(authenticated.admission_commitment(), B256::ZERO);
+
+    let (inclusion, _) = authenticate_at_index(&transaction, 1);
+    let mut wrong = expectation(&inclusion);
+    wrong.settlement.statement.l2_state_root = h(0xee);
+    assert!(matches!(
+        authenticate_settlement_inclusion(inclusion, &wrong),
+        Err(SettlementAdmissionErrorV1::SettlementExpectation)
+    ));
 }
 
 #[test]
