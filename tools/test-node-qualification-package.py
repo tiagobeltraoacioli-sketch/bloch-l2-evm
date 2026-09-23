@@ -49,7 +49,7 @@ class NodeQualificationPackageTest(unittest.TestCase):
             self.assertEqual(one.read_bytes(), two.read_bytes())
             report = self.verify(one)
             self.assertEqual(report["sourceRevision"], REVISION)
-            self.assertEqual(report["filesVerified"], 13)
+            self.assertEqual(report["filesVerified"], 15)
             with zipfile.ZipFile(one, "r") as archive:
                 self.assertIn("deployment/l2-node.json", archive.namelist())
                 self.assertIn(
@@ -58,12 +58,20 @@ class NodeQualificationPackageTest(unittest.TestCase):
                 self.assertIn(
                     "deployment/production-entrypoint-contract.json", archive.namelist()
                 )
+                self.assertIn(
+                    "deployment/production-entrypoint-conformance.json", archive.namelist()
+                )
+                self.assertIn(
+                    "tests/fixtures/production-entrypoint-synthetic-observations.json",
+                    archive.namelist(),
+                )
             self.assertFalse(report["identityProductionReady"])
             self.assertFalse(report["finality"]["productionFinalityReady"])
             self.assertFalse(report["node"]["bindPermitted"])
             self.assertFalse(report["provisioning"]["startPermitted"])
             self.assertFalse(report["productionBuild"]["buildPermitted"])
             self.assertFalse(report["productionEntrypoint"]["productionReady"])
+            self.assertFalse(report["entrypointConformance"]["productionQualified"])
             self.assertFalse(report["activationPermitted"])
 
     def test_revision_must_be_exact_lowercase_git_sha(self) -> None:

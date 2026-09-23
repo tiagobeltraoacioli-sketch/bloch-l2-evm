@@ -1,0 +1,119 @@
+{
+  "schema": "bloch.l2.entrypoint-conformance-fixture.v1",
+  "classification": "synthetic-process-observations-non-authorizing",
+  "chainId": 700771,
+  "observations": [
+    {
+      "capabilityId": "p2p-networking",
+      "adapterId": "p2p-networking-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "authenticated-peer-identity",
+        "chain-domain-separation",
+        "fork-choice-input-validation"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "authenticated-native-l1-derivation",
+      "adapterId": "authenticated-native-l1-derivation-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "authenticated-native-checkpoint",
+        "raw-header-ancestry",
+        "deposit-source-conservation"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "production-consensus",
+      "adapterId": "production-consensus-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "deterministic-block-production",
+        "fork-choice-policy",
+        "reorganization-policy"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "finalized-head",
+      "adapterId": "finalized-head-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "non-regressing-finalized-above-genesis",
+        "canonical-finalized-reread",
+        "settlement-bound-finality"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "frozen-genesis",
+      "adapterId": "frozen-genesis-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "exact-genesis-bytes-sha256",
+        "reviewed-genesis-state-root",
+        "chain-id-700771"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "gated-json-rpc",
+      "adapterId": "gated-json-rpc-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "readiness-gated-bind",
+        "chain-id-700771",
+        "safe-finalized-tag-semantics",
+        "bounded-method-policy"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "durable-persistence",
+      "adapterId": "durable-persistence-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "canonical-head-durability",
+        "state-root-durability",
+        "receipt-durability",
+        "settlement-cursor-durability"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "graceful-shutdown",
+      "adapterId": "graceful-shutdown-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "stop-transaction-admission",
+        "drain-pending-writes",
+        "close-storage",
+        "restart-integrity-check"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    },
+    {
+      "capabilityId": "crash-recovery",
+      "adapterId": "crash-recovery-synthetic-adapter-v1",
+      "subjectKind": "synthetic-process-double",
+      "acceptanceExercised": [
+        "interrupted-write-detection",
+        "deterministic-replay-or-rollback",
+        "no-unreviewed-auto-repair",
+        "qualified-fault-matrix"
+      ],
+      "result": "pass",
+      "productionEvidence": false
+    }
+  ]
+}

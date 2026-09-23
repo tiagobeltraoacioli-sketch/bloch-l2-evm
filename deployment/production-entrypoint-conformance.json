@@ -1,0 +1,23 @@
+{
+  "schema": "bloch.l2.entrypoint-conformance-plan.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "synthetic-adapter-plan-non-authorizing",
+  "contract": {
+    "artifact": "deployment/production-entrypoint-contract.json",
+    "sha256": "783c401d244c7519452e0909c6547c0adde2612d5f6ffb318a442c5613195c26"
+  },
+  "fixture": {
+    "artifact": "tests/fixtures/production-entrypoint-synthetic-observations.json",
+    "sha256": "3c34e825ce80d04c258510051712bdce53a58d26c0331fb556834e0da8ec19e9"
+  },
+  "effect": "rehearsal-only",
+  "mayQualifyProduction": false,
+  "permissions": {
+    "build": false,
+    "start": false,
+    "bindRpc": false,
+    "bindP2p": false,
+    "publishFinalized": false
+  }
+}

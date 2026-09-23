@@ -27,6 +27,7 @@ ROLES = [
     "candidate-manifest", "candidate-lockfile", "candidate-toolchain",
     "synthetic-entrypoint", "external-source-verifier", "external-source-patch",
     "production-entrypoint-contract",
+    "production-entrypoint-conformance-plan",
 ]
 DECISIONS = [
     "production-node-entrypoint", "frozen-production-genesis",

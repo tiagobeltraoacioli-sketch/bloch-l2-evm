@@ -45,6 +45,11 @@
       "path": "deployment/production-entrypoint-contract.json",
       "role": "production-entrypoint-contract",
       "sha256": "783c401d244c7519452e0909c6547c0adde2612d5f6ffb318a442c5613195c26"
+    },
+    {
+      "path": "deployment/production-entrypoint-conformance.json",
+      "role": "production-entrypoint-conformance-plan",
+      "sha256": "3b24cc8492828162a88af595667326c9f97609ec4be639f7ea03bd71860f4d98"
     }
   ],
   "externalReth": {
