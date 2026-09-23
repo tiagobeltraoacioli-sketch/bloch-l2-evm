@@ -7,8 +7,9 @@
 
 use super::{
     AcceptedSettlementV1, SettlementError, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
-    SettlementRegistryV1,
+    SettlementRegistryV1, SettlementTransactionV1, SETTLEMENT_TX_V1_BYTES,
 };
+use crate::{l1::FinalizedCheckpoint, settlement_admission::AuthenticatedSettlementInclusionV1};
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 use std::{
@@ -20,9 +21,12 @@ use std::{
 };
 
 const POLICY_TAG: &[u8; 8] = b"BLSTPL01";
-const RECORD_TAG: &[u8; 8] = b"BLSTRC01";
+const RECORD_TAG: &[u8; 8] = b"BLSTRC02";
 const MARK_TAG: &[u8; 8] = b"BLSTMK01";
-const RECORD_BYTES: usize = 8 + 8 + 32 + 32 + 32 + 1 + 6 * 32 + 5 * 8;
+const ACCEPTED_HEAD_BYTES: usize = 1 + 6 * 32 + 5 * 8;
+const ADMISSION_BYTES: usize = 32 + 8 + 32 + 8 + 4 + 32;
+const RECORD_BYTES: usize =
+    8 + 8 + 32 + 32 + 32 + ACCEPTED_HEAD_BYTES + 1 + SETTLEMENT_TX_V1_BYTES + 1 + ADMISSION_BYTES;
 /// Exact canonical byte length of an external settlement-store mark.
 pub const SETTLEMENT_STORE_MARK_V1_BYTES: usize = 8 + 8 + 32 + 32;
 const MAX_RECORDS: u64 = 10_000;
@@ -37,6 +41,52 @@ pub struct SettlementStoreMarkV1 {
     pub record_digest: B256,
     /// Registry state commitment in that record.
     pub state_commitment: B256,
+}
+
+/// Inclusion receipt retained inside the same create-once settlement record.
+///
+/// This is replayable audit data, not a finality capability. The header path,
+/// complete body and authenticated checkpoint artifact remain external.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementStoreAdmissionV1 {
+    transaction: [u8; SETTLEMENT_TX_V1_BYTES],
+    block: B256,
+    slot: u64,
+    checkpoint: FinalizedCheckpoint,
+    transaction_index: u32,
+    admission_commitment: B256,
+}
+
+impl SettlementStoreAdmissionV1 {
+    /// Exact canonical settlement transaction stored in the record.
+    pub const fn transaction(&self) -> &[u8; SETTLEMENT_TX_V1_BYTES] {
+        &self.transaction
+    }
+
+    /// Native block containing the transaction.
+    pub const fn block(&self) -> B256 {
+        self.block
+    }
+
+    /// Native consensus slot of the containing block.
+    pub const fn slot(&self) -> u64 {
+        self.slot
+    }
+
+    /// External checkpoint terminating the authenticated ancestry path.
+    pub const fn checkpoint(&self) -> FinalizedCheckpoint {
+        self.checkpoint
+    }
+
+    /// Exact zero-based position in the authenticated complete body.
+    pub const fn transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
+
+    /// Domain-separated commitment to the transaction and coordinates.
+    pub const fn admission_commitment(&self) -> B256 {
+        self.admission_commitment
+    }
 }
 
 impl SettlementStoreMarkV1 {
@@ -113,6 +163,7 @@ pub struct SettlementStoreV1 {
     lock: File,
     registry: SettlementRegistryV1,
     mark: SettlementStoreMarkV1,
+    admission: Option<SettlementStoreAdmissionV1>,
     poisoned: bool,
 }
 
@@ -142,7 +193,7 @@ impl SettlementStoreV1 {
                 .as_slice(),
         );
         publish_create_once(&directory, "POLICY", &policy_bytes)?;
-        let bytes = encode_record(0, policy, B256::ZERO, &registry)?;
+        let bytes = encode_record(0, policy, B256::ZERO, &registry, None, None)?;
         publish_create_once(&directory, &record_name(0), &bytes)?;
         directory_file(&directory)?.sync_all()?;
         directory_file(directory.parent().ok_or(SettlementStoreErrorV1::Format)?)?.sync_all()?;
@@ -152,6 +203,7 @@ impl SettlementStoreV1 {
             lock,
             registry,
             mark,
+            admission: None,
             poisoned: false,
         })
     }
@@ -182,6 +234,7 @@ impl SettlementStoreV1 {
         let mut previous_head = None;
         let mut found_floor = false;
         let mut current_mark = None;
+        let mut current_admission = None;
         for (index, generation) in generations.into_iter().enumerate() {
             if generation != index as u64 {
                 return Err(SettlementStoreErrorV1::Format);
@@ -202,6 +255,7 @@ impl SettlementStoreV1 {
             }
             previous_digest = observed.record_digest;
             previous_head = decoded.head;
+            current_admission = decoded.admission;
             current_mark = Some(observed);
         }
         if !found_floor {
@@ -213,6 +267,7 @@ impl SettlementStoreV1 {
             lock,
             registry,
             mark: current_mark.ok_or(SettlementStoreErrorV1::Format)?,
+            admission: current_admission,
             poisoned: false,
         })
     }
@@ -225,6 +280,12 @@ impl SettlementStoreV1 {
     /// Current local registry. This value is not a finalized-L2 capability.
     pub const fn registry(&self) -> &SettlementRegistryV1 {
         &self.registry
+    }
+
+    /// Inclusion receipt on the current record, when committed through the
+    /// authenticated-inclusion path.
+    pub const fn admission(&self) -> Option<&SettlementStoreAdmissionV1> {
+        self.admission.as_ref()
     }
 
     /// Verify against a private clone, publish one create-once record, and only
@@ -254,21 +315,87 @@ impl SettlementStoreV1 {
         let accepted = next
             .verify_and_apply(transaction_bytes, expectation, verifier)
             .map_err(SettlementStoreErrorV1::Settlement)?;
-        let bytes = encode_record(generation, next.policy, self.mark.record_digest, &next)?;
+        let transaction: [u8; SETTLEMENT_TX_V1_BYTES] = transaction_bytes
+            .try_into()
+            .map_err(|_| SettlementStoreErrorV1::Format)?;
+        self.commit(generation, next, transaction, None)?;
+        Ok((accepted, self.mark))
+    }
+
+    /// Consume an authenticated inclusion capability and durably bind its
+    /// exact transaction and coordinates to the accepted settlement head.
+    pub fn verify_inclusion_and_commit<V: SettlementProofVerifierV1>(
+        &mut self,
+        expected: SettlementStoreMarkV1,
+        inclusion: AuthenticatedSettlementInclusionV1,
+        expectation: &SettlementExpectationV1,
+        verifier: &V,
+    ) -> Result<(AcceptedSettlementV1, SettlementStoreMarkV1, SettlementStoreAdmissionV1), SettlementStoreErrorV1> {
+        if self.poisoned {
+            return Err(SettlementStoreErrorV1::Poisoned);
+        }
+        if expected != self.mark {
+            return Err(SettlementStoreErrorV1::Cas);
+        }
+        if inclusion.statement() != &expectation.statement {
+            return Err(SettlementStoreErrorV1::Settlement(SettlementError::Expectation));
+        }
+        let generation = self
+            .mark
+            .generation
+            .checked_add(1)
+            .ok_or(SettlementStoreErrorV1::Limit)?;
+        if generation > MAX_RECORDS {
+            return Err(SettlementStoreErrorV1::Limit);
+        }
+        let transaction = *inclusion.transaction();
+        let admission = SettlementStoreAdmissionV1 {
+            transaction,
+            block: inclusion.block(),
+            slot: inclusion.slot(),
+            checkpoint: inclusion.checkpoint(),
+            transaction_index: inclusion.transaction_index(),
+            admission_commitment: inclusion.admission_commitment(),
+        };
+        let mut next = self.registry.clone();
+        let accepted = next
+            .verify_and_apply(&transaction, expectation, verifier)
+            .map_err(SettlementStoreErrorV1::Settlement)?;
+        self.commit(generation, next, transaction, Some(admission.clone()))?;
+        Ok((accepted, self.mark, admission))
+    }
+
+    fn commit(
+        &mut self,
+        generation: u64,
+        next: SettlementRegistryV1,
+        transaction: [u8; SETTLEMENT_TX_V1_BYTES],
+        admission: Option<SettlementStoreAdmissionV1>,
+    ) -> Result<(), SettlementStoreErrorV1> {
+        let bytes = encode_record(
+            generation,
+            next.policy,
+            self.mark.record_digest,
+            &next,
+            Some(&transaction),
+            admission.as_ref(),
+        )?;
         self.poisoned = true;
         if let Err(error) = publish_create_once(&self.directory, &record_name(generation), &bytes) {
             return Err(SettlementStoreErrorV1::CommitUncertain(error));
         }
         self.registry = next;
         self.mark = mark(generation, &bytes, &self.registry);
+        self.admission = admission;
         self.poisoned = false;
-        Ok((accepted, self.mark))
+        Ok(())
     }
 }
 
 struct DecodedRecord {
     state_commitment: B256,
     head: Option<AcceptedSettlementV1>,
+    admission: Option<SettlementStoreAdmissionV1>,
 }
 
 fn encode_record(
@@ -276,7 +403,31 @@ fn encode_record(
     policy: SettlementPolicyV1,
     previous_digest: B256,
     registry: &SettlementRegistryV1,
+    transaction: Option<&[u8; SETTLEMENT_TX_V1_BYTES]>,
+    admission: Option<&SettlementStoreAdmissionV1>,
 ) -> Result<Vec<u8>, SettlementStoreErrorV1> {
+    let decoded_transaction = match transaction {
+        None => None,
+        Some(bytes) => {
+            let decoded = SettlementTransactionV1::decode(bytes).map_err(|_| SettlementStoreErrorV1::Format)?;
+            if decoded.encode() != *bytes
+                || !transaction_matches_head(&decoded, &registry.head.ok_or(SettlementStoreErrorV1::Format)?)
+            {
+                return Err(SettlementStoreErrorV1::Format);
+            }
+            Some(decoded)
+        }
+    };
+    if let Some(admission) = admission {
+        if admission.transaction != *transaction.ok_or(SettlementStoreErrorV1::Format)?
+            || !admission_matches_transaction(
+                decoded_transaction.as_ref().ok_or(SettlementStoreErrorV1::Format)?,
+                admission,
+            )
+        {
+            return Err(SettlementStoreErrorV1::Format);
+        }
+    }
     let mut bytes = Vec::with_capacity(RECORD_BYTES);
     bytes.extend_from_slice(RECORD_TAG);
     bytes.extend_from_slice(&generation.to_le_bytes());
@@ -290,10 +441,16 @@ fn encode_record(
     bytes.extend_from_slice(registry.state_commitment().as_slice());
     match registry.head {
         None => {
+            if generation != 0 || transaction.is_some() || admission.is_some() {
+                return Err(SettlementStoreErrorV1::Format);
+            }
             bytes.push(0);
-            bytes.resize(RECORD_BYTES, 0);
+            bytes.resize(8 + 8 + 32 + 32 + 32 + ACCEPTED_HEAD_BYTES, 0);
         }
         Some(head) => {
+            if generation == 0 || transaction.is_none() {
+                return Err(SettlementStoreErrorV1::Format);
+            }
             bytes.push(1);
             for value in [
                 head.commitment,
@@ -314,6 +471,31 @@ fn encode_record(
             ] {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
+        }
+    }
+    match transaction {
+        None => {
+            bytes.push(0);
+            bytes.extend_from_slice(&[0; SETTLEMENT_TX_V1_BYTES]);
+        }
+        Some(transaction) => {
+            bytes.push(1);
+            bytes.extend_from_slice(transaction);
+        }
+    }
+    match admission {
+        None => {
+            bytes.push(0);
+            bytes.extend_from_slice(&[0; ADMISSION_BYTES]);
+        }
+        Some(admission) => {
+            bytes.push(1);
+            bytes.extend_from_slice(admission.block.as_slice());
+            bytes.extend_from_slice(&admission.slot.to_le_bytes());
+            bytes.extend_from_slice(admission.checkpoint.block.as_slice());
+            bytes.extend_from_slice(&admission.checkpoint.slot.to_le_bytes());
+            bytes.extend_from_slice(&admission.transaction_index.to_le_bytes());
+            bytes.extend_from_slice(admission.admission_commitment.as_slice());
         }
     }
     if bytes.len() != RECORD_BYTES {
@@ -342,11 +524,9 @@ fn decode_record(
     let present = reader.byte()?;
     let head = match present {
         0 => {
-            if reader.remaining().iter().any(|byte| *byte != 0) {
+            if reader.take(ACCEPTED_HEAD_BYTES - 1)?.iter().any(|byte| *byte != 0) {
                 return Err(SettlementStoreErrorV1::Format);
             }
-            let padding = reader.remaining().len();
-            reader.take(padding)?;
             None
         }
         1 => Some(AcceptedSettlementV1 {
@@ -364,10 +544,110 @@ fn decode_record(
         }),
         _ => return Err(SettlementStoreErrorV1::Format),
     };
+    let transaction = match reader.byte()? {
+        0 => {
+            if reader.take(SETTLEMENT_TX_V1_BYTES)?.iter().any(|byte| *byte != 0) {
+                return Err(SettlementStoreErrorV1::Format);
+            }
+            None
+        }
+        1 => {
+            let bytes: [u8; SETTLEMENT_TX_V1_BYTES] = reader
+                .take(SETTLEMENT_TX_V1_BYTES)?
+                .try_into()
+                .map_err(|_| SettlementStoreErrorV1::Format)?;
+            let decoded = SettlementTransactionV1::decode(&bytes).map_err(|_| SettlementStoreErrorV1::Format)?;
+            if decoded.encode() != bytes {
+                return Err(SettlementStoreErrorV1::Format);
+            }
+            Some((bytes, decoded))
+        }
+        _ => return Err(SettlementStoreErrorV1::Format),
+    };
+    let admission = match reader.byte()? {
+        0 => {
+            if reader.take(ADMISSION_BYTES)?.iter().any(|byte| *byte != 0) {
+                return Err(SettlementStoreErrorV1::Format);
+            }
+            None
+        }
+        1 => {
+            let (transaction_bytes, transaction) = transaction.as_ref().ok_or(SettlementStoreErrorV1::Format)?;
+            let value = SettlementStoreAdmissionV1 {
+                transaction: *transaction_bytes,
+                block: reader.hash()?,
+                slot: reader.u64()?,
+                checkpoint: FinalizedCheckpoint {
+                    block: reader.hash()?,
+                    slot: reader.u64()?,
+                },
+                transaction_index: reader.u32()?,
+                admission_commitment: reader.hash()?,
+            };
+            if !admission_matches_transaction(transaction, &value) {
+                return Err(SettlementStoreErrorV1::Format);
+            }
+            Some(value)
+        }
+        _ => return Err(SettlementStoreErrorV1::Format),
+    };
     if !reader.remaining().is_empty() {
         return Err(SettlementStoreErrorV1::Format);
     }
-    Ok(DecodedRecord { state_commitment, head })
+    match (expected_generation, head.as_ref(), transaction.as_ref()) {
+        (0, None, None) => {}
+        (0, _, _) | (_, None, _) | (_, _, None) => return Err(SettlementStoreErrorV1::Format),
+        (_, Some(head), Some((_, transaction))) if !transaction_matches_head(transaction, head) => {
+            return Err(SettlementStoreErrorV1::Format)
+        }
+        _ => {}
+    }
+    Ok(DecodedRecord {
+        state_commitment,
+        head,
+        admission,
+    })
+}
+
+fn transaction_matches_head(transaction: &SettlementTransactionV1, head: &AcceptedSettlementV1) -> bool {
+    let statement = transaction.statement();
+    transaction.commitment() == head.commitment
+        && statement.l2_header_hash == head.l2_header_hash
+        && statement.l2_state_root == head.l2_state_root
+        && statement.l1_block == head.l1_block
+        && statement.source_commitment == head.source_commitment
+        && statement.inbox_root == head.inbox_root
+        && statement.l2_number == head.l2_number
+        && statement.l1_slot == head.l1_slot
+        && statement.l1_height == head.l1_height
+        && statement.inbox_count == head.inbox_count
+        && statement.consumed_end == head.consumed_end
+}
+
+fn admission_commitment(transaction_commitment: B256, admission: &SettlementStoreAdmissionV1) -> B256 {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"BLOCH:EXPERIMENTAL:SETTLEMENT-ADMISSION:1");
+    hasher.update(transaction_commitment);
+    hasher.update(admission.block);
+    hasher.update(admission.slot.to_le_bytes());
+    hasher.update(admission.checkpoint.block);
+    hasher.update(admission.checkpoint.slot.to_le_bytes());
+    hasher.update(admission.transaction_index.to_le_bytes());
+    hasher.update((admission.transaction.len() as u64).to_le_bytes());
+    hasher.update(admission.transaction);
+    B256::from_slice(&hasher.finalize())
+}
+
+fn admission_matches_transaction(
+    transaction: &SettlementTransactionV1,
+    admission: &SettlementStoreAdmissionV1,
+) -> bool {
+    transaction.statement().l1_block != admission.block
+        && transaction.statement().l1_slot < admission.slot
+        && admission.checkpoint.block != B256::ZERO
+        && admission.checkpoint.slot >= admission.slot
+        && (admission.checkpoint.slot != admission.slot || admission.checkpoint.block == admission.block)
+        && admission_commitment(transaction.commitment(), admission) == admission.admission_commitment
 }
 
 fn validate_replayed_head(
@@ -542,6 +822,12 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, SettlementStoreErrorV1> {
         Ok(u64::from_le_bytes(
             self.take(8)?.try_into().map_err(|_| SettlementStoreErrorV1::Format)?,
+        ))
+    }
+
+    fn u32(&mut self) -> Result<u32, SettlementStoreErrorV1> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().map_err(|_| SettlementStoreErrorV1::Format)?,
         ))
     }
 

@@ -137,16 +137,18 @@ its own state, and advance consumption exactly once. The Unix-only
 `verify_and_commit` composition now routes the token and exact proof transport
 through the local settlement store's CAS, kernel verifier and create-once durable
 record, returning a mark for independent retention. It persists the settlement
-cursor only: source-journal durability, native inclusion, checkpoint authority,
-cross-store crash coordination and validator consensus remain external.
+cursor and exact transaction; source-journal durability, authenticated native
+artifacts, checkpoint authority, cross-store crash coordination and validator
+consensus remain external.
 
 `verify_inclusion_and_commit` is the narrower live path: it consumes a
 non-cloneable settlement capability derived from exact bytes in a complete
-authenticated Genesis-4 body and commits those same bytes. The returned receipt
-keeps inclusion coordinates beside the accepted head and mark while in memory.
-The store does not retain that complete receipt, header/body proof or checkpoint
-artifact, so restart recovery of the settlement cursor is not yet durable
-inclusion evidence.
+authenticated Genesis-4 body and commits those same bytes. The store retains the
+exact transaction, containing block/slot, checkpoint, transaction index and
+admission commitment beside the accepted head, and validates them on restart.
+It does not retain the complete body, header/ancestry proof or authenticated
+checkpoint-authority artifact, so the recovered receipt is audit data rather
+than a recreated finality capability.
 
 The V2 integration test demonstrates why the distinction matters: altered
 recipient, amount and omitted deposits can produce valid real EVM/witness
@@ -155,7 +157,8 @@ and an empty suffix match actual V2 execution statements, conserved minted
 balances and three contiguous settlement-kernel transitions. Cross-policy
 composition, a stale registry, forged CAS mark, verifier-rejected proof and empty
 proof transport are rejected without advancing the store. Restart recovers the
-exact third settlement from the retained floor. Unit negatives also bind
+exact third settlement and its receipt from the retained floor; receipt
+corruption is rejected. Unit negatives also bind
 header/post-state changes, malformed signed bytes, domain/anchor, cursor bounds
 and unchanged registry state. Every successful durable transition consumes an
 exact-index inclusion capability from a complete synthetic native body.

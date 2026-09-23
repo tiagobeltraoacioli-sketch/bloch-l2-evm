@@ -12,7 +12,7 @@ use bloch_l2_evm::{
     native_settlement::{
         store::{SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
         SettlementError, SettlementPolicyV1, SettlementProofVerifierV1, SettlementRegistryV1,
-        SETTLEMENT_PROOF_V1_BYTES,
+        SettlementTransactionV1, SETTLEMENT_PROOF_V1_BYTES,
     },
     proof_statement::execute_statement,
     scale::sats_to_wei,
@@ -362,9 +362,9 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
         store_mark = persisted.mark();
         assert_eq!(persisted.accepted().l2_number, recorded.header.number);
         assert_eq!(persisted.accepted().consumed_end, end);
-        assert_eq!(persisted.inclusion().transaction_index(), 1);
-        assert_eq!(persisted.inclusion().slot(), containing_slot);
-        assert_ne!(persisted.inclusion().admission_commitment(), B256::ZERO);
+        assert_eq!(persisted.admission().transaction_index(), 1);
+        assert_eq!(persisted.admission().slot(), containing_slot);
+        assert_ne!(persisted.admission().admission_commitment(), B256::ZERO);
         let settlement = SettlementPayload::from_validated_prefix(
             &selected,
             &recorded.header,
@@ -410,6 +410,28 @@ fn valid_v2_execution_still_requires_exact_source_selected_deposits() {
     assert_eq!(recovered.mark(), store_mark);
     assert_eq!(recovered.registry().head().unwrap().l2_number, 3);
     assert_eq!(recovered.registry().head().unwrap().consumed_end, 3);
+    let recovered_admission = recovered.admission().unwrap();
+    assert_eq!(recovered_admission.transaction_index(), 1);
+    assert!(recovered_admission.slot() > recovered.registry().head().unwrap().l1_slot);
+    assert_ne!(recovered_admission.admission_commitment(), B256::ZERO);
+    let recovered_transaction = SettlementTransactionV1::decode(recovered_admission.transaction()).unwrap();
+    assert_eq!(
+        recovered_transaction.commitment(),
+        recovered.registry().head().unwrap().commitment
+    );
+    drop(recovered);
+    let last_record = store_path.join(format!("{:020}.sst", store_mark.generation));
+    let canonical_record = fs::read(&last_record).unwrap();
+    let mut corrupted_record = canonical_record.clone();
+    *corrupted_record.last_mut().unwrap() ^= 1;
+    fs::write(&last_record, &corrupted_record).unwrap();
+    assert!(matches!(
+        SettlementStoreV1::open(&store_path, settlement_policy, initial_store_mark),
+        Err(SettlementStoreErrorV1::Format)
+    ));
+    fs::write(&last_record, canonical_record).unwrap();
+    let recovered = SettlementStoreV1::open(&store_path, settlement_policy, store_mark).unwrap();
+    assert_eq!(recovered.admission().unwrap().transaction_index(), 1);
     drop(recovered);
     fs::remove_dir_all(store_path).unwrap();
 }

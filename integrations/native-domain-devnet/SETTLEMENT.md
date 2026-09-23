@@ -101,19 +101,22 @@ and cannot replace checkpoint/source authentication or validator execution.
 On Unix, `ValidatedSettlementSelectionV1::verify_and_commit` frames the exact
 proof bytes and sends the matching transaction/expectation directly through
 `SettlementStoreV1`'s CAS and durable publication path. The returned mark must
-be retained independently for rollback detection. This persists only the local
-settlement head and consumed cursor; it does not persist the source registry,
-the selection proof, native transaction inclusion or checkpoint authority, and
-it provides no atomic transaction spanning the separate source journal.
+be retained independently for rollback detection. This persists the local
+settlement head, consumed cursor and exact transaction; it does not persist the
+source registry, authenticated body artifacts or checkpoint authority, and it
+provides no atomic transaction spanning the separate source journal.
 
 The stricter `verify_inclusion_and_commit` path accepts no free proof bytes. It
 consumes an `AuthenticatedSettlementInclusionV1` previously refined from a
 complete authenticated Genesis-4 body, requires its statement to equal this
 selection and passes those exact included bytes to the same store/kernel. Its
 `PersistedSettlementAdmissionV1` result keeps the accepted head, new external
-mark and consumed inclusion receipt together in memory. Only the head/cursor is
-stored: the containing block, slot, checkpoint, transaction index, header path
-and body must be retained independently and reauthenticated for audit/recovery.
+mark and durable admission receipt together. The same create-once record stores
+the exact transaction, containing block/slot, checkpoint, transaction index and
+admission commitment and validates their cross-links on recovery. The complete
+body, header/ancestry path and authenticated checkpoint-authority artifact must
+still be retained independently; stored coordinates are not a finality
+capability.
 
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.

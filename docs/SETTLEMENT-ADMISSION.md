@@ -45,9 +45,10 @@ the checkpoint's voting authority, validator-set transitions or non-regression.
 This in-memory adapter also provides no Genesis-4 transaction tag or state key,
 validator execution, reorg recovery, SP1 verifier implementation, RPC finality
 or product permission. The Unix devnet composer can durably commit the accepted
-settlement head after consuming the refined inclusion capability, but its local
-store does not persist the complete inclusion receipt or its source artifacts.
-Neither path may populate
+settlement head, exact transaction and inclusion coordinates after consuming the
+refined capability. That replayable receipt does not preserve the complete body,
+header/ancestry path or checkpoint-authority artifact and cannot recreate the
+consumed authentication capability after restart. Neither path may populate
 `eth_getBlockByNumber("finalized")`, open bridge/DEX permissions or be described
 as production settlement evidence.
 

@@ -5,9 +5,12 @@ primitive for `SettlementRegistryV1`. It does not activate native settlement.
 
 The store creates a private `0700` directory and `0600` files without replacing
 an existing path. Generation zero records the empty registry. Each later,
-fixed-width record binds the exact settlement policy commitment, previous record
-digest, registry state commitment, accepted L2 head, native anchor and inbox
-cursor. Publication writes and fsyncs a private temporary inode, links it to a
+fixed-width `BLSTRC02` record binds the exact settlement policy commitment,
+previous record digest, registry state commitment, accepted L2 head, native
+anchor, inbox cursor and canonical settlement transaction. Records committed
+through `verify_inclusion_and_commit` additionally retain the containing block,
+slot, checkpoint, transaction index and admission commitment. Publication writes
+and fsyncs a private temporary inode, links it to a
 create-once generation name, removes the temporary name and fsyncs the directory.
 The in-memory head changes only after that sequence succeeds.
 
@@ -16,6 +19,13 @@ starts poisons the handle and requires close/reopen; it must not be retried
 blindly. Recovery rejects partial records, gaps, unknown files, leftover
 `.pending-*` crash evidence, non-private files, policy substitution, broken hash
 chains and noncanonical head/cursor progress.
+
+Recovery decodes and round-trips every stored transaction, checks its commitment
+and statement against the accepted head, and recomputes every stored admission
+commitment from the exact transaction and coordinates. `BLSTRC01` is deliberately
+not accepted by this implementation: an operator must explicitly replay trusted
+source artifacts into a new store and establish a new independently retained
+floor rather than silently reinterpret an old record layout.
 
 `open` requires an exact independently retained rollback floor. A floor copied
 from the directory under inspection provides no rollback protection. Operators
@@ -29,3 +39,6 @@ host-compromise resistance, proof that validators ran the transition, consensus,
 or L2 finality. `registry()` exposes local recovered state only and must never be
 published as `finalized`. Filesystem power-loss guarantees still depend on the
 host, filesystem and storage hardware honoring `fsync` and hard-link semantics.
+The inclusion receipt is replayable audit data, not an authentication capability;
+the complete body, header/ancestry path and checkpoint-authority artifact remain
+external and must be retained independently.

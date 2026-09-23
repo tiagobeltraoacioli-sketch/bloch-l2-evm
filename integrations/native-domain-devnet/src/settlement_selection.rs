@@ -17,7 +17,7 @@ use bloch_l2_evm::{
 
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::store::{
-    SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1,
+    SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1,
 };
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::{AcceptedSettlementV1, SettlementProofVerifierV1};
@@ -34,17 +34,16 @@ pub enum SettlementSelectionCommitErrorV1 {
     Store(SettlementStoreErrorV1),
 }
 
-/// One locally persisted settlement tied to its consumed inclusion capability.
+/// One locally persisted settlement and its replayable inclusion receipt.
 ///
-/// The store persists the settlement head, not this complete receipt. Callers
-/// that need inclusion audit history must retain its source artifacts
-/// separately and reauthenticate them after restart.
+/// Header, body, ancestry and checkpoint-authority artifacts remain external
+/// and must still be retained independently for a full audit after restart.
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct PersistedSettlementAdmissionV1 {
     accepted: AcceptedSettlementV1,
     mark: SettlementStoreMarkV1,
-    inclusion: AuthenticatedSettlementInclusionV1,
+    admission: SettlementStoreAdmissionV1,
 }
 
 #[cfg(unix)]
@@ -59,9 +58,14 @@ impl PersistedSettlementAdmissionV1 {
         self.mark
     }
 
-    /// Exact native inclusion consumed by this local commit.
-    pub const fn inclusion(&self) -> &AuthenticatedSettlementInclusionV1 {
-        &self.inclusion
+    /// Durable exact-transaction and inclusion-coordinate receipt.
+    pub const fn admission(&self) -> &SettlementStoreAdmissionV1 {
+        &self.admission
+    }
+
+    /// Durable receipt for the exact native inclusion consumed by this commit.
+    pub const fn inclusion(&self) -> &SettlementStoreAdmissionV1 {
+        &self.admission
     }
 }
 
@@ -149,13 +153,13 @@ impl ValidatedSettlementSelectionV1 {
         if inclusion.statement() != &self.expectation.statement {
             return Err(SettlementSelectionCommitErrorV1::Candidate(Error::Identity));
         }
-        let (accepted, mark) = store
-            .verify_and_commit(expected, inclusion.transaction(), &self.expectation, verifier)
+        let (accepted, mark, admission) = store
+            .verify_inclusion_and_commit(expected, inclusion, &self.expectation, verifier)
             .map_err(SettlementSelectionCommitErrorV1::Store)?;
         Ok(PersistedSettlementAdmissionV1 {
             accepted,
             mark,
-            inclusion,
+            admission,
         })
     }
 }

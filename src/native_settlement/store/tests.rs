@@ -97,6 +97,7 @@ fn persists_recovers_and_enforces_cas_and_external_floor() {
             &Accept,
         )
         .unwrap();
+    assert!(store.admission().is_none());
     assert!(matches!(
         store.verify_and_commit(
             zero,
@@ -136,6 +137,7 @@ fn persists_recovers_and_enforces_cas_and_external_floor() {
     let recovered = SettlementStoreV1::open(&path, policy(), one).unwrap();
     assert_eq!(recovered.mark(), two);
     assert_eq!(recovered.registry().head().unwrap().consumed_end, 2);
+    assert!(recovered.admission().is_none());
     drop(recovered);
     let forged = SettlementStoreMarkV1 {
         record_digest: h(99),
