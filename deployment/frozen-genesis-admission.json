@@ -1,0 +1,25 @@
+{
+  "schema": "bloch.l2.frozen-genesis-admission.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "external-approval-required-non-authorizing",
+  "status": "pending",
+  "inputArtifacts": {
+    "trustRoots": null,
+    "trustRootsSha256": null,
+    "identityVerifier": null,
+    "identityVerifierSha256": null,
+    "identityVerifierSourceRevision": null,
+    "genesisPackage": null,
+    "genesisPackageSha256": null,
+    "approvals": null,
+    "approvalsSha256": null
+  },
+  "permissions": {
+    "admitGenesis": false,
+    "startNode": false,
+    "bindRpc": false,
+    "publishFinalized": false
+  },
+  "genesisAdmitted": false
+}

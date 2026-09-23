@@ -89,3 +89,8 @@ serde = ["dep:serde", "revm/serde", "alloy-primitives/serde", "alloy-trie/serde"
 [[example]]
 name = "native_escrow"
 required-features = ["experimental-escrow"]
+
+[[example]]
+name = "bloch-genesis-identity"
+path = "examples/bloch-genesis-identity.rs"
+required-features = ["serde"]
