@@ -238,6 +238,21 @@ a persistence error. Its provider supplies the shared RPC/pool notification
 channel. Sole-writer ownership is a host contract; complete startup validation,
 cross-backend crash recovery and fork-choice/reorganization remain separate work.
 
+`RuntimeLease` adds a host-facing, durable process lifecycle boundary. A versioned,
+checksummed record binds the configured chain ID, genesis hash and last acknowledged
+database head, state root, receipt root and observed L1 settlement cursor. Startup
+creates an exclusive sidecar and changes `clean` to `running` with a same-directory
+atomic replace; every post-commit checkpoint and clean shutdown uses the same replace,
+file `fsync` and parent-directory `fsync`. Abrupt drop deliberately leaves crash
+evidence. Restart remains blocked until the stopped host independently verifies the
+exact durable identity/head and explicitly acknowledges recovery. A head ahead of
+or behind the journal is never repaired or guessed. The journal is local consistency
+evidence—not genesis authentication, fork choice, L1 finality or a production node.
+The monotonically increasing generation detects out-of-order writes during one
+observed lifecycle, but a single local file and unkeyed checksum cannot detect an
+attacker restoring an entire older valid record. Operators must retain an external
+minimum generation or authenticated audit copy when rollback resistance is required.
+
 Attachment also checks configured genesis accounts, code and storage through
 historical reads; missing allocation indices reject startup without repair.
 `rpc_developer_flow` exercises real HTTP signed deploy/call through the coordinator
