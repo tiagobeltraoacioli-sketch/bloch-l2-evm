@@ -44,11 +44,11 @@ export function canonicalBytes(value) {
   return Buffer.from(`${canonicalValue(value)}\n`, "utf8");
 }
 
-function sha256(bytes) {
+export function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function regularFile(file, label, maximum = 16 * 1024 * 1024) {
+export async function regularFile(file, label, maximum = 16 * 1024 * 1024) {
   const before = await lstat(file).catch((error) => { throw new AdmissionError(`cannot stat ${label}: ${error.message}`); });
   requireCondition(before.isFile() && !before.isSymbolicLink(), `${label} must be a regular non-symlink file`);
   requireCondition(before.nlink === 1, `${label} must not be hard-linked`);
@@ -79,7 +79,7 @@ async function regularFile(file, label, maximum = 16 * 1024 * 1024) {
   }
 }
 
-async function jsonDocument(file, label, requireCanonical = true) {
+export async function jsonDocument(file, label, requireCanonical = true) {
   const bytes = await regularFile(file, label);
   let value;
   try { value = JSON.parse(bytes.toString("utf8")); }
@@ -88,7 +88,7 @@ async function jsonDocument(file, label, requireCanonical = true) {
   return { value, bytes, sha256: sha256(bytes) };
 }
 
-function validateContract(value) {
+export function validateContract(value) {
   const contract = exactObject(value, ["schema", "network", "chainId", "classification", "status", "inputArtifacts", "permissions", "genesisAdmitted"], "admission contract");
   requireCondition(contract.schema === "bloch.l2.frozen-genesis-admission.v1", "unsupported admission contract schema");
   requireCondition(contract.network === "bloch-l2-testnet" && contract.chainId === 700771, "admission contract must target bloch-l2-testnet chain 700771");
@@ -110,7 +110,7 @@ function validateContract(value) {
   return contract;
 }
 
-function validateTrustRoots(value) {
+export function validateTrustRoots(value) {
   const registry = exactObject(value, ["schema", "network", "chainId", "threshold", "roots"], "trust root registry");
   requireCondition(registry.schema === "bloch.l2.genesis-trust-roots.v1", "unsupported trust root registry schema");
   requireCondition(registry.network === "bloch-l2-testnet" && registry.chainId === 700771, "trust roots target the wrong chain");
@@ -139,7 +139,7 @@ function validateTrustRoots(value) {
   return { registry, roots };
 }
 
-async function executePinnedVerifier(verifierBytes, artifactPath) {
+export async function executePinnedVerifier(verifierBytes, artifactPath) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "bloch-genesis-verifier-"));
   const executable = path.join(directory, "bloch-genesis-identity");
   try {

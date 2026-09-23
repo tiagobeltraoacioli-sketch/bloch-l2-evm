@@ -63,3 +63,81 @@ node tools/check-frozen-genesis-admission.mjs \
 Even a successful result reports `nodeStartPermitted: false`. It is evidence for
 the separate production-entrypoint gate, not permission to deploy or bind a
 network service.
+
+## Executable ceremony workflow
+
+The ceremony tool never creates or reads a private key. Every output is opened
+with create-once semantics and mode `0600`; an existing path is an error. Start
+in a new owner-only directory only after the reviewed contract pins the roots
+registry and identity-verifier binary:
+
+```sh
+install -d -m 0700 /secure/ceremony-700771
+
+node tools/frozen-genesis-ceremony.mjs template \
+  --out /secure/ceremony-700771/genesis.template.json
+
+node tools/frozen-genesis-ceremony.mjs freeze \
+  --template /secure/ceremony-700771/genesis.template.json \
+  --domain "$REVIEWED_EXECUTION_DOMAIN" \
+  --timestamp "$REVIEWED_GENESIS_TIMESTAMP" \
+  --out /secure/ceremony-700771/genesis.json
+
+node tools/frozen-genesis-ceremony.mjs derive \
+  --contract deployment/frozen-genesis-admission.json \
+  --genesis /secure/ceremony-700771/genesis.json \
+  --ceremony-id ceremony-700771-001 \
+  --decision-id decision-700771-genesis-001 \
+  --out /secure/ceremony-700771/package.json
+
+node tools/frozen-genesis-ceremony.mjs requests \
+  --contract deployment/frozen-genesis-admission.json \
+  --package /secure/ceremony-700771/package.json \
+  --out-dir /secure/ceremony-700771/requests
+```
+
+The `requests` command emits three JSON requests and three exact binary payloads.
+Transfer one request and its matching payload to each independent root through
+that organization's authenticated channel. On each organization's offline
+signing machine, after independently reviewing the package digest:
+
+```sh
+openssl pkeyutl -sign -rawin \
+  -inkey /offline/private/root-ed25519.pem \
+  -in trust-root-1.payload.bin \
+  -out trust-root-1.signature.bin
+```
+
+The private-key path above belongs only to that independent authority and must
+never be copied to the coordinator. Return only the 64-byte detached signature.
+The coordinator verifies and wraps each response create-once:
+
+```sh
+node tools/frozen-genesis-ceremony.mjs respond \
+  --contract deployment/frozen-genesis-admission.json \
+  --request /secure/ceremony-700771/requests/trust-root-1.request.json \
+  --signature /secure/inbox/trust-root-1.signature.bin \
+  --out /secure/ceremony-700771/trust-root-1.response.json
+```
+
+After at least two independently returned responses exist, assemble the final
+approval envelope and re-run the admission gate:
+
+```sh
+node tools/frozen-genesis-ceremony.mjs assemble \
+  --contract deployment/frozen-genesis-admission.json \
+  --package /secure/ceremony-700771/package.json \
+  --response /secure/ceremony-700771/trust-root-1.response.json \
+  --response /secure/ceremony-700771/trust-root-2.response.json \
+  --out /secure/ceremony-700771/approvals.json
+
+node tools/check-frozen-genesis-admission.mjs \
+  --contract deployment/frozen-genesis-admission.json \
+  --package /secure/ceremony-700771/package.json \
+  --approvals /secure/ceremony-700771/approvals.json \
+  --require-admitted
+```
+
+The assembled result still reports `nodeStartPermitted: false`. A successful
+genesis ceremony does not satisfy finality, derivation, persistence, recovery,
+RPC, P2P or production-entrypoint gates.
