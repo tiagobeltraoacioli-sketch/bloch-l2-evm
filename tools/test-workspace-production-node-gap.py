@@ -29,7 +29,7 @@ class WorkspaceProductionNodeGapTests(unittest.TestCase):
     def test_checked_in_report_has_no_compatible_candidate(self) -> None:
         result = MODULE.validate(self.report)
         self.assertEqual(result["sourcesInspected"], 4)
-        self.assertEqual(result["symbolsRecorded"], 30)
+        self.assertEqual(result["symbolsRecorded"], 44)
         self.assertEqual(result["capabilityGaps"], 9)
         self.assertEqual(result["compatibleCandidates"], 0)
         self.assertTrue(result["legacyDevnetRejected"])

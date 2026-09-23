@@ -28,10 +28,11 @@ CORE_FILES = (
     "deployment/production-entrypoint-contract.json",
     "deployment/production-entrypoint-conformance.json",
     "deployment/workspace-production-node-gap-report.json",
+    "deployment/partial-implementation-evidence.json",
 )
 MANIFEST_NAME = "qualification-package.json"
-SCHEMA = "bloch.l2.node-qualification-package.v7"
-VERIFIER_SCHEMA = "bloch.l2.node-qualification-verifier.v1"
+SCHEMA = "bloch.l2.node-qualification-package.v8"
+VERIFIER_SCHEMA = "bloch.l2.node-qualification-verifier.v2"
 VERIFIER_FILES = (
     "tools/node-qualification-package.py",
     "tools/check-network-identity.py",
@@ -42,6 +43,7 @@ VERIFIER_FILES = (
     "tools/check-production-entrypoint-contract.py",
     "tools/check-production-entrypoint-conformance.py",
     "tools/check-workspace-production-node-gap.py",
+    "tools/check-partial-implementation-evidence.py",
 )
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 SECRET_PATTERNS = (
@@ -74,7 +76,7 @@ def load_module(name: str, path: Path) -> Any:
     return module
 
 
-def validator_modules() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+def validator_modules() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]:
     """Load semantic validators only after verifier provenance is checked."""
     return (
         load_module("network_identity", ROOT / "tools/check-network-identity.py"),
@@ -96,6 +98,10 @@ def validator_modules() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
         load_module(
             "workspace_production_node_gap",
             ROOT / "tools/check-workspace-production-node-gap.py",
+        ),
+        load_module(
+            "partial_implementation_evidence",
+            ROOT / "tools/check-partial-implementation-evidence.py",
         ),
     )
 
@@ -201,6 +207,7 @@ def read_json(path: Path) -> Any:
 def referenced_files(
     finality: dict[str, Any], node: dict[str, Any], build_request: dict[str, Any],
     conformance_plan: dict[str, Any], gap_report: dict[str, Any],
+    partial_evidence: dict[str, Any],
 ) -> set[str]:
     paths: set[str] = set(CORE_FILES)
     for requirement in finality.get("requirements", []):
@@ -222,6 +229,9 @@ def referenced_files(
         for item in interface.get("files", []):
             if isinstance(item, dict) and isinstance(item.get("path"), str):
                 paths.add(item["path"])
+    for artifact in partial_evidence.get("artifacts", []):
+        if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
+            paths.add(artifact["path"])
     for path in paths:
         safe_relative_path(path)
     return paths
@@ -231,12 +241,12 @@ def validate_sources(
     root: Path,
 ) -> tuple[
     dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any],
-    dict[str, Any],
+    dict[str, Any], dict[str, Any],
 ]:
     (
         identity_validator, finality_validator, node_validator,
         provisioning_validator, build_request_validator, entrypoint_validator,
-        conformance_validator, gap_validator,
+        conformance_validator, gap_validator, partial_evidence_validator,
     ) = validator_modules()
     identity = read_json(root / CORE_FILES[0])
     proposal = read_json(root / CORE_FILES[1])
@@ -247,6 +257,7 @@ def validate_sources(
     entrypoint_contract = read_json(root / CORE_FILES[6])
     conformance_plan = read_json(root / CORE_FILES[7])
     gap_report = read_json(root / CORE_FILES[8])
+    partial_evidence = read_json(root / CORE_FILES[9])
     try:
         identity_validator.validate_identity(identity)
         identity_validator.validate_proposal(identity, proposal)
@@ -257,6 +268,7 @@ def validate_sources(
         entrypoint_report = entrypoint_validator.validate(entrypoint_contract)
         conformance_report = conformance_validator.validate(conformance_plan, root)
         gap_report_result = gap_validator.validate(gap_report, root)
+        partial_evidence_report = partial_evidence_validator.validate(partial_evidence, root)
     except (
         identity_validator.IdentityError,
         finality_validator.FinalityError,
@@ -266,6 +278,7 @@ def validate_sources(
         entrypoint_validator.EntrypointContractError,
         conformance_validator.ConformanceError,
         gap_validator.GapReportError,
+        partial_evidence_validator.PartialEvidenceError,
     ) as error:
         raise PackageError(str(error)) from error
     identity_ready = identity["activation"]["productionReady"]
@@ -278,6 +291,7 @@ def validate_sources(
         "productionEntrypoint": entrypoint_report,
         "entrypointConformance": conformance_report,
         "workspaceGapReport": gap_report_result,
+        "partialImplementationEvidence": partial_evidence_report,
         "activationPermitted": bool(
             identity_ready
             and finality_report["productionFinalityReady"]
@@ -287,18 +301,19 @@ def validate_sources(
             and entrypoint_report["productionReady"]
             and conformance_report["productionQualified"]
             and gap_report_result["productionReady"]
+            and partial_evidence_report["productionReady"]
         ),
     }
-    return finality, node, build_request, conformance_plan, gap_report, report
+    return finality, node, build_request, conformance_plan, gap_report, partial_evidence, report
 
 
 def package_contents(root: Path, revision: str) -> dict[str, bytes]:
     require(REVISION_PATTERN.fullmatch(revision) is not None,
             "source revision must be a lowercase 40-character git SHA")
-    finality, node, build_request, conformance_plan, gap_report, report = validate_sources(root)
+    finality, node, build_request, conformance_plan, gap_report, partial_evidence, report = validate_sources(root)
     files: dict[str, bytes] = {}
     for relative in sorted(
-        referenced_files(finality, node, build_request, conformance_plan, gap_report)
+        referenced_files(finality, node, build_request, conformance_plan, gap_report, partial_evidence)
     ):
         path = (root / relative).resolve()
         require(path.is_relative_to(root.resolve()) and path.is_file(),
@@ -427,12 +442,12 @@ def verify_package(
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
         (
-            finality, node, build_request, conformance_plan, gap_report, report,
+            finality, node, build_request, conformance_plan, gap_report, partial_evidence, report,
         ) = validate_sources(root)
         require(
             set(expected_names)
             == referenced_files(
-                finality, node, build_request, conformance_plan, gap_report
+                finality, node, build_request, conformance_plan, gap_report, partial_evidence
             ),
                 "package does not contain the exact evidence closure")
     require(manifest["report"] == report, "package qualification report does not match its sources")

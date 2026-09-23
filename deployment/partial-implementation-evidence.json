@@ -1,0 +1,157 @@
+{
+  "schema": "bloch.l2.partial-implementation-evidence.v1",
+  "network": "bloch-l2-testnet",
+  "chainId": 700771,
+  "classification": "implementation-audit-non-authorizing",
+  "baselineRevision": "68bbd9f862e43a472fa844393020d48ed77d50c5",
+  "artifacts": [
+    {
+      "id": "frozen-genesis-admission-contract",
+      "path": "deployment/frozen-genesis-admission.json",
+      "sha256": "4572ac8bab5b368470a6f1b918182db8837cda7e43902433edd2e76762fcc323",
+      "evidenceClass": "pending-contract",
+      "productionQualified": false
+    },
+    {
+      "id": "frozen-genesis-admission-verifier",
+      "path": "tools/check-frozen-genesis-admission.mjs",
+      "sha256": "0433bc2ffaf99432a1e29e91c023489da65adc2663f72829ec5f66bc6c525c67",
+      "evidenceClass": "verifier-source",
+      "productionQualified": false
+    },
+    {
+      "id": "frozen-genesis-admission-tests",
+      "path": "tools/test-frozen-genesis-admission.mjs",
+      "sha256": "35d2650f7ef8664a70f84cb327afbe3fa75fde5c84e3d2b45b8a8c11f9962827",
+      "evidenceClass": "test-source",
+      "productionQualified": false
+    },
+    {
+      "id": "frozen-genesis-ceremony-tool",
+      "path": "tools/frozen-genesis-ceremony.mjs",
+      "sha256": "41c06f8afae2ec6f97e991e82a02f4ce79df16aadc802092b99665b6965b3622",
+      "evidenceClass": "ceremony-tool-source",
+      "productionQualified": false
+    },
+    {
+      "id": "frozen-genesis-ceremony-tests",
+      "path": "tools/test-frozen-genesis-ceremony.mjs",
+      "sha256": "9cd808e4cc6f10f773413d2396e18e1909c3448faa547158ed758b07532b36f5",
+      "evidenceClass": "test-source",
+      "productionQualified": false
+    },
+    {
+      "id": "frozen-genesis-ceremony-procedure",
+      "path": "docs/FROZEN-GENESIS-ADMISSION.md",
+      "sha256": "8ea7afb683a503b424517597990d8abb7f9f7d38427d996fa505633479a5b156",
+      "evidenceClass": "procedure-source",
+      "productionQualified": false
+    },
+    {
+      "id": "compiled-genesis-identity-source",
+      "path": "examples/bloch-genesis-identity.rs",
+      "sha256": "2f2aca0d2a2b1bbfde3e682e6c761ead4ac5b60b86b3c89e425441a9d319445d",
+      "evidenceClass": "implementation-source",
+      "productionQualified": false
+    },
+    {
+      "id": "runtime-lifecycle-source",
+      "path": "integrations/reth-execution/src/lifecycle.rs",
+      "sha256": "29aa59adb8a8eb583a0103b6e2566414752dbbcedffb727a6fc36305f77719ed",
+      "evidenceClass": "implementation-source",
+      "productionQualified": false
+    },
+    {
+      "id": "runtime-lifecycle-tests",
+      "path": "integrations/reth-execution/tests/runtime_lifecycle.rs",
+      "sha256": "4f1d8ac0eb612eb4dd80021e95f6bdbe0bbf610ff3ca6c3f6ab59577ca909275",
+      "evidenceClass": "test-source",
+      "productionQualified": false
+    },
+    {
+      "id": "durable-supervisor-source",
+      "path": "integrations/reth-execution/src/supervisor.rs",
+      "sha256": "18904f950d5f0bd9cf5fa4124c63a29d3b02497e407414b69c06ed8460ad8434",
+      "evidenceClass": "implementation-source",
+      "productionQualified": false
+    },
+    {
+      "id": "durable-supervisor-tests",
+      "path": "integrations/reth-execution/tests/durable_supervisor.rs",
+      "sha256": "45d61ea800678e48996775e8a3aa76ce5d79e99178ced62b1ef911bbb9b9c800",
+      "evidenceClass": "test-source",
+      "productionQualified": false
+    }
+  ],
+  "capabilityAssessments": [
+    {
+      "capabilityId": "frozen-genesis",
+      "status": "partial-implementation-external-inputs-missing",
+      "artifactIds": [
+        "frozen-genesis-admission-contract",
+        "frozen-genesis-admission-verifier",
+        "frozen-genesis-admission-tests",
+        "frozen-genesis-ceremony-tool",
+        "frozen-genesis-ceremony-tests",
+        "frozen-genesis-ceremony-procedure",
+        "compiled-genesis-identity-source"
+      ],
+      "remainingBlockers": [
+        "three independent trust roots are not pinned",
+        "no externally reviewed genesis package or approvals are present"
+      ],
+      "productionQualified": false
+    },
+    {
+      "capabilityId": "durable-persistence",
+      "status": "partial-implementation-cross-backend-atomicity-unqualified",
+      "artifactIds": [
+        "runtime-lifecycle-source",
+        "runtime-lifecycle-tests",
+        "durable-supervisor-source",
+        "durable-supervisor-tests"
+      ],
+      "remainingBlockers": [
+        "database and lifecycle journal are not one atomic transaction",
+        "settlement cursor authentication remains a host responsibility"
+      ],
+      "productionQualified": false
+    },
+    {
+      "capabilityId": "graceful-shutdown",
+      "status": "partial-implementation-service-drain-unqualified",
+      "artifactIds": [
+        "runtime-lifecycle-source",
+        "durable-supervisor-source",
+        "durable-supervisor-tests"
+      ],
+      "remainingBlockers": [
+        "production derivation, networking and RPC services do not exist to drain",
+        "full process-level shutdown qualification has not been performed"
+      ],
+      "productionQualified": false
+    },
+    {
+      "capabilityId": "crash-recovery",
+      "status": "partial-implementation-forensic-recovery-required",
+      "artifactIds": [
+        "runtime-lifecycle-source",
+        "runtime-lifecycle-tests",
+        "durable-supervisor-source",
+        "durable-supervisor-tests"
+      ],
+      "remainingBlockers": [
+        "ambiguous database/journal outcomes still require independent recovery",
+        "replay does not authenticate L1 derivation or establish finality"
+      ],
+      "productionQualified": false
+    }
+  ],
+  "permissions": {
+    "admitGenesis": false,
+    "startNode": false,
+    "bindRpc": false,
+    "publishFinalized": false
+  },
+  "productionReady": false
+}

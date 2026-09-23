@@ -3,7 +3,7 @@
   "network": "bloch-l2-testnet",
   "chainId": 700771,
   "classification": "workspace-audit-non-authorizing",
-  "inspectionBaselineRevision": "8d5032bb5d10968d36cc96e4751e3efb126398e2",
+  "inspectionBaselineRevision": "68bbd9f862e43a472fa844393020d48ed77d50c5",
   "interface": {
     "crate": "bloch-production-entrypoint-api",
     "registeredCandidate": false,
@@ -51,7 +51,7 @@
       "id": "bloch-l2-execution",
       "repository": "bloch-l2-evm",
       "origin": "git@github.com:tiagobeltraoacioli-sketch/bloch-l2-evm.git",
-      "revision": "8d5032bb5d10968d36cc96e4751e3efb126398e2",
+      "revision": "68bbd9f862e43a472fa844393020d48ed77d50c5",
       "protocol": "bloch-l2-execution-scaffold",
       "sourceChainId": 700771,
       "compatibility": "partial-l2-non-entrypoint",
@@ -95,6 +95,36 @@
           "path": "integrations/reth-execution/src/bin/bloch-evm-dev.rs",
           "sha256": "f149595d75169b026e5606c8ded422af94ff08e8ed8d99c76c204a533d34d95f",
           "names": ["bloch-evm-dev"]
+        },
+        {
+          "path": "deployment/frozen-genesis-admission.json",
+          "sha256": "4572ac8bab5b368470a6f1b918182db8837cda7e43902433edd2e76762fcc323",
+          "names": ["frozen-genesis-admission"]
+        },
+        {
+          "path": "tools/check-frozen-genesis-admission.mjs",
+          "sha256": "0433bc2ffaf99432a1e29e91c023489da65adc2663f72829ec5f66bc6c525c67",
+          "names": ["validate", "validateContract"]
+        },
+        {
+          "path": "tools/frozen-genesis-ceremony.mjs",
+          "sha256": "41c06f8afae2ec6f97e991e82a02f4ce79df16aadc802092b99665b6965b3622",
+          "names": ["createTemplate", "freezeTemplate", "derivePackage", "createSignatureRequests", "wrapResponse", "assembleApprovals"]
+        },
+        {
+          "path": "examples/bloch-genesis-identity.rs",
+          "sha256": "2f2aca0d2a2b1bbfde3e682e6c761ead4ac5b60b86b3c89e425441a9d319445d",
+          "names": ["bloch-genesis-identity"]
+        },
+        {
+          "path": "integrations/reth-execution/src/lifecycle.rs",
+          "sha256": "29aa59adb8a8eb583a0103b6e2566414752dbbcedffb727a6fc36305f77719ed",
+          "names": ["RuntimeLease", "RuntimeReceiptFloor", "runtime_receipt_tip"]
+        },
+        {
+          "path": "integrations/reth-execution/src/supervisor.rs",
+          "sha256": "18904f950d5f0bd9cf5fa4124c63a29d3b02497e407414b69c06ed8460ad8434",
+          "names": ["DurableCanonicalSupervisor"]
         }
       ]
     },
@@ -201,7 +231,7 @@
       "status": "missing-compatible-implementation",
       "nearbySourceIds": ["bloch-l2-execution", "bloch-genesis4-l1"],
       "requiredProtocol": "reviewed-chain-700771-genesis-bytes-state-root-and-domain",
-      "incompatibility": "The L2 code generates test/developer genesis state; the reviewed frozen production artifact does not exist, while the available Genesis-4 manifest is for L1."
+      "incompatibility": "A fail-closed admission verifier and offline ceremony workflow now exist, but the contract remains pending without pinned independent roots, an externally reviewed chain-700771 genesis package or approvals; Genesis-4 remains L1-only."
     },
     {
       "capabilityId": "gated-json-rpc",
@@ -215,21 +245,21 @@
       "status": "missing-compatible-implementation",
       "nearbySourceIds": ["bloch-l2-execution", "upstream-reth"],
       "requiredProtocol": "atomic-l2-head-state-receipts-and-settlement-cursor",
-      "incompatibility": "Synthetic canonical persistence exists, but it is not atomically bound to authenticated derivation/finality and its multi-store crash matrix is unqualified."
+      "incompatibility": "Lifecycle receipts and a fail-closed canonical supervisor bind observed head/state/receipts/cursor, but the cursor is a host trust input, database and journal are not one atomic transaction, and authenticated derivation/finality plus the multi-store crash matrix remain unqualified."
     },
     {
       "capabilityId": "graceful-shutdown",
       "status": "missing-compatible-implementation",
       "nearbySourceIds": ["bloch-l2-execution"],
       "requiredProtocol": "production-admission-drain-storage-close-restart-verification",
-      "incompatibility": "The developer binary performs orderly runtime shutdown only in mandatory synthetic mode; no production admission or derivation services exist to drain."
+      "incompatibility": "The lifecycle supervisor records exact clean shutdown and rejects ambiguous restart, but no production derivation, P2P or RPC services exist to drain and qualify at process level."
     },
     {
       "capabilityId": "crash-recovery",
       "status": "missing-compatible-implementation",
       "nearbySourceIds": ["bloch-l2-execution"],
       "requiredProtocol": "authenticated-deterministic-replay-or-reviewed-rollback",
-      "incompatibility": "replay_canonical_prefix trusts recorded local canonical selection and explicitly does not authenticate L1 derivation or establish finality."
+      "incompatibility": "Append-only lifecycle receipts detect local gaps, forks and rollback above an external floor, while replay_canonical_prefix still trusts recorded local selection; ambiguous cross-store outcomes require forensic recovery and neither mechanism authenticates L1 derivation or establishes finality."
     }
   ],
   "productionEntrypointCandidate": null,

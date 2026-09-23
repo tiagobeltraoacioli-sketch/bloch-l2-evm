@@ -54,7 +54,7 @@
     {
       "path": "deployment/workspace-production-node-gap-report.json",
       "role": "workspace-production-node-gap-report",
-      "sha256": "f568bf9f61b4d77ba98cb1b18c544527eaa1ff06a8820190566f30c6a0d9a2fe"
+      "sha256": "2c6b4b5b67f6aa0111a621cb20758bfaa228f623fcde3f6711d383008be5e9c5"
     }
   ],
   "externalReth": {

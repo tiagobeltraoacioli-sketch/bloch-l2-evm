@@ -194,10 +194,14 @@ gates are closed with authenticated evidence.
 `tools/node-qualification-package.py` creates a deterministic ZIP containing
 the network identity, registration proposal, finality gate, node gate,
 provisioning preflight, blocked production-build request, production entrypoint
-contract, synthetic conformance plan and fixture, and the exact transitive set of
+contract, synthetic conformance plan and fixture, the non-authorizing partial
+implementation inventory, and the exact transitive set of
 evidence files referenced by the two readiness gates plus all nine audited build
-inputs, the workspace gap report and the three compile-time interface files. Every file
-is inventoried by path, byte length and SHA-256. Verification uses the trusted,
+inputs, the workspace gap report, the frozen-genesis admission and offline ceremony
+sources/tests/procedure, lifecycle/
+supervisor sources and tests, and the three compile-time interface files. Every file
+is inventoried by path, byte length and SHA-256. Partial implementation records keep
+their affected production capabilities explicitly unqualified. Verification uses the trusted,
 externally pinned validator suite to re-check the packaged sources; trusting
 only the inventory or a reported boolean is insufficient.
 
@@ -214,7 +218,8 @@ verifier identity inside the ZIP are self-declarations. Before handoff, record
 the reviewed commit and the verifier-suite SHA-256 through an independent,
 authenticated channel. The suite identity covers this packager, all three
 semantic readiness validators, provisioning preflight, build-request checker and
-entrypoint-contract/conformance checkers, and the workspace-gap checker. Obtain it
+entrypoint-contract/conformance checkers, the workspace-gap checker, and the partial
+implementation evidence checker. Obtain it
 from the exact reviewed checkout with:
 
 ```sh

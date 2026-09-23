@@ -47,6 +47,10 @@ jobs:
         run: python3 tools/test-production-entrypoint-conformance.py
       - name: Test workspace production-node gap report
         run: python3 tools/test-workspace-production-node-gap.py
+      - name: Test non-authorizing partial implementation evidence
+        run: python3 tools/test-partial-implementation-evidence.py
+      - name: Test frozen-genesis admission and offline ceremony
+        run: node --test tools/test-frozen-genesis-admission.mjs tools/test-frozen-genesis-ceremony.mjs
       - name: Compile the non-authorizing production entrypoint API
         run: cargo test --locked --manifest-path integrations/production-entrypoint-api/Cargo.toml
       - name: Test source-bound production-node qualification packages
