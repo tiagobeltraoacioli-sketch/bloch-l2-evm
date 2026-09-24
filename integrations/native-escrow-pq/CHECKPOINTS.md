@@ -88,11 +88,13 @@ native committed representation and activation.
 
 The authority-bound commit path embeds that receipt beside the complete
 inclusion envelope in one `BLSTRC04` settlement record. Coordinated recovery
-reopens both stores under independently retained marks, rechecks current PQ
-freshness and requires the recovered policy, checkpoint digest, epoch, block and
-slot to match the V4 receipt. The checkpoint history remains a separate
-rollback domain, so both marks are mandatory. This is still weak-subjectivity
-authentication, not production FFG finality.
+reopens both stores under independently retained marks, rereads the exact
+historical checkpoint, reverifies its PQ authority at the receipt's recorded
+freshness epoch, rejects future-dated checks, and requires policy, digest, epoch,
+block and slot to match. The audit-only result cannot become a current anchor;
+`current` still performs that separate check. The checkpoint history remains a
+separate rollback domain, so both marks are mandatory. This is still
+weak-subjectivity authentication, not production FFG finality.
 
 ## Validation
 
@@ -104,8 +106,9 @@ missing external quorum, duplicate signer indices, freshness boundaries,
 adoption/review/expiry clocks, network/genesis/state/header/version mismatch,
 rollback, same-epoch conflict, identical retry and resource bounds. The eight
 existing escrow authorization tests also pass. The authority suite additionally
-covers V4 atomic publication, dual-store recovery and receipt tampering. Keys
-are not printed or saved.
+covers V4 atomic publication, recovery after a newer checkpoint advances,
+historical expiry, future audit claims, predecessor relinking and receipt
+tampering. Keys are not printed or saved.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml

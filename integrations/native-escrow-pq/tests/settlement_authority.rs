@@ -114,7 +114,10 @@ fn settlement_transaction() -> Bytes {
 }
 
 fn checkpoint_artifacts(transactions: &[Bytes]) -> (CheckpointEnvelope, Vec<u8>) {
-    let epoch = 100u64;
+    checkpoint_artifacts_at(transactions, 100)
+}
+
+fn checkpoint_artifacts_at(transactions: &[Bytes], epoch: u64) -> (CheckpointEnvelope, Vec<u8>) {
     let slot = epoch * 120;
     let mut header = vec![0; 304];
     header[..4].copy_from_slice(&0xb10c_0005u32.to_le_bytes());
@@ -288,9 +291,17 @@ fn v4_atomically_recovers_evidence_and_rechecks_independent_checkpoint_store() {
     drop(settlement_store);
     drop(checkpoint_store);
 
-    let checkpoint_store = CheckpointStore::open(&checkpoint_path, checkpoint_policy(), Some(checkpoint_mark)).unwrap();
+    let mut checkpoint_store =
+        CheckpointStore::open(&checkpoint_path, checkpoint_policy(), Some(checkpoint_mark)).unwrap();
+    let (newer_envelope, newer_header) = checkpoint_artifacts_at(&[Bytes::from_static(b"newer")], 102);
+    let newer_mark = checkpoint_store.accept(&newer_envelope, &newer_header, 103).unwrap();
+    assert_ne!(newer_mark, checkpoint_mark);
+    drop(checkpoint_store);
+    let checkpoint_store = CheckpointStore::open(&checkpoint_path, checkpoint_policy(), Some(newer_mark)).unwrap();
     let settlement_store = SettlementStoreV1::open(&settlement_path, settlement_policy(), settlement_mark).unwrap();
-    let recovered = recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 101).unwrap();
+    let recovered =
+        recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 100 + ws::WS_PERIOD_EPOCHS)
+            .unwrap();
     assert_eq!(recovered, persisted.authority());
     assert_eq!(
         settlement_store
@@ -310,7 +321,7 @@ fn v4_atomically_recovers_evidence_and_rechecks_independent_checkpoint_store() {
     let settlement_store =
         SettlementStoreV1::open(&settlement_path, settlement_policy(), initial_settlement_mark).unwrap();
     assert!(matches!(
-        recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 101),
+        recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 100 + ws::WS_PERIOD_EPOCHS,),
         Err(SettlementAuthorityStoreErrorV1::Mismatch)
     ));
     drop(settlement_store);

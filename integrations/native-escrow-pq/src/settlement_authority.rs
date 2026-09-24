@@ -15,7 +15,7 @@ use bloch_l2_evm::{
 use sha3::{Digest, Sha3_256};
 
 #[cfg(unix)]
-use crate::checkpoint_store::{CheckpointStore, StoreError as CheckpointStoreError};
+use crate::checkpoint_store::{CheckpointStore, HistoricalCheckpointAuditV1, StoreError as CheckpointStoreError};
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::{
     store::{SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
@@ -280,9 +280,24 @@ fn authority_receipt(checkpoint: &VerifiedCheckpoint) -> CheckpointAuthorityRece
     }
 }
 
-/// Recheck a recovered V4 audit receipt against the latest independently
-/// recovered and currently fresh PQ checkpoint. Older historical authorities
-/// require an explicit historical checkpoint-store lookup and are refused here.
+#[cfg(unix)]
+fn historical_authority_receipt(audit: HistoricalCheckpointAuditV1) -> CheckpointAuthorityReceiptV1 {
+    let anchor = audit.anchor();
+    CheckpointAuthorityReceiptV1 {
+        policy_identity: audit.policy_identity(),
+        checkpoint_digest: audit.checkpoint_digest(),
+        checkpoint_epoch: audit.checkpoint_epoch(),
+        checked_at_epoch: audit.checked_at_epoch(),
+        checkpoint_block: anchor.block,
+        checkpoint_slot: anchor.slot,
+        arrangement_review_due: audit.arrangement_review_due(),
+    }
+}
+
+/// Recheck a recovered V4 audit receipt against its exact independently
+/// retained PQ checkpoint and the historical freshness epoch recorded at
+/// acceptance. The audit-only result never becomes a current checkpoint
+/// capability; callers still need `CheckpointStore::current` for that purpose.
 #[cfg(unix)]
 pub fn recover_settlement_checkpoint_authority(
     checkpoint_store: &CheckpointStore,
@@ -293,10 +308,10 @@ pub fn recover_settlement_checkpoint_authority(
         .authority_audit()
         .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
     let retained = CheckpointAuthorityReceiptV1::decode(bytes).map_err(SettlementAuthorityStoreErrorV1::Receipt)?;
-    let verified = checkpoint_store
-        .current(current_epoch)
+    let audit = checkpoint_store
+        .historical_audit(retained.checkpoint_epoch(), retained.checked_at_epoch(), current_epoch)
         .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
-    let expected = authority_receipt(&verified);
+    let expected = historical_authority_receipt(audit);
     let admission = settlement_store
         .admission()
         .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;

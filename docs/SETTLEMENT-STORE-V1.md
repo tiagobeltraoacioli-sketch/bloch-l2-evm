@@ -48,8 +48,10 @@ cross-file crash window.
 suffix in that same inode. The portable store binds the bytes into its record
 digest but deliberately does not interpret them as authority. The native-PQ
 integration writes its canonical 129-byte receipt through this path and, after
-restart, compares it with a freshly reverified checkpoint store. A V4 record
-without that external recheck is audit data, not a finality capability.
+restart, compares it with the exact independently retained PQ record reverified
+at the receipt's historical freshness epoch. The returned audit type cannot be
+used as a current checkpoint capability. A V4 record without that external
+recheck is audit data, not a finality capability.
 
 This module does **not** provide distributed availability, hardware-backed WORM,
 host-compromise resistance, proof that validators ran the transition, consensus,

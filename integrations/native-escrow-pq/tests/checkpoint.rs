@@ -273,6 +273,44 @@ mod persistence {
         );
     }
     #[test]
+    fn historical_audit_rechecks_exact_record_without_exporting_a_current_anchor() {
+        let temp = Temp::new();
+        let (old, old_header) = fixture(100);
+        let mut store = CheckpointStore::create(&temp.0, policy()).unwrap();
+        let old_mark = store.accept(&old, &old_header, 101).unwrap();
+        let (new, new_header) = fixture(102);
+        store.accept(&new, &new_header, 103).unwrap();
+
+        let observed_now = 100 + ws::WS_PERIOD_EPOCHS;
+        let audit = store.historical_audit(100, 101, observed_now).unwrap();
+        assert_eq!(audit.checkpoint_epoch(), 100);
+        assert_eq!(audit.checked_at_epoch(), 101);
+        assert_eq!(audit.checkpoint_digest(), old_mark.digest);
+        assert_eq!(audit.anchor().slot, 12_000);
+        assert!(matches!(
+            store.historical_audit(100, observed_now + 1, observed_now),
+            Err(StoreError::Verify(Error::Future))
+        ));
+        assert!(matches!(
+            store.historical_audit(101, 101, observed_now),
+            Err(StoreError::Missing)
+        ));
+
+        let canonical = fs::read(temp.record(100)).unwrap();
+        let mut changed = canonical.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        fs::write(temp.record(100), changed).unwrap();
+        assert!(store.historical_audit(100, 101, observed_now).is_err());
+
+        let mut relinked = canonical;
+        relinked[8] ^= 1;
+        fs::write(temp.record(100), relinked).unwrap();
+        assert!(matches!(
+            store.historical_audit(100, 101, observed_now),
+            Err(StoreError::Format)
+        ));
+    }
+    #[test]
     fn conflicting_checkpoint_never_replaces_committed_file() {
         let temp = Temp::new();
         let (env, header) = fixture(100);

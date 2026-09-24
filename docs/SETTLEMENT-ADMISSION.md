@@ -69,8 +69,9 @@ The AGPL native-PQ integration now provides an explicit upstream composition:
 binds it to this module's complete evidence and exact settlement capability. Its
 fixed authority receipt remains audit data. The authority-bound path stores it
 with the complete evidence in one `BLSTRC04` record and jointly rechecks it
-against the independently recovered PQ checkpoint store. Both rollback marks
-must still be retained separately.
+against the exact historical record in the independently recovered PQ checkpoint
+store. The historical result is audit-only, future-dated freshness claims are
+refused, and both rollback marks must still be retained separately.
 
 Activation requires a separately reviewed native consensus integration to
 derive the expectation from committed state, authenticate the checkpoint,

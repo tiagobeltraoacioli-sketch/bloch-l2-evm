@@ -17,6 +17,11 @@ It is a separate experimental library: it does not overwrite the native node's
   checkpoints are idempotent; older epochs or conflicting digests are refused.
 * `current(current_epoch)` rechecks freshness and cryptographic validity before
   returning a usable `VerifiedCheckpoint`. An empty or poisoned store refuses.
+* `historical_audit(epoch, checked_at_epoch, observed_current_epoch)` rereads and
+  reverifies one exact retained record at its original freshness epoch. It
+  rejects future-dated audits, records absent from the opened history and any
+  changed predecessor link, and returns an audit-only type that cannot be used
+  as a current checkpoint capability.
 * `mark()` reports the stored rollback floor. It is not a fresh anchor and cannot
   be passed to the header verifier as one.
 
@@ -25,8 +30,10 @@ It is a separate experimental library: it does not overwrite the native node's
 A store may contain a validly signed checkpoint that has aged beyond the
 weak-subjectivity window. Reopening must preserve its rollback floor without
 making it current. Historical replay therefore verifies each signature,
-arrangement validity and header against that checkpoint's own epoch, retaining
-the result privately. It does not export these historical verification objects.
+arrangement validity and header against that checkpoint's own epoch. Settlement
+recovery may request an exact retained record at the freshness epoch recorded in
+its V4 receipt, but receives `HistoricalCheckpointAuditV1`, not
+`VerifiedCheckpoint`.
 
 Only `current` applies the caller's trusted present epoch before returning an
 anchor. Stale or future anchors are refused. The store can still accept a newer,
@@ -81,13 +88,12 @@ or supply a native escrow activation.
 
 ## Validation
 
-Seven new persistence tests use real signatures from disposable test keys. They
-cover restart and writer exclusion, idempotence, rollback and conflict refusal,
-stale historical recovery with fresh replacement, signature corruption,
-truncation, acknowledged-tail deletion, immutable policy, oversized input,
-publication-error poisoning and incomplete temporary files. Together with the
-seven checkpoint authentication and eight escrow authorization tests, 22 tests
-pass in this integration.
+Persistence tests use real signatures from disposable test keys. They cover
+restart and writer exclusion, idempotence, rollback and conflict refusal, stale
+historical recovery with fresh replacement, exact historical audit after the
+latest checkpoint advances, future audit claims, changed predecessor links,
+signature corruption, truncation, acknowledged-tail deletion, immutable policy,
+oversized input, publication-error poisoning and incomplete temporary files.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml

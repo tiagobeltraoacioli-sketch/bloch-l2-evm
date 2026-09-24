@@ -31,6 +31,7 @@ pub enum StoreError {
     CommitUncertain(io::Error),
     Poisoned,
     Empty,
+    Missing,
 }
 impl From<io::Error> for StoreError {
     fn from(e: io::Error) -> Self {
@@ -42,11 +43,44 @@ struct Stored {
     header: Vec<u8>,
     verified: VerifiedCheckpoint,
 }
+/// Reverified historical checkpoint identity for audit/recovery only. This is
+/// deliberately a distinct type from `VerifiedCheckpoint` and cannot be used
+/// as a currently fresh checkpoint capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoricalCheckpointAuditV1 {
+    policy_identity: B256,
+    checkpoint_digest: B256,
+    checkpoint_epoch: u64,
+    checked_at_epoch: u64,
+    anchor: bloch_l2_evm::l1::FinalizedCheckpoint,
+    arrangement_review_due: bool,
+}
+impl HistoricalCheckpointAuditV1 {
+    pub const fn policy_identity(&self) -> B256 {
+        self.policy_identity
+    }
+    pub const fn checkpoint_digest(&self) -> B256 {
+        self.checkpoint_digest
+    }
+    pub const fn checkpoint_epoch(&self) -> u64 {
+        self.checkpoint_epoch
+    }
+    pub const fn checked_at_epoch(&self) -> u64 {
+        self.checked_at_epoch
+    }
+    pub const fn anchor(&self) -> bloch_l2_evm::l1::FinalizedCheckpoint {
+        self.anchor
+    }
+    pub const fn arrangement_review_due(&self) -> bool {
+        self.arrangement_review_due
+    }
+}
 pub struct CheckpointStore {
     directory: PathBuf,
     _lock: File,
     policy: CheckpointPolicy,
     latest: Option<Stored>,
+    history: Vec<CheckpointMark>,
     count: usize,
     poisoned: bool,
 }
@@ -70,6 +104,7 @@ impl CheckpointStore {
             _lock: lock,
             policy,
             latest: None,
+            history: Vec::new(),
             count: 0,
             poisoned: false,
         })
@@ -112,6 +147,7 @@ impl CheckpointStore {
             _lock: lock,
             policy,
             latest: None,
+            history: Vec::new(),
             count: 0,
             poisoned: false,
         };
@@ -147,6 +183,7 @@ impl CheckpointStore {
                 header,
                 verified,
             });
+            store.history.push(mark);
             store.count += 1;
         }
         if !found {
@@ -176,6 +213,52 @@ impl CheckpointStore {
         self.policy
             .verify(&latest.envelope, &latest.header, current_epoch, None)
             .map_err(StoreError::Verify)
+    }
+    /// Reverify one retained checkpoint exactly at the historical epoch recorded
+    /// by a durable audit receipt. `observed_current_epoch` prevents a forged
+    /// receipt from claiming that verification happened in the future. The
+    /// result is audit-only and is never a current checkpoint capability.
+    pub fn historical_audit(
+        &self,
+        epoch: u64,
+        checked_at_epoch: u64,
+        observed_current_epoch: u64,
+    ) -> Result<HistoricalCheckpointAuditV1, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        if checked_at_epoch > observed_current_epoch {
+            return Err(StoreError::Verify(CheckpointError::Future));
+        }
+        let index = self
+            .history
+            .binary_search_by_key(&epoch, |mark| mark.epoch)
+            .ok()
+            .ok_or(StoreError::Missing)?;
+        let retained = self.history[index];
+        let expected_previous = index
+            .checked_sub(1)
+            .map(|previous| self.history[previous].digest)
+            .unwrap_or_else(|| self.policy.storage_identity());
+        let (previous, envelope, header) = decode(&read(&self.directory.join(name(epoch)))?)?;
+        if previous != expected_previous || envelope.checkpoint.epoch != epoch {
+            return Err(StoreError::Format);
+        }
+        let verified = self
+            .policy
+            .verify(&envelope, &header, checked_at_epoch, None)
+            .map_err(StoreError::Verify)?;
+        if verified.digest() != retained.digest {
+            return Err(StoreError::Rollback);
+        }
+        Ok(HistoricalCheckpointAuditV1 {
+            policy_identity: verified.policy_identity(),
+            checkpoint_digest: verified.digest(),
+            checkpoint_epoch: verified.epoch(),
+            checked_at_epoch: verified.checked_at_epoch(),
+            anchor: verified.anchor(),
+            arrangement_review_due: verified.arrangement_review_due(),
+        })
     }
     /// Verify first, durably publish, then advance the in-memory floor. Identical
     /// fresh checkpoints are idempotent. I/O ambiguity requires closing/recovery.
@@ -218,6 +301,7 @@ impl CheckpointStore {
             header: header.to_vec(),
             verified,
         });
+        self.history.push(mark);
         self.count += 1;
         self.poisoned = false;
         Ok(mark)

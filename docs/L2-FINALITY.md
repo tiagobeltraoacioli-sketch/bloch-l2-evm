@@ -133,10 +133,12 @@ settlement expectation. It also emits a fixed audit receipt binding policy,
 checkpoint digest and freshness epoch. This closes an in-process capability
 composition gap. The authority receipt and complete inclusion evidence are now
 atomic in `BLSTRC04` and dual-store recovery rechecks the independent signed
-checkpoint history. That history remains a separate rollback domain and the
-signer policy is still a weak-subjectivity trust input, not consensus activation
-or independent FFG proof. This changes no readiness requirement or product
-permission.
+checkpoint history at the receipt's original freshness epoch, even after newer
+checkpoints advance. That audit-only path rejects future-dated claims and cannot
+produce a current anchor. The history remains a separate rollback domain and
+the signer policy is still a weak-subjectivity trust input, not consensus
+activation or independent FFG proof. This changes no readiness requirement or
+product permission.
 
 ## RPC tag qualification
 
