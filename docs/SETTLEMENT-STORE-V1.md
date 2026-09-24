@@ -44,4 +44,5 @@ the complete body, header/ancestry path and checkpoint-authority artifact remain
 external and must be retained independently. `l1::TransactionInclusionEvidenceV1`
 provides a bounded canonical envelope for independently retaining and
 reauthenticating the complete body and ancestry path, but the store does not yet
-commit it atomically and the envelope does not authenticate checkpoint authority.
+commit it or its domain-separated identity atomically, and the envelope does not
+authenticate checkpoint authority.

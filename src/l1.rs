@@ -16,6 +16,7 @@ const MAX_HEADERS: usize = 2048;
 const MAX_TRANSACTIONS: usize = 4096;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const EVIDENCE_TAG: &[u8] = b"BLOCH:L1:INCLUSION-EVIDENCE:1";
+const EVIDENCE_COMMITMENT_TAG: &[u8] = b"BLOCH:L1:INCLUSION-EVIDENCE-COMMITMENT:1";
 /// Maximum canonical byte length of a retained inclusion-evidence envelope.
 pub const MAX_INCLUSION_EVIDENCE_V1_BYTES: usize =
     EVIDENCE_TAG.len() + 32 + 8 + 4 + MAX_HEADERS * HEADER_LEN + 4 + MAX_TRANSACTIONS * 4 + MAX_BODY_BYTES;
@@ -107,21 +108,7 @@ impl TransactionInclusionEvidenceV1 {
     /// Encode one strict, bounded envelope. Header lengths are implicit and
     /// transaction lengths are canonical little-endian `u32` values.
     pub fn encode(&self) -> Vec<u8> {
-        let body_bytes = self
-            .transactions
-            .iter()
-            .map(|transaction| transaction.len())
-            .sum::<usize>();
-        let mut out = Vec::with_capacity(
-            EVIDENCE_TAG.len()
-                + 32
-                + 8
-                + 4
-                + self.headers.len() * HEADER_LEN
-                + 4
-                + self.transactions.len() * 4
-                + body_bytes,
-        );
+        let mut out = Vec::with_capacity(self.encoded_len());
         out.extend_from_slice(EVIDENCE_TAG);
         out.extend_from_slice(self.checkpoint.block.as_slice());
         out.extend_from_slice(&self.checkpoint.slot.to_le_bytes());
@@ -135,6 +122,28 @@ impl TransactionInclusionEvidenceV1 {
             out.extend_from_slice(transaction);
         }
         out
+    }
+
+    /// SHA3-256 identity of the exact canonical envelope, with an independent
+    /// domain and encoded-length prefix. Computation streams the retained
+    /// fields and does not allocate a second envelope-sized buffer.
+    pub fn commitment(&self) -> B256 {
+        let mut hasher = Sha3_256::new();
+        hasher.update(EVIDENCE_COMMITMENT_TAG);
+        hasher.update((self.encoded_len() as u64).to_le_bytes());
+        hasher.update(EVIDENCE_TAG);
+        hasher.update(self.checkpoint.block);
+        hasher.update(self.checkpoint.slot.to_le_bytes());
+        hasher.update((self.headers.len() as u32).to_le_bytes());
+        for header in &self.headers {
+            hasher.update(header);
+        }
+        hasher.update((self.transactions.len() as u32).to_le_bytes());
+        for transaction in &self.transactions {
+            hasher.update((transaction.len() as u32).to_le_bytes());
+            hasher.update(transaction);
+        }
+        B256::from_slice(&hasher.finalize())
     }
 
     /// Decode exactly one canonical envelope and reverify its ancestry and
@@ -178,6 +187,21 @@ impl TransactionInclusionEvidenceV1 {
             return Err(L1Error::Evidence);
         }
         Ok(evidence)
+    }
+
+    fn encoded_len(&self) -> usize {
+        EVIDENCE_TAG.len()
+            + 32
+            + 8
+            + 4
+            + self.headers.len() * HEADER_LEN
+            + 4
+            + self.transactions.len() * 4
+            + self
+                .transactions
+                .iter()
+                .map(|transaction| transaction.len())
+                .sum::<usize>()
     }
 }
 

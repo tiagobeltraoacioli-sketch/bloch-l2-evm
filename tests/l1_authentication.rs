@@ -4,6 +4,7 @@ use bloch_l2_evm::l1::{
     TransactionInclusionEvidenceV1, MAX_INCLUSION_EVIDENCE_V1_BYTES,
 };
 use serde_json::Value;
+use sha3::{Digest, Sha3_256};
 use std::str::FromStr;
 fn decode(s: &str) -> Bytes {
     (0..s.len())
@@ -73,6 +74,20 @@ fn inclusion_evidence_round_trips_and_reauthenticates_after_restart() {
     assert!(encoded.len() <= MAX_INCLUSION_EVIDENCE_V1_BYTES);
     let recovered = TransactionInclusionEvidenceV1::decode(&encoded).unwrap();
     assert_eq!(recovered, evidence);
+    assert_eq!(recovered.commitment(), evidence.commitment());
+    assert_ne!(recovered.commitment(), B256::ZERO);
+    let mut expected_commitment = Sha3_256::new();
+    expected_commitment.update(b"BLOCH:L1:INCLUSION-EVIDENCE-COMMITMENT:1");
+    expected_commitment.update((encoded.len() as u64).to_le_bytes());
+    expected_commitment.update(&encoded);
+    assert_eq!(
+        recovered.commitment(),
+        B256::from_slice(&expected_commitment.finalize())
+    );
+
+    let (other_checkpoint, other_headers, other_transactions) = fixture(3);
+    let other = TransactionInclusionEvidenceV1::new(other_checkpoint, other_headers, other_transactions).unwrap();
+    assert_ne!(recovered.commitment(), other.commitment());
 
     let included = recovered.authenticate_exact(&transactions[2]).unwrap();
     assert_eq!(

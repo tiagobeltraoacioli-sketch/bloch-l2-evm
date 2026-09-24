@@ -46,7 +46,9 @@ the checkpoint's voting authority, validator-set transitions or non-regression.
 canonical copy of the complete headers and body. Decoding reverifies ancestry
 and the body root, and an exact transaction can then be reauthenticated after a
 restart. The envelope preserves the checkpoint's identity but does not prove
-its authority or finality.
+its authority or finality. Its domain-separated `commitment()` is a stable
+identity for the complete canonical envelope, not a substitute for retaining
+the envelope itself.
 This in-memory adapter also provides no Genesis-4 transaction tag or state key,
 validator execution, reorg recovery, SP1 verifier implementation, RPC finality
 or product permission. The Unix devnet composer can durably commit the accepted
