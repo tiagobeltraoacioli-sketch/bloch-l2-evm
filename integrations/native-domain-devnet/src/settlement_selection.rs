@@ -16,6 +16,8 @@ use bloch_l2_evm::{
 };
 
 #[cfg(unix)]
+use bloch_l2_evm::l1::TransactionInclusionEvidenceV1;
+#[cfg(unix)]
 use bloch_l2_evm::native_settlement::store::{
     SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1,
 };
@@ -36,8 +38,9 @@ pub enum SettlementSelectionCommitErrorV1 {
 
 /// One locally persisted settlement and its replayable inclusion receipt.
 ///
-/// Header, body, ancestry and checkpoint-authority artifacts remain external
-/// and must still be retained independently for a full audit after restart.
+/// The legacy inclusion path retains only coordinates. The evidence-bearing
+/// path retains body and ancestry in the store; checkpoint authority remains
+/// external in both cases.
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct PersistedSettlementAdmissionV1 {
@@ -108,12 +111,8 @@ impl ValidatedSettlementSelectionV1 {
 
     /// Build the canonical candidate transaction around exact proof bytes.
     /// Cryptographic verification still occurs inside the settlement kernel.
-    pub fn transaction(
-        &self,
-        proof: [u8; SETTLEMENT_PROOF_V1_BYTES],
-    ) -> Result<SettlementTransactionV1, Error> {
-        SettlementTransactionV1::new(self.proof_policy, self.expectation.statement, proof)
-            .map_err(|_| Error::Codec)
+    pub fn transaction(&self, proof: [u8; SETTLEMENT_PROOF_V1_BYTES]) -> Result<SettlementTransactionV1, Error> {
+        SettlementTransactionV1::new(self.proof_policy, self.expectation.statement, proof).map_err(|_| Error::Codec)
     }
 
     /// Verify and publish this exact selection through the durable CAS store.
@@ -155,6 +154,31 @@ impl ValidatedSettlementSelectionV1 {
         }
         let (accepted, mark, admission) = store
             .verify_inclusion_and_commit(expected, inclusion, &self.expectation, verifier)
+            .map_err(SettlementSelectionCommitErrorV1::Store)?;
+        Ok(PersistedSettlementAdmissionV1 {
+            accepted,
+            mark,
+            admission,
+        })
+    }
+
+    /// Atomically retain the complete authenticated native body and ancestry
+    /// envelope with the accepted settlement record. Checkpoint authority is
+    /// still an external input and is not established by this method.
+    #[cfg(unix)]
+    pub fn verify_evidence_and_commit<V: SettlementProofVerifierV1>(
+        &self,
+        store: &mut SettlementStoreV1,
+        expected: SettlementStoreMarkV1,
+        inclusion: AuthenticatedSettlementInclusionV1,
+        evidence: TransactionInclusionEvidenceV1,
+        verifier: &V,
+    ) -> Result<PersistedSettlementAdmissionV1, SettlementSelectionCommitErrorV1> {
+        if inclusion.statement() != &self.expectation.statement {
+            return Err(SettlementSelectionCommitErrorV1::Candidate(Error::Identity));
+        }
+        let (accepted, mark, admission) = store
+            .verify_evidence_and_commit(expected, inclusion, evidence, &self.expectation, verifier)
             .map_err(SettlementSelectionCommitErrorV1::Store)?;
         Ok(PersistedSettlementAdmissionV1 {
             accepted,

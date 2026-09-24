@@ -9,7 +9,10 @@ use super::{
     AcceptedSettlementV1, SettlementError, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
     SettlementRegistryV1, SettlementTransactionV1, SETTLEMENT_TX_V1_BYTES,
 };
-use crate::{l1::FinalizedCheckpoint, settlement_admission::AuthenticatedSettlementInclusionV1};
+use crate::{
+    l1::{FinalizedCheckpoint, TransactionInclusionEvidenceV1, MAX_INCLUSION_EVIDENCE_V1_BYTES},
+    settlement_admission::AuthenticatedSettlementInclusionV1,
+};
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 use std::{
@@ -21,12 +24,14 @@ use std::{
 };
 
 const POLICY_TAG: &[u8; 8] = b"BLSTPL01";
-const RECORD_TAG: &[u8; 8] = b"BLSTRC02";
+const RECORD_V2_TAG: &[u8; 8] = b"BLSTRC02";
+const RECORD_V3_TAG: &[u8; 8] = b"BLSTRC03";
 const MARK_TAG: &[u8; 8] = b"BLSTMK01";
 const ACCEPTED_HEAD_BYTES: usize = 1 + 6 * 32 + 5 * 8;
 const ADMISSION_BYTES: usize = 32 + 8 + 32 + 8 + 4 + 32;
 const RECORD_BYTES: usize =
     8 + 8 + 32 + 32 + 32 + ACCEPTED_HEAD_BYTES + 1 + SETTLEMENT_TX_V1_BYTES + 1 + ADMISSION_BYTES;
+const MAX_RECORD_BYTES: usize = RECORD_BYTES + 4 + MAX_INCLUSION_EVIDENCE_V1_BYTES;
 /// Exact canonical byte length of an external settlement-store mark.
 pub const SETTLEMENT_STORE_MARK_V1_BYTES: usize = 8 + 8 + 32 + 32;
 const MAX_RECORDS: u64 = 10_000;
@@ -136,6 +141,9 @@ pub enum SettlementStoreErrorV1 {
     Cas,
     /// Native settlement verification rejected the candidate.
     Settlement(SettlementError),
+    /// Complete inclusion evidence did not match the consumed capability or
+    /// could not be reauthenticated.
+    Evidence,
     /// A write, link, unlink, or fsync may have changed durable state. Close
     /// and reopen; blindly retrying is forbidden.
     CommitUncertain(io::Error),
@@ -164,6 +172,7 @@ pub struct SettlementStoreV1 {
     registry: SettlementRegistryV1,
     mark: SettlementStoreMarkV1,
     admission: Option<SettlementStoreAdmissionV1>,
+    evidence: Option<TransactionInclusionEvidenceV1>,
     poisoned: bool,
 }
 
@@ -193,7 +202,7 @@ impl SettlementStoreV1 {
                 .as_slice(),
         );
         publish_create_once(&directory, "POLICY", &policy_bytes)?;
-        let bytes = encode_record(0, policy, B256::ZERO, &registry, None, None)?;
+        let bytes = encode_record(0, policy, B256::ZERO, &registry, None, None, None)?;
         publish_create_once(&directory, &record_name(0), &bytes)?;
         directory_file(&directory)?.sync_all()?;
         directory_file(directory.parent().ok_or(SettlementStoreErrorV1::Format)?)?.sync_all()?;
@@ -204,6 +213,7 @@ impl SettlementStoreV1 {
             registry,
             mark,
             admission: None,
+            evidence: None,
             poisoned: false,
         })
     }
@@ -235,11 +245,12 @@ impl SettlementStoreV1 {
         let mut found_floor = false;
         let mut current_mark = None;
         let mut current_admission = None;
+        let mut current_evidence = None;
         for (index, generation) in generations.into_iter().enumerate() {
             if generation != index as u64 {
                 return Err(SettlementStoreErrorV1::Format);
             }
-            let bytes = read_exact_bounded(&directory.join(record_name(generation)), RECORD_BYTES)?;
+            let bytes = read_record_bounded(&directory.join(record_name(generation)))?;
             let decoded = decode_record(&bytes, generation, policy, previous_digest)?;
             validate_replayed_head(generation, policy, previous_head, decoded.head)?;
             registry.head = decoded.head;
@@ -256,6 +267,7 @@ impl SettlementStoreV1 {
             previous_digest = observed.record_digest;
             previous_head = decoded.head;
             current_admission = decoded.admission;
+            current_evidence = decoded.evidence;
             current_mark = Some(observed);
         }
         if !found_floor {
@@ -268,6 +280,7 @@ impl SettlementStoreV1 {
             registry,
             mark: current_mark.ok_or(SettlementStoreErrorV1::Format)?,
             admission: current_admission,
+            evidence: current_evidence,
             poisoned: false,
         })
     }
@@ -286,6 +299,12 @@ impl SettlementStoreV1 {
     /// authenticated-inclusion path.
     pub const fn admission(&self) -> Option<&SettlementStoreAdmissionV1> {
         self.admission.as_ref()
+    }
+
+    /// Complete body and ancestry evidence on the current record, when the
+    /// evidence-bearing commit path was used. Checkpoint authority is external.
+    pub const fn evidence(&self) -> Option<&TransactionInclusionEvidenceV1> {
+        self.evidence.as_ref()
     }
 
     /// Verify against a private clone, publish one create-once record, and only
@@ -318,7 +337,7 @@ impl SettlementStoreV1 {
         let transaction: [u8; SETTLEMENT_TX_V1_BYTES] = transaction_bytes
             .try_into()
             .map_err(|_| SettlementStoreErrorV1::Format)?;
-        self.commit(generation, next, transaction, None)?;
+        self.commit(generation, next, transaction, None, None)?;
         Ok((accepted, self.mark))
     }
 
@@ -361,7 +380,52 @@ impl SettlementStoreV1 {
         let accepted = next
             .verify_and_apply(&transaction, expectation, verifier)
             .map_err(SettlementStoreErrorV1::Settlement)?;
-        self.commit(generation, next, transaction, Some(admission.clone()))?;
+        self.commit(generation, next, transaction, Some(admission.clone()), None)?;
+        Ok((accepted, self.mark, admission))
+    }
+
+    /// Reauthenticate and atomically retain the complete body/ancestry
+    /// envelope together with the settlement receipt and accepted head.
+    pub fn verify_evidence_and_commit<V: SettlementProofVerifierV1>(
+        &mut self,
+        expected: SettlementStoreMarkV1,
+        inclusion: AuthenticatedSettlementInclusionV1,
+        evidence: TransactionInclusionEvidenceV1,
+        expectation: &SettlementExpectationV1,
+        verifier: &V,
+    ) -> Result<(AcceptedSettlementV1, SettlementStoreMarkV1, SettlementStoreAdmissionV1), SettlementStoreErrorV1> {
+        if self.poisoned {
+            return Err(SettlementStoreErrorV1::Poisoned);
+        }
+        if expected != self.mark {
+            return Err(SettlementStoreErrorV1::Cas);
+        }
+        if inclusion.statement() != &expectation.statement {
+            return Err(SettlementStoreErrorV1::Settlement(SettlementError::Expectation));
+        }
+        evidence_matches_inclusion(&evidence, &inclusion)?;
+        let generation = self
+            .mark
+            .generation
+            .checked_add(1)
+            .ok_or(SettlementStoreErrorV1::Limit)?;
+        if generation > MAX_RECORDS {
+            return Err(SettlementStoreErrorV1::Limit);
+        }
+        let transaction = *inclusion.transaction();
+        let admission = SettlementStoreAdmissionV1 {
+            transaction,
+            block: inclusion.block(),
+            slot: inclusion.slot(),
+            checkpoint: inclusion.checkpoint(),
+            transaction_index: inclusion.transaction_index(),
+            admission_commitment: inclusion.admission_commitment(),
+        };
+        let mut next = self.registry.clone();
+        let accepted = next
+            .verify_and_apply(&transaction, expectation, verifier)
+            .map_err(SettlementStoreErrorV1::Settlement)?;
+        self.commit(generation, next, transaction, Some(admission.clone()), Some(evidence))?;
         Ok((accepted, self.mark, admission))
     }
 
@@ -371,6 +435,7 @@ impl SettlementStoreV1 {
         next: SettlementRegistryV1,
         transaction: [u8; SETTLEMENT_TX_V1_BYTES],
         admission: Option<SettlementStoreAdmissionV1>,
+        evidence: Option<TransactionInclusionEvidenceV1>,
     ) -> Result<(), SettlementStoreErrorV1> {
         let bytes = encode_record(
             generation,
@@ -379,6 +444,7 @@ impl SettlementStoreV1 {
             &next,
             Some(&transaction),
             admission.as_ref(),
+            evidence.as_ref(),
         )?;
         self.poisoned = true;
         if let Err(error) = publish_create_once(&self.directory, &record_name(generation), &bytes) {
@@ -387,6 +453,7 @@ impl SettlementStoreV1 {
         self.registry = next;
         self.mark = mark(generation, &bytes, &self.registry);
         self.admission = admission;
+        self.evidence = evidence;
         self.poisoned = false;
         Ok(())
     }
@@ -396,6 +463,7 @@ struct DecodedRecord {
     state_commitment: B256,
     head: Option<AcceptedSettlementV1>,
     admission: Option<SettlementStoreAdmissionV1>,
+    evidence: Option<TransactionInclusionEvidenceV1>,
 }
 
 fn encode_record(
@@ -405,6 +473,7 @@ fn encode_record(
     registry: &SettlementRegistryV1,
     transaction: Option<&[u8; SETTLEMENT_TX_V1_BYTES]>,
     admission: Option<&SettlementStoreAdmissionV1>,
+    evidence: Option<&TransactionInclusionEvidenceV1>,
 ) -> Result<Vec<u8>, SettlementStoreErrorV1> {
     let decoded_transaction = match transaction {
         None => None,
@@ -428,8 +497,18 @@ fn encode_record(
             return Err(SettlementStoreErrorV1::Format);
         }
     }
-    let mut bytes = Vec::with_capacity(RECORD_BYTES);
-    bytes.extend_from_slice(RECORD_TAG);
+    match (admission, evidence) {
+        (None, Some(_)) => return Err(SettlementStoreErrorV1::Format),
+        (Some(admission), Some(evidence)) => evidence_matches_admission(evidence, admission)?,
+        _ => {}
+    }
+    let evidence_bytes = evidence.map(TransactionInclusionEvidenceV1::encode);
+    let mut bytes = Vec::with_capacity(RECORD_BYTES + evidence_bytes.as_ref().map_or(0, |value| 4 + value.len()));
+    bytes.extend_from_slice(if evidence.is_some() {
+        RECORD_V3_TAG
+    } else {
+        RECORD_V2_TAG
+    });
     bytes.extend_from_slice(&generation.to_le_bytes());
     bytes.extend_from_slice(
         policy
@@ -498,7 +577,11 @@ fn encode_record(
             bytes.extend_from_slice(admission.admission_commitment.as_slice());
         }
     }
-    if bytes.len() != RECORD_BYTES {
+    if let Some(evidence_bytes) = evidence_bytes {
+        bytes.extend_from_slice(&(evidence_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&evidence_bytes);
+    }
+    if (evidence.is_none() && bytes.len() != RECORD_BYTES) || bytes.len() > MAX_RECORD_BYTES {
         return Err(SettlementStoreErrorV1::Format);
     }
     Ok(bytes)
@@ -510,7 +593,13 @@ fn decode_record(
     policy: SettlementPolicyV1,
     expected_previous: B256,
 ) -> Result<DecodedRecord, SettlementStoreErrorV1> {
-    if bytes.len() != RECORD_BYTES || &bytes[..8] != RECORD_TAG {
+    if bytes.len() < RECORD_BYTES {
+        return Err(SettlementStoreErrorV1::Format);
+    }
+    let version = &bytes[..8];
+    if (version == RECORD_V2_TAG && bytes.len() != RECORD_BYTES)
+        || (version != RECORD_V2_TAG && version != RECORD_V3_TAG)
+    {
         return Err(SettlementStoreErrorV1::Format);
     }
     let mut reader = Reader(&bytes[8..]);
@@ -591,6 +680,19 @@ fn decode_record(
         }
         _ => return Err(SettlementStoreErrorV1::Format),
     };
+    let evidence = if version == RECORD_V3_TAG {
+        let admission = admission.as_ref().ok_or(SettlementStoreErrorV1::Format)?;
+        let length = reader.u32()? as usize;
+        if length == 0 || length > MAX_INCLUSION_EVIDENCE_V1_BYTES || reader.remaining().len() != length {
+            return Err(SettlementStoreErrorV1::Format);
+        }
+        let evidence = TransactionInclusionEvidenceV1::decode(reader.take(length)?)
+            .map_err(|_| SettlementStoreErrorV1::Evidence)?;
+        evidence_matches_admission(&evidence, admission)?;
+        Some(evidence)
+    } else {
+        None
+    };
     if !reader.remaining().is_empty() {
         return Err(SettlementStoreErrorV1::Format);
     }
@@ -606,7 +708,42 @@ fn decode_record(
         state_commitment,
         head,
         admission,
+        evidence,
     })
+}
+
+fn evidence_matches_inclusion(
+    evidence: &TransactionInclusionEvidenceV1,
+    inclusion: &AuthenticatedSettlementInclusionV1,
+) -> Result<(), SettlementStoreErrorV1> {
+    let authenticated = evidence
+        .authenticate_exact(inclusion.transaction())
+        .map_err(|_| SettlementStoreErrorV1::Evidence)?;
+    if authenticated.block() != inclusion.block()
+        || authenticated.slot() != inclusion.slot()
+        || authenticated.checkpoint() != inclusion.checkpoint()
+        || authenticated.transaction_index() != inclusion.transaction_index()
+    {
+        return Err(SettlementStoreErrorV1::Evidence);
+    }
+    Ok(())
+}
+
+fn evidence_matches_admission(
+    evidence: &TransactionInclusionEvidenceV1,
+    admission: &SettlementStoreAdmissionV1,
+) -> Result<(), SettlementStoreErrorV1> {
+    let authenticated = evidence
+        .authenticate_exact(&admission.transaction)
+        .map_err(|_| SettlementStoreErrorV1::Evidence)?;
+    if authenticated.block() != admission.block
+        || authenticated.slot() != admission.slot
+        || authenticated.checkpoint() != admission.checkpoint
+        || authenticated.transaction_index() != admission.transaction_index
+    {
+        return Err(SettlementStoreErrorV1::Evidence);
+    }
+    Ok(())
 }
 
 fn transaction_matches_head(transaction: &SettlementTransactionV1, head: &AcceptedSettlementV1) -> bool {
@@ -798,6 +935,25 @@ fn read_exact_bounded(path: &Path, expected: usize) -> Result<Vec<u8>, Settlemen
     let mut bytes = Vec::with_capacity(expected);
     file.take(expected as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != expected {
+        return Err(SettlementStoreErrorV1::Format);
+    }
+    Ok(bytes)
+}
+
+fn read_record_bounded(path: &Path) -> Result<Vec<u8>, SettlementStoreErrorV1> {
+    regular_private(path)?;
+    let file = File::open(path)?;
+    let length: usize = file
+        .metadata()?
+        .len()
+        .try_into()
+        .map_err(|_| SettlementStoreErrorV1::Limit)?;
+    if !(RECORD_BYTES..=MAX_RECORD_BYTES).contains(&length) {
+        return Err(SettlementStoreErrorV1::Format);
+    }
+    let mut bytes = Vec::with_capacity(length);
+    file.take(MAX_RECORD_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() != length {
         return Err(SettlementStoreErrorV1::Format);
     }
     Ok(bytes)

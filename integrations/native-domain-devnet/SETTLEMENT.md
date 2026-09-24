@@ -117,8 +117,9 @@ admission commitment and validates their cross-links on recovery. The complete
 body, header/ancestry path and authenticated checkpoint-authority artifact must
 still be retained independently; stored coordinates are not a finality
 capability. The core `TransactionInclusionEvidenceV1` format can canonically
-retain and reauthenticate that body and ancestry path, but it is not atomically
-stored here and deliberately does not authenticate checkpoint authority.
+retain and reauthenticate that body and ancestry path. The
+`verify_evidence_and_commit` path stores it atomically with the accepted record;
+it deliberately does not authenticate checkpoint authority.
 
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.

@@ -55,8 +55,11 @@ or product permission. The Unix devnet composer can durably commit the accepted
 settlement head, exact transaction and inclusion coordinates after consuming the
 refined capability. That replayable receipt does not preserve the complete body,
 header/ancestry path or checkpoint-authority artifact and cannot recreate the
-consumed authentication capability after restart. The evidence envelope is not
-yet atomically committed with this receipt. Neither path may populate
+consumed authentication capability after restart. The separate
+`verify_evidence_and_commit` path writes a `BLSTRC03` record containing the
+complete canonical envelope in the same create-once publication and
+reauthenticates it during recovery. It still does not retain or authenticate the
+checkpoint-authority artifact. Neither path may populate
 `eth_getBlockByNumber("finalized")`, open bridge/DEX permissions or be described
 as production settlement evidence.
 
