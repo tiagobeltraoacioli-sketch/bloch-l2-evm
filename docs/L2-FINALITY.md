@@ -140,6 +140,12 @@ the signer policy is still a weak-subjectivity trust input, not consensus
 activation or independent FFG proof. This changes no readiness requirement or
 product permission.
 
+The integration now also has one fail-closed startup boundary that requires both
+independently retained floors and exposes neither checkpoint nor settlement
+store until their V4 authority relationship is reverified. This avoids a caller
+accidentally recovering one rollback domain without the other; it is still local
+recovery plumbing, not validator consensus or production finality.
+
 ## RPC tag qualification
 
 The presence of `safe` or `finalized` tags is not finality evidence by itself.

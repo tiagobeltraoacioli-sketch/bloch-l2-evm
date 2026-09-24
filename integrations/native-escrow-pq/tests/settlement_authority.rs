@@ -14,7 +14,7 @@ use bloch_native_escrow_pq::{
     checkpoint::{CheckpointPolicy, Phase},
     checkpoint_store::CheckpointStore,
     settlement_authority::{
-        bind_settlement_checkpoint_authority, recover_settlement_checkpoint_authority, CheckpointAuthorityReceiptV1,
+        bind_settlement_checkpoint_authority, open_authority_bound_stores, CheckpointAuthorityReceiptV1,
         SettlementAuthorityErrorV1, SettlementAuthorityStoreErrorV1, CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
     },
 };
@@ -297,12 +297,48 @@ fn v4_atomically_recovers_evidence_and_rechecks_independent_checkpoint_store() {
     let newer_mark = checkpoint_store.accept(&newer_envelope, &newer_header, 103).unwrap();
     assert_ne!(newer_mark, checkpoint_mark);
     drop(checkpoint_store);
-    let checkpoint_store = CheckpointStore::open(&checkpoint_path, checkpoint_policy(), Some(newer_mark)).unwrap();
-    let settlement_store = SettlementStoreV1::open(&settlement_path, settlement_policy(), settlement_mark).unwrap();
-    let recovered =
-        recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 100 + ws::WS_PERIOD_EPOCHS)
-            .unwrap();
-    assert_eq!(recovered, persisted.authority());
+
+    let mut wrong_checkpoint_floor = newer_mark;
+    wrong_checkpoint_floor.digest = h(0xfe);
+    assert!(matches!(
+        open_authority_bound_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            wrong_checkpoint_floor,
+            &settlement_path,
+            settlement_policy(),
+            settlement_mark,
+            100 + ws::WS_PERIOD_EPOCHS,
+        ),
+        Err(SettlementAuthorityStoreErrorV1::Checkpoint(_))
+    ));
+    let mut wrong_settlement_floor = settlement_mark;
+    wrong_settlement_floor.record_digest = h(0xfd);
+    assert!(matches!(
+        open_authority_bound_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            newer_mark,
+            &settlement_path,
+            settlement_policy(),
+            wrong_settlement_floor,
+            100 + ws::WS_PERIOD_EPOCHS,
+        ),
+        Err(SettlementAuthorityStoreErrorV1::Settlement(_))
+    ));
+    let recovered_stores = open_authority_bound_stores(
+        &checkpoint_path,
+        checkpoint_policy(),
+        newer_mark,
+        &settlement_path,
+        settlement_policy(),
+        settlement_mark,
+        100 + ws::WS_PERIOD_EPOCHS,
+    )
+    .unwrap();
+    assert_eq!(recovered_stores.authority(), persisted.authority());
+    assert_eq!(recovered_stores.checkpoint_store().mark(), Some(newer_mark));
+    let settlement_store = recovered_stores.settlement_store();
     assert_eq!(
         settlement_store
             .evidence()
@@ -312,20 +348,37 @@ fn v4_atomically_recovers_evidence_and_rechecks_independent_checkpoint_store() {
             .transaction_index(),
         1
     );
-    drop(settlement_store);
+    drop(recovered_stores);
 
     let canonical = fs::read(&record).unwrap();
     let mut changed_receipt = canonical.clone();
     *changed_receipt.last_mut().unwrap() ^= 1;
     fs::write(&record, changed_receipt).unwrap();
-    let settlement_store =
-        SettlementStoreV1::open(&settlement_path, settlement_policy(), initial_settlement_mark).unwrap();
     assert!(matches!(
-        recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 100 + ws::WS_PERIOD_EPOCHS,),
+        open_authority_bound_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            newer_mark,
+            &settlement_path,
+            settlement_policy(),
+            initial_settlement_mark,
+            100 + ws::WS_PERIOD_EPOCHS,
+        ),
         Err(SettlementAuthorityStoreErrorV1::Mismatch)
     ));
-    drop(settlement_store);
     fs::write(&record, &canonical).unwrap();
+    drop(
+        open_authority_bound_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            newer_mark,
+            &settlement_path,
+            settlement_policy(),
+            settlement_mark,
+            100 + ws::WS_PERIOD_EPOCHS,
+        )
+        .unwrap(),
+    );
 
     let mut excessive_authority_length = fs::read(&record).unwrap();
     let authority_offset = excessive_authority_length

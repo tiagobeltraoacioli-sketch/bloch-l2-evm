@@ -96,6 +96,12 @@ block and slot to match. The audit-only result cannot become a current anchor;
 separate rollback domain, so both marks are mandatory. This is still
 weak-subjectivity authentication, not production FFG finality.
 
+`open_authority_bound_stores` is the coordinated startup boundary: it requires
+both non-optional external floors, opens both stores under their exclusive locks,
+performs the historical V4/PQ cross-check, and exposes neither handle if any
+step fails. The V4 receipt already binds the two identities, so this API does not
+invent a third unsigned manifest or collapse the independently protected floors.
+
 ## Validation
 
 The checkpoint and settlement-authority tests use disposable locally generated
@@ -108,7 +114,8 @@ rollback, same-epoch conflict, identical retry and resource bounds. The eight
 existing escrow authorization tests also pass. The authority suite additionally
 covers V4 atomic publication, recovery after a newer checkpoint advances,
 historical expiry, future audit claims, predecessor relinking and receipt
-tampering. Keys are not printed or saved.
+tampering. Coordinated-open tests also reject either incorrect floor and prove
+that failed admission releases both locks. Keys are not printed or saved.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml

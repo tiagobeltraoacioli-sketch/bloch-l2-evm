@@ -71,7 +71,9 @@ fixed authority receipt remains audit data. The authority-bound path stores it
 with the complete evidence in one `BLSTRC04` record and jointly rechecks it
 against the exact historical record in the independently recovered PQ checkpoint
 store. The historical result is audit-only, future-dated freshness claims are
-refused, and both rollback marks must still be retained separately.
+refused, and both rollback marks must still be retained separately. The
+native-PQ `open_authority_bound_stores` startup boundary requires both floors and
+returns no store handle until the complete cross-check succeeds.
 
 Activation requires a separately reviewed native consensus integration to
 derive the expectation from committed state, authenticate the checkpoint,

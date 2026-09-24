@@ -53,6 +53,11 @@ at the receipt's historical freshness epoch. The returned audit type cannot be
 used as a current checkpoint capability. A V4 record without that external
 recheck is audit data, not a finality capability.
 
+The native-PQ integration's coordinated open requires the external settlement
+floor and checkpoint floor together, holds both single-writer locks, and returns
+the stores only after V4 authority recovery succeeds. A failure drops both
+handles. This does not merge or replace the two independently retained floors.
+
 This module does **not** provide distributed availability, hardware-backed WORM,
 host-compromise resistance, proof that validators ran the transition, consensus,
 or L2 finality. `registry()` exposes local recovered state only and must never be

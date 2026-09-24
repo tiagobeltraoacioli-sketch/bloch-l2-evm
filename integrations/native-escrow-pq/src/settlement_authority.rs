@@ -15,12 +15,16 @@ use bloch_l2_evm::{
 use sha3::{Digest, Sha3_256};
 
 #[cfg(unix)]
-use crate::checkpoint_store::{CheckpointStore, HistoricalCheckpointAuditV1, StoreError as CheckpointStoreError};
+use crate::checkpoint_store::{
+    CheckpointMark, CheckpointStore, HistoricalCheckpointAuditV1, StoreError as CheckpointStoreError,
+};
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::{
     store::{SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
-    AcceptedSettlementV1, SettlementExpectationV1, SettlementProofVerifierV1,
+    AcceptedSettlementV1, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
 };
+#[cfg(unix)]
+use std::path::Path;
 
 const AUTHORITY_RECEIPT_TAG: &[u8; 8] = b"BLCPAU01";
 /// Exact fixed-width transport for checkpoint-authority audit data.
@@ -223,6 +227,32 @@ pub struct PersistedAuthoritySettlementV1 {
     authority: CheckpointAuthorityReceiptV1,
 }
 
+/// Both independently floored stores after coordinated recovery and exact
+/// authority cross-checking. No handle escapes if either open or the joint
+/// verification fails.
+#[cfg(unix)]
+pub struct RecoveredAuthorityStoresV1 {
+    checkpoint_store: CheckpointStore,
+    settlement_store: SettlementStoreV1,
+    authority: CheckpointAuthorityReceiptV1,
+}
+
+#[cfg(unix)]
+impl RecoveredAuthorityStoresV1 {
+    pub const fn checkpoint_store(&self) -> &CheckpointStore {
+        &self.checkpoint_store
+    }
+    pub const fn settlement_store(&self) -> &SettlementStoreV1 {
+        &self.settlement_store
+    }
+    pub const fn authority(&self) -> CheckpointAuthorityReceiptV1 {
+        self.authority
+    }
+    pub fn into_stores(self) -> (CheckpointStore, SettlementStoreV1) {
+        (self.checkpoint_store, self.settlement_store)
+    }
+}
+
 #[cfg(unix)]
 impl PersistedAuthoritySettlementV1 {
     pub const fn accepted(&self) -> &AcceptedSettlementV1 {
@@ -326,4 +356,28 @@ pub fn recover_settlement_checkpoint_authority(
         return Err(SettlementAuthorityStoreErrorV1::Mismatch);
     }
     Ok(retained)
+}
+
+/// Open both rollback domains under mandatory independently retained floors,
+/// then perform the full V4/PQ cross-check before exposing either handle.
+#[cfg(unix)]
+pub fn open_authority_bound_stores(
+    checkpoint_path: impl AsRef<Path>,
+    checkpoint_policy: crate::checkpoint::CheckpointPolicy,
+    checkpoint_floor: CheckpointMark,
+    settlement_path: impl AsRef<Path>,
+    settlement_policy: SettlementPolicyV1,
+    settlement_floor: SettlementStoreMarkV1,
+    current_epoch: u64,
+) -> Result<RecoveredAuthorityStoresV1, SettlementAuthorityStoreErrorV1> {
+    let checkpoint_store = CheckpointStore::open(checkpoint_path, checkpoint_policy, Some(checkpoint_floor))
+        .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
+    let settlement_store = SettlementStoreV1::open(settlement_path, settlement_policy, settlement_floor)
+        .map_err(SettlementAuthorityStoreErrorV1::Settlement)?;
+    let authority = recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, current_epoch)?;
+    Ok(RecoveredAuthorityStoresV1 {
+        checkpoint_store,
+        settlement_store,
+        authority,
+    })
 }

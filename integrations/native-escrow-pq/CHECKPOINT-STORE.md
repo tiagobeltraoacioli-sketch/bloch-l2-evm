@@ -25,6 +25,11 @@ It is a separate experimental library: it does not overwrite the native node's
 * `mark()` reports the stored rollback floor. It is not a fresh anchor and cannot
   be passed to the header verifier as one.
 
+Settlement startup should use the sibling authority module's
+`open_authority_bound_stores` facade. It requires this checkpoint floor and the
+settlement floor, and releases both locks without exposing a handle if joint
+recovery fails. Direct `open` remains the lower-level checkpoint-only primitive.
+
 ## Historical validity is not freshness
 
 A store may contain a validly signed checkpoint that has aged beyond the
