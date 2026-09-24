@@ -3,16 +3,19 @@ use alloy_primitives::{Bytes, B256};
 use bloch_l2_evm::{
     l1::{FinalizedCheckpoint, L1Error, TransactionInclusionEvidenceV1},
     native_settlement::{
-        SettlementExpectationV1, SettlementPolicyV1, SettlementTransactionV1, SETTLEMENT_PROOF_V1_BYTES,
+        store::{SettlementStoreErrorV1, SettlementStoreV1},
+        SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1, SettlementTransactionV1,
+        SETTLEMENT_PROOF_V1_BYTES,
     },
     proof_statement::SettlementStatementV2,
     settlement_admission::{SettlementAdmissionErrorV1, SettlementAdmissionExpectationV1},
 };
 use bloch_native_escrow_pq::{
     checkpoint::{CheckpointPolicy, Phase},
+    checkpoint_store::CheckpointStore,
     settlement_authority::{
-        bind_settlement_checkpoint_authority, CheckpointAuthorityReceiptV1, SettlementAuthorityErrorV1,
-        CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
+        bind_settlement_checkpoint_authority, recover_settlement_checkpoint_authority, CheckpointAuthorityReceiptV1,
+        SettlementAuthorityErrorV1, SettlementAuthorityStoreErrorV1, CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
     },
 };
 use bloch_pos_committee::{
@@ -20,7 +23,7 @@ use bloch_pos_committee::{
     header::{BlockHeaderV4, BlockId},
     ws::{self, CheckpointEnvelope, Signer, SignerSet, WeakSubjectivityCheckpoint},
 };
-use std::sync::OnceLock;
+use std::{fs, sync::OnceLock};
 
 fn h(value: u8) -> B256 {
     B256::repeat_byte(value)
@@ -110,12 +113,7 @@ fn settlement_transaction() -> Bytes {
     .into()
 }
 
-fn signed_checkpoint(
-    transactions: Vec<Bytes>,
-) -> (
-    bloch_native_escrow_pq::checkpoint::VerifiedCheckpoint,
-    TransactionInclusionEvidenceV1,
-) {
+fn checkpoint_artifacts(transactions: &[Bytes]) -> (CheckpointEnvelope, Vec<u8>) {
     let epoch = 100u64;
     let slot = epoch * 120;
     let mut header = vec![0; 304];
@@ -150,10 +148,41 @@ fn signed_checkpoint(
             })
             .collect(),
     };
+    (envelope, header)
+}
+
+fn signed_checkpoint(
+    transactions: Vec<Bytes>,
+) -> (
+    bloch_native_escrow_pq::checkpoint::VerifiedCheckpoint,
+    TransactionInclusionEvidenceV1,
+) {
+    let (envelope, header) = checkpoint_artifacts(&transactions);
     let verified = checkpoint_policy().verify(&envelope, &header, 101, None).unwrap();
     let evidence =
         TransactionInclusionEvidenceV1::new(verified.anchor(), vec![Bytes::from(header)], transactions).unwrap();
     (verified, evidence)
+}
+
+struct ExactVerifier;
+
+impl SettlementProofVerifierV1 for ExactVerifier {
+    fn verify(&self, policy: B256, public_values: &[u8], proof: &[u8]) -> bool {
+        policy == settlement_policy().proof_policy
+            && public_values == statement().encode()
+            && proof == [9; SETTLEMENT_PROOF_V1_BYTES]
+    }
+}
+
+fn temporary(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "bloch-authority-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
 }
 
 fn expectation(checkpoint: FinalizedCheckpoint) -> SettlementAdmissionExpectationV1 {
@@ -218,6 +247,98 @@ fn real_pq_checkpoint_binds_exact_settlement_body_and_authority_identity() {
         1
     );
     assert_eq!(authority.checkpoint_block(), inclusion.checkpoint().block);
+}
+
+#[test]
+fn v4_atomically_recovers_evidence_and_rechecks_independent_checkpoint_store() {
+    let checkpoint_path = temporary("checkpoint");
+    let settlement_path = temporary("settlement");
+    let transaction = settlement_transaction();
+    let transactions = vec![Bytes::from_static(b"unrelated"), transaction];
+    let (envelope, header) = checkpoint_artifacts(&transactions);
+
+    let mut checkpoint_store = CheckpointStore::create(&checkpoint_path, checkpoint_policy()).unwrap();
+    let checkpoint_mark = checkpoint_store.accept(&envelope, &header, 101).unwrap();
+    let verified = checkpoint_store.current(101).unwrap();
+    let evidence =
+        TransactionInclusionEvidenceV1::new(verified.anchor(), vec![Bytes::copy_from_slice(&header)], transactions)
+            .unwrap();
+    let expected = expectation(verified.anchor());
+    let bound = bind_settlement_checkpoint_authority(verified, evidence, &expected).unwrap();
+
+    let mut settlement_store = SettlementStoreV1::create(&settlement_path, settlement_policy()).unwrap();
+    let initial_settlement_mark = settlement_store.mark();
+    let persisted = bound
+        .verify_and_commit(
+            &mut settlement_store,
+            initial_settlement_mark,
+            &expected.settlement,
+            &ExactVerifier,
+        )
+        .unwrap();
+    let settlement_mark = persisted.mark();
+    assert_eq!(persisted.accepted().l2_number, 1);
+    assert_eq!(persisted.admission().checkpoint(), expected.checkpoint);
+    assert_eq!(
+        settlement_store.authority_audit().unwrap(),
+        persisted.authority().encode()
+    );
+    let record = settlement_path.join(format!("{:020}.sst", settlement_mark.generation));
+    assert_eq!(&fs::read(&record).unwrap()[..8], b"BLSTRC04");
+    drop(settlement_store);
+    drop(checkpoint_store);
+
+    let checkpoint_store = CheckpointStore::open(&checkpoint_path, checkpoint_policy(), Some(checkpoint_mark)).unwrap();
+    let settlement_store = SettlementStoreV1::open(&settlement_path, settlement_policy(), settlement_mark).unwrap();
+    let recovered = recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 101).unwrap();
+    assert_eq!(recovered, persisted.authority());
+    assert_eq!(
+        settlement_store
+            .evidence()
+            .unwrap()
+            .authenticate_exact(settlement_store.admission().unwrap().transaction())
+            .unwrap()
+            .transaction_index(),
+        1
+    );
+    drop(settlement_store);
+
+    let canonical = fs::read(&record).unwrap();
+    let mut changed_receipt = canonical.clone();
+    *changed_receipt.last_mut().unwrap() ^= 1;
+    fs::write(&record, changed_receipt).unwrap();
+    let settlement_store =
+        SettlementStoreV1::open(&settlement_path, settlement_policy(), initial_settlement_mark).unwrap();
+    assert!(matches!(
+        recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, 101),
+        Err(SettlementAuthorityStoreErrorV1::Mismatch)
+    ));
+    drop(settlement_store);
+    fs::write(&record, &canonical).unwrap();
+
+    let mut excessive_authority_length = fs::read(&record).unwrap();
+    let authority_offset = excessive_authority_length
+        .windows(8)
+        .rposition(|window| window == b"BLCPAU01")
+        .unwrap();
+    excessive_authority_length[authority_offset - 4..authority_offset].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(&record, excessive_authority_length).unwrap();
+    assert!(matches!(
+        SettlementStoreV1::open(&settlement_path, settlement_policy(), initial_settlement_mark),
+        Err(SettlementStoreErrorV1::Format)
+    ));
+
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    fs::write(&record, trailing).unwrap();
+    assert!(matches!(
+        SettlementStoreV1::open(&settlement_path, settlement_policy(), initial_settlement_mark),
+        Err(SettlementStoreErrorV1::Format)
+    ));
+    fs::write(&record, canonical).unwrap();
+
+    fs::remove_dir_all(checkpoint_path).unwrap();
+    fs::remove_dir_all(settlement_path).unwrap();
 }
 
 #[test]

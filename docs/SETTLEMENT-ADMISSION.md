@@ -67,8 +67,10 @@ The AGPL native-PQ integration now provides an explicit upstream composition:
 `bind_settlement_checkpoint_authority` accepts only a real
 `VerifiedCheckpoint` produced by the hybrid ML-DSA-65 + Falcon-1024 verifier and
 binds it to this module's complete evidence and exact settlement capability. Its
-fixed authority receipt is audit data; it is not yet part of `BLSTRC03`, so
-cross-store atomic recovery remains open.
+fixed authority receipt remains audit data. The authority-bound path stores it
+with the complete evidence in one `BLSTRC04` record and jointly rechecks it
+against the independently recovered PQ checkpoint store. Both rollback marks
+must still be retained separately.
 
 Activation requires a separately reviewed native consensus integration to
 derive the expectation from committed state, authenticate the checkpoint,

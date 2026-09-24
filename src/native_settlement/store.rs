@@ -26,12 +26,16 @@ use std::{
 const POLICY_TAG: &[u8; 8] = b"BLSTPL01";
 const RECORD_V2_TAG: &[u8; 8] = b"BLSTRC02";
 const RECORD_V3_TAG: &[u8; 8] = b"BLSTRC03";
+const RECORD_V4_TAG: &[u8; 8] = b"BLSTRC04";
 const MARK_TAG: &[u8; 8] = b"BLSTMK01";
 const ACCEPTED_HEAD_BYTES: usize = 1 + 6 * 32 + 5 * 8;
 const ADMISSION_BYTES: usize = 32 + 8 + 32 + 8 + 4 + 32;
 const RECORD_BYTES: usize =
     8 + 8 + 32 + 32 + 32 + ACCEPTED_HEAD_BYTES + 1 + SETTLEMENT_TX_V1_BYTES + 1 + ADMISSION_BYTES;
-const MAX_RECORD_BYTES: usize = RECORD_BYTES + 4 + MAX_INCLUSION_EVIDENCE_V1_BYTES;
+/// Maximum opaque authority-audit transport retained with one settlement.
+pub const MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES: usize = 4096;
+const MAX_RECORD_BYTES: usize =
+    RECORD_BYTES + 4 + MAX_INCLUSION_EVIDENCE_V1_BYTES + 4 + MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES;
 /// Exact canonical byte length of an external settlement-store mark.
 pub const SETTLEMENT_STORE_MARK_V1_BYTES: usize = 8 + 8 + 32 + 32;
 const MAX_RECORDS: u64 = 10_000;
@@ -173,6 +177,7 @@ pub struct SettlementStoreV1 {
     mark: SettlementStoreMarkV1,
     admission: Option<SettlementStoreAdmissionV1>,
     evidence: Option<TransactionInclusionEvidenceV1>,
+    authority_audit: Option<Vec<u8>>,
     poisoned: bool,
 }
 
@@ -202,7 +207,15 @@ impl SettlementStoreV1 {
                 .as_slice(),
         );
         publish_create_once(&directory, "POLICY", &policy_bytes)?;
-        let bytes = encode_record(0, policy, B256::ZERO, &registry, None, None, None)?;
+        let bytes = encode_record(
+            0,
+            policy,
+            B256::ZERO,
+            &registry,
+            None,
+            None,
+            RecordExtensions::default(),
+        )?;
         publish_create_once(&directory, &record_name(0), &bytes)?;
         directory_file(&directory)?.sync_all()?;
         directory_file(directory.parent().ok_or(SettlementStoreErrorV1::Format)?)?.sync_all()?;
@@ -214,6 +227,7 @@ impl SettlementStoreV1 {
             mark,
             admission: None,
             evidence: None,
+            authority_audit: None,
             poisoned: false,
         })
     }
@@ -246,6 +260,7 @@ impl SettlementStoreV1 {
         let mut current_mark = None;
         let mut current_admission = None;
         let mut current_evidence = None;
+        let mut current_authority_audit = None;
         for (index, generation) in generations.into_iter().enumerate() {
             if generation != index as u64 {
                 return Err(SettlementStoreErrorV1::Format);
@@ -268,6 +283,7 @@ impl SettlementStoreV1 {
             previous_head = decoded.head;
             current_admission = decoded.admission;
             current_evidence = decoded.evidence;
+            current_authority_audit = decoded.authority_audit;
             current_mark = Some(observed);
         }
         if !found_floor {
@@ -281,6 +297,7 @@ impl SettlementStoreV1 {
             mark: current_mark.ok_or(SettlementStoreErrorV1::Format)?,
             admission: current_admission,
             evidence: current_evidence,
+            authority_audit: current_authority_audit,
             poisoned: false,
         })
     }
@@ -305,6 +322,13 @@ impl SettlementStoreV1 {
     /// evidence-bearing commit path was used. Checkpoint authority is external.
     pub const fn evidence(&self) -> Option<&TransactionInclusionEvidenceV1> {
         self.evidence.as_ref()
+    }
+
+    /// Opaque authority audit bytes on the current V4 record. These bytes are
+    /// not an authentication capability; their owning verifier must recheck
+    /// them against independently recovered authority state.
+    pub fn authority_audit(&self) -> Option<&[u8]> {
+        self.authority_audit.as_deref()
     }
 
     /// Verify against a private clone, publish one create-once record, and only
@@ -337,7 +361,7 @@ impl SettlementStoreV1 {
         let transaction: [u8; SETTLEMENT_TX_V1_BYTES] = transaction_bytes
             .try_into()
             .map_err(|_| SettlementStoreErrorV1::Format)?;
-        self.commit(generation, next, transaction, None, None)?;
+        self.commit(generation, next, transaction, None, None, None)?;
         Ok((accepted, self.mark))
     }
 
@@ -380,7 +404,7 @@ impl SettlementStoreV1 {
         let accepted = next
             .verify_and_apply(&transaction, expectation, verifier)
             .map_err(SettlementStoreErrorV1::Settlement)?;
-        self.commit(generation, next, transaction, Some(admission.clone()), None)?;
+        self.commit(generation, next, transaction, Some(admission.clone()), None, None)?;
         Ok((accepted, self.mark, admission))
     }
 
@@ -391,6 +415,43 @@ impl SettlementStoreV1 {
         expected: SettlementStoreMarkV1,
         inclusion: AuthenticatedSettlementInclusionV1,
         evidence: TransactionInclusionEvidenceV1,
+        expectation: &SettlementExpectationV1,
+        verifier: &V,
+    ) -> Result<(AcceptedSettlementV1, SettlementStoreMarkV1, SettlementStoreAdmissionV1), SettlementStoreErrorV1> {
+        self.verify_evidence_commit_inner(expected, inclusion, evidence, None, expectation, verifier)
+    }
+
+    /// Atomically retain complete inclusion evidence plus bounded opaque audit
+    /// data produced by an external checkpoint-authority verifier. The bytes
+    /// remain audit data and are not authenticated by this portable crate.
+    pub fn verify_evidence_and_authority_audit_commit<V: SettlementProofVerifierV1>(
+        &mut self,
+        expected: SettlementStoreMarkV1,
+        inclusion: AuthenticatedSettlementInclusionV1,
+        evidence: TransactionInclusionEvidenceV1,
+        authority_audit: &[u8],
+        expectation: &SettlementExpectationV1,
+        verifier: &V,
+    ) -> Result<(AcceptedSettlementV1, SettlementStoreMarkV1, SettlementStoreAdmissionV1), SettlementStoreErrorV1> {
+        if authority_audit.is_empty() || authority_audit.len() > MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES {
+            return Err(SettlementStoreErrorV1::Limit);
+        }
+        self.verify_evidence_commit_inner(
+            expected,
+            inclusion,
+            evidence,
+            Some(authority_audit.to_vec()),
+            expectation,
+            verifier,
+        )
+    }
+
+    fn verify_evidence_commit_inner<V: SettlementProofVerifierV1>(
+        &mut self,
+        expected: SettlementStoreMarkV1,
+        inclusion: AuthenticatedSettlementInclusionV1,
+        evidence: TransactionInclusionEvidenceV1,
+        authority_audit: Option<Vec<u8>>,
         expectation: &SettlementExpectationV1,
         verifier: &V,
     ) -> Result<(AcceptedSettlementV1, SettlementStoreMarkV1, SettlementStoreAdmissionV1), SettlementStoreErrorV1> {
@@ -425,7 +486,14 @@ impl SettlementStoreV1 {
         let accepted = next
             .verify_and_apply(&transaction, expectation, verifier)
             .map_err(SettlementStoreErrorV1::Settlement)?;
-        self.commit(generation, next, transaction, Some(admission.clone()), Some(evidence))?;
+        self.commit(
+            generation,
+            next,
+            transaction,
+            Some(admission.clone()),
+            Some(evidence),
+            authority_audit,
+        )?;
         Ok((accepted, self.mark, admission))
     }
 
@@ -436,6 +504,7 @@ impl SettlementStoreV1 {
         transaction: [u8; SETTLEMENT_TX_V1_BYTES],
         admission: Option<SettlementStoreAdmissionV1>,
         evidence: Option<TransactionInclusionEvidenceV1>,
+        authority_audit: Option<Vec<u8>>,
     ) -> Result<(), SettlementStoreErrorV1> {
         let bytes = encode_record(
             generation,
@@ -444,7 +513,10 @@ impl SettlementStoreV1 {
             &next,
             Some(&transaction),
             admission.as_ref(),
-            evidence.as_ref(),
+            RecordExtensions {
+                evidence: evidence.as_ref(),
+                authority_audit: authority_audit.as_deref(),
+            },
         )?;
         self.poisoned = true;
         if let Err(error) = publish_create_once(&self.directory, &record_name(generation), &bytes) {
@@ -454,6 +526,7 @@ impl SettlementStoreV1 {
         self.mark = mark(generation, &bytes, &self.registry);
         self.admission = admission;
         self.evidence = evidence;
+        self.authority_audit = authority_audit;
         self.poisoned = false;
         Ok(())
     }
@@ -464,6 +537,13 @@ struct DecodedRecord {
     head: Option<AcceptedSettlementV1>,
     admission: Option<SettlementStoreAdmissionV1>,
     evidence: Option<TransactionInclusionEvidenceV1>,
+    authority_audit: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct RecordExtensions<'a> {
+    evidence: Option<&'a TransactionInclusionEvidenceV1>,
+    authority_audit: Option<&'a [u8]>,
 }
 
 fn encode_record(
@@ -473,8 +553,12 @@ fn encode_record(
     registry: &SettlementRegistryV1,
     transaction: Option<&[u8; SETTLEMENT_TX_V1_BYTES]>,
     admission: Option<&SettlementStoreAdmissionV1>,
-    evidence: Option<&TransactionInclusionEvidenceV1>,
+    extensions: RecordExtensions<'_>,
 ) -> Result<Vec<u8>, SettlementStoreErrorV1> {
+    let RecordExtensions {
+        evidence,
+        authority_audit,
+    } = extensions;
     let decoded_transaction = match transaction {
         None => None,
         Some(bytes) => {
@@ -502,9 +586,21 @@ fn encode_record(
         (Some(admission), Some(evidence)) => evidence_matches_admission(evidence, admission)?,
         _ => {}
     }
+    if authority_audit.is_some() && evidence.is_none() {
+        return Err(SettlementStoreErrorV1::Format);
+    }
+    if authority_audit.is_some_and(|value| value.is_empty() || value.len() > MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES) {
+        return Err(SettlementStoreErrorV1::Limit);
+    }
     let evidence_bytes = evidence.map(TransactionInclusionEvidenceV1::encode);
-    let mut bytes = Vec::with_capacity(RECORD_BYTES + evidence_bytes.as_ref().map_or(0, |value| 4 + value.len()));
-    bytes.extend_from_slice(if evidence.is_some() {
+    let mut bytes = Vec::with_capacity(
+        RECORD_BYTES
+            + evidence_bytes.as_ref().map_or(0, |value| 4 + value.len())
+            + authority_audit.map_or(0, |value| 4 + value.len()),
+    );
+    bytes.extend_from_slice(if authority_audit.is_some() {
+        RECORD_V4_TAG
+    } else if evidence.is_some() {
         RECORD_V3_TAG
     } else {
         RECORD_V2_TAG
@@ -581,6 +677,10 @@ fn encode_record(
         bytes.extend_from_slice(&(evidence_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&evidence_bytes);
     }
+    if let Some(authority_audit) = authority_audit {
+        bytes.extend_from_slice(&(authority_audit.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(authority_audit);
+    }
     if (evidence.is_none() && bytes.len() != RECORD_BYTES) || bytes.len() > MAX_RECORD_BYTES {
         return Err(SettlementStoreErrorV1::Format);
     }
@@ -598,7 +698,7 @@ fn decode_record(
     }
     let version = &bytes[..8];
     if (version == RECORD_V2_TAG && bytes.len() != RECORD_BYTES)
-        || (version != RECORD_V2_TAG && version != RECORD_V3_TAG)
+        || (version != RECORD_V2_TAG && version != RECORD_V3_TAG && version != RECORD_V4_TAG)
     {
         return Err(SettlementStoreErrorV1::Format);
     }
@@ -680,16 +780,25 @@ fn decode_record(
         }
         _ => return Err(SettlementStoreErrorV1::Format),
     };
-    let evidence = if version == RECORD_V3_TAG {
+    let evidence = if version == RECORD_V3_TAG || version == RECORD_V4_TAG {
         let admission = admission.as_ref().ok_or(SettlementStoreErrorV1::Format)?;
         let length = reader.u32()? as usize;
-        if length == 0 || length > MAX_INCLUSION_EVIDENCE_V1_BYTES || reader.remaining().len() != length {
+        if length == 0 || length > MAX_INCLUSION_EVIDENCE_V1_BYTES || reader.remaining().len() < length {
             return Err(SettlementStoreErrorV1::Format);
         }
         let evidence = TransactionInclusionEvidenceV1::decode(reader.take(length)?)
             .map_err(|_| SettlementStoreErrorV1::Evidence)?;
         evidence_matches_admission(&evidence, admission)?;
         Some(evidence)
+    } else {
+        None
+    };
+    let authority_audit = if version == RECORD_V4_TAG {
+        let length = reader.u32()? as usize;
+        if length == 0 || length > MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES || reader.remaining().len() != length {
+            return Err(SettlementStoreErrorV1::Format);
+        }
+        Some(reader.take(length)?.to_vec())
     } else {
         None
     };
@@ -709,6 +818,7 @@ fn decode_record(
         head,
         admission,
         evidence,
+        authority_audit,
     })
 }
 

@@ -86,21 +86,26 @@ trust decision. This module does not wire the operator
 CLI's trusted inbox files to consensus: the experimental inbox still needs a
 native committed representation and activation.
 
-The authority receipt is not yet embedded in the settlement store's atomic
-record. Until that migration and coordinated recovery of both stores are
-implemented, callers must retain the checkpoint-store mark and settlement-store
-mark independently and must not describe the composition as production
-finality.
+The authority-bound commit path embeds that receipt beside the complete
+inclusion envelope in one `BLSTRC04` settlement record. Coordinated recovery
+reopens both stores under independently retained marks, rechecks current PQ
+freshness and requires the recovered policy, checkpoint digest, epoch, block and
+slot to match the V4 receipt. The checkpoint history remains a separate
+rollback domain, so both marks are mandatory. This is still weak-subjectivity
+authentication, not production FFG finality.
 
 ## Validation
 
-Seven new tests use five disposable locally generated hybrid keys. They cover
+The checkpoint and settlement-authority tests use disposable locally generated
+hybrid keys. They cover
 real Phase-A and Phase-B signatures, successful header/body authentication,
 corruption/removal of signature components, weakened or duplicate-key policies,
 missing external quorum, duplicate signer indices, freshness boundaries,
 adoption/review/expiry clocks, network/genesis/state/header/version mismatch,
 rollback, same-epoch conflict, identical retry and resource bounds. The eight
-existing escrow authorization tests also pass. Keys are not printed or saved.
+existing escrow authorization tests also pass. The authority suite additionally
+covers V4 atomic publication, dual-store recovery and receipt tampering. Keys
+are not printed or saved.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml

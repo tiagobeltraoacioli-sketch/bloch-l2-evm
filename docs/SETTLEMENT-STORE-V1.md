@@ -44,6 +44,13 @@ one hash-chained history; only V3 exposes recoverable evidence. The envelope and
 accepted head share one create-once inode and record digest, avoiding a
 cross-file crash window.
 
+`BLSTRC04` extends V3 with a length-prefixed, bounded opaque authority-audit
+suffix in that same inode. The portable store binds the bytes into its record
+digest but deliberately does not interpret them as authority. The native-PQ
+integration writes its canonical 129-byte receipt through this path and, after
+restart, compares it with a freshly reverified checkpoint store. A V4 record
+without that external recheck is audit data, not a finality capability.
+
 This module does **not** provide distributed availability, hardware-backed WORM,
 host-compromise resistance, proof that validators ran the transition, consensus,
 or L2 finality. `registry()` exposes local recovered state only and must never be

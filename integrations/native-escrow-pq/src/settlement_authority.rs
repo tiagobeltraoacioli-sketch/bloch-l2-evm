@@ -14,6 +14,14 @@ use bloch_l2_evm::{
 };
 use sha3::{Digest, Sha3_256};
 
+#[cfg(unix)]
+use crate::checkpoint_store::{CheckpointStore, StoreError as CheckpointStoreError};
+#[cfg(unix)]
+use bloch_l2_evm::native_settlement::{
+    store::{SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
+    AcceptedSettlementV1, SettlementExpectationV1, SettlementProofVerifierV1,
+};
+
 const AUTHORITY_RECEIPT_TAG: &[u8; 8] = b"BLCPAU01";
 /// Exact fixed-width transport for checkpoint-authority audit data.
 pub const CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES: usize = 8 + 32 + 32 + 8 + 8 + 32 + 8 + 1;
@@ -31,6 +39,17 @@ pub enum SettlementAuthorityErrorV1 {
     Admission(SettlementAdmissionErrorV1),
     /// Authority receipt framing or required identity was invalid.
     Receipt,
+}
+
+/// Failure to durably publish or jointly recover the authority-bound record.
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum SettlementAuthorityStoreErrorV1 {
+    Settlement(SettlementStoreErrorV1),
+    Checkpoint(CheckpointStoreError),
+    Missing,
+    Receipt(SettlementAuthorityErrorV1),
+    Mismatch,
 }
 
 /// Audit identity of the real PQ verification that authorized one checkpoint.
@@ -162,6 +181,62 @@ impl AuthorityBoundSettlementEvidenceV1 {
     ) {
         (self.inclusion, self.evidence, self.authority)
     }
+
+    /// Publish settlement, complete evidence and the PQ authority receipt in
+    /// one V4 settlement record. The independently persisted checkpoint store
+    /// remains a separate rollback domain and must retain its own mark.
+    #[cfg(unix)]
+    pub fn verify_and_commit<V: SettlementProofVerifierV1>(
+        self,
+        store: &mut SettlementStoreV1,
+        expected: SettlementStoreMarkV1,
+        expectation: &SettlementExpectationV1,
+        verifier: &V,
+    ) -> Result<PersistedAuthoritySettlementV1, SettlementAuthorityStoreErrorV1> {
+        let authority = self.authority;
+        let (accepted, mark, admission) = store
+            .verify_evidence_and_authority_audit_commit(
+                expected,
+                self.inclusion,
+                self.evidence,
+                &authority.encode(),
+                expectation,
+                verifier,
+            )
+            .map_err(SettlementAuthorityStoreErrorV1::Settlement)?;
+        Ok(PersistedAuthoritySettlementV1 {
+            accepted,
+            mark,
+            admission,
+            authority,
+        })
+    }
+}
+
+/// Result of one authority-bound V4 settlement publication.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct PersistedAuthoritySettlementV1 {
+    accepted: AcceptedSettlementV1,
+    mark: SettlementStoreMarkV1,
+    admission: SettlementStoreAdmissionV1,
+    authority: CheckpointAuthorityReceiptV1,
+}
+
+#[cfg(unix)]
+impl PersistedAuthoritySettlementV1 {
+    pub const fn accepted(&self) -> &AcceptedSettlementV1 {
+        &self.accepted
+    }
+    pub const fn mark(&self) -> SettlementStoreMarkV1 {
+        self.mark
+    }
+    pub const fn admission(&self) -> &SettlementStoreAdmissionV1 {
+        &self.admission
+    }
+    pub const fn authority(&self) -> CheckpointAuthorityReceiptV1 {
+        self.authority
+    }
 }
 
 /// Compose only after real PQ quorum/header/freshness verification produced
@@ -184,8 +259,17 @@ pub fn bind_settlement_checkpoint_authority(
         .map_err(SettlementAuthorityErrorV1::Inclusion)?;
     let inclusion =
         authenticate_settlement_inclusion(exact, expectation).map_err(SettlementAuthorityErrorV1::Admission)?;
+    let authority = authority_receipt(&checkpoint);
+    Ok(AuthorityBoundSettlementEvidenceV1 {
+        inclusion,
+        evidence,
+        authority,
+    })
+}
+
+fn authority_receipt(checkpoint: &VerifiedCheckpoint) -> CheckpointAuthorityReceiptV1 {
     let anchor = checkpoint.anchor();
-    let authority = CheckpointAuthorityReceiptV1 {
+    CheckpointAuthorityReceiptV1 {
         policy_identity: checkpoint.policy_identity(),
         checkpoint_digest: checkpoint.digest(),
         checkpoint_epoch: checkpoint.epoch(),
@@ -193,10 +277,38 @@ pub fn bind_settlement_checkpoint_authority(
         checkpoint_block: anchor.block,
         checkpoint_slot: anchor.slot,
         arrangement_review_due: checkpoint.arrangement_review_due(),
-    };
-    Ok(AuthorityBoundSettlementEvidenceV1 {
-        inclusion,
-        evidence,
-        authority,
-    })
+    }
+}
+
+/// Recheck a recovered V4 audit receipt against the latest independently
+/// recovered and currently fresh PQ checkpoint. Older historical authorities
+/// require an explicit historical checkpoint-store lookup and are refused here.
+#[cfg(unix)]
+pub fn recover_settlement_checkpoint_authority(
+    checkpoint_store: &CheckpointStore,
+    settlement_store: &SettlementStoreV1,
+    current_epoch: u64,
+) -> Result<CheckpointAuthorityReceiptV1, SettlementAuthorityStoreErrorV1> {
+    let bytes = settlement_store
+        .authority_audit()
+        .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
+    let retained = CheckpointAuthorityReceiptV1::decode(bytes).map_err(SettlementAuthorityStoreErrorV1::Receipt)?;
+    let verified = checkpoint_store
+        .current(current_epoch)
+        .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
+    let expected = authority_receipt(&verified);
+    let admission = settlement_store
+        .admission()
+        .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
+    let evidence = settlement_store
+        .evidence()
+        .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
+    if retained != expected
+        || retained.checkpoint_block() != admission.checkpoint().block
+        || retained.checkpoint_slot() != admission.checkpoint().slot
+        || evidence.checkpoint() != admission.checkpoint()
+    {
+        return Err(SettlementAuthorityStoreErrorV1::Mismatch);
+    }
+    Ok(retained)
 }

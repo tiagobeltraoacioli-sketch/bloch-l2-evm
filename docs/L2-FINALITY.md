@@ -131,9 +131,12 @@ The separate native-PQ integration can now consume its real hybrid-quorum
 that signed anchor matches the complete ancestry/body envelope and exact
 settlement expectation. It also emits a fixed audit receipt binding policy,
 checkpoint digest and freshness epoch. This closes an in-process capability
-composition gap, but the authority receipt and signed checkpoint history are
-not yet atomically coordinated with `BLSTRC03`; it therefore changes no
-readiness requirement or product permission.
+composition gap. The authority receipt and complete inclusion evidence are now
+atomic in `BLSTRC04` and dual-store recovery rechecks the independent signed
+checkpoint history. That history remains a separate rollback domain and the
+signer policy is still a weak-subjectivity trust input, not consensus activation
+or independent FFG proof. This changes no readiness requirement or product
+permission.
 
 ## RPC tag qualification
 
