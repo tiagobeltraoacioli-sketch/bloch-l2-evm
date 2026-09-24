@@ -126,6 +126,15 @@ handling or conformance evidence. Consequently they do not satisfy
 `native-settlement-consensus-active`, `l2-settlement-inclusion-verified` or
 `settlement-cursor-durable`, and RPC `finalized` remains `null`.
 
+The separate native-PQ integration can now consume its real hybrid-quorum
+`VerifiedCheckpoint` and produce a non-cloneable settlement package only when
+that signed anchor matches the complete ancestry/body envelope and exact
+settlement expectation. It also emits a fixed audit receipt binding policy,
+checkpoint digest and freshness epoch. This closes an in-process capability
+composition gap, but the authority receipt and signed checkpoint history are
+not yet atomically coordinated with `BLSTRC03`; it therefore changes no
+readiness requirement or product permission.
+
 ## RPC tag qualification
 
 The presence of `safe` or `finalized` tags is not finality evidence by itself.

@@ -63,6 +63,13 @@ checkpoint-authority artifact. Neither path may populate
 `eth_getBlockByNumber("finalized")`, open bridge/DEX permissions or be described
 as production settlement evidence.
 
+The AGPL native-PQ integration now provides an explicit upstream composition:
+`bind_settlement_checkpoint_authority` accepts only a real
+`VerifiedCheckpoint` produced by the hybrid ML-DSA-65 + Falcon-1024 verifier and
+binds it to this module's complete evidence and exact settlement capability. Its
+fixed authority receipt is audit data; it is not yet part of `BLSTRC03`, so
+cross-store atomic recovery remains open.
+
 Activation requires a separately reviewed native consensus integration to
 derive the expectation from committed state, authenticate the checkpoint,
 execute this transition identically on validators, persist it atomically and

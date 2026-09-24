@@ -10,6 +10,7 @@ pub mod checkpoint;
 pub mod checkpoint_store;
 #[cfg(unix)]
 pub mod lock_store;
+pub mod settlement_authority;
 
 /// Authentication or state-transition rejection. All errors preserve ledger state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

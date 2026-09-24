@@ -67,6 +67,8 @@ pub struct CheckpointPolicy {
 pub struct VerifiedCheckpoint {
     checkpoint: WeakSubjectivityCheckpoint,
     anchor: FinalizedCheckpoint,
+    policy_identity: B256,
+    checked_at_epoch: u64,
     review_due: bool,
 }
 impl VerifiedCheckpoint {
@@ -86,6 +88,14 @@ impl VerifiedCheckpoint {
     }
     pub fn arrangement_review_due(&self) -> bool {
         self.review_due
+    }
+    /// Exact immutable signer/chain policy that authenticated this checkpoint.
+    pub fn policy_identity(&self) -> B256 {
+        self.policy_identity
+    }
+    /// Independently supplied epoch at which freshness was last checked.
+    pub fn checked_at_epoch(&self) -> u64 {
+        self.checked_at_epoch
     }
 }
 impl CheckpointPolicy {
@@ -192,11 +202,13 @@ impl CheckpointPolicy {
             }
         }
         Ok(VerifiedCheckpoint {
-            checkpoint: cp.clone(),
+            checkpoint: *cp,
             anchor: FinalizedCheckpoint {
                 block: B256::from(cp.block_root),
                 slot: native.slot,
             },
+            policy_identity: self.storage_identity(),
+            checked_at_epoch: current_epoch,
             review_due: verified.arrangement_past_review,
         })
     }

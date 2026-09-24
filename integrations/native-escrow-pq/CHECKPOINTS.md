@@ -44,6 +44,16 @@ slot comes from this header. The signed epoch is retained separately; neither
 epoch nor slot is silently converted into block height. Header linkage does not
 execute the block or validate its proposer/FFG signatures.
 
+`settlement_authority::bind_settlement_checkpoint_authority` consumes this
+private verified capability together with a complete canonical inclusion
+envelope and an independently selected settlement expectation. It returns a
+non-cloneable package only when the PQ-signed anchor, ancestry endpoint, body,
+exact transaction index and settlement statement all agree. The accompanying
+129-byte `CheckpointAuthorityReceiptV1` binds the immutable policy identity,
+signed checkpoint digest, checkpoint/freshness epochs, block, slot and review
+warning. Decoding the receipt is audit transport only and cannot recreate PQ
+verification.
+
 If a previously verified checkpoint is supplied, its chain identity must match.
 An older incoming epoch is refused. A different digest at the same epoch raises
 a conflict; an identical checkpoint is accepted idempotently. A newer checkpoint
@@ -75,6 +85,12 @@ signed artifact and supply `previous`; omitting it starts a fresh bootstrap
 trust decision. This module does not wire the operator
 CLI's trusted inbox files to consensus: the experimental inbox still needs a
 native committed representation and activation.
+
+The authority receipt is not yet embedded in the settlement store's atomic
+record. Until that migration and coordinated recovery of both stores are
+implemented, callers must retain the checkpoint-store mark and settlement-store
+mark independently and must not describe the composition as production
+finality.
 
 ## Validation
 
