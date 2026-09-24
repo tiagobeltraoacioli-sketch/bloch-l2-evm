@@ -116,7 +116,9 @@ the exact transaction, containing block/slot, checkpoint, transaction index and
 admission commitment and validates their cross-links on recovery. The complete
 body, header/ancestry path and authenticated checkpoint-authority artifact must
 still be retained independently; stored coordinates are not a finality
-capability.
+capability. The core `TransactionInclusionEvidenceV1` format can canonically
+retain and reauthenticate that body and ancestry path, but it is not atomically
+stored here and deliberately does not authenticate checkpoint authority.
 
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.

@@ -148,7 +148,11 @@ exact transaction, containing block/slot, checkpoint, transaction index and
 admission commitment beside the accepted head, and validates them on restart.
 It does not retain the complete body, header/ancestry proof or authenticated
 checkpoint-authority artifact, so the recovered receipt is audit data rather
-than a recreated finality capability.
+than a recreated finality capability. The core library's bounded
+`TransactionInclusionEvidenceV1` envelope can reauthenticate a separately
+retained complete body and ancestry path after restart, but this composer does
+not yet commit that envelope atomically and it does not establish checkpoint
+authority or finality.
 
 The V2 integration test demonstrates why the distinction matters: altered
 recipient, amount and omitted deposits can produce valid real EVM/witness

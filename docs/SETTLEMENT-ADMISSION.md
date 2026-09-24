@@ -42,13 +42,19 @@ before or inside verification leave both heads unchanged.
 
 The checkpoint is an external trust input. Inclusion under it does not prove
 the checkpoint's voting authority, validator-set transitions or non-regression.
+`l1::TransactionInclusionEvidenceV1` can separately retain a strict, bounded,
+canonical copy of the complete headers and body. Decoding reverifies ancestry
+and the body root, and an exact transaction can then be reauthenticated after a
+restart. The envelope preserves the checkpoint's identity but does not prove
+its authority or finality.
 This in-memory adapter also provides no Genesis-4 transaction tag or state key,
 validator execution, reorg recovery, SP1 verifier implementation, RPC finality
 or product permission. The Unix devnet composer can durably commit the accepted
 settlement head, exact transaction and inclusion coordinates after consuming the
 refined capability. That replayable receipt does not preserve the complete body,
 header/ancestry path or checkpoint-authority artifact and cannot recreate the
-consumed authentication capability after restart. Neither path may populate
+consumed authentication capability after restart. The evidence envelope is not
+yet atomically committed with this receipt. Neither path may populate
 `eth_getBlockByNumber("finalized")`, open bridge/DEX permissions or be described
 as production settlement evidence.
 

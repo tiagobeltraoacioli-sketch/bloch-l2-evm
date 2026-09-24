@@ -1,6 +1,7 @@
 use alloy_primitives::{Bytes, B256};
 use bloch_l2_evm::l1::{
     authenticate_ancestry, authenticate_body, authenticate_exact_transaction, FinalizedCheckpoint, L1Error,
+    TransactionInclusionEvidenceV1, MAX_INCLUSION_EVIDENCE_V1_BYTES,
 };
 use serde_json::Value;
 use std::str::FromStr;
@@ -58,6 +59,103 @@ fn exact_unique_transaction_inclusion_is_position_bound() {
     assert_eq!(included.checkpoint(), checkpoint);
     assert_eq!(included.transaction_index(), 2);
     assert_eq!(included.transaction(), transactions[2].as_ref());
+}
+
+#[test]
+fn inclusion_evidence_round_trips_and_reauthenticates_after_restart() {
+    let (checkpoint, headers, transactions) = fixture(4);
+    let evidence = TransactionInclusionEvidenceV1::new(checkpoint, headers.clone(), transactions.clone()).unwrap();
+    assert_eq!(evidence.checkpoint(), checkpoint);
+    assert_eq!(evidence.headers(), headers);
+    assert_eq!(evidence.transactions(), transactions);
+
+    let encoded = evidence.encode();
+    assert!(encoded.len() <= MAX_INCLUSION_EVIDENCE_V1_BYTES);
+    let recovered = TransactionInclusionEvidenceV1::decode(&encoded).unwrap();
+    assert_eq!(recovered, evidence);
+
+    let included = recovered.authenticate_exact(&transactions[2]).unwrap();
+    assert_eq!(
+        included.block(),
+        B256::from_str(fixtures()[4]["target"].as_str().unwrap()).unwrap()
+    );
+    assert_eq!(included.slot(), 100);
+    assert_eq!(included.checkpoint(), checkpoint);
+    assert_eq!(included.transaction_index(), 2);
+    assert_eq!(included.transaction(), transactions[2].as_ref());
+}
+
+#[test]
+fn inclusion_evidence_rejects_noncanonical_or_corrupted_envelopes() {
+    let (checkpoint, headers, transactions) = fixture(4);
+    let header_count = headers.len();
+    let encoded = TransactionInclusionEvidenceV1::new(checkpoint, headers, transactions)
+        .unwrap()
+        .encode();
+
+    for length in 0..encoded.len() {
+        assert!(TransactionInclusionEvidenceV1::decode(&encoded[..length]).is_err());
+    }
+
+    let mut wrong_tag = encoded.clone();
+    wrong_tag[0] ^= 1;
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&wrong_tag).unwrap_err(),
+        L1Error::Evidence
+    );
+
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&trailing).unwrap_err(),
+        L1Error::Evidence
+    );
+
+    let header_count_offset = b"BLOCH:L1:INCLUSION-EVIDENCE:1".len() + 32 + 8;
+    let mut no_headers = encoded.clone();
+    no_headers[header_count_offset..header_count_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&no_headers).unwrap_err(),
+        L1Error::Evidence
+    );
+
+    let mut excessive_headers = encoded.clone();
+    excessive_headers[header_count_offset..header_count_offset + 4].copy_from_slice(&2049u32.to_le_bytes());
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&excessive_headers).unwrap_err(),
+        L1Error::Evidence
+    );
+
+    let transaction_count_offset = header_count_offset + 4 + header_count * 304;
+    let mut excessive_transactions = encoded.clone();
+    excessive_transactions[transaction_count_offset..transaction_count_offset + 4]
+        .copy_from_slice(&4097u32.to_le_bytes());
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&excessive_transactions).unwrap_err(),
+        L1Error::Evidence
+    );
+
+    let first_transaction_length_offset = transaction_count_offset + 4;
+    let mut excessive_body = encoded.clone();
+    excessive_body[first_transaction_length_offset..first_transaction_length_offset + 4]
+        .copy_from_slice(&(16u32 * 1024 * 1024 + 1).to_le_bytes());
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&excessive_body).unwrap_err(),
+        L1Error::Evidence
+    );
+
+    let mut changed_body = encoded;
+    *changed_body.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&changed_body).unwrap_err(),
+        L1Error::BodyRoot
+    );
+
+    let oversized = vec![0; MAX_INCLUSION_EVIDENCE_V1_BYTES + 1];
+    assert_eq!(
+        TransactionInclusionEvidenceV1::decode(&oversized).unwrap_err(),
+        L1Error::Evidence
+    );
 }
 
 #[test]

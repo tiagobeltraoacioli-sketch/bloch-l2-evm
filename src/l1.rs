@@ -15,6 +15,10 @@ const VERSION: u32 = 0xb10c_0005;
 const MAX_HEADERS: usize = 2048;
 const MAX_TRANSACTIONS: usize = 4096;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const EVIDENCE_TAG: &[u8] = b"BLOCH:L1:INCLUSION-EVIDENCE:1";
+/// Maximum canonical byte length of a retained inclusion-evidence envelope.
+pub const MAX_INCLUSION_EVIDENCE_V1_BYTES: usize =
+    EVIDENCE_TAG.len() + 32 + 8 + 4 + MAX_HEADERS * HEADER_LEN + 4 + MAX_TRANSACTIONS * 4 + MAX_BODY_BYTES;
 
 /// Finalized checkpoint authenticated by the embedding application, not an RPC assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +32,8 @@ pub struct FinalizedCheckpoint {
 /// Rejection of unauthenticated, malformed or oversized L1 data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum L1Error {
+    /// Invalid evidence-envelope version, framing, length or trailing bytes.
+    Evidence,
     /// Invalid version, encoding, or checkpoint value.
     Header,
     /// The ancestry path is empty or exceeds the local work limit.
@@ -46,6 +52,155 @@ pub enum L1Error {
     TransactionMissing,
     /// The exact native transaction occurs more than once, so its position is ambiguous.
     TransactionAmbiguous,
+}
+
+/// Canonical replay data for reauthenticating one complete native body.
+///
+/// Construction and decoding both verify the complete target-to-checkpoint
+/// ancestry and body root. The checkpoint remains an external trust input: this
+/// value preserves its exact identity but does not authenticate validator votes
+/// or checkpoint authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransactionInclusionEvidenceV1 {
+    checkpoint: FinalizedCheckpoint,
+    headers: Vec<Bytes>,
+    transactions: Vec<Bytes>,
+}
+
+impl TransactionInclusionEvidenceV1 {
+    /// Verify and retain an exact complete-body ancestry package.
+    pub fn new(
+        checkpoint: FinalizedCheckpoint,
+        headers: Vec<Bytes>,
+        transactions: Vec<Bytes>,
+    ) -> Result<Self, L1Error> {
+        authenticate_body(checkpoint, &headers, &transactions)?;
+        Ok(Self {
+            checkpoint,
+            headers,
+            transactions,
+        })
+    }
+
+    /// Exact external checkpoint named by this replay package.
+    pub const fn checkpoint(&self) -> FinalizedCheckpoint {
+        self.checkpoint
+    }
+
+    /// Complete target-to-checkpoint header path, including both endpoints.
+    pub fn headers(&self) -> &[Bytes] {
+        &self.headers
+    }
+
+    /// Complete ordered transaction body committed by the target header.
+    pub fn transactions(&self) -> &[Bytes] {
+        &self.transactions
+    }
+
+    /// Reverify ancestry and body before producing an exact inclusion
+    /// capability. No cached successful result is trusted.
+    pub fn authenticate_exact(&self, exact_transaction: &[u8]) -> Result<AuthenticatedTransactionInclusion, L1Error> {
+        let body = authenticate_body(self.checkpoint, &self.headers, &self.transactions)?;
+        authenticate_exact_transaction(&body, exact_transaction)
+    }
+
+    /// Encode one strict, bounded envelope. Header lengths are implicit and
+    /// transaction lengths are canonical little-endian `u32` values.
+    pub fn encode(&self) -> Vec<u8> {
+        let body_bytes = self
+            .transactions
+            .iter()
+            .map(|transaction| transaction.len())
+            .sum::<usize>();
+        let mut out = Vec::with_capacity(
+            EVIDENCE_TAG.len()
+                + 32
+                + 8
+                + 4
+                + self.headers.len() * HEADER_LEN
+                + 4
+                + self.transactions.len() * 4
+                + body_bytes,
+        );
+        out.extend_from_slice(EVIDENCE_TAG);
+        out.extend_from_slice(self.checkpoint.block.as_slice());
+        out.extend_from_slice(&self.checkpoint.slot.to_le_bytes());
+        out.extend_from_slice(&(self.headers.len() as u32).to_le_bytes());
+        for header in &self.headers {
+            out.extend_from_slice(header);
+        }
+        out.extend_from_slice(&(self.transactions.len() as u32).to_le_bytes());
+        for transaction in &self.transactions {
+            out.extend_from_slice(&(transaction.len() as u32).to_le_bytes());
+            out.extend_from_slice(transaction);
+        }
+        out
+    }
+
+    /// Decode exactly one canonical envelope and reverify its ancestry and
+    /// complete body before returning replay data.
+    pub fn decode(bytes: &[u8]) -> Result<Self, L1Error> {
+        if bytes.len() > MAX_INCLUSION_EVIDENCE_V1_BYTES || !bytes.starts_with(EVIDENCE_TAG) {
+            return Err(L1Error::Evidence);
+        }
+        let mut reader = EvidenceReader(&bytes[EVIDENCE_TAG.len()..]);
+        let checkpoint = FinalizedCheckpoint {
+            block: B256::from_slice(reader.take(32)?),
+            slot: reader.u64()?,
+        };
+        let header_count = reader.u32()? as usize;
+        if header_count == 0 || header_count > MAX_HEADERS {
+            return Err(L1Error::Evidence);
+        }
+        let mut headers = Vec::with_capacity(header_count);
+        for _ in 0..header_count {
+            headers.push(Bytes::copy_from_slice(reader.take(HEADER_LEN)?));
+        }
+        let transaction_count = reader.u32()? as usize;
+        if transaction_count > MAX_TRANSACTIONS {
+            return Err(L1Error::Evidence);
+        }
+        let mut body_bytes = 0usize;
+        let mut transactions = Vec::with_capacity(transaction_count);
+        for _ in 0..transaction_count {
+            let length = reader.u32()? as usize;
+            body_bytes = body_bytes.checked_add(length).ok_or(L1Error::Evidence)?;
+            if body_bytes > MAX_BODY_BYTES {
+                return Err(L1Error::Evidence);
+            }
+            transactions.push(Bytes::copy_from_slice(reader.take(length)?));
+        }
+        if !reader.0.is_empty() {
+            return Err(L1Error::Evidence);
+        }
+        let evidence = Self::new(checkpoint, headers, transactions)?;
+        if evidence.encode() != bytes {
+            return Err(L1Error::Evidence);
+        }
+        Ok(evidence)
+    }
+}
+
+struct EvidenceReader<'a>(&'a [u8]);
+
+impl<'a> EvidenceReader<'a> {
+    fn take(&mut self, count: usize) -> Result<&'a [u8], L1Error> {
+        let (head, tail) = self.0.split_at_checked(count).ok_or(L1Error::Evidence)?;
+        self.0 = tail;
+        Ok(head)
+    }
+
+    fn u32(&mut self) -> Result<u32, L1Error> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().map_err(|_| L1Error::Evidence)?,
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, L1Error> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().map_err(|_| L1Error::Evidence)?,
+        ))
+    }
 }
 
 /// A target header proved to be on the complete parent path to an externally
