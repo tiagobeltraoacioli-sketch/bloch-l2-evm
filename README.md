@@ -240,3 +240,11 @@ CI (`.github/workflows/ci.yml`) runs all of the above with the committed
 lockfile and the pinned toolchain.
 
 License: MIT OR Apache-2.0. `publish = false`, version `0.0.0-scaffold`.
+
+## Three-holder component checkpoints
+
+The [component checkpoint integration](integrations/component-checkpoint/README.md)
+adds detached hybrid PQ signatures for L2, DEX and bridge release review with
+three holders, external participation and independently pinned trust/artifact
+commitments. Production registries and signatures remain pending; this gate does
+not replace genesis admission, consensus finality or native settlement.

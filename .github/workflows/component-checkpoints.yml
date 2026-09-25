@@ -1,0 +1,39 @@
+name: Component checkpoint ceremony
+on:
+  pull_request:
+    paths:
+      - 'integrations/component-checkpoint/**'
+      - 'tools/component-checkpoint.py'
+      - '.github/workflows/component-checkpoints.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/component-checkpoint/**'
+      - 'tools/component-checkpoint.py'
+      - '.github/workflows/component-checkpoints.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hybrid-quorum:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: bloch-l2-evm
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: tiagobeltraoacioli-sketch/bloch-sis-pow
+          ref: 5af78a04a27dcb2c2253c32134fca888a8a965f9
+          path: bloch-validator-payout
+          persist-credentials: false
+      - name: Install declared Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt,clippy
+      - name: Hybrid signature and full offline ceremony regressions
+        working-directory: bloch-l2-evm
+        run: |
+          cargo +1.94.1 fmt --manifest-path integrations/component-checkpoint/Cargo.toml --check
+          cargo +1.94.1 test --locked --manifest-path integrations/component-checkpoint/Cargo.toml
+          cargo +1.94.1 clippy --locked --manifest-path integrations/component-checkpoint/Cargo.toml --all-targets -- -D warnings

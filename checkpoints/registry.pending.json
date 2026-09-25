@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "component-review-1",
+  "threshold": 2,
+  "min_external": 1,
+  "valid_from": null,
+  "valid_until": null,
+  "signers": [
+    {"id": "holder-1", "external": false, "public_key": null},
+    {"id": "holder-2", "external": false, "public_key": null},
+    {"id": "external-holder-3", "external": true, "public_key": null}
+  ]
+}

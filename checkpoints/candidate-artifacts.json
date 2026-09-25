@@ -1,0 +1,66 @@
+{
+  "schema": "bloch.component-artifacts.v1",
+  "component": "l2",
+  "files": [
+    {
+      "path": ".github/workflows/component-checkpoints.yml",
+      "sha3": "fe99df25734ba0e9f44349484ca8604d7d0444c30f0bce7d1be8e498f7160bd2"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha3": "e5d76454b98eda855bf8a456c7200a8573d66b27df951b8c11881d43d6af15ec"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha3": "3a7d41dd4b4a0ce6d6f9ffc29629b62a8ddc6e68d8904b5a5aac81cb56fb081e"
+    },
+    {
+      "path": "README.md",
+      "sha3": "429d8c0eb433006e5192a6c42b6dc0a5ecd19a11b7c4d67f2bf227d9338bc99e"
+    },
+    {
+      "path": "checkpoints/README.md",
+      "sha3": "4ad2c40a160b0a2c35f39ae7a28f1ec1090e97e5c941fe2bb6283b39c593694d"
+    },
+    {
+      "path": "checkpoints/registry.pending.json",
+      "sha3": "0c30bc2bb83fdb4ea3971aa75f3aaf30eb87ab95c244e24018d698ec3714af8f"
+    },
+    {
+      "path": "integrations/component-checkpoint/Cargo.lock",
+      "sha3": "be786f5d645c028f78e705279979ed3705557e944bedbab86d4ae01d4bdcb7d3"
+    },
+    {
+      "path": "integrations/component-checkpoint/Cargo.toml",
+      "sha3": "5c2ceac43fcd2f50057684fdca1fad3a30e1cf24238afc02e56bee9cc52240cb"
+    },
+    {
+      "path": "integrations/component-checkpoint/README.md",
+      "sha3": "f0796d434b0d1138687559cef162b6829d69680a27892854a4d1403b88e339df"
+    },
+    {
+      "path": "integrations/component-checkpoint/src/lib.rs",
+      "sha3": "b53f5115a0e28f1d08a7810d9aa8b24c192774adfad6677dcc9ff28325927eca"
+    },
+    {
+      "path": "integrations/component-checkpoint/src/main.rs",
+      "sha3": "e1b2fcebd060c5c0b3b0696f86d17bde51f2d9f19cd04d17d7522954cdf232c0"
+    },
+    {
+      "path": "integrations/component-checkpoint/tests/ceremony_cli.rs",
+      "sha3": "d55430a2a699945bab69ddba6a0291c3ab6654979fc1992a6cece71059855fea"
+    },
+    {
+      "path": "integrations/component-checkpoint/tests/quorum.rs",
+      "sha3": "9f80c431ae3ba63b07aedae21ae7baa386d659ca09c16383ad964156d7e1629f"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha3": "800e71024e230aa7554684bddff06c9eeed2d952f43e77f0b5669a2846dbcdc3"
+    },
+    {
+      "path": "tools/component-checkpoint.py",
+      "sha3": "7786238c39129bec5693a886c824cc0d32a5927085e0740bc840d03227bfab2c"
+    }
+  ]
+}
