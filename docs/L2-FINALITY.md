@@ -146,6 +146,46 @@ store until their V4 authority relationship is reverified. This avoids a caller
 accidentally recovering one rollback domain without the other; it is still local
 recovery plumbing, not validator consensus or production finality.
 
+## Proof-verified recovery (2026-09-30)
+
+`SettlementStoreV1::open_verified` adds a strict recovery path that reruns
+`verify_and_apply` with an independently selected `SettlementProofVerifierV1`
+for every retained settlement. It checks the pinned policy, execution proof,
+predecessor, consumed cursor and resulting head, including records before the
+externally retained rollback floor. A valid floor does not skip earlier proofs.
+The existing `open` API remains structural recovery and does not repeat proof
+verification.
+
+The caller supplies `maximum_proofs` in `0..=10_000`. Recovery refuses a larger
+history before invoking the proof verifier; zero permits only the empty store.
+Any invalid proof, inconsistent record or absent floor releases the recovery
+lock without returning a handle or rewriting the stored history. The limit
+bounds invocation count, not the runtime or resource usage of an arbitrary
+verifier implementation.
+
+The native-PQ integration's `open_proof_verified_authority_stores` composes this
+path with the independently pinned checkpoint history and then checks the
+latest retained V4 authority receipt at its original freshness epoch. Both
+rollback floors are mandatory. Neither store is exposed if proof replay or
+joint authority recovery fails. This does not expand the historical receipt
+check into a consensus audit of every settlement.
+
+Replay derives each execution expectation from its retained statement and the
+preceding registry head. It does not independently authenticate the source of
+that statement, native consensus, or availability of a consensus proof
+transport. Tests use a deterministic proof-verifier double to establish call
+coverage and rejection, plus real hybrid signatures from disposable keys in
+the PQ integration. No new genuine Groth16/native-settlement proof was generated
+by this change. These results qualify recovery behavior only and do not change
+`network/finality.json` or grant a finalized-block capability.
+
+The read-only server observation on 2026-09-30 found the isolated, unfunded
+development node for chain 700771 running at block 212 with `finalized: null`.
+Its pinned genesis is
+`0xaec9844384415c8ba7157298fa13f7e6c951a6ba9332f516180a4aa22208fefa`.
+This supersedes the September 23 observation that its reserved server had no
+running node; it does not establish production deployment or native finality.
+
 ## RPC tag qualification
 
 The presence of `safe` or `finalized` tags is not finality evidence by itself.

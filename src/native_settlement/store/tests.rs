@@ -218,3 +218,118 @@ fn truncation_mutation_gap_and_missing_floor_are_rejected() {
     ));
     fs::remove_dir_all(path).unwrap();
 }
+
+// Deliberately permissive test-only writer, used to retain a cryptographically
+// invalid but structurally coherent record and exercise proof recovery refusal.
+struct TestAcceptAll;
+impl SettlementProofVerifierV1 for TestAcceptAll {
+    fn verify(&self, _: B256, _: &[u8], _: &[u8]) -> bool {
+        true
+    }
+}
+struct CountingVerifier {
+    calls: std::cell::Cell<usize>,
+}
+impl SettlementProofVerifierV1 for CountingVerifier {
+    fn verify(&self, policy: B256, public: &[u8], proof: &[u8]) -> bool {
+        self.calls.set(self.calls.get() + 1);
+        Accept.verify(policy, public, proof)
+    }
+}
+fn retained_chain(path: &Path, invalid_at: Option<u64>) -> (SettlementStoreMarkV1, SettlementStoreMarkV1) {
+    let mut store = SettlementStoreV1::create(path, policy()).unwrap();
+    let zero = store.mark();
+    for number in 1..=2 {
+        let previous = store.registry().head().copied();
+        let s = statement(
+            number,
+            previous.map_or(B256::ZERO, |v| v.commitment),
+            previous.map_or(h(10), |v| v.l2_header_hash),
+            previous.map_or(h(11), |v| v.l2_state_root),
+            previous.map_or(0, |v| v.consumed_end),
+        );
+        let proof = [if invalid_at == Some(number) { 8 } else { 9 }; super::super::SETTLEMENT_PROOF_V1_BYTES];
+        let tx = SettlementTransactionV1::new(h(8), s, proof).unwrap().encode();
+        store
+            .verify_and_commit(
+                store.mark(),
+                &tx,
+                &SettlementExpectationV1 {
+                    statement: s,
+                    source_predecessor: previous.map_or(B256::ZERO, |v| v.source_commitment),
+                },
+                &TestAcceptAll,
+            )
+            .unwrap();
+    }
+    (zero, store.mark())
+}
+
+#[test]
+fn proof_recovery_reverifies_every_record_even_before_the_external_floor() {
+    for invalid_at in [None, Some(1), Some(2)] {
+        let path = directory("proof-replay");
+        let (_, tip) = retained_chain(&path, invalid_at);
+        let before: Vec<_> = (0..=2).map(|i| fs::read(path.join(record_name(i))).unwrap()).collect();
+        // Structural recovery never claimed to authenticate execution proofs.
+        drop(SettlementStoreV1::open(&path, policy(), tip).unwrap());
+        let verifier = CountingVerifier {
+            calls: std::cell::Cell::new(0),
+        };
+        let recovered = SettlementStoreV1::open_verified(&path, policy(), tip, 2, &verifier);
+        if invalid_at.is_none() {
+            assert_eq!(recovered.as_ref().unwrap().mark(), tip);
+            assert_eq!(verifier.calls.get(), 2);
+        } else {
+            assert!(matches!(
+                recovered,
+                Err(SettlementStoreErrorV1::Settlement(SettlementError::Proof))
+            ));
+            assert_eq!(verifier.calls.get(), invalid_at.unwrap() as usize);
+        }
+        drop(recovered);
+        // Failure must release the writer lock, expose no partial handle and
+        // preserve every record; the independent floor is not rewritten.
+        drop(SettlementStoreV1::open(&path, policy(), tip).unwrap());
+        for i in 0..=2 {
+            assert_eq!(fs::read(path.join(record_name(i))).unwrap(), before[i as usize]);
+        }
+        fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[test]
+fn proof_recovery_budget_precedes_crypto_and_zero_budget_accepts_only_empty_history() {
+    let path = directory("proof-budget");
+    let (zero, tip) = retained_chain(&path, None);
+    let verifier = CountingVerifier {
+        calls: std::cell::Cell::new(0),
+    };
+    for budget in [0, 1, MAX_RECORDS + 1] {
+        assert!(matches!(
+            SettlementStoreV1::open_verified(&path, policy(), zero, budget, &verifier),
+            Err(SettlementStoreErrorV1::Limit)
+        ));
+        assert_eq!(verifier.calls.get(), 0);
+    }
+    let store = SettlementStoreV1::open_verified(&path, policy(), zero, 2, &verifier).unwrap();
+    assert_eq!(store.mark(), tip);
+    drop(store);
+    let mut wrong = tip;
+    wrong.record_digest = h(99);
+    assert!(matches!(
+        SettlementStoreV1::open_verified(&path, policy(), wrong, 2, &verifier),
+        Err(SettlementStoreErrorV1::Rollback)
+    ));
+    fs::remove_dir_all(path).unwrap();
+    let path = directory("proof-empty");
+    let store = SettlementStoreV1::create(&path, policy()).unwrap();
+    let zero = store.mark();
+    drop(store);
+    let verifier = CountingVerifier {
+        calls: std::cell::Cell::new(0),
+    };
+    drop(SettlementStoreV1::open_verified(&path, policy(), zero, 0, &verifier).unwrap());
+    assert_eq!(verifier.calls.get(), 0);
+    fs::remove_dir_all(path).unwrap();
+}

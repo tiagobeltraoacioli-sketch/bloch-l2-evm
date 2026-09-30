@@ -14,8 +14,9 @@ use bloch_native_escrow_pq::{
     checkpoint::{CheckpointPolicy, Phase},
     checkpoint_store::CheckpointStore,
     settlement_authority::{
-        bind_settlement_checkpoint_authority, open_authority_bound_stores, CheckpointAuthorityReceiptV1,
-        SettlementAuthorityErrorV1, SettlementAuthorityStoreErrorV1, CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
+        bind_settlement_checkpoint_authority, open_authority_bound_stores, open_proof_verified_authority_stores,
+        CheckpointAuthorityReceiptV1, SettlementAuthorityErrorV1, SettlementAuthorityStoreErrorV1,
+        CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
     },
 };
 use bloch_pos_committee::{
@@ -349,6 +350,60 @@ fn v4_atomically_recovers_evidence_and_rechecks_independent_checkpoint_store() {
         1
     );
     drop(recovered_stores);
+
+    struct RejectProof;
+    impl SettlementProofVerifierV1 for RejectProof {
+        fn verify(&self, _: B256, _: &[u8], _: &[u8]) -> bool {
+            false
+        }
+    }
+    assert!(matches!(
+        open_proof_verified_authority_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            newer_mark,
+            &settlement_path,
+            settlement_policy(),
+            settlement_mark,
+            100 + ws::WS_PERIOD_EPOCHS,
+            1,
+            &RejectProof,
+        ),
+        Err(SettlementAuthorityStoreErrorV1::Settlement(
+            SettlementStoreErrorV1::Settlement(_)
+        ))
+    ));
+    assert!(matches!(
+        open_proof_verified_authority_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            newer_mark,
+            &settlement_path,
+            settlement_policy(),
+            settlement_mark,
+            100 + ws::WS_PERIOD_EPOCHS,
+            0,
+            &ExactVerifier,
+        ),
+        Err(SettlementAuthorityStoreErrorV1::Settlement(
+            SettlementStoreErrorV1::Limit
+        ))
+    ));
+    let strict = open_proof_verified_authority_stores(
+        &checkpoint_path,
+        checkpoint_policy(),
+        newer_mark,
+        &settlement_path,
+        settlement_policy(),
+        settlement_mark,
+        100 + ws::WS_PERIOD_EPOCHS,
+        1,
+        &ExactVerifier,
+    )
+    .unwrap();
+    assert_eq!(strict.authority(), persisted.authority());
+    assert_eq!(strict.settlement_store().mark(), settlement_mark);
+    drop(strict);
 
     let canonical = fs::read(&record).unwrap();
     let mut changed_receipt = canonical.clone();

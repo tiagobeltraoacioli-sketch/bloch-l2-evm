@@ -234,11 +234,57 @@ impl SettlementStoreV1 {
 
     /// Replay all canonical records under the exact policy and require the
     /// independently supplied floor to occur unchanged in that history.
+    /// This structural path does not repeat execution-proof verification; use
+    /// `open_verified` when recovering proof-verified execution evidence.
     pub fn open(
         path: impl AsRef<Path>,
         policy: SettlementPolicyV1,
         floor: SettlementStoreMarkV1,
     ) -> Result<Self, SettlementStoreErrorV1> {
+        Self::open_inner(path, policy, floor, MAX_RECORDS, |_, _| Ok(()))
+    }
+
+    /// Recover while cryptographically reverifying every retained proof and
+    /// policy/successor transition, including records before the external floor.
+    /// The budget is checked before any proof verification. No handle escapes
+    /// on refusal. This authenticates neither native source authority nor
+    /// consensus activation; the verifier must be selected independently.
+    pub fn open_verified<V: SettlementProofVerifierV1>(
+        path: impl AsRef<Path>,
+        policy: SettlementPolicyV1,
+        floor: SettlementStoreMarkV1,
+        maximum_proofs: u64,
+        verifier: &V,
+    ) -> Result<Self, SettlementStoreErrorV1> {
+        Self::open_inner(path, policy, floor, maximum_proofs, |registry, record| {
+            if let Some(transaction) = &record.transaction {
+                let decoded =
+                    SettlementTransactionV1::decode(transaction).map_err(SettlementStoreErrorV1::Settlement)?;
+                let expectation = SettlementExpectationV1 {
+                    statement: *decoded.statement(),
+                    source_predecessor: registry.head().map_or(B256::ZERO, |head| head.source_commitment),
+                };
+                let accepted = registry
+                    .verify_and_apply(transaction, &expectation, verifier)
+                    .map_err(SettlementStoreErrorV1::Settlement)?;
+                if Some(accepted) != record.head {
+                    return Err(SettlementStoreErrorV1::Format);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        policy: SettlementPolicyV1,
+        floor: SettlementStoreMarkV1,
+        maximum_proofs: u64,
+        mut verify: impl FnMut(&mut SettlementRegistryV1, &DecodedRecord) -> Result<(), SettlementStoreErrorV1>,
+    ) -> Result<Self, SettlementStoreErrorV1> {
+        if maximum_proofs > MAX_RECORDS {
+            return Err(SettlementStoreErrorV1::Limit);
+        }
         check_private_directory(path.as_ref())?;
         let directory = fs::canonicalize(path)?;
         regular_private(&directory.join("LOCK"))?;
@@ -250,7 +296,7 @@ impl SettlementStoreV1 {
             return Err(SettlementStoreErrorV1::Policy);
         }
         let generations = record_generations(&directory)?;
-        if generations.is_empty() || generations.len() > MAX_RECORDS as usize + 1 {
+        if generations.is_empty() || generations.len() > maximum_proofs as usize + 1 {
             return Err(SettlementStoreErrorV1::Limit);
         }
         let mut registry = SettlementRegistryV1::new(policy).map_err(SettlementStoreErrorV1::Settlement)?;
@@ -268,6 +314,7 @@ impl SettlementStoreV1 {
             let bytes = read_record_bounded(&directory.join(record_name(generation)))?;
             let decoded = decode_record(&bytes, generation, policy, previous_digest)?;
             validate_replayed_head(generation, policy, previous_head, decoded.head)?;
+            verify(&mut registry, &decoded)?;
             registry.head = decoded.head;
             if registry.state_commitment() != decoded.state_commitment {
                 return Err(SettlementStoreErrorV1::Format);
@@ -533,6 +580,7 @@ impl SettlementStoreV1 {
 }
 
 struct DecodedRecord {
+    transaction: Option<[u8; SETTLEMENT_TX_V1_BYTES]>,
     state_commitment: B256,
     head: Option<AcceptedSettlementV1>,
     admission: Option<SettlementStoreAdmissionV1>,
@@ -814,6 +862,7 @@ fn decode_record(
         _ => {}
     }
     Ok(DecodedRecord {
+        transaction: transaction.map(|(bytes, _)| bytes),
         state_commitment,
         head,
         admission,

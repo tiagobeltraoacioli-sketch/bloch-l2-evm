@@ -26,9 +26,18 @@ It is a separate experimental library: it does not overwrite the native node's
   be passed to the header verifier as one.
 
 Settlement startup should use the sibling authority module's
-`open_authority_bound_stores` facade. It requires this checkpoint floor and the
-settlement floor, and releases both locks without exposing a handle if joint
-recovery fails. Direct `open` remains the lower-level checkpoint-only primitive.
+`open_proof_verified_authority_stores` facade when execution-proof replay is
+required. It takes both independently retained floors, the current epoch, a
+maximum proof count and an independently selected `SettlementProofVerifierV1`.
+Every retained settlement proof is rechecked, including records before the
+floor; the current V4 authority receipt is then checked against the retained
+PQ history. Any failure releases both locks without exposing a handle.
+
+The lower-level `open_authority_bound_stores` facade retains structural
+settlement recovery and joint authority checking without repeating execution
+proofs. Direct `open` remains the checkpoint-only primitive. Proof replay does
+not independently authenticate a retained statement's native source or create
+a current finality capability; see [the finality boundary](../../docs/L2-FINALITY.md#proof-verified-recovery-2026-09-30).
 
 ## Historical validity is not freshness
 
@@ -99,6 +108,10 @@ historical recovery with fresh replacement, exact historical audit after the
 latest checkpoint advances, future audit claims, changed predecessor links,
 signature corruption, truncation, acknowledged-tail deletion, immutable policy,
 oversized input, publication-error poisoning and incomplete temporary files.
+Strict settlement recovery tests additionally cover rejecting proof verifiers,
+proof-count limits, unchanged history after rejection and lock release before
+a subsequent successful joint recovery. These execution-proof tests use a
+deterministic test verifier; they are not new real Groth16 proof evidence.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml

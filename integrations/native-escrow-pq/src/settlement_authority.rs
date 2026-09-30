@@ -381,3 +381,38 @@ pub fn open_authority_bound_stores(
         authority,
     })
 }
+
+/// Strict recovery for evidence qualification: repeat all execution proof
+/// checks under the selected verifier before exposing either recovered store.
+/// Historical PQ authority is then cross-checked as in the structural opener.
+/// This adds proof replay, not native consensus or a finalized-RPC capability.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub fn open_proof_verified_authority_stores<V: SettlementProofVerifierV1>(
+    checkpoint_path: impl AsRef<Path>,
+    checkpoint_policy: crate::checkpoint::CheckpointPolicy,
+    checkpoint_floor: CheckpointMark,
+    settlement_path: impl AsRef<Path>,
+    settlement_policy: SettlementPolicyV1,
+    settlement_floor: SettlementStoreMarkV1,
+    current_epoch: u64,
+    maximum_proofs: u64,
+    verifier: &V,
+) -> Result<RecoveredAuthorityStoresV1, SettlementAuthorityStoreErrorV1> {
+    let checkpoint_store = CheckpointStore::open(checkpoint_path, checkpoint_policy, Some(checkpoint_floor))
+        .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
+    let settlement_store = SettlementStoreV1::open_verified(
+        settlement_path,
+        settlement_policy,
+        settlement_floor,
+        maximum_proofs,
+        verifier,
+    )
+    .map_err(SettlementAuthorityStoreErrorV1::Settlement)?;
+    let authority = recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, current_epoch)?;
+    Ok(RecoveredAuthorityStoresV1 {
+        checkpoint_store,
+        settlement_store,
+        authority,
+    })
+}
