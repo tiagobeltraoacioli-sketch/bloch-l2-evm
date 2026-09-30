@@ -24,7 +24,7 @@ use bloch_pos_committee::{
     header::{BlockHeaderV4, BlockId},
     ws::{self, CheckpointEnvelope, Signer, SignerSet, WeakSubjectivityCheckpoint},
 };
-use std::{fs, sync::OnceLock};
+use std::{cell::Cell, fs, sync::OnceLock};
 
 fn h(value: u8) -> B256 {
     B256::repeat_byte(value)
@@ -495,4 +495,265 @@ fn mismatched_checkpoint_index_statement_and_duplicate_bytes_fail_closed() {
         bind_settlement_checkpoint_authority(checkpoint, evidence, &expected),
         Err(SettlementAuthorityErrorV1::Inclusion(L1Error::TransactionAmbiguous))
     ));
+}
+
+/// Fixed statement/proof pairs for replay tests, not a Groth16 implementation.
+struct HistoryProofVerifier {
+    statements: [SettlementStatementV2; 2],
+    calls: Cell<usize>,
+}
+
+impl SettlementProofVerifierV1 for HistoryProofVerifier {
+    fn verify(&self, policy: B256, public: &[u8], proof: &[u8]) -> bool {
+        self.calls.set(self.calls.get() + 1);
+        policy == settlement_policy().proof_policy
+            && self.statements.iter().any(|statement| statement.encode() == public)
+            && proof == [9; SETTLEMENT_PROOF_V1_BYTES]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FirstRecord {
+    Valid,
+    WithoutInclusion,
+    WithoutAuthority,
+    ChangedAuthorityByte(usize),
+    MissingSignedCheckpoint,
+    FutureAcceptance,
+    StaleAtAcceptance,
+    TruncatedAuthority,
+}
+
+#[test]
+fn strict_recovery_authenticates_every_record_even_when_the_latest_receipt_is_valid() {
+    use bloch_native_escrow_pq::{checkpoint::CheckpointError, checkpoint_store::StoreError as CheckpointStoreError};
+
+    let observed_epoch = 103 + ws::WS_PERIOD_EPOCHS;
+    for first_record in [
+        FirstRecord::Valid,
+        FirstRecord::WithoutInclusion,
+        FirstRecord::WithoutAuthority,
+        FirstRecord::ChangedAuthorityByte(8),   // Policy identity.
+        FirstRecord::ChangedAuthorityByte(40),  // Signed checkpoint digest.
+        FirstRecord::ChangedAuthorityByte(88),  // Checkpoint block.
+        FirstRecord::ChangedAuthorityByte(120), // Checkpoint slot.
+        FirstRecord::ChangedAuthorityByte(128), // Arrangement review flag.
+        FirstRecord::MissingSignedCheckpoint,
+        FirstRecord::FutureAcceptance,
+        FirstRecord::StaleAtAcceptance,
+        FirstRecord::TruncatedAuthority,
+    ] {
+        let checkpoint_path = temporary("history-checkpoint");
+        let settlement_path = temporary("history-settlement");
+        let first = statement();
+        let first_tx = SettlementTransactionV1::decode(&settlement_transaction()).unwrap();
+        let second = SettlementStatementV2 {
+            previous_settlement: first_tx.commitment(),
+            l2_number: 2,
+            l2_parent_hash: first.l2_header_hash,
+            l2_previous_state_root: first.l2_state_root,
+            l2_header_hash: h(30),
+            l2_state_root: h(31),
+            l1_block: h(32),
+            l1_slot: 81,
+            l1_height: 71,
+            source_commitment: h(33),
+            inbox_root: h(34),
+            inbox_count: 2,
+            consumed_start: 1,
+            consumed_end: 2,
+            body_commitment: h(35),
+            ..first
+        };
+        let verifier = HistoryProofVerifier {
+            statements: [first, second],
+            calls: Cell::new(0),
+        };
+        let mut checkpoints = CheckpointStore::create(&checkpoint_path, checkpoint_policy()).unwrap();
+        let mut settlements = SettlementStoreV1::create(&settlement_path, settlement_policy()).unwrap();
+        for (index, statement) in verifier.statements.iter().enumerate() {
+            let transaction = SettlementTransactionV1::new(
+                settlement_policy().proof_policy,
+                *statement,
+                [9; SETTLEMENT_PROOF_V1_BYTES],
+            )
+            .unwrap()
+            .encode();
+            let transactions = vec![Bytes::from_static(b"unrelated"), Bytes::copy_from_slice(&transaction)];
+            let epoch = 100 + 2 * index as u64;
+            let (envelope, header) = checkpoint_artifacts_at(&transactions, epoch);
+            checkpoints.accept(&envelope, &header, epoch + 1).unwrap();
+            let checkpoint = checkpoints.current(epoch + 1).unwrap();
+            let evidence =
+                TransactionInclusionEvidenceV1::new(checkpoint.anchor(), vec![Bytes::from(header)], transactions)
+                    .unwrap();
+            let expected = SettlementAdmissionExpectationV1 {
+                settlement: SettlementExpectationV1 {
+                    statement: *statement,
+                    source_predecessor: if index == 0 {
+                        B256::ZERO
+                    } else {
+                        first.source_commitment
+                    },
+                },
+                ..expectation(checkpoint.anchor())
+            };
+            let bound = bind_settlement_checkpoint_authority(checkpoint, evidence, &expected).unwrap();
+            let mark = settlements.mark();
+            if index == 1 || matches!(first_record, FirstRecord::Valid) {
+                bound
+                    .verify_and_commit(&mut settlements, mark, &expected.settlement, &verifier)
+                    .unwrap();
+                continue;
+            }
+            let (inclusion, evidence, authority) = bound.into_parts();
+            match first_record {
+                FirstRecord::WithoutInclusion => {
+                    settlements
+                        .verify_and_commit(mark, &transaction, &expected.settlement, &verifier)
+                        .unwrap();
+                }
+                FirstRecord::WithoutAuthority => {
+                    settlements
+                        .verify_evidence_and_commit(mark, inclusion, evidence, &expected.settlement, &verifier)
+                        .unwrap();
+                }
+                _ => {
+                    // The lower-level store retains opaque audit bytes. Its
+                    // structural integrity must not authenticate these claims.
+                    let mut bytes = authority.encode().to_vec();
+                    match first_record {
+                        FirstRecord::ChangedAuthorityByte(offset) => bytes[offset] ^= 1,
+                        FirstRecord::MissingSignedCheckpoint => bytes[72..80].copy_from_slice(&101u64.to_le_bytes()),
+                        FirstRecord::FutureAcceptance => {
+                            bytes[80..88].copy_from_slice(&(observed_epoch + 1).to_le_bytes())
+                        }
+                        FirstRecord::StaleAtAcceptance => {
+                            bytes[80..88].copy_from_slice(&(100 + ws::WS_PERIOD_EPOCHS).to_le_bytes())
+                        }
+                        FirstRecord::TruncatedAuthority => {
+                            bytes.pop();
+                        }
+                        _ => unreachable!(),
+                    }
+                    settlements
+                        .verify_evidence_and_authority_audit_commit(
+                            mark,
+                            inclusion,
+                            evidence,
+                            &bytes,
+                            &expected.settlement,
+                            &verifier,
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        // Pin the newest marks, so record 1 is strictly before both floors.
+        let checkpoint_floor = checkpoints.mark().unwrap();
+        let settlement_floor = settlements.mark();
+        let expected_latest = settlements.authority_audit().unwrap().to_vec();
+        drop(settlements);
+        drop(checkpoints);
+        let records = |path: &std::path::Path| -> Vec<(std::ffi::OsString, Vec<u8>)> {
+            let mut entries: Vec<_> = fs::read_dir(path)
+                .unwrap()
+                .map(|item| {
+                    let item = item.unwrap();
+                    (item.file_name(), fs::read(item.path()).unwrap())
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+        let before = (records(&checkpoint_path), records(&settlement_path));
+        // The compatibility opener checks only the latest receipt, which is
+        // genuinely signed in every case, including the adversarial histories.
+        drop(
+            open_authority_bound_stores(
+                &checkpoint_path,
+                checkpoint_policy(),
+                checkpoint_floor,
+                &settlement_path,
+                settlement_policy(),
+                settlement_floor,
+                observed_epoch,
+            )
+            .unwrap(),
+        );
+        verifier.calls.set(0);
+        let result = open_proof_verified_authority_stores(
+            &checkpoint_path,
+            checkpoint_policy(),
+            checkpoint_floor,
+            &settlement_path,
+            settlement_policy(),
+            settlement_floor,
+            observed_epoch,
+            2,
+            &verifier,
+        );
+        match (first_record, result) {
+            (FirstRecord::Valid, Ok(stores)) => {
+                assert_eq!(verifier.calls.get(), 2);
+                assert_eq!(stores.authority().encode().as_slice(), expected_latest);
+                assert_eq!(stores.settlement_store().mark(), settlement_floor);
+                // Reverified historical authority never becomes a fresh anchor.
+                assert!(matches!(
+                    stores.checkpoint_store().current(observed_epoch),
+                    Err(CheckpointStoreError::Verify(CheckpointError::Stale))
+                ));
+            }
+            (case, Err(SettlementAuthorityStoreErrorV1::History { generation, error })) => {
+                assert_eq!(generation, 1);
+                assert_eq!(verifier.calls.get(), 1);
+                match (case, *error) {
+                    (
+                        FirstRecord::WithoutInclusion | FirstRecord::WithoutAuthority,
+                        SettlementAuthorityStoreErrorV1::Missing,
+                    )
+                    | (FirstRecord::ChangedAuthorityByte(_), SettlementAuthorityStoreErrorV1::Mismatch)
+                    | (
+                        FirstRecord::MissingSignedCheckpoint,
+                        SettlementAuthorityStoreErrorV1::Checkpoint(CheckpointStoreError::Missing),
+                    )
+                    | (
+                        FirstRecord::FutureAcceptance,
+                        SettlementAuthorityStoreErrorV1::Checkpoint(CheckpointStoreError::Verify(
+                            CheckpointError::Future,
+                        )),
+                    )
+                    | (
+                        FirstRecord::StaleAtAcceptance,
+                        SettlementAuthorityStoreErrorV1::Checkpoint(CheckpointStoreError::Verify(
+                            CheckpointError::Stale,
+                        )),
+                    )
+                    | (
+                        FirstRecord::TruncatedAuthority,
+                        SettlementAuthorityStoreErrorV1::Receipt(SettlementAuthorityErrorV1::Receipt),
+                    ) => {}
+                    (case, error) => panic!("wrong rejection for {case:?}: {error:?}"),
+                }
+            }
+            (case, Err(error)) => panic!("unexpected recovery failure for {case:?}: {error:?}"),
+            (case, Ok(_)) => panic!("invalid history accepted: {case:?}"),
+        }
+        // Both locks are released and neither history was rewritten on failure.
+        drop(
+            open_authority_bound_stores(
+                &checkpoint_path,
+                checkpoint_policy(),
+                checkpoint_floor,
+                &settlement_path,
+                settlement_policy(),
+                settlement_floor,
+                observed_epoch,
+            )
+            .unwrap(),
+        );
+        assert_eq!((records(&checkpoint_path), records(&settlement_path)), before);
+        fs::remove_dir_all(checkpoint_path).unwrap();
+        fs::remove_dir_all(settlement_path).unwrap();
+    }
 }

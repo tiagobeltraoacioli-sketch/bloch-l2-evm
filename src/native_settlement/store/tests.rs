@@ -333,3 +333,74 @@ fn proof_recovery_budget_precedes_crypto_and_zero_budget_accepts_only_empty_hist
     assert_eq!(verifier.calls.get(), 0);
     fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn audited_recovery_checks_each_proven_record_before_floor_and_releases_on_refusal() {
+    let path = directory("audited-recovery");
+    let (_, tip) = retained_chain(&path, None);
+    let before: Vec<_> = (0..=2).map(|i| fs::read(path.join(record_name(i))).unwrap()).collect();
+    for reject in [None, Some(1), Some(2)] {
+        let verifier = CountingVerifier {
+            calls: std::cell::Cell::new(0),
+        };
+        let mut seen = Vec::new();
+        let result = SettlementStoreV1::open_verified_with_audit(&path, policy(), tip, 2, &verifier, |record| {
+            let generation = record.mark.generation;
+            assert_eq!(generation, verifier.calls.get() as u64);
+            assert_eq!(generation, record.accepted.l2_number);
+            let transaction = SettlementTransactionV1::decode(record.transaction).unwrap();
+            assert_eq!(transaction.commitment(), record.accepted.commitment);
+            assert!(record.admission.is_none());
+            assert!(record.evidence.is_none());
+            assert!(record.authority_audit.is_none());
+            seen.push(generation);
+            if reject == Some(generation) {
+                Err("independent authority unavailable")
+            } else {
+                Ok(())
+            }
+        });
+        match reject {
+            None => assert_eq!(result.as_ref().unwrap().mark(), tip),
+            Some(expected) => assert!(matches!(
+                &result,
+                Err(SettlementStoreReplayErrorV1::Audit { generation, error })
+                    if *generation == expected && *error == "independent authority unavailable"
+            )),
+        }
+        assert_eq!(seen, (1..=reject.unwrap_or(2)).collect::<Vec<_>>());
+        drop(result);
+        drop(SettlementStoreV1::open(&path, policy(), tip).unwrap());
+        for i in 0..=2 {
+            assert_eq!(fs::read(path.join(record_name(i))).unwrap(), before[i as usize]);
+        }
+    }
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn audit_never_runs_for_invalid_proofs_over_budget_or_empty_history() {
+    let path = directory("audit-proof-failure");
+    let (zero, tip) = retained_chain(&path, Some(1));
+    for budget in [1, 2] {
+        let result =
+            SettlementStoreV1::open_verified_with_audit(&path, policy(), tip, budget, &Accept, |_| -> Result<(), ()> {
+                panic!("unverified record reached auditor")
+            });
+        assert!(matches!(result, Err(SettlementStoreReplayErrorV1::Store(_))));
+    }
+    drop(SettlementStoreV1::open(&path, policy(), zero).unwrap());
+    fs::remove_dir_all(path).unwrap();
+
+    let path = directory("audit-empty");
+    let store = SettlementStoreV1::create(&path, policy()).unwrap();
+    let zero = store.mark();
+    drop(store);
+    drop(
+        SettlementStoreV1::open_verified_with_audit(&path, policy(), zero, 0, &Accept, |_| -> Result<(), ()> {
+            panic!("generation zero reached auditor")
+        })
+        .unwrap(),
+    );
+    fs::remove_dir_all(path).unwrap();
+}

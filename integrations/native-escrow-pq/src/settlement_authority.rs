@@ -20,7 +20,10 @@ use crate::checkpoint_store::{
 };
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::{
-    store::{SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreV1},
+    store::{
+        SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreReplayErrorV1,
+        SettlementStoreV1,
+    },
     AcceptedSettlementV1, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
 };
 #[cfg(unix)]
@@ -54,6 +57,11 @@ pub enum SettlementAuthorityStoreErrorV1 {
     Missing,
     Receipt(SettlementAuthorityErrorV1),
     Mismatch,
+    /// One earlier or current settlement failed independent authority replay.
+    History {
+        generation: u64,
+        error: Box<SettlementAuthorityStoreErrorV1>,
+    },
 }
 
 /// Audit identity of the real PQ verification that authorized one checkpoint.
@@ -334,20 +342,31 @@ pub fn recover_settlement_checkpoint_authority(
     settlement_store: &SettlementStoreV1,
     current_epoch: u64,
 ) -> Result<CheckpointAuthorityReceiptV1, SettlementAuthorityStoreErrorV1> {
-    let bytes = settlement_store
-        .authority_audit()
-        .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
+    recover_record_checkpoint_authority(
+        checkpoint_store,
+        settlement_store.admission(),
+        settlement_store.evidence(),
+        settlement_store.authority_audit(),
+        current_epoch,
+    )
+}
+
+#[cfg(unix)]
+fn recover_record_checkpoint_authority(
+    checkpoint_store: &CheckpointStore,
+    admission: Option<&SettlementStoreAdmissionV1>,
+    evidence: Option<&TransactionInclusionEvidenceV1>,
+    authority_audit: Option<&[u8]>,
+    current_epoch: u64,
+) -> Result<CheckpointAuthorityReceiptV1, SettlementAuthorityStoreErrorV1> {
+    let bytes = authority_audit.ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
     let retained = CheckpointAuthorityReceiptV1::decode(bytes).map_err(SettlementAuthorityStoreErrorV1::Receipt)?;
     let audit = checkpoint_store
         .historical_audit(retained.checkpoint_epoch(), retained.checked_at_epoch(), current_epoch)
         .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
     let expected = historical_authority_receipt(audit);
-    let admission = settlement_store
-        .admission()
-        .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
-    let evidence = settlement_store
-        .evidence()
-        .ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
+    let admission = admission.ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
+    let evidence = evidence.ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
     if retained != expected
         || retained.checkpoint_block() != admission.checkpoint().block
         || retained.checkpoint_slot() != admission.checkpoint().slot
@@ -359,7 +378,9 @@ pub fn recover_settlement_checkpoint_authority(
 }
 
 /// Open both rollback domains under mandatory independently retained floors,
-/// then perform the full V4/PQ cross-check before exposing either handle.
+/// then cross-check the latest V4/PQ record before exposing either handle.
+/// This structural compatibility opener does not audit every settlement's
+/// authority; use `open_proof_verified_authority_stores` for strict replay.
 #[cfg(unix)]
 pub fn open_authority_bound_stores(
     checkpoint_path: impl AsRef<Path>,
@@ -383,8 +404,10 @@ pub fn open_authority_bound_stores(
 }
 
 /// Strict recovery for evidence qualification: repeat all execution proof
-/// checks under the selected verifier before exposing either recovered store.
-/// Historical PQ authority is then cross-checked as in the structural opener.
+/// checks and every historical PQ authority/inclusion binding before exposing
+/// either recovered store. Every nonempty record must carry V4 evidence; an
+/// older V2/V3 entry cannot be hidden by a valid latest record. The independent
+/// checkpoint store stays locked throughout the bounded settlement replay.
 /// This adds proof replay, not native consensus or a finalized-RPC capability.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -401,15 +424,32 @@ pub fn open_proof_verified_authority_stores<V: SettlementProofVerifierV1>(
 ) -> Result<RecoveredAuthorityStoresV1, SettlementAuthorityStoreErrorV1> {
     let checkpoint_store = CheckpointStore::open(checkpoint_path, checkpoint_policy, Some(checkpoint_floor))
         .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
-    let settlement_store = SettlementStoreV1::open_verified(
+    let mut latest_authority = None;
+    let settlement_store = SettlementStoreV1::open_verified_with_audit(
         settlement_path,
         settlement_policy,
         settlement_floor,
         maximum_proofs,
         verifier,
+        |record| {
+            latest_authority = Some(recover_record_checkpoint_authority(
+                &checkpoint_store,
+                record.admission,
+                record.evidence,
+                record.authority_audit,
+                current_epoch,
+            )?);
+            Ok(())
+        },
     )
-    .map_err(SettlementAuthorityStoreErrorV1::Settlement)?;
-    let authority = recover_settlement_checkpoint_authority(&checkpoint_store, &settlement_store, current_epoch)?;
+    .map_err(|error| match error {
+        SettlementStoreReplayErrorV1::Store(error) => SettlementAuthorityStoreErrorV1::Settlement(error),
+        SettlementStoreReplayErrorV1::Audit { generation, error } => SettlementAuthorityStoreErrorV1::History {
+            generation,
+            error: Box::new(error),
+        },
+    })?;
+    let authority = latest_authority.ok_or(SettlementAuthorityStoreErrorV1::Missing)?;
     Ok(RecoveredAuthorityStoresV1 {
         checkpoint_store,
         settlement_store,

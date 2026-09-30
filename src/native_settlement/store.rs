@@ -169,6 +169,78 @@ impl core::fmt::Display for SettlementStoreErrorV1 {
 
 impl std::error::Error for SettlementStoreErrorV1 {}
 
+/// Borrowed audit data for one proof-reverified, nonempty recovery record.
+///
+/// The whole history and external floor have not necessarily passed yet. An
+/// auditor must only validate this view, never publish it as an acknowledged
+/// head or finality capability. The view contains no new checkpoint authority.
+#[derive(Debug)]
+pub struct SettlementReplayRecordV1<'a> {
+    /// Exact record identity, not an independently retained rollback floor.
+    pub mark: SettlementStoreMarkV1,
+    /// Head reconstructed by the pinned execution-proof verifier and kernel.
+    pub accepted: &'a AcceptedSettlementV1,
+    /// Exact canonical transaction whose execution proof passed replay.
+    pub transaction: &'a [u8; SETTLEMENT_TX_V1_BYTES],
+    /// Native inclusion coordinates, if retained by this record version.
+    pub admission: Option<&'a SettlementStoreAdmissionV1>,
+    /// Reauthenticated complete native body and ancestry, if retained.
+    pub evidence: Option<&'a TransactionInclusionEvidenceV1>,
+    /// Opaque audit bytes requiring independent authority authentication.
+    pub authority_audit: Option<&'a [u8]>,
+}
+
+/// Recovery refused by storage/proof verification or an independently supplied
+/// record auditor. Neither variant returns a partially recovered store handle.
+#[derive(Debug)]
+pub enum SettlementStoreReplayErrorV1<E> {
+    /// Storage integrity, rollback floor, resource budget or proof failure.
+    Store(SettlementStoreErrorV1),
+    /// The independently supplied auditor refused this nonempty record.
+    Audit {
+        /// First refused record generation, including records before the floor.
+        generation: u64,
+        /// Auditor's original refusal, without collapsing its cause.
+        error: E,
+    },
+}
+
+impl<E> From<SettlementStoreErrorV1> for SettlementStoreReplayErrorV1<E> {
+    fn from(error: SettlementStoreErrorV1) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl<E> From<io::Error> for SettlementStoreReplayErrorV1<E> {
+    fn from(error: io::Error) -> Self {
+        Self::Store(SettlementStoreErrorV1::Io(error))
+    }
+}
+
+impl<E: core::fmt::Debug> core::fmt::Display for SettlementStoreReplayErrorV1<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "settlement history recovery refused: {self:?}")
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for SettlementStoreReplayErrorV1<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Store(error) => error,
+            Self::Audit { error, .. } => error,
+        })
+    }
+}
+
+impl SettlementStoreReplayErrorV1<core::convert::Infallible> {
+    fn into_store_error(self) -> SettlementStoreErrorV1 {
+        match self {
+            Self::Store(error) => error,
+            Self::Audit { error, .. } => match error {},
+        }
+    }
+}
+
 /// Exclusively locked local settlement registry and append-only snapshots.
 pub struct SettlementStoreV1 {
     directory: PathBuf,
@@ -241,7 +313,8 @@ impl SettlementStoreV1 {
         policy: SettlementPolicyV1,
         floor: SettlementStoreMarkV1,
     ) -> Result<Self, SettlementStoreErrorV1> {
-        Self::open_inner(path, policy, floor, MAX_RECORDS, |_, _| Ok(()))
+        Self::open_inner(path, policy, floor, MAX_RECORDS, |_, _| Ok(()), |_| Ok(()))
+            .map_err(SettlementStoreReplayErrorV1::into_store_error)
     }
 
     /// Recover while cryptographically reverifying every retained proof and
@@ -256,34 +329,61 @@ impl SettlementStoreV1 {
         maximum_proofs: u64,
         verifier: &V,
     ) -> Result<Self, SettlementStoreErrorV1> {
-        Self::open_inner(path, policy, floor, maximum_proofs, |registry, record| {
-            if let Some(transaction) = &record.transaction {
-                let decoded =
-                    SettlementTransactionV1::decode(transaction).map_err(SettlementStoreErrorV1::Settlement)?;
-                let expectation = SettlementExpectationV1 {
-                    statement: *decoded.statement(),
-                    source_predecessor: registry.head().map_or(B256::ZERO, |head| head.source_commitment),
-                };
-                let accepted = registry
-                    .verify_and_apply(transaction, &expectation, verifier)
-                    .map_err(SettlementStoreErrorV1::Settlement)?;
-                if Some(accepted) != record.head {
-                    return Err(SettlementStoreErrorV1::Format);
-                }
-            }
-            Ok(())
-        })
+        Self::open_verified_with_audit(path, policy, floor, maximum_proofs, verifier, |_| Ok(()))
+            .map_err(SettlementStoreReplayErrorV1::into_store_error)
     }
 
-    fn open_inner(
+    /// Repeat every execution proof, then audit each nonempty record in order,
+    /// including entries before the external floor. The auditor may bind the
+    /// retained inclusion/authority data to a separately locked trust store.
+    /// It receives each entry once after proof and record integrity checks,
+    /// and never receives generation zero. Any refusal aborts recovery and
+    /// releases the lock without changing persistent records. Success still
+    /// establishes neither native consensus nor permission to publish finality.
+    pub fn open_verified_with_audit<V: SettlementProofVerifierV1, E>(
+        path: impl AsRef<Path>,
+        policy: SettlementPolicyV1,
+        floor: SettlementStoreMarkV1,
+        maximum_proofs: u64,
+        verifier: &V,
+        audit: impl FnMut(SettlementReplayRecordV1<'_>) -> Result<(), E>,
+    ) -> Result<Self, SettlementStoreReplayErrorV1<E>> {
+        Self::open_inner(
+            path,
+            policy,
+            floor,
+            maximum_proofs,
+            |registry, record| {
+                if let Some(transaction) = &record.transaction {
+                    let decoded =
+                        SettlementTransactionV1::decode(transaction).map_err(SettlementStoreErrorV1::Settlement)?;
+                    let expectation = SettlementExpectationV1 {
+                        statement: *decoded.statement(),
+                        source_predecessor: registry.head().map_or(B256::ZERO, |head| head.source_commitment),
+                    };
+                    let accepted = registry
+                        .verify_and_apply(transaction, &expectation, verifier)
+                        .map_err(SettlementStoreErrorV1::Settlement)?;
+                    if Some(accepted) != record.head {
+                        return Err(SettlementStoreErrorV1::Format);
+                    }
+                }
+                Ok(())
+            },
+            audit,
+        )
+    }
+
+    fn open_inner<E>(
         path: impl AsRef<Path>,
         policy: SettlementPolicyV1,
         floor: SettlementStoreMarkV1,
         maximum_proofs: u64,
         mut verify: impl FnMut(&mut SettlementRegistryV1, &DecodedRecord) -> Result<(), SettlementStoreErrorV1>,
-    ) -> Result<Self, SettlementStoreErrorV1> {
+        mut audit: impl FnMut(SettlementReplayRecordV1<'_>) -> Result<(), E>,
+    ) -> Result<Self, SettlementStoreReplayErrorV1<E>> {
         if maximum_proofs > MAX_RECORDS {
-            return Err(SettlementStoreErrorV1::Limit);
+            return Err(SettlementStoreErrorV1::Limit.into());
         }
         check_private_directory(path.as_ref())?;
         let directory = fs::canonicalize(path)?;
@@ -293,11 +393,11 @@ impl SettlementStoreV1 {
         let commitment = policy.commitment().map_err(SettlementStoreErrorV1::Settlement)?;
         let expected_policy = [POLICY_TAG.as_slice(), commitment.as_slice()].concat();
         if read_exact_bounded(&directory.join("POLICY"), 40)? != expected_policy {
-            return Err(SettlementStoreErrorV1::Policy);
+            return Err(SettlementStoreErrorV1::Policy.into());
         }
         let generations = record_generations(&directory)?;
         if generations.is_empty() || generations.len() > maximum_proofs as usize + 1 {
-            return Err(SettlementStoreErrorV1::Limit);
+            return Err(SettlementStoreErrorV1::Limit.into());
         }
         let mut registry = SettlementRegistryV1::new(policy).map_err(SettlementStoreErrorV1::Settlement)?;
         let mut previous_digest = B256::ZERO;
@@ -309,7 +409,7 @@ impl SettlementStoreV1 {
         let mut current_authority_audit = None;
         for (index, generation) in generations.into_iter().enumerate() {
             if generation != index as u64 {
-                return Err(SettlementStoreErrorV1::Format);
+                return Err(SettlementStoreErrorV1::Format.into());
             }
             let bytes = read_record_bounded(&directory.join(record_name(generation)))?;
             let decoded = decode_record(&bytes, generation, policy, previous_digest)?;
@@ -317,14 +417,25 @@ impl SettlementStoreV1 {
             verify(&mut registry, &decoded)?;
             registry.head = decoded.head;
             if registry.state_commitment() != decoded.state_commitment {
-                return Err(SettlementStoreErrorV1::Format);
+                return Err(SettlementStoreErrorV1::Format.into());
             }
             let observed = mark(generation, &bytes, &registry);
             if generation == floor.generation {
                 if observed != floor {
-                    return Err(SettlementStoreErrorV1::Rollback);
+                    return Err(SettlementStoreErrorV1::Rollback.into());
                 }
                 found_floor = true;
+            }
+            if let (Some(accepted), Some(transaction)) = (&decoded.head, &decoded.transaction) {
+                audit(SettlementReplayRecordV1 {
+                    mark: observed,
+                    accepted,
+                    transaction,
+                    admission: decoded.admission.as_ref(),
+                    evidence: decoded.evidence.as_ref(),
+                    authority_audit: decoded.authority_audit.as_deref(),
+                })
+                .map_err(|error| SettlementStoreReplayErrorV1::Audit { generation, error })?;
             }
             previous_digest = observed.record_digest;
             previous_head = decoded.head;
@@ -334,7 +445,7 @@ impl SettlementStoreV1 {
             current_mark = Some(observed);
         }
         if !found_floor {
-            return Err(SettlementStoreErrorV1::Rollback);
+            return Err(SettlementStoreErrorV1::Rollback.into());
         }
         directory_file(&directory)?.sync_all()?;
         Ok(Self {

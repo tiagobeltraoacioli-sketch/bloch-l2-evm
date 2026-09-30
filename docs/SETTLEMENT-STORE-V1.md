@@ -55,8 +55,37 @@ recheck is audit data, not a finality capability.
 
 The native-PQ integration's coordinated open requires the external settlement
 floor and checkpoint floor together, holds both single-writer locks, and returns
-the stores only after V4 authority recovery succeeds. A failure drops both
-handles. This does not merge or replace the two independently retained floors.
+the stores only after V4 authority recovery succeeds. The compatibility opener
+`open_authority_bound_stores` checks the latest authority receipt only; it is
+not complete proof/authority replay. A failure drops both handles. This does
+not merge or replace the two independently retained floors.
+
+`open_verified` repeats the pinned execution proof and predecessor/cursor checks
+for every retained settlement, including entries before the rollback floor.
+`open_verified_with_audit` adds a caller-selected audit for each nonempty record
+after those checks, its state commitment and its complete inclusion envelope
+have passed. Its borrowed `SettlementReplayRecordV1` contains the exact record
+mark, accepted head, transaction, inclusion, evidence and opaque authority bytes.
+Generation zero is not audited. The callback must only validate: later history
+or floor checks can still fail, so observing a record is not permission to
+acknowledge or publish it. Audits run in order under the same writer lock, with
+no second directory scan or retained copy of the entire history.
+
+The native-PQ `open_proof_verified_authority_stores` uses this boundary to audit
+**every** historical receipt against its independently pinned, locked checkpoint
+store. V2/V3 records without an authority receipt are refused even when a later
+V4 record is legitimate. Changed policy/digest/anchor/review claims, missing
+signed checkpoints, malformed receipts, future acceptance epochs and authority
+that was already stale at acceptance also fail. `History { generation, error }`
+identifies the first failing authority record. Storage/proof errors retain their
+original error category. Neither kind returns handles or rewrites records.
+
+The `maximum_proofs` bound (`0..=10_000`) is checked before any settlement proof
+or record audit. Checkpoint-store opening separately reverifies its own bounded
+history. Legitimate historical receipts may be old at restart; their original
+freshness is checked, while `CheckpointStore::current` still independently
+refuses an expired current anchor. No recovered receipt is promoted to current
+authority, validator execution or a finalized RPC tag.
 
 This module does **not** provide distributed availability, hardware-backed WORM,
 host-compromise resistance, proof that validators ran the transition, consensus,

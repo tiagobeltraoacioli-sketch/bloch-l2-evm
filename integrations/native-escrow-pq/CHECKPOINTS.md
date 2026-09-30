@@ -96,11 +96,28 @@ block and slot to match. The audit-only result cannot become a current anchor;
 separate rollback domain, so both marks are mandatory. This is still
 weak-subjectivity authentication, not production FFG finality.
 
-`open_authority_bound_stores` is the coordinated startup boundary: it requires
+`open_authority_bound_stores` is the structural compatibility boundary: it requires
 both non-optional external floors, opens both stores under their exclusive locks,
-performs the historical V4/PQ cross-check, and exposes neither handle if any
+checks the latest historical V4/PQ receipt, and exposes neither handle if any
 step fails. The V4 receipt already binds the two identities, so this API does not
 invent a third unsigned manifest or collapse the independently protected floors.
+
+For complete evidence recovery, `open_proof_verified_authority_stores` now
+reverifies every execution proof and every authority receipt in record order,
+including records before either external floor. Every nonempty settlement must
+retain its complete V4 inclusion and authority data; mixed V2/V3 histories need
+explicit reconstruction from independently authenticated artifacts, never
+automatic receipt backfilling. The callback to
+`SettlementStoreV1::open_verified_with_audit` keeps both stores locked until the
+whole replay succeeds. `History { generation, error }` reports an authority
+failure without returning a partial handle or changing retained bytes. An
+otherwise valid latest record cannot hide an earlier invalid receipt.
+
+The caller's `maximum_proofs` bounds settlement proof/audit invocations and
+does not replace the checkpoint store's separate history limit. Signer policy,
+current epoch and both floors remain independent trust inputs. Reverification
+of a historical acceptance epoch does not grant a fresh checkpoint capability,
+establish native settlement consensus or authorize the `finalized` RPC tag.
 
 ## Validation
 
@@ -116,6 +133,12 @@ covers V4 atomic publication, recovery after a newer checkpoint advances,
 historical expiry, future audit claims, predecessor relinking and receipt
 tampering. Coordinated-open tests also reject either incorrect floor and prove
 that failed admission releases both locks. Keys are not printed or saved.
+Full-history replay additionally covers a valid two-record history and eleven
+invalid first-record variants under a legitimate latest receipt: V2/V3 missing
+authority, changed policy/digest/block/slot/review flag, an absent signed
+checkpoint, future or stale-at-acceptance clocks, and a truncated receipt. The
+execution-proof verifier in these recovery regressions is a fixed test double;
+the checkpoint signatures are real ML-DSA-65 and Falcon-1024 signatures.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml
