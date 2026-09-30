@@ -156,8 +156,60 @@ making no progress and authenticating no settlement. The diagnostic probe:
 python3 tools/check-finalized-rpc.py --rpc-url https://example.invalid/rpc
 ```
 
-requires the reviewed chain ID, a finalized block strictly above genesis,
-`latest >= safe >= finalized`, and a stable reread of the finalized block by
-number. It never changes `network/finality.json`, always reports
-`permissionsOpened: false`, and does not replace native checkpoint,
-settlement-proof, inclusion or consensus evidence.
+takes two consecutive observations of the reviewed chain ID, genesis and
+`latest`, `safe`, and `finalized` tags. Each observation requires a finalized
+block strictly above genesis, `latest >= safe >= finalized`, and an identical
+reread of the finalized block by number. It walks numbered headers from `latest`
+to `finalized`, checks every parent-hash link, and requires `safe` to be the exact
+header on that branch. A block hash cannot claim different heights or parents.
+Between observations the finalized head must retain its identity or descend
+from the previously observed finalized block; its old numbered block is read
+again. Reorganizations strictly above the retained finalized head are allowed.
+
+An externally selected frozen genesis can be supplied with `--genesis-hash`.
+Without that argument the report explicitly returns `genesisPinned: false`;
+matching a chain ID is insufficient to select a deployment. Both observations
+must return the same genesis. Two equal finalized observations are permitted and
+report `finalizedProgressObserved: false`: this is a short consistency probe,
+not a liveness or durability qualification.
+
+Successful observations can be retained and replayed without network access:
+
+```sh
+# Run only against an independently selected endpoint and genesis.
+python3 tools/check-finalized-rpc.py \
+  --rpc-url https://example.invalid/rpc \
+  --genesis-hash "$REVIEWED_GENESIS_HASH" \
+  --capture-output /secure/intake/finalized-rpc-transcript.json
+
+python3 tools/check-finalized-rpc.py \
+  --transcript /secure/intake/finalized-rpc-transcript.json \
+  --genesis-hash "$REVIEWED_GENESIS_HASH"
+```
+
+The new transcript file uses mode `0600`, cannot overwrite an existing path,
+and contains the exact ordered method/parameters and examined result fields.
+Block results retain only number, hash and parent hash. Endpoint URLs,
+credentials, transaction bodies and unrelated RPC fields are excluded. Replay
+validates the schema, exact call sequence, header fields and every consistency
+check; missing, extra or reordered calls are rejected. `transcriptSha256` binds
+the retained bytes, but does not authenticate their origin. The local
+`recordedAt` timestamp is capture metadata, not a source timestamp or freshness
+proof. If an operator authenticates these details through operational evidence
+intake, that separate signature authenticates the observation only.
+
+The default ancestry budget is **128 numbered ancestor reads shared across
+both observations and the inter-observation finality check**. A caller can set
+`--max-ancestry-blocks` between 1 and 4096. The total request bound is that budget
+plus 13; responses are limited to one MiB each and transcripts to four MiB.
+`--timeout` bounds each request to at most 30 seconds. Missing/pruned headers,
+transient tag ordering changes or gaps exceeding the budget cause a diagnostic
+refusal; they do not establish an operational outage or an invalid chain.
+
+The probe checks relationships asserted by one RPC. It does not recompute block
+hashes, establish native settlement inclusion, independently authenticate the
+chain, or link a non-genesis finalized head all the way back to genesis. It
+never changes `network/finality.json` and always reports `diagnosticOnly: true`,
+`qualified: false`, and `permissionsOpened: false`. Native checkpoint,
+settlement-proof, inclusion, consensus, persistence and operational evidence
+remain separate prerequisites.

@@ -3,7 +3,7 @@
 #![cfg(unix)]
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use jsonrpsee::{
     core::client::ClientT,
     http_client::{HttpClient, HttpClientBuilder},
@@ -52,7 +52,7 @@ fn launch(directory: &Path, fund: Option<Address>) -> (Node, HttpClient) {
 }
 
 fn launch_at_interval(directory: &Path, fund: Option<Address>, interval: &str) -> (Node, HttpClient) {
-    launch_options(directory, fund, interval, None)
+    launch_options(directory, fund, interval, None, None)
 }
 
 fn launch_options(
@@ -60,6 +60,7 @@ fn launch_options(
     fund: Option<Address>,
     interval: &str,
     replay: Option<&Path>,
+    replay_floor: Option<(u64, B256)>,
 ) -> (Node, HttpClient) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_bloch-evm-dev"));
     command.args(["--synthetic-dev", "--data-dir"]).arg(directory).args([
@@ -73,6 +74,14 @@ fn launch_options(
     }
     if let Some(source) = replay {
         command.args(["--init", "--replay-from"]).arg(source);
+    }
+    if let Some((number, hash)) = replay_floor {
+        command.args([
+            "--replay-min-block",
+            &number.to_string(),
+            "--replay-min-hash",
+            &hash.to_string(),
+        ]);
     }
     let mut node = Node(command.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap());
     let output = node.0.stdout.take().unwrap();
@@ -334,7 +343,17 @@ async fn contract_restart(replay: bool) {
     drop(first);
 
     let (mut second, client) = if replay {
-        launch_options(&temporary.path().join("replayed"), None, "50", Some(&directory))
+        // Retain the acknowledged receipt's exact block before closing the source.
+        // The new CLI must preserve this supplied floor, even if later empty blocks exist.
+        let number = u64::from_str_radix(called["blockNumber"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+        let hash: B256 = called["blockHash"].as_str().unwrap().parse().unwrap();
+        launch_options(
+            &temporary.path().join("replayed"),
+            None,
+            "50",
+            Some(&directory),
+            Some((number, hash)),
+        )
     } else {
         launch(&directory, None)
     };

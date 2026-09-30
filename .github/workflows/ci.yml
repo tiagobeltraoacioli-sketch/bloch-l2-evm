@@ -35,6 +35,8 @@ jobs:
         run: python3 tools/test-network-identity.py
       - name: Test the fail-closed L2 finality permission gate
         run: python3 tools/test-finality-readiness.py
+      - name: Test bounded finalized RPC capture and offline replay
+        run: python3 tools/test-finalized-rpc.py
       - name: Test the fail-closed production-node bind gate
         run: python3 tools/test-node-production.py
       - name: Test the fail-closed L2 node provisioning preflight

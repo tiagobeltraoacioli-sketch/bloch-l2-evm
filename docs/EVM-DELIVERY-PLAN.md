@@ -248,3 +248,18 @@ Tests cover SIGKILL between writes, signed contract replay/continued mining,
 static-file finalization before MDBX abort, genesis-index reconstruction and
 rejection of missing bodies. Broader crash/power-loss and native-finality recovery
 remain open; this path trusts the synthetic source's canonical selection.
+
+
+### Bounded local recovery and retained history
+
+The developer recovery path now accepts an independently retained minimum
+block/hash and explicit block/canonical-byte budgets. Source identity, floor,
+available bodies, header ancestry and cumulative bytes are checked before the
+CLI creates the target. Full V2 re-execution still verifies state and receipt
+commitments into separate storage before serving RPC. A complete suffix beyond
+the floor is allowed, while an older backup or conflicting retained block is
+refused. Existing library callers retain the convenience function, now with
+10,000-block/256-MiB defaults; explicit limits and source-only inspection have
+separate APIs. See [developer recovery](../integrations/reth-execution/DEVNODE.md#recover-by-replay-into-another-directory)
+for usage and scope. This closes a local recovery/resource-control gap; it does
+not authenticate native derivation, provide automatic repair, or qualify finality.

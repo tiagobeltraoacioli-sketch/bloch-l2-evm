@@ -30,7 +30,10 @@ pub mod payload;
 pub mod pool;
 pub mod proof_export;
 pub mod recovery;
-pub use recovery::replay_canonical_prefix;
+pub use recovery::{
+    inspect_canonical_prefix, replay_canonical_prefix, replay_canonical_prefix_with_limits, ReplayFloor,
+    ReplayInspection, ReplayLimits, ReplayOutcome,
+};
 pub mod rpc;
 pub mod rpc_identity;
 pub mod rpc_transport;

@@ -8,9 +8,10 @@ use bloch_l2_evm::{
     ChainSpec, DepositMint, DepositProvenance,
 };
 use bloch_reth_execution::{
-    build_eth_api, chain_identity_rpc, chain_status_rpc, pool_maintenance, prepare_genesis, replay_canonical_prefix,
-    start_http_rpc, start_ws_rpc, BlochChainSpec, BlochEvmConfig, BlochNextBlockEnvCtx, BlochProviderFactory,
-    BlochTables, BlochTransactionValidator, CanonicalCoordinator,
+    build_eth_api, chain_identity_rpc, chain_status_rpc, inspect_canonical_prefix, pool_maintenance, prepare_genesis,
+    replay_canonical_prefix_with_limits, start_http_rpc, start_ws_rpc, BlochChainSpec, BlochEvmConfig,
+    BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, BlochTransactionValidator, CanonicalCoordinator,
+    ReplayFloor, ReplayLimits,
 };
 use eyre::{bail, ensure, Result};
 use reth_db::mdbx::{init_db_for, open_db, open_db_read_only, DatabaseArguments};
@@ -26,13 +27,20 @@ use reth_transaction_pool::{
     blobstore::InMemoryBlobStore, maintain::MaintainPoolConfig, validate::EthTransactionValidatorBuilder,
     CoinbaseTipOrdering, EthPooledTransaction, Pool, PoolConfig, PoolTransaction, TransactionPool,
 };
-use std::{future::Future, path::PathBuf, sync::Arc, task::Poll, time::Duration};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+    task::Poll,
+    time::Duration,
+};
 
-const USAGE: &str = "bloch-evm-dev --synthetic-dev --data-dir PATH [--init] [--fund ADDRESS] [--replay-from SOURCE] [--port 8545] [--ws-port PORT] [--block-interval-ms 1000]\n\
+const USAGE: &str = "bloch-evm-dev --synthetic-dev --data-dir PATH [--init] [--fund ADDRESS] [--replay-from SOURCE] [--replay-min-block NUMBER --replay-min-hash HASH] [--replay-max-blocks NUMBER] [--replay-max-bytes NUMBER] [--port 8545] [--ws-port PORT] [--block-interval-ms 1000]\n\
 Isolated synthetic developer domain, loopback HTTP and optional WebSocket, no P2P/L1 derivation/finality.\n\
 --ws-port enables a separate loopback listener; port 0 selects an available port.\n\
 --init requires a nonexistent directory; --fund is init-only synthetic issuance (100,000,000 sats).\n\
 --replay-from requires --init and forbids --fund; re-executes a stopped source into the new directory without writing the source.\n\
+Replay limits default to 10000 blocks and 268435456 canonical bytes; the optional minimum block/hash must come from independently retained history.\n\
 Without --init the existing archival database is validated and reopened. Partial initialization is never retried automatically.\n\
 Pending block/state queries are unsupported. No private keys are generated or accepted. Ctrl-C stops the service.";
 
@@ -41,6 +49,8 @@ struct Options {
     init: bool,
     fund: Option<Address>,
     replay_from: Option<PathBuf>,
+    replay_floor: Option<ReplayFloor>,
+    replay_limits: ReplayLimits,
     port: u16,
     ws_port: Option<u16>,
     block_time: Duration,
@@ -50,6 +60,8 @@ impl Options {
         let mut args = std::env::args().skip(1);
         let (mut synthetic, mut path, mut init, mut fund) = (false, None, false, None);
         let mut replay_from = None;
+        let (mut replay_min_block, mut replay_min_hash) = (None, None);
+        let mut replay_limits = ReplayLimits::default();
         let (mut port, mut millis) = (8545, 1000u64);
         let mut ws_port = None;
         let mut seen = std::collections::BTreeSet::new();
@@ -67,6 +79,32 @@ impl Options {
                 "--replay-from" => {
                     replay_from = Some(PathBuf::from(args.next().ok_or_else(|| eyre::eyre!("missing SOURCE"))?))
                 }
+                "--replay-min-block" => {
+                    replay_min_block = Some(
+                        args.next()
+                            .ok_or_else(|| eyre::eyre!("missing minimum block"))?
+                            .parse()?,
+                    );
+                }
+                "--replay-min-hash" => {
+                    replay_min_hash = Some(
+                        args.next()
+                            .ok_or_else(|| eyre::eyre!("missing minimum hash"))?
+                            .parse::<B256>()?,
+                    );
+                }
+                "--replay-max-blocks" => {
+                    replay_limits.blocks = args
+                        .next()
+                        .ok_or_else(|| eyre::eyre!("missing replay block limit"))?
+                        .parse()?;
+                }
+                "--replay-max-bytes" => {
+                    replay_limits.bytes = args
+                        .next()
+                        .ok_or_else(|| eyre::eyre!("missing replay byte limit"))?
+                        .parse()?;
+                }
                 "--port" => port = args.next().ok_or_else(|| eyre::eyre!("missing port"))?.parse()?,
                 "--ws-port" => ws_port = Some(args.next().ok_or_else(|| eyre::eyre!("missing WS port"))?.parse()?),
                 "--block-interval-ms" => {
@@ -80,6 +118,18 @@ impl Options {
         ensure!(
             replay_from.is_none() || (init && fund.is_none()),
             "--replay-from requires --init and forbids --fund"
+        );
+        let replay_floor = match (replay_min_block, replay_min_hash) {
+            (None, None) => None,
+            (Some(number), Some(hash)) => {
+                ensure!(!hash.is_zero(), "minimum replay hash must be nonzero");
+                Some(ReplayFloor { number, hash })
+            }
+            _ => bail!("--replay-min-block and --replay-min-hash must be supplied together"),
+        };
+        ensure!(
+            replay_from.is_some() || !seen.iter().any(|name| name.starts_with("--replay-")),
+            "replay bounds and floor require --replay-from"
         );
         ensure!(millis > 0, "block interval must be nonzero");
         ensure!(
@@ -96,11 +146,38 @@ impl Options {
             init,
             fund,
             replay_from,
+            replay_floor,
+            replay_limits,
             port,
             ws_port,
             block_time,
         }))
     }
+}
+
+/// Resolve trusted parent directories before opening any storage. A replay
+/// target must be new and disjoint from the source, including symlink aliases.
+fn replay_paths(source: &Path, target: &Path) -> Result<(PathBuf, PathBuf)> {
+    let source = source.canonicalize()?;
+    ensure!(source.is_dir(), "replay source must be a directory");
+    match std::fs::symlink_metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => bail!("replay target must not already exist"),
+    }
+    let name = target
+        .file_name()
+        .ok_or_else(|| eyre::eyre!("replay target needs a directory name"))?;
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let target = parent.canonicalize()?.join(name);
+    ensure!(
+        !target.starts_with(&source) && !source.starts_with(&target),
+        "replay source and target directories must not overlap"
+    );
+    Ok((source, target))
 }
 
 #[tokio::main]
@@ -121,7 +198,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
+async fn run(mut options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
     let first_tick = tokio::time::Instant::now()
         .checked_add(options.block_time)
         .ok_or_else(|| eyre::eyre!("block interval overflows the monotonic clock"))?;
@@ -141,6 +218,35 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
     let kernel = ChainSpec::testnet();
     // Stable synthetic identity, deliberately unrelated to native/L1 deployment.
     let spec = Arc::new(BlochChainSpec::new(kernel.clone(), B256::repeat_byte(0xd3), 0)?);
+    // Inspect the read-only source before creating or opening a writable target.
+    let replay_source = if let Some(source_path) = &options.replay_from {
+        let (source_path, target_path) = replay_paths(source_path, &options.path)?;
+        options.path = target_path;
+        let source: BlochProviderFactory = ProviderFactory::new(
+            Arc::new(open_db_read_only(source_path.join("db"), DatabaseArguments::default())?),
+            spec.clone(),
+            StaticFileProvider::read_only(source_path.join("static"))?,
+            RocksDBBuilder::new(source_path.join("rocks"))
+                .with_default_tables()
+                .with_read_only(true)
+                .build()?,
+            runtime.clone(),
+        )?;
+        let inspected = inspect_canonical_prefix(&source, &spec, options.replay_floor, options.replay_limits)?;
+        eprintln!(
+            "Synthetic replay preflight: blocks={} canonical_bytes={} rollback_floor={}",
+            inspected.blocks,
+            inspected.bytes,
+            if inspected.floor.is_some() {
+                "supplied"
+            } else {
+                "not-supplied"
+            }
+        );
+        Some(source)
+    } else {
+        None
+    };
     if options.init {
         std::fs::create_dir(&options.path)?;
     } else {
@@ -170,22 +276,14 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
             .build()?,
         runtime.clone(),
     )?;
-    if let Some(source) = &options.replay_from {
-        let source: BlochProviderFactory = ProviderFactory::new(
-            Arc::new(open_db_read_only(source.join("db"), DatabaseArguments::default())?),
-            spec.clone(),
-            StaticFileProvider::read_only(source.join("static"))?,
-            RocksDBBuilder::new(source.join("rocks"))
-                .with_default_tables()
-                .with_read_only(true)
-                .build()?,
-            runtime.clone(),
-        )?;
-        let recovered = replay_canonical_prefix(&source, &factory)?;
+    if let Some(source) = &replay_source {
+        let recovered =
+            replay_canonical_prefix_with_limits(source, &factory, options.replay_floor, options.replay_limits)?;
         eprintln!(
-            "Replayed acknowledged synthetic prefix: block={} hash={}; source opened read-only",
-            recovered.0.number,
-            recovered.hash()
+            "Replayed acknowledged synthetic prefix: block={} hash={} canonical_bytes={}; source opened read-only",
+            recovered.head.0.number,
+            recovered.head.hash(),
+            recovered.bytes
         );
     } else if options.init {
         let genesis = prepare_genesis(&spec, factory.latest()?.as_ref())?;
@@ -324,4 +422,40 @@ async fn run(options: Options, runtime: reth_tasks::Runtime) -> Result<()> {
     stopped?;
     ws_stopped?;
     Ok(())
+}
+
+#[cfg(test)]
+mod replay_path_tests {
+    use super::replay_paths;
+
+    #[test]
+    fn rejects_same_existing_and_nested_targets_before_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        assert!(replay_paths(&source, &source).is_err());
+        assert!(replay_paths(&source, &source.join("nested")).is_err());
+        assert!(!source.join("nested").exists());
+        let target = root.path().join("new");
+        let (resolved_source, resolved_target) = replay_paths(&source, &target).unwrap();
+        assert_eq!(resolved_source, source.canonicalize().unwrap());
+        assert_eq!(resolved_target, root.path().canonicalize().unwrap().join("new"));
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_alias_overlap_and_dangling_target() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&source).unwrap();
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        assert!(replay_paths(&source, &alias.join("nested")).is_err());
+        assert!(replay_paths(&alias, &source.join("nested")).is_err());
+        let dangling = root.path().join("dangling");
+        std::os::unix::fs::symlink(root.path().join("absent"), &dangling).unwrap();
+        assert!(replay_paths(&source, &dangling).is_err());
+        assert!(!source.join("nested").exists());
+    }
 }

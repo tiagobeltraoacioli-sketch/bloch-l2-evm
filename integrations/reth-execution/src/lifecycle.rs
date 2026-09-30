@@ -307,7 +307,6 @@ fn read_runtime_record_inner(
     path: &Path,
     floor: Option<RuntimeReceiptFloor>,
 ) -> io::Result<(RuntimeRecord, RuntimeReceiptFloor)> {
-    let path = path.as_ref();
     verify_parent(path)?;
     verify_regular_single_link(path)?;
     let bytes = fs::read(path)?;

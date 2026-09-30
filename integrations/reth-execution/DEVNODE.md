@@ -93,6 +93,54 @@ including state and receipts, rather than copying potentially damaged current
 state or history indices. The new service starts only after replay and attachment
 validation succeed. Existing target directories are refused.
 
+Recovery now has explicit cumulative limits: `--replay-max-blocks` defaults to
+10,000 non-genesis blocks and `--replay-max-bytes` to 268,435,456 bytes (256 MiB).
+Bytes are the sum of canonical V2 block RLP lengths, including headers, signed
+transactions and deposits; genesis is excluded. Exact limits are accepted, and
+zero limits allow a genesis-only source. These bounds do not limit decoded heap,
+backend reads, state size or EVM execution time.
+
+To reject a valid but rolled-back source copy, provide a block number and exact
+hash retained independently before the incident:
+
+```sh
+integrations/reth-execution/target/debug/bloch-evm-dev \
+  --synthetic-dev --data-dir /tmp/bloch-evm-recovered --init \
+  --replay-from /tmp/bloch-evm-local \
+  --replay-min-block "$RETAINED_L2_BLOCK" \
+  --replay-min-hash "$RETAINED_L2_HASH" \
+  --replay-max-blocks 10000 --replay-max-bytes 268435456 --port 8545
+```
+
+The floor is a minimum: later complete commits can be recovered after a lost
+acknowledgement. An older source or a conflicting hash at the retained height is
+refused. Both floor arguments must be supplied together; a requested floor is
+never dropped or replaced with a value from the source. Reading the floor from
+the same backup being inspected does not provide rollback protection. Without a
+floor the startup diagnostic explicitly says `rollback_floor=not-supplied`;
+suffix deletion remains undetectable. The floor selects local acknowledged
+history and does not establish native settlement, consensus or finality.
+
+The CLI resolves source/target paths and rejects existing targets, nested paths,
+and overlaps through symlink aliases. It opens the source read-only and checks
+identity, the optional floor, block count, available bodies/header linkage and
+cumulative bytes **before creating the target directory**. It then repeats
+inspection under the same retained MDBX read transaction used for actual replay,
+checks byte accounting again, and publishes RPC only after full execution and
+attachment validation. Keep the source node stopped throughout; the read
+transaction does not lock independent static-file writers. Use trusted parent
+directories; this is not a filesystem sandbox against concurrent path replacement.
+
+The library exposes `inspect_canonical_prefix` for source-only preflight and
+`replay_canonical_prefix_with_limits` for explicit `ReplayFloor`/`ReplayLimits`.
+The existing `replay_canonical_prefix` signature remains available and now uses
+the same 10,000-block/256-MiB defaults without a floor. Library callers must
+provide a fresh target and keep it separate from the source. A floor or budget
+refusal leaves target genesis unwritten. An execution or publication error after
+preflight can leave an incomplete separate target; inspect it and choose another
+new target rather than automatically retrying over it. Successful replay returns
+the exact recovered head, block/byte totals and supplied floor.
+
 Static-file rows ahead of the completed MDBX checkpoint are excluded; the source
 is not truncated or repaired. Missing/corrupt canonical bodies or inconsistent
 headers stop recovery instead of inventing replacement blocks. An error leaves
@@ -152,7 +200,12 @@ Recovery tests cover SIGKILL between writes after a completed commit, replay of
 signed contracts into another directory, and a reproduced commit boundary where
 static files are finalized but MDBX aborts. Startup rejects that mismatch; replay
 recovers only the completed prefix. Separate tests rebuild missing genesis history
-indices and reject a missing required block body. These are specific failure
+indices and reject a missing required block body. `tests/recovery_limits.rs`
+reexecutes a signed contract through real MDBX/static/RocksDB storage, checks its
+receipts/nonce/storage after reopening, and continues execution. It also checks
+retained floors, exact/cumulative resource limits and refusal before target
+creation. The process replay test supplies the exact block retained from an
+acknowledged transaction receipt. These are specific failure
 models, not exhaustive crash/power-loss qualification.
 
 Storage spans MDBX, static files and RocksDB; broader crash recovery, fork choice,
