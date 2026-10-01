@@ -199,6 +199,34 @@ Its pinned genesis is
 This supersedes the September 23 observation that its reserved server had no
 running node; it does not establish production deployment or native finality.
 
+## Native consensus and real-proof rehearsal (2026-10-01)
+
+The native development branch `codex/native-l2-settlement-20261001` now connects
+a bounded settlement transaction to the actual native state transition and a
+CPU-only SP1 6.8.0 Groth16 verifier. Policy, native height and accepted cursor are
+committed in native state. Parent/source selection comes from that state; the
+first version accepts an empty inbox only. Existing network manifests keep the
+policy absent, and the shipping mempool rejects the new transaction.
+
+The `native-empty` SP1 harness reads seven public fixture fields exported by the
+native transition through `BLOCH_NATIVE_L2_REQUEST`. It reexecutes the empty L2
+block at that exact anchor, generates the existing V2 public statement and can
+prove/reverify it using the already pinned guest ELF. This is an isolated
+qualification fixture, not a native checkpoint or production source authority.
+The earlier genuine `source-contract` proof remains synthetic source evidence:
+cryptographic validity does not authorize that source in native consensus.
+The generated `native-empty` proof has also been persisted, reverified by the SDK
+and accepted by the actual native `apply_block` test using the real CPU proof
+verifier. Native validator signatures in this rehearsal are test doubles; this
+does not qualify a live quorum. The proof and public values are retained in the
+native `bloch-l2-proof` fixtures with artifact, guest and host provenance hashes.
+
+The new native wire envelope uses `0x0E` with 32-byte proof policy, 590-byte public
+values and the complete 356-byte proof. Existing recovery/admission adapters must
+be qualified for that exact native envelope before it can advance production
+finality. Network activation, validator fault/replay evidence, checkpoint authority
+and RPC publication remain separately gated. No readiness flag changes here.
+
 ## RPC tag qualification
 
 ### Durable preparation before RPC publication

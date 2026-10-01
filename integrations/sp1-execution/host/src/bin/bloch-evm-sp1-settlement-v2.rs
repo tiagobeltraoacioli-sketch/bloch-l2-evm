@@ -143,14 +143,55 @@ fn source_qualification(identity: ProgramIdentity) -> Result<Qualification> {
     })
 }
 
+/// Public deterministic context exported by the native transition rehearsal.
+/// This input selects a test fixture; it is not a production trust anchor.
+fn native_qualification(identity: ProgramIdentity, text: &str) -> Result<Qualification> {
+    let fields: Vec<_> = text.lines().collect();
+    if text.len() > 512 || fields.len() != 7 {
+        return Err(io::Error::other("native fixture requires exactly seven bounded fields").into());
+    }
+    let hash = |index: usize| -> Result<B256> {
+        if fields[index].len() != 64 || !fields[index].bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(io::Error::other("native fixture requires 32-byte hexadecimal identities").into());
+        }
+        let value: B256 = fields[index].parse()?;
+        if value == B256::ZERO { return Err(io::Error::other("zero native fixture identity").into()); }
+        Ok(value)
+    };
+    let slot: u64 = fields[3].parse()?;
+    let height: u64 = fields[4].parse()?;
+    if height == 0 || slot < height { return Err(io::Error::other("invalid native fixture position").into()); }
+    let (execution, _, _) = fixture::execute_fixture_at(Default::default(), hash(2)?)?;
+    let context = SettlementContextV2 {
+        network: hash(0)?, genesis: hash(1)?,
+        program_elf_keccak: identity.elf_keccak(), program_vkey_koalabear: identity.verifying_key_hash(),
+        program_vkey_bn254: identity.verifying_key_bn254(), previous_settlement: B256::ZERO,
+        l1_slot: slot, l1_height: height, source_commitment: hash(5)?, inbox_root: hash(6)?,
+        inbox_count: 0, consumed_start: 0, consumed_end: 0,
+    };
+    let expected = execute_settlement_statement_v2(&ChainSpec::testnet(), B256::repeat_byte(0xd3),
+        &execution.witness, &execution.context, &execution.body, context)?;
+    Ok(Qualification { execution, context, expected,
+        #[cfg(feature = "source-settlement")]
+        source: None,
+    })
+}
+
 fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification> {
     match name {
         "empty" => empty_qualification(identity),
+        "native-empty" => {
+            let path = std::env::var_os("BLOCH_NATIVE_L2_REQUEST")
+                .ok_or("BLOCH_NATIVE_L2_REQUEST must name the exported public native fixture")?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.is_file() || metadata.len() > 512 { return Err("invalid native fixture file".into()); }
+            native_qualification(identity, &fs::read_to_string(path)?)
+        },
         #[cfg(feature = "source-settlement")]
         "source-contract" => source_qualification(identity),
         #[cfg(not(feature = "source-settlement"))]
         "source-contract" => Err(io::Error::other("source-contract requires --features source-settlement").into()),
-        _ => Err(io::Error::other("fixture must be empty or source-contract").into()),
+        _ => Err(io::Error::other("fixture must be empty, native-empty or source-contract").into()),
     }
 }
 
@@ -181,7 +222,7 @@ fn report_verified_source(qualification: &mut Qualification, proof: &QualifiedGr
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v2 <execute|prove-groth16|verify-groth16> <empty|source-contract> TRUSTED_SETTLEMENT_V2_ELF [PROOF_FILE]";
+    let usage = "usage: bloch-evm-sp1-settlement-v2 <execute|prove-groth16|verify-groth16> <empty|source-contract|native-empty> TRUSTED_SETTLEMENT_V2_ELF [PROOF_FILE]";
     let mode = args.first().map(String::as_str).ok_or(usage)?;
     let legacy_args = if mode == "execute" { 2 } else { 3 };
     let selected_args = legacy_args + 1;
