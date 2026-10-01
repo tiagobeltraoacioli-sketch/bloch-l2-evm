@@ -1866,12 +1866,14 @@ dependencies = [
  "bloch-native-escrow-pq",
  "bloch-pos-committee",
  "bloch-reth-execution",
+ "hex",
  "k256",
  "reth-chainspec",
  "reth-db",
  "reth-db-api",
  "reth-provider",
  "reth-tasks",
+ "serde_json",
  "tempfile",
 ]
 

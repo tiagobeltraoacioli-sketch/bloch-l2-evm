@@ -232,6 +232,31 @@ not an operational FFG quorum. Network activation, validator fault/replay eviden
 production checkpoint authority and RPC publication remain separately gated.
 No readiness flag changes here.
 
+## Native FFG replay integration (2026-10-01)
+
+The combined recovery adapter now has an additional native-consensus boundary.
+It requires an independently pinned initial native state and policy, reexecutes
+the complete bounded block history with real hybrid signatures and Groth16,
+and obtains finality from the actual native transition. Votes and checkpoint
+roots must belong to that same branch under the native node's epoch convention.
+The result can authenticate only settlements whose exact native bytes were
+executed inside the finalized prefix; a WS signature alone cannot satisfy it.
+
+The FFG recovery/staging APIs repeat all existing proof, authority, canonical-L2
+and durable candidate checks, adding native inclusion/finality for every record
+and checkpoint. Native evidence remains independently required after restart;
+the saved candidate is still not a finality capability. Its report is accounting
+only and no numeric Reth `safe`/`finalized` marker is written.
+
+The new public fixture has a freshly generated real Groth16 proof, real native
+proposer signatures and real FFG votes under disposable validator keys. It
+exercises epochs 0–3, two-round finalization, 2/3 and 3/3 participation, insufficient
+and conflicting votes, tampering, replay limits and database reopening. This
+supersedes the signature-double limitation for this additional fixture only.
+It does not qualify live validators, later activation/leak regimes, production
+manifest authority, data availability or RPC publication. Network activation and
+the seven production gates remain unchanged.
+
 ## RPC tag qualification
 
 ### Durable preparation before RPC publication

@@ -1,0 +1,78 @@
+{
+  "steps": [
+    {
+      "name": "execute",
+      "exit_code": 0,
+      "seconds": 5.57489323313348,
+      "log_sha256": "fe861bd85d225b8b31cdc2f54827d45a15a95556a10a1ae32da8a1a40b60d706"
+    },
+    {
+      "name": "prove",
+      "exit_code": 0,
+      "seconds": 633.5215171359014,
+      "log_sha256": "876151dc3f0620d7cbe3ece12a492120f80dcb8f3674c0216c4c456c0fe34f39"
+    },
+    {
+      "name": "verify",
+      "exit_code": 0,
+      "seconds": 4.800491194007918,
+      "log_sha256": "17bd629194f6937a53ee3b561b6d365d4e120d3736c298afb749d34ba504a2bf"
+    }
+  ],
+  "runtime_updated": false,
+  "operational_private_keys_read": false,
+  "request_sha256": "2e7d7135ebf3b8e32b56dabe01a686f6f1735d1960906f5670685cc046f00ac4",
+  "host_sha256": "6896ceb7e2ca81aca468225c34d520251b472f79cc37967b8236baa817983aad",
+  "guest_sha256": "8e24512ffa42d7c7e87db8c10df8c2a1d09c3977170e6615d559f9b5f9da8c4b",
+  "ok": true,
+  "proof_sha256": "defc0cc20c306c3c3aec1a4d6787b6ced3f55dfcfe2f701304bf61bb54c3cbe6",
+  "original_prover_unchanged": true,
+  "classification": "real-proof-disposable-pq-native-ffg-rehearsal",
+  "genesis_state_root": "a18d390fd74edb85ccce6be661a21dfa3aa645759142ecc1292fe6631963078c",
+  "bootstrap_sha256": "0dd49ba339ff3b442d819ea28ccecf97cc486819379c83d278d6bcd21c480afe",
+  "canonical_proof_sha256": "181e3459dbd31a14f3900da381cdc428f9a28dbb08bd3d5bd43fcb67c05c77b0",
+  "public_values_sha256": "c8905ee7701d32525bc3b04fbf11853f5d9a1c699311e82fa40f148ee986e9b3",
+  "wrapper_vk_sha256": "4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+  "native_revision": "7eb589049121ff98baab99a565e046b495b877c2",
+  "native_block_and_ffg_signatures": "genuine ML-DSA-65/Falcon-1024, disposable test validators",
+  "production_authority": false,
+  "fixture_files": [
+    {
+      "path": "bootstrap.json",
+      "sha256": "0dd49ba339ff3b442d819ea28ccecf97cc486819379c83d278d6bcd21c480afe"
+    },
+    {
+      "path": "canonical.proof",
+      "sha256": "181e3459dbd31a14f3900da381cdc428f9a28dbb08bd3d5bd43fcb67c05c77b0"
+    },
+    {
+      "path": "canonical.values",
+      "sha256": "c8905ee7701d32525bc3b04fbf11853f5d9a1c699311e82fa40f148ee986e9b3"
+    },
+    {
+      "path": "conflict.json",
+      "sha256": "dc65ad4c920e4f2fcbd2d06f509f65e2e08aadb31a3d9454f53c2b3665cddd93"
+    },
+    {
+      "path": "duplicates.json",
+      "sha256": "7830321bdb77f8fa5ec3ee196a7bf3a923ddde53d9f133e175c61a7027c5b341"
+    },
+    {
+      "path": "full.json",
+      "sha256": "dcd1d798c1c36f30ce5d4a0f16e73fd658d1fa9fc698a9ec35c5751322810f38"
+    },
+    {
+      "path": "insufficient.json",
+      "sha256": "181d9ac4b42698ee565e7cc7680d8517787695a021d8b02398b686bcff43e241"
+    },
+    {
+      "path": "native-request.txt",
+      "sha256": "2e7d7135ebf3b8e32b56dabe01a686f6f1735d1960906f5670685cc046f00ac4"
+    },
+    {
+      "path": "two.json",
+      "sha256": "029ede1ec8a9f0d75c2ef4be4ac251465676d24cc747a52bc1b167f4a9f87d98"
+    }
+  ],
+  "scope": "One isolated, empty-inbox L2 settlement; native epochs 0-3. Fresh PQ keys in the generator process only. No live validator or economic finality qualification."
+}

@@ -74,7 +74,7 @@ pub fn recover_and_stage_finality_candidate<V: SettlementProofVerifierV1>(
     verifier: &V,
     expected_cursor: Option<B256>,
 ) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
-    stage_with_wire(source, request, verifier, expected_cursor, false)
+    stage_with_wire(source, request, verifier, expected_cursor, false, None)
 }
 
 /// Native-only candidate preparation. Uses the compiled real proof verifier and
@@ -87,7 +87,22 @@ pub fn recover_and_stage_native_finality_candidate(
 ) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
     let verifier = crate::proof::NativeGroth16Verifier::from_policy(&request.settlement_policy)
         .map_err(|_| FinalityCandidateErrorV1::Recovery(SettlementRecoveryErrorV1::ProofPolicy))?;
-    stage_with_wire(source, request, &verifier, expected_cursor, true)
+    stage_with_wire(source, request, &verifier, expected_cursor, true, None)
+}
+
+/// Stage only after complete native FFG and L2 recovery. Every current/historical
+/// checkpoint must agree with the replayed native branch and finalized prefix.
+/// The persisted candidate remains audit data; every restart must reverify the
+/// native history. This does not grant permission to publish RPC finality.
+pub fn recover_and_stage_ffg_finality_candidate(
+    source: &BlochProviderFactory,
+    request: SettlementRecoveryRequestV1<'_>,
+    native: &crate::native::VerifiedNativeFinalityV1,
+    expected_cursor: Option<B256>,
+) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
+    let verifier = crate::proof::NativeGroth16Verifier::from_policy(&request.settlement_policy)
+        .map_err(|_| FinalityCandidateErrorV1::Recovery(SettlementRecoveryErrorV1::ProofPolicy))?;
+    stage_with_wire(source, request, &verifier, expected_cursor, true, Some(native))
 }
 
 fn stage_with_wire<V: SettlementProofVerifierV1>(
@@ -96,6 +111,7 @@ fn stage_with_wire<V: SettlementProofVerifierV1>(
     verifier: &V,
     expected_cursor: Option<B256>,
     require_native: bool,
+    native: Option<&crate::native::VerifiedNativeFinalityV1>,
 ) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
     reject_unverified_finality_markers(source).map_err(storage)?;
     let previous = {
@@ -106,13 +122,18 @@ fn stage_with_wire<V: SettlementProofVerifierV1>(
         return Err(FinalityCandidateErrorV1::CursorFloor);
     }
     let current_epoch = request.current_epoch;
-    let recovery = recover_with_cursor(source, request, verifier, previous, require_native)
+    let recovery = recover_with_cursor(source, request, verifier, previous, require_native, native)
         .map_err(FinalityCandidateErrorV1::Recovery)?;
     let checkpoint = recovery
         .stores()
         .checkpoint_store()
         .current(current_epoch)
         .map_err(|_| FinalityCandidateErrorV1::Freshness)?;
+    if let Some(native) = native {
+        native
+            .check_checkpoint(checkpoint.anchor(), checkpoint.epoch())
+            .map_err(|e| FinalityCandidateErrorV1::Recovery(SettlementRecoveryErrorV1::NativeFinality(e)))?;
+    }
     let settlement = recovery.stores().settlement_store();
     let head = settlement.registry().head().ok_or(FinalityCandidateErrorV1::Changed)?;
     let mark = settlement.mark();

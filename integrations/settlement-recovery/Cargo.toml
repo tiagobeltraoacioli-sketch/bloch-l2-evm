@@ -15,6 +15,8 @@ bloch-l2-evm = { path = "../.." }
 bloch-native-escrow-pq = { path = "../native-escrow-pq" }
 bloch-reth-execution = { path = "../reth-execution" }
 bloch-l2-proof = { path = "../../../bloch-validator-payout/crates/bloch-l2-proof" }
+bloch-crypto = { path = "../../../bloch-validator-payout/crates/bloch-crypto", default-features = false }
+bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos-committee" }
 alloy-primitives = { version = "=1.6.1", default-features = false }
 reth-db-api = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db-api" }
 reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider" }
@@ -25,8 +27,8 @@ pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-i
 [dev-dependencies]
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-rlp = "=0.3.16"
-bloch-crypto = { path = "../../../bloch-validator-payout/crates/bloch-crypto", default-features = false }
-bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos-committee" }
+hex = "0.4"
+serde_json = "1.0"
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 reth-chainspec = { path = "../../../reth-bloch-rpc-snapshot/crates/chainspec" }
 reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider", features = ["test-utils"] }

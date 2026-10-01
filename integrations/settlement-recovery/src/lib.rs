@@ -20,6 +20,7 @@ use bloch_reth_execution::{
 use std::path::Path;
 
 pub mod cursor;
+pub mod native;
 pub mod proof;
 
 /// Explicit host inputs. Policies, floors and epoch must come from independent
@@ -44,6 +45,7 @@ pub enum SettlementRecoveryErrorV1 {
     Policy,
     /// The native entry point requires the compiled complete Groth16 policy.
     ProofPolicy,
+    NativeFinality(native::NativeFinalityErrorV1),
     Verification(CanonicalSettlementAuditErrorV1<SettlementAuthorityStoreErrorV1>),
     /// Defensive postcondition: every recovered generation and the exact head
     /// must be represented in the canonical audit before either handle escapes.
@@ -66,6 +68,7 @@ impl std::error::Error for SettlementRecoveryErrorV1 {}
 pub struct RecoveredCanonicalSettlementsV1 {
     stores: RecoveredAuthorityStoresV1,
     report: CanonicalSettlementAuditReportV1,
+    native_finality: Option<native::NativeFinalityReportV1>,
 }
 
 impl RecoveredCanonicalSettlementsV1 {
@@ -75,6 +78,12 @@ impl RecoveredCanonicalSettlementsV1 {
 
     pub const fn report(&self) -> &CanonicalSettlementAuditReportV1 {
         &self.report
+    }
+
+    /// Informational accounting of a complete native FFG replay, when requested.
+    /// Copying this report cannot reconstruct its private verification capability.
+    pub const fn native_finality(&self) -> Option<&native::NativeFinalityReportV1> {
+        self.native_finality.as_ref()
     }
 
     /// Consume the recovery result before opening any mutable store access.
@@ -98,7 +107,7 @@ pub fn recover_canonical_settlements<V: SettlementProofVerifierV1>(
     request: SettlementRecoveryRequestV1<'_>,
     verifier: &V,
 ) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
-    recover_with_cursor(source, request, verifier, None, false)
+    recover_with_cursor(source, request, verifier, None, false, None)
 }
 
 /// Native-only recovery with the pinned real verifier. Every historical record
@@ -109,7 +118,20 @@ pub fn recover_canonical_native_settlements(
 ) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
     let verifier = proof::NativeGroth16Verifier::from_policy(&request.settlement_policy)
         .map_err(|_| SettlementRecoveryErrorV1::ProofPolicy)?;
-    recover_with_cursor(source, request, &verifier, None, true)
+    recover_with_cursor(source, request, &verifier, None, true, None)
+}
+
+/// Compose full native consensus/FFG replay with every recovered L2 record.
+/// The supplied native capability can only be built by real native replay.
+/// Its trust root is independently pinned; no network activation is implied.
+pub fn recover_canonical_ffg_settlements(
+    source: &BlochProviderFactory,
+    request: SettlementRecoveryRequestV1<'_>,
+    native: &native::VerifiedNativeFinalityV1,
+) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
+    let verifier = proof::NativeGroth16Verifier::from_policy(&request.settlement_policy)
+        .map_err(|_| SettlementRecoveryErrorV1::ProofPolicy)?;
+    recover_with_cursor(source, request, &verifier, None, true, Some(native))
 }
 
 fn recover_with_cursor<V: SettlementProofVerifierV1>(
@@ -118,9 +140,19 @@ fn recover_with_cursor<V: SettlementProofVerifierV1>(
     verifier: &V,
     previous: Option<bloch_reth_execution::finality_cursor::FinalityCandidateCursorV1>,
     require_native: bool,
+    native: Option<&native::VerifiedNativeFinalityV1>,
 ) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
     if request.checkpoint_policy.native_genesis().as_slice() != request.settlement_policy.genesis.as_slice() {
         return Err(SettlementRecoveryErrorV1::Policy);
+    }
+    if let Some(native) = native {
+        if request.settlement_policy.commitment().ok() != Some(native.report().settlement_policy)
+            || request.current_epoch < bloch_pos_committee::epoch_of(native.report().replayed_slot)
+        {
+            return Err(SettlementRecoveryErrorV1::NativeFinality(
+                native::NativeFinalityErrorV1::Trust,
+            ));
+        }
     }
     let current_epoch = request.current_epoch;
     let mut previous_seen = previous.is_none();
@@ -141,6 +173,11 @@ fn recover_with_cursor<V: SettlementProofVerifierV1>(
                 request.maximum_proofs,
                 verifier,
                 |record| {
+                    if let Some(native) = native {
+                        native
+                            .audit_record(record)
+                            .map_err(|e| SettlementAuthorityStoreErrorV1::AdditionalAudit(e.to_string()))?;
+                    }
                     if require_native {
                         use bloch_l2_evm::native_settlement::{SettlementTransactionV1, SettlementWireFormat};
                         if !matches!(
@@ -198,6 +235,15 @@ fn recover_with_cursor<V: SettlementProofVerifierV1>(
         if retained.checkpoint_digest() != f.checkpoint_digest || retained.policy_identity() != f.checkpoint_policy {
             return Err(SettlementRecoveryErrorV1::Cursor);
         }
+        if let Some(native) = native {
+            native
+                .check_checkpoint(retained.anchor(), retained.checkpoint_epoch())
+                .map_err(SettlementRecoveryErrorV1::NativeFinality)?;
+        }
     }
-    Ok(RecoveredCanonicalSettlementsV1 { stores, report })
+    Ok(RecoveredCanonicalSettlementsV1 {
+        stores,
+        report,
+        native_finality: native.map(|n| *n.report()),
+    })
 }

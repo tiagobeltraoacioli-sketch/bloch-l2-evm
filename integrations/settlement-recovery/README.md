@@ -106,6 +106,55 @@ validator FFG quorum. The exported native block's proposer signatures still use
 the original test scheme. This qualification does not establish live FFG finality,
 organizational independence, production checkpoint authority or funded escrow.
 
+## Native consensus and FFG recovery
+
+`native::verify_native_finality` adds complete native replay from an independently
+pinned genesis state root and settlement policy. The policy binds the native
+network/genesis, L2 identities and the compiled Groth16 policy. The supplied state
+must be the initial state, with no accepted settlement. A constructor or a root
+copied from the submitted data is not independent genesis authentication.
+
+The replay entry point fixes real ML-DSA/Falcon and Groth16 verification internally.
+It reexecutes each complete native block, checks proposer and attester signatures
+against the committed registry, and derives justification/finality through the
+actual native transition. Full history retains epoch accounting and the leak
+ledger. It does not bootstrap finality from a bare quorum, header flag or a WS
+snapshot. The adapter also requires vote heads/checkpoints and finalized roots
+to belong to the replayed branch, following the node's checkpoint convention:
+the last block strictly before the epoch boundary, including skipped slots.
+
+Blocks, epochs, attestations, transactions, proof calls and supplied bytes have
+explicit budgets and hard ceilings, checked before signature/proof work. This is
+a host API over decoded data; network/file decoding must enforce its own input
+allocation limits. The initial state and its manifest are trusted host inputs.
+This version replays one complete branch from genesis; it does not run network
+fork choice, fetch missing blocks or authenticate a state-sync snapshot.
+
+`recover_canonical_ffg_settlements` composes the resulting private-constructor
+capability with full proof/PQ/Reth recovery. Every retained settlement must match
+the exact bytes executed in a native block inside the finalized prefix. Each
+authority receipt's checkpoint epoch/root must agree with native replay, including
+old records before the external rollback floor. A valid WS signature cannot
+replace missing FFG finality or change the native checkpoint convention.
+
+`cursor::recover_and_stage_ffg_finality_candidate` applies the same requirements
+to candidate staging and rechecks both previous and current checkpoint bindings.
+A native tip from a future epoch is refused against the independently supplied
+current epoch. The existing candidate encoding remains unchanged; it is not a
+saved native-finality capability. Restart requires fresh native replay as well as
+L2/history recovery. Generic compatibility APIs make no FFG claim.
+
+The additional `ffg_recovery.rs` qualification uses a new genuine Groth16 proof,
+real proposer signatures and real FFG votes from three disposable test validators.
+Public fixtures retain the signed blocks, attestations and proof provenance;
+private keys remain in the generator process. Tests cover 2/3 and 3/3 agreement,
+two-round finalization, insufficient/duplicated/conflicting votes, branch and
+signature changes, bounds, stale checkpoint claims and recovery after restart.
+These tests cover epochs 0–3 of the isolated fixture, not a live network or all
+activation/leak/fault regimes. Native consensus rules and their historical
+activation gates are replayed unchanged; this is not a new economic-finality
+guarantee or evidence of independent operational validators.
+
 ## Trust and remaining production work
 
 The host must stop all Reth and static-file writers, independently retain all
@@ -117,7 +166,8 @@ input. This adapter does not invent a conversion between them. The native
 genesis identity is compared directly.
 
 The execution-proof verifier is a required trusted host dependency; an arbitrary
-implementation of the verifier trait is not evidence of proof soundness. Native
+implementation of the verifier trait is not evidence of proof soundness. The
+native and FFG entry points select the real verifier internally. Native
 checkpoint signatures authenticate the selected weak-subjectivity arrangement,
 not an independent FFG history or organizational independence of its members.
 Historical receipts can be recovered after expiry but cannot become fresh
@@ -133,7 +183,7 @@ bridge payouts. The seven production gates in `network/finality.json` remain unc
 
 Use Rust 1.98.1, the committed lockfile and these independently checked sources:
 
-- Native consensus revision `0857987f12c43aa905d50106ea64eb34681bd5bc` in the
+- Native consensus revision `7eb589049121ff98baab99a565e046b495b877c2` in the
   sibling `bloch-validator-payout` directory, without local changes.
 - Reth base `8eb210175687c9f0c889a3b6795c16781d830e3a` plus the exact recorded
   `../reth-execution/reth-snapshot.patch`, prepared with its existing tool.
