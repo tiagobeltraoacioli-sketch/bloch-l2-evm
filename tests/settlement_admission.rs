@@ -180,7 +180,7 @@ fn generic_inclusion_refines_into_a_non_fungible_settlement_capability() {
     let (inclusion, checkpoint) = authenticate_at_index(&transaction, 1);
     let expected = expectation(&inclusion);
     let authenticated = authenticate_settlement_inclusion(inclusion, &expected).unwrap();
-    assert_eq!(authenticated.transaction().as_slice(), transaction);
+    assert_eq!(authenticated.transaction(), transaction);
     assert_eq!(authenticated.statement(), &statement());
     assert_eq!(authenticated.block(), expected.block);
     assert_eq!(authenticated.slot(), expected.slot);

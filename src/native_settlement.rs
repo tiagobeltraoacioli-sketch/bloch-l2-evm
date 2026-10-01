@@ -10,6 +10,7 @@
 //! state rather than from the transaction proposer.
 
 use crate::proof_statement::{SettlementStatementV2, SettlementStatementV2Error, SETTLEMENT_STATEMENT_V2_LEN};
+use alloc::vec::Vec;
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 
@@ -25,6 +26,42 @@ pub const SETTLEMENT_PROOF_V1_BYTES: usize = 356;
 /// allocation controlled by untrusted length fields.
 pub const SETTLEMENT_TX_V1_BYTES: usize =
     EXPERIMENTAL_SETTLEMENT_TX_V1_TAG.len() + 32 + SETTLEMENT_STATEMENT_V2_LEN + SETTLEMENT_PROOF_V1_BYTES;
+/// Native development format assigned by the separately pinned consensus implementation.
+pub const NATIVE_SETTLEMENT_TAG: u8 = 0x0e;
+/// Exact native envelope size, with no user-controlled length fields.
+pub const NATIVE_SETTLEMENT_BYTES: usize = 1 + 32 + SETTLEMENT_STATEMENT_V2_LEN + SETTLEMENT_PROOF_V1_BYTES;
+
+/// Explicit framing; exact native bytes must never be replaced inside inclusion evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementWireFormat {
+    /// Original unassigned tagged transport; historical encodings remain unchanged.
+    ExperimentalV1,
+    /// Assigned 0x0E native development transport with an empty inbox.
+    NativeV1,
+}
+
+// Independent implementation of the native empty-source rule, checked on both
+// admission and historical replay. The containing header separately binds parent.
+fn check_native_source(statement: &SettlementStatementV2, previous: B256) -> Result<(), SettlementError> {
+    let mut hash = Sha3_256::new();
+    hash.update(b"BLOCH:NATIVE:L2:EMPTY-SOURCE:1");
+    for value in [
+        statement.network,
+        statement.genesis,
+        statement.domain,
+        previous,
+        statement.l1_block,
+    ] {
+        hash.update(value);
+    }
+    hash.update(statement.l1_slot.to_le_bytes());
+    hash.update(statement.l1_height.to_le_bytes());
+    hash.update(statement.inbox_root);
+    if B256::from_slice(&hash.finalize()) != statement.source_commitment {
+        return Err(SettlementError::Transition);
+    }
+    Ok(())
+}
 
 /// Consensus-pinned identities for the dormant V1 transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +150,46 @@ pub struct SettlementTransactionV1 {
 }
 
 impl SettlementTransactionV1 {
+    /// Decode exactly one of the two bounded envelopes. The legacy decoder
+    /// remains strict; this entry point is reserved for envelope-aware adapters.
+    pub fn decode_wire(bytes: &[u8]) -> Result<(Self, SettlementWireFormat), SettlementError> {
+        if bytes.len() == NATIVE_SETTLEMENT_BYTES && bytes.first() == Some(&NATIVE_SETTLEMENT_TAG) {
+            let statement = SettlementStatementV2::decode(&bytes[33..33 + SETTLEMENT_STATEMENT_V2_LEN])
+                .map_err(SettlementError::Statement)?;
+            if statement.inbox_count != 0
+                || statement.consumed_start != 0
+                || statement.consumed_end != 0
+                || statement.inbox_root != B256::from_slice(&Sha3_256::digest(b"BLOCH:NATIVE:L2:EMPTY-INBOX:1"))
+            {
+                return Err(SettlementError::Transition);
+            }
+            let tx = Self::new(
+                B256::from_slice(&bytes[1..33]),
+                statement,
+                bytes[33 + SETTLEMENT_STATEMENT_V2_LEN..]
+                    .try_into()
+                    .map_err(|_| SettlementError::Encoding)?,
+            )?;
+            Ok((tx, SettlementWireFormat::NativeV1))
+        } else {
+            Self::decode(bytes).map(|tx| (tx, SettlementWireFormat::ExperimentalV1))
+        }
+    }
+
+    /// Encode the selected complete envelope. The predecessor commitment is
+    /// unchanged; admission commitments separately bind these exact wire bytes.
+    pub fn encode_wire(&self, format: SettlementWireFormat) -> Vec<u8> {
+        let legacy = self.encode();
+        match format {
+            SettlementWireFormat::ExperimentalV1 => legacy.to_vec(),
+            SettlementWireFormat::NativeV1 => {
+                let mut bytes = Vec::with_capacity(NATIVE_SETTLEMENT_BYTES);
+                bytes.push(NATIVE_SETTLEMENT_TAG);
+                bytes.extend_from_slice(&legacy[EXPERIMENTAL_SETTLEMENT_TX_V1_TAG.len()..]);
+                bytes
+            }
+        }
+    }
     /// Construct after the caller has obtained canonical proof bytes. This does
     /// not verify the proof; [`SettlementRegistryV1::verify_and_apply`] does.
     pub fn new(
@@ -309,13 +386,16 @@ impl SettlementRegistryV1 {
         expectation: &SettlementExpectationV1,
         verifier: &V,
     ) -> Result<AcceptedSettlementV1, SettlementError> {
-        let transaction = SettlementTransactionV1::decode(transaction_bytes)?;
+        let (transaction, format) = SettlementTransactionV1::decode_wire(transaction_bytes)?;
         let statement = transaction.statement;
         if statement != expectation.statement {
             return Err(SettlementError::Expectation);
         }
         self.check_policy(&transaction)?;
         self.check_successor(&statement, expectation.source_predecessor)?;
+        if format == SettlementWireFormat::NativeV1 {
+            check_native_source(&statement, self.head.map_or(B256::ZERO, |head| head.source_commitment))?;
+        }
         if !verifier.verify(transaction.proof_policy, &statement.encode(), &transaction.proof) {
             return Err(SettlementError::Proof);
         }

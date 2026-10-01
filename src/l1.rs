@@ -233,6 +233,7 @@ impl<'a> EvidenceReader<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthenticatedAncestry {
     block: B256,
+    parent: B256,
     slot: u64,
     state_root: B256,
     body_root: B256,
@@ -262,6 +263,7 @@ impl AuthenticatedAncestry {
 #[derive(Debug, Clone)]
 pub struct AuthenticatedBody {
     block: B256,
+    parent: B256,
     slot: u64,
     state_root: B256,
     checkpoint: FinalizedCheckpoint,
@@ -300,12 +302,17 @@ impl AuthenticatedBody {
 #[derive(Debug, PartialEq, Eq)]
 pub struct AuthenticatedTransactionInclusion {
     block: B256,
+    parent: B256,
     slot: u64,
     checkpoint: FinalizedCheckpoint,
     transaction_index: u32,
     transaction: Bytes,
 }
 impl AuthenticatedTransactionInclusion {
+    /// Parent ID committed by the authenticated containing header.
+    pub fn parent(&self) -> B256 {
+        self.parent
+    }
     /// Native block whose complete body contains the transaction.
     pub fn block(&self) -> B256 {
         self.block
@@ -351,6 +358,7 @@ pub fn authenticate_exact_transaction(
     }
     Ok(AuthenticatedTransactionInclusion {
         block: body.block,
+        parent: body.parent,
         slot: body.slot,
         checkpoint: body.checkpoint,
         transaction_index: index as u32,
@@ -445,6 +453,7 @@ pub fn authenticate_ancestry(
     }
     Ok(AuthenticatedAncestry {
         block: target.id,
+        parent: target.parent,
         slot: target.slot,
         state_root: target.state,
         body_root: target.body,
@@ -468,6 +477,7 @@ pub fn authenticate_body(
     }
     Ok(AuthenticatedBody {
         block: ancestry.block,
+        parent: ancestry.parent,
         slot: ancestry.slot,
         state_root: ancestry.state_root,
         checkpoint: ancestry.checkpoint,
@@ -483,6 +493,7 @@ mod tests {
     fn duplicate_exact_bytes_are_not_an_inclusion_capability() {
         let transaction = Bytes::from_static(b"same canonical transaction");
         let body = AuthenticatedBody {
+            parent: B256::repeat_byte(8),
             block: B256::repeat_byte(1),
             slot: 2,
             state_root: B256::repeat_byte(3),

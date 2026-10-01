@@ -20,6 +20,7 @@ use bloch_reth_execution::{
 use std::path::Path;
 
 pub mod cursor;
+pub mod proof;
 
 /// Explicit host inputs. Policies, floors and epoch must come from independent
 /// trusted sources, never from the files or RPC claims being audited. The host
@@ -41,6 +42,8 @@ pub struct SettlementRecoveryRequestV1<'a> {
 pub enum SettlementRecoveryErrorV1 {
     /// The two independently supplied policies name different native genesis blocks.
     Policy,
+    /// The native entry point requires the compiled complete Groth16 policy.
+    ProofPolicy,
     Verification(CanonicalSettlementAuditErrorV1<SettlementAuthorityStoreErrorV1>),
     /// Defensive postcondition: every recovered generation and the exact head
     /// must be represented in the canonical audit before either handle escapes.
@@ -95,7 +98,18 @@ pub fn recover_canonical_settlements<V: SettlementProofVerifierV1>(
     request: SettlementRecoveryRequestV1<'_>,
     verifier: &V,
 ) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
-    recover_with_cursor(source, request, verifier, None)
+    recover_with_cursor(source, request, verifier, None, false)
+}
+
+/// Native-only recovery with the pinned real verifier. Every historical record
+/// must retain the exact native envelope; callers cannot substitute a proof double.
+pub fn recover_canonical_native_settlements(
+    source: &BlochProviderFactory,
+    request: SettlementRecoveryRequestV1<'_>,
+) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
+    let verifier = proof::NativeGroth16Verifier::from_policy(&request.settlement_policy)
+        .map_err(|_| SettlementRecoveryErrorV1::ProofPolicy)?;
+    recover_with_cursor(source, request, &verifier, None, true)
 }
 
 fn recover_with_cursor<V: SettlementProofVerifierV1>(
@@ -103,6 +117,7 @@ fn recover_with_cursor<V: SettlementProofVerifierV1>(
     request: SettlementRecoveryRequestV1<'_>,
     verifier: &V,
     previous: Option<bloch_reth_execution::finality_cursor::FinalityCandidateCursorV1>,
+    require_native: bool,
 ) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
     if request.checkpoint_policy.native_genesis().as_slice() != request.settlement_policy.genesis.as_slice() {
         return Err(SettlementRecoveryErrorV1::Policy);
@@ -126,6 +141,17 @@ fn recover_with_cursor<V: SettlementProofVerifierV1>(
                 request.maximum_proofs,
                 verifier,
                 |record| {
+                    if require_native {
+                        use bloch_l2_evm::native_settlement::{SettlementTransactionV1, SettlementWireFormat};
+                        if !matches!(
+                            SettlementTransactionV1::decode_wire(record.transaction),
+                            Ok((_, SettlementWireFormat::NativeV1))
+                        ) {
+                            return Err(SettlementAuthorityStoreErrorV1::AdditionalAudit(
+                                "native recovery requires exact native envelope in every record".into(),
+                            ));
+                        }
+                    }
                     canonical
                         .audit_record(record)
                         .map_err(|error| SettlementAuthorityStoreErrorV1::AdditionalAudit(error.to_string()))?;

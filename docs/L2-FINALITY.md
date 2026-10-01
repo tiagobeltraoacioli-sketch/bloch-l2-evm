@@ -222,10 +222,15 @@ does not qualify a live quorum. The proof and public values are retained in the
 native `bloch-l2-proof` fixtures with artifact, guest and host provenance hashes.
 
 The new native wire envelope uses `0x0E` with 32-byte proof policy, 590-byte public
-values and the complete 356-byte proof. Existing recovery/admission adapters must
-be qualified for that exact native envelope before it can advance production
-finality. Network activation, validator fault/replay evidence, checkpoint authority
-and RPC publication remain separately gated. No readiness flag changes here.
+values and the complete 356-byte proof. The recovery/admission adapters now retain
+and reauthenticate that exact native envelope in V5 records. Native-only recovery
+and candidate staging use the pinned
+real Groth16 verifier and reject historical experimental envelopes. The integrated
+qualification combines real execution proof, disposable real hybrid-PQ checkpoint
+quorums and Reth restart/cursor checks. These are weak-subjectivity signatures,
+not an operational FFG quorum. Network activation, validator fault/replay evidence,
+production checkpoint authority and RPC publication remain separately gated.
+No readiness flag changes here.
 
 ## RPC tag qualification
 

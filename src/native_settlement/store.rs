@@ -7,7 +7,8 @@
 
 use super::{
     AcceptedSettlementV1, SettlementError, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
-    SettlementRegistryV1, SettlementTransactionV1, SETTLEMENT_TX_V1_BYTES,
+    SettlementRegistryV1, SettlementTransactionV1, SettlementWireFormat, NATIVE_SETTLEMENT_BYTES,
+    SETTLEMENT_TX_V1_BYTES,
 };
 use crate::{
     l1::{FinalizedCheckpoint, TransactionInclusionEvidenceV1, MAX_INCLUSION_EVIDENCE_V1_BYTES},
@@ -27,6 +28,9 @@ const POLICY_TAG: &[u8; 8] = b"BLSTPL01";
 const RECORD_V2_TAG: &[u8; 8] = b"BLSTRC02";
 const RECORD_V3_TAG: &[u8; 8] = b"BLSTRC03";
 const RECORD_V4_TAG: &[u8; 8] = b"BLSTRC04";
+// V5 retains exact native bytes with canonical zero padding in the old fixed slot.
+// It always carries complete inclusion evidence and an authority audit receipt.
+const RECORD_V5_TAG: &[u8; 8] = b"BLSTRC05";
 const MARK_TAG: &[u8; 8] = b"BLSTMK01";
 const ACCEPTED_HEAD_BYTES: usize = 1 + 6 * 32 + 5 * 8;
 const ADMISSION_BYTES: usize = 32 + 8 + 32 + 8 + 4 + 32;
@@ -58,7 +62,7 @@ pub struct SettlementStoreMarkV1 {
 /// complete body and authenticated checkpoint artifact remain external.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlementStoreAdmissionV1 {
-    transaction: [u8; SETTLEMENT_TX_V1_BYTES],
+    transaction: Vec<u8>,
     block: B256,
     slot: u64,
     checkpoint: FinalizedCheckpoint,
@@ -68,7 +72,7 @@ pub struct SettlementStoreAdmissionV1 {
 
 impl SettlementStoreAdmissionV1 {
     /// Exact canonical settlement transaction stored in the record.
-    pub const fn transaction(&self) -> &[u8; SETTLEMENT_TX_V1_BYTES] {
+    pub fn transaction(&self) -> &[u8] {
         &self.transaction
     }
 
@@ -181,7 +185,7 @@ pub struct SettlementReplayRecordV1<'a> {
     /// Head reconstructed by the pinned execution-proof verifier and kernel.
     pub accepted: &'a AcceptedSettlementV1,
     /// Exact canonical transaction whose execution proof passed replay.
-    pub transaction: &'a [u8; SETTLEMENT_TX_V1_BYTES],
+    pub transaction: &'a [u8],
     /// Native inclusion coordinates, if retained by this record version.
     pub admission: Option<&'a SettlementStoreAdmissionV1>,
     /// Reauthenticated complete native body and ancestry, if retained.
@@ -355,8 +359,8 @@ impl SettlementStoreV1 {
             maximum_proofs,
             |registry, record| {
                 if let Some(transaction) = &record.transaction {
-                    let decoded =
-                        SettlementTransactionV1::decode(transaction).map_err(SettlementStoreErrorV1::Settlement)?;
+                    let (decoded, _) = SettlementTransactionV1::decode_wire(transaction)
+                        .map_err(SettlementStoreErrorV1::Settlement)?;
                     let expectation = SettlementExpectationV1 {
                         statement: *decoded.statement(),
                         source_predecessor: registry.head().map_or(B256::ZERO, |head| head.source_commitment),
@@ -414,6 +418,17 @@ impl SettlementStoreV1 {
             let bytes = read_record_bounded(&directory.join(record_name(generation)))?;
             let decoded = decode_record(&bytes, generation, policy, previous_digest)?;
             validate_replayed_head(generation, policy, previous_head, decoded.head)?;
+            if let Some(bytes) = &decoded.transaction {
+                let (tx, format) =
+                    SettlementTransactionV1::decode_wire(bytes).map_err(SettlementStoreErrorV1::Settlement)?;
+                if format == SettlementWireFormat::NativeV1 {
+                    super::check_native_source(
+                        tx.statement(),
+                        previous_head.map_or(B256::ZERO, |head| head.source_commitment),
+                    )
+                    .map_err(SettlementStoreErrorV1::Settlement)?;
+                }
+            }
             verify(&mut registry, &decoded)?;
             registry.head = decoded.head;
             if registry.state_commitment() != decoded.state_commitment {
@@ -516,9 +531,7 @@ impl SettlementStoreV1 {
         let accepted = next
             .verify_and_apply(transaction_bytes, expectation, verifier)
             .map_err(SettlementStoreErrorV1::Settlement)?;
-        let transaction: [u8; SETTLEMENT_TX_V1_BYTES] = transaction_bytes
-            .try_into()
-            .map_err(|_| SettlementStoreErrorV1::Format)?;
+        let transaction = transaction_bytes.to_vec();
         self.commit(generation, next, transaction, None, None, None)?;
         Ok((accepted, self.mark))
     }
@@ -549,9 +562,9 @@ impl SettlementStoreV1 {
         if generation > MAX_RECORDS {
             return Err(SettlementStoreErrorV1::Limit);
         }
-        let transaction = *inclusion.transaction();
+        let transaction = inclusion.transaction().to_vec();
         let admission = SettlementStoreAdmissionV1 {
-            transaction,
+            transaction: transaction.clone(),
             block: inclusion.block(),
             slot: inclusion.slot(),
             checkpoint: inclusion.checkpoint(),
@@ -631,9 +644,9 @@ impl SettlementStoreV1 {
         if generation > MAX_RECORDS {
             return Err(SettlementStoreErrorV1::Limit);
         }
-        let transaction = *inclusion.transaction();
+        let transaction = inclusion.transaction().to_vec();
         let admission = SettlementStoreAdmissionV1 {
-            transaction,
+            transaction: transaction.clone(),
             block: inclusion.block(),
             slot: inclusion.slot(),
             checkpoint: inclusion.checkpoint(),
@@ -659,7 +672,7 @@ impl SettlementStoreV1 {
         &mut self,
         generation: u64,
         next: SettlementRegistryV1,
-        transaction: [u8; SETTLEMENT_TX_V1_BYTES],
+        transaction: Vec<u8>,
         admission: Option<SettlementStoreAdmissionV1>,
         evidence: Option<TransactionInclusionEvidenceV1>,
         authority_audit: Option<Vec<u8>>,
@@ -691,7 +704,7 @@ impl SettlementStoreV1 {
 }
 
 struct DecodedRecord {
-    transaction: Option<[u8; SETTLEMENT_TX_V1_BYTES]>,
+    transaction: Option<Vec<u8>>,
     state_commitment: B256,
     head: Option<AcceptedSettlementV1>,
     admission: Option<SettlementStoreAdmissionV1>,
@@ -710,7 +723,7 @@ fn encode_record(
     policy: SettlementPolicyV1,
     previous_digest: B256,
     registry: &SettlementRegistryV1,
-    transaction: Option<&[u8; SETTLEMENT_TX_V1_BYTES]>,
+    transaction: Option<&[u8]>,
     admission: Option<&SettlementStoreAdmissionV1>,
     extensions: RecordExtensions<'_>,
 ) -> Result<Vec<u8>, SettlementStoreErrorV1> {
@@ -718,11 +731,14 @@ fn encode_record(
         evidence,
         authority_audit,
     } = extensions;
+    let mut native_wire = false;
     let decoded_transaction = match transaction {
         None => None,
         Some(bytes) => {
-            let decoded = SettlementTransactionV1::decode(bytes).map_err(|_| SettlementStoreErrorV1::Format)?;
-            if decoded.encode() != *bytes
+            let (decoded, format) =
+                SettlementTransactionV1::decode_wire(bytes).map_err(|_| SettlementStoreErrorV1::Format)?;
+            native_wire = format == SettlementWireFormat::NativeV1;
+            if decoded.encode_wire(format) != bytes
                 || !transaction_matches_head(&decoded, &registry.head.ok_or(SettlementStoreErrorV1::Format)?)
             {
                 return Err(SettlementStoreErrorV1::Format);
@@ -745,7 +761,7 @@ fn encode_record(
         (Some(admission), Some(evidence)) => evidence_matches_admission(evidence, admission)?,
         _ => {}
     }
-    if authority_audit.is_some() && evidence.is_none() {
+    if (authority_audit.is_some() && evidence.is_none()) || (native_wire && authority_audit.is_none()) {
         return Err(SettlementStoreErrorV1::Format);
     }
     if authority_audit.is_some_and(|value| value.is_empty() || value.len() > MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES) {
@@ -757,7 +773,9 @@ fn encode_record(
             + evidence_bytes.as_ref().map_or(0, |value| 4 + value.len())
             + authority_audit.map_or(0, |value| 4 + value.len()),
     );
-    bytes.extend_from_slice(if authority_audit.is_some() {
+    bytes.extend_from_slice(if native_wire {
+        RECORD_V5_TAG
+    } else if authority_audit.is_some() {
         RECORD_V4_TAG
     } else if evidence.is_some() {
         RECORD_V3_TAG
@@ -813,8 +831,9 @@ fn encode_record(
             bytes.extend_from_slice(&[0; SETTLEMENT_TX_V1_BYTES]);
         }
         Some(transaction) => {
-            bytes.push(1);
+            bytes.push(if native_wire { 2 } else { 1 });
             bytes.extend_from_slice(transaction);
+            bytes.resize(bytes.len() + SETTLEMENT_TX_V1_BYTES - transaction.len(), 0);
         }
     }
     match admission {
@@ -857,7 +876,10 @@ fn decode_record(
     }
     let version = &bytes[..8];
     if (version == RECORD_V2_TAG && bytes.len() != RECORD_BYTES)
-        || (version != RECORD_V2_TAG && version != RECORD_V3_TAG && version != RECORD_V4_TAG)
+        || (version != RECORD_V2_TAG
+            && version != RECORD_V3_TAG
+            && version != RECORD_V4_TAG
+            && version != RECORD_V5_TAG)
     {
         return Err(SettlementStoreErrorV1::Format);
     }
@@ -893,19 +915,26 @@ fn decode_record(
         _ => return Err(SettlementStoreErrorV1::Format),
     };
     let transaction = match reader.byte()? {
-        0 => {
+        0 if version != RECORD_V5_TAG => {
             if reader.take(SETTLEMENT_TX_V1_BYTES)?.iter().any(|byte| *byte != 0) {
                 return Err(SettlementStoreErrorV1::Format);
             }
             None
         }
-        1 => {
-            let bytes: [u8; SETTLEMENT_TX_V1_BYTES] = reader
-                .take(SETTLEMENT_TX_V1_BYTES)?
-                .try_into()
-                .map_err(|_| SettlementStoreErrorV1::Format)?;
-            let decoded = SettlementTransactionV1::decode(&bytes).map_err(|_| SettlementStoreErrorV1::Format)?;
-            if decoded.encode() != bytes {
+        kind @ (1 | 2) if (kind == 2) == (version == RECORD_V5_TAG) => {
+            let padded = reader.take(SETTLEMENT_TX_V1_BYTES)?;
+            let length = if kind == 2 {
+                NATIVE_SETTLEMENT_BYTES
+            } else {
+                SETTLEMENT_TX_V1_BYTES
+            };
+            if padded[length..].iter().any(|byte| *byte != 0) {
+                return Err(SettlementStoreErrorV1::Format);
+            }
+            let bytes = padded[..length].to_vec();
+            let (decoded, format) =
+                SettlementTransactionV1::decode_wire(&bytes).map_err(|_| SettlementStoreErrorV1::Format)?;
+            if (format == SettlementWireFormat::NativeV1) != (kind == 2) || decoded.encode_wire(format) != bytes {
                 return Err(SettlementStoreErrorV1::Format);
             }
             Some((bytes, decoded))
@@ -922,7 +951,7 @@ fn decode_record(
         1 => {
             let (transaction_bytes, transaction) = transaction.as_ref().ok_or(SettlementStoreErrorV1::Format)?;
             let value = SettlementStoreAdmissionV1 {
-                transaction: *transaction_bytes,
+                transaction: transaction_bytes.clone(),
                 block: reader.hash()?,
                 slot: reader.u64()?,
                 checkpoint: FinalizedCheckpoint {
@@ -939,7 +968,7 @@ fn decode_record(
         }
         _ => return Err(SettlementStoreErrorV1::Format),
     };
-    let evidence = if version == RECORD_V3_TAG || version == RECORD_V4_TAG {
+    let evidence = if version == RECORD_V3_TAG || version == RECORD_V4_TAG || version == RECORD_V5_TAG {
         let admission = admission.as_ref().ok_or(SettlementStoreErrorV1::Format)?;
         let length = reader.u32()? as usize;
         if length == 0 || length > MAX_INCLUSION_EVIDENCE_V1_BYTES || reader.remaining().len() < length {
@@ -952,7 +981,7 @@ fn decode_record(
     } else {
         None
     };
-    let authority_audit = if version == RECORD_V4_TAG {
+    let authority_audit = if version == RECORD_V4_TAG || version == RECORD_V5_TAG {
         let length = reader.u32()? as usize;
         if length == 0 || length > MAX_SETTLEMENT_AUTHORITY_AUDIT_V1_BYTES || reader.remaining().len() != length {
             return Err(SettlementStoreErrorV1::Format);
@@ -1006,7 +1035,10 @@ fn evidence_matches_admission(
     let authenticated = evidence
         .authenticate_exact(&admission.transaction)
         .map_err(|_| SettlementStoreErrorV1::Evidence)?;
-    if authenticated.block() != admission.block
+    let (transaction, format) =
+        SettlementTransactionV1::decode_wire(&admission.transaction).map_err(|_| SettlementStoreErrorV1::Evidence)?;
+    if (format == SettlementWireFormat::NativeV1 && transaction.statement().l1_block != authenticated.parent())
+        || authenticated.block() != admission.block
         || authenticated.slot() != admission.slot
         || authenticated.checkpoint() != admission.checkpoint
         || authenticated.transaction_index() != admission.transaction_index
@@ -1041,7 +1073,7 @@ fn admission_commitment(transaction_commitment: B256, admission: &SettlementStor
     hasher.update(admission.checkpoint.slot.to_le_bytes());
     hasher.update(admission.transaction_index.to_le_bytes());
     hasher.update((admission.transaction.len() as u64).to_le_bytes());
-    hasher.update(admission.transaction);
+    hasher.update(&admission.transaction);
     B256::from_slice(&hasher.finalize())
 }
 

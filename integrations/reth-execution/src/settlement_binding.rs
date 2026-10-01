@@ -56,7 +56,8 @@ impl CanonicalSettlementAuditV1 {
             .ok()
             .and_then(|number| self.blocks.get(number))
             .ok_or_else(|| invalid("settlement is beyond the acknowledged canonical prefix"))?;
-        let transaction = SettlementTransactionV1::decode(record.transaction).map_err(BlockExecutionError::other)?;
+        let (transaction, _) =
+            SettlementTransactionV1::decode_wire(record.transaction).map_err(BlockExecutionError::other)?;
         let statement = transaction.statement();
         let expected_head = AcceptedSettlementV1 {
             commitment: transaction.commitment(),

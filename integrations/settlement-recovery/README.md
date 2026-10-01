@@ -65,6 +65,47 @@ proof refusal and a competing candidate update. Successful staging leaves RPC
 safe/finalized markers absent. Production publication still requires native
 consensus acceptance and the remaining release qualifications.
 
+## Exact native recovery and real-proof/PQ qualification
+
+`recover_canonical_native_settlements` and
+`cursor::recover_and_stage_native_finality_candidate` select the real native
+Groth16 verifier internally. Its guest BN254 key comes from the independently
+trusted settlement policy. These entry points refuse experimental framing in
+**every** historical record, including records before the retained floor.
+An earlier candidate or a genuine signature cannot bypass this requirement.
+The generic APIs remain available for explicitly selected historical integrations.
+
+The portable codec now recognizes the exact 979-byte native `0x0E` envelope.
+Its original experimental decoder remains strict. Admission compares the source
+to the authenticated containing header's parent and preserves the complete native
+bytes. It never proves inclusion of a normalized payload or a substring.
+Native records rederive the versioned empty-source commitment from policy,
+parent coordinates and the previously accepted source. Nonempty inboxes remain
+unsupported by this version of native consensus.
+
+New `BLSTRC05` records retain the native envelope in the existing fixed transaction
+slot, with discriminator 2 and canonical zero padding. V5 always includes the
+complete body/ancestry evidence and an authority audit receipt. V2/V3/V4 bytes and
+interpretation are unchanged. Downgrades, nonzero padding, substituted transports
+and missing authority fail before a recovered handle or candidate is published.
+The record digest, admission commitment and external floor cover the exact bytes.
+
+`tests/native_recovery.rs` combines the retained real Groth16 proof, an actual
+header/body exported after native `apply_block`, an empty block independently
+executed and persisted by Reth, and real ML-DSA-65/Falcon-1024 checkpoint signatures.
+The test arrangement exercises Phase A's 2-of-3 threshold with the required
+external marker and a 3-of-3 envelope. It rejects insufficient quorums, missing
+external participation, duplicate signers, corruption of either signature half,
+foreign networks, expiry, lost history, envelope substitution and late proof
+refusal. It reopens both evidence histories and the durable candidate and leaves
+numeric RPC finality markers absent. All signer keys are disposable and remain
+in test-process memory; their identities/independence are synthetic trust inputs.
+
+These are real **weak-subjectivity checkpoint signatures**, not an operational
+validator FFG quorum. The exported native block's proposer signatures still use
+the original test scheme. This qualification does not establish live FFG finality,
+organizational independence, production checkpoint authority or funded escrow.
+
 ## Trust and remaining production work
 
 The host must stop all Reth and static-file writers, independently retain all
@@ -84,15 +125,15 @@ checkpoint capabilities. Current use still requires the checkpoint freshness
 check.
 
 The report is not a finalized-block capability. This library does not set Reth
-`safe`/`finalized`, activate native settlement consensus, qualify proof transport,
-start a production service or authorize DEX liquidity or bridge payouts. The
-seven production gates in `network/finality.json` remain unchanged.
+`safe`/`finalized`, activate native settlement consensus, establish operational
+validator authority, start a production service or authorize DEX liquidity or
+bridge payouts. The seven production gates in `network/finality.json` remain unchanged.
 
 ## Reproduce
 
 Use Rust 1.98.1, the committed lockfile and these independently checked sources:
 
-- Native consensus revision `5af78a04a27dcb2c2253c32134fca888a8a965f9` in the
+- Native consensus revision `0857987f12c43aa905d50106ea64eb34681bd5bc` in the
   sibling `bloch-validator-payout` directory, without local changes.
 - Reth base `8eb210175687c9f0c889a3b6795c16781d830e3a` plus the exact recorded
   `../reth-execution/reth-snapshot.patch`, prepared with its existing tool.
@@ -121,6 +162,7 @@ V4 authority receipts. They reopen all histories, preserve independent floors,
 reject an older bad record beneath a valid latest record, reject a corrupted
 PQ signature before proof replay, exercise late proof refusal and detect L2
 advancement during recovery. They check lock release, unchanged audit-history
-bytes and absent safe/finalized markers. The execution-proof verifier is an
-explicit test double; these tests do not generate a real Groth16 proof or use
-operational signing keys.
+bytes and absent safe/finalized markers. The older `recovery.rs` suite retains its
+explicit proof double for fault injection; the additional `native_recovery.rs`
+suite uses the retained real Groth16 proof and the pinned native verifier.
+Neither uses operational keys.

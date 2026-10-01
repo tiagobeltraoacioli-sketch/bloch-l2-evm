@@ -74,6 +74,29 @@ pub fn recover_and_stage_finality_candidate<V: SettlementProofVerifierV1>(
     verifier: &V,
     expected_cursor: Option<B256>,
 ) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
+    stage_with_wire(source, request, verifier, expected_cursor, false)
+}
+
+/// Native-only candidate preparation. Uses the compiled real proof verifier and
+/// rejects any experimental envelope in the recovered history, including before
+/// the retained floor. This candidate still cannot publish RPC finality.
+pub fn recover_and_stage_native_finality_candidate(
+    source: &BlochProviderFactory,
+    request: SettlementRecoveryRequestV1<'_>,
+    expected_cursor: Option<B256>,
+) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
+    let verifier = crate::proof::NativeGroth16Verifier::from_policy(&request.settlement_policy)
+        .map_err(|_| FinalityCandidateErrorV1::Recovery(SettlementRecoveryErrorV1::ProofPolicy))?;
+    stage_with_wire(source, request, &verifier, expected_cursor, true)
+}
+
+fn stage_with_wire<V: SettlementProofVerifierV1>(
+    source: &BlochProviderFactory,
+    request: SettlementRecoveryRequestV1<'_>,
+    verifier: &V,
+    expected_cursor: Option<B256>,
+    require_native: bool,
+) -> Result<StagedFinalityCandidateV1, FinalityCandidateErrorV1> {
     reject_unverified_finality_markers(source).map_err(storage)?;
     let previous = {
         let reader = source.database_provider_ro().map_err(storage)?;
@@ -83,8 +106,8 @@ pub fn recover_and_stage_finality_candidate<V: SettlementProofVerifierV1>(
         return Err(FinalityCandidateErrorV1::CursorFloor);
     }
     let current_epoch = request.current_epoch;
-    let recovery =
-        recover_with_cursor(source, request, verifier, previous).map_err(FinalityCandidateErrorV1::Recovery)?;
+    let recovery = recover_with_cursor(source, request, verifier, previous, require_native)
+        .map_err(FinalityCandidateErrorV1::Recovery)?;
     let checkpoint = recovery
         .stores()
         .checkpoint_store()

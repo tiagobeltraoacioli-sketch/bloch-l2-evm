@@ -11,8 +11,9 @@
 use crate::l1::{AuthenticatedTransactionInclusion, FinalizedCheckpoint};
 use crate::native_settlement::{
     AcceptedSettlementV1, SettlementError, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
-    SettlementRegistryV1, SettlementTransactionV1, SETTLEMENT_TX_V1_BYTES,
+    SettlementRegistryV1, SettlementTransactionV1, SettlementWireFormat,
 };
+use alloc::vec::Vec;
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 
@@ -42,7 +43,7 @@ pub struct SettlementAdmissionExpectationV1 {
 /// checkpoint itself is authoritative or that validators executed settlement.
 #[derive(Debug)]
 pub struct AuthenticatedSettlementInclusionV1 {
-    transaction: [u8; SETTLEMENT_TX_V1_BYTES],
+    transaction: Vec<u8>,
     statement: crate::proof_statement::SettlementStatementV2,
     block: B256,
     slot: u64,
@@ -53,7 +54,7 @@ pub struct AuthenticatedSettlementInclusionV1 {
 
 impl AuthenticatedSettlementInclusionV1 {
     /// Exact canonical transaction bytes authenticated in the native body.
-    pub const fn transaction(&self) -> &[u8; SETTLEMENT_TX_V1_BYTES] {
+    pub fn transaction(&self) -> &[u8] {
         &self.transaction
     }
 
@@ -102,16 +103,19 @@ pub fn authenticate_settlement_inclusion(
         return Err(SettlementAdmissionErrorV1::InclusionExpectation);
     }
 
-    let transaction =
-        SettlementTransactionV1::decode(inclusion.transaction()).map_err(SettlementAdmissionErrorV1::Codec)?;
-    let canonical = transaction.encode();
+    let (transaction, format) =
+        SettlementTransactionV1::decode_wire(inclusion.transaction()).map_err(SettlementAdmissionErrorV1::Codec)?;
+    let canonical = transaction.encode_wire(format);
     if canonical.as_slice() != inclusion.transaction() {
         return Err(SettlementAdmissionErrorV1::NonCanonicalEncoding);
     }
     if transaction.statement() != &expectation.settlement.statement {
         return Err(SettlementAdmissionErrorV1::SettlementExpectation);
     }
-    if transaction.statement().l1_block == inclusion.block() || transaction.statement().l1_slot >= inclusion.slot() {
+    if transaction.statement().l1_block == inclusion.block()
+        || transaction.statement().l1_slot >= inclusion.slot()
+        || (format == SettlementWireFormat::NativeV1 && transaction.statement().l1_block != inclusion.parent())
+    {
         return Err(SettlementAdmissionErrorV1::SourceAnchor);
     }
     let admission_commitment = admission_commitment(transaction.commitment(), &inclusion);
