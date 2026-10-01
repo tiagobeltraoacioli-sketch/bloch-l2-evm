@@ -21,8 +21,8 @@ use crate::checkpoint_store::{
 #[cfg(unix)]
 use bloch_l2_evm::native_settlement::{
     store::{
-        SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1, SettlementStoreReplayErrorV1,
-        SettlementStoreV1,
+        SettlementReplayRecordV1, SettlementStoreAdmissionV1, SettlementStoreErrorV1, SettlementStoreMarkV1,
+        SettlementStoreReplayErrorV1, SettlementStoreV1,
     },
     AcceptedSettlementV1, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
 };
@@ -57,6 +57,8 @@ pub enum SettlementAuthorityStoreErrorV1 {
     Missing,
     Receipt(SettlementAuthorityErrorV1),
     Mismatch,
+    /// A caller-selected correspondence check failed after PQ authentication.
+    AdditionalAudit(String),
     /// One earlier or current settlement failed independent authority replay.
     History {
         generation: u64,
@@ -422,6 +424,40 @@ pub fn open_proof_verified_authority_stores<V: SettlementProofVerifierV1>(
     maximum_proofs: u64,
     verifier: &V,
 ) -> Result<RecoveredAuthorityStoresV1, SettlementAuthorityStoreErrorV1> {
+    open_proof_verified_authority_stores_with_audit(
+        checkpoint_path,
+        checkpoint_policy,
+        checkpoint_floor,
+        settlement_path,
+        settlement_policy,
+        settlement_floor,
+        current_epoch,
+        maximum_proofs,
+        verifier,
+        |_| Ok(()),
+    )
+}
+
+/// Compose strict proof/PQ replay with an additional read-only record audit,
+/// such as correspondence to a stopped Reth canonical snapshot. Each callback
+/// runs only after that record's proof, inclusion and PQ authority have passed.
+/// A callback failure aborts both store opens and retains its record generation.
+/// The callback must not publish handles or heads: later records can still fail.
+/// It cannot replace or relax any mandatory proof or authority verification.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub fn open_proof_verified_authority_stores_with_audit<V: SettlementProofVerifierV1>(
+    checkpoint_path: impl AsRef<Path>,
+    checkpoint_policy: crate::checkpoint::CheckpointPolicy,
+    checkpoint_floor: CheckpointMark,
+    settlement_path: impl AsRef<Path>,
+    settlement_policy: SettlementPolicyV1,
+    settlement_floor: SettlementStoreMarkV1,
+    current_epoch: u64,
+    maximum_proofs: u64,
+    verifier: &V,
+    mut audit: impl FnMut(&SettlementReplayRecordV1<'_>) -> Result<(), SettlementAuthorityStoreErrorV1>,
+) -> Result<RecoveredAuthorityStoresV1, SettlementAuthorityStoreErrorV1> {
     let checkpoint_store = CheckpointStore::open(checkpoint_path, checkpoint_policy, Some(checkpoint_floor))
         .map_err(SettlementAuthorityStoreErrorV1::Checkpoint)?;
     let mut latest_authority = None;
@@ -439,6 +475,7 @@ pub fn open_proof_verified_authority_stores<V: SettlementProofVerifierV1>(
                 record.authority_audit,
                 current_epoch,
             )?);
+            audit(&record)?;
             Ok(())
         },
     )

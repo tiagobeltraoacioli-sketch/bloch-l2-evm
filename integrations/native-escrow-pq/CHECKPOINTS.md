@@ -119,6 +119,15 @@ current epoch and both floors remain independent trust inputs. Reverification
 of a historical acceptance epoch does not grant a fresh checkpoint capability,
 establish native settlement consensus or authorize the `finalized` RPC tag.
 
+`open_proof_verified_authority_stores_with_audit` additionally accepts a
+read-only per-record check after mandatory proof, inclusion and PQ authority
+verification. For example, a host can bind every verified record to a stopped
+[Reth canonical snapshot](../reth-execution/SETTLEMENT-BINDING.md). Invalid
+authority never reaches this callback. `AdditionalAudit` refusals retain their
+record generation and release both stores without returning a handle. This
+hook is additive; it cannot replace the mandatory verifiers. The original
+strict opener preserves its behavior by supplying a no-op additional audit.
+
 ## Validation
 
 The checkpoint and settlement-authority tests use disposable locally generated

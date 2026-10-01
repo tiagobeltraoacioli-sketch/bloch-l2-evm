@@ -179,6 +179,11 @@ impl SettlementTransactionV1 {
     pub const fn statement(&self) -> &SettlementStatementV2 {
         &self.statement
     }
+
+    /// Claimed proof-policy identity; this accessor performs no verification.
+    pub const fn proof_policy(&self) -> B256 {
+        self.proof_policy
+    }
 }
 
 /// Source and L2 successor selected independently by native consensus.

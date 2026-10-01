@@ -151,6 +151,15 @@ test deliberately violates sole-writer ownership to check defensive rejection.
 Separate regressions remove account or storage history indices and verify that
 attachment rejects the database without restoring the deleted indices.
 
+The read-only [canonical settlement audit](SETTLEMENT-BINDING.md) now binds
+recovered settlement records to the exact persisted V2 headers and complete
+bodies under a separate L2 rollback floor. It checks a bounded canonical prefix
+before replay, rejects mismatches or ignored errors, and rechecks the
+acknowledged tip before returning a recovered handle. It composes with the
+native-PQ per-record audit hook without adding that integration's dependencies
+to this crate. It does not set safe/finalized markers or establish native
+consensus execution.
+
 `replay_canonical_prefix(source, fresh_target)` re-executes the completed MDBX
 prefix into separate storage. It validates each full V2 header against execution,
 rebuilds historical indices and excludes static-file rows ahead of the checkpoint.

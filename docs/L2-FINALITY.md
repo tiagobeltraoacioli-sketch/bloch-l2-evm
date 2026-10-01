@@ -201,6 +201,21 @@ running node; it does not establish production deployment or native finality.
 
 ## RPC tag qualification
 
+The Reth integration now has a read-only
+[canonical settlement correspondence boundary](../integrations/reth-execution/SETTLEMENT-BINDING.md).
+It inspects the complete acknowledged V2 prefix under a separate L2 floor and
+explicit budgets, then compares each recovered settlement with the exact local
+header, complete body and consumed deposit count. The native-PQ strict recovery
+hook runs this additional check only after that record's proof and authority
+have passed. Missing bodies, mismatched earlier records, skipped generations,
+ignored failures and a changed canonical tip prevent a recovery result from
+escaping. The returned accounting is not a finalized-block capability.
+
+Tests use real local Reth storage and kernel execution with synthetic native
+provenance and a proof-verifier double. They establish correspondence and
+failure handling, not production proof transport, native settlement consensus
+or RPC finality. All production requirements remain independently gated.
+
 The presence of `safe` or `finalized` tags is not finality evidence by itself.
 A static or genesis-only endpoint can return block zero for all three tags while
 making no progress and authenticating no settlement. The diagnostic probe:

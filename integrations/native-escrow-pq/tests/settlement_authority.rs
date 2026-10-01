@@ -15,8 +15,8 @@ use bloch_native_escrow_pq::{
     checkpoint_store::CheckpointStore,
     settlement_authority::{
         bind_settlement_checkpoint_authority, open_authority_bound_stores, open_proof_verified_authority_stores,
-        CheckpointAuthorityReceiptV1, SettlementAuthorityErrorV1, SettlementAuthorityStoreErrorV1,
-        CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
+        open_proof_verified_authority_stores_with_audit, CheckpointAuthorityReceiptV1, SettlementAuthorityErrorV1,
+        SettlementAuthorityStoreErrorV1, CHECKPOINT_AUTHORITY_RECEIPT_V1_BYTES,
     },
 };
 use bloch_pos_committee::{
@@ -682,7 +682,8 @@ fn strict_recovery_authenticates_every_record_even_when_the_latest_receipt_is_va
             .unwrap(),
         );
         verifier.calls.set(0);
-        let result = open_proof_verified_authority_stores(
+        let additional_audits = Cell::new(0);
+        let result = open_proof_verified_authority_stores_with_audit(
             &checkpoint_path,
             checkpoint_policy(),
             checkpoint_floor,
@@ -692,10 +693,17 @@ fn strict_recovery_authenticates_every_record_even_when_the_latest_receipt_is_va
             observed_epoch,
             2,
             &verifier,
+            |record| {
+                additional_audits.set(additional_audits.get() + 1);
+                assert_eq!(record.mark.generation, additional_audits.get());
+                assert!(record.admission.is_some() && record.evidence.is_some() && record.authority_audit.is_some());
+                Ok(())
+            },
         );
         match (first_record, result) {
             (FirstRecord::Valid, Ok(stores)) => {
                 assert_eq!(verifier.calls.get(), 2);
+                assert_eq!(additional_audits.get(), 2);
                 assert_eq!(stores.authority().encode().as_slice(), expected_latest);
                 assert_eq!(stores.settlement_store().mark(), settlement_floor);
                 // Reverified historical authority never becomes a fresh anchor.
@@ -703,10 +711,36 @@ fn strict_recovery_authenticates_every_record_even_when_the_latest_receipt_is_va
                     stores.checkpoint_store().current(observed_epoch),
                     Err(CheckpointStoreError::Verify(CheckpointError::Stale))
                 ));
+                drop(stores);
+                let refused = open_proof_verified_authority_stores_with_audit(
+                    &checkpoint_path,
+                    checkpoint_policy(),
+                    checkpoint_floor,
+                    &settlement_path,
+                    settlement_policy(),
+                    settlement_floor,
+                    observed_epoch,
+                    2,
+                    &verifier,
+                    |record| {
+                        if record.mark.generation == 2 {
+                            Err(SettlementAuthorityStoreErrorV1::AdditionalAudit(
+                                "canonical L2 mismatch".into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+                assert!(
+                    matches!(refused, Err(SettlementAuthorityStoreErrorV1::History { generation: 2, error })
+                    if matches!(*error, SettlementAuthorityStoreErrorV1::AdditionalAudit(_)))
+                );
             }
             (case, Err(SettlementAuthorityStoreErrorV1::History { generation, error })) => {
                 assert_eq!(generation, 1);
                 assert_eq!(verifier.calls.get(), 1);
+                assert_eq!(additional_audits.get(), 0);
                 match (case, *error) {
                     (
                         FirstRecord::WithoutInclusion | FirstRecord::WithoutAuthority,
