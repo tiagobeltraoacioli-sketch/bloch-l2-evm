@@ -42,7 +42,16 @@ The separate AGPL native-PQ adapter exposes
 `open_proof_verified_authority_stores_with_audit`. Its additional callback runs
 only after each record has passed execution-proof, complete-inclusion and
 historical checkpoint-authority verification. The callback cannot relax those
-checks. A host that links both integrations can compose them as follows:
+checks.
+
+The separate AGPL [settlement recovery adapter](../settlement-recovery/README.md)
+now provides this closed composition as `recover_canonical_settlements`, with
+joint storage/PQ integration tests and a final check of full replay coverage.
+Hosts can use that entrypoint instead of implementing the callback composition
+themselves. Its runtime proof verifier and production qualification remain
+independent requirements.
+
+The equivalent callback composition is:
 
 ```rust
 with_canonical_settlement_audit(

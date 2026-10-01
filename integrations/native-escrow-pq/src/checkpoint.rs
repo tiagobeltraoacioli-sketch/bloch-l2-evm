@@ -99,6 +99,11 @@ impl VerifiedCheckpoint {
     }
 }
 impl CheckpointPolicy {
+    /// Independently selected native genesis, not a verified checkpoint claim.
+    pub const fn native_genesis(&self) -> [u8; 32] {
+        self.genesis
+    }
+
     /// Storage identity for this exact out-of-band policy, including key order.
     pub(crate) fn storage_identity(&self) -> B256 {
         use sha3::{Digest, Sha3_256};

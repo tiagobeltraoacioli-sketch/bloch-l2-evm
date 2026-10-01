@@ -1,0 +1,32 @@
+[package]
+name = "bloch-settlement-recovery"
+version = "0.1.0-experimental"
+edition = "2021"
+rust-version = "1.98.1"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Read-only composition of PQ authority recovery and canonical L2 settlement correspondence"
+
+# The combined host adapter stays outside both portable and Reth workspaces.
+[workspace]
+
+[dependencies]
+bloch-l2-evm = { path = "../.." }
+bloch-native-escrow-pq = { path = "../native-escrow-pq" }
+bloch-reth-execution = { path = "../reth-execution" }
+
+[patch.crates-io]
+pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-internals" }
+
+[dev-dependencies]
+alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
+alloy-primitives = { version = "=1.6.1", default-features = false }
+alloy-rlp = "=0.3.16"
+bloch-crypto = { path = "../../../bloch-validator-payout/crates/bloch-crypto", default-features = false }
+bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos-committee" }
+k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+reth-chainspec = { path = "../../../reth-bloch-rpc-snapshot/crates/chainspec" }
+reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider", features = ["test-utils"] }
+reth-db = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db", features = ["test-utils"] }
+reth-tasks = { path = "../../../reth-bloch-rpc-snapshot/crates/tasks", features = ["test-utils"] }
+tempfile = "3"

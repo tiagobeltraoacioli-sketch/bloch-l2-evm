@@ -128,6 +128,13 @@ record generation and release both stores without returning a handle. This
 hook is additive; it cannot replace the mandatory verifiers. The original
 strict opener preserves its behavior by supplying a no-op additional audit.
 
+The separate AGPL [combined recovery adapter](../settlement-recovery/README.md)
+links that strict opener with the Reth audit behind one entrypoint. It compares
+the selected native genesis identities, exposes no caller-controlled audit
+callback and returns locked stores only after full coverage and a stable local
+canonical tip. Combined tests exercise real PQ signatures and real Reth storage;
+the proof verifier remains an explicit test double in those fixtures.
+
 ## Validation
 
 The checkpoint and settlement-authority tests use disposable locally generated

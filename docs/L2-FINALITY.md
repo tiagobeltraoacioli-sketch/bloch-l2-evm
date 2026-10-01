@@ -216,6 +216,15 @@ provenance and a proof-verifier double. They establish correspondence and
 failure handling, not production proof transport, native settlement consensus
 or RPC finality. All production requirements remain independently gated.
 
+The separate AGPL [combined recovery adapter](../integrations/settlement-recovery/README.md)
+now exercises both integrations in one process. Its entrypoint requires matching
+native genesis policies and all three independent recovery floors, always runs
+the mandatory canonical callback, and checks complete generation/head coverage
+before exposing either locked history. Tests cover real PQ signatures together
+with actual Reth storage, late failures and changed canonical tips. This closes
+the local composition test gap; production proof transport and consensus
+activation are still required before any finalized-RPC publication.
+
 The presence of `safe` or `finalized` tags is not finality evidence by itself.
 A static or genesis-only endpoint can return block zero for all three tags while
 making no progress and authenticating no settlement. The diagnostic probe:
