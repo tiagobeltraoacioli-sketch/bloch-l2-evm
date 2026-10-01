@@ -91,13 +91,16 @@ impl TableInfo for BlochV2Deposits {
         false
     }
 }
-/// Standard Reth tables plus the independently named Bloch V2 deposits table.
+/// Standard Reth tables plus the Bloch V2 deposits and finality-candidate tables.
 /// Register this complete set at database creation and reopen, before sharing it.
 #[derive(Debug)]
 pub struct BlochTables;
 impl TableSet for BlochTables {
     fn tables() -> Box<dyn Iterator<Item = Box<dyn TableInfo>>> {
-        Box::new(Tables::tables().chain(std::iter::once(Box::new(BlochV2Deposits) as Box<dyn TableInfo>)))
+        Box::new(Tables::tables().chain([
+            Box::new(BlochV2Deposits) as Box<dyn TableInfo>,
+            Box::new(crate::finality_cursor::BlochFinalityCandidate) as Box<dyn TableInfo>,
+        ]))
     }
 }
 

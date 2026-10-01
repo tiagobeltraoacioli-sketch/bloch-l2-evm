@@ -40,6 +40,7 @@ impl CanonicalCoordinator {
     /// databases missing genesis history indices fail closed. This requires an
     /// archival database; it does not repair indices or cross-backend crash damage.
     pub fn attach(factory: BlochProviderFactory) -> Result<Self, BlockExecutionError> {
+        crate::finality_cursor::reject_unverified_finality_markers(&factory)?;
         let spec = factory.chain_spec();
         let number = factory.best_block_number().map_err(BlockExecutionError::other)?;
         if factory.last_block_number().map_err(BlockExecutionError::other)? != number {

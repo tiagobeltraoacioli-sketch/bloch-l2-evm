@@ -25,16 +25,21 @@ use bloch_pos_committee::{
     header::{BlockHeaderV4, BlockId},
     ws::{self, CheckpointEnvelope, Signer, SignerSet, WeakSubjectivityCheckpoint},
 };
+use bloch_reth_execution::finality_cursor::{
+    read_finality_candidate, BlochFinalityCandidate, FinalityCandidateCursorV1,
+};
 use bloch_reth_execution::{
     prepare_genesis, settlement_binding::CanonicalSettlementAuditErrorV1, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator, ReplayFloor, ReplayLimits,
 };
+use bloch_settlement_recovery::cursor::{recover_and_stage_finality_candidate, FinalityCandidateErrorV1};
 use bloch_settlement_recovery::{
     recover_canonical_settlements, SettlementRecoveryErrorV1, SettlementRecoveryRequestV1,
 };
 use k256::ecdsa::SigningKey;
 use reth_chainspec::EthChainSpec;
 use reth_db::mdbx::{init_db_for, DatabaseArguments};
+use reth_db_api::transaction::DbTxMut;
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     BlockIdReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
@@ -209,6 +214,8 @@ struct Fixture {
     checkpoint_floor: CheckpointMark,
     settlement_floor: SettlementStoreMarkV1,
     l2_floor: ReplayFloor,
+    first_checkpoint_floor: CheckpointMark,
+    first_settlement_floor: SettlementStoreMarkV1,
 }
 impl Fixture {
     fn create(first: FirstRecord) -> Self {
@@ -220,6 +227,7 @@ impl Fixture {
         let mut checkpoint_store = CheckpointStore::create(&checkpoints, checkpoint_policy()).unwrap();
         let p = policy();
         let mut settlement_store = SettlementStoreV1::create(&settlements, p).unwrap();
+        let mut first_marks = None;
         for number in 1..=2 {
             let block = source.block_by_number(number).unwrap().unwrap();
             let header = &block.header.0;
@@ -299,6 +307,9 @@ impl Fixture {
                     )
                     .unwrap();
             }
+            if number == 1 {
+                first_marks = Some((checkpoint_store.mark().unwrap(), settlement_store.mark()));
+            }
         }
         let l2_floor = ReplayFloor {
             number: 2,
@@ -311,6 +322,8 @@ impl Fixture {
             l2_floor,
             checkpoint_floor: checkpoint_store.mark().unwrap(),
             settlement_floor: settlement_store.mark(),
+            first_checkpoint_floor: first_marks.unwrap().0,
+            first_settlement_floor: first_marks.unwrap().1,
         }
     }
     fn request(&self) -> SettlementRecoveryRequestV1<'_> {
@@ -345,6 +358,212 @@ impl Fixture {
         drop(CheckpointStore::open(&self.checkpoints, checkpoint_policy(), Some(self.checkpoint_floor)).unwrap());
         drop(SettlementStoreV1::open(&self.settlements, policy(), self.settlement_floor).unwrap());
     }
+}
+
+fn stored_candidate(source: &BlochProviderFactory) -> Option<FinalityCandidateCursorV1> {
+    let reader = source.database_provider_ro().unwrap();
+    read_finality_candidate(reader.tx_ref()).unwrap()
+}
+
+#[test]
+fn candidate_is_durable_monotonic_and_reverified_when_histories_advance() {
+    let fixture = Fixture::create(FirstRecord::Valid);
+    let source = open(fixture.root.path());
+    let original = fixture.bytes();
+    let pending_cp = fixture.root.path().join("pending-checkpoint");
+    let pending_settlement = fixture.root.path().join("pending-settlement");
+    let last_cp = fixture.checkpoints.join(format!("{:020}.ckp", 102));
+    let last_settlement = fixture.settlements.join(format!("{:020}.sst", 2));
+    fs::rename(&last_cp, &pending_cp).unwrap();
+    fs::rename(&last_settlement, &pending_settlement).unwrap();
+    let mut request = fixture.request();
+    request.checkpoint_floor = fixture.first_checkpoint_floor;
+    request.settlement_floor = fixture.first_settlement_floor;
+    let verifier = FixedProof::default();
+    let staged = recover_and_stage_finality_candidate(&source, request, &verifier, None).unwrap();
+    let first = staged.cursor();
+    assert_eq!(first.fields().l2_number, 1);
+    assert_eq!(stored_candidate(&source), Some(first));
+    drop(staged);
+    fs::rename(&pending_cp, &last_cp).unwrap();
+    fs::rename(&pending_settlement, &last_settlement).unwrap();
+    let staged =
+        recover_and_stage_finality_candidate(&source, fixture.request(), &verifier, Some(first.commitment())).unwrap();
+    let second = staged.cursor();
+    assert_eq!(second.fields().l2_number, 2);
+    assert_ne!(first.commitment(), second.commitment());
+    drop(staged);
+    drop(source);
+    let source = open(fixture.root.path());
+    let staged =
+        recover_and_stage_finality_candidate(&source, fixture.request(), &verifier, Some(second.commitment())).unwrap();
+    assert_eq!(staged.cursor(), second);
+    assert_eq!(verifier.calls.get(), 5); // 1 + 2 + 2, including records below the new floor.
+    let provider = CanonicalCoordinator::attach(source.clone()).unwrap().provider();
+    assert_eq!(provider.finalized_block_num_hash().unwrap(), None);
+    assert_eq!(provider.safe_block_num_hash().unwrap(), None);
+    drop(staged.into_recovery());
+    fixture.assert_unlocked();
+    fs::rename(&last_cp, &pending_cp).unwrap();
+    fs::rename(&last_settlement, &pending_settlement).unwrap();
+    let mut rolled_back = fixture.request();
+    rolled_back.checkpoint_floor = fixture.first_checkpoint_floor;
+    rolled_back.settlement_floor = fixture.first_settlement_floor;
+    assert!(recover_and_stage_finality_candidate(&source, rolled_back, &verifier, Some(second.commitment())).is_err());
+    assert_eq!(stored_candidate(&source), Some(second));
+    fs::rename(pending_cp, last_cp).unwrap();
+    fs::rename(pending_settlement, last_settlement).unwrap();
+    fixture.assert_unlocked();
+    assert_eq!(fixture.bytes(), original);
+}
+
+#[test]
+fn matching_cursor_bytes_never_replace_mandatory_evidence_reverification() {
+    let fixture = Fixture::create(FirstRecord::Valid);
+    let source = open(fixture.root.path());
+    let staged =
+        recover_and_stage_finality_candidate(&source, fixture.request(), &FixedProof::default(), None).unwrap();
+    let original = staged.cursor();
+    drop(staged);
+    let before = fixture.bytes();
+    for case in 0..9 {
+        let mut fields = *original.fields();
+        match case {
+            0 => fields.l2_hash = h(99),
+            1 => fields.l2_state_root = h(99),
+            2 => fields.settlement_record_digest = h(99),
+            3 => fields.settlement_generation = 3,
+            4 => fields.checkpoint_digest = h(99),
+            5 => fields.checkpoint_policy = h(99),
+            6 => fields.checked_at_epoch = 104,
+            7 => fields.settlement_policy = h(99),
+            8 => fields.l2_genesis = h(99),
+            _ => unreachable!(),
+        }
+        let forged = FinalityCandidateCursorV1::from_fields(fields).unwrap();
+        let writer = source.database_provider_rw().unwrap();
+        writer.tx_ref().put::<BlochFinalityCandidate>(0, forged).unwrap();
+        writer.commit().unwrap();
+        // Even a matching claimed floor cannot turn decoded audit data into authority.
+        assert!(
+            recover_and_stage_finality_candidate(
+                &source,
+                fixture.request(),
+                &FixedProof::default(),
+                Some(forged.commitment())
+            )
+            .is_err(),
+            "case {case}"
+        );
+        assert_eq!(stored_candidate(&source), Some(forged));
+        fixture.assert_unlocked();
+    }
+    assert_eq!(fixture.bytes(), before);
+}
+
+#[test]
+fn missing_foreign_and_stale_cursor_rows_fail_before_proof_replay() {
+    let fixture = Fixture::create(FirstRecord::Valid);
+    let source = open(fixture.root.path());
+    let staged =
+        recover_and_stage_finality_candidate(&source, fixture.request(), &FixedProof::default(), None).unwrap();
+    let cursor = staged.cursor();
+    drop(staged);
+    let verifier = FixedProof::default();
+    for expected in [None, Some(h(99))] {
+        assert!(matches!(
+            recover_and_stage_finality_candidate(&source, fixture.request(), &verifier, expected),
+            Err(FinalityCandidateErrorV1::CursorFloor)
+        ));
+    }
+    let writer = source.database_provider_rw().unwrap();
+    writer.tx_ref().put::<BlochFinalityCandidate>(1, cursor).unwrap();
+    writer.commit().unwrap();
+    assert!(matches!(
+        recover_and_stage_finality_candidate(&source, fixture.request(), &verifier, Some(cursor.commitment())),
+        Err(FinalityCandidateErrorV1::Storage(_))
+    ));
+    let mut writer = source.database_provider_rw().unwrap();
+    writer.tx_mut().clear::<BlochFinalityCandidate>().unwrap();
+    writer.commit().unwrap();
+    assert!(matches!(
+        recover_and_stage_finality_candidate(&source, fixture.request(), &verifier, Some(cursor.commitment())),
+        Err(FinalityCandidateErrorV1::CursorFloor)
+    ));
+    assert_eq!(verifier.calls.get(), 0);
+    fixture.assert_unlocked();
+}
+
+#[test]
+fn proof_failure_and_checkpoint_expiry_preserve_the_saved_candidate() {
+    let fixture = Fixture::create(FirstRecord::Valid);
+    let source = open(fixture.root.path());
+    let staged =
+        recover_and_stage_finality_candidate(&source, fixture.request(), &FixedProof::default(), None).unwrap();
+    let cursor = staged.cursor();
+    drop(staged);
+    let before = fixture.bytes();
+    let reject = FixedProof {
+        calls: Cell::new(0),
+        reject: Some(2),
+    };
+    assert!(matches!(
+        recover_and_stage_finality_candidate(&source, fixture.request(), &reject, Some(cursor.commitment())),
+        Err(FinalityCandidateErrorV1::Recovery(_))
+    ));
+    assert_eq!(reject.calls.get(), 2);
+    let mut request = fixture.request();
+    request.current_epoch += ws::WS_PERIOD_EPOCHS;
+    assert!(matches!(
+        recover_and_stage_finality_candidate(&source, request, &FixedProof::default(), Some(cursor.commitment())),
+        Err(FinalityCandidateErrorV1::Freshness)
+    ));
+    assert_eq!(stored_candidate(&source), Some(cursor));
+    assert_eq!(fixture.bytes(), before);
+    fixture.assert_unlocked();
+}
+
+#[test]
+fn concurrent_cursor_replacement_is_not_overwritten_after_successful_replay() {
+    struct ReplacingProof<'a> {
+        source: &'a BlochProviderFactory,
+        replacement: FinalityCandidateCursorV1,
+        inner: FixedProof,
+    }
+    impl SettlementProofVerifierV1 for ReplacingProof<'_> {
+        fn verify(&self, policy: B256, values: &[u8], proof: &[u8]) -> bool {
+            if self.inner.calls.get() == 0 {
+                let writer = self.source.database_provider_rw().unwrap();
+                writer
+                    .tx_ref()
+                    .put::<BlochFinalityCandidate>(0, self.replacement)
+                    .unwrap();
+                writer.commit().unwrap();
+            }
+            self.inner.verify(policy, values, proof)
+        }
+    }
+    let fixture = Fixture::create(FirstRecord::Valid);
+    let source = open(fixture.root.path());
+    let staged =
+        recover_and_stage_finality_candidate(&source, fixture.request(), &FixedProof::default(), None).unwrap();
+    let cursor = staged.cursor();
+    drop(staged);
+    let mut fields = *cursor.fields();
+    fields.checked_at_epoch += 1;
+    let replacement = FinalityCandidateCursorV1::from_fields(fields).unwrap();
+    let verifier = ReplacingProof {
+        source: &source,
+        replacement,
+        inner: FixedProof::default(),
+    };
+    assert!(matches!(
+        recover_and_stage_finality_candidate(&source, fixture.request(), &verifier, Some(cursor.commitment())),
+        Err(FinalityCandidateErrorV1::Changed)
+    ));
+    assert_eq!(verifier.inner.calls.get(), 2);
+    assert_eq!(stored_candidate(&source), Some(replacement));
+    fixture.assert_unlocked();
 }
 
 #[test]

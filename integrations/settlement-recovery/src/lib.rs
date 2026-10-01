@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Read-only recovery of PQ-authorized settlements against exact local L2 blocks.
+//! Recovery of PQ-authorized settlements and durable local finality candidates.
 //! This host composition never grants native consensus or an RPC finality capability.
 #![cfg(unix)]
 
@@ -18,6 +18,8 @@ use bloch_reth_execution::{
     BlochProviderFactory, ReplayFloor, ReplayLimits,
 };
 use std::path::Path;
+
+pub mod cursor;
 
 /// Explicit host inputs. Policies, floors and epoch must come from independent
 /// trusted sources, never from the files or RPC claims being audited. The host
@@ -43,6 +45,8 @@ pub enum SettlementRecoveryErrorV1 {
     /// Defensive postcondition: every recovered generation and the exact head
     /// must be represented in the canonical audit before either handle escapes.
     Incomplete,
+    /// A retained candidate no longer matches the independently reverified histories.
+    Cursor,
 }
 
 impl std::fmt::Display for SettlementRecoveryErrorV1 {
@@ -91,9 +95,20 @@ pub fn recover_canonical_settlements<V: SettlementProofVerifierV1>(
     request: SettlementRecoveryRequestV1<'_>,
     verifier: &V,
 ) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
+    recover_with_cursor(source, request, verifier, None)
+}
+
+fn recover_with_cursor<V: SettlementProofVerifierV1>(
+    source: &BlochProviderFactory,
+    request: SettlementRecoveryRequestV1<'_>,
+    verifier: &V,
+    previous: Option<bloch_reth_execution::finality_cursor::FinalityCandidateCursorV1>,
+) -> Result<RecoveredCanonicalSettlementsV1, SettlementRecoveryErrorV1> {
     if request.checkpoint_policy.native_genesis().as_slice() != request.settlement_policy.genesis.as_slice() {
         return Err(SettlementRecoveryErrorV1::Policy);
     }
+    let current_epoch = request.current_epoch;
+    let mut previous_seen = previous.is_none();
     let (stores, report) = with_canonical_settlement_audit(
         source,
         request.settlement_policy,
@@ -113,7 +128,24 @@ pub fn recover_canonical_settlements<V: SettlementProofVerifierV1>(
                 |record| {
                     canonical
                         .audit_record(record)
-                        .map_err(|error| SettlementAuthorityStoreErrorV1::AdditionalAudit(error.to_string()))
+                        .map_err(|error| SettlementAuthorityStoreErrorV1::AdditionalAudit(error.to_string()))?;
+                    if let Some(previous) = previous {
+                        let f = previous.fields();
+                        if record.mark.generation == f.settlement_generation {
+                            if record.mark.record_digest != f.settlement_record_digest
+                                || record.mark.state_commitment != f.settlement_state_commitment
+                                || record.accepted.l2_number != f.l2_number
+                                || record.accepted.l2_header_hash != f.l2_hash
+                                || record.accepted.l2_state_root != f.l2_state_root
+                            {
+                                return Err(SettlementAuthorityStoreErrorV1::AdditionalAudit(
+                                    "saved finality candidate differs from reverified settlement".into(),
+                                ));
+                            }
+                            previous_seen = true;
+                        }
+                    }
+                    Ok(())
                 },
             )
         },
@@ -127,6 +159,19 @@ pub fn recover_canonical_settlements<V: SettlementProofVerifierV1>(
             .is_some_and(|(head, last)| head.l2_number == last.number && head.l2_header_hash == last.hash)
     {
         return Err(SettlementRecoveryErrorV1::Incomplete);
+    }
+    if let Some(previous) = previous {
+        let f = previous.fields();
+        if !previous_seen || f.l2_genesis != report.genesis || f.settlement_policy != report.policy_commitment {
+            return Err(SettlementRecoveryErrorV1::Cursor);
+        }
+        let retained = stores
+            .checkpoint_store()
+            .historical_audit(f.checkpoint_epoch, f.checked_at_epoch, current_epoch)
+            .map_err(|_| SettlementRecoveryErrorV1::Cursor)?;
+        if retained.checkpoint_digest() != f.checkpoint_digest || retained.policy_identity() != f.checkpoint_policy {
+            return Err(SettlementRecoveryErrorV1::Cursor);
+        }
     }
     Ok(RecoveredCanonicalSettlementsV1 { stores, report })
 }

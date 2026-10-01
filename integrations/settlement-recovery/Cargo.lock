@@ -1846,6 +1846,7 @@ dependencies = [
  "k256",
  "reth-chainspec",
  "reth-db",
+ "reth-db-api",
  "reth-provider",
  "reth-tasks",
  "tempfile",

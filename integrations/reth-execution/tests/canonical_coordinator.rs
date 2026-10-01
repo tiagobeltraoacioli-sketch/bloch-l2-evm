@@ -45,6 +45,28 @@ fn attributes(timestamp: u64) -> BlochNextBlockEnvCtx {
 }
 
 #[test]
+fn unverified_numeric_finality_markers_cannot_bootstrap_the_canonical_provider() {
+    for key in [
+        tables::ChainStateKey::LastSafeBlock,
+        tables::ChainStateKey::LastFinalizedBlock,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = Arc::new(BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(75), 10).unwrap());
+        let factory = open(directory.path(), spec.clone());
+        let genesis = prepare_genesis(&spec, factory.latest().unwrap().as_ref()).unwrap();
+        let writer = factory.database_provider_rw().unwrap();
+        writer.save_blocks(vec![genesis], SaveBlocksMode::Full).unwrap();
+        writer.tx_ref().put::<tables::ChainState>(key.clone(), 0).unwrap();
+        writer.commit().unwrap();
+        drop(factory);
+        let factory = open(directory.path(), spec);
+        assert!(CanonicalCoordinator::attach(factory.clone()).is_err());
+        let reader = factory.database_provider_ro().unwrap();
+        assert_eq!(reader.tx_ref().get::<tables::ChainState>(key).unwrap(), Some(0));
+    }
+}
+
+#[test]
 fn held_transaction_snapshot_does_not_follow_newer_static_file_tip() {
     snapshot_queries_survive_static_tip_advance(false);
 }

@@ -24,6 +24,7 @@ pub use consensus::BlochConsensus;
 pub mod execute;
 pub use chainspec::BlochChainSpec;
 pub use execute::{execute_next_block, prepare_genesis, validate_and_execute_block};
+pub mod finality_cursor;
 pub mod lifecycle;
 pub mod maintenance;
 pub mod payload;

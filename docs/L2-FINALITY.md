@@ -201,6 +201,24 @@ running node; it does not establish production deployment or native finality.
 
 ## RPC tag qualification
 
+### Durable preparation before RPC publication
+
+The combined adapter's `recover_and_stage_finality_candidate` now persists an
+exact candidate in a dedicated MDBX singleton after complete proof/PQ/canonical
+replay. It compares the independently retained candidate commitment, rechecks
+the previous candidate's exact historical settlement and checkpoint, requires
+a fresh checkpoint and fences the canonical tip in the committing transaction.
+Lost evidence suffixes, regressing generations, conflicting records, ignored
+external marks or concurrent cursor replacement prevent staging.
+
+The fixed-size candidate is durable preparation, not a finalized-block
+capability. It never writes Reth's numeric safe/finalized keys. The current
+canonical coordinator refuses startup when such unverified keys are present,
+including block zero, preserving them for review. Production finality cannot
+be bootstrapped from a stored height or a well-formed candidate. Native
+consensus-enforced settlement and proof transport qualification remain required;
+no production gate is changed by this implementation.
+
 The Reth integration now has a read-only
 [canonical settlement correspondence boundary](../integrations/reth-execution/SETTLEMENT-BINDING.md).
 It inspects the complete acknowledged V2 prefix under a separate L2 floor and

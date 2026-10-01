@@ -27,6 +27,44 @@ returned value exposes immutable history views and informational accounting.
 later appends require their own validation. Locks protect the two audit stores,
 not the Reth writer lifecycle.
 
+## Durable finality candidate
+
+`cursor::recover_and_stage_finality_candidate` adds a durable preparation step
+after mandatory combined recovery. The 296-byte candidate in the separate
+`BlochFinalityCandidate` MDBX table binds the L2 genesis, policy identities,
+settlement generation/digest/state commitment, exact L2 header and state root,
+checkpoint digest/epoch and observation epoch. It is distinct from Reth's
+numeric `safe`/`finalized` markers and cannot authorize either RPC tag.
+
+The caller supplies an exact candidate commitment retained outside this database;
+`None` permits only an empty table. During full recovery, the previous candidate's
+settlement must match its retained record, including records before the selected
+floor. Its checkpoint is independently reauthenticated at its recorded epoch.
+A currently fresh checkpoint is required to stage a new observation. The final
+MDBX transaction compares the prior cursor and canonical tip before replacing
+the singleton. Generations, heights and epochs cannot regress. Both evidence
+stores stay locked until the returned value is dropped or consumed.
+
+The external candidate mark is an exact CAS value, not a minimum. Retain the
+returned commitment independently before acknowledging the update. A lost suffix,
+unknown newer cursor, missing row or inconsistent mark requires independent
+recovery; it is never silently adopted. A commit error is potentially uncertain
+and must not be retried as though no write occurred. This is single-host MDBX
+durability, not distributed durability, and cannot defeat a compromised host
+that replaces both data and all independently retained trust inputs.
+
+Decoding a cursor validates bounded framing only. Recovery repeats proof, PQ,
+inclusion and canonical checks even when cursor bytes and their supplied hash
+match. Candidate staging never writes Reth's numeric finality keys. The current
+canonical coordinator refuses those keys at startup because no qualified native
+settlement publisher is registered. Refusal preserves the data for review.
+
+Combined tests exercise candidate advancement, restart, lost evidence suffixes,
+forged fields, deletion, foreign rows, stale external marks, checkpoint expiry,
+proof refusal and a competing candidate update. Successful staging leaves RPC
+safe/finalized markers absent. Production publication still requires native
+consensus acceptance and the remaining release qualifications.
+
 ## Trust and remaining production work
 
 The host must stop all Reth and static-file writers, independently retain all

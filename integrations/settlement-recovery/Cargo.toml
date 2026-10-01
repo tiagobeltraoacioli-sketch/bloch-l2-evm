@@ -14,13 +14,15 @@ description = "Read-only composition of PQ authority recovery and canonical L2 s
 bloch-l2-evm = { path = "../.." }
 bloch-native-escrow-pq = { path = "../native-escrow-pq" }
 bloch-reth-execution = { path = "../reth-execution" }
+alloy-primitives = { version = "=1.6.1", default-features = false }
+reth-db-api = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db-api" }
+reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider" }
 
 [patch.crates-io]
 pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-internals" }
 
 [dev-dependencies]
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
-alloy-primitives = { version = "=1.6.1", default-features = false }
 alloy-rlp = "=0.3.16"
 bloch-crypto = { path = "../../../bloch-validator-payout/crates/bloch-crypto", default-features = false }
 bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos-committee" }
