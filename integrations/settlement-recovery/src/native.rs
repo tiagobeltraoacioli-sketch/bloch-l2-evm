@@ -249,7 +249,11 @@ pub fn verify_native_finality(
         }
         for tx in &block.transactions {
             byte_count = byte_count.checked_add(tx.len()).ok_or(E::Limit)?;
-            if tx.first() == Some(&bloch_pos_committee::l2_settlement::WIRE_TAG) {
+            if matches!(
+                tx.first(),
+                Some(&bloch_pos_committee::l2_settlement::WIRE_TAG)
+                    | Some(&bloch_pos_committee::l2_settlement::ASYNC_WIRE_TAG)
+            ) {
                 proofs = proofs.checked_add(1).ok_or(E::Limit)?;
             }
             if byte_count > limits.bytes || proofs > limits.proofs {
@@ -312,7 +316,10 @@ pub fn verify_native_finality(
         }
         chain.push((block.envelope.header.slot, id));
         for (tx, bytes) in transactions.iter().zip(&block.transactions) {
-            if matches!(tx, PosTransaction::L2Settlement(_)) {
+            if matches!(
+                tx,
+                PosTransaction::L2Settlement(_) | PosTransaction::L2SettlementAsync(_)
+            ) {
                 settlements.insert(id, bytes.clone());
             }
         }
@@ -349,4 +356,43 @@ pub fn verify_native_finality(
         finalized_index: final_index,
         settlements,
     })
+}
+
+/// Bind every finalized asynchronous settlement, in native order, to a bounded
+/// stopped-writer canonical L2 snapshot. Only full real-cryptography replay can
+/// construct `verified`; caller-supplied RPC heights are never authority.
+/// Existing 0x0E/WS stores retain their strict immediate-parent admission rule.
+pub fn audit_finalized_async_settlements(
+    verified: &VerifiedNativeFinalityV1,
+    source: &bloch_reth_execution::BlochProviderFactory,
+    policy: SettlementPolicyV1,
+    floor: bloch_reth_execution::ReplayFloor,
+    limits: bloch_reth_execution::ReplayLimits,
+) -> Result<
+    bloch_reth_execution::settlement_binding::CanonicalSettlementAuditReportV1,
+    bloch_reth_execution::settlement_binding::CanonicalSettlementAuditErrorV1<NativeFinalityErrorV1>,
+> {
+    use bloch_l2_evm::{native_settlement::SettlementTransactionV1, proof_statement::SettlementStatementV2};
+    use bloch_reth_execution::settlement_binding::{with_canonical_settlement_audit, CanonicalSettlementAuditErrorV1};
+    if policy.commitment().ok() != Some(verified.report.settlement_policy) {
+        return Err(CanonicalSettlementAuditErrorV1::Consumer(NativeFinalityErrorV1::Trust));
+    }
+    let (_, report) = with_canonical_settlement_audit(source, policy, floor, limits, |audit| {
+        for (_, id) in verified.chain.iter().take(verified.finalized_index + 1) {
+            let Some(bytes) = verified.settlements.get(id) else {
+                continue;
+            };
+            let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes)
+                .ok_or(NativeFinalityErrorV1::Encoding)?;
+            let statement =
+                SettlementStatementV2::decode(&tx.statement).map_err(|_| NativeFinalityErrorV1::Encoding)?;
+            let tx = SettlementTransactionV1::new(tx.proof_policy.into(), statement, tx.proof)
+                .map_err(|_| NativeFinalityErrorV1::Encoding)?;
+            audit
+                .audit_transaction(&tx)
+                .map_err(|_| NativeFinalityErrorV1::Settlement)?;
+        }
+        Ok(())
+    })?;
+    Ok(report)
 }

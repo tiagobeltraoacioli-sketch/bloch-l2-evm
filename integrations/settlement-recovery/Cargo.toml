@@ -25,6 +25,7 @@ reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provid
 pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-internals" }
 
 [dev-dependencies]
+bloch-pos-node = { path = "../../../bloch-validator-payout/crates/bloch-pos-node" }
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-rlp = "=0.3.16"
 hex = "0.4"

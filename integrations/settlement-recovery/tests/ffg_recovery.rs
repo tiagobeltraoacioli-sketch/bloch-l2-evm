@@ -414,3 +414,31 @@ fn future_native_replay_cannot_stage_at_an_earlier_trusted_epoch() {
     assert!(recover_and_stage_ffg_finality_candidate(&source, disk.request(), &native, None).is_ok());
     assert_eq!(disk.history(), before);
 }
+
+#[test]
+fn asynchronous_boundary_refuses_legacy_mode_and_wrong_policy_and_counts_both_proof_tags() {
+    use bloch_settlement_recovery::native::audit_finalized_async_settlements;
+    let disk = Disk::new(1, 1);
+    let source = open(disk.root.path());
+    let blocks = blocks("full");
+    let native = verify_native_finality(&genesis(), trust(), &blocks, NativeReplayLimitsV1::default()).unwrap();
+    assert!(
+        audit_finalized_async_settlements(&native, &source, fixture::policy(), disk.l2, ReplayLimits::default())
+            .is_err()
+    );
+    let mut foreign = fixture::policy();
+    foreign.network = B256::repeat_byte(0xa1);
+    assert!(audit_finalized_async_settlements(&native, &source, foreign, disk.l2, ReplayLimits::default()).is_err());
+    for tag in [0x0e, 0x0f] {
+        let mut changed = blocks.clone();
+        changed[1].transactions[0][0] = tag;
+        let limits = NativeReplayLimitsV1 {
+            proofs: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_native_finality(&genesis(), trust(), &changed, limits).err(),
+            Some(NativeFinalityErrorV1::Limit)
+        );
+    }
+}

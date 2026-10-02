@@ -35,6 +35,25 @@ impl CanonicalSettlementAuditV1 {
     /// the public record view itself is not an authentication capability.
     /// Any failure poisons the audit, including when a caller swallows the error.
     pub fn audit_record(&mut self, record: &SettlementReplayRecordV1<'_>) -> Result<(), BlockExecutionError> {
+        let decoded = SettlementTransactionV1::decode_wire(record.transaction);
+        let (transaction, _) = decoded.map_err(|e| {
+            self.poisoned = true;
+            BlockExecutionError::other(e)
+        })?;
+        self.audit(&transaction, Some((record.mark.generation, *record.accepted)))
+    }
+
+    /// Exact correspondence only. The caller must authenticate native consensus
+    /// separately; this method never creates native or Ethereum finality authority.
+    pub fn audit_transaction(&mut self, transaction: &SettlementTransactionV1) -> Result<(), BlockExecutionError> {
+        self.audit(transaction, None)
+    }
+
+    fn audit(
+        &mut self,
+        transaction: &SettlementTransactionV1,
+        record: Option<(u64, AcceptedSettlementV1)>,
+    ) -> Result<(), BlockExecutionError> {
         if self.poisoned {
             return Err(invalid("canonical settlement audit requires a fresh snapshot"));
         }
@@ -49,15 +68,10 @@ impl CanonicalSettlementAuditV1 {
             .first_l2_number
             .checked_add(self.report.audited_records)
             .ok_or_else(|| invalid("settlement block number overflow"))?;
-        if record.mark.generation != generation || record.accepted.l2_number != number {
-            return Err(invalid("settlement audit skipped, repeated or reordered a record"));
-        }
         let block = usize::try_from(number)
             .ok()
             .and_then(|number| self.blocks.get(number))
             .ok_or_else(|| invalid("settlement is beyond the acknowledged canonical prefix"))?;
-        let (transaction, _) =
-            SettlementTransactionV1::decode_wire(record.transaction).map_err(BlockExecutionError::other)?;
         let statement = transaction.statement();
         let expected_head = AcceptedSettlementV1 {
             commitment: transaction.commitment(),
@@ -73,7 +87,8 @@ impl CanonicalSettlementAuditV1 {
             consumed_end: statement.consumed_end,
         };
         let header = &block.header;
-        if *record.accepted != expected_head
+        if statement.l2_number != number
+            || record.is_some_and(|(g, head)| g != generation || head != expected_head)
             || transaction.proof_policy() != self.policy.proof_policy
             || statement.network != self.policy.network
             || statement.genesis != self.policy.genesis

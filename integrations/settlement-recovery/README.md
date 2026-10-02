@@ -183,7 +183,7 @@ bridge payouts. The seven production gates in `network/finality.json` remain unc
 
 Use Rust 1.98.1, the committed lockfile and these independently checked sources:
 
-- Native consensus revision `7eb589049121ff98baab99a565e046b495b877c2` in the
+- Native consensus revision `2b808ca370276d3415a24d20e1892d79fed2a750` in the
   sibling `bloch-validator-payout` directory, without local changes.
 - Reth base `8eb210175687c9f0c889a3b6795c16781d830e3a` plus the exact recorded
   `../reth-execution/reth-snapshot.patch`, prepared with its existing tool.
@@ -216,3 +216,38 @@ bytes and absent safe/finalized markers. The older `recovery.rs` suite retains i
 explicit proof double for fault injection; the additional `native_recovery.rs`
 suite uses the retained real Groth16 proof and the pinned native verifier.
 Neither uses operational keys.
+
+
+## Asynchronous native development settlement
+
+`audit_finalized_async_settlements` consumes only the private-constructor result
+of full native replay and checks every finalized `0x0F` settlement against the
+canonical L2 prefix in order. The native `BPOSMAN3` genesis pins a public source
+across blocks while a real proof is generated. The existing `0x0E` immediate
+parent admission and WS stores remain unchanged; changing a wire tag does not
+turn an older admission receipt into asynchronous authority.
+
+`qualify_live_async` imports a public native manifest pinned independently by
+its SHA3 network identity, decodes the node's exact canonical envelopes, verifies
+real proposer/attester signatures, Groth16 and FFG, and executes/binds the first
+empty-inbox L2 block in an isolated persistent database. Run `init` once in a
+fresh directory and `recover` in a separate process against that same database.
+It refuses altered proof/body bytes, altered proposer signatures and inclusion
+before finality. File counts, encoded bytes, epochs and proof work are bounded.
+The current qualification worker supports one empty-inbox block, not continuous
+production, native deposits, bridge withdrawals or operational checkpoints.
+
+```sh
+# Build with the pinned native and Reth sources above.
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 build --offline --locked \
+  --manifest-path integrations/settlement-recovery/Cargo.toml \
+  --example qualify_live_async
+# Supply the retained installation pin, never a network value from submitted history.
+qualify_live_async init genesis.blg "$PINNED_MANIFEST_SHA3" history fresh-l2-db init.json
+qualify_live_async recover genesis.blg "$PINNED_MANIFEST_SHA3" history fresh-l2-db recovered.json
+```
+
+Neither the report nor the new correspondence-only audit method authorizes
+RPC finality publication. Production readiness and same-host validator fault
+independence remain separate operational requirements.
