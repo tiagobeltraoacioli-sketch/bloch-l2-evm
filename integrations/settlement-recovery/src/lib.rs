@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Recovery of PQ-authorized settlements and durable local finality candidates.
+//! Recovery of native settlements and durable local finality candidates.
 //! This host composition never grants native consensus or an RPC finality capability.
 #![cfg(unix)]
 
@@ -19,6 +19,7 @@ use bloch_reth_execution::{
 };
 use std::path::Path;
 
+pub mod async_cursor;
 pub mod cursor;
 pub mod native;
 pub mod proof;

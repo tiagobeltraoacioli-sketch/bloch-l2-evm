@@ -1,5 +1,10 @@
 # L2 finality boundary
 
+The asynchronous development path now has a separate durable audit candidate
+with exact external CAS, finalized-prefix rollback checks and full restart
+reverification. See the [combined recovery adapter](../integrations/settlement-recovery/README.md#durable-asynchronous-candidate).
+This preparation does not publish RPC finality or change production permissions.
+
 `eth_getBlockByNumber("finalized")` must remain `null` until a native Bloch
 checkpoint proves a consensus-enforced settlement of a specific L2 block. An L2
 header merely referencing an old native block is not settlement of that L2

@@ -14,6 +14,7 @@ use bloch_l2_evm::{
 };
 use reth_revm::database::{EvmStateProvider, StateProviderDatabase};
 
+pub mod async_finality_cursor;
 pub mod block;
 pub mod canonical;
 pub mod chainspec;

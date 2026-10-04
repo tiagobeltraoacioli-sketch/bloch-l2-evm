@@ -112,6 +112,15 @@ impl VerifiedNativeFinalityV1 {
         &self.report
     }
 
+    /// Exact accepted bytes in native order, restricted to the finalized prefix.
+    /// This borrowed view is available only after complete consensus replay.
+    pub(crate) fn finalized_settlements(&self) -> impl Iterator<Item = (u64, B256, &[u8])> {
+        self.chain
+            .iter()
+            .take(self.finalized_index + 1)
+            .filter_map(|(slot, id)| self.settlements.get(id).map(|bytes| (*slot, *id, bytes.as_slice())))
+    }
+
     pub(crate) fn check_checkpoint(
         &self,
         anchor: FinalizedCheckpoint,
@@ -378,10 +387,7 @@ pub fn audit_finalized_async_settlements(
         return Err(CanonicalSettlementAuditErrorV1::Consumer(NativeFinalityErrorV1::Trust));
     }
     let (_, report) = with_canonical_settlement_audit(source, policy, floor, limits, |audit| {
-        for (_, id) in verified.chain.iter().take(verified.finalized_index + 1) {
-            let Some(bytes) = verified.settlements.get(id) else {
-                continue;
-            };
+        for (_, _, bytes) in verified.finalized_settlements() {
             let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes)
                 .ok_or(NativeFinalityErrorV1::Encoding)?;
             let statement =
@@ -396,3 +402,7 @@ pub fn audit_finalized_async_settlements(
     })?;
     Ok(report)
 }
+
+#[cfg(test)]
+#[path = "async_cursor_tests.rs"]
+mod async_cursor_tests;

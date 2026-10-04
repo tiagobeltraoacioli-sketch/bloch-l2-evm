@@ -100,6 +100,7 @@ impl TableSet for BlochTables {
         Box::new(Tables::tables().chain([
             Box::new(BlochV2Deposits) as Box<dyn TableInfo>,
             Box::new(crate::finality_cursor::BlochFinalityCandidate) as Box<dyn TableInfo>,
+            Box::new(crate::async_finality_cursor::BlochAsyncFinalityCandidate) as Box<dyn TableInfo>,
         ]))
     }
 }

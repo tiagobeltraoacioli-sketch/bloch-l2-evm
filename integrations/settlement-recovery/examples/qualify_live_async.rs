@@ -14,9 +14,12 @@ use bloch_reth_execution::{
     prepare_genesis, BlochChainSpec, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, CanonicalCoordinator,
     ReplayFloor, ReplayLimits,
 };
-use bloch_settlement_recovery::native::{
-    audit_finalized_async_settlements, verify_native_finality, NativeGenesisTrustV1, NativeReplayBlockV1,
-    NativeReplayLimitsV1,
+use bloch_settlement_recovery::{
+    async_cursor::{recover_and_stage_async_finality_candidate, AsyncFinalityCandidateRequestV1},
+    native::{
+        audit_finalized_async_settlements, verify_native_finality, NativeGenesisTrustV1, NativeReplayBlockV1,
+        NativeReplayLimitsV1,
+    },
 };
 use reth_db::mdbx::{init_db_for, DatabaseArguments};
 use reth_provider::{
@@ -32,13 +35,14 @@ fn public_file(path: &Path, limit: u64) -> Vec<u8> {
     fs::read(path).unwrap()
 }
 fn save(path: &Path, bytes: &[u8]) {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .unwrap()
-        .write_all(bytes)
-        .unwrap();
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path).unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::File::open(parent).unwrap().sync_all().unwrap();
 }
 fn spec() -> Arc<BlochChainSpec> {
     Arc::new(BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(0xd3), 0).unwrap())
@@ -78,11 +82,24 @@ fn main() {
         return;
     }
     assert!(
-        args.len() == 7,
-        "usage: qualify_live_async init|recover MANIFEST PINNED_NETWORK_HEX HISTORY_DIR DATABASE REPORT"
+        args.len() == 9,
+        "usage: qualify_live_async init|recover MANIFEST PINNED_NETWORK_HEX HISTORY_DIR DATABASE REPORT EXPECTED_CANDIDATE_OR_NONE CURRENT_EPOCH"
     );
     let mode = &args[1];
     assert!(mode == "init" || mode == "recover");
+    // The recovery mark must be independently retained from an acknowledged
+    // earlier invocation, never loaded from the database being inspected.
+    let expected_cursor = if args[7] == "none" {
+        assert_eq!(
+            mode, "init",
+            "recover requires an independently retained candidate mark"
+        );
+        None
+    } else {
+        assert_eq!(mode, "recover", "init requires an empty candidate table");
+        Some(args[7].parse::<B256>().unwrap())
+    };
+    let current_epoch = args[8].parse::<u64>().unwrap();
     let manifest = Manifest::decode(&public_file(Path::new(&args[2]), 1_048_576)).unwrap();
     assert_eq!(manifest.format, ManifestFormat::V3L2Async(config(fixture::policy())));
     assert_eq!(manifest.validators.len(), 3);
@@ -132,6 +149,7 @@ fn main() {
         bytes: 64 * 1_048_576,
     };
     let verified = verify_native_finality(&genesis, trust, &blocks, limits).unwrap();
+    assert!(current_epoch >= bloch_pos_committee::epoch_of(verified.report().replayed_slot));
     let statements = blocks
         .iter()
         .flat_map(|b| &b.transactions)
@@ -172,20 +190,6 @@ fn main() {
     let block = source.block_by_number(1).unwrap().unwrap();
     assert_eq!(block.header.0.hash(), statement.l2_header_hash);
     assert_eq!(block.header.0.state_root, statement.l2_state_root);
-    let audit = audit_finalized_async_settlements(
-        &verified,
-        &source,
-        policy,
-        ReplayFloor {
-            number: 1,
-            hash: statement.l2_header_hash,
-        },
-        ReplayLimits {
-            blocks: 1,
-            bytes: 1_048_576,
-        },
-    )
-    .unwrap();
     // Negative qualifications use real signatures/proofs from this exact history.
     let mut corrupted = blocks.clone();
     let candidate = corrupted.iter_mut().find(|b| !b.transactions.is_empty()).unwrap();
@@ -212,6 +216,25 @@ fn main() {
         )
         .is_err());
     }
+    let staged = recover_and_stage_async_finality_candidate(
+        &source,
+        AsyncFinalityCandidateRequestV1 {
+            settlement_policy: policy,
+            l2_floor: ReplayFloor {
+                number: 1,
+                hash: statement.l2_header_hash,
+            },
+            canonical_limits: ReplayLimits {
+                blocks: 1,
+                bytes: 1_048_576,
+            },
+            expected_cursor,
+            current_epoch,
+        },
+        &verified,
+    )
+    .unwrap();
+    let audit = staged.canonical();
     let report = verified.report();
     save(
         Path::new(&args[6]),
@@ -225,6 +248,8 @@ fn main() {
             "l2_state_root":hex::encode(statement.l2_state_root), "source_block":hex::encode(statement.l1_block),
             "source_slot":statement.l1_slot, "source_height":statement.l1_height,
             "audited_records":audit.audited_records, "negative_checks_passed":true,
+            "candidate_commitment":hex::encode(staged.cursor().commitment()),
+            "candidate_checked_at_epoch":staged.cursor().fields().checked_at_epoch,
             "production_finality":false, "rpc_finality_published":false,
             "same_host_failure_domain":true, "empty_inbox":true
         }))

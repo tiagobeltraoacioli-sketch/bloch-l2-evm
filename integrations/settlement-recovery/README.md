@@ -183,7 +183,7 @@ bridge payouts. The seven production gates in `network/finality.json` remain unc
 
 Use Rust 1.98.1, the committed lockfile and these independently checked sources:
 
-- Native consensus revision `2b808ca370276d3415a24d20e1892d79fed2a750` in the
+- Native consensus revision `15a5f4f62f6d1993bfcd7ab1c5c4aa9d7e632e18` in the
   sibling `bloch-validator-payout` directory, without local changes.
 - Reth base `8eb210175687c9f0c889a3b6795c16781d830e3a` plus the exact recorded
   `../reth-execution/reth-snapshot.patch`, prepared with its existing tool.
@@ -244,10 +244,69 @@ python3 integrations/reth-execution/prepare-reth.py --check -- \
   --manifest-path integrations/settlement-recovery/Cargo.toml \
   --example qualify_live_async
 # Supply the retained installation pin, never a network value from submitted history.
-qualify_live_async init genesis.blg "$PINNED_MANIFEST_SHA3" history fresh-l2-db init.json
-qualify_live_async recover genesis.blg "$PINNED_MANIFEST_SHA3" history fresh-l2-db recovered.json
+qualify_live_async init genesis.blg "$PINNED_MANIFEST_SHA3" history fresh-l2-db init.json none "$CURRENT_EPOCH"
+qualify_live_async recover genesis.blg "$PINNED_MANIFEST_SHA3" history fresh-l2-db recovered.json "$RETAINED_CANDIDATE_COMMITMENT" "$CURRENT_EPOCH"
 ```
 
 Neither the report nor the new correspondence-only audit method authorizes
 RPC finality publication. Production readiness and same-host validator fault
 independence remain separate operational requirements.
+
+### Durable asynchronous candidate
+
+`async_cursor::recover_and_stage_async_finality_candidate` now persists the
+asynchronous audit result in a separate `BlochAsyncFinalityCandidate` MDBX table.
+It accepts only the private result of full real native replay, audits every
+finalized `0x0F` settlement against canonical L2, and rederives the complete saved
+candidate before replacing it. The older WS-authorized cursor keeps its own
+format and table; no checkpoint receipt or signer policy is fabricated for the
+asynchronous protocol.
+
+The `BLAFNC01` record is exactly 344 bytes. It binds the native genesis state
+root and settlement policy, finalized native checkpoint, last settlement block
+and exact transaction digest, ordered settlement-prefix digest, L2 genesis,
+number, hash and state root, settlement count, and observation epoch. The digest
+includes the original transaction tag and proof bytes. These hashes describe a
+local audit record, not new native consensus commitments.
+
+The exact prior cursor commitment must be retained independently; `None` allows
+only an empty singleton table. Recovery refuses missing rows, extra rows,
+unknown newer cursors, forged fields and truncated or conflicting finalized
+history. It reconstructs the old settlement and complete prefix even if the
+supplied cursor checksum matches. The previous finalized checkpoint must remain
+on the verified branch. An unfinalized native tail may reorganize because its
+tip is deliberately not the rollback floor.
+
+After validation, one MDBX transaction compares the previous cursor, the
+acknowledged canonical L2 tip and absence of numeric finality markers, then
+publishes the candidate. All Reth and static-file writers must remain stopped.
+Commit uncertainty or failure to retain the returned mark requires independent
+recovery; never adopt the inspected database's own checksum as its trusted floor.
+Every restart still requires full native replay and canonical L2 verification.
+
+The qualification example now requires the externally retained mark for
+`recover` and reports `candidate_commitment` for independent retention. It also
+requires a trusted current epoch and rejects a replayed native tip from the
+future. The recorded epoch is an observation bound, not proof of current network
+freshness. This remains offline candidate preparation; `safe` and `finalized`
+are not written or published.
+
+The candidate storage tests use real MDBX and executed Reth blocks with a
+deliberately synthetic native capability confined to `cfg(test)`. They cover
+restart, monotonic advancement, tampering, rollback, canonical mismatches and
+commit races. The separate `ffg_recovery` suite exercises genuine native
+signatures, proofs and FFG with the retained immediate-parent fixture. These
+tests do not substitute for an end-to-end signed asynchronous-history rehearsal
+of the new candidate API or qualify production publication.
+
+Local validation on 2026-10-04 passed all 37 settlement-recovery tests, the four
+new `async_finality_cursor` codec tests in the Reth crate, and settlement-recovery
+Clippy with `--all-targets -- -D warnings`. The native source was clean at the
+revision pinned above; Reth matched its recorded base and patch. Reproduce the
+separate codec tests with the same prepared sources:
+
+```sh
+python3 integrations/reth-execution/prepare-reth.py --check -- \
+  cargo +1.98.1 test --offline --locked \
+  --manifest-path integrations/reth-execution/Cargo.toml --lib async_finality_cursor
+```
