@@ -21,6 +21,7 @@ use std::path::Path;
 
 pub mod async_cursor;
 pub mod cursor;
+pub mod history;
 pub mod native;
 pub mod proof;
 

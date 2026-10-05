@@ -1981,6 +1981,7 @@ dependencies = [
  "bloch-reth-execution",
  "hex",
  "k256",
+ "libc",
  "reth-chainspec",
  "reth-db",
  "reth-db-api",
