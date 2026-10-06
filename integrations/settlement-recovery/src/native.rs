@@ -542,3 +542,45 @@ pub fn audit_finalized_async_settlements(
 #[cfg(test)]
 #[path = "async_cursor_tests.rs"]
 mod async_cursor_tests;
+
+#[cfg(test)]
+mod deposit_conformance {
+    use bloch_l2_evm::{node_primitives::NodeBodyV2, DepositMint, DepositProvenance};
+    use bloch_pos_committee::l2_settlement::{expected_body_commitment, InboxRecord};
+
+    /// The native consensus recomputes the L2 body commitment from inbox
+    /// records with its own minimal RLP; it must equal the L2 codec exactly.
+    #[test]
+    fn native_inbox_body_commitment_matches_the_l2_body_codec() {
+        let records: Vec<InboxRecord> = (0..70u32)
+            .map(|i| InboxRecord {
+                height: [1, 127, 128, 255, 256, 65_535, u64::MAX][i as usize % 7] + u64::from(i / 7),
+                tx_index: i,
+                txid: [i as u8; 32],
+                vout: [0, 1, 127, 128, u32::MAX][i as usize % 5],
+                sats: [1, 0x7f, 0x80, 1_000_000, u64::MAX / 3][i as usize % 5],
+                recipient: [(i as u8).wrapping_mul(3); 20],
+            })
+            .collect();
+        for n in [0usize, 1, 2, 3, 64, 70] {
+            let body = NodeBodyV2 {
+                deposits: records[..n]
+                    .iter()
+                    .map(|r| DepositMint {
+                        recipient: r.recipient.into(),
+                        provenance: DepositProvenance::BridgedBlch {
+                            l1_height: r.height,
+                            l1_tx_index: r.tx_index,
+                            l1_txid: r.txid,
+                            l1_vout: r.vout,
+                            l1_sats: r.sats,
+                        },
+                    })
+                    .collect(),
+                transactions: vec![],
+            };
+            let l2 = alloy_primitives::keccak256(alloy_rlp::encode(&body));
+            assert_eq!(expected_body_commitment(&records[..n]), l2.0, "{n} deposits");
+        }
+    }
+}

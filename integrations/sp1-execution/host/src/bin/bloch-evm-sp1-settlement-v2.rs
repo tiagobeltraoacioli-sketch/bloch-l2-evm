@@ -184,8 +184,10 @@ fn native_qualification(identity: ProgramIdentity, text: &str) -> Result<Qualifi
 #[cfg(feature = "node-artifact")]
 fn native_artifact_qualification(identity: ProgramIdentity, text: &str, artifact: &std::path::Path) -> Result<Qualification> {
     let fields: Vec<_> = text.lines().collect();
-    if text.len() > 600 || fields.len() != 8 {
-        return Err(io::Error::other("native artifact request requires seven native fields and the previous settlement").into());
+    // Seven native fields, the previous settlement and, when the native inbox
+    // is in use, inbox count plus the consumed range [start, end).
+    if text.len() > 700 || (fields.len() != 8 && fields.len() != 11) {
+        return Err(io::Error::other("native artifact request requires 8 or 11 fields").into());
     }
     let hash = |index: usize, zero_ok: bool| -> Result<B256> {
         if fields[index].len() != 64 || !fields[index].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
@@ -207,8 +209,16 @@ fn native_artifact_qualification(identity: ProgramIdentity, text: &str, artifact
     if artifact.context().anchor_root != hash(2, false)? {
         return Err(io::Error::other("artifact anchor is not the native-selected source block").into());
     }
-    if !artifact.body().transactions.is_empty() || !artifact.body().deposits.is_empty() {
-        return Err(io::Error::other("native settlement currently accepts empty L2 blocks only").into());
+    let (inbox_count, consumed_start, consumed_end) = if fields.len() == 11 {
+        (fields[8].parse::<u64>()?, fields[9].parse::<u64>()?, fields[10].parse::<u64>()?)
+    } else {
+        (0, 0, 0)
+    };
+    if !artifact.body().transactions.is_empty() {
+        return Err(io::Error::other("native settlement accepts deposit-only L2 blocks").into());
+    }
+    if consumed_end.checked_sub(consumed_start) != Some(artifact.body().deposits.len() as u64) || consumed_end > inbox_count {
+        return Err(io::Error::other("artifact deposits do not match the consumed inbox range").into());
     }
     let execution = fixture::Fixture {
         witness: artifact.witness().clone(), context: artifact.context().clone(), body: artifact.body().clone(),
@@ -219,7 +229,7 @@ fn native_artifact_qualification(identity: ProgramIdentity, text: &str, artifact
         program_elf_keccak: identity.elf_keccak(), program_vkey_koalabear: identity.verifying_key_hash(),
         program_vkey_bn254: identity.verifying_key_bn254(), previous_settlement,
         l1_slot: slot, l1_height: height, source_commitment: hash(5, false)?, inbox_root: hash(6, false)?,
-        inbox_count: 0, consumed_start: 0, consumed_end: 0,
+        inbox_count, consumed_start, consumed_end,
     };
     let expected = execute_settlement_statement_v2(&ChainSpec::testnet(), B256::repeat_byte(0xd3),
         &execution.witness, &execution.context, &execution.body, context)?;
@@ -246,7 +256,7 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
             let artifact = std::env::var_os("BLOCH_NATIVE_L2_ARTIFACT")
                 .ok_or("BLOCH_NATIVE_L2_ARTIFACT must name the exported execution artifact")?;
             let metadata = fs::symlink_metadata(&request)?;
-            if !metadata.is_file() || metadata.len() > 600 { return Err("invalid native request file".into()); }
+            if !metadata.is_file() || metadata.len() > 700 { return Err("invalid native request file".into()); }
             native_artifact_qualification(identity, &fs::read_to_string(request)?, std::path::Path::new(&artifact))
         },
         #[cfg(not(feature = "node-artifact"))]

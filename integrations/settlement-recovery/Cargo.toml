@@ -25,6 +25,8 @@ path = "src/bin/bloch-l2-native-follower.rs"
 [features]
 # Development networks whose native consensus arms RANDAO re-commits from genesis.
 devnet-randao-recommit = ["bloch-pos-committee/devnet-randao-recommit", "bloch-pos-node/devnet-randao-recommit"]
+# Development networks with native L2 deposits (escrow inbox).
+devnet-l2-deposits = ["bloch-pos-committee/devnet-l2-deposits", "bloch-pos-node/devnet-l2-deposits"]
 
 [dependencies]
 bloch-l2-evm = { path = "../.." }

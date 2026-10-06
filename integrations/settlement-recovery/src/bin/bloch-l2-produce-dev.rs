@@ -36,13 +36,15 @@ use std::{
 const USAGE: &str = "\
 usage:
   bloch-l2-produce-dev init   --target DIR
-  bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX
+  bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
   bloch-l2-produce-dev export --target DIR --number N --out FILE
   bloch-l2-produce-dev head   --target DIR
 
 extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
 whose anchor is the native-selected source block. HEX is 64 lowercase hex
-characters without 0x. Development only: no settlement or finality is implied.
+characters without 0x. --deposits is a JSON list of native inbox records
+({height,tx_index,txid,vout,sats,recipient}) minted at block start, in order.
+Development only: no settlement or finality is implied.
 ";
 
 fn main() -> ExitCode {
@@ -145,7 +147,11 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(json!({"number": 0, "hash": hex::encode(hash)}).to_string())
         }
         "extend" => {
-            only(rest, &["--target", "--parent", "--anchor"])?;
+            only(rest, &["--target", "--parent", "--anchor", "--deposits"])?;
+            let deposits = match rest.chunks(2).find(|p| p[0] == "--deposits") {
+                Some(pair) => read_deposits(Path::new(&pair[1]))?,
+                None => vec![],
+            };
             let parent = hash(option(rest, "--parent")?, "--parent")?;
             let anchor = hash(option(rest, "--anchor")?, "--anchor")?;
             let mut coordinator =
@@ -166,14 +172,14 @@ fn run(args: &[String]) -> Result<String, String> {
                         timestamp,
                         prevrandao: B256::repeat_byte(7),
                         anchor_root: anchor,
-                        deposits: vec![],
+                        deposits: deposits.clone(),
                     },
                     vec![],
                 )
                 .map_err(|e| e.to_string())?;
             Ok(json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                       "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
-                      "anchor": hex::encode(anchor), "timestamp": timestamp})
+                      "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len()})
             .to_string())
         }
         "export" => {
@@ -208,4 +214,31 @@ fn run(args: &[String]) -> Result<String, String> {
         return Err("task runtime did not shut down".into());
     }
     result
+}
+
+/// Native inbox records as L2 deposit mints. The native settlement rejects any
+/// body that does not mint exactly these records, so no field is defaulted.
+fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("deposits: {e}"))?;
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|e| format!("deposits: {e}"))?;
+    let num = |v: &serde_json::Value, k: &str| v[k].as_u64().ok_or_else(|| format!("deposit field {k} must be an integer"));
+    let bytes_of = |v: &serde_json::Value, k: &str, n: usize| -> Result<Vec<u8>, String> {
+        let b = hex::decode(v[k].as_str().unwrap_or_default().trim_start_matches("0x")).map_err(|_| format!("deposit field {k} must be hex"))?;
+        if b.len() != n { return Err(format!("deposit field {k} must be {n} bytes")); }
+        Ok(b)
+    };
+    list.iter()
+        .map(|v| {
+            Ok(bloch_l2_evm::DepositMint {
+                recipient: alloy_primitives::Address::from_slice(&bytes_of(v, "recipient", 20)?),
+                provenance: bloch_l2_evm::DepositProvenance::BridgedBlch {
+                    l1_height: num(v, "height")?,
+                    l1_tx_index: u32::try_from(num(v, "tx_index")?).map_err(|_| "tx_index too large")?,
+                    l1_txid: bytes_of(v, "txid", 32)?.try_into().unwrap(),
+                    l1_vout: u32::try_from(num(v, "vout")?).map_err(|_| "vout too large")?,
+                    l1_sats: num(v, "sats")?,
+                },
+            })
+        })
+        .collect()
 }
