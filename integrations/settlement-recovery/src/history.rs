@@ -123,6 +123,71 @@ pub fn load_native_history(
     if independent_network.is_zero() {
         return Err(E::Identity);
     }
+    let (manifest, genesis, policy) = load_native_manifest(manifest_path, independent_network, limits.manifest_bytes)?;
+    let directory = open_directory(history_dir)?;
+    let index = read_public_file(&directory, OsStr::new("index.json"), limits.index_bytes)?;
+    let ids: Vec<String> = serde_json::from_slice(&index).map_err(|_| E::Encoding("index"))?;
+    if ids.is_empty() || ids.len() > limits.blocks {
+        return Err(E::Limit);
+    }
+    let mut unique = BTreeSet::new();
+    for id in &ids {
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) || !unique.insert(id)
+        {
+            return Err(E::Encoding("invalid or duplicate block id"));
+        }
+    }
+    let mut total_bytes = 0u64;
+    let mut blocks = Vec::with_capacity(ids.len());
+    let mut parent = *genesis.head().as_bytes();
+    let mut previous_slot = 0;
+    for id in ids {
+        let remaining = limits.total_bytes.checked_sub(total_bytes).ok_or(E::Limit)?;
+        let bytes = read_public_file(
+            &directory,
+            OsStr::new(&format!("{id}.bin")),
+            limits.block_bytes.min(remaining),
+        )?;
+        total_bytes = total_bytes.checked_add(bytes.len() as u64).ok_or(E::Limit)?;
+        let envelope = codec::decode_envelope(&bytes).map_err(|_| E::Encoding("block envelope"))?;
+        if codec::encode_envelope(&envelope) != bytes || codec::hex32(envelope.block_id().as_bytes()) != id {
+            return Err(E::Encoding("noncanonical or misidentified block"));
+        }
+        if envelope.header.parent != parent || envelope.header.slot <= previous_slot {
+            return Err(E::Encoding("incomplete or reordered ancestry"));
+        }
+        parent = *envelope.block_id().as_bytes();
+        previous_slot = envelope.header.slot;
+        blocks.push(NativeReplayBlockV1 {
+            envelope: ProposalEnvelope {
+                header: envelope.header,
+                proposer_sig: envelope.proposer_sig,
+            },
+            attestations: envelope.body.attestations,
+            transactions: envelope.body.transactions,
+        });
+    }
+    Ok(OwnedNativeHistoryV1 {
+        manifest,
+        genesis,
+        policy,
+        blocks,
+        total_bytes,
+    })
+}
+
+/// Read and validate the pinned BPOSMAN3 manifest and derive the settlement
+/// policy it commits to. The network identity must equal the independent pin.
+pub fn load_native_manifest(
+    manifest_path: &Path,
+    independent_network: B256,
+    manifest_limit: u64,
+) -> Result<(Manifest, CommittedState, SettlementPolicyV1), NativeHistoryErrorV1> {
+    use NativeHistoryErrorV1 as E;
+    if manifest_limit == 0 || manifest_limit > MIB || independent_network.is_zero() {
+        return Err(E::Limit);
+    }
+    let limits = NativeHistoryInputLimitsV1 { manifest_bytes: manifest_limit, ..Default::default() };
     let parent = manifest_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -179,56 +244,7 @@ pub fn load_native_history(
         initial_l2_state_root: native.initial_l2_state.into(),
     };
     policy.commitment().map_err(|_| E::Identity)?;
-    let directory = open_directory(history_dir)?;
-    let index = read_public_file(&directory, OsStr::new("index.json"), limits.index_bytes)?;
-    let ids: Vec<String> = serde_json::from_slice(&index).map_err(|_| E::Encoding("index"))?;
-    if ids.is_empty() || ids.len() > limits.blocks {
-        return Err(E::Limit);
-    }
-    let mut unique = BTreeSet::new();
-    for id in &ids {
-        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) || !unique.insert(id)
-        {
-            return Err(E::Encoding("invalid or duplicate block id"));
-        }
-    }
-    let mut total_bytes = 0u64;
-    let mut blocks = Vec::with_capacity(ids.len());
-    let mut parent = *genesis.head().as_bytes();
-    let mut previous_slot = 0;
-    for id in ids {
-        let remaining = limits.total_bytes.checked_sub(total_bytes).ok_or(E::Limit)?;
-        let bytes = read_public_file(
-            &directory,
-            OsStr::new(&format!("{id}.bin")),
-            limits.block_bytes.min(remaining),
-        )?;
-        total_bytes = total_bytes.checked_add(bytes.len() as u64).ok_or(E::Limit)?;
-        let envelope = codec::decode_envelope(&bytes).map_err(|_| E::Encoding("block envelope"))?;
-        if codec::encode_envelope(&envelope) != bytes || codec::hex32(envelope.block_id().as_bytes()) != id {
-            return Err(E::Encoding("noncanonical or misidentified block"));
-        }
-        if envelope.header.parent != parent || envelope.header.slot <= previous_slot {
-            return Err(E::Encoding("incomplete or reordered ancestry"));
-        }
-        parent = *envelope.block_id().as_bytes();
-        previous_slot = envelope.header.slot;
-        blocks.push(NativeReplayBlockV1 {
-            envelope: ProposalEnvelope {
-                header: envelope.header,
-                proposer_sig: envelope.proposer_sig,
-            },
-            attestations: envelope.body.attestations,
-            transactions: envelope.body.transactions,
-        });
-    }
-    Ok(OwnedNativeHistoryV1 {
-        manifest,
-        genesis,
-        policy,
-        blocks,
-        total_bytes,
-    })
+    Ok((manifest, genesis, policy))
 }
 
 fn open_at(directory: &File, name: &OsStr, flags: libc::c_int) -> Result<File, NativeHistoryErrorV1> {

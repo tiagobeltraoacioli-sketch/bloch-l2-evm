@@ -114,7 +114,7 @@ impl VerifiedNativeFinalityV1 {
 
     /// Exact accepted bytes in native order, restricted to the finalized prefix.
     /// This borrowed view is available only after complete consensus replay.
-    pub(crate) fn finalized_settlements(&self) -> impl Iterator<Item = (u64, B256, &[u8])> {
+    pub fn finalized_settlements(&self) -> impl Iterator<Item = (u64, B256, &[u8])> {
         self.chain
             .iter()
             .take(self.finalized_index + 1)
@@ -210,21 +210,7 @@ pub fn verify_native_finality(
     {
         return Err(E::Limit);
     }
-    let p = trust.settlement_policy;
-    let policy_commitment = p.commitment().map_err(|_| E::Trust)?;
-    let state = genesis.l2_settlement().ok_or(E::Trust)?;
-    if trust.state_root == B256::ZERO
-        || genesis.slot() != 0
-        || genesis.head().as_bytes() != &p.genesis.0
-        || genesis.state_root() != trust.state_root.0
-        || state.height() != 0
-        || state.head().is_some()
-        || state.policy() != &native_policy(p)
-        || p.first_l2_number != 1
-        || p.proof_policy.0 != bloch_l2_proof::policy_commitment()
-    {
-        return Err(E::Trust);
-    }
+    check_trust(genesis, trust)?;
     let mut byte_count = 0usize;
     let mut atts = 0usize;
     let mut txs = 0usize;
@@ -277,22 +263,157 @@ pub fn verify_native_finality(
             return Err(E::Limit);
         }
     }
-    let transition = Transition::new(NativeConsensusVerifierV1);
-    let mut state = genesis.clone();
-    let mut chain = vec![(0, p.genesis)];
-    let mut positions = BTreeMap::from([(p.genesis, (0, 0))]);
-    let mut settlements = BTreeMap::new();
-    let mut final_epoch = 0;
-    let mut final_index = 0;
-    for (index, block) in blocks.iter().enumerate() {
-        if block.envelope.header.parent != state.head().as_bytes()[..] {
+    let mut verifier = IncrementalNativeVerifierV1::new(genesis, trust, blocks.len())?;
+    for block in blocks {
+        verifier.apply_checked(block)?;
+    }
+    verifier.snapshot()
+}
+
+fn check_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<B256, NativeFinalityErrorV1> {
+    use NativeFinalityErrorV1 as E;
+    let p = trust.settlement_policy;
+    let policy_commitment = p.commitment().map_err(|_| E::Trust)?;
+    let state = genesis.l2_settlement().ok_or(E::Trust)?;
+    if trust.state_root == B256::ZERO
+        || genesis.slot() != 0
+        || genesis.head().as_bytes() != &p.genesis.0
+        || genesis.state_root() != trust.state_root.0
+        || state.height() != 0
+        || state.head().is_some()
+        || state.policy() != &native_policy(p)
+        || p.first_l2_number != 1
+        || p.proof_policy.0 != bloch_l2_proof::policy_commitment()
+    {
+        return Err(E::Trust);
+    }
+    Ok(policy_commitment)
+}
+
+/// Per-block bounds for continuous verification, where no whole-history budget
+/// applies. All are checked before any signature or proof work on that block.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeBlockLimitsV1 {
+    pub signature_bytes: usize,
+    pub attestations: usize,
+    pub transactions: usize,
+    pub proofs: usize,
+    pub bytes: usize,
+}
+impl Default for NativeBlockLimitsV1 {
+    fn default() -> Self {
+        Self {
+            signature_bytes: 8_192,
+            attestations: 4_096,
+            transactions: 4_096,
+            proofs: 64,
+            bytes: 4 * 1_048_576,
+        }
+    }
+}
+
+/// Real native replay that advances one block at a time and can be queried
+/// between blocks. It holds the complete committed state from the pinned
+/// genesis; nothing is restored from a stored snapshot. Any refusal poisons the
+/// verifier: no partially applied state is ever reported or extended.
+pub struct IncrementalNativeVerifierV1 {
+    transition: Transition<NativeConsensusVerifierV1>,
+    trust: NativeGenesisTrustV1,
+    policy_commitment: B256,
+    state: CommittedState,
+    chain: Vec<(u64, B256)>,
+    positions: BTreeMap<B256, (u64, usize)>,
+    settlements: BTreeMap<B256, Vec<u8>>,
+    final_epoch: u64,
+    final_index: usize,
+    applied: usize,
+    max_blocks: usize,
+    poisoned: bool,
+}
+
+impl IncrementalNativeVerifierV1 {
+    pub fn new(genesis: &CommittedState, trust: NativeGenesisTrustV1, max_blocks: usize) -> Result<Self, NativeFinalityErrorV1> {
+        if genesis.validator_count() > 4_096 || max_blocks == 0 {
+            return Err(NativeFinalityErrorV1::Limit);
+        }
+        let policy_commitment = check_trust(genesis, trust)?;
+        let p = trust.settlement_policy;
+        Ok(Self {
+            transition: Transition::new(NativeConsensusVerifierV1),
+            trust,
+            policy_commitment,
+            state: genesis.clone(),
+            chain: vec![(0, p.genesis)],
+            positions: BTreeMap::from([(p.genesis, (0, 0))]),
+            settlements: BTreeMap::new(),
+            final_epoch: 0,
+            final_index: 0,
+            applied: 0,
+            max_blocks,
+            poisoned: false,
+        })
+    }
+
+    /// Head of the verified branch (the pinned genesis before any block).
+    pub fn head(&self) -> B256 {
+        B256::from(*self.state.head().as_bytes())
+    }
+
+    pub const fn applied(&self) -> usize {
+        self.applied
+    }
+
+    /// Apply one block after enforcing [`NativeBlockLimitsV1`].
+    pub fn apply(&mut self, block: &NativeReplayBlockV1, limits: NativeBlockLimitsV1) -> Result<(), NativeFinalityErrorV1> {
+        use NativeFinalityErrorV1 as E;
+        let sizes_ok = block.envelope.proposer_sig.len() <= limits.signature_bytes
+            && block.attestations.len() <= limits.attestations
+            && block.transactions.len() <= limits.transactions
+            && block.attestations.iter().all(|a| a.signature.len() <= limits.signature_bytes);
+        let bytes = 304usize
+            .saturating_add(block.envelope.proposer_sig.len())
+            .saturating_add(block.attestations.iter().map(|a| 132 + a.signature.len()).sum::<usize>())
+            .saturating_add(block.transactions.iter().map(Vec::len).sum::<usize>());
+        let proofs = block
+            .transactions
+            .iter()
+            .filter(|tx| {
+                matches!(
+                    tx.first(),
+                    Some(&bloch_pos_committee::l2_settlement::WIRE_TAG)
+                        | Some(&bloch_pos_committee::l2_settlement::ASYNC_WIRE_TAG)
+                )
+            })
+            .count();
+        if !sizes_ok || bytes > limits.bytes || proofs > limits.proofs {
+            self.poisoned = true;
+            return Err(E::Limit);
+        }
+        self.apply_checked(block)
+    }
+
+    /// Callers must already have bounded this block's sizes.
+    fn apply_checked(&mut self, block: &NativeReplayBlockV1) -> Result<(), NativeFinalityErrorV1> {
+        use NativeFinalityErrorV1 as E;
+        if self.poisoned {
+            return Err(E::Ancestry);
+        }
+        if self.applied >= self.max_blocks || block.envelope.header.slot <= self.state.slot() {
+            self.poisoned = true;
+            return Err(E::Limit);
+        }
+        // Poison until every check below has passed and the block is published.
+        self.poisoned = true;
+        let index = self.applied;
+        if block.envelope.header.parent != self.state.head().as_bytes()[..] {
             return Err(E::Ancestry);
         }
         for att in &block.attestations {
             let a = &att.data;
-            if checkpoint(&chain, a.source_epoch).map(|h| h.0) != Some(a.source_root)
-                || checkpoint(&chain, a.target_epoch).map(|h| h.0) != Some(a.target_root)
-                || !positions
+            if checkpoint(&self.chain, a.source_epoch).map(|h| h.0) != Some(a.source_root)
+                || checkpoint(&self.chain, a.target_epoch).map(|h| h.0) != Some(a.target_root)
+                || !self
+                    .positions
                     .get(&B256::from(a.head))
                     .is_some_and(|(slot, _)| *slot <= a.slot)
             {
@@ -310,61 +431,76 @@ pub fn verify_native_finality(
                 Ok(tx)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        state = transition
-            .apply_block(&state, &block.envelope, &block.attestations, &transactions)
+        self.state = self
+            .transition
+            .apply_block(&self.state, &block.envelope, &block.attestations, &transactions)
             .map_err(|e| E::Transition {
                 block: index,
                 reason: format!("{e:?}"),
             })?;
         let id = B256::from(*BlockId::of(&block.envelope.header).as_bytes());
-        if positions
-            .insert(id, (block.envelope.header.slot, chain.len()))
+        if self
+            .positions
+            .insert(id, (block.envelope.header.slot, self.chain.len()))
             .is_some()
         {
             return Err(E::Ancestry);
         }
-        chain.push((block.envelope.header.slot, id));
+        self.chain.push((block.envelope.header.slot, id));
         for (tx, bytes) in transactions.iter().zip(&block.transactions) {
             if matches!(
                 tx,
                 PosTransaction::L2Settlement(_) | PosTransaction::L2SettlementAsync(_)
             ) {
-                settlements.insert(id, bytes.clone());
+                self.settlements.insert(id, bytes.clone());
             }
         }
-        let finalized = state.finality().finalized;
-        if finalized.epoch < final_epoch || checkpoint(&chain, finalized.epoch).map(|h| h.0) != Some(finalized.root) {
+        let finalized = self.state.finality().finalized;
+        if finalized.epoch < self.final_epoch
+            || checkpoint(&self.chain, finalized.epoch).map(|h| h.0) != Some(finalized.root)
+        {
             return Err(E::Ancestry);
         }
-        let position = positions.get(&B256::from(finalized.root)).ok_or(E::Ancestry)?.1;
-        if position < final_index {
+        let position = self.positions.get(&B256::from(finalized.root)).ok_or(E::Ancestry)?.1;
+        if position < self.final_index {
             return Err(E::Ancestry);
         }
-        final_epoch = finalized.epoch;
-        final_index = position;
+        self.final_epoch = finalized.epoch;
+        self.final_index = position;
+        self.applied += 1;
+        self.poisoned = false;
+        Ok(())
     }
-    if final_epoch == 0 || final_index == 0 {
-        return Err(E::NotFinalized);
-    }
-    Ok(VerifiedNativeFinalityV1 {
-        report: NativeFinalityReportV1 {
-            genesis_state_root: trust.state_root,
-            settlement_policy: policy_commitment,
-            replayed_tip: B256::from(*state.head().as_bytes()),
-            replayed_state_root: B256::from(state.state_root()),
-            replayed_blocks: blocks.len(),
-            replayed_slot: state.slot(),
-            finalized: FinalizedCheckpoint {
-                block: chain[final_index].1,
-                slot: chain[final_index].0,
+
+    /// The verified finality capability at the current branch tip.
+    pub fn snapshot(&self) -> Result<VerifiedNativeFinalityV1, NativeFinalityErrorV1> {
+        use NativeFinalityErrorV1 as E;
+        if self.poisoned {
+            return Err(E::Ancestry);
+        }
+        if self.final_epoch == 0 || self.final_index == 0 {
+            return Err(E::NotFinalized);
+        }
+        Ok(VerifiedNativeFinalityV1 {
+            report: NativeFinalityReportV1 {
+                genesis_state_root: self.trust.state_root,
+                settlement_policy: self.policy_commitment,
+                replayed_tip: self.head(),
+                replayed_state_root: B256::from(self.state.state_root()),
+                replayed_blocks: self.applied,
+                replayed_slot: self.state.slot(),
+                finalized: FinalizedCheckpoint {
+                    block: self.chain[self.final_index].1,
+                    slot: self.chain[self.final_index].0,
+                },
+                finalized_epoch: self.final_epoch,
             },
-            finalized_epoch: final_epoch,
-        },
-        chain,
-        positions,
-        finalized_index: final_index,
-        settlements,
-    })
+            chain: self.chain.clone(),
+            positions: self.positions.clone(),
+            finalized_index: self.final_index,
+            settlements: self.settlements.clone(),
+        })
+    }
 }
 
 /// Bind every finalized asynchronous settlement, in native order, to a bounded
