@@ -177,6 +177,58 @@ fn native_qualification(identity: ProgramIdentity, text: &str) -> Result<Qualifi
     })
 }
 
+/// A chained successor: block `n` exported from the persisted canonical L2
+/// database (`bloch-evm-export`) plus the native request and the commitment of
+/// the previously accepted native settlement. The artifact's sparse witness is
+/// re-executed on decode; its anchor must be the native-selected source block.
+#[cfg(feature = "node-artifact")]
+fn native_artifact_qualification(identity: ProgramIdentity, text: &str, artifact: &std::path::Path) -> Result<Qualification> {
+    let fields: Vec<_> = text.lines().collect();
+    if text.len() > 600 || fields.len() != 8 {
+        return Err(io::Error::other("native artifact request requires seven native fields and the previous settlement").into());
+    }
+    let hash = |index: usize, zero_ok: bool| -> Result<B256> {
+        if fields[index].len() != 64 || !fields[index].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(io::Error::other("native request requires lowercase 32-byte hexadecimal identities").into());
+        }
+        let value: B256 = fields[index].parse()?;
+        if value == B256::ZERO && !zero_ok { return Err(io::Error::other("zero native request identity").into()); }
+        Ok(value)
+    };
+    let slot: u64 = fields[3].parse()?;
+    let height: u64 = fields[4].parse()?;
+    if height == 0 || slot < height { return Err(io::Error::other("invalid native request position").into()); }
+    let previous_settlement = hash(7, true)?;
+    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact(artifact)?;
+    let number = artifact.header().number;
+    if (number == 1) != (previous_settlement == B256::ZERO) {
+        return Err(io::Error::other("only L2 block 1 may have no previous settlement").into());
+    }
+    if artifact.context().anchor_root != hash(2, false)? {
+        return Err(io::Error::other("artifact anchor is not the native-selected source block").into());
+    }
+    if !artifact.body().transactions.is_empty() || !artifact.body().deposits.is_empty() {
+        return Err(io::Error::other("native settlement currently accepts empty L2 blocks only").into());
+    }
+    let execution = fixture::Fixture {
+        witness: artifact.witness().clone(), context: artifact.context().clone(), body: artifact.body().clone(),
+        expected: artifact.expected(), parent: artifact.parent().clone(), header: artifact.header().clone(),
+    };
+    let context = SettlementContextV2 {
+        network: hash(0, false)?, genesis: hash(1, false)?,
+        program_elf_keccak: identity.elf_keccak(), program_vkey_koalabear: identity.verifying_key_hash(),
+        program_vkey_bn254: identity.verifying_key_bn254(), previous_settlement,
+        l1_slot: slot, l1_height: height, source_commitment: hash(5, false)?, inbox_root: hash(6, false)?,
+        inbox_count: 0, consumed_start: 0, consumed_end: 0,
+    };
+    let expected = execute_settlement_statement_v2(&ChainSpec::testnet(), B256::repeat_byte(0xd3),
+        &execution.witness, &execution.context, &execution.body, context)?;
+    Ok(Qualification { execution, context, expected,
+        #[cfg(feature = "source-settlement")]
+        source: None,
+    })
+}
+
 fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification> {
     match name {
         "empty" => empty_qualification(identity),
@@ -187,11 +239,23 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
             if !metadata.is_file() || metadata.len() > 512 { return Err("invalid native fixture file".into()); }
             native_qualification(identity, &fs::read_to_string(path)?)
         },
+        #[cfg(feature = "node-artifact")]
+        "native-artifact" => {
+            let request = std::env::var_os("BLOCH_NATIVE_L2_REQUEST")
+                .ok_or("BLOCH_NATIVE_L2_REQUEST must name the native request with the previous settlement")?;
+            let artifact = std::env::var_os("BLOCH_NATIVE_L2_ARTIFACT")
+                .ok_or("BLOCH_NATIVE_L2_ARTIFACT must name the exported execution artifact")?;
+            let metadata = fs::symlink_metadata(&request)?;
+            if !metadata.is_file() || metadata.len() > 600 { return Err("invalid native request file".into()); }
+            native_artifact_qualification(identity, &fs::read_to_string(request)?, std::path::Path::new(&artifact))
+        },
+        #[cfg(not(feature = "node-artifact"))]
+        "native-artifact" => Err(io::Error::other("native-artifact requires --features node-artifact").into()),
         #[cfg(feature = "source-settlement")]
         "source-contract" => source_qualification(identity),
         #[cfg(not(feature = "source-settlement"))]
         "source-contract" => Err(io::Error::other("source-contract requires --features source-settlement").into()),
-        _ => Err(io::Error::other("fixture must be empty, native-empty or source-contract").into()),
+        _ => Err(io::Error::other("fixture must be empty, native-empty, native-artifact or source-contract").into()),
     }
 }
 
@@ -222,7 +286,7 @@ fn report_verified_source(qualification: &mut Qualification, proof: &QualifiedGr
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v2 <execute|prove-groth16|verify-groth16> <empty|source-contract|native-empty> TRUSTED_SETTLEMENT_V2_ELF [PROOF_FILE]";
+    let usage = "usage: bloch-evm-sp1-settlement-v2 <execute|prove-groth16|verify-groth16> <empty|source-contract|native-empty|native-artifact> TRUSTED_SETTLEMENT_V2_ELF [PROOF_FILE]";
     let mode = args.first().map(String::as_str).ok_or(usage)?;
     let legacy_args = if mode == "execute" { 2 } else { 3 };
     let selected_args = legacy_args + 1;

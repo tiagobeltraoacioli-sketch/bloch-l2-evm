@@ -14,6 +14,10 @@ description = "Read-only composition of PQ authority recovery and canonical L2 s
 name = "bloch-l2-audit-dev"
 path = "src/bin/bloch-l2-audit-dev.rs"
 
+[[bin]]
+name = "bloch-l2-produce-dev"
+path = "src/bin/bloch-l2-produce-dev.rs"
+
 [dependencies]
 bloch-l2-evm = { path = "../.." }
 bloch-native-escrow-pq = { path = "../native-escrow-pq" }
