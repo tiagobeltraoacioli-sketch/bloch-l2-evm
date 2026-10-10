@@ -21,6 +21,7 @@ use bloch_l2_evm::{
     data_availability::{da_commitment, decode_da_payload},
     deposits_hash,
     proof_statement::{SettlementStatementV2, SettlementStatementV3, SETTLEMENT_STATEMENT_V3_TAG},
+    withdrawal::WithdrawalCommitment,
     DepositMint, DepositProvenance,
 };
 use bloch_pos_committee::{l2_settlement::InboxRecord, transition::PosTransaction};
@@ -51,6 +52,8 @@ pub struct SettledBlockInputs {
     pub transactions_root: Option<B256>,
     /// Zero for V2 and for blocks without user transactions.
     pub da_commitment: B256,
+    /// V3 only: the outbox root and count after the block.
+    pub withdrawals: Option<WithdrawalCommitment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +76,9 @@ pub enum ReconstructError {
     DataUnavailable { number: u64, commitment: B256 },
     /// The batch does not decode or its size differs from `user_tx_count`.
     Batch { number: u64 },
+    /// The withdrawal count decreased, or the root changed without new
+    /// withdrawals (or stayed with new ones) — the native acceptance rules.
+    Withdrawals { number: u64 },
 }
 
 impl std::fmt::Display for ReconstructError {
@@ -93,6 +99,7 @@ impl std::fmt::Display for ReconstructError {
                 write!(f, "L2 block {number}: no L1 data-availability batch {commitment}")
             }
             Self::Batch { number } => write!(f, "L2 block {number}: DA batch is malformed or has the wrong size"),
+            Self::Withdrawals { number } => write!(f, "L2 block {number}: withdrawal root/count do not extend the previous ones"),
         }
     }
 }
@@ -124,6 +131,7 @@ pub fn derive_settled_blocks(
     let mut batches: BTreeMap<(u64, B256), Vec<u8>> = BTreeMap::new();
     let mut out: Vec<SettledBlockInputs> = Vec::new();
     let (mut head_hash, mut head_root, mut head_number) = (genesis_hash, genesis_state_root, 0u64);
+    let mut head_withdrawals = WithdrawalCommitment::empty();
     let mut last_height = 0u64;
     for block in blocks {
         if block.height <= last_height {
@@ -181,6 +189,13 @@ pub fn derive_settled_blocks(
                     let deposits: Vec<DepositMint> = records.iter().map(mint).collect();
                     let mut transactions = Vec::new();
                     if let Some(v3) = &v3 {
+                        let next = WithdrawalCommitment { root: v3.withdrawal_root, count: v3.withdrawal_count };
+                        if next.count < head_withdrawals.count
+                            || (next.count == head_withdrawals.count) != (next.root == head_withdrawals.root)
+                        {
+                            return Err(ReconstructError::Withdrawals { number });
+                        }
+                        head_withdrawals = next;
                         if deposits_hash(&deposits) != v3.deposits_hash {
                             return Err(ReconstructError::Deposits { number });
                         }
@@ -211,6 +226,7 @@ pub fn derive_settled_blocks(
                         deposits_hash: v3.map(|v| v.deposits_hash),
                         transactions_root: v3.map(|v| v.transactions_root),
                         da_commitment: v3.map_or(B256::ZERO, |v| v.da_commitment),
+                        withdrawals: v3.map(|v| WithdrawalCommitment { root: v.withdrawal_root, count: v.withdrawal_count }),
                     });
                     (head_hash, head_root, head_number) = (base.l2_header_hash, base.l2_state_root, number);
                     // Batches for settled blocks are never needed again.

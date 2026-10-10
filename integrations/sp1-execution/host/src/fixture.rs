@@ -27,7 +27,11 @@ pub struct Fixture {
 
 /// Synthetic deposit funds nonce-0 deployment and nonce-1 call storing 42 in slot 0.
 pub fn fixture() -> Result<Fixture, Box<dyn Error>> {
-    let spec = ChainSpec::testnet();
+    fixture_with(&ChainSpec::testnet())
+}
+
+/// [`fixture`] under the given execution rules (settlement V3: `testnet_v3`).
+pub fn fixture_with(spec: &ChainSpec) -> Result<Fixture, Box<dyn Error>> {
     let key = SigningKey::from_bytes((&[7u8; 32]).into()).map_err(|error| io::Error::other(error.to_string()))?;
     let sender = Address::from_public_key(key.verifying_key());
     let contract = sender.create(0);
@@ -48,9 +52,9 @@ pub fn fixture() -> Result<Fixture, Box<dyn Error>> {
             },
         }],
         transactions: vec![
-            sign(&spec, &key, 0, TxKind::Create, initcode.into())?,
+            sign(spec, &key, 0, TxKind::Create, initcode.into())?,
             sign(
-                &spec,
+                spec,
                 &key,
                 1,
                 TxKind::Call(contract),
@@ -58,7 +62,7 @@ pub fn fixture() -> Result<Fixture, Box<dyn Error>> {
             )?,
         ],
     };
-    let (fixture, state, outcome) = execute_fixture(body)?;
+    let (fixture, state, outcome) = execute_fixture_with(spec, body, B256::repeat_byte(8))?;
     ensure(state.nonce_of(&sender) == 2, "fixture sender nonce is not 2")?;
     ensure(outcome.transactions.len() == 2, "fixture transaction count differs")?;
     ensure(outcome.receipts.len() == 2, "fixture receipt count differs")?;
@@ -94,8 +98,7 @@ pub fn fixture() -> Result<Fixture, Box<dyn Error>> {
 /// Benchmark block: one deposit funds a single sender that makes `n` plain
 /// value transfers (21,000 gas each) to `n` distinct, previously empty
 /// accounts. `n = 0` is the deposit-only block the devnets settle today.
-pub fn fixture_transfers(n: u64) -> Result<Fixture, Box<dyn Error>> {
-    let spec = ChainSpec::testnet();
+pub fn fixture_transfers(spec: &ChainSpec, n: u64) -> Result<Fixture, Box<dyn Error>> {
     let key = SigningKey::from_bytes((&[7u8; 32]).into()).map_err(|error| io::Error::other(error.to_string()))?;
     let sender = Address::from_public_key(key.verifying_key());
     let mut transactions = Vec::new();
@@ -103,7 +106,7 @@ pub fn fixture_transfers(n: u64) -> Result<Fixture, Box<dyn Error>> {
         let mut recipient = [0x5a; 20];
         recipient[12..].copy_from_slice(&nonce.to_be_bytes());
         transactions.push(sign_with(
-            &spec,
+            spec,
             &key,
             nonce,
             TxKind::Call(Address::from(recipient)),
@@ -116,7 +119,7 @@ pub fn fixture_transfers(n: u64) -> Result<Fixture, Box<dyn Error>> {
         deposits: vec![bench_deposit(sender)],
         transactions,
     };
-    let (fixture, state, outcome) = execute_fixture(body)?;
+    let (fixture, state, outcome) = execute_fixture_with(spec, body, B256::repeat_byte(8))?;
     ensure(state.nonce_of(&sender) == n, "transfer fixture sender nonce differs")?;
     ensure(
         outcome
@@ -131,8 +134,7 @@ pub fn fixture_transfers(n: u64) -> Result<Fixture, Box<dyn Error>> {
 /// Benchmark block: one deposit, a deployment of a contract whose runtime
 /// stores calldata word `v` at storage slot `v`, then `n` calls writing `n`
 /// distinct fresh slots. User transactions: `n + 1`.
-pub fn fixture_calls(n: u64) -> Result<Fixture, Box<dyn Error>> {
-    let spec = ChainSpec::testnet();
+pub fn fixture_calls(spec: &ChainSpec, n: u64) -> Result<Fixture, Box<dyn Error>> {
     let key = SigningKey::from_bytes((&[7u8; 32]).into()).map_err(|error| io::Error::other(error.to_string()))?;
     let sender = Address::from_public_key(key.verifying_key());
     let contract = sender.create(0);
@@ -142,7 +144,7 @@ pub fn fixture_calls(n: u64) -> Result<Fixture, Box<dyn Error>> {
     let mut initcode = vec![0x60, 0x06, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, 0x06, 0x60, 0x00, 0xf3];
     initcode.extend_from_slice(&runtime);
     let mut transactions = vec![sign_with(
-        &spec,
+        spec,
         &key,
         0,
         TxKind::Create,
@@ -152,7 +154,7 @@ pub fn fixture_calls(n: u64) -> Result<Fixture, Box<dyn Error>> {
     )?];
     for i in 0..n {
         transactions.push(sign_with(
-            &spec,
+            spec,
             &key,
             i + 1,
             TxKind::Call(contract),
@@ -165,7 +167,7 @@ pub fn fixture_calls(n: u64) -> Result<Fixture, Box<dyn Error>> {
         deposits: vec![bench_deposit(sender)],
         transactions,
     };
-    let (fixture, state, outcome) = execute_fixture(body)?;
+    let (fixture, state, outcome) = execute_fixture_with(spec, body, B256::repeat_byte(8))?;
     ensure(state.nonce_of(&sender) == n + 1, "call fixture sender nonce differs")?;
     ensure(
         outcome.transactions.iter().all(|tx| tx.success),
@@ -175,6 +177,45 @@ pub fn fixture_calls(n: u64) -> Result<Fixture, Box<dyn Error>> {
         .account(&contract)
         .ok_or_else(|| io::Error::other("benchmark contract missing"))?;
     ensure(account.code_hash == keccak256(runtime), "benchmark runtime differs")?;
+    Ok(fixture)
+}
+
+/// Benchmark block: one deposit, then `n` withdrawals through the outbox
+/// predeploy (`initiateWithdrawal`, 0.01 BLCH each, distinct L1 recipients).
+/// Requires a chain with the withdrawal outbox (`ChainSpec::testnet_v3`).
+pub fn fixture_withdrawals(spec: &ChainSpec, n: u64) -> Result<Fixture, Box<dyn Error>> {
+    use bloch_l2_evm::withdrawal::{INITIATE_WITHDRAWAL_SELECTOR, MIN_WITHDRAWAL_SATS};
+    let outbox = spec
+        .withdrawal_outbox
+        .ok_or_else(|| io::Error::other("withdrawal fixture requires the outbox"))?;
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).map_err(|error| io::Error::other(error.to_string()))?;
+    let sender = Address::from_public_key(key.verifying_key());
+    let mut transactions = Vec::new();
+    for nonce in 0..n {
+        let mut input = INITIATE_WITHDRAWAL_SELECTOR.to_vec();
+        input.extend_from_slice(&[0x5a; 24]);
+        input.extend_from_slice(&nonce.to_be_bytes());
+        transactions.push(sign_with(
+            spec,
+            &key,
+            nonce,
+            TxKind::Call(outbox),
+            bloch_l2_evm::sats_to_wei(MIN_WITHDRAWAL_SATS),
+            input.into(),
+            100_000,
+        )?);
+    }
+    let body = NodeBodyV2 {
+        deposits: vec![bench_deposit(sender)],
+        transactions,
+    };
+    let (fixture, state, outcome) = execute_fixture_with(spec, body, B256::repeat_byte(8))?;
+    ensure(state.nonce_of(&sender) == n, "withdrawal fixture sender nonce differs")?;
+    ensure(
+        outcome.transactions.iter().all(|tx| tx.success)
+            && outcome.withdrawals.as_ref().map(|w| w.commitment.count) == Some(n),
+        "a benchmark withdrawal failed",
+    )?;
     Ok(fixture)
 }
 
@@ -193,7 +234,12 @@ fn bench_deposit(recipient: Address) -> DepositMint {
 
 /// Minimal transition for initial zkVM/proof qualification before the contract fixture.
 pub fn fixture_empty() -> Result<Fixture, Box<dyn Error>> {
-    let (fixture, _, outcome) = execute_fixture(NodeBodyV2::default())?;
+    fixture_empty_with(&ChainSpec::testnet())
+}
+
+/// [`fixture_empty`] under the given execution rules.
+pub fn fixture_empty_with(spec: &ChainSpec) -> Result<Fixture, Box<dyn Error>> {
+    let (fixture, _, outcome) = execute_fixture_with(spec, NodeBodyV2::default(), B256::repeat_byte(8))?;
     ensure(
         outcome.transactions.is_empty() && outcome.receipts.is_empty(),
         "empty fixture has transactions",
@@ -201,21 +247,22 @@ pub fn fixture_empty() -> Result<Fixture, Box<dyn Error>> {
     Ok(fixture)
 }
 
-fn execute_fixture(
-    body: NodeBodyV2,
-) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
-    execute_fixture_at(body, B256::repeat_byte(8))
-}
-
 pub(crate) fn execute_fixture_at(
     body: NodeBodyV2,
     anchor_root: B256,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
-    let spec = ChainSpec::testnet();
+    execute_fixture_with(&ChainSpec::testnet(), body, anchor_root)
+}
+
+pub(crate) fn execute_fixture_with(
+    spec: &ChainSpec,
+    body: NodeBodyV2,
+    anchor_root: B256,
+) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
     let domain = B256::repeat_byte(0xd3);
-    let mut pre_state = genesis_v2(&spec, 0)?;
+    let mut pre_state = genesis_v2(spec, 0)?;
     let previous_state_root = pre_state.commit_root();
-    let parent = node_head(&spec, domain, &pre_state)?;
+    let parent = node_head(spec, domain, &pre_state)?;
     let context = BlockContext {
         number: 1,
         timestamp: 1,
@@ -223,18 +270,22 @@ pub(crate) fn execute_fixture_at(
         prevrandao: B256::repeat_byte(7),
         anchor_root,
     };
-    let (witness, recorded) = generate_node_batch_witness(&pre_state, &spec, domain, &context, &body)?;
+    let (witness, recorded) = generate_node_batch_witness(&pre_state, spec, domain, &context, &body)?;
     ensure(
         pre_state.state_root() == previous_state_root,
         "witness generation mutated pre-state",
     )?;
     let mut state = pre_state.clone();
-    let outcome = execute_node_block(&spec, domain, &mut state, &context, &body)?;
-    outcome.header.validate_parent(&spec, &parent)?;
+    let outcome = execute_node_block(spec, domain, &mut state, &context, &body)?;
+    outcome.header.validate_parent(spec, &parent)?;
     outcome
         .header
-        .validate_commitments(&spec, domain, &body, &outcome.receipts)?;
+        .validate_commitments(spec, domain, &body, &outcome.receipts)?;
     ensure(outcome.header == recorded.header, "host and witness headers differ")?;
+    ensure(
+        outcome.withdrawals == recorded.withdrawals,
+        "host and witness withdrawals differ",
+    )?;
     ensure(
         outcome.receipts == recorded.receipts,
         "host and witness receipts differ",
@@ -264,7 +315,7 @@ pub(crate) fn execute_fixture_at(
     // Derive expected values from the configured host execution, not guest output
     // or a deserialized statement supplied alongside a proof.
     let expected = ExecutionStatement {
-        configuration: configuration_commitment(&spec)?,
+        configuration: configuration_commitment(spec)?,
         domain,
         previous_state_root,
         header_hash: outcome.header.hash(),

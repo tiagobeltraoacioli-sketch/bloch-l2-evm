@@ -39,7 +39,7 @@ fn stdin(fixture: &fixture::Fixture, context: SettlementContextV2) -> SP1Stdin {
 
 fn expect(execution: fixture::Fixture, context: SettlementContextV2) -> Result<Qualification> {
     let expected = execute_settlement_statement_v3(
-        &ChainSpec::testnet(),
+        &ChainSpec::testnet_v3(),
         B256::repeat_byte(0xd3),
         &execution.witness,
         &execution.context,
@@ -114,7 +114,7 @@ fn native_artifact_qualification(
         return Err(io::Error::other("invalid native request position").into());
     }
     let previous_settlement = hash(7, true)?;
-    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact(artifact)?;
+    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact_for(artifact, &ChainSpec::testnet_v3())?;
     if (artifact.header().number == 1) != (previous_settlement == B256::ZERO) {
         return Err(io::Error::other("only L2 block 1 may have no previous settlement").into());
     }
@@ -165,9 +165,9 @@ fn native_artifact_qualification(
 
 fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification> {
     match name {
-        "empty" => expect(fixture::fixture_empty()?, synthetic_context(identity, 0)),
+        "empty" => expect(fixture::fixture_empty_with(&ChainSpec::testnet_v3())?, synthetic_context(identity, 0)),
         // Deposit plus a signed deploy and call: two user transactions.
-        "contract" => expect(fixture::fixture()?, synthetic_context(identity, 1)),
+        "contract" => expect(fixture::fixture_with(&ChainSpec::testnet_v3())?, synthetic_context(identity, 1)),
         #[cfg(feature = "node-artifact")]
         "native-artifact" => {
             let request = std::env::var_os("BLOCH_NATIVE_L2_REQUEST")
@@ -287,7 +287,7 @@ async fn print_identity(elf_path: &str) -> Result<()> {
     let bytes = fs::read(elf_path)?;
     let trusted = TrustedProgram::from_trusted_elf(Elf::from(bytes)).await?;
     let identity = trusted.identity();
-    let spec = ChainSpec::testnet();
+    let spec = ChainSpec::testnet_v3();
     #[cfg(feature = "source-settlement")]
     let policy = {
         use sha2::Digest;
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn contract_fixture_settles_user_transactions_under_v3() {
         let program = [B256::repeat_byte(9), B256::repeat_byte(10), B256::repeat_byte(11)];
-        let q = expect(fixture::fixture().unwrap(), synthetic_context_for(program, 1)).unwrap();
+        let q = expect(fixture::fixture_with(&ChainSpec::testnet_v3()).unwrap(), synthetic_context_for(program, 1)).unwrap();
         assert_eq!(q.expected.user_tx_count, 2);
         assert_eq!(q.expected.base.consumed_end, 1);
         assert_eq!(q.expected.deposits_hash, q.execution.body.deposits_hash());

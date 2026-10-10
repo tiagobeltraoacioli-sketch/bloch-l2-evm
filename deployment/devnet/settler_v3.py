@@ -10,10 +10,13 @@ Differences, all deliberate:
 * builds the 1155-byte native transaction under the renumbered asynchronous
   tag 0x13 (`tag || config[160:192] || values || proof`);
 * checks the V3 fields before submitting: deposits_hash equals keccak over the
-  native pending records, transactions/receipts roots are non-zero, the
-  reserved withdrawal_root / withdrawal_count are zero, user_tx_count matches
-  what the producer put in the block, and da_commitment is zero without user
-  transactions or else the commitment of the block's batch (`produce da`);
+  native pending records, transactions/receipts roots are non-zero,
+  user_tx_count matches what the producer put in the block, da_commitment is
+  zero without user transactions or else the commitment of the block's batch
+  (`produce da`), and (M4) withdrawal_root / withdrawal_count equal what the
+  producer reported for the block and follow the native rules against the
+  accepted head: the count never decreases and the root changes exactly when
+  the count does (the empty tree before any withdrawal);
 * data availability (M3): before settling a block with user transactions it
   publishes the block's batch in a native `L2DataAvailability` (0x15)
   transaction and waits until `getl2settlement.data_availability` shows the
@@ -66,6 +69,9 @@ DA_TAG = 0x15
 DA_DOMAIN = b'BLOCH:L2:DA:1'
 DA_MAX_PAYLOAD_BYTES = 114_688
 DA_MAX_INPUTS = 16
+# L2 -> L1 withdrawals (bloch_l2_evm::withdrawal, native l2_settlement::withdrawal).
+WITHDRAWAL_DOMAIN = b'BLOCH:L2:WITHDRAW:1'
+WITHDRAWAL_TREE_DEPTH = 32
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 256}  # bytes: one native DA batch
 
@@ -133,6 +139,69 @@ def deposits_hash(records):
         preimage += (recipient + int(r['height']).to_bytes(8, 'big') + int(r['tx_index']).to_bytes(4, 'big') + txid
                      + int(r['vout']).to_bytes(4, 'big') + int(r['sats']).to_bytes(8, 'big'))
     return keccak256(preimage)
+
+
+def withdrawal_leaf(chain_id, nonce, l1_recipient, sats):
+    """keccak256("BLOCH:L2:WITHDRAW:1" || chain_id BE8 || nonce BE8 || l1_recipient || sats BE8)."""
+    if len(l1_recipient) != 32:
+        raise ValueError('l1_recipient must be 32 bytes')
+    return keccak256(WITHDRAWAL_DOMAIN + chain_id.to_bytes(8, 'big') + nonce.to_bytes(8, 'big') + l1_recipient
+                     + sats.to_bytes(8, 'big'))
+
+
+def _zero_hashes():
+    zero = [bytes(32)]
+    for _ in range(WITHDRAWAL_TREE_DEPTH):
+        zero.append(keccak256(zero[-1] + zero[-1]))
+    return zero
+
+
+ZERO_HASHES = _zero_hashes()
+EMPTY_WITHDRAWAL_ROOT = ZERO_HASHES[WITHDRAWAL_TREE_DEPTH]
+
+
+def withdrawal_tree_root(leaves):
+    """Root of the depth-32 keccak tree over `leaves` (empty leaves are zero)."""
+    level = list(leaves)
+    if len(level) > 1 << WITHDRAWAL_TREE_DEPTH:
+        raise ValueError('too many leaves')
+    for h in range(WITHDRAWAL_TREE_DEPTH):
+        if not level:
+            return EMPTY_WITHDRAWAL_ROOT
+        if len(level) % 2:
+            level.append(ZERO_HASHES[h])
+        level = [keccak256(level[i] + level[i + 1]) for i in range(0, len(level), 2)]
+    return level[0]
+
+
+def withdrawal_root_from_proof(leaf, index, siblings):
+    """Fold a leaf with its 32 bottom-up siblings into the root it proves."""
+    if len(siblings) != WITHDRAWAL_TREE_DEPTH or not 0 <= index < 1 << WITHDRAWAL_TREE_DEPTH:
+        return None
+    node = leaf
+    for h, sibling in enumerate(siblings):
+        node = keccak256(sibling + node) if (index >> h) & 1 else keccak256(node + sibling)
+    return node
+
+
+def withdrawal_fields(values):
+    """(root, count) of a V3 statement; the empty tree for a V2 statement or none."""
+    if values is None or len(values) != VALUES_BYTES or not values.startswith(TAG):
+        return EMPTY_WITHDRAWAL_ROOT, 0
+    return (values[T + WITHDRAWAL_ROOT:T + WITHDRAWAL_ROOT + 32],
+            int.from_bytes(values[T + WITHDRAWAL_COUNT:T + WITHDRAWAL_COUNT + 8], 'big'))
+
+
+def check_withdrawals(values, previous):
+    """The native acceptance rule: the withdrawal count never decreases and the
+    root changes exactly when the count does. Returns (root, count)."""
+    root, count = withdrawal_fields(values)
+    previous_root, previous_count = withdrawal_fields(previous)
+    if count < previous_count:
+        raise Halt(f'statement withdrawal count {count} is below the accepted {previous_count}')
+    if (count == previous_count) != (root == previous_root):
+        raise Halt('statement withdrawal root must change exactly when the withdrawal count does')
+    return root, count
 
 
 def da_commitment(number, payload):
@@ -312,7 +381,8 @@ class Settler:
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
             produced.write_text(json.dumps(block, sort_keys=True) + '\n')
-            log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions') if k in block},
+            log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
+                                                               'withdrawal_count') if k in block},
                 deferred=len(block.get('deferred', [])), dropped=block.get('dropped', []))
         elif head['number'] == number:
             # Crash after extend: reuse only the block built on this exact parent and anchor.
@@ -362,8 +432,9 @@ class Settler:
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
 
-    def check_v3(self, values, directory):
-        """V3-only pre-submit checks (the V2-prefix checks are in transaction())."""
+    def check_v3(self, values, directory, previous=None):
+        """V3-only pre-submit checks (the V2-prefix checks are in transaction()).
+        `previous` is the accepted head statement (bytes) or None."""
         field = lambda offset: values[T + offset:T + offset + 32]  # noqa: E731
         number = lambda offset: int.from_bytes(values[T + offset:T + offset + 8], 'big')  # noqa: E731
         pending = json.loads((directory / 'deposits.json').read_text())
@@ -371,16 +442,19 @@ class Settler:
             raise Halt('statement deposits_hash does not match the native pending deposits')
         if field(TRANSACTIONS_ROOT) == bytes(32) or field(RECEIPTS_ROOT) == bytes(32):
             raise Halt('statement has a zero transactions or receipts root')
-        if field(WITHDRAWAL_ROOT) != bytes(32) or number(WITHDRAWAL_COUNT):
-            raise Halt('statement reserved V3 fields are not zero')
+        root, count = check_withdrawals(values, previous)
         users = number(USER_TX_COUNT)
         if users and not self.c['user_transactions']:
             raise Halt(f'statement reports {users} user transactions while user_transactions is false')
         produced = directory / 'block.json'
         if produced.exists():
-            expected = json.loads(produced.read_text()).get('transactions', 0)
+            block = json.loads(produced.read_text())
+            expected = block.get('transactions', 0)
             if users != expected:
                 raise Halt(f'statement reports {users} user transactions, the producer included {expected}')
+            if 'withdrawal_count' in block and (block['withdrawal_root'] != root.hex()
+                                                or block['withdrawal_count'] != count):
+                raise Halt('statement withdrawal root/count differ from the producer block')
         if not users:
             if field(DA_COMMITMENT) != bytes(32):
                 raise Halt('statement da_commitment is not zero without user transactions')
@@ -459,7 +533,7 @@ class Settler:
         log('da-inclusion-timeout', number=number)
         return False
 
-    def transaction(self, directory, proof_path):
+    def transaction(self, directory, proof_path, accepted=None):
         values, proof = parse_proof_artifact(proof_path.read_bytes())
         config = Path(self.c['l2_config']).read_bytes()
         request = (directory / 'native-request.txt').read_text().splitlines()
@@ -472,12 +546,15 @@ class Settler:
         checks += [int.from_bytes(values[T + 512 + 8 * i:T + 520 + 8 * i], 'big') == inbox[i] for i in range(3)]
         if not all(checks):
             raise Halt('proof public values do not match the native request')
-        users = self.check_v3(values, directory)
+        previous = bytes.fromhex(accepted['statement']) if accepted else None
+        users = self.check_v3(values, directory, previous)
         tx = bytes([ASYNC_SETTLEMENT_TAG]) + config[160:192] + values + proof
         if len(tx) != TRANSACTION_BYTES:
             raise Halt('settlement transaction has the wrong length')
         (directory / 'transaction.bin').write_bytes(tx)
-        log('transaction-built', directory=str(directory), user_transactions=users, bytes=len(tx))
+        root, count = withdrawal_fields(values)
+        log('transaction-built', directory=str(directory), user_transactions=users, bytes=len(tx),
+            withdrawal_root=root.hex(), withdrawal_count=count)
         return tx
 
     def submit_and_wait(self, number, directory, tx, view):
@@ -506,7 +583,7 @@ class Settler:
             return False
         number, directory = self.prepare_block(view)
         proof = self.prove(directory)
-        tx = self.transaction(directory, proof)
+        tx = self.transaction(directory, proof, view.get('accepted'))
         values = tx[33:33 + VALUES_BYTES]
         if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big') and \
                 not self.publish_da(number, directory, values):

@@ -14,6 +14,7 @@ use bloch_l2_evm::{
     deposits_hash,
     node_primitives::NodeBodyV2,
     proof_statement::{SettlementStatementV2, SettlementStatementV3},
+    withdrawal::{verify_withdrawal_proof, withdrawal_leaf, INITIATE_WITHDRAWAL_SELECTOR, L2_TO_L1_MESSAGE_PASSER},
     DepositMint, DepositProvenance,
 };
 use bloch_pos_committee::{
@@ -49,6 +50,25 @@ fn transfer(i: u8, nonce: u64) -> String {
         to: TxKind::Call(Address::repeat_byte(0x55)),
         value: U256::from(1_000u64 + nonce),
         gas_limit: 21_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 1,
+        ..Default::default()
+    };
+    let signature: Signature = key(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+}
+
+/// `initiateWithdrawal(l1_recipient)` with `sats` (M4 outbox).
+fn withdraw(i: u8, nonce: u64, l1_recipient: B256, sats: u64) -> String {
+    let mut input = INITIATE_WITHDRAWAL_SELECTOR.to_vec();
+    input.extend_from_slice(l1_recipient.as_slice());
+    let tx = TxEip1559 {
+        chain_id: CHAIN_ID,
+        nonce,
+        to: TxKind::Call(L2_TO_L1_MESSAGE_PASSER),
+        value: bloch_l2_evm::sats_to_wei(sats),
+        input: input.into(),
+        gas_limit: 100_000,
         max_fee_per_gas: 2_000_000_000,
         max_priority_fee_per_gas: 1,
         ..Default::default()
@@ -119,6 +139,8 @@ struct Produced {
     records: Vec<Value>,
     consumed: (u64, u64),
     payload: Option<Vec<u8>>,
+    /// Outbox (root, count) after the block, as the producer reports it.
+    withdrawals: (B256, u64),
 }
 
 fn settlement(block: &Produced, inbox_count: u64) -> PosTransaction {
@@ -154,8 +176,8 @@ fn settlement(block: &Produced, inbox_count: u64) -> PosTransaction {
         transactions_root: NodeBodyV2 { deposits: vec![], transactions: transactions.clone() }.transactions_root(),
         receipts_root: B256::repeat_byte(12),
         user_tx_count: transactions.len() as u64,
-        withdrawal_root: B256::ZERO,
-        withdrawal_count: 0,
+        withdrawal_root: block.withdrawals.0,
+        withdrawal_count: block.withdrawals.1,
         da_commitment: block
             .payload
             .as_deref()
@@ -193,11 +215,17 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
     let inbox = [record(&d1, 2, 0), record(&d2, 2, 1), record(&d3, 5, 0)];
 
     // L2 block 1: deposits only. L2 block 2: two user transfers. L2 block 3:
-    // the third deposit funds a sender that spends it in the same block.
+    // the third deposit funds a sender that spends it in the same block, and
+    // two withdrawals go through the outbox (M4).
+    let (l1_alice, l1_bob) = (B256::repeat_byte(0x77), B256::repeat_byte(0x78));
     let plan: Vec<(Vec<Value>, (u64, u64), Vec<String>)> = vec![
         (inbox[..2].to_vec(), (0, 2), vec![]),
         (vec![], (2, 2), vec![transfer(0, 0), transfer(0, 1)]),
-        (inbox[2..].to_vec(), (2, 3), vec![transfer(1, 0), transfer(2, 0)]),
+        (
+            inbox[2..].to_vec(),
+            (2, 3),
+            vec![transfer(1, 0), transfer(2, 0), withdraw(0, 2, l1_alice, 5_000_000), withdraw(2, 1, l1_bob, 7_000_000)],
+        ),
     ];
     let mut produced = Vec::new();
     let (mut parent, mut parent_root) = (h(&genesis, "hash"), h(&genesis_head, "state_root"));
@@ -245,7 +273,9 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
             records,
             consumed,
             payload,
+            withdrawals: (h(&block, "withdrawal_root"), block["withdrawal_count"].as_u64().unwrap()),
         };
+        assert_eq!(block["withdrawals"].as_array().unwrap().len() as u64, if number == 3 { 2 } else { 0 });
         (parent, parent_root) = (p.hash, p.state_root);
         produced.push(p);
     }
@@ -275,6 +305,36 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
     }
     assert_eq!(report["blocks"][1]["transactions"], 2);
     assert_eq!(report["blocks"][2]["deposits"], 1);
+    assert_eq!(report["blocks"][2]["withdrawal_count"], 2);
+    assert_eq!(h(&report["blocks"][2], "withdrawal_root"), b3.withdrawals.0);
+    // Blocks 1 and 2 have no withdrawal: the empty tree.
+    assert_eq!(b1.withdrawals, (bloch_l2_evm::withdrawal::empty_withdrawal_root(), 0));
+    assert_eq!(b2.withdrawals, b1.withdrawals);
+
+    // Claim input: the proof of withdrawal 1 against the settled root of L2
+    // block 3, rebuilt from receipts and checked against the outbox state.
+    let (root3, count3) = (hex::encode(b3.withdrawals.0), b3.withdrawals.1.to_string());
+    let proof = produce(&["withdrawal-proof", "--target", &db, "--index", "1", "--number", "3", "--root", &root3,
+                          "--count", &count3])
+    .unwrap();
+    assert_eq!(proof["withdrawal"]["nonce"], 1);
+    assert_eq!(proof["withdrawal"]["sats"], 7_000_000);
+    assert_eq!(proof["withdrawal"]["l2_block"], 3);
+    assert_eq!(h(&proof["withdrawal"], "l1_recipient"), l1_bob);
+    let siblings: Vec<B256> = proof["siblings"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().parse().unwrap()).collect();
+    let leaf = withdrawal_leaf(CHAIN_ID, 1, l1_bob, 7_000_000);
+    assert!(verify_withdrawal_proof(leaf, 1, &siblings.try_into().unwrap(), b3.withdrawals.0));
+    let head = produce(&["head", "--target", &db]).unwrap();
+    assert_eq!((h(&head, "withdrawal_root"), head["withdrawal_count"].as_u64()), (b3.withdrawals.0, Some(2)));
+    // Refused: a root the chain never had, a missing leaf, a block before it.
+    let wrong = hex::encode(B256::repeat_byte(9));
+    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "0", "--root", &wrong, "--count", "2"])
+        .unwrap_err()
+        .contains("differ"));
+    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "2"]).unwrap_err().contains("does not exist"));
+    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "0", "--number", "2"])
+        .unwrap_err()
+        .contains("does not exist"));
     // The rebuilt database is a usable canonical L2 database.
     let head = produce(&["head", "--target", &dir("rebuilt")]).unwrap();
     assert_eq!((head["number"].as_u64(), h(&head, "state_root")), (Some(3), b3.state_root));
@@ -326,6 +386,18 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
     bad_root[1].1 = vec![settlement(&lie, 2)];
     bad_root.truncate(2);
     refuse("wrong-root", bad_root, "differ from settled");
+    // A settled withdrawal root the L1 data does not produce is refused.
+    let mut lie = clone_produced(b3);
+    lie.withdrawals.0 = B256::repeat_byte(0x67);
+    let mut bad_withdrawals = honest.clone();
+    bad_withdrawals[5].1 = vec![settlement(&lie, 3)];
+    refuse("wrong-withdrawal-root", bad_withdrawals, "withdrawal root");
+    // A settlement whose withdrawal root changes without new withdrawals.
+    let mut lie = clone_produced(b2);
+    lie.withdrawals.0 = B256::repeat_byte(0x68);
+    let mut moved = honest.clone();
+    moved[3].1 = vec![d3.clone(), settlement(&lie, 3)];
+    refuse("moved-withdrawal-root", moved, "do not extend");
     // A deposit the settlement claims but L1 never carried.
     let mut no_deposit = honest.clone();
     no_deposit[0].1.pop();
@@ -343,6 +415,7 @@ fn clone_produced(p: &Produced) -> Produced {
         records: p.records.clone(),
         consumed: p.consumed,
         payload: p.payload.clone(),
+        withdrawals: p.withdrawals,
     }
 }
 

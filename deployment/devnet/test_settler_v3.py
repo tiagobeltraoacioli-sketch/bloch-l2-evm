@@ -56,6 +56,7 @@ def statement(user_txs=0, deposits=None, **overrides):
     put(s.TRANSACTIONS_ROOT, b'\x61' * 32)
     put(s.RECEIPTS_ROOT, b'\x62' * 32)
     put(s.USER_TX_COUNT, user_txs.to_bytes(8, 'big'))
+    put(s.WITHDRAWAL_ROOT, s.EMPTY_WITHDRAWAL_ROOT)
     if user_txs:
         put(s.DA_COMMITMENT, s.da_commitment(1, batch(user_txs)))
     for offset, data in overrides.items():
@@ -78,6 +79,7 @@ class Fake:
         self.calls, self.sent, self.accepted, self.head = [], [], None, 0
         self.da_payload = batch(produced_txs) if da_payload is None else da_payload
         self.da_records, self.include_da = [], True
+        self.extend_extra = {}
 
     def view(self):
         request = ''.join(x + '\n' for x in (NETWORK, GENESIS, BLOCK, '5', '4', SOURCE, INBOX))
@@ -119,7 +121,8 @@ class Fake:
             elif command == 'extend':
                 self.head += 1
                 out.stdout = json.dumps({'number': self.head, 'hash': '51' * 32, 'deposits': 1,
-                                         'transactions': self.produced_txs, 'deferred': [], 'dropped': []})
+                                         'transactions': self.produced_txs, 'deferred': [], 'dropped': [],
+                                         **self.extend_extra})
             elif command == 'da':
                 Path(argv[argv.index('--out') + 1]).write_text(self.da_payload.hex() + '\n')
                 out.stdout = json.dumps({'number': self.head, 'transactions': self.produced_txs,
@@ -275,8 +278,8 @@ class SettlerV3Test(unittest.TestCase):
             'deposits_hash': statement(deposits=[]),
             'zero transactions': statement(**{str(s.TRANSACTIONS_ROOT): bytes(32)}),
             'zero transactions or receipts': statement(**{str(s.RECEIPTS_ROOT): bytes(32)}),
-            'reserved': statement(**{str(s.WITHDRAWAL_ROOT): b'\x01' + bytes(31)}),
-            'reserved V3': statement(**{str(s.WITHDRAWAL_COUNT): (1).to_bytes(8, 'big')}),
+            'withdrawal root must change': statement(**{str(s.WITHDRAWAL_ROOT): b'\x01' + bytes(31)}),
+            'withdrawal root must change ': statement(**{str(s.WITHDRAWAL_COUNT): (1).to_bytes(8, 'big')}),
             'da_commitment is not zero': statement(**{str(s.DA_COMMITMENT): b'\x01' * 32}),
             'native request': statement(**{'432': (6).to_bytes(8, 'big')}),
             'native request ': statement(**{'64': b'\x00' * 32}),
@@ -288,6 +291,55 @@ class SettlerV3Test(unittest.TestCase):
                 with self.assertRaisesRegex(s.Halt, name.strip()):
                     self.settler(fake).cycle()
                 self.assertEqual(fake.sent, [], name)
+
+    # ---- M4 withdrawals ----
+    def test_withdrawal_vectors_match_the_shared_fixture(self):
+        fixture = json.loads((HERE.parent.parent / 'tests/fixtures/l2-withdrawal-v1/vectors.json').read_text())
+        unhex = lambda v: bytes.fromhex(v.removeprefix('0x'))  # noqa: E731
+        self.assertEqual(s.EMPTY_WITHDRAWAL_ROOT, unhex(fixture['empty_root']))
+        for leaf in fixture['leaves']:
+            self.assertEqual(s.withdrawal_leaf(leaf['chain_id'], leaf['nonce'], unhex(leaf['l1_recipient']),
+                                               leaf['sats']), unhex(leaf['leaf']))
+        chain = fixture['chain_id']
+        vector_leaf = lambda i: s.withdrawal_leaf(chain, i, bytes([i % 255 + 1]) * 32, 1_000_000 + i)  # noqa: E731
+        for tree in fixture['trees']:
+            leaves = [vector_leaf(i) for i in range(tree['count'])]
+            root = s.withdrawal_tree_root(leaves)
+            self.assertEqual(root, unhex(tree['root']), tree['count'])
+            for proof in tree['proofs']:
+                siblings = [unhex(x) for x in proof['siblings']]
+                self.assertEqual(s.withdrawal_root_from_proof(leaves[proof['index']], proof['index'], siblings), root)
+                self.assertNotEqual(s.withdrawal_root_from_proof(leaves[proof['index']], proof['index'] ^ 1,
+                                                                 siblings), root)
+
+    def test_withdrawal_root_and_count_follow_the_accepted_head(self):
+        def with_withdrawals(root, count):
+            return statement(**{str(s.WITHDRAWAL_ROOT): root, str(s.WITHDRAWAL_COUNT): count.to_bytes(8, 'big')})
+        empty, first, second = with_withdrawals(s.EMPTY_WITHDRAWAL_ROOT, 0), with_withdrawals(b'\x01' * 32, 1), \
+            with_withdrawals(b'\x02' * 32, 3)
+        self.assertEqual(s.check_withdrawals(empty, None), (s.EMPTY_WITHDRAWAL_ROOT, 0))
+        self.assertEqual(s.check_withdrawals(first, empty), (b'\x01' * 32, 1))
+        self.assertEqual(s.check_withdrawals(second, first), (b'\x02' * 32, 3))
+        self.assertEqual(s.check_withdrawals(first, first), (b'\x01' * 32, 1))
+        # A V2 head has no withdrawals: the empty tree.
+        self.assertEqual(s.check_withdrawals(first, b'\x00' * 590), (b'\x01' * 32, 1))
+        with self.assertRaisesRegex(s.Halt, 'below the accepted'):
+            s.check_withdrawals(first, second)
+        with self.assertRaisesRegex(s.Halt, 'exactly when'):
+            s.check_withdrawals(with_withdrawals(b'\x03' * 32, 1), first)
+        with self.assertRaisesRegex(s.Halt, 'exactly when'):
+            s.check_withdrawals(with_withdrawals(b'\x01' * 32, 2), first)
+
+    def test_statement_withdrawals_must_match_the_producer_block(self):
+        fake = Fake(self.root, statement())
+        fake.extend_extra = {'withdrawal_root': (b'\x01' * 32).hex(), 'withdrawal_count': 1}
+        with self.assertRaisesRegex(s.Halt, 'differ from the producer'):
+            self.settler(fake).cycle()
+        self.assertEqual(fake.sent, [])
+        self.tearDown(), self.setUp()
+        fake = Fake(self.root, statement())
+        fake.extend_extra = {'withdrawal_root': s.EMPTY_WITHDRAWAL_ROOT.hex(), 'withdrawal_count': 0}
+        self.assertTrue(self.settler(fake).cycle())
 
     # ---- M3 data availability ----
     def test_da_matches_the_shared_vector_and_batch_codec(self):

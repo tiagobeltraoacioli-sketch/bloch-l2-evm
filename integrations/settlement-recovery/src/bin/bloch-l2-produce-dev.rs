@@ -10,16 +10,23 @@
 //! settlement's L2 header). Without `--txs` the block carries deposits only;
 //! with `--txs` it also carries user transactions chosen deterministically by
 //! `bloch_l2_evm::node_execution::select` within per-block gas/byte/count limits. `export` writes the execution artifact of one block
-//! for the settlement prover. Block attributes follow a fixed development rule
+//! for the settlement prover. `withdrawal-proof` (M4) prints the Merkle proof
+//! of one outbox withdrawal against the withdrawal root after a block, the
+//! input of an L1 claim. Blocks execute under the settlement V3 rules
+//! (`ChainSpec::testnet_v3`, withdrawal outbox). Block attributes follow a fixed development rule
 //! (timestamp = parent + 1, prevrandao 0x07..07), which reproduces the block the
 //! `native-empty` qualification proves for block 1. No proof, settlement,
 //! deposit or finality is produced or implied here.
 #![cfg(unix)]
 
-use alloy_primitives::{hex, B256};
+use alloy_primitives::{hex, Address, B256, U256};
 use bloch_l2_evm::{
     data_availability::{da_commitment, encode_da_payload},
     node_execution::select::SelectionLimits,
+    withdrawal::{
+        empty_withdrawal_root, verify_withdrawal_proof, Withdrawal, WithdrawalCommitment, WithdrawalTree,
+        OUTBOX_NONCE_SLOT, OUTBOX_ROOT_SLOT,
+    },
     ChainSpec,
 };
 use bloch_settlement_recovery::reconstruct::{derive_settled_blocks, NativeBlockTransactions};
@@ -31,6 +38,7 @@ use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+    ReceiptProvider, StateProvider, StateProviderFactory,
 };
 use reth_tasks::{Runtime, RuntimeBuilder, RuntimeConfig};
 use serde_json::json;
@@ -52,6 +60,7 @@ usage:
   bloch-l2-produce-dev head   --target DIR
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
   bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
+  bloch-l2-produce-dev withdrawal-proof --target DIR --index I [--number N] [--root HEX --count N]
 
 extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
 whose anchor is the native-selected source block. HEX is 64 lowercase hex
@@ -71,7 +80,14 @@ every L2 block settled in the given native blocks, from native data only:
 inbox deposits (0x14), DA batches (0x15) and settlements (0x12/0x13). --l1 is
 a JSON object {blocks: [{height, transactions: [hex, ...]}, ...]} in height order;
 --l1-follower is a native follower state directory (index + blocks/*.bin).
-Each rebuilt block must reproduce the settled header hash and state root.
+Each rebuilt block must reproduce the settled header hash and state root, and
+a V3 settlement's withdrawal root and count.
+withdrawal-proof rebuilds the withdrawal tree from the outbox events of blocks
+1..=N (default: the head), checks it against the outbox root and count in the
+state after block N (and against --root/--count, e.g. a settled statement),
+and prints the 32 siblings of withdrawal I (bottom-up) with its leaf fields.
+extend and head report the outbox withdrawal_root / withdrawal_count after the
+block; extend also lists the withdrawals the block initiated.
 Development only: no settlement or finality is implied.
 ";
 
@@ -129,8 +145,18 @@ fn hash(value: &str, name: &str) -> Result<B256, String> {
     Ok(parsed)
 }
 
+/// The settlement V3 execution rules: testnet parameters plus the withdrawal
+/// outbox (the `settlement_v3` guest compiles the same `ChainSpec`).
+fn rules() -> ChainSpec {
+    ChainSpec::testnet_v3()
+}
+
+fn outbox() -> Address {
+    rules().withdrawal_outbox.expect("settlement V3 rules have the withdrawal outbox")
+}
+
 fn spec() -> Result<Arc<BlochChainSpec>, String> {
-    BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(0xd3), 0)
+    BlochChainSpec::new(rules(), B256::repeat_byte(0xd3), 0)
         .map(Arc::new)
         .map_err(|e| e.to_string())
 }
@@ -213,13 +239,14 @@ fn run(args: &[String]) -> Result<String, String> {
             };
             let Some(pool) = pool else {
                 let tip = coordinator.extend(parent, attributes, vec![]).map_err(|e| e.to_string())?;
-                return Ok(json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
+                let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                           "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
                           "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
-                          "transactions": 0})
-                .to_string());
+                          "transactions": 0});
+                report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
+                return Ok(out.to_string());
             };
-            let limits = limits(rest, SelectionLimits::protocol(&ChainSpec::testnet()))?;
+            let limits = limits(rest, SelectionLimits::protocol(&rules()))?;
             let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
             let (tip, selection) = coordinator
                 .extend_with_pending(parent, attributes, &candidates, limits)
@@ -239,7 +266,7 @@ fn run(args: &[String]) -> Result<String, String> {
                     pruned += 1;
                 }
             }
-            Ok(json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
+            let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                       "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
                       "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
                       "transactions": selection.transactions.len(),
@@ -252,8 +279,9 @@ fn run(args: &[String]) -> Result<String, String> {
                       "dropped": selection.dropped.iter().map(|d| json!({"index": d.index,
                                   "hash": d.hash.map(hex::encode), "reason": d.reason.describe()}))
                                   .collect::<Vec<_>>(),
-                      "pruned": pruned})
-            .to_string())
+                      "pruned": pruned});
+            report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
+            Ok(out.to_string())
         }
         "export" => {
             only(rest, &["--target", "--number", "--out"])?;
@@ -286,7 +314,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 return Err(format!("block {number} has no user transactions: nothing to publish"));
             }
             let payload = encode_da_payload(transactions).map_err(|e| e.to_string())?;
-            let chain_id = ChainSpec::testnet().chain_id;
+            let chain_id = rules().chain_id;
             let commitment = da_commitment(chain_id, number, &payload);
             let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
             writeln!(file, "{}", hex::encode(&payload)).map_err(|e| e.to_string())?;
@@ -305,7 +333,7 @@ fn run(args: &[String]) -> Result<String, String> {
             };
             let chain_id = match option(rest, "--chain-id") {
                 Ok(value) => value.parse().map_err(|_| "--chain-id must be decimal")?,
-                Err(_) => ChainSpec::testnet().chain_id,
+                Err(_) => rules().chain_id,
             };
             fs::create_dir(&target).map_err(|e| format!("create target: {e}"))?;
             let factory = open(&target, &runtime, true)?;
@@ -333,6 +361,17 @@ fn run(args: &[String]) -> Result<String, String> {
                 let tip = coordinator
                     .extend_raw(head.hash(), attributes, &block.transactions)
                     .map_err(|e| format!("L2 block {}: {e}", block.number))?;
+                let withdrawals = outbox_commitment(
+                    coordinator.provider().history_by_block_hash(tip.hash()).map_err(|e| e.to_string())?.as_ref(),
+                )?;
+                if block.withdrawals.is_some_and(|settled| settled != withdrawals) {
+                    return Err(format!(
+                        "L2 block {}: rebuilt withdrawal root {} / count {} differ from settled",
+                        block.number,
+                        hex::encode(withdrawals.root),
+                        withdrawals.count
+                    ));
+                }
                 let mismatch = tip.hash() != block.header_hash
                     || tip.0.state_root != block.state_root
                     || block.transactions_root.is_some_and(|root| root != tip.0.transactions_root)
@@ -350,7 +389,9 @@ fn run(args: &[String]) -> Result<String, String> {
                 report.push(json!({"number": block.number, "settled_at": block.settled_at,
                                    "hash": hex::encode(tip.hash()), "state_root": hex::encode(tip.0.state_root),
                                    "deposits": block.deposits.len(), "transactions": block.transactions.len(),
-                                   "da_commitment": hex::encode(block.da_commitment)}));
+                                   "da_commitment": hex::encode(block.da_commitment),
+                                   "withdrawal_root": hex::encode(withdrawals.root),
+                                   "withdrawal_count": withdrawals.count}));
             }
             Ok(json!({"genesis": hex::encode(genesis_header.hash()), "native_blocks": blocks.len(),
                       "settled": report.len(), "head": report.last().map(|b| b["hash"].clone()),
@@ -362,9 +403,25 @@ fn run(args: &[String]) -> Result<String, String> {
             let factory = open(&target, &runtime, false)?;
             let number = factory.best_block_number().map_err(|e| e.to_string())?;
             let header = factory.sealed_header(number).map_err(|e| e.to_string())?.ok_or("missing head header")?;
+            let withdrawals = outbox_commitment(factory.latest().map_err(|e| e.to_string())?.as_ref())?;
             Ok(json!({"number": number, "hash": hex::encode(header.hash()),
-                      "state_root": hex::encode(header.0.state_root)})
+                      "state_root": hex::encode(header.0.state_root),
+                      "withdrawal_root": hex::encode(withdrawals.root), "withdrawal_count": withdrawals.count})
             .to_string())
+        }
+        "withdrawal-proof" => {
+            only(rest, &["--target", "--index", "--number", "--root", "--count"])?;
+            let index: u64 = option(rest, "--index")?.parse().map_err(|_| "--index must be decimal")?;
+            let factory = open(&target, &runtime, false)?;
+            let head = factory.best_block_number().map_err(|e| e.to_string())?;
+            let number = match option(rest, "--number") {
+                Ok(value) => value.parse().map_err(|_| "--number must be decimal")?,
+                Err(_) => head,
+            };
+            if number > head {
+                return Err(format!("no block {number} (head {head})"));
+            }
+            withdrawal_proof(&factory, number, index, settled_commitment(rest)?)
         }
         other => Err(format!("unknown command {other}")),
     })();
@@ -479,6 +536,133 @@ fn read_l1_follower(dir: &Path) -> Result<Vec<NativeBlockTransactions>, String> 
     }
     Ok(blocks)
 }
+
+/// The outbox root and count in a state (the empty tree before the outbox
+/// exists or before the first withdrawal), as settlement V3 publishes them.
+fn outbox_commitment(state: &dyn StateProvider) -> Result<WithdrawalCommitment, String> {
+    let slot = |key: U256| -> Result<U256, String> {
+        Ok(state.storage(outbox(), B256::from(key)).map_err(|e| e.to_string())?.unwrap_or_default())
+    };
+    let count = u64::try_from(slot(OUTBOX_NONCE_SLOT)?).map_err(|_| "outbox counter exceeds u64")?;
+    let root = if count == 0 { empty_withdrawal_root() } else { B256::from(slot(OUTBOX_ROOT_SLOT)?) };
+    Ok(WithdrawalCommitment { root, count })
+}
+
+/// Outbox withdrawals initiated in block `number`, from its receipts' logs.
+fn block_withdrawals(provider: &impl ReceiptProvider<Receipt = bloch_reth_execution::BlochRethReceipt>, number: u64)
+    -> Result<Vec<Withdrawal>, String> {
+    let receipts = provider
+        .receipts_by_block(number.into())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no receipts for block {number}"))?;
+    receipts
+        .iter()
+        .flat_map(|receipt| receipt.logs.iter())
+        .filter_map(|log| Withdrawal::from_log(outbox(), log))
+        .map(|w| w.map_err(|e| format!("block {number}: {e}")))
+        .collect()
+}
+
+fn withdrawal_json(w: &Withdrawal, block: u64) -> serde_json::Value {
+    json!({"nonce": w.nonce, "l1_recipient": hex::encode(w.l1_recipient), "sats": w.sats,
+           "sender": hex::encode(w.sender), "l2_block": block,
+           "leaf": hex::encode(w.leaf(rules().chain_id))})
+}
+
+/// Add the post-block outbox commitment and the block's withdrawals.
+fn report_withdrawals(
+    out: &mut serde_json::Value,
+    provider: &bloch_reth_execution::BlochBlockchainProvider,
+    number: u64,
+    hash: B256,
+) -> Result<(), String> {
+    let state = provider.history_by_block_hash(hash).map_err(|e| e.to_string())?;
+    let commitment = outbox_commitment(state.as_ref())?;
+    let withdrawals = block_withdrawals(provider, number)?;
+    out["withdrawal_root"] = json!(hex::encode(commitment.root));
+    out["withdrawal_count"] = json!(commitment.count);
+    out["withdrawals"] = json!(withdrawals.iter().map(|w| withdrawal_json(w, number)).collect::<Vec<_>>());
+    Ok(())
+}
+
+/// `--root HEX --count N` (both or neither): a settled commitment to check.
+fn settled_commitment(args: &[String]) -> Result<Option<WithdrawalCommitment>, String> {
+    match (option(args, "--root"), option(args, "--count")) {
+        (Err(_), Err(_)) => Ok(None),
+        (Ok(root), Ok(count)) => {
+            if root.len() != 64 || !root.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                return Err("--root must be 64 lowercase hex characters".into());
+            }
+            Ok(Some(WithdrawalCommitment {
+                root: root.parse().map_err(|_| "--root is not a hash")?,
+                count: count.parse().map_err(|_| "--count must be decimal")?,
+            }))
+        }
+        _ => Err("--root and --count go together".into()),
+    }
+}
+
+/// Rebuild the withdrawal tree of blocks 1..=number from receipts, check it
+/// against the outbox state after `number` (and a settled commitment, if
+/// given), and print the proof of withdrawal `index`.
+fn withdrawal_proof(
+    factory: &BlochProviderFactory,
+    number: u64,
+    index: u64,
+    settled: Option<WithdrawalCommitment>,
+) -> Result<String, String> {
+    if number > MAX_PROOF_BLOCKS {
+        return Err(format!("withdrawal-proof scans at most {MAX_PROOF_BLOCKS} blocks"));
+    }
+    let chain_id = rules().chain_id;
+    let mut withdrawals = Vec::new();
+    for height in 1..=number {
+        withdrawals.extend(block_withdrawals(factory, height)?.into_iter().map(|w| (w, height)));
+    }
+    if withdrawals.iter().enumerate().any(|(i, (w, _))| w.nonce != i as u64) {
+        return Err("outbox events are not consecutive from nonce 0".into());
+    }
+    let tree = WithdrawalTree::new(withdrawals.iter().map(|(w, _)| w.leaf(chain_id)).collect())
+        .map_err(|e| e.to_string())?;
+    let hash = factory
+        .sealed_header(number)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("missing header {number}"))?
+        .hash();
+    let state = factory.history_by_block_hash(hash).map_err(|e| e.to_string())?;
+    let stored = outbox_commitment(state.as_ref())?;
+    if tree.commitment() != stored {
+        return Err(format!(
+            "rebuilt tree ({} / {}) differs from the outbox state after block {number} ({} / {})",
+            hex::encode(tree.root()), tree.count(), hex::encode(stored.root), stored.count
+        ));
+    }
+    if let Some(settled) = settled {
+        if settled != stored {
+            return Err(format!(
+                "settled withdrawal root {} / count {} differ from block {number} ({} / {})",
+                hex::encode(settled.root), settled.count, hex::encode(stored.root), stored.count
+            ));
+        }
+    }
+    let (withdrawal, block) = withdrawals
+        .get(usize::try_from(index).map_err(|_| "--index too large")?)
+        .ok_or_else(|| format!("withdrawal {index} does not exist after block {number} (count {})", stored.count))?;
+    let siblings = tree.proof(index).ok_or("no proof")?;
+    let leaf = withdrawal.leaf(chain_id);
+    if !verify_withdrawal_proof(leaf, index, &siblings, stored.root) {
+        return Err("internal error: the proof does not verify".into());
+    }
+    Ok(json!({"chain_id": chain_id, "number": number, "withdrawal_root": hex::encode(stored.root),
+              "withdrawal_count": stored.count, "index": index,
+              "withdrawal": withdrawal_json(withdrawal, *block),
+              "siblings": siblings.iter().map(hex::encode).collect::<Vec<_>>()})
+    .to_string())
+}
+
+/// Upper bound on blocks scanned by one withdrawal proof (receipts of every
+/// block since genesis; an indexer replaces this outside development).
+const MAX_PROOF_BLOCKS: u64 = 1_000_000;
 
 /// Upper bound on native blocks read by one reconstruction.
 const MAX_L1_BLOCKS: usize = 1_000_000;
