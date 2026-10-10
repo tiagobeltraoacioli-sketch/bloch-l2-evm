@@ -11,8 +11,16 @@ Differences, all deliberate:
   tag 0x13 (`tag || config[160:192] || values || proof`);
 * checks the V3 fields before submitting: deposits_hash equals keccak over the
   native pending records, transactions/receipts roots are non-zero, the
-  reserved withdrawal_root / withdrawal_count / da_commitment are zero, and
-  user_tx_count matches what the producer put in the block;
+  reserved withdrawal_root / withdrawal_count are zero, user_tx_count matches
+  what the producer put in the block, and da_commitment is zero without user
+  transactions or else the commitment of the block's batch (`produce da`);
+* data availability (M3): before settling a block with user transactions it
+  publishes the block's batch in a native `L2DataAvailability` (0x15)
+  transaction and waits until `getl2settlement.data_availability` shows the
+  record (the native verifier refuses the settlement otherwise). The DA
+  transaction pays ordinary fees from a dedicated development funding key: it
+  is prepared and signed by the pinned `bloch-pos l2-da` tool, which alone
+  opens that keystore;
 * `user_transactions` (default false). False: every block is deposit-only
   (`produce extend` without `--txs`) and a statement reporting any user
   transaction stops the worker. True: blocks also take pending transactions
@@ -26,7 +34,9 @@ Each cycle: read the native request all validators agree on, extend the
 canonical L2 database by exactly one block anchored to it, prove it, build the
 settlement transaction, submit it and wait for native acceptance. The worker
 never reads signing keys and never publishes L2 finality. Any divergence stops
-the worker (exit 3) for operator review. Dependency-free Python 3.9+.
+the worker (exit 3) for operator review. Dependency-free Python 3.9+. The
+worker never reads signing keys itself; with user transactions it invokes the
+pinned DA signer (whose keystore holds only DA fee funds).
 """
 import hashlib
 import json
@@ -51,8 +61,13 @@ CHAIN_ID = 700771
 DEPOSITS_HASH, TRANSACTIONS_ROOT, RECEIPTS_ROOT, USER_TX_COUNT = 568, 600, 632, 664
 WITHDRAWAL_ROOT, WITHDRAWAL_COUNT, DA_COMMITMENT, V3_END = 672, 704, 712, 744
 assert T + V3_END == VALUES_BYTES
+# L1 data availability (bloch_l2_evm::data_availability, native l2_settlement::da).
+DA_TAG = 0x15
+DA_DOMAIN = b'BLOCH:L2:DA:1'
+DA_MAX_PAYLOAD_BYTES = 114_688
+DA_MAX_INPUTS = 16
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
-            'max_block_bytes': 1_048_576, 'max_block_txs': 256}
+            'max_block_bytes': 114_688, 'max_block_txs': 256}  # bytes: one native DA batch
 
 
 class Halt(Exception):
@@ -118,6 +133,47 @@ def deposits_hash(records):
         preimage += (recipient + int(r['height']).to_bytes(8, 'big') + int(r['tx_index']).to_bytes(4, 'big') + txid
                      + int(r['vout']).to_bytes(4, 'big') + int(r['sats']).to_bytes(8, 'big'))
     return keccak256(preimage)
+
+
+def da_commitment(number, payload):
+    """keccak256("BLOCH:L2:DA:1" || chain_id BE8 || l2_block_number BE8 || payload)."""
+    return keccak256(DA_DOMAIN + CHAIN_ID.to_bytes(8, 'big') + int(number).to_bytes(8, 'big') + payload)
+
+
+def da_batch_count(payload):
+    """Number of transactions in a canonical DA batch, or None."""
+    if not 4 <= len(payload) <= DA_MAX_PAYLOAD_BYTES:
+        return None
+    count, at = int.from_bytes(payload[:4], 'big'), 4
+    for _ in range(count):
+        if at + 4 > len(payload):
+            return None
+        size = int.from_bytes(payload[at:at + 4], 'big')
+        at += 4 + size
+        if size == 0 or at > len(payload):
+            return None
+    return count if count and at == len(payload) else None
+
+
+def da_frame_fields(tx):
+    """(l2_chain_id, l2_block_number, payload) of a native 0x15 wire frame:
+    tag || domain[32] || u32 LE key len || key || u32 LE inputs || 36 B each ||
+    chain u64 LE || number u64 LE || u32 LE payload len || payload || ...
+    (bloch_pos_committee::transition::l2_da; pinned by tx-0x15.hex)."""
+    def take(at, size):
+        if size < 0 or at + size > len(tx):
+            raise Halt('malformed DA transaction')
+        return tx[at:at + size]
+    if not tx or tx[0] != DA_TAG:
+        raise Halt('not a DA transaction')
+    at = 33
+    key = int.from_bytes(take(at, 4), 'little')
+    at += 4 + key
+    inputs = int.from_bytes(take(at, 4), 'little')
+    at += 4 + 36 * inputs
+    chain, number = int.from_bytes(take(at, 8), 'little'), int.from_bytes(take(at + 8, 8), 'little')
+    size = int.from_bytes(take(at + 16, 4), 'little')
+    return chain, number, take(at + 20, size)
 
 
 def rpc(port, method, params=()):
@@ -188,15 +244,24 @@ class Settler:
         if not isinstance(self.c['user_transactions'], bool):
             raise Halt('user_transactions must be true or false')
         if self.c['user_transactions']:
-            # Production guard (M2.6): no user transactions before L1 data availability.
+            # Production guard (M2.6): user transactions stay on development networks only.
             if self.c['network_kind'] != 'devnet':
-                raise Halt('user_transactions is refused outside development networks until data availability (M3)')
+                raise Halt('user_transactions is refused outside development networks')
             pool = Path(self.c.get('txpool_dir', ''))
             if not self.c.get('txpool_dir') or not pool.is_dir():
                 raise Halt('user_transactions requires an existing txpool_dir')
             for key in ('max_block_gas', 'max_block_bytes', 'max_block_txs'):
                 if not isinstance(self.c[key], int) or self.c[key] <= 0:
                     raise Halt(f'{key} must be a positive integer')
+            da = self.c.get('da')
+            if not isinstance(da, dict):
+                raise Halt('user_transactions requires the da signer configuration')
+            for key in ('signer', 'signer_sha256', 'genesis', 'funding_pubkey', 'keystore_dir', 'passphrase_file'):
+                if not da.get(key):
+                    raise Halt(f'da.{key} is required')
+            if digest(da['signer']) != da['signer_sha256']:
+                raise Halt('da signer differs from its pin')
+            self.da_script = hashlib.sha3_256(bytes.fromhex(Path(da['funding_pubkey']).read_text().strip())).hexdigest()
         self.work = Path(self.c['workdir'])
 
     def native_view(self):
@@ -306,7 +371,7 @@ class Settler:
             raise Halt('statement deposits_hash does not match the native pending deposits')
         if field(TRANSACTIONS_ROOT) == bytes(32) or field(RECEIPTS_ROOT) == bytes(32):
             raise Halt('statement has a zero transactions or receipts root')
-        if field(WITHDRAWAL_ROOT) != bytes(32) or number(WITHDRAWAL_COUNT) or field(DA_COMMITMENT) != bytes(32):
+        if field(WITHDRAWAL_ROOT) != bytes(32) or number(WITHDRAWAL_COUNT):
             raise Halt('statement reserved V3 fields are not zero')
         users = number(USER_TX_COUNT)
         if users and not self.c['user_transactions']:
@@ -316,7 +381,83 @@ class Settler:
             expected = json.loads(produced.read_text()).get('transactions', 0)
             if users != expected:
                 raise Halt(f'statement reports {users} user transactions, the producer included {expected}')
+        if not users:
+            if field(DA_COMMITMENT) != bytes(32):
+                raise Halt('statement da_commitment is not zero without user transactions')
+            return users
+        payload = self.da_payload(number(264), directory)
+        if da_batch_count(payload) != users:
+            raise Halt('DA batch does not hold exactly the statement user transactions')
+        if field(DA_COMMITMENT) != da_commitment(number(264), payload):
+            raise Halt('statement da_commitment does not match the block DA batch')
         return users
+
+    def da_payload(self, number, directory):
+        """The block's canonical DA batch, exported once by the producer."""
+        path = directory / 'da-payload.hex'
+        if not path.exists():
+            info = self.produce('da', '--target', self.c['l2_db'], '--number', str(number), '--out', str(path))
+            if info.get('number') != number:
+                raise Halt('producer exported the DA batch of another block')
+        payload = bytes.fromhex(path.read_text().strip())
+        if len(payload) > DA_MAX_PAYLOAD_BYTES:
+            raise Halt('DA batch exceeds the native size cap')
+        return payload
+
+    def da_recorded(self, number, commitment):
+        view = self.native_view()
+        return bool(view) and any(r.get('l2_number') == number and r.get('commitment') == commitment.hex()
+                                  for r in view.get('data_availability', []))
+
+    def publish_da(self, number, directory, values):
+        """Publish the block's batch on L1 and wait until the record is committed."""
+        commitment = values[T + DA_COMMITMENT:T + DA_COMMITMENT + 32]
+        if self.da_recorded(number, commitment):
+            return True
+        da = self.c['da']
+        port = self.c['rpc_ports'][0]
+        base_fee = str(self.rpc(port, 'getchaininfo')['next_base_fee_millisat_per_gas'])
+        utxos = self.rpc(port, 'getutxos', [self.da_script, 64]).get('utxos', [])
+        utxos = sorted(utxos, key=lambda u: (-int(u['value_sat']), u['txid'], u['vout']))[:DA_MAX_INPUTS]
+        if not utxos:
+            raise Halt('the DA funding key has no spendable outputs')
+        env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'BLOCH_KEYSTORE_PASSPHRASE_FILE': da['passphrase_file']}
+        attempt = 0
+        while (directory / f'da-unsigned-{attempt}.hex').exists():
+            attempt += 1
+        unsigned, signed = directory / f'da-unsigned-{attempt}.hex', directory / f'da-signed-{attempt}.hex'
+        result = None
+        for count in range(1, len(utxos) + 1):
+            unsigned.unlink(missing_ok=True)
+            argv = [da['signer'], 'l2-da', 'prepare', '--genesis', da['genesis'], '--funding-pubkey', da['funding_pubkey'],
+                    '--chain-id', str(CHAIN_ID), '--number', str(number), '--payload', str(directory / 'da-payload.hex'),
+                    '--base-fee', base_fee, '--tip', str(da.get('tip_millisat_per_gas', 0)), '--out', str(unsigned)]
+            for u in utxos[:count]:
+                argv[3:3] = ['--input', f"{u['txid']}:{u['vout']}:{u['value_sat']}"]
+            result = self.run(argv, env=env, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                break
+        if result is None or result.returncode:
+            raise Halt(f'DA prepare failed: {(result.stderr if result else "").strip()[:400]}')
+        result = self.run([da['signer'], 'l2-da', 'sign', '--genesis', da['genesis'], '--tx', str(unsigned),
+                           '--dir', da['keystore_dir'], '--out', str(signed)],
+                          env=env, capture_output=True, text=True, timeout=300)
+        if result.returncode:
+            raise Halt(f'DA signer refused: {result.stderr.strip()[:400]}')
+        tx = bytes.fromhex(signed.read_text().strip())
+        payload = bytes.fromhex((directory / 'da-payload.hex').read_text().strip())
+        if da_frame_fields(tx) != (CHAIN_ID, number, payload):
+            raise Halt('signed DA transaction does not carry this block batch')
+        response = self.rpc(port, 'sendrawtransaction', [tx.hex()])
+        log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'))
+        deadline = self.clock() + da.get('inclusion_timeout_seconds', 300)
+        while self.clock() < deadline:
+            self.sleep(6)
+            if self.da_recorded(number, commitment):
+                log('da-included', number=number, commitment=commitment.hex())
+                return True
+        log('da-inclusion-timeout', number=number)
+        return False
 
     def transaction(self, directory, proof_path):
         values, proof = parse_proof_artifact(proof_path.read_bytes())
@@ -366,6 +507,10 @@ class Settler:
         number, directory = self.prepare_block(view)
         proof = self.prove(directory)
         tx = self.transaction(directory, proof)
+        values = tx[33:33 + VALUES_BYTES]
+        if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big') and \
+                not self.publish_da(number, directory, values):
+            return False
         return self.submit_and_wait(number, directory, tx, view)
 
 

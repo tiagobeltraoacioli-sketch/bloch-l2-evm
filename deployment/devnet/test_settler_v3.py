@@ -22,6 +22,18 @@ CONFIG_BYTES = bytes(range(160)) + b'\x77' * 32  # identities[2..7] || proof pol
 PENDING = [{'height': 3, 'tx_index': 0, 'txid': '11' * 32, 'vout': 1, 'sats': 5000, 'recipient': '42' * 20}]
 
 
+def batch(user_txs):
+    """A canonical DA batch of `user_txs` opaque envelopes."""
+    return user_txs.to_bytes(4, 'big') + b''.join((2).to_bytes(4, 'big') + bytes([2, i]) for i in range(user_txs))
+
+
+def da_frame(number, payload):
+    """A 0x15 frame with the native layout (placeholder key and signature)."""
+    return (bytes([s.DA_TAG]) + b'\x91' * 32 + (4).to_bytes(4, 'little') + b'kkkk' + (1).to_bytes(4, 'little')
+            + b'\x33' * 36 + s.CHAIN_ID.to_bytes(8, 'little') + number.to_bytes(8, 'little')
+            + len(payload).to_bytes(4, 'little') + payload + b'\0' * 60)
+
+
 def statement(user_txs=0, deposits=None, **overrides):
     """A 766-byte V3 statement consistent with the fake native request."""
     v = bytearray(s.VALUES_BYTES)
@@ -44,6 +56,8 @@ def statement(user_txs=0, deposits=None, **overrides):
     put(s.TRANSACTIONS_ROOT, b'\x61' * 32)
     put(s.RECEIPTS_ROOT, b'\x62' * 32)
     put(s.USER_TX_COUNT, user_txs.to_bytes(8, 'big'))
+    if user_txs:
+        put(s.DA_COMMITMENT, s.da_commitment(1, batch(user_txs)))
     for offset, data in overrides.items():
         put(int(offset), data)
     return bytes(v)
@@ -59,19 +73,35 @@ def artifact(values, version=s.SP1_CIRCUIT_VERSION, trailing=b''):
 class Fake:
     """Native RPC + producer + prover stubs sharing one scripted world."""
 
-    def __init__(self, root, values, produced_txs=0):
+    def __init__(self, root, values, produced_txs=0, da_payload=None):
         self.root, self.values, self.produced_txs = root, values, produced_txs
         self.calls, self.sent, self.accepted, self.head = [], [], None, 0
+        self.da_payload = batch(produced_txs) if da_payload is None else da_payload
+        self.da_records, self.include_da = [], True
 
     def view(self):
         request = ''.join(x + '\n' for x in (NETWORK, GENESIS, BLOCK, '5', '4', SOURCE, INBOX))
         return {'network': NETWORK, 'chain_id': s.CHAIN_ID, 'accepted': self.accepted,
+                'data_availability': list(self.da_records),
                 'source': {'block': BLOCK, 'request': request, 'pending': PENDING, 'inbox_count': 1,
                            'consumed_start': 0, 'consumed_end': 1}}
 
     def rpc(self, port, method, params=()):
         if method == 'getl2settlement':
             return self.view()
+        if method == 'getchaininfo':
+            return {'next_base_fee_millisat_per_gas': '10'}
+        if method == 'getutxos':
+            return {'utxos': [{'txid': '33' * 32, 'vout': 0, 'value_sat': '9000000', 'script_hash': params[0]},
+                              {'txid': '34' * 32, 'vout': 1, 'value_sat': '1000', 'script_hash': params[0]}]}
+        if method == 'sendrawtransaction' and params[0].startswith('15'):
+            tx = bytes.fromhex(params[0])
+            self.sent.append(tx)
+            if self.include_da:
+                _, number, payload = s.da_frame_fields(tx)
+                self.da_records.append({'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(),
+                                        'height': 9})
+            return {'status': 'accepted', 'tx_hash': '01' * 32}
         if method == 'sendrawtransaction':
             self.sent.append(bytes.fromhex(params[0]))
             self.accepted = {'statement': self.values.hex(), 'commitment': '99' * 32}
@@ -90,9 +120,27 @@ class Fake:
                 self.head += 1
                 out.stdout = json.dumps({'number': self.head, 'hash': '51' * 32, 'deposits': 1,
                                          'transactions': self.produced_txs, 'deferred': [], 'dropped': []})
+            elif command == 'da':
+                Path(argv[argv.index('--out') + 1]).write_text(self.da_payload.hex() + '\n')
+                out.stdout = json.dumps({'number': self.head, 'transactions': self.produced_txs,
+                                         'da_commitment': s.da_commitment(self.head, self.da_payload).hex()})
             elif command == 'export':
                 Path(argv[argv.index('--out') + 1]).write_bytes(b'artifact')
                 out.stdout = json.dumps({'number': self.head, 'hash': '51' * 32, 'anchor': BLOCK, 'bytes': 8})
+            return out
+        if name == 'bloch-pos':
+            assert argv[1] == 'l2-da' and kwargs['env']['BLOCH_KEYSTORE_PASSPHRASE_FILE']
+            out_path = Path(argv[argv.index('--out') + 1])
+            if argv[2] == 'prepare':
+                inputs = [argv[i + 1] for i, a in enumerate(argv) if a == '--input']
+                if sum(int(i.split(':')[2]) for i in inputs) < 5000000:
+                    out.returncode, out.stderr = 2, 'inputs do not cover the fee'
+                    return out
+                payload = bytes.fromhex(Path(argv[argv.index('--payload') + 1]).read_text().strip())
+                number = int(argv[argv.index('--number') + 1])
+                out_path.write_text(da_frame(number, payload).hex() + '\n')
+            else:
+                out_path.write_text(Path(argv[argv.index('--tx') + 1]).read_text())
             return out
         if 'settlement-v3' in name:
             if argv[1] == 'prove-groth16':
@@ -106,7 +154,7 @@ class SettlerV3Test(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         for name, data in (('bloch-evm-sp1-settlement-v3', b'prover'), ('settlement_v3', b'guest'),
-                           ('l2-config.bin', CONFIG_BYTES)):
+                           ('l2-config.bin', CONFIG_BYTES), ('bloch-pos', b'signer'), ('da.pub', b'5a' * 3749)):
             (self.root / name).write_bytes(data)
         (self.root / 'txpool').mkdir()
         (self.root / 'home').mkdir()
@@ -130,6 +178,15 @@ class SettlerV3Test(unittest.TestCase):
         clock = iter(range(0, 10_000, 3))
         return s.Settler(self.config(**extra), rpc=fake.rpc, run=fake.run, sleep=lambda _: None,
                          clock=lambda: next(clock))
+
+    def da_config(self):
+        return {'signer': str(self.root / 'bloch-pos'), 'signer_sha256': s.digest(self.root / 'bloch-pos'),
+                'genesis': str(self.root / 'genesis'), 'funding_pubkey': str(self.root / 'da.pub'),
+                'keystore_dir': str(self.root / 'keys'), 'passphrase_file': str(self.root / 'pass')}
+
+    def user_settler(self, fake, **extra):
+        extra.setdefault('da', self.da_config())
+        return self.settler(fake, user_transactions=True, txpool_dir=str(self.root / 'txpool'), **extra)
 
     def extend_call(self, fake):
         return next(c for c in fake.calls if Path(c[0]).name == 'produce' and c[1] == 'extend')
@@ -179,22 +236,28 @@ class SettlerV3Test(unittest.TestCase):
     def test_user_transactions_pass_the_pool_and_limits_and_must_match_the_block(self):
         pool = str(self.root / 'txpool')
         fake = Fake(self.root, statement(user_txs=3), produced_txs=3)
-        settler = self.settler(fake, user_transactions=True, txpool_dir=pool, max_block_gas=1_000_000,
-                               max_block_bytes=65536, max_block_txs=50)
+        settler = self.user_settler(fake, max_block_gas=1_000_000, max_block_bytes=65536, max_block_txs=50)
         self.assertTrue(settler.cycle())
         call = self.extend_call(fake)
         for flag, value in (('--txs', pool), ('--max-gas', '1000000'), ('--max-bytes', '65536'), ('--max-txs', '50')):
             self.assertEqual(call[call.index(flag) + 1], value)
-        self.assertEqual(int.from_bytes(fake.sent[0][33 + s.T + s.USER_TX_COUNT:33 + s.T + s.USER_TX_COUNT + 8], 'big'), 3)
+        # DA first (0x15, carrying the batch), then the settlement (0x13).
+        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual(s.da_frame_fields(fake.sent[0]), (s.CHAIN_ID, 1, batch(3)))
+        self.assertEqual(int.from_bytes(fake.sent[1][33 + s.T + s.USER_TX_COUNT:33 + s.T + s.USER_TX_COUNT + 8], 'big'), 3)
         mismatch = Fake(self.root, statement(user_txs=2), produced_txs=3)
         self.tearDown(), self.setUp()
         with self.assertRaisesRegex(s.Halt, 'producer included 3'):
-            self.settler(mismatch, user_transactions=True, txpool_dir=str(self.root / 'txpool')).cycle()
+            self.user_settler(mismatch).cycle()
 
     def test_user_transactions_are_refused_outside_devnet_and_need_a_pool(self):
         fake = Fake(self.root, statement())
         with self.assertRaisesRegex(s.Halt, 'outside development networks'):
-            self.settler(fake, user_transactions=True, txpool_dir=str(self.root / 'txpool'), network_kind='mainnet')
+            self.user_settler(fake, network_kind='mainnet')
+        with self.assertRaisesRegex(s.Halt, 'da signer configuration'):
+            self.settler(fake, user_transactions=True, txpool_dir=str(self.root / 'txpool'))
+        with self.assertRaisesRegex(s.Halt, 'signer differs from its pin'):
+            self.user_settler(fake, da={**self.da_config(), 'signer_sha256': '00' * 32})
         with self.assertRaisesRegex(s.Halt, 'txpool_dir'):
             self.settler(fake, user_transactions=True)
         with self.assertRaisesRegex(s.Halt, 'txpool_dir'):
@@ -202,7 +265,7 @@ class SettlerV3Test(unittest.TestCase):
         with self.assertRaisesRegex(s.Halt, 'true or false'):
             self.settler(fake, user_transactions='yes')
         with self.assertRaisesRegex(s.Halt, 'max_block_gas'):
-            self.settler(fake, user_transactions=True, txpool_dir=str(self.root / 'txpool'), max_block_gas=0)
+            self.user_settler(fake, max_block_gas=0)
         # Deposit-only stays allowed on any network kind.
         self.settler(fake, network_kind='mainnet')
 
@@ -214,7 +277,7 @@ class SettlerV3Test(unittest.TestCase):
             'zero transactions or receipts': statement(**{str(s.RECEIPTS_ROOT): bytes(32)}),
             'reserved': statement(**{str(s.WITHDRAWAL_ROOT): b'\x01' + bytes(31)}),
             'reserved V3': statement(**{str(s.WITHDRAWAL_COUNT): (1).to_bytes(8, 'big')}),
-            'reserved V3 fields': statement(**{str(s.DA_COMMITMENT): b'\x01' * 32}),
+            'da_commitment is not zero': statement(**{str(s.DA_COMMITMENT): b'\x01' * 32}),
             'native request': statement(**{'432': (6).to_bytes(8, 'big')}),
             'native request ': statement(**{'64': b'\x00' * 32}),
         }
@@ -225,6 +288,49 @@ class SettlerV3Test(unittest.TestCase):
                 with self.assertRaisesRegex(s.Halt, name.strip()):
                     self.settler(fake).cycle()
                 self.assertEqual(fake.sent, [], name)
+
+    # ---- M3 data availability ----
+    def test_da_matches_the_shared_vector_and_batch_codec(self):
+        payload = bytes.fromhex((HERE.parent.parent / 'tests/fixtures/l2-da-v1/batch.hex').read_text().strip())
+        expected = (HERE.parent.parent / 'tests/fixtures/l2-da-v1/commitment-700771-7.hex').read_text().strip()
+        self.assertEqual(s.da_commitment(7, payload).hex(), expected)
+        self.assertEqual(s.da_batch_count(payload), 2)
+        for bad in (b'', batch(0), batch(1) + b'\0', batch(2)[:-1], b'\0\0\0\1\0\0\0\0'):
+            self.assertIsNone(s.da_batch_count(bad), bad)
+        # The native 0x15 frame of the shared vector, parsed independently.
+        frame = bytes.fromhex((HERE.parent.parent / 'tests/fixtures/l2-da-v1/tx-0x15.hex').read_text().strip())
+        self.assertEqual(s.da_frame_fields(frame), (s.CHAIN_ID, 7, payload))
+        with self.assertRaises(s.Halt):
+            s.da_frame_fields(frame[:3800])
+
+    def test_da_already_recorded_is_not_published_again(self):
+        fake = Fake(self.root, statement(user_txs=2), produced_txs=2)
+        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, batch(2)).hex(), 'height': 3})
+        self.assertTrue(self.user_settler(fake).cycle())
+        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
+        self.assertFalse(any(Path(c[0]).name == 'bloch-pos' for c in fake.calls))
+
+    def test_settlement_waits_for_da_inclusion(self):
+        fake = Fake(self.root, statement(user_txs=2), produced_txs=2)
+        fake.include_da = False
+        self.assertFalse(self.user_settler(fake).cycle())
+        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG], 'no settlement before the DA record')
+        # Next cycle: a new DA attempt (fresh files); once included, it settles.
+        fake.include_da = True
+        self.assertTrue(self.user_settler(fake).cycle())
+        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        prepares = [c for c in fake.calls if Path(c[0]).name == 'bloch-pos' and c[2] == 'prepare']
+        self.assertTrue(prepares[0][-1].endswith('da-unsigned-0.hex') and prepares[1][-1].endswith('da-unsigned-1.hex'))
+
+    def test_da_commitment_must_match_the_block_batch(self):
+        wrong = Fake(self.root, statement(user_txs=2), produced_txs=2, da_payload=batch(2)[:-1] + b'\x09')
+        with self.assertRaisesRegex(s.Halt, 'da_commitment does not match'):
+            self.user_settler(wrong).cycle()
+        self.assertEqual(wrong.sent, [])
+        self.tearDown(), self.setUp()
+        short = Fake(self.root, statement(user_txs=2), produced_txs=2, da_payload=batch(1))
+        with self.assertRaisesRegex(s.Halt, 'exactly the statement user transactions'):
+            self.user_settler(short).cycle()
 
     def test_only_the_v3_prover_and_guest_are_accepted(self):
         (self.root / 'bloch-evm-sp1-settlement-v2').write_bytes(b'prover')
