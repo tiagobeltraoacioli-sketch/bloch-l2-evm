@@ -123,6 +123,14 @@ pub struct ChainSpec {
     /// Block gas charged per deposit (see [`DEPOSIT_GAS`]); bounds the number
     /// of deposits per block to `gas_limit / deposit_gas`.
     pub deposit_gas: u64,
+    /// The L2 → L1 withdrawal outbox predeploy
+    /// ([`crate::withdrawal::L2_TO_L1_MESSAGE_PASSER`]), or `None` for a chain
+    /// without withdrawals. Part of the execution rules: the executor installs
+    /// the outbox code at block start and appends its withdrawals to the
+    /// committed tree when the block finishes ([`crate::withdrawal`]).
+    /// Settlement V3 requires it ([`ChainSpec::testnet_v3`]); the V2 testnet
+    /// rules ([`ChainSpec::testnet`], devnet2/devnet3 history) have none.
+    pub withdrawal_outbox: Option<Address>,
 }
 
 /// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
@@ -149,8 +157,8 @@ pub enum ChainSpecError {
     ZeroDepositGas,
     /// `deposit_gas > gas_limit` (no deposit could ever be included).
     DepositGasAboveGasLimit,
-    /// Two system addresses (vaults, ledger, block info, EIP-4788 predeploy)
-    /// coincide.
+    /// Two system addresses (vaults, ledger, block info, EIP-4788 predeploy,
+    /// withdrawal outbox) coincide.
     SystemAddressCollision(Address),
 }
 
@@ -191,6 +199,18 @@ impl ChainSpec {
             block_info: BLOCK_INFO,
             max_l1_sats: MAX_L1_SATS,
             deposit_gas: DEPOSIT_GAS,
+            withdrawal_outbox: None,
+        }
+    }
+
+    /// The settlement V3 execution rules (devnet4): [`Self::testnet`] plus the
+    /// withdrawal outbox at [`crate::withdrawal::L2_TO_L1_MESSAGE_PASSER`].
+    /// Same genesis state (the outbox is installed by the first block, like the
+    /// EIP-4788 predeploy), different configuration commitment.
+    pub fn testnet_v3() -> Self {
+        Self {
+            withdrawal_outbox: Some(crate::withdrawal::L2_TO_L1_MESSAGE_PASSER),
+            ..Self::testnet()
         }
     }
 
@@ -226,14 +246,16 @@ impl ChainSpec {
             return Err(ChainSpecError::DepositGasAboveGasLimit);
         }
         let system = [
-            self.base_fee_vault,
-            self.sequencer_fee_vault,
-            self.supply_ledger,
-            self.block_info,
-            BEACON_ROOTS_ADDRESS,
+            Some(self.base_fee_vault),
+            Some(self.sequencer_fee_vault),
+            Some(self.supply_ledger),
+            Some(self.block_info),
+            Some(BEACON_ROOTS_ADDRESS),
+            self.withdrawal_outbox,
         ];
         for (i, a) in system.iter().enumerate() {
-            if system[..i].contains(a) {
+            let Some(a) = a else { continue };
+            if system[..i].contains(&Some(*a)) {
                 return Err(ChainSpecError::SystemAddressCollision(*a));
             }
         }

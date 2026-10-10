@@ -48,6 +48,9 @@ pub struct NodeExecutionOutcome {
     pub receipts: Vec<ReceiptEnvelope>,
     /// Detailed execution outcomes in signed body order.
     pub transactions: Vec<TxOutcome>,
+    /// Outbox effect and post-block withdrawal commitment (`None` on a chain
+    /// without the withdrawal outbox).
+    pub withdrawals: Option<crate::withdrawal::WithdrawalSummary>,
 }
 
 /// Reconstruct the V2 head from committed state and trusted configuration.
@@ -146,6 +149,7 @@ pub(crate) struct PendingOutcome {
     pub(crate) record: HeadRecordV2,
     pub(crate) receipts: Vec<ReceiptEnvelope>,
     pub(crate) transactions: Vec<TxOutcome>,
+    pub(crate) withdrawals: Option<crate::withdrawal::WithdrawalSummary>,
 }
 impl PendingOutcome {
     pub(crate) fn finalize(self, spec: &ChainSpec, domain: B256, root: B256) -> NodeExecutionOutcome {
@@ -153,6 +157,7 @@ impl PendingOutcome {
             header: self.record.header(spec, domain, root),
             receipts: self.receipts,
             transactions: self.transactions,
+            withdrawals: self.withdrawals,
         }
     }
 }
@@ -183,6 +188,7 @@ fn run_node_block<DB: DatabaseRef>(
             record,
             receipts,
             transactions: run.tx_outcomes,
+            withdrawals: run.withdrawals,
         },
     ))
 }
@@ -302,6 +308,7 @@ pub fn generate_node_batch_witness(
     let verified = verify_node_batch(spec, domain, &witness, context, body)?;
     if verified.header != outcome.header
         || verified.receipts != outcome.receipts
+        || verified.withdrawals != outcome.withdrawals
         || verified.transactions.len() != outcome.transactions.len()
         || !verified.transactions.iter().zip(&outcome.transactions).all(|(a, b)| {
             a.success == b.success

@@ -64,8 +64,9 @@ use crate::state::{
     DepositError, DepositMint, HeadRecord, L2State, BLOCK_HASH_HISTORY, BLOCK_INFO_ANCHOR_ROOT_SLOT,
     BLOCK_INFO_BASE_FEE_SLOT, BLOCK_INFO_DEPOSITS_HASH_SLOT, BLOCK_INFO_FLAG_SLOT, BLOCK_INFO_GAS_USED_SLOT,
     BLOCK_INFO_NUMBER_SLOT, BLOCK_INFO_PARENT_HASH_SLOT, BLOCK_INFO_PREVRANDAO_SLOT, BLOCK_INFO_TIMESTAMP_SLOT,
-    SUPPLY_LEDGER_BURNED_SLOT,
+    SUPPLY_LEDGER_BURNED_SLOT, SUPPLY_LEDGER_WITHDRAWN_SLOT,
 };
+use crate::withdrawal::{outbox_bytecode, WithdrawalError, WithdrawalSummary};
 
 /// Per-block environment chosen by the sequencer and **validated** by the
 /// executor against the committed head record (number, timestamp, base fee).
@@ -263,6 +264,10 @@ pub struct ExecutionOutcome {
     /// Wei routed to the `SequencerFeeVault` (priority fee × gas, per tx,
     /// paid by unmodified revm to the block beneficiary).
     pub priority_fee_routed_wei: U256,
+    /// Outbox effect of the block (withdrawals appended, wei removed from the
+    /// supply, post-block root and count); `None` on a chain without the
+    /// withdrawal outbox.
+    pub withdrawals: Option<WithdrawalSummary>,
     /// Per-transaction outcomes, in block order.
     pub tx_outcomes: Vec<TxOutcome>,
     /// The keccak-256 hexary Merkle-Patricia state root over the post-execution
@@ -393,6 +398,10 @@ pub enum BlockExecutionError {
     /// The [`ChainSpec`] itself is invalid (see [`ChainSpec::validate`]); no
     /// block executes under it.
     InvalidChainSpec(ChainSpecError),
+    /// The outbox logs, counter, tree or balance are inconsistent
+    /// ([`crate::withdrawal::WithdrawalError`]); unreachable with the outbox
+    /// code, a hard stop rather than a wrong withdrawal tree.
+    Withdrawal(WithdrawalError),
     /// The block's deposits alone exceed the block gas budget
     /// (`deposits × deposit_gas > gas_limit`).
     DepositGasExceedsBlock {
@@ -467,6 +476,7 @@ impl core::fmt::Display for BlockExecutionError {
             ),
             BlockExecutionError::Database { detail } => write!(f, "database error: {detail}"),
             BlockExecutionError::InvalidChainSpec(e) => write!(f, "invalid chain spec: {e}"),
+            BlockExecutionError::Withdrawal(e) => write!(f, "withdrawal outbox: {e}"),
             BlockExecutionError::DepositGasExceedsBlock { deposits, max_deposits } => {
                 write!(
                     f,
@@ -604,6 +614,8 @@ pub(crate) struct BlockRun {
     pub(crate) base_fee_routed_wei: U256,
     pub(crate) priority_fee_routed_wei: U256,
     pub(crate) tx_outcomes: Vec<TxOutcome>,
+    /// Set when the block finishes on a chain with the withdrawal outbox.
+    pub(crate) withdrawals: Option<WithdrawalSummary>,
 }
 
 impl BlockRun {
@@ -637,6 +649,7 @@ impl BlockRun {
             deposits_hash: self.deposits_hash,
             base_fee_routed_wei: self.base_fee_routed_wei,
             priority_fee_routed_wei: self.priority_fee_routed_wei,
+            withdrawals: self.withdrawals,
             tx_outcomes: self.tx_outcomes,
             state_root,
             block_hash: header.hash(),
@@ -1027,6 +1040,7 @@ impl<DB: DatabaseRef> BlockSession<DB> {
             Some(&beacon_roots_bytecode()),
         )
         .map_err(db_error)?;
+        install_outbox(&mut evm.ctx.journaled_state.database, spec)?;
         let sys = evm
             .system_call_commit(
                 BEACON_ROOTS_ADDRESS,
@@ -1059,6 +1073,7 @@ impl<DB: DatabaseRef> BlockSession<DB> {
                 base_fee_routed_wei: U256::ZERO,
                 priority_fee_routed_wei: U256::ZERO,
                 tx_outcomes: Vec::new(),
+                withdrawals: None,
             },
         })
     }
@@ -1104,19 +1119,19 @@ impl<DB: DatabaseRef> BlockSession<DB> {
             .unwrap_or_default())
     }
 
-    pub(crate) fn finish(self) -> Result<(CacheDB<DB>, BlockRun), BlockExecutionError> {
+    pub(crate) fn finish(mut self) -> Result<(CacheDB<DB>, BlockRun), BlockExecutionError> {
         let mut db = self.db;
-        finish_protocol(&mut db, &self.spec, &self.context, &self.run)?;
+        finish_protocol(&mut db, &self.spec, &self.context, &mut self.run)?;
 
         Ok((db, self.run))
     }
 
     pub(crate) fn finish_with_header<T>(
-        self,
+        mut self,
         write_header: impl FnOnce(&mut CacheDB<DB>, &BlockRun) -> Result<T, BlockExecutionError>,
     ) -> Result<(CacheDB<DB>, BlockRun, T), BlockExecutionError> {
         let mut db = self.db;
-        finish_burns(&mut db, &self.spec, &self.run)?;
+        finish_supply(&mut db, &self.spec, &mut self.run)?;
         let header = write_header(&mut db, &self.run)?;
         Ok((db, self.run, header))
     }
@@ -1142,9 +1157,9 @@ fn finish_protocol<DB: DatabaseRef>(
     db: &mut CacheDB<DB>,
     spec: &ChainSpec,
     context: &BlockContext,
-    run: &BlockRun,
+    run: &mut BlockRun,
 ) -> Result<(), BlockExecutionError> {
-    finish_burns(db, spec, run)?;
+    finish_supply(db, spec, run)?;
     write_head(
         db,
         spec.block_info,
@@ -1163,13 +1178,46 @@ fn finish_protocol<DB: DatabaseRef>(
     Ok(())
 }
 
-fn finish_burns<DB: DatabaseRef>(
+/// Supply accounting when the block ends: record the EVM's EIP-6780 burns and,
+/// on a chain with the withdrawal outbox, append the block's withdrawals to the
+/// outbox tree and remove the withdrawn wei from the supply
+/// ([`crate::withdrawal::apply_withdrawals`]), storing the outbox summary in
+/// `run`.
+fn finish_supply<DB: DatabaseRef>(
     db: &mut CacheDB<DB>,
     spec: &ChainSpec,
-    run: &BlockRun,
+    run: &mut BlockRun,
 ) -> Result<(), BlockExecutionError> {
     if !run.burned_wei.is_zero() {
         ledger_add(db, spec.supply_ledger, SUPPLY_LEDGER_BURNED_SLOT, run.burned_wei).map_err(db_error)?;
+    }
+    if let Some(outbox) = spec.withdrawal_outbox {
+        let logs = run.tx_outcomes.iter().flat_map(|outcome| outcome.result.logs());
+        let summary = crate::withdrawal::apply_withdrawals(db, outbox, spec.chain_id, logs)
+            .map_err(|error| error.into_block_error())?;
+        if !summary.withdrawn_wei.is_zero() {
+            ledger_add(
+                db,
+                spec.supply_ledger,
+                SUPPLY_LEDGER_WITHDRAWN_SLOT,
+                summary.withdrawn_wei,
+            )
+            .map_err(db_error)?;
+        }
+        run.withdrawals = Some(summary);
+    }
+    Ok(())
+}
+
+/// Materialize the withdrawal outbox predeploy (code and nonce 1) at block
+/// start, before any transaction can call it — idempotent, like the EIP-4788
+/// predeploy. No-op on a chain without the outbox.
+pub(crate) fn install_outbox<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+) -> Result<(), BlockExecutionError> {
+    if let Some(outbox) = spec.withdrawal_outbox {
+        ensure_system_account(db, outbox, Some(&outbox_bytecode())).map_err(db_error)?;
     }
     Ok(())
 }

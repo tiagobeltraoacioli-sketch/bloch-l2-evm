@@ -63,7 +63,7 @@ fn sign(spec: &ChainSpec, nonce: u64, to: TxKind, value: U256, input: Bytes) -> 
 
 #[test]
 fn v3_statement_settles_a_block_with_user_transactions() {
-    let spec = ChainSpec::testnet();
+    let spec = ChainSpec::testnet_v3();
     let sender = Address::from_public_key(key().verifying_key());
     let mut state = genesis_v2(&spec, 10).unwrap();
     let genesis = genesis_header(&spec, state.commit_root());
@@ -139,7 +139,10 @@ fn v3_statement_settles_a_block_with_user_transactions() {
     preimage.extend_from_slice(&1u32.to_be_bytes());
     preimage.extend_from_slice(&100_000_000u64.to_be_bytes());
     assert_eq!(v3.deposits_hash, keccak256(&preimage));
-    assert_eq!((v3.withdrawal_root, v3.withdrawal_count), (B256::ZERO, 0));
+    // No withdrawal yet: the empty tree (M4), read from the outbox storage.
+    let empty = bloch_l2_evm::withdrawal::WithdrawalCommitment::empty();
+    assert_eq!((v3.withdrawal_root, v3.withdrawal_count), (empty.root, 0));
+    assert_eq!(recorded.withdrawals.as_ref().map(|w| w.commitment), Some(empty));
     // M3: the executed user transactions, published as one L1 DA batch.
     let payload = bloch_l2_evm::data_availability::encode_da_payload(&body.transactions).unwrap();
     assert_eq!(
@@ -167,6 +170,14 @@ fn v3_statement_settles_a_block_with_user_transactions() {
         ..settlement
     };
     assert!(execute_settlement_statement_v3(&spec, domain(), &witness, &context, &body, wrong_range).is_err());
+    // V3 publishes the outbox commitment: a chain without the outbox cannot
+    // produce a V3 statement.
+    let v2_rules = ChainSpec::testnet();
+    let (witness, _) = generate_node_batch_witness(&state, &v2_rules, domain(), &context, &body).unwrap();
+    assert!(matches!(
+        execute_settlement_statement_v3(&v2_rules, domain(), &witness, &context, &body, settlement),
+        Err(bloch_l2_evm::proof_statement::SettlementStatementV2Error::Withdrawals)
+    ));
 }
 
 /// Golden deposits hash shared with the native verifier's conformance test

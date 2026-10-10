@@ -134,6 +134,7 @@ fn prepare_start<DB: Database>(
             .map(|number| (number, overlay.cache.block_hashes[&U256::from(number)]))
             .collect();
         ensure_system_account(overlay, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())).map_err(db_error)?;
+        install_outbox(overlay, spec)?;
         Ok((parent_hash, block_hashes))
     })?;
     Ok(PreparedBlockStart {
@@ -152,6 +153,7 @@ fn prepare_start<DB: Database>(
                     base_fee_routed_wei: U256::ZERO,
                     priority_fee_routed_wei: U256::ZERO,
                     tx_outcomes: Vec::new(),
+                    withdrawals: None,
                 },
             },
             deposits: input.deposits.clone(),
@@ -272,14 +274,14 @@ impl ActiveBlock {
     }
 
     /// Prepare the burned-supply ledger and committed head together.
-    pub fn prepare_finish<DB: Database>(self, db: &mut DB) -> Result<PreparedBlockFinish, BlockExecutionError> {
+    pub fn prepare_finish<DB: Database>(mut self, db: &mut DB) -> Result<PreparedBlockFinish, BlockExecutionError> {
         if !matches!(self.header_policy, HeaderPolicy::V1) {
             return Err(BlockExecutionError::HeaderState {
                 detail: "V2 block requires V2 finalization".into(),
             });
         }
         let (changes, ()) = stage_protocol(db, |overlay| {
-            finish_protocol(overlay, &self.spec, &self.context, &self.run)
+            finish_protocol(overlay, &self.spec, &self.context, &mut self.run)
         })?;
         Ok(PreparedBlockFinish { changes, block: self })
     }
@@ -289,7 +291,7 @@ impl ActiveBlock {
     /// the exact signed bytes corresponding to each committed EVM result.
     /// Dropped or skipped candidates must not appear in `body`.
     pub fn prepare_node_finish<DB: Database>(
-        self,
+        mut self,
         db: &mut DB,
         body: &NodeBodyV2,
     ) -> Result<PreparedNodeBlockFinish, NodeExecutionError> {
@@ -303,7 +305,7 @@ impl ActiveBlock {
         let (record, receipts) =
             crate::node_execution::outcome_record(&self.context, previous_root, &self.run, body, &input.txs)?;
         let (changes, ()) = stage_protocol(db, |overlay| {
-            finish_burns(overlay, &self.spec, &self.run)?;
+            finish_supply(overlay, &self.spec, &mut self.run)?;
             crate::node_execution::head::write_head_v2(overlay, self.spec.block_info, &record)
         })?;
         Ok(PreparedNodeBlockFinish {
@@ -315,6 +317,7 @@ impl ActiveBlock {
                     record,
                     receipts,
                     transactions: self.run.tx_outcomes,
+                    withdrawals: self.run.withdrawals,
                 },
             },
         })

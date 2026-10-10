@@ -7,13 +7,13 @@
 //! Supply rule (BLOCH-L2-EVM-DESIGN §1): the native gas token is an L2
 //! representation of **bridged BLCH** with **zero issuance** — balances enter
 //! only via deposit mints (crediting exactly the escrowed L1 sats scaled by
-//! [`crate::scale::ATOM_SCALE`]) and leave only via withdrawals (bridge
-//! component, not this crate). Block reward is zero and fees are routed to
+//! [`crate::scale::ATOM_SCALE`]) and leave only via withdrawals (the outbox,
+//! [`crate::withdrawal`], on chains that configure it). Block reward is zero and fees are routed to
 //! vaults, so **the protocol never burns**; the EVM itself can still destroy
 //! native value through EIP-6780 (`SELFDESTRUCT` to self in the creating
 //! transaction). The executor measures that per transaction and accumulates it
-//! in the ledger, so `total_native_wei == total_minted_wei - total_burned_wei`
-//! is the invariant it maintains.
+//! in the ledger, as are outbox withdrawals, so the executor maintains
+//! `total_native_wei == total_minted_wei - total_burned_wei - total_withdrawn_wei`.
 //!
 //! The supply ledger — cumulative minted wei, the **deposit cursor** and the
 //! cumulative wei burned by the EVM — lives in the storage of the
@@ -185,6 +185,11 @@ pub const SUPPLY_LEDGER_CURSOR_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
 /// EVM destroyed (EIP-6780 `SELFDESTRUCT` to self in the creating transaction),
 /// as measured by the executor per transaction.
 pub const SUPPLY_LEDGER_BURNED_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+
+/// Storage slot of the supply-ledger account holding the cumulative wei
+/// withdrawn to L1 through the outbox ([`crate::withdrawal`]): value that left
+/// the L2 supply and is owed by the L1 escrow until claimed.
+pub const SUPPLY_LEDGER_WITHDRAWN_SLOT: U256 = U256::from_limbs([3, 0, 0, 0]);
 
 /// `BLOCK_INFO` slot: non-zero once any block has executed (a head exists).
 pub const BLOCK_INFO_FLAG_SLOT: U256 = U256::ZERO;
@@ -580,6 +585,25 @@ impl L2State {
         ledger_slot(&self.db, SUPPLY_LEDGER, SUPPLY_LEDGER_BURNED_SLOT)
     }
 
+    /// Total wei withdrawn to L1 through the outbox, read from the committed
+    /// ledger at the default [`SUPPLY_LEDGER`] address.
+    pub fn total_withdrawn_wei(&self) -> U256 {
+        ledger_slot(&self.db, SUPPLY_LEDGER, SUPPLY_LEDGER_WITHDRAWN_SLOT)
+    }
+
+    /// The outbox commitment in this state (`None` without an outbox account):
+    /// the root and count the next settlement V3 statement would publish.
+    pub fn withdrawal_commitment(&self, outbox: Address) -> Option<crate::withdrawal::WithdrawalCommitment> {
+        self.account(&outbox)?;
+        let count = ledger_slot(&self.db, outbox, crate::withdrawal::OUTBOX_NONCE_SLOT).as_limbs()[0];
+        let root = if count == 0 {
+            crate::withdrawal::empty_withdrawal_root()
+        } else {
+            B256::from(ledger_slot(&self.db, outbox, crate::withdrawal::OUTBOX_ROOT_SLOT))
+        };
+        Some(crate::withdrawal::WithdrawalCommitment { root, count })
+    }
+
     /// The committed head-block record at the default [`BLOCK_INFO`] address
     /// (`None` before any block executed).
     pub fn head(&self) -> Option<HeadRecord> {
@@ -630,9 +654,9 @@ impl L2State {
     }
 
     /// Sum of every live account's native balance. With zero issuance,
-    /// vault-routed fees and the executor's burn accounting this equals
-    /// [`Self::total_minted_wei`]` - `[`Self::total_burned_wei`] — asserted by
-    /// the executor tests.
+    /// vault-routed fees and the executor's burn and withdrawal accounting this
+    /// equals [`Self::total_minted_wei`]` - `[`Self::total_burned_wei`]` -
+    /// `[`Self::total_withdrawn_wei`] — asserted by the executor tests.
     pub fn total_native_wei(&self) -> U256 {
         self.db
             .cache
@@ -670,6 +694,11 @@ impl L2State {
     /// Nonce of `address` (zero if absent).
     pub fn nonce_of(&self, address: &Address) -> u64 {
         self.account(address).map(|a| a.nonce).unwrap_or(0)
+    }
+
+    /// Storage `slot` of `address` (zero if absent or unset).
+    pub fn storage_of(&self, address: &Address, slot: U256) -> U256 {
+        ledger_slot(&self.db, *address, slot)
     }
 }
 

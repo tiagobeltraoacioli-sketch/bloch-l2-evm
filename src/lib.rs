@@ -128,6 +128,7 @@ pub mod state;
 pub mod stateroot;
 pub mod stubs;
 pub mod transactions;
+pub mod withdrawal;
 
 pub use chainspec::{ChainSpec, ChainSpecError};
 pub use executor::{
