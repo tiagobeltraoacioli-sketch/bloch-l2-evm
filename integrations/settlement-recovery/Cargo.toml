@@ -27,6 +27,9 @@ path = "src/bin/bloch-l2-native-follower.rs"
 devnet-randao-recommit = ["bloch-pos-committee/devnet-randao-recommit", "bloch-pos-node/devnet-randao-recommit"]
 # Development networks with native L2 deposits (escrow inbox).
 devnet-l2-deposits = ["bloch-pos-committee/devnet-l2-deposits", "bloch-pos-node/devnet-l2-deposits"]
+# Development networks admitting settlement V3 user transactions and their L1
+# data-availability transactions (0x15); a follower without it halts on them.
+devnet-l2-user-txs = ["devnet-l2-deposits", "bloch-pos-committee/devnet-l2-user-txs", "bloch-pos-node/devnet-l2-user-txs"]
 
 [dependencies]
 bloch-l2-evm = { path = "../.." }

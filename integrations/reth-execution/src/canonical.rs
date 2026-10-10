@@ -192,8 +192,20 @@ impl CanonicalCoordinator {
             return Err(BlockExecutionError::msg("stale canonical parent"));
         }
         let selection = self.select_pending(&attributes, candidates, limits)?;
-        let transactions = selection
-            .transactions
+        let tip = self.extend_raw(expected_parent, attributes, &selection.transactions)?;
+        Ok((tip, selection))
+    }
+
+    /// Extend the head with exactly these canonical signed envelopes, in
+    /// order (for example a batch re-read from L1 data availability). Each
+    /// must decode exactly; execution validates them like any block.
+    pub fn extend_raw(
+        &mut self,
+        expected_parent: B256,
+        attributes: BlochNextBlockEnvCtx,
+        raw: &[alloy_primitives::Bytes],
+    ) -> Result<SealedHeader<BlochNodeHeader>, BlockExecutionError> {
+        let transactions = raw
             .iter()
             .map(|raw| {
                 let mut bytes = raw.as_ref();
@@ -204,8 +216,7 @@ impl CanonicalCoordinator {
                 Ok(tx)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let tip = self.extend(expected_parent, attributes, transactions)?;
-        Ok((tip, selection))
+        self.extend(expected_parent, attributes, transactions)
     }
 
     /// Execute against the selected parent and publish only after commit.

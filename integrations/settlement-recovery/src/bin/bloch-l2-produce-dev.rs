@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Development producer for the natively settled L2 canonical database.
 //!
-//! `init` creates a fresh database at L2 genesis. `extend` appends exactly one
+//! `init` creates a fresh database at L2 genesis. `da` prints the L1
+//! data-availability batch of one block's user transactions (M3), and
+//! `reconstruct` rebuilds a fresh database from native (L1) blocks only:
+//! deposits, DA batches and settlements, checking every settled root. `extend` appends exactly one
 //! block anchored to the native-selected source block, refusing any parent
 //! other than the one the caller names (the previously accepted native
 //! settlement's L2 header). Without `--txs` the block carries deposits only;
@@ -14,7 +17,12 @@
 #![cfg(unix)]
 
 use alloy_primitives::{hex, B256};
-use bloch_l2_evm::{node_execution::select::SelectionLimits, ChainSpec};
+use bloch_l2_evm::{
+    data_availability::{da_commitment, encode_da_payload},
+    node_execution::select::SelectionLimits,
+    ChainSpec,
+};
+use bloch_settlement_recovery::reconstruct::{derive_settled_blocks, NativeBlockTransactions};
 use bloch_reth_execution::{
     prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator,
@@ -22,7 +30,7 @@ use bloch_reth_execution::{
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
-    BlockNumReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
 };
 use reth_tasks::{Runtime, RuntimeBuilder, RuntimeConfig};
 use serde_json::json;
@@ -42,6 +50,8 @@ usage:
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
   bloch-l2-produce-dev export --target DIR --number N --out FILE
   bloch-l2-produce-dev head   --target DIR
+  bloch-l2-produce-dev da     --target DIR --number N --out FILE
+  bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
 
 extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
 whose anchor is the native-selected source block. HEX is 64 lowercase hex
@@ -54,6 +64,14 @@ first; transactions are selected in a deterministic order within --max-gas
 pending and invalid transactions are dropped with a reason. With a spool
 directory, files of included and dropped transactions are removed after the
 block is durably committed. Without --txs the block has no user transactions.
+da writes the canonical L1 data-availability batch (hex) of block N's user
+transactions and prints its da_commitment; a block without user transactions
+has nothing to publish. reconstruct creates NEW_DIR at L2 genesis and replays
+every L2 block settled in the given native blocks, from native data only:
+inbox deposits (0x14), DA batches (0x15) and settlements (0x12/0x13). --l1 is
+a JSON object {blocks: [{height, transactions: [hex, ...]}, ...]} in height order;
+--l1-follower is a native follower state directory (index + blocks/*.bin).
+Each rebuilt block must reproduce the settled header hash and state root.
 Development only: no settlement or finality is implied.
 ";
 
@@ -254,6 +272,91 @@ fn run(args: &[String]) -> Result<String, String> {
                       "anchor": hex::encode(artifact.context().anchor_root), "bytes": bytes.len()})
             .to_string())
         }
+        "da" => {
+            only(rest, &["--target", "--number", "--out"])?;
+            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let out = PathBuf::from(option(rest, "--out")?);
+            let factory = open(&target, &runtime, false)?;
+            let block = factory
+                .block_by_number(number)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no block {number}"))?;
+            let transactions = &block.body.as_core().transactions;
+            if transactions.is_empty() {
+                return Err(format!("block {number} has no user transactions: nothing to publish"));
+            }
+            let payload = encode_da_payload(transactions).map_err(|e| e.to_string())?;
+            let chain_id = ChainSpec::testnet().chain_id;
+            let commitment = da_commitment(chain_id, number, &payload);
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
+            writeln!(file, "{}", hex::encode(&payload)).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            Ok(json!({"number": number, "hash": hex::encode(block.header.0.hash()), "chain_id": chain_id,
+                      "transactions": transactions.len(), "bytes": payload.len(),
+                      "da_commitment": hex::encode(commitment)})
+            .to_string())
+        }
+        "reconstruct" => {
+            only(rest, &["--target", "--l1", "--l1-follower", "--chain-id"])?;
+            let blocks = match (option(rest, "--l1"), option(rest, "--l1-follower")) {
+                (Ok(file), Err(_)) => read_l1_fixture(Path::new(file))?,
+                (Err(_), Ok(dir)) => read_l1_follower(Path::new(dir))?,
+                _ => return Err("exactly one of --l1 or --l1-follower is required".into()),
+            };
+            let chain_id = match option(rest, "--chain-id") {
+                Ok(value) => value.parse().map_err(|_| "--chain-id must be decimal")?,
+                Err(_) => ChainSpec::testnet().chain_id,
+            };
+            fs::create_dir(&target).map_err(|e| format!("create target: {e}"))?;
+            let factory = open(&target, &runtime, true)?;
+            let genesis = prepare_genesis(&*spec()?, factory.latest().map_err(|e| e.to_string())?.as_ref())
+                .map_err(|e| e.to_string())?;
+            let genesis_header = genesis.recovered_block().clone_sealed_header();
+            let writer = factory.database_provider_rw().map_err(|e| e.to_string())?;
+            writer.save_blocks(vec![genesis], SaveBlocksMode::Full).map_err(|e| e.to_string())?;
+            writer.commit().map_err(|e| e.to_string())?;
+            let settled = derive_settled_blocks(&blocks, chain_id, genesis_header.hash(), genesis_header.0.state_root)
+                .map_err(|e| e.to_string())?;
+            let mut coordinator = CanonicalCoordinator::attach(factory).map_err(|e| e.to_string())?;
+            let mut report = Vec::new();
+            for block in &settled {
+                let head = coordinator.head().clone();
+                if head.hash() != block.parent_hash || head.0.state_root != block.previous_state_root {
+                    return Err(format!("L2 block {}: rebuilt parent differs from the settled parent", block.number));
+                }
+                let attributes = BlochNextBlockEnvCtx {
+                    timestamp: head.0.timestamp.checked_add(1).ok_or("timestamp overflow")?,
+                    prevrandao: B256::repeat_byte(7),
+                    anchor_root: block.anchor,
+                    deposits: block.deposits.clone(),
+                };
+                let tip = coordinator
+                    .extend_raw(head.hash(), attributes, &block.transactions)
+                    .map_err(|e| format!("L2 block {}: {e}", block.number))?;
+                let mismatch = tip.hash() != block.header_hash
+                    || tip.0.state_root != block.state_root
+                    || block.transactions_root.is_some_and(|root| root != tip.0.transactions_root)
+                    || block.deposits_hash.is_some_and(|hash| hash != tip.0.deposits_hash);
+                if mismatch {
+                    return Err(format!(
+                        "L2 block {}: rebuilt hash {} / state root {} differ from settled {} / {}",
+                        block.number,
+                        hex::encode(tip.hash()),
+                        hex::encode(tip.0.state_root),
+                        hex::encode(block.header_hash),
+                        hex::encode(block.state_root)
+                    ));
+                }
+                report.push(json!({"number": block.number, "settled_at": block.settled_at,
+                                   "hash": hex::encode(tip.hash()), "state_root": hex::encode(tip.0.state_root),
+                                   "deposits": block.deposits.len(), "transactions": block.transactions.len(),
+                                   "da_commitment": hex::encode(block.da_commitment)}));
+            }
+            Ok(json!({"genesis": hex::encode(genesis_header.hash()), "native_blocks": blocks.len(),
+                      "settled": report.len(), "head": report.last().map(|b| b["hash"].clone()),
+                      "blocks": report})
+            .to_string())
+        }
         "head" => {
             only(rest, &["--target"])?;
             let factory = open(&target, &runtime, false)?;
@@ -333,6 +436,52 @@ fn read_pool(path: &Path) -> Result<Vec<(Option<PathBuf>, alloy_primitives::Byte
     }
     Ok(entries)
 }
+
+/// Native blocks as a JSON fixture: {"blocks":[{"height":H,"transactions":[HEX,...]}]}.
+fn read_l1_fixture(path: &Path) -> Result<Vec<NativeBlockTransactions>, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).map_err(|e| format!("--l1: {e}"))?).map_err(|e| format!("--l1: {e}"))?;
+    let blocks = value["blocks"].as_array().ok_or("--l1 needs a blocks list")?;
+    if blocks.len() > MAX_L1_BLOCKS {
+        return Err(format!("--l1 holds more than {MAX_L1_BLOCKS} blocks"));
+    }
+    blocks
+        .iter()
+        .map(|block| {
+            let height = block["height"].as_u64().ok_or("block height must be an integer")?;
+            let transactions = block["transactions"]
+                .as_array()
+                .ok_or("block transactions must be a list")?
+                .iter()
+                .map(|tx| hex::decode(tx.as_str().unwrap_or_default()).map_err(|_| "transaction is not hex".to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(NativeBlockTransactions { height, transactions })
+        })
+        .collect()
+}
+
+/// A native follower state directory: `index` lists verified block ids from
+/// genesis (line i is height i), `blocks/<id>.bin` holds each envelope.
+fn read_l1_follower(dir: &Path) -> Result<Vec<NativeBlockTransactions>, String> {
+    let index = fs::read_to_string(dir.join("index")).map_err(|e| format!("--l1-follower index: {e}"))?;
+    let mut blocks = Vec::new();
+    for (i, line) in index.lines().enumerate() {
+        if blocks.len() >= MAX_L1_BLOCKS {
+            return Err(format!("--l1-follower holds more than {MAX_L1_BLOCKS} blocks"));
+        }
+        let id: B256 = line.trim().parse().map_err(|_| "corrupt follower index line")?;
+        let bytes = fs::read(dir.join("blocks").join(format!("{}.bin", hex::encode(id)))).map_err(|e| e.to_string())?;
+        let envelope = bloch_pos_node::codec::decode_envelope(&bytes).map_err(|_| "native envelope does not decode")?;
+        if B256::from(*envelope.block_id().as_bytes()) != id {
+            return Err("native envelope does not match its index id".into());
+        }
+        blocks.push(NativeBlockTransactions { height: i as u64 + 1, transactions: envelope.body.transactions });
+    }
+    Ok(blocks)
+}
+
+/// Upper bound on native blocks read by one reconstruction.
+const MAX_L1_BLOCKS: usize = 1_000_000;
 
 /// Upper bound on candidates read per block (selection cost is linear in it).
 const MAX_POOL_ENTRIES: usize = 16_384;
