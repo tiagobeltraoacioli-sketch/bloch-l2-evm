@@ -45,6 +45,116 @@ pub const NATIVE_L2_DEPOSIT_TAG_V2: u8 = 0x14;
 /// Exact native envelope size, with no user-controlled length fields.
 pub const NATIVE_SETTLEMENT_BYTES: usize = 1 + 32 + SETTLEMENT_STATEMENT_V2_LEN + SETTLEMENT_PROOF_V1_BYTES;
 
+/// Versioned native wire-tag sets. A tool selects the set of the network it
+/// targets; it never mixes bytes from two sets.
+///
+/// * [`NativeWireTags::V1`] — development history before 2026-10-10 (devnet1..3):
+///   0x0E settlement, 0x0F async settlement, 0x10 deposit. These collide with
+///   the mainnet funded-delegation tags and are kept only so recorded history
+///   and the real V2 fixtures still decode.
+/// * [`NativeWireTags::V2`] — every network built from the renumbered native
+///   branch (devnet4 onward): 0x12, 0x13, 0x14. The settlement V3 frame
+///   ([`NativeSettlementFrameV3`]) exists only under this set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeWireTags {
+    /// Synchronous settlement transaction tag.
+    pub settlement: u8,
+    /// Asynchronous settlement transaction tag.
+    pub settlement_async: u8,
+    /// Native L2 deposit transaction tag.
+    pub deposit: u8,
+}
+impl NativeWireTags {
+    /// Historical development tag set (devnet3 and earlier).
+    pub const V1: Self = Self {
+        settlement: NATIVE_SETTLEMENT_TAG,
+        settlement_async: 0x0f,
+        deposit: 0x10,
+    };
+    /// Renumbered tag set, past the mainnet transaction space (0x00..=0x11).
+    pub const V2: Self = Self {
+        settlement: NATIVE_SETTLEMENT_TAG_V2,
+        settlement_async: NATIVE_ASYNC_SETTLEMENT_TAG_V2,
+        deposit: NATIVE_L2_DEPOSIT_TAG_V2,
+    };
+}
+
+/// Exact native settlement V3 transaction length: tag, proof-policy hash,
+/// 766-byte V3 statement, 356-byte Groth16 proof (1155 bytes).
+pub const NATIVE_SETTLEMENT_V3_BYTES: usize =
+    1 + 32 + crate::proof_statement::SETTLEMENT_STATEMENT_V3_LEN + SETTLEMENT_PROOF_V1_BYTES;
+
+/// Which native settlement transaction carries a V3 statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSettlementModeV3 {
+    /// `L2Settlement` (0x12).
+    Synchronous,
+    /// `L2SettlementAsync` (0x13), used by the asynchronous development genesis.
+    Asynchronous,
+}
+impl NativeSettlementModeV3 {
+    /// Wire tag under the renumbered tag set. V3 is never framed with V1 tags.
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Synchronous => NativeWireTags::V2.settlement,
+            Self::Asynchronous => NativeWireTags::V2.settlement_async,
+        }
+    }
+}
+
+/// Native settlement transaction carrying a [`SettlementStatementV3`]:
+/// `tag || proof_policy || statement (766) || proof (356)`. This is the exact
+/// byte layout the native `l2_settlement::Transaction` decodes at 1155 bytes.
+/// The shared golden vector in `tests/native_settlement_v3_frame.rs` is
+/// reproduced independently by the native crate.
+///
+/// [`SettlementStatementV3`]: crate::proof_statement::SettlementStatementV3
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSettlementFrameV3 {
+    /// Synchronous or asynchronous settlement.
+    pub mode: NativeSettlementModeV3,
+    /// Pinned proof-policy commitment (`bloch_l2_proof::policy_commitment_v3`).
+    pub proof_policy: B256,
+    /// Exact proven public values.
+    pub statement: crate::proof_statement::SettlementStatementV3,
+    /// SP1 Groth16 selector plus encoded proof.
+    pub proof: [u8; SETTLEMENT_PROOF_V1_BYTES],
+}
+impl NativeSettlementFrameV3 {
+    /// Encode the exact 1155-byte native transaction.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(NATIVE_SETTLEMENT_V3_BYTES);
+        bytes.push(self.mode.tag());
+        bytes.extend_from_slice(self.proof_policy.as_slice());
+        bytes.extend_from_slice(&self.statement.encode());
+        bytes.extend_from_slice(&self.proof);
+        debug_assert_eq!(bytes.len(), NATIVE_SETTLEMENT_V3_BYTES);
+        bytes
+    }
+
+    /// Decode exactly one V3 frame. Historical V1 tags (0x0E/0x0F), the V2
+    /// statement length, prefixes and suffixes are all refused.
+    pub fn decode(bytes: &[u8]) -> Result<Self, SettlementError> {
+        if bytes.len() != NATIVE_SETTLEMENT_V3_BYTES {
+            return Err(SettlementError::Encoding);
+        }
+        let mode = match bytes[0] {
+            tag if tag == NativeSettlementModeV3::Synchronous.tag() => NativeSettlementModeV3::Synchronous,
+            tag if tag == NativeSettlementModeV3::Asynchronous.tag() => NativeSettlementModeV3::Asynchronous,
+            _ => return Err(SettlementError::Encoding),
+        };
+        let end = 33 + crate::proof_statement::SETTLEMENT_STATEMENT_V3_LEN;
+        let statement = crate::proof_statement::SettlementStatementV3::decode(&bytes[33..end])
+            .map_err(SettlementError::Statement)?;
+        Ok(Self {
+            mode,
+            proof_policy: B256::from_slice(&bytes[1..33]),
+            statement,
+            proof: bytes[end..].try_into().map_err(|_| SettlementError::Encoding)?,
+        })
+    }
+}
+
 /// Explicit framing; exact native bytes must never be replaced inside inclusion evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettlementWireFormat {
