@@ -219,8 +219,12 @@ async fn main() -> Result<()> {
     let (fixture, context, expected) = (&qualification.execution, qualification.context, qualification.expected);
     println!("OFFLINE QUALIFICATION ONLY: no native source authority, consensus activation, finality or payouts");
     println!(
-        "Expected settlement V3 statement: user_tx_count={} deposits_hash={:?} transactions_root={:?}",
-        expected.user_tx_count, expected.deposits_hash, expected.transactions_root
+        "Expected settlement V3 statement: user_tx_count={} deposits_hash={:?} transactions_root={:?} withdrawal_root={:?} withdrawal_count={}",
+        expected.user_tx_count,
+        expected.deposits_hash,
+        expected.transactions_root,
+        expected.withdrawal_root,
+        expected.withdrawal_count
     );
 
     if mode == "execute" {

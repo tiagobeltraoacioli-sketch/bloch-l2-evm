@@ -205,8 +205,12 @@ pub fn fixture_withdrawals(spec: &ChainSpec, n: u64) -> Result<Fixture, Box<dyn 
             100_000,
         )?);
     }
+    // 100 BLCH: n withdrawals of 0.01 BLCH plus fees, for any benchmarked n.
+    let mut deposit = bench_deposit(sender);
+    let DepositProvenance::BridgedBlch { l1_sats, .. } = &mut deposit.provenance;
+    *l1_sats = 100 * 100_000_000;
     let body = NodeBodyV2 {
-        deposits: vec![bench_deposit(sender)],
+        deposits: vec![deposit],
         transactions,
     };
     let (fixture, state, outcome) = execute_fixture_with(spec, body, B256::repeat_byte(8))?;

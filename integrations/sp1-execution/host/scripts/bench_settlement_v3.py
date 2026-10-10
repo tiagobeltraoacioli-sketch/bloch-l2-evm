@@ -3,7 +3,7 @@
 
 usage: bench_settlement_v3.py BENCH_BINARY SETTLEMENT_V3_ELF [CONFIG ...]
 
-CONFIG is KIND:N (KIND = transfers | calls); default: transfers 0/1/10/50/100
+CONFIG is KIND:N (KIND = transfers | calls | withdrawals); default: transfers 0/1/10/50/100
 and calls 10. Each configuration runs in its own process, so the peak RSS the
 binary reports (getrusage) belongs to that block alone. No proof is generated.
 """
@@ -30,11 +30,11 @@ def main(argv):
         rows.append(row)
         print(json.dumps(row), file=sys.stderr, flush=True)
     print(f'Host: {platform.machine()} {platform.system()} {platform.release()}, Python {platform.python_version()}\n')
-    print('| Block | User txs | Block gas | Body bytes | Witness bytes | SP1 cycles | Syscalls | SP1 gas | Execute (s) | Peak RSS (MiB) |')
-    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+    print('| Block | User txs | Withdrawals | Block gas | Body bytes | Witness bytes | SP1 cycles | Syscalls | SP1 gas | Execute (s) | Peak RSS (MiB) |')
+    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     for r in rows:
         label = f"{r['kind']} N={r['n']}"
-        print(f"| {label} | {r['user_txs']} | {r['block_gas_used']:,} | {r['body_bytes']:,} | {r['witness_bytes']:,} | "
+        print(f"| {label} | {r['user_txs']} | {r.get('withdrawal_count', 0)} | {r['block_gas_used']:,} | {r['body_bytes']:,} | {r['witness_bytes']:,} | "
               f"{r['cycles']:,} | {r['syscalls']:,} | {r['sp1_gas'] if r['sp1_gas'] is not None else '—'} | "
               f"{r['execute_seconds']:.2f} | {r['peak_rss_bytes'] / 2**20:,.0f} |")
 

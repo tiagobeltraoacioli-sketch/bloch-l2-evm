@@ -19,8 +19,8 @@ devnet3 cannot carry settlement V3:
 
 | Component | Branch | Commit |
 |---|---|---|
-| Native node (`bloch-validator-payout`) | `codex/native-l2-v3-m3-20261010` | the reviewed HEAD of that branch |
-| L2 (`bloch-l2-evm`) | `codex/l2-v3-m3-20261010` | the reviewed HEAD of that branch |
+| Native node (`bloch-validator-payout`) | `codex/native-l2-v3-m4-20261010` | the reviewed HEAD of that branch |
+| L2 (`bloch-l2-evm`) | `codex/l2-v3-m4-20261010` | the reviewed HEAD of that branch |
 | Reth snapshot (`reth-bloch-rpc-snapshot`) | as used by devnet3 | `8eb210175687c9f0c889a3b6795c16781d830e3a` |
 
 The L2 integration crates resolve the native and Reth trees as siblings
@@ -52,21 +52,30 @@ remapped paths: the ELF no longer depends on the checkout directory
 (`verify-reproducible.sh` checks two checkouts). It still depends on the
 compiler host platform; pin the ELF built where the keys are derived.
 
-* `settlement_v3` ELF (M3, precompiles, reproducible build of `codex/l2-v3-m3-20261010`):
-  SHA-256 `853ecdcb1ae13a6df8abc471a6c34f4fc9c61a37ae19aa7dced904ff7a8435ff`,
-  Keccak `d17782a8694048bd33f2e5a218d046d2a77b3b9d087cf87180fbe5949dd0902c`,
-  KoalaBear vkey `1119054d718a452008c8809c4309c6cb2a0e277b0cee51984d76c8cf6c9cc47a`,
-  BN254 vkey `0022320a9bc6291480464404e4309c6cb541c4ef633b946626bb6467ec9cc47a`.
-  (The M2 ELF `a80aa3a5…` / vkey `00eef117…` is superseded.)
-* `configuration` `d8bda58311d30b1e2c08097b8ad4f08b767dbad1ed70403aaf6f601944921616`, domain `0xd3…d3`.
+* `settlement_v3` ELF (M4, withdrawal outbox, reproducible build of `codex/l2-v3-m4-20261010`):
+  SHA-256 `6fa44f9cd5c3b5461db115725692b4b6277cf441edf72e89343c5dc71ab3c259`,
+  Keccak `c3004c33cd7c77aeb23eac42bc3553102241b6f715fc76bdd013707ae9ca464f`,
+  KoalaBear vkey `0fbf3f4334530ec9108d6b640b01fb6836e7f05d7dd982fb6d476f841d4c34ba`,
+  BN254 vkey `001f7e7e86d14c3b24846b5b20b01fb686dcfe0bbf7660bef6a3b7c21d4c34ba`.
+  (Superseded: M3 ELF `853ecdcb…` / vkey `0022320a…`, M2 ELF `a80aa3a5…`.
+  The same build also changes `settlement_v2` to `2b63bb74…` and the synthetic
+  guest to `63994ed7…`, because the shared execution core changed; devnet3
+  keeps its own pinned V2 artifacts.)
+* `configuration` `deeee918393658e5edd6616d7dc062d00ba21979520f44a3991f6a7bd8ad0f63`
+  (tag `BLOCH:EVM:CONFIG:2:CANCUN`: `ChainSpec::testnet_v3()`, the testnet
+  parameters plus the outbox address and minimum withdrawal; M3 value
+  `d8bda583…` superseded), domain `0xd3…d3`.
 * `proof_policy_v3` `154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d`
   (L2 host and native build agree).
-* L2 genesis (reproduced locally with the M2 and M3 producers): hash
+* L2 genesis (reproduced locally with the M2, M3 and M4 producers; the outbox is
+  installed by block 1, not at genesis): hash
   `aec9844384415c8ba7157298fa13f7e6c951a6ba9332f516180a4aa22208fefa`, state root
   `8f329e1ce3b48212f1e8bf8eb25d567433f872a8ef1493257e1bcfcd289d1ae7`.
 * A sample `l2-config.bin` from these values: SHA-256
-  `e1ae001bf8a5efd05c7301716c3bd7f3513c9f0fef42df834b22d9575ce82305` (264 bytes;
-  M2 sample `a2dfc21b…` superseded).
+  `27e26debdea078997ff725d4180a64dcf7554a1a4100a438175b3dfad4b03ea0` (264 bytes;
+  M3 sample `e1ae001b…` and M2 sample `a2dfc21b…` superseded).
+* Empty withdrawal root (block 1 onwards until the first withdrawal):
+  `27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757`.
 
 ## Steps (build machine; no keys involved)
 
@@ -147,6 +156,7 @@ Settler (adapt `install-settler.py`):
 - [ ] Unit as devnet3 (`RestartPreventExitStatus=3`, `MemoryMax` sized for the prover).
 - [ ] First cycle: block 1 deposit-only, proof verified, 1155-byte `0x13` transaction accepted (`getl2settlement.accepted.statement` starts with `BLOCH:EVM:SETTLEMENT:3`).
 - [ ] One native deposit (`0x14`) minted by the next settlement (`deposits_hash` check passes).
+- [ ] `getl2settlement.withdrawals` shows `count: 0` and the empty root above, `roots: []`; `produce head` reports the same `withdrawal_root` / `withdrawal_count`.
 
 Enabling user transactions (only after the deposit-only path is stable):
 
@@ -156,6 +166,39 @@ Enabling user transactions (only after the deposit-only path is stable):
 - [ ] Set `user_transactions: true` and restart; place signed transactions in `txpool_dir` as `*.tx` (one hex envelope per file). `produce extend --txs` prunes included and dropped entries after commit; a block never selects more bytes than one DA batch (112 KiB with framing).
 - [ ] First user-transaction cycle: the log shows `da-submitted` then `da-included` before `submitted`; `getl2settlement.data_availability` lists `{l2_number, commitment, height}` until the settlement lands, then the record disappears.
 - [ ] Measure proof time and peak RSS per block against the cycle benchmark before raising `max_block_txs`.
+
+## Withdrawals, L2 side (M4)
+
+Execution rules: `ChainSpec::testnet_v3()` everywhere devnet4 executes
+(`settlement_v3` guest, V3 prover host, `bloch-l2-produce-dev`). The outbox
+`L2ToL1MessagePasser` is installed at `0x4200000000000000000000000000000000000102`
+by the first block (code hash = keccak of the 132-byte `OUTBOX_CODE`).
+
+* Call `initiateWithdrawal(bytes32 l1Recipient)` (selector `0xb769844a`) with
+  the amount as value: a multiple of `10^10` wei (one sat), at least
+  `1,000,000` sats (0.01 BLCH), recipient = the native owner script hash
+  (SHA3-256 of the hybrid public key), non-zero. Anything else reverts and
+  refunds. Event `WithdrawalInitiated(uint256 indexed nonce, bytes32 indexed
+  l1Recipient, address sender, uint256 amountWei)`.
+* At block end the protocol appends one leaf per outbox event to the depth-32
+  keccak tree (`keccak256("BLOCH:L2:WITHDRAW:1" || chain_id BE8 || nonce BE8 ||
+  l1_recipient || sats BE8)`), removes the value from the outbox balance and
+  adds it to the supply ledger (slot 3): L2 supply = minted − burned − withdrawn.
+* V3 publishes the post-block `withdrawal_root` / `withdrawal_count` (offsets
+  672/704), read from the authenticated outbox storage. The native chain
+  requires the count never to decrease and the root to change exactly when the
+  count does (`Reject::Withdrawals`), and keeps `(l2_number, root, count,
+  height)` of settlements that added withdrawals (1,024 native blocks plus the
+  newest older record), shown under `getl2settlement.withdrawals`.
+* Claim input (for M5): `bloch-l2-produce-dev withdrawal-proof --target DB
+  --index I [--number N] [--root HEX --count N]` rebuilds the tree from
+  receipts, checks it against the outbox state after block N and the settled
+  root, and prints the 32 siblings and the leaf fields.
+* The settler checks each statement's withdrawal fields against the producer
+  block and the accepted head and logs them (`transaction-built`).
+* **No L1 release yet (M5).** Withdrawn value leaves the L2 supply but
+  `escrow_sat` on L1 is unchanged: it is locked until the claim exists. Keep
+  withdrawals to development amounts.
 
 ## Data availability (M3)
 
@@ -199,7 +242,14 @@ with `produce head` of the settler database.
 * `reconstruct --l1-follower` reads the follower store as-is (it trusts that
   the follower verified it). `tests/reconstruct.rs` covers both inputs with a
   synthetic store (unsigned envelopes), not a store written by a live follower.
-* Withdrawals (M4/M5): `withdrawal_root` / `withdrawal_count` stay reserved zero.
+* Withdrawals: the L1 claim (`L2WithdrawClaim`, nullifiers, delay, escrow
+  release) is M5; until then withdrawn value is locked in the escrow.
+  `bloch-l2-settled-rpc`, `bloch-evm-export`, `bloch-evm-dev` and
+  `bloch-l2-audit-dev` still construct `ChainSpec::testnet()`: they read the
+  devnet4 database (same genesis) but would re-execute blocks under the rules
+  without the outbox; switch them to `testnet_v3()` before using them on devnet4.
+* `withdrawal-proof` scans every block's receipts since genesis (bounded at
+  10^6 blocks); an indexer is needed beyond development.
 * Every host that replays native blocks (native follower, audit tools,
   `produce reconstruct`) must be built with `--features devnet-l2-user-txs`
   (settlement-recovery), or it refuses the first block carrying a `0x15` DA
