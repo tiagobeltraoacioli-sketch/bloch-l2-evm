@@ -127,18 +127,28 @@ and [SP1 6.8.0 I/O implementation](https://github.com/succinctlabs/sp1/blob/v6.8
 ## Reproducible build and pinned identity (M3, 2026-10-10)
 
 Build the programs with `scripts/build-reproducible.sh` (not a bare
-`cargo prove build`). Without it the ELF embeds absolute source paths (panic
-locations, tracing call sites): the same commit built at two worktree paths
-produced two ELFs (`6dd5f5a3…` at the M1 path, `a80aa3a5…` at the M2 path),
-hence two SP1 key pairs and two genesis policies. The script passes
-`--remap-path-prefix` for the repository root (`/bloch-l2-evm`) and for
-`$CARGO_HOME` (`/cargo`, registry sources and the git patches), refuses to
-finish if either absolute prefix still appears in an ELF, and prints the
-SHA-256 of each program.
+`cargo prove build`). A bare build is path-dependent: the same commit built at
+two worktree paths produced two ELFs (`6dd5f5a3…` at the M1 path, `a80aa3a5…`
+at the M2 path), hence two SP1 key pairs and two genesis policies. Two causes:
 
-`scripts/verify-reproducible.sh [COMMIT]` exports the commit twice with
-`git archive` into two differently named directories, builds both from clean
-targets and compares every ELF hash; it exits non-zero on any difference.
+1. absolute source paths in panic locations and tracing call sites;
+2. Cargo's `-C metadata` for `bloch-l2-evm`, a path dependency outside this
+   isolated workspace, hashes its absolute path into every symbol name and so
+   into the section layout. `--remap-path-prefix` alone does not fix this
+   (measured: two remapped builds from two paths still differed).
+
+The script therefore exports a commit (default `HEAD`; uncommitted changes are
+not built) with `git archive` into a fixed directory
+(`$BLOCH_GUEST_BUILD_ROOT/bloch-l2-evm`, default `/tmp/bloch-guest-build`),
+builds there with the build root remapped to `/bloch-l2-evm` and `$CARGO_HOME`
+to `/cargo`, refuses an ELF that still contains a local prefix, and prints the
+SHA-256 of each program (`--out DIR` copies them). The fixed root is part of
+the program identity: pin ELFs built at the default root.
+
+`scripts/verify-reproducible.sh [COMMIT]` exports the commit into two
+differently named checkouts, builds each from a clean target and compares
+every ELF hash (optionally also against an expected list); it exits non-zero
+on any difference.
 
 The pinned identity is derived only from that ELF:
 
@@ -152,9 +162,9 @@ The pinned identity is derived only from that ELF:
 
 Inputs that still change the ELF and must be pinned with it: the commit
 (sources and `Cargo.lock`, including the patch commits), SP1 CLI 6.8.0, the
-`succinct-1.96.0-64bit-v2` compiler, and the compiler host platform (only
-macOS x86_64 was measured; a Linux host build must be compared separately or
-built in SP1's Docker image).
+`succinct-1.96.0-64bit-v2` compiler, the fixed build root, and the compiler
+host platform (only macOS x86_64 was measured; a Linux build must be compared
+separately).
 
 ## SP1 precompiles (M3.0b)
 

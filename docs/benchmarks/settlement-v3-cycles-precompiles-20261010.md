@@ -24,13 +24,13 @@ also matched (445,986 and 906,295 instructions).
 
 ```sh
 cd integrations/sp1-execution
-(cd guest && ./scripts/build-reproducible.sh)
+(cd guest && ./scripts/build-reproducible.sh --out "$PWD/pinned")
 (cd host && PROTOC=/path/to/protoc cargo +1.98.1 build --locked --release \
    --features node-artifact,source-settlement \
    --bin bloch-evm-sp1-settlement-v3-bench --bin bloch-evm-sp1-settlement-v3)
 python3 host/scripts/bench_settlement_v3.py \
   host/target/release/bloch-evm-sp1-settlement-v3-bench \
-  guest/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/settlement_v3 \
+  guest/pinned/settlement_v3 \
   transfers:0 transfers:1 transfers:10 transfers:50 transfers:100 calls:10 calls:50
 ```
 
