@@ -27,7 +27,21 @@ pub const SETTLEMENT_PROOF_V1_BYTES: usize = 356;
 pub const SETTLEMENT_TX_V1_BYTES: usize =
     EXPERIMENTAL_SETTLEMENT_TX_V1_TAG.len() + 32 + SETTLEMENT_STATEMENT_V2_LEN + SETTLEMENT_PROOF_V1_BYTES;
 /// Native development format assigned by the separately pinned consensus implementation.
+///
+/// HISTORICAL: this is the pre-2026-10-10 synchronous settlement byte, kept so
+/// recorded development history (and the real fixtures under
+/// `tests/fixtures/native-settlement/`) still decodes. The native branch
+/// `codex/native-l2-v3-m1-20261010` moved its L2 tags past the mainnet
+/// transaction space (mainnet assigns 0x0E-0x11 to funded delegation):
+/// settlement 0x12, async settlement 0x13, L2 deposit 0x14. A tool targeting a
+/// network built from that branch must use [`NATIVE_SETTLEMENT_TAG_V2`].
 pub const NATIVE_SETTLEMENT_TAG: u8 = 0x0e;
+/// Renumbered native synchronous settlement tag (see [`NATIVE_SETTLEMENT_TAG`]).
+pub const NATIVE_SETTLEMENT_TAG_V2: u8 = 0x12;
+/// Renumbered native asynchronous settlement tag (was 0x0F).
+pub const NATIVE_ASYNC_SETTLEMENT_TAG_V2: u8 = 0x13;
+/// Renumbered native L2 deposit tag (was 0x10).
+pub const NATIVE_L2_DEPOSIT_TAG_V2: u8 = 0x14;
 /// Exact native envelope size, with no user-controlled length fields.
 pub const NATIVE_SETTLEMENT_BYTES: usize = 1 + 32 + SETTLEMENT_STATEMENT_V2_LEN + SETTLEMENT_PROOF_V1_BYTES;
 
