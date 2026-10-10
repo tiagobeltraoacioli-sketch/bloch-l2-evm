@@ -13,7 +13,8 @@ Execution in the SP1 6.8.0 executor only; **no proof was generated**.
   `sp1-patches/signatures` tag `sp1-skip-verify-on-recovery` for `ecdsa`);
 * M3.2: the statement now carries `da_commitment` (Keccak over the
   user-transaction batch), computed in the guest;
-* built with `scripts/build-reproducible.sh` (path remapping).
+* built with `scripts/build-reproducible.sh` (fixed build root and path
+  remapping; `verify-reproducible.sh` gave this same ELF from two checkouts).
 
 The bench checks each committed 766-byte statement byte-for-byte against host
 execution with the unpatched crates, so the patches did not change results for
@@ -37,17 +38,17 @@ python3 host/scripts/bench_settlement_v3.py \
 ## Results
 
 Machine: MacBook Pro, x86_64, macOS (Darwin 25.6.0), 16 GB RAM.
-ELF: `settlement_v3` SHA-256 `eff3efca9f174a44472282badbec3092d8803cc6463be4edb2421b12452fd12c`.
+ELF: `settlement_v3` SHA-256 `853ecdcb1ae13a6df8abc471a6c34f4fc9c61a37ae19aa7dced904ff7a8435ff`.
 
 | Block | User txs | Block gas | Body bytes | Witness bytes | SP1 cycles | Syscalls | SP1 gas | Execute (s) | Peak RSS (MiB) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| transfers N=0 | 0 | 21,000 | 86 | 1,274 | 520,378 | 95 | 675228 | 0.11 | 120 |
-| transfers N=1 | 1 | 42,000 | 206 | 1,358 | 741,223 | 897 | 930401 | 0.14 | 128 |
-| transfers N=10 | 10 | 231,000 | 1,279 | 1,610 | 2,184,437 | 7,927 | 2554187 | 0.33 | 138 |
-| transfers N=50 | 50 | 1,071,000 | 6,039 | 2,730 | 8,748,049 | 39,195 | 9867158 | 1.27 | 189 |
-| transfers N=100 | 100 | 2,121,000 | 11,989 | 4,130 | 16,882,348 | 78,132 | 18907228 | 2.60 | 247 |
-| calls N=10 | 11 | 507,956 | 1,672 | 1,358 | 2,290,011 | 8,762 | 2710994 | 0.39 | 146 |
-| calls N=50 | 51 | 2,237,916 | 7,552 | 1,358 | 8,386,485 | 40,072 | 9738061 | 1.35 | 190 |
+| transfers N=0 | 0 | 21,000 | 86 | 1,274 | 520,378 | 95 | 675228 | 0.14 | 119 |
+| transfers N=1 | 1 | 42,000 | 206 | 1,358 | 741,223 | 897 | 930401 | 0.17 | 128 |
+| transfers N=10 | 10 | 231,000 | 1,279 | 1,610 | 2,184,437 | 7,927 | 2554187 | 0.37 | 139 |
+| transfers N=50 | 50 | 1,071,000 | 6,039 | 2,730 | 8,748,049 | 39,195 | 9867158 | 1.54 | 190 |
+| transfers N=100 | 100 | 2,121,000 | 11,989 | 4,130 | 16,882,348 | 78,132 | 18907228 | 3.05 | 230 |
+| calls N=10 | 11 | 507,956 | 1,672 | 1,358 | 2,290,011 | 8,762 | 2710994 | 0.45 | 146 |
+| calls N=50 | 51 | 2,237,916 | 7,552 | 1,358 | 8,386,485 | 40,072 | 9738061 | 1.59 | 190 |
 
 Execute time and RSS are of the executor, not of proving.
 
@@ -80,7 +81,7 @@ Execute time and RSS are of the executor, not of proving.
 ## Program identity of this ELF (`bloch-evm-sp1-settlement-v3 identity`)
 
 ```json
-{"program":"settlement_v3","chain_id":700771,"domain":"d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3","configuration":"d8bda58311d30b1e2c08097b8ad4f08b767dbad1ed70403aaf6f601944921616","elf_keccak":"865acc2891bd0b4d9f18e813c21f4483b8f8f950f0a982172be1ac14c861b5be","vkey_koalabear":"56c29fa41bc5c42471b3e769490a69f72d52d0221caaa74d4c0ab7df260067ba","vkey_bn254":"00ad853f486f1710938d9f3b4c90a69f75aa5a04472aa9d366055befa60067ba","sp1_circuit_version":"v6.1.0","proof_policy_v3":"154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d"}
+{"program":"settlement_v3","chain_id":700771,"domain":"d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3","configuration":"d8bda58311d30b1e2c08097b8ad4f08b767dbad1ed70403aaf6f601944921616","elf_keccak":"d17782a8694048bd33f2e5a218d046d2a77b3b9d087cf87180fbe5949dd0902c","vkey_koalabear":"1119054d718a452008c8809c4309c6cb2a0e277b0cee51984d76c8cf6c9cc47a","vkey_bn254":"0022320a9bc6291480464404e4309c6cb541c4ef633b946626bb6467ec9cc47a","sp1_circuit_version":"v6.1.0","proof_policy_v3":"154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d"}
 ```
 
 `proof_policy_v3` is unchanged (it does not depend on the ELF) and equals the

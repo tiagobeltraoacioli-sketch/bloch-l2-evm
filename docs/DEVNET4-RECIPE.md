@@ -19,8 +19,8 @@ devnet3 cannot carry settlement V3:
 
 | Component | Branch | Commit |
 |---|---|---|
-| Native node (`bloch-validator-payout`) | `codex/native-l2-v3-m2-20261010` | the reviewed HEAD of that branch |
-| L2 (`bloch-l2-evm`) | `codex/l2-v3-m2-20261010` | the reviewed HEAD of that branch |
+| Native node (`bloch-validator-payout`) | `codex/native-l2-v3-m3-20261010` | the reviewed HEAD of that branch |
+| L2 (`bloch-l2-evm`) | `codex/l2-v3-m3-20261010` | the reviewed HEAD of that branch |
 | Reth snapshot (`reth-bloch-rpc-snapshot`) | as used by devnet3 | `8eb210175687c9f0c889a3b6795c16781d830e3a` |
 
 The L2 integration crates resolve the native and Reth trees as siblings
@@ -32,7 +32,7 @@ three checkouts must sit side by side in one directory.
 | Pin | How it is obtained | Checked by |
 |---|---|---|
 | Native binary SHA-256 and `--version` (commit, `+devnet-randao-recommit+devnet-l2-deposits+devnet-l2-user-txs`, source digest) | step 1 | install script |
-| `settlement_v3` ELF SHA-256 and Keccak-256 | step 2 | settler (`guest_sha256`), statement field `program_elf_keccak` |
+| `settlement_v3` ELF SHA-256 and Keccak-256 (reproducible build) | step 2 | settler (`guest_sha256`), statement field `program_elf_keccak` |
 | SP1 KoalaBear vkey and BN254 vkey of that ELF | step 3 (`identity`) | statement fields; native verifier uses the BN254 key from the policy |
 | SP1 circuit version (`v6.1.0`) and full Groth16 wrapper VK SHA-256 | bound inside `proof_policy_v3` | native `bloch_l2_proof::verify` |
 | `proof_policy_v3` (native `policy_commitment_v3()` == L2 host value) | step 3 + step 4 | `make_l2_config.py` refuses a mismatch |
@@ -41,26 +41,32 @@ three checkouts must sit side by side in one directory.
 | `l2-config.bin` SHA-256 (264 bytes) | step 6 | install script, settler (`l2_config_sha256`) |
 | Producer and prover binary SHA-256 | steps 2–3 | settler (`prover_sha256`), installer |
 | Settler source SHA-256 (`deployment/devnet/settler_v3.py`) | `sha256sum` | installer |
+| DA signer (`bloch-pos` binary used for `l2-da prepare/sign`) SHA-256 | = the native binary of step 1 | settler (`da.signer_sha256`) |
+| DA funding public key (hex file, exported like the `l2-deposit` funding key) and its script hash (SHA3-256 of the key) | a dedicated keystore (`bloch-pos keygen`, then `keys seal`) | settler (`da.funding_pubkey`), dev allocation |
 
 Reference values computed on the development Mac (2026-10-10), **to be
-recomputed from the artifacts actually deployed**. The guest ELF embeds absolute
-source paths, so the same commit built under another directory yields another
-ELF and other keys: build it in a fixed path (or SP1's Docker build) and pin
-that output.
+recomputed from the artifacts actually deployed**. Since M3 the guest is built
+with `integrations/sp1-execution/guest/scripts/build-reproducible.sh`, which
+builds the commit in the fixed root `/tmp/bloch-guest-build/bloch-l2-evm` with
+remapped paths: the ELF no longer depends on the checkout directory
+(`verify-reproducible.sh` checks two checkouts). It still depends on the
+compiler host platform; pin the ELF built where the keys are derived.
 
-* `settlement_v3` ELF built at `~/worktrees/l2-v3-m2-20261010`: SHA-256
-  `a80aa3a54848cd03fff30dd1acb79d9ce357d75a0e2902fbd748da124936861a`,
-  Keccak `b343363ded81606f1b7e61fdebb2a266a60c3d0f302fa2e98546b8b4dac87157`,
-  KoalaBear vkey `77788bcf2733dd8673c0e21a31665a7026e9810573f9e98b2684c59534e9468d`,
-  BN254 vkey `00eef1179e9ccf761b9e0710d31665a704dd3020bcfe7a62d34262cab4e9468d`.
+* `settlement_v3` ELF (M3, precompiles, reproducible build of `codex/l2-v3-m3-20261010`):
+  SHA-256 `853ecdcb1ae13a6df8abc471a6c34f4fc9c61a37ae19aa7dced904ff7a8435ff`,
+  Keccak `d17782a8694048bd33f2e5a218d046d2a77b3b9d087cf87180fbe5949dd0902c`,
+  KoalaBear vkey `1119054d718a452008c8809c4309c6cb2a0e277b0cee51984d76c8cf6c9cc47a`,
+  BN254 vkey `0022320a9bc6291480464404e4309c6cb541c4ef633b946626bb6467ec9cc47a`.
+  (The M2 ELF `a80aa3a5…` / vkey `00eef117…` is superseded.)
 * `configuration` `d8bda58311d30b1e2c08097b8ad4f08b767dbad1ed70403aaf6f601944921616`, domain `0xd3…d3`.
 * `proof_policy_v3` `154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d`
   (L2 host and native build agree).
-* L2 genesis (reproduced locally with the M2 producer): hash
+* L2 genesis (reproduced locally with the M2 and M3 producers): hash
   `aec9844384415c8ba7157298fa13f7e6c951a6ba9332f516180a4aa22208fefa`, state root
   `8f329e1ce3b48212f1e8bf8eb25d567433f872a8ef1493257e1bcfcd289d1ae7`.
 * A sample `l2-config.bin` from these values: SHA-256
-  `a2dfc21b1c1260935594a18ff45e2c91b5b7516dce21b840145d6187397395ff` (264 bytes).
+  `e1ae001bf8a5efd05c7301716c3bd7f3513c9f0fef42df834b22d9575ce82305` (264 bytes;
+  M2 sample `a2dfc21b…` superseded).
 
 ## Steps (build machine; no keys involved)
 
@@ -80,11 +86,12 @@ BLOCH_BUILD_COMMIT=<NATIVE_COMMIT> cargo +1.94.1 build --locked --release \
 sha256sum target/release/bloch-pos && target/release/bloch-pos --version
 cd ..
 
-# 2. Guest ELF (SP1 6.8.0 CLI, succinct toolchain; see docs/SP1-TOOLCHAIN.md)
+# 2. Guest ELF (SP1 6.8.0 CLI, succinct toolchain; see docs/SP1-TOOLCHAIN.md).
+#    Path-independent build; optionally verify two paths give the same ELF.
 cd bloch-l2-evm/integrations/sp1-execution/guest
-CARGO_BUILD_JOBS=2 cargo prove build --locked
-ELF=$PWD/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/settlement_v3
-sha256sum "$ELF"
+./scripts/build-reproducible.sh --out "$PWD/pinned"   # prints sha256 of each program
+./scripts/verify-reproducible.sh HEAD                 # optional, two checkouts, clean builds
+ELF=$PWD/pinned/settlement_v3
 
 # 3. V3 prover host + program identity (runs SP1 setup, no proof)
 cd ../host
@@ -130,7 +137,7 @@ Install (adapt `l2-devnet3-20261006/remote-install.py`, changing only names, por
 - [ ] keygen ×3 validators + development wallet (sealed; passphrase file root-only, never exported).
 - [ ] `bloch-pos genesis --keys … --bind-genesis --l2-settlement-config l2-config.bin --dev-allocation <wallet_script>:<sat> --slot-ms 2000` (the native decoder accepts the V3 policy and pins it for this genesis).
 - [ ] systemd units with the devnet3 hardening; liveness: every node finalizes and `behind_by_slots ≤ 2` within 7 minutes.
-- [ ] `getl2settlement` shows the V3 policy (`proof_policy` = `proof_policy_v3`), `accepted: null`.
+- [ ] `getl2settlement` shows the V3 policy (`proof_policy` = `proof_policy_v3`), `accepted: null`, `data_availability: []`.
 
 Settler (adapt `install-settler.py`):
 
@@ -143,19 +150,68 @@ Settler (adapt `install-settler.py`):
 
 Enabling user transactions (only after the deposit-only path is stable):
 
-- [ ] Native build has `devnet-l2-user-txs` (otherwise every V3 statement with `user_tx_count > 0` is refused with `Reject::UserTransactions`).
-- [ ] Set `user_transactions: true` and restart; place signed transactions in `txpool_dir` as `*.tx` (one hex envelope per file). `produce extend --txs` prunes included and dropped entries after commit.
+- [ ] Native build has `devnet-l2-user-txs` (otherwise every V3 statement with `user_tx_count > 0` is refused with `Reject::UserTransactions`, and every `0x15` DA transaction with `NotActive`).
+- [ ] DA fee key: a separate keystore (`bloch-pos keys`) sealed with its own passphrase file readable only by the settler user; fund its script hash from the development wallet (a few outputs; each DA transaction spends 1–16 of them and returns change). It holds only DA fee money, never escrow.
+- [ ] Settler `config.json` gains `"da": {"signer": "<bloch-pos>", "signer_sha256": "…", "genesis": "<manifest>", "funding_pubkey": "<hex file>", "keystore_dir": "…", "passphrase_file": "…", "tip_millisat_per_gas": 0, "inclusion_timeout_seconds": 300}`; the settler refuses `user_transactions: true` without it or with a signer that differs from its pin.
+- [ ] Set `user_transactions: true` and restart; place signed transactions in `txpool_dir` as `*.tx` (one hex envelope per file). `produce extend --txs` prunes included and dropped entries after commit; a block never selects more bytes than one DA batch (112 KiB with framing).
+- [ ] First user-transaction cycle: the log shows `da-submitted` then `da-included` before `submitted`; `getl2settlement.data_availability` lists `{l2_number, commitment, height}` until the settlement lands, then the record disappears.
 - [ ] Measure proof time and peak RSS per block against the cycle benchmark before raising `max_block_txs`.
+
+## Data availability (M3)
+
+A V3 settlement with `user_tx_count > 0` is accepted only if, in a strictly
+earlier native block, an `L2DataAvailability` (`0x15`) transaction published
+that block's user-transaction batch (`da_commitment` =
+`keccak256("BLOCH:L2:DA:1" || chain_id || l2_number || payload)`). The native
+state keeps only `(l2_number, commitment, inclusion height)`; the batch stays in
+the native block. Limits: payload ≤ 114,688 bytes, ≤ 4 DA transactions per
+native block, records retained 1,024 native blocks and only for the next 64
+unsettled L2 blocks; ordinary eUTXO fees (16 gas/byte). Full rules:
+`docs/specs/BLOCH-NATIVE-L2-SETTLEMENT.md` (native repository).
+
+Settler cycle with user transactions: produce → prove → check the statement
+(`da_commitment` equals the commitment of `produce da` output) → if the record
+is not yet on L1: `getutxos` for the DA key, `bloch-pos l2-da prepare` at the
+current `next_base_fee_millisat_per_gas`, `bloch-pos l2-da sign` (keystore +
+passphrase file), `sendrawtransaction`, wait for the record → submit the
+settlement. A timeout leaves the block for the next cycle, which builds a fresh
+DA transaction (`da-unsigned-N.hex`) if the record is still missing (e.g. the
+base fee moved and conservation failed, or the record expired).
+
+## Rebuilding the L2 from L1 (M3)
+
+`bloch-l2-produce-dev reconstruct --target NEW_DIR --l1-follower FOLLOWER_STATE`
+creates a fresh L2 database at genesis and replays every settled L2 block using
+only native data: inbox deposits (`0x14`), DA batches (`0x15`) and settlements
+(`0x12`/`0x13`) from the native follower's verified block store (`index` +
+`blocks/*.bin`; `--l1 FILE` takes a JSON fixture instead). Each rebuilt block
+must reproduce the settled header hash and state root (and V3 `deposits_hash` /
+`transactions_root`), otherwise it stops with the first divergence. Rehearse it
+on devnet4 after the first user-transaction settlements, and compare its head
+with `produce head` of the settler database.
 
 ## Known gaps (not addressed by this recipe)
 
-* Data availability (M3): user transactions settle with only hashes on L1;
-  devnet4 user data is not reconstructible from L1.
+* Data availability uses a fee-paying, permissionless DA transaction. A
+  spammer can compete for the 4 DA slots per native block (fee auction) but can
+  neither evict nor overwrite a recorded batch; a single-sequencer key or bond
+  is a later decision (M8/M9). Compression is not used (raw canonical batch).
+* `reconstruct --l1-follower` reads the follower store as-is (it trusts that
+  the follower verified it). `tests/reconstruct.rs` covers both inputs with a
+  synthetic store (unsigned envelopes), not a store written by a live follower.
 * Withdrawals (M4/M5): `withdrawal_root` / `withdrawal_count` stay reserved zero.
+* Every host that replays native blocks (native follower, audit tools,
+  `produce reconstruct`) must be built with `--features devnet-l2-user-txs`
+  (settlement-recovery), or it refuses the first block carrying a `0x15` DA
+  transaction exactly as a non-devnet native build does.
 * The native follower / settled RPC still decode only the V2 (979-byte) frame;
   following devnet4 V3 settlements needs the V3 frame (`NativeSettlementFrameV3`)
   wired into `settlement-recovery`.
 * The settled RPC has no transaction submission (Noop pool): the txpool spool
   is filled by an operator tool, not by `eth_sendRawTransaction`.
-* Guest ELF bit-reproducibility across machines/paths is not established (it is path-dependent).
-* Prover sizing: see `docs/benchmarks/settlement-v3-cycles-20261010.md` (~2.95 M cycles per user transaction, no precompiles); keep `max_block_txs` small.
+* Guest ELF reproducibility is established across checkout paths on one
+  machine (`verify-reproducible.sh`), not across host platforms.
+* Prover sizing: see `docs/benchmarks/settlement-v3-cycles-20261010.md` (M2,
+  no precompiles) and `docs/benchmarks/settlement-v3-cycles-precompiles-20261010.md`
+  (M3, SP1 Keccak/secp256k1 precompiles); keep `max_block_txs` small until a
+  real proof is measured.
