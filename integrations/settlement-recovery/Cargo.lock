@@ -1974,6 +1974,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "bloch-crypto",
+ "bloch-execution-artifact",
  "bloch-l2-evm",
  "bloch-l2-proof",
  "bloch-native-escrow-pq",

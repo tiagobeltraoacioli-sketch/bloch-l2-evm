@@ -51,6 +51,7 @@ reth-tasks = { path = "../../../reth-bloch-rpc-snapshot/crates/tasks" }
 pqcrypto-internals = { path = "../../../bloch-validator-payout/crates/pqcrypto-internals" }
 
 [dev-dependencies]
+bloch-execution-artifact = { path = "../execution-artifact" }
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 alloy-rlp = "=0.3.16"
 hex = "0.4"
