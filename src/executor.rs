@@ -1093,6 +1093,17 @@ impl<DB: DatabaseRef> BlockSession<DB> {
         Ok(self.run.tx_outcomes.last())
     }
 
+    /// Nonce of `address` in the session state (after deposits and every
+    /// accepted transaction). Used by block selection to classify candidates.
+    pub(crate) fn account_nonce(&self, address: alloy_primitives::Address) -> Result<u64, BlockExecutionError> {
+        Ok(self
+            .db
+            .basic_ref(address)
+            .map_err(db_error)?
+            .map(|info| info.nonce)
+            .unwrap_or_default())
+    }
+
     pub(crate) fn finish(self) -> Result<(CacheDB<DB>, BlockRun), BlockExecutionError> {
         let mut db = self.db;
         finish_protocol(&mut db, &self.spec, &self.context, &self.run)?;
