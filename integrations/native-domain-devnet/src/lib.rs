@@ -28,7 +28,8 @@ pub use payload::{SourcePayload, MAX_SOURCE_PAYLOAD_BYTES};
 
 mod settlement;
 pub use settlement::{
-    proof_digest, settlement_v2_groth16_proof_policy_commitment, SettlementPayload, SettlementPayloadV2,
+    proof_digest, settlement_v2_groth16_proof_policy_commitment, settlement_v3_groth16_proof_policy_commitment,
+    SettlementPayload, SettlementPayloadV2,
     MAX_SETTLEMENT_PROOF_BYTES, SETTLEMENT_PAYLOAD_BYTES, SETTLEMENT_PAYLOAD_V2_BYTES, SP1_GROTH16_TRANSPORT_BYTES,
 };
 

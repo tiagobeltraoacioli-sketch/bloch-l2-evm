@@ -4,13 +4,16 @@ use crate::{invalid, Result};
 use alloy_primitives::{keccak256, B256};
 use bincode::Options;
 use bloch_l2_evm::proof_statement::{
-    ExecutionStatement, SettlementStatementV2, SETTLEMENT_STATEMENT_V2_LEN, STATEMENT_LEN,
+    ExecutionStatement, SettlementStatementV2, SettlementStatementV3, SETTLEMENT_STATEMENT_V2_LEN,
+    SETTLEMENT_STATEMENT_V3_LEN, STATEMENT_LEN,
 };
 use sp1_sdk::{Elf, HashableKey, LightProver, Prover, ProvingKey, SP1Proof, SP1ProofWithPublicValues, SP1VerifyingKey};
 use std::{io::Read, path::Path};
 #[cfg(feature = "source-settlement")]
 use {
-    bloch_native_domain_devnet::settlement_v2_groth16_proof_policy_commitment,
+    bloch_native_domain_devnet::{
+        settlement_v2_groth16_proof_policy_commitment, settlement_v3_groth16_proof_policy_commitment,
+    },
     sha2::{Digest, Sha256},
     sp1_verifier::GROTH16_VK_BYTES,
 };
@@ -213,6 +216,41 @@ impl TrustedProgram {
         )
     }
 
+    /// Verify a genuine Groth16 wrapper for the V3 settlement guest. V3 public
+    /// values are 766 bytes, so a V2 proof can never satisfy this check.
+    pub fn verify_groth16_settlement_v3(
+        &self,
+        proof: SP1ProofWithPublicValues,
+        expected: &SettlementStatementV3,
+    ) -> Result<QualifiedGroth16SettlementV3> {
+        if !statement_program_matches(&expected.base, self.identity) {
+            return Err(invalid(
+                "settlement statement program identity differs from trusted ELF",
+            ));
+        }
+        validate_groth16_envelope(&proof, SETTLEMENT_STATEMENT_V3_LEN)?;
+        #[cfg(feature = "source-settlement")]
+        validate_settlement_v2_groth16_wrapper_key(&proof)?;
+        self.client.verify(&proof, &self.key, None)?;
+        expected.check_expected(proof.public_values.as_slice())?;
+        Ok(QualifiedGroth16SettlementV3 {
+            statement: *expected,
+            program: self.identity,
+            proof,
+        })
+    }
+
+    pub fn verify_groth16_settlement_v3_file(
+        &self,
+        path: impl AsRef<Path>,
+        expected: &SettlementStatementV3,
+    ) -> Result<QualifiedGroth16SettlementV3> {
+        self.verify_groth16_settlement_v3(
+            load_groth16_proof_for_public_len(path, SETTLEMENT_STATEMENT_V3_LEN)?,
+            expected,
+        )
+    }
+
     /// Verify a real SP1 Groth16 wrapper for offline qualification only.
     ///
     /// This intentionally returns a different capability from the Core-proof
@@ -292,6 +330,51 @@ impl QualifiedGroth16SettlementV2 {
         let full_vk_sha256: [u8; 32] = Sha256::digest(*GROTH16_VK_BYTES).into();
         validate_settlement_v2_groth16_wrapper_key(&self.proof)?;
         Ok(settlement_v2_groth16_proof_policy_commitment(
+            sp1_sdk::SP1_CIRCUIT_VERSION,
+            B256::from(full_vk_sha256),
+        )?)
+    }
+}
+
+/// Evidence that a real SP1 Groth16 wrapper authenticated the complete V3
+/// settlement statement under the exact trusted ELF and verifying key.
+pub struct QualifiedGroth16SettlementV3 {
+    statement: SettlementStatementV3,
+    program: ProgramIdentity,
+    proof: SP1ProofWithPublicValues,
+}
+
+impl QualifiedGroth16SettlementV3 {
+    /// Exact authenticated public statement.
+    pub fn statement(&self) -> SettlementStatementV3 {
+        self.statement
+    }
+    /// Exact ELF and SP1 key identity used for verification.
+    pub fn program(&self) -> ProgramIdentity {
+        self.program
+    }
+    /// Exact SDK artifact retained after cryptographic verification.
+    pub fn artifact_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = bincode::serialize(&self.proof)?;
+        if bytes.is_empty() || bytes.len() > MAX_GROTH16_ARTIFACT_BYTES {
+            return Err(invalid("Groth16 artifact outside qualification bound"));
+        }
+        Ok(bytes)
+    }
+    /// Canonical 356-byte proof consumed by `sp1-verifier`.
+    pub fn canonical_proof_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = self.proof.bytes();
+        if bytes.len() != GROTH16_CONSENSUS_PROOF_BYTES {
+            return Err(invalid("unexpected canonical Groth16 proof length"));
+        }
+        Ok(bytes)
+    }
+    /// Commitment to the exact V3 SDK proof policy used by this capability.
+    #[cfg(feature = "source-settlement")]
+    pub fn proof_policy_commitment(&self) -> Result<B256> {
+        let full_vk_sha256: [u8; 32] = Sha256::digest(*GROTH16_VK_BYTES).into();
+        validate_settlement_v2_groth16_wrapper_key(&self.proof)?;
+        Ok(settlement_v3_groth16_proof_policy_commitment(
             sp1_sdk::SP1_CIRCUIT_VERSION,
             B256::from(full_vk_sha256),
         )?)
@@ -573,6 +656,15 @@ mod groth16_tests {
         let bytes = bincode::serialize(&proof).unwrap();
         assert!(decode_groth16_proof(&bytes).is_err());
         assert!(decode_groth16_proof_for_public_len(&bytes, SETTLEMENT_STATEMENT_V2_LEN).is_ok());
+    }
+
+    #[test]
+    fn groth16_v3_envelope_is_length_separated_from_v2() {
+        let v3 = bincode::serialize(&fake_envelope_len(SETTLEMENT_STATEMENT_V3_LEN)).unwrap();
+        let v2 = bincode::serialize(&fake_envelope_len(SETTLEMENT_STATEMENT_V2_LEN)).unwrap();
+        assert!(decode_groth16_proof_for_public_len(&v3, SETTLEMENT_STATEMENT_V3_LEN).is_ok());
+        assert!(decode_groth16_proof_for_public_len(&v3, SETTLEMENT_STATEMENT_V2_LEN).is_err());
+        assert!(decode_groth16_proof_for_public_len(&v2, SETTLEMENT_STATEMENT_V3_LEN).is_err());
     }
 
     #[test]

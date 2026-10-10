@@ -282,3 +282,25 @@ fn proof_policy_commitment_has_a_stable_golden_vector() {
         ]),
     );
 }
+
+/// Shared with the native `bloch-l2-proof` crate's
+/// `v3_policy_matches_the_l2_host_golden_vector`: both must produce this value
+/// for circuit `v6.1.0` and wrapper-key digest `0x2a..2a`.
+#[test]
+fn settlement_v3_proof_policy_is_distinct_and_has_a_golden_vector() {
+    let vk = B256::repeat_byte(42);
+    let v3 = crate::settlement_v3_groth16_proof_policy_commitment("v6.1.0", vk).unwrap();
+    assert_ne!(v3, settlement_v2_groth16_proof_policy_commitment("v6.1.0", vk).unwrap());
+    assert_eq!(
+        crate::settlement_v3_groth16_proof_policy_commitment("v6.1.0", B256::ZERO),
+        Err(Error::Configuration)
+    );
+    assert_eq!(
+        alloc_hex(v3),
+        "70443a9010c089a683469f86ac9568dc3d09f23ada88afd87ffc441ec60b1eb4"
+    );
+}
+
+fn alloc_hex(value: B256) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}

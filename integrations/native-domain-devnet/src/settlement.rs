@@ -11,6 +11,7 @@ const PROOF_POLICY_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:SETTLEMENT-PROOF-POLICY:1";
 const PROOF_SCHEME: &[u8] = b"SP1_GROTH16";
 const FULL_WRAPPER_VK_HASH_POLICY: &[u8] = b"SHA256:FULL-WRAPPER-VK";
 const PUBLIC_VALUES_POLICY: &[u8] = b"PUBLIC-VALUES:EXACT-SETTLEMENT-V2-BYTES";
+const PUBLIC_VALUES_POLICY_V3: &[u8] = b"PUBLIC-VALUES:EXACT-SETTLEMENT-V3-BYTES";
 const MAX_SP1_CIRCUIT_VERSION_BYTES: usize = 64;
 const HASH_FIELDS: usize = 17;
 const INTEGER_FIELDS: usize = 7;
@@ -56,6 +57,37 @@ pub fn settlement_v2_groth16_proof_policy_commitment(
     sp1_circuit_version: &str,
     full_wrapper_vk_sha256: B256,
 ) -> Result<B256, Error> {
+    groth16_proof_policy_commitment(
+        sp1_circuit_version,
+        full_wrapper_vk_sha256,
+        bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG,
+        PUBLIC_VALUES_POLICY,
+    )
+}
+
+/// Proof-policy commitment for the settlement V3 program. Same construction as
+/// [`settlement_v2_groth16_proof_policy_commitment`] with the V3 statement tag
+/// and `PUBLIC-VALUES:EXACT-SETTLEMENT-V3-BYTES`, so a V2 policy can never
+/// admit V3 public values or the reverse. The native `bloch-l2-proof` crate
+/// computes the same value independently (shared golden vector).
+pub fn settlement_v3_groth16_proof_policy_commitment(
+    sp1_circuit_version: &str,
+    full_wrapper_vk_sha256: B256,
+) -> Result<B256, Error> {
+    groth16_proof_policy_commitment(
+        sp1_circuit_version,
+        full_wrapper_vk_sha256,
+        bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V3_TAG,
+        PUBLIC_VALUES_POLICY_V3,
+    )
+}
+
+fn groth16_proof_policy_commitment(
+    sp1_circuit_version: &str,
+    full_wrapper_vk_sha256: B256,
+    statement_tag: &[u8],
+    public_values_policy: &[u8],
+) -> Result<B256, Error> {
     let version = sp1_circuit_version.as_bytes();
     if version.is_empty()
         || version.len() > MAX_SP1_CIRCUIT_VERSION_BYTES
@@ -73,8 +105,8 @@ pub fn settlement_v2_groth16_proof_policy_commitment(
             + FULL_WRAPPER_VK_HASH_POLICY.len()
             + 32
             + 2
-            + bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG.len()
-            + PUBLIC_VALUES_POLICY.len(),
+            + statement_tag.len()
+            + public_values_policy.len(),
     );
     encoded.extend_from_slice(PROOF_POLICY_TAG);
     encoded.extend_from_slice(PROOF_SCHEME);
@@ -83,9 +115,9 @@ pub fn settlement_v2_groth16_proof_policy_commitment(
     encoded.extend_from_slice(version);
     encoded.extend_from_slice(FULL_WRAPPER_VK_HASH_POLICY);
     encoded.extend_from_slice(full_wrapper_vk_sha256.as_slice());
-    encoded.extend_from_slice(&(bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG.len() as u16).to_le_bytes());
-    encoded.extend_from_slice(bloch_l2_evm::proof_statement::SETTLEMENT_STATEMENT_V2_TAG);
-    encoded.extend_from_slice(PUBLIC_VALUES_POLICY);
+    encoded.extend_from_slice(&(statement_tag.len() as u16).to_le_bytes());
+    encoded.extend_from_slice(statement_tag);
+    encoded.extend_from_slice(public_values_policy);
     Ok(keccak256(encoded))
 }
 
