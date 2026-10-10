@@ -123,3 +123,49 @@ lockfile with newer transitive execution dependencies.
 API references are pinned to the upstream
 [SP1 6.8.0 example](https://github.com/succinctlabs/sp1/blob/v6.8.0/examples/fibonacci/program/src/main.rs)
 and [SP1 6.8.0 I/O implementation](https://github.com/succinctlabs/sp1/blob/v6.8.0/crates/zkvm/lib/src/io.rs).
+
+## Reproducible build and pinned identity (M3, 2026-10-10)
+
+Build the programs with `scripts/build-reproducible.sh` (not a bare
+`cargo prove build`). Without it the ELF embeds absolute source paths (panic
+locations, tracing call sites): the same commit built at two worktree paths
+produced two ELFs (`6dd5f5a3…` at the M1 path, `a80aa3a5…` at the M2 path),
+hence two SP1 key pairs and two genesis policies. The script passes
+`--remap-path-prefix` for the repository root (`/bloch-l2-evm`) and for
+`$CARGO_HOME` (`/cargo`, registry sources and the git patches), refuses to
+finish if either absolute prefix still appears in an ELF, and prints the
+SHA-256 of each program.
+
+`scripts/verify-reproducible.sh [COMMIT]` exports the commit twice with
+`git archive` into two differently named directories, builds both from clean
+targets and compares every ELF hash; it exits non-zero on any difference.
+
+The pinned identity is derived only from that ELF:
+
+1. `settlement_v3` ELF bytes → SHA-256 (settler `guest_sha256`) and Keccak-256
+   (statement `program_elf_keccak`);
+2. `bloch-evm-sp1-settlement-v3 identity ELF` (SP1 setup, no proof) → the
+   KoalaBear and BN254 verifying keys (statement fields; the BN254 key is
+   identity 5 of `l2-config.bin`);
+3. `proof_policy_v3` does not depend on the ELF (wrapper VK, tag, public-value
+   rule) and must equal the native `policy_commitment_v3()`.
+
+Inputs that still change the ELF and must be pinned with it: the commit
+(sources and `Cargo.lock`, including the patch commits), SP1 CLI 6.8.0, the
+`succinct-1.96.0-64bit-v2` compiler, and the compiler host platform (only
+macOS x86_64 was measured; a Linux host build must be compared separately or
+built in SP1's Docker image).
+
+## SP1 precompiles (M3.0b)
+
+The guest enables `alloy-primitives/tiny-keccak` and patches `tiny-keccak`
+(`sp1-patches/tiny-keccak`, tag `patch-2.0.2-sp1-6.2.0`) and `k256`
+(`sp1-patches/elliptic-curves`, tag `patch-k256-13.4-sp1-6.2.0`, which also
+pulls `sp1-patches/signatures` tag `sp1-skip-verify-on-recovery` for `ecdsa`).
+Keccak-f and secp256k1 then run as SP1 syscalls instead of plain RISC-V. The
+patched `ecdsa` skips the redundant re-verification after public-key recovery
+(the recovered key verifies by construction). Results are unchanged: the
+execution benchmark checks the committed statement byte-for-byte against host
+execution, which uses the unpatched crates. The k256/tiny-keccak versions are
+the core's; only their sources (git, pinned by commit in `Cargo.lock`) differ.
+Precompile soundness is SP1's; these patches are not independently audited here.
