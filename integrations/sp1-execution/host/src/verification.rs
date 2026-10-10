@@ -62,6 +62,23 @@ impl ProgramIdentity {
     }
 }
 
+/// The BN254 key projection as 32 bytes, parsed from the SDK's zero-padded
+/// `bytes32()` hex. SP1 6.8.0 `bytes32_raw()` panics when the digest has more
+/// than one leading zero byte (it copies into a fixed 31-byte window); it was
+/// hit by a locally built settlement_v3 ELF. For every other key both forms
+/// are identical.
+fn bn254_key_bytes(hex: &str) -> Result<B256> {
+    let digits = hex.strip_prefix("0x").ok_or_else(|| invalid("BN254 key is not 0x-prefixed"))?;
+    if digits.len() != 64 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid("BN254 key is not 32 hexadecimal bytes"));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).map_err(|_| invalid("BN254 key hex"))?;
+    }
+    Ok(B256::from(out))
+}
+
 /// An operator-selected program. The concrete LightProver always performs real
 /// cryptographic verification; callers cannot supply a `MockProver` or closure.
 pub struct TrustedProgram {
@@ -85,7 +102,7 @@ impl TrustedProgram {
         let identity = ProgramIdentity {
             elf_keccak,
             verifying_key_hash: B256::from(key.hash_bytes()),
-            verifying_key_bn254: B256::from(key.bytes32_raw()),
+            verifying_key_bn254: bn254_key_bytes(&key.bytes32())?,
         };
         Ok(Self { client, key, identity })
     }
@@ -656,6 +673,16 @@ mod groth16_tests {
         let bytes = bincode::serialize(&proof).unwrap();
         assert!(decode_groth16_proof(&bytes).is_err());
         assert!(decode_groth16_proof_for_public_len(&bytes, SETTLEMENT_STATEMENT_V2_LEN).is_ok());
+    }
+
+    #[test]
+    fn bn254_key_bytes_is_zero_padded_and_strict() {
+        let leading = format!("0x0000{}", "ab".repeat(30));
+        let parsed = super::bn254_key_bytes(&leading).unwrap();
+        assert_eq!(&parsed[..2], &[0, 0]);
+        assert_eq!(parsed[2], 0xab);
+        assert!(super::bn254_key_bytes(&"ab".repeat(32)).is_err());
+        assert!(super::bn254_key_bytes("0x12").is_err());
     }
 
     #[test]
