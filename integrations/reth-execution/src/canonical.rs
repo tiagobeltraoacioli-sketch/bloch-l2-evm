@@ -3,9 +3,10 @@
 use crate::{
     execute_next_block, BlochEvmConfig, BlochNextBlockEnvCtx, BlochNodeHeader, BlochNodeTypes, BlochRethTransaction,
 };
-use alloy_eips::BlockNumHash;
+use alloy_eips::{eip2718::Decodable2718, BlockNumHash};
 use alloy_evm::block::BlockExecutionError;
 use alloy_primitives::{keccak256, B256, U256};
+use bloch_l2_evm::node_execution::select::{select_node_transactions, BlockSelection, SelectionLimits};
 use reth_chain_state::CanonStateNotification;
 use reth_chainspec::EthChainSpec;
 use reth_db::DatabaseEnv;
@@ -148,6 +149,63 @@ impl CanonicalCoordinator {
     /// A poisoned coordinator must be discarded and storage independently checked.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
+    }
+
+    /// Deterministically select, from `candidates` (canonical signed bytes),
+    /// the user transactions for the next block on the current head, after the
+    /// block's `attributes.deposits` are minted. Reads the latest state only;
+    /// nothing is executed into storage. See
+    /// [`bloch_l2_evm::node_execution::select`] for order and reasons.
+    pub fn select_pending(
+        &self,
+        attributes: &BlochNextBlockEnvCtx,
+        candidates: &[alloy_primitives::Bytes],
+        limits: SelectionLimits,
+    ) -> Result<BlockSelection, BlockExecutionError> {
+        let spec = self.factory.chain_spec();
+        let config = BlochEvmConfig::new(spec.execution(), spec.domain());
+        let context = config.next_context(self.head.header(), attributes)?;
+        let state = self.factory.latest().map_err(BlockExecutionError::other)?;
+        select_node_transactions(
+            spec.execution(),
+            spec.domain(),
+            reth_revm::database::StateProviderDatabase::new(state.as_ref()),
+            self.head.0.state_root,
+            &context,
+            &attributes.deposits,
+            candidates,
+            limits,
+        )
+        .map_err(BlockExecutionError::other)
+    }
+
+    /// Select pending transactions ([`Self::select_pending`]) and extend the
+    /// head with exactly that selection, deposits first.
+    pub fn extend_with_pending(
+        &mut self,
+        expected_parent: B256,
+        attributes: BlochNextBlockEnvCtx,
+        candidates: &[alloy_primitives::Bytes],
+        limits: SelectionLimits,
+    ) -> Result<(SealedHeader<BlochNodeHeader>, BlockSelection), BlockExecutionError> {
+        if expected_parent != self.head.hash() {
+            return Err(BlockExecutionError::msg("stale canonical parent"));
+        }
+        let selection = self.select_pending(&attributes, candidates, limits)?;
+        let transactions = selection
+            .transactions
+            .iter()
+            .map(|raw| {
+                let mut bytes = raw.as_ref();
+                let tx = BlochRethTransaction::decode_2718(&mut bytes).map_err(BlockExecutionError::other)?;
+                if !bytes.is_empty() {
+                    return Err(BlockExecutionError::msg("selected transaction has trailing bytes"));
+                }
+                Ok(tx)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let tip = self.extend(expected_parent, attributes, transactions)?;
+        Ok((tip, selection))
     }
 
     /// Execute against the selected parent and publish only after commit.

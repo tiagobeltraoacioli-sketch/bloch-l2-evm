@@ -554,7 +554,7 @@ mod deposit_conformance {
     fn native_inbox_body_commitment_matches_the_l2_body_codec() {
         let records: Vec<InboxRecord> = (0..70u32)
             .map(|i| InboxRecord {
-                height: [1, 127, 128, 255, 256, 65_535, u64::MAX][i as usize % 7] + u64::from(i / 7),
+                height: [1, 127, 128, 255, 256, 65_535, u64::MAX][i as usize % 7].wrapping_add(u64::from(i / 7)),
                 tx_index: i,
                 txid: [i as u8; 32],
                 vout: [0, 1, 127, 128, u32::MAX][i as usize % 5],

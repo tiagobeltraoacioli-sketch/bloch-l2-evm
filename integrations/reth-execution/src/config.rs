@@ -64,7 +64,7 @@ impl BlochEvmConfig {
         self.rpc_block_hashes = true;
         self
     }
-    fn next_context(
+    pub(crate) fn next_context(
         &self,
         parent: &BlochNodeHeader,
         attributes: &BlochNextBlockEnvCtx,

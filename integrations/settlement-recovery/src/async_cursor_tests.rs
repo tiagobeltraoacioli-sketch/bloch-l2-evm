@@ -132,7 +132,7 @@ impl Fixture {
             };
             let tx = Transaction {
                 proof_policy: p.proof_policy.0,
-                statement: statement.encode(),
+                statement: statement.encode().to_vec(),
                 // Deliberately invalid as a cryptographic proof. This fixture
                 // tests only the consumer's storage and correspondence checks.
                 proof: [9; bloch_pos_committee::l2_settlement::PROOF_BYTES],
@@ -407,7 +407,7 @@ fn storage_settlement_must_match_canonical_l2_state_and_complete_body() {
         } else {
             statement.body_commitment = h(99);
         }
-        tx.statement = statement.encode();
+        tx.statement = statement.encode().to_vec();
         native.settlements.insert(h(31), tx.encode_async());
         assert!(matches!(
             stage(&source, fixture.request(None), &native),

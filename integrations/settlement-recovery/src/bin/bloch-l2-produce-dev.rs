@@ -2,9 +2,11 @@
 //! Development producer for the natively settled L2 canonical database.
 //!
 //! `init` creates a fresh database at L2 genesis. `extend` appends exactly one
-//! EMPTY block anchored to the native-selected source block, refusing any parent
+//! block anchored to the native-selected source block, refusing any parent
 //! other than the one the caller names (the previously accepted native
-//! settlement's L2 header). `export` writes the execution artifact of one block
+//! settlement's L2 header). Without `--txs` the block carries deposits only;
+//! with `--txs` it also carries user transactions chosen deterministically by
+//! `bloch_l2_evm::node_execution::select` within per-block gas/byte/count limits. `export` writes the execution artifact of one block
 //! for the settlement prover. Block attributes follow a fixed development rule
 //! (timestamp = parent + 1, prevrandao 0x07..07), which reproduces the block the
 //! `native-empty` qualification proves for block 1. No proof, settlement,
@@ -12,7 +14,7 @@
 #![cfg(unix)]
 
 use alloy_primitives::{hex, B256};
-use bloch_l2_evm::ChainSpec;
+use bloch_l2_evm::{node_execution::select::SelectionLimits, ChainSpec};
 use bloch_reth_execution::{
     prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator,
@@ -37,6 +39,7 @@ const USAGE: &str = "\
 usage:
   bloch-l2-produce-dev init   --target DIR
   bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
+                              [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
   bloch-l2-produce-dev export --target DIR --number N --out FILE
   bloch-l2-produce-dev head   --target DIR
 
@@ -44,6 +47,13 @@ extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
 whose anchor is the native-selected source block. HEX is 64 lowercase hex
 characters without 0x. --deposits is a JSON list of native inbox records
 ({height,tx_index,txid,vout,sats,recipient}) minted at block start, in order.
+--txs is the pending pool: a JSON list of signed transaction hex strings, or a
+spool directory of *.tx files (one hex transaction each). Deposits are minted
+first; transactions are selected in a deterministic order within --max-gas
+(declared gas), --max-bytes (encoded bytes) and --max-txs; overflow is left
+pending and invalid transactions are dropped with a reason. With a spool
+directory, files of included and dropped transactions are removed after the
+block is durably committed. Without --txs the block has no user transactions.
 Development only: no settlement or finality is implied.
 ";
 
@@ -147,7 +157,10 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(json!({"number": 0, "hash": hex::encode(hash)}).to_string())
         }
         "extend" => {
-            only(rest, &["--target", "--parent", "--anchor", "--deposits"])?;
+            only(
+                rest,
+                &["--target", "--parent", "--anchor", "--deposits", "--txs", "--max-gas", "--max-bytes", "--max-txs"],
+            )?;
             let deposits = match rest.chunks(2).find(|p| p[0] == "--deposits") {
                 Some(pair) => read_deposits(Path::new(&pair[1]))?,
                 None => vec![],
@@ -165,21 +178,63 @@ fn run(args: &[String]) -> Result<String, String> {
                 ));
             }
             let timestamp = head.0.timestamp.checked_add(1).ok_or("timestamp overflow")?;
-            let tip = coordinator
-                .extend(
-                    parent,
-                    BlochNextBlockEnvCtx {
-                        timestamp,
-                        prevrandao: B256::repeat_byte(7),
-                        anchor_root: anchor,
-                        deposits: deposits.clone(),
-                    },
-                    vec![],
-                )
+            let attributes = BlochNextBlockEnvCtx {
+                timestamp,
+                prevrandao: B256::repeat_byte(7),
+                anchor_root: anchor,
+                deposits: deposits.clone(),
+            };
+            let pool = match rest.chunks(2).find(|p| p[0] == "--txs") {
+                Some(pair) => Some(read_pool(Path::new(&pair[1]))?),
+                None => {
+                    if rest.chunks(2).any(|p| p[0].starts_with("--max-")) {
+                        return Err("--max-gas/--max-bytes/--max-txs require --txs".into());
+                    }
+                    None
+                }
+            };
+            let Some(pool) = pool else {
+                let tip = coordinator.extend(parent, attributes, vec![]).map_err(|e| e.to_string())?;
+                return Ok(json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
+                          "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
+                          "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
+                          "transactions": 0})
+                .to_string());
+            };
+            let limits = limits(rest, SelectionLimits::protocol(&ChainSpec::testnet()))?;
+            let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
+            let (tip, selection) = coordinator
+                .extend_with_pending(parent, attributes, &candidates, limits)
                 .map_err(|e| e.to_string())?;
+            // Committed: prune the spool of included and dropped entries.
+            let mut pruned = 0usize;
+            let finished = selection
+                .dropped
+                .iter()
+                .map(|d| d.index)
+                .chain(selection.hashes.iter().filter_map(|h| {
+                    candidates.iter().position(|raw| alloy_primitives::keccak256(raw) == *h)
+                }));
+            for index in finished {
+                if let Some(file) = &pool[index].0 {
+                    fs::remove_file(file).map_err(|e| format!("prune {}: {e}", file.display()))?;
+                    pruned += 1;
+                }
+            }
             Ok(json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                       "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
-                      "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len()})
+                      "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
+                      "transactions": selection.transactions.len(),
+                      "declared_gas": selection.declared_gas, "bytes": selection.bytes,
+                      "limits": {"max_gas": limits.max_gas, "max_bytes": limits.max_bytes,
+                                 "max_txs": limits.max_transactions},
+                      "included": selection.hashes.iter().map(hex::encode).collect::<Vec<_>>(),
+                      "deferred": selection.deferred.iter().map(|d| json!({"hash": hex::encode(d.hash),
+                                  "reason": d.reason.as_str()})).collect::<Vec<_>>(),
+                      "dropped": selection.dropped.iter().map(|d| json!({"index": d.index,
+                                  "hash": d.hash.map(hex::encode), "reason": d.reason.describe()}))
+                                  .collect::<Vec<_>>(),
+                      "pruned": pruned})
             .to_string())
         }
         "export" => {
@@ -241,4 +296,67 @@ fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> 
             })
         })
         .collect()
+}
+
+/// Pending pool entries: (spool file, if any; canonical signed bytes).
+/// Bytes are not authenticated here; selection drops invalid ones with a reason.
+fn read_pool(path: &Path) -> Result<Vec<(Option<PathBuf>, alloy_primitives::Bytes)>, String> {
+    let decode = |text: &str| -> Result<alloy_primitives::Bytes, String> {
+        hex::decode(text.trim().trim_start_matches("0x")).map(Into::into).map_err(|_| "--txs entry is not hex".to_string())
+    };
+    let metadata = fs::symlink_metadata(path).map_err(|e| format!("--txs: {e}"))?;
+    let entries = if metadata.is_dir() {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(path).map_err(|e| format!("--txs: {e}"))? {
+            let file = entry.map_err(|e| format!("--txs: {e}"))?.path();
+            if file.extension().is_some_and(|x| x == "tx") && fs::symlink_metadata(&file).map(|m| m.is_file()).unwrap_or(false) {
+                files.push(file);
+            }
+        }
+        // Order does not affect selection; sort only for stable reports.
+        files.sort();
+        files
+            .into_iter()
+            .map(|file| {
+                let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+                // Undecodable text still becomes a (dropped) candidate, so the file is pruned.
+                Ok((Some(file), decode(&text).unwrap_or_default()))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        let list: Vec<String> =
+            serde_json::from_slice(&fs::read(path).map_err(|e| format!("--txs: {e}"))?).map_err(|e| format!("--txs: {e}"))?;
+        list.iter().map(|text| Ok((None, decode(text)?))).collect::<Result<Vec<_>, String>>()?
+    };
+    if entries.len() > MAX_POOL_ENTRIES {
+        return Err(format!("--txs holds more than {MAX_POOL_ENTRIES} entries"));
+    }
+    Ok(entries)
+}
+
+/// Upper bound on candidates read per block (selection cost is linear in it).
+const MAX_POOL_ENTRIES: usize = 16_384;
+
+fn limits(args: &[String], protocol: SelectionLimits) -> Result<SelectionLimits, String> {
+    let value = |name: &str| -> Result<Option<u64>, String> {
+        args.chunks(2)
+            .find(|p| p[0] == name)
+            .map(|p| p[1].parse::<u64>().map_err(|_| format!("{name} must be decimal")))
+            .transpose()
+    };
+    let limits = SelectionLimits {
+        max_gas: value("--max-gas")?.unwrap_or(protocol.max_gas),
+        max_bytes: value("--max-bytes")?.map_or(Ok(protocol.max_bytes), |v| usize::try_from(v).map_err(|_| "--max-bytes too large".to_string()))?,
+        max_transactions: value("--max-txs")?.map_or(Ok(protocol.max_transactions), |v| usize::try_from(v).map_err(|_| "--max-txs too large".to_string()))?,
+    };
+    if limits.max_gas > protocol.max_gas
+        || limits.max_bytes > protocol.max_bytes
+        || limits.max_transactions > protocol.max_transactions
+    {
+        return Err(format!(
+            "limits exceed the protocol maxima (gas {}, bytes {}, txs {})",
+            protocol.max_gas, protocol.max_bytes, protocol.max_transactions
+        ));
+    }
+    Ok(limits)
 }
