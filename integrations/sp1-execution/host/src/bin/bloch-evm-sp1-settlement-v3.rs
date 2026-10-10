@@ -190,6 +190,12 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: bloch-evm-sp1-settlement-v3 <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
+    if args.first().map(String::as_str) == Some("identity") {
+        return print_identity(args.get(1).filter(|_| args.len() == 2).ok_or(
+            "usage: bloch-evm-sp1-settlement-v3 identity TRUSTED_SETTLEMENT_V3_ELF",
+        )?)
+        .await;
+    }
     let mode = args.first().map(String::as_str).ok_or(usage)?;
     let expected_len = if mode == "execute" { 3 } else { 4 };
     if !matches!(mode, "execute" | "prove-groth16" | "verify-groth16") || args.len() != expected_len {
@@ -269,6 +275,43 @@ async fn main() -> Result<()> {
         "Settlement V3 Groth16 proof generated, persisted and reverified in {:?}: canonical={} bytes; no activation implied",
         started.elapsed(),
         reopened.canonical_proof_bytes()?.len()
+    );
+    Ok(())
+}
+
+/// Print every L2-side pin a V3 genesis needs, as JSON: the compiled domain
+/// and configuration commitment, the ELF Keccak, both SP1 key
+/// identities and (with `source-settlement`) the V3 proof-policy commitment.
+/// No proof is generated; deriving the keys runs the SP1 setup only.
+async fn print_identity(elf_path: &str) -> Result<()> {
+    let bytes = fs::read(elf_path)?;
+    let trusted = TrustedProgram::from_trusted_elf(Elf::from(bytes)).await?;
+    let identity = trusted.identity();
+    let spec = ChainSpec::testnet();
+    #[cfg(feature = "source-settlement")]
+    let policy = {
+        use sha2::Digest;
+        let full_vk: [u8; 32] = sha2::Sha256::digest(*sp1_verifier::GROTH16_VK_BYTES).into();
+        format!(
+            "\"{:x}\"",
+            bloch_native_domain_devnet::settlement_v3_groth16_proof_policy_commitment(
+                sp1_sdk::SP1_CIRCUIT_VERSION,
+                B256::from(full_vk),
+            )?
+        )
+    };
+    #[cfg(not(feature = "source-settlement"))]
+    let policy = "null".to_string();
+    println!(
+        "{{\"program\":\"settlement_v3\",\"chain_id\":{},\"domain\":\"{:x}\",\"configuration\":\"{:x}\",\"elf_keccak\":\"{:x}\",\"vkey_koalabear\":\"{:x}\",\"vkey_bn254\":\"{:x}\",\"sp1_circuit_version\":\"{}\",\"proof_policy_v3\":{}}}",
+        spec.chain_id,
+        B256::repeat_byte(0xd3),
+        bloch_l2_evm::proof_statement::configuration_commitment(&spec)?,
+        identity.elf_keccak(),
+        identity.verifying_key_hash(),
+        identity.verifying_key_bn254(),
+        sp1_sdk::SP1_CIRCUIT_VERSION,
+        policy
     );
     Ok(())
 }

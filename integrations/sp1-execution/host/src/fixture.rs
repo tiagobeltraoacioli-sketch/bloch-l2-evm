@@ -91,6 +91,106 @@ pub fn fixture() -> Result<Fixture, Box<dyn Error>> {
     Ok(fixture)
 }
 
+/// Benchmark block: one deposit funds a single sender that makes `n` plain
+/// value transfers (21,000 gas each) to `n` distinct, previously empty
+/// accounts. `n = 0` is the deposit-only block the devnets settle today.
+pub fn fixture_transfers(n: u64) -> Result<Fixture, Box<dyn Error>> {
+    let spec = ChainSpec::testnet();
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).map_err(|error| io::Error::other(error.to_string()))?;
+    let sender = Address::from_public_key(key.verifying_key());
+    let mut transactions = Vec::new();
+    for nonce in 0..n {
+        let mut recipient = [0x5a; 20];
+        recipient[12..].copy_from_slice(&nonce.to_be_bytes());
+        transactions.push(sign_with(
+            &spec,
+            &key,
+            nonce,
+            TxKind::Call(Address::from(recipient)),
+            U256::from(1_000_000_000_000u64),
+            Bytes::new(),
+            21_000,
+        )?);
+    }
+    let body = NodeBodyV2 {
+        deposits: vec![bench_deposit(sender)],
+        transactions,
+    };
+    let (fixture, state, outcome) = execute_fixture(body)?;
+    ensure(state.nonce_of(&sender) == n, "transfer fixture sender nonce differs")?;
+    ensure(
+        outcome
+            .transactions
+            .iter()
+            .all(|tx| tx.success && tx.gas_used == 21_000),
+        "a benchmark transfer failed",
+    )?;
+    Ok(fixture)
+}
+
+/// Benchmark block: one deposit, a deployment of a contract whose runtime
+/// stores calldata word `v` at storage slot `v`, then `n` calls writing `n`
+/// distinct fresh slots. User transactions: `n + 1`.
+pub fn fixture_calls(n: u64) -> Result<Fixture, Box<dyn Error>> {
+    let spec = ChainSpec::testnet();
+    let key = SigningKey::from_bytes((&[7u8; 32]).into()).map_err(|error| io::Error::other(error.to_string()))?;
+    let sender = Address::from_public_key(key.verifying_key());
+    let contract = sender.create(0);
+    // Runtime: PUSH1 0; CALLDATALOAD; DUP1; SSTORE; STOP  (sstore(v, v)).
+    let runtime = [0x60, 0x00, 0x35, 0x80, 0x55, 0x00];
+    // Copy and return the six runtime bytes immediately following this prefix.
+    let mut initcode = vec![0x60, 0x06, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, 0x06, 0x60, 0x00, 0xf3];
+    initcode.extend_from_slice(&runtime);
+    let mut transactions = vec![sign_with(
+        &spec,
+        &key,
+        0,
+        TxKind::Create,
+        U256::ZERO,
+        initcode.into(),
+        200_000,
+    )?];
+    for i in 0..n {
+        transactions.push(sign_with(
+            &spec,
+            &key,
+            i + 1,
+            TxKind::Call(contract),
+            U256::ZERO,
+            Bytes::copy_from_slice(&U256::from(i + 1).to_be_bytes::<32>()),
+            100_000,
+        )?);
+    }
+    let body = NodeBodyV2 {
+        deposits: vec![bench_deposit(sender)],
+        transactions,
+    };
+    let (fixture, state, outcome) = execute_fixture(body)?;
+    ensure(state.nonce_of(&sender) == n + 1, "call fixture sender nonce differs")?;
+    ensure(
+        outcome.transactions.iter().all(|tx| tx.success),
+        "a benchmark contract call failed",
+    )?;
+    let account = state
+        .account(&contract)
+        .ok_or_else(|| io::Error::other("benchmark contract missing"))?;
+    ensure(account.code_hash == keccak256(runtime), "benchmark runtime differs")?;
+    Ok(fixture)
+}
+
+fn bench_deposit(recipient: Address) -> DepositMint {
+    DepositMint {
+        recipient,
+        provenance: DepositProvenance::BridgedBlch {
+            l1_height: 1,
+            l1_tx_index: 0,
+            l1_txid: [0xd3; 32],
+            l1_vout: 0,
+            l1_sats: 100_000_000,
+        },
+    }
+}
+
 /// Minimal transition for initial zkVM/proof qualification before the contract fixture.
 pub fn fixture_empty() -> Result<Fixture, Box<dyn Error>> {
     let (fixture, _, outcome) = execute_fixture(NodeBodyV2::default())?;
@@ -184,13 +284,25 @@ pub(crate) fn execute_fixture_at(
 }
 
 fn sign(spec: &ChainSpec, key: &SigningKey, nonce: u64, to: TxKind, input: Bytes) -> Result<Bytes, Box<dyn Error>> {
+    sign_with(spec, key, nonce, to, U256::ZERO, input, 200_000)
+}
+
+fn sign_with(
+    spec: &ChainSpec,
+    key: &SigningKey,
+    nonce: u64,
+    to: TxKind,
+    value: U256,
+    input: Bytes,
+    gas_limit: u64,
+) -> Result<Bytes, Box<dyn Error>> {
     let transaction = TxEip1559 {
         chain_id: spec.chain_id,
         nonce,
         to,
-        value: U256::ZERO,
+        value,
         input,
-        gas_limit: 200_000,
+        gas_limit,
         max_fee_per_gas: 2_000_000_000,
         max_priority_fee_per_gas: 100_000_000,
         ..Default::default()
