@@ -476,3 +476,44 @@ fn deposits_consume_block_gas_before_user_transactions() {
     assert_eq!(s.deferred.len(), 1);
     assert_eq!(s.deferred[0].reason, DeferReason::GasLimit);
 }
+
+/// M3: whatever the configured byte limit, a selection always fits one native
+/// DA batch (framing included), and a transaction no batch can carry is
+/// dropped rather than deferred forever.
+#[test]
+fn selection_always_fits_one_l1_data_availability_batch() {
+    use bloch_l2_evm::data_availability::{encode_da_payload, MAX_DA_PAYLOAD_BYTES};
+    let mut chain = Chain::new();
+    let deposits = funded(4);
+    // Each ~40 KiB of calldata: two fit one 112 KiB DA batch, a third does not.
+    let big = |i: u8| {
+        sign(
+            i,
+            Tx {
+                gas: 2_000_000,
+                input: vec![0x01; 40 * 1024],
+                ..Tx::default()
+            },
+        )
+    };
+    let txs: Vec<_> = (0..4).map(big).collect();
+    let selection = chain.select(&deposits, &txs, unlimited());
+    assert_eq!(selection.transactions.len(), 2, "{:?}", selection.deferred);
+    assert!(selection.deferred.iter().all(|d| d.reason == DeferReason::ByteLimit));
+    let payload = encode_da_payload(&selection.transactions).unwrap();
+    assert!(payload.len() <= MAX_DA_PAYLOAD_BYTES);
+    chain.commit(&deposits, &selection);
+
+    let chain = Chain::new();
+    let oversize = sign(
+        0,
+        Tx {
+            gas: 5_000_000,
+            input: vec![0x01; MAX_DA_PAYLOAD_BYTES],
+            ..Tx::default()
+        },
+    );
+    let selection = chain.select(&funded(1), &[oversize], unlimited());
+    assert!(selection.transactions.is_empty());
+    assert!(matches!(&selection.dropped[0].reason, DropReason::Execution(r) if r.contains("data-availability")));
+}

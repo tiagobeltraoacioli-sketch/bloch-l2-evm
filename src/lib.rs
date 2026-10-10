@@ -107,6 +107,7 @@ pub mod escrow_inbox;
 extern crate std;
 
 pub mod chainspec;
+pub mod data_availability;
 pub mod domain;
 pub mod executor;
 pub mod l1;

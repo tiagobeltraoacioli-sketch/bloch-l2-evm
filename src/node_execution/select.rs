@@ -20,9 +20,15 @@
 //! * `dropped` — can never become valid (bad encoding/signature/chain, already
 //!   used nonce, duplicate, or refused by execution): remove it, with a reason.
 //!
+//! A selection also always fits one native DA batch
+//! ([`crate::data_availability::MAX_DA_PAYLOAD_BYTES`], framing included): a
+//! block whose user transactions could not be published on L1 could never
+//! settle under settlement V3 (M3).
+//!
 //! This is development block production, not a fee market or a Reth pool.
 
 use crate::{
+    data_availability::{da_framing_bytes, MAX_DA_PAYLOAD_BYTES},
     executor::BlockSession,
     transactions::{decode_signed_transaction, TransactionAuthError, MAX_SIGNED_BLOCK_BYTES, MAX_SIGNED_TRANSACTIONS},
     BlockContext, BlockExecutionError, ChainSpec, DepositMint,
@@ -287,6 +293,16 @@ pub fn select_node_transactions<DB: DatabaseRef>(
             });
             continue;
         }
+        if candidate.raw.len().saturating_add(da_framing_bytes(1)) > MAX_DA_PAYLOAD_BYTES {
+            // No DA batch can ever carry it, so no settleable block can hold it.
+            selection.dropped.push(DroppedTransaction {
+                index: candidate.index,
+                hash: Some(candidate.hash),
+                reason: DropReason::Execution("larger than one L1 data-availability batch".to_string()),
+            });
+            defer_rest(queue, &mut selection.deferred);
+            continue;
+        }
         if candidate.env.gas_limit > spec.gas_limit {
             // No block can ever hold it.
             selection.dropped.push(DroppedTransaction {
@@ -307,7 +323,13 @@ pub fn select_node_transactions<DB: DatabaseRef>(
             Some(DeferReason::CountLimit)
         } else if selection.declared_gas.saturating_add(candidate.env.gas_limit) > limits.max_gas {
             Some(DeferReason::GasLimit)
-        } else if selection.bytes.saturating_add(candidate.raw.len()) > limits.max_bytes {
+        } else if selection.bytes.saturating_add(candidate.raw.len()) > limits.max_bytes
+            || selection
+                .bytes
+                .saturating_add(candidate.raw.len())
+                .saturating_add(da_framing_bytes(selection.transactions.len() + 1))
+                > MAX_DA_PAYLOAD_BYTES
+        {
             Some(DeferReason::ByteLimit)
         } else {
             None

@@ -163,6 +163,9 @@ pub enum SettlementStatementV2Error {
     Mismatch,
     /// Stateless execution rejected the witness or body.
     Execution(NodeWitnessError),
+    /// The block's user transactions cannot be published in one native DA
+    /// transaction ([`crate::data_availability::MAX_DA_PAYLOAD_BYTES`]).
+    DataAvailability(crate::data_availability::DaPayloadError),
 }
 
 impl core::fmt::Display for SettlementStatementV2Error {
@@ -172,6 +175,7 @@ impl core::fmt::Display for SettlementStatementV2Error {
             Self::Encoding => f.write_str("invalid settlement V2 encoding"),
             Self::Mismatch => f.write_str("settlement V2 statement differs from trusted expectation"),
             Self::Execution(error) => write!(f, "settlement V2 execution failed: {error}"),
+            Self::DataAvailability(error) => write!(f, "settlement V3 data availability: {error}"),
         }
     }
 }
@@ -387,7 +391,8 @@ pub mod settlement_v3_layout {
     pub const WITHDRAWAL_ROOT: usize = 672;
     /// Number of withdrawals (big-endian `u64`; M1: reserved, zero).
     pub const WITHDRAWAL_COUNT: usize = 704;
-    /// Data-availability commitment (M1: reserved, zero).
+    /// Data-availability commitment (M3, [`crate::data_availability`]):
+    /// zero without user transactions.
     pub const DA_COMMITMENT: usize = 712;
     /// End of the statement after the tag.
     pub const END: usize = 744;
@@ -397,9 +402,6 @@ pub mod settlement_v3_layout {
 /// (L2 outbox predeploy) defines the real root; until then the guest commits
 /// zero and the native verifier refuses anything else.
 pub const SETTLEMENT_V3_RESERVED_WITHDRAWAL_ROOT: B256 = B256::ZERO;
-/// M1 placeholder for [`SettlementStatementV3::da_commitment`]. Milestone M3
-/// (L1 data availability) defines it; until then it is zero and enforced zero.
-pub const SETTLEMENT_V3_RESERVED_DA_COMMITMENT: B256 = B256::ZERO;
 
 /// Settlement statement that admits user transactions.
 ///
@@ -414,9 +416,13 @@ pub const SETTLEMENT_V3_RESERVED_DA_COMMITMENT: B256 = B256::ZERO;
 /// * `transactions_root`, `receipts_root`, `user_tx_count` publish what was
 ///   executed (the header hash already commits to them; exposing them lets L1
 ///   and observers reference them without the full header);
-/// * `withdrawal_root`, `withdrawal_count`, `da_commitment` are RESERVED in M1:
-///   always zero here and refused if non-zero by the native verifier. M3 (data
-///   availability) and M4 (outbox) give them meaning under a new program.
+/// * `da_commitment` (M3) names the exact user-transaction batch the block
+///   executed ([`crate::data_availability::block_da_commitment`]); the native
+///   chain accepts the settlement only after that batch was published in an
+///   earlier native block. Zero for a block without user transactions;
+/// * `withdrawal_root`, `withdrawal_count` are RESERVED: always zero here and
+///   refused if non-zero by the native verifier. M4 (outbox) gives them meaning
+///   under a new program.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettlementStatementV3 {
     /// All V2 fields, encoded at their V2 offsets after the V3 tag.
@@ -433,13 +439,14 @@ pub struct SettlementStatementV3 {
     pub withdrawal_root: B256,
     /// Reserved (M4): number of withdrawals. Zero in M1.
     pub withdrawal_count: u64,
-    /// Reserved (M3): data-availability commitment. Zero in M1.
+    /// Commitment to the L1-published user-transaction batch (zero if none).
     pub da_commitment: B256,
 }
 
 impl SettlementStatementV3 {
     /// Build the V3 statement from an already verified execution result.
-    /// Fails if the header's body commitments disagree with `body`.
+    /// Fails if the header's body commitments disagree with `body`, or if the
+    /// body's user transactions exceed one native DA transaction.
     pub fn from_executed(
         configuration: B256,
         header: &crate::node_primitives::NodeHeaderV2,
@@ -462,7 +469,12 @@ impl SettlementStatementV3 {
             user_tx_count: u64::try_from(body.transactions.len()).map_err(|_| SettlementStatementV2Error::Context)?,
             withdrawal_root: SETTLEMENT_V3_RESERVED_WITHDRAWAL_ROOT,
             withdrawal_count: 0,
-            da_commitment: SETTLEMENT_V3_RESERVED_DA_COMMITMENT,
+            da_commitment: crate::data_availability::block_da_commitment(
+                base.chain_id,
+                base.l2_number,
+                &body.transactions,
+            )
+            .map_err(SettlementStatementV2Error::DataAvailability)?,
         })
     }
 
@@ -948,7 +960,10 @@ mod settlement_v3_tests {
         assert_eq!(int(settlement_v3_layout::USER_TX_COUNT), 2);
         assert_eq!(at(settlement_v3_layout::WITHDRAWAL_ROOT), B256::ZERO);
         assert_eq!(int(settlement_v3_layout::WITHDRAWAL_COUNT), 0);
-        assert_eq!(at(settlement_v3_layout::DA_COMMITMENT), B256::ZERO);
+        assert_eq!(
+            at(settlement_v3_layout::DA_COMMITMENT),
+            crate::data_availability::block_da_commitment(700_771, 1, &body().transactions).unwrap()
+        );
     }
 
     #[test]
@@ -1009,6 +1024,40 @@ mod settlement_v3_tests {
         assert!(
             SettlementStatementV3::from_executed(B256::repeat_byte(14), &header(&body), &body, bad_context).is_err()
         );
+    }
+
+    /// M3: `da_commitment` names exactly the block's batch (chain, number and
+    /// envelope bytes), is zero without user transactions, and a block whose
+    /// batch could not fit one native DA transaction has no statement.
+    #[test]
+    fn settlement_v3_da_commitment_binds_the_user_transaction_batch() {
+        use crate::data_availability::{da_commitment, encode_da_payload, DaPayloadError, MAX_DA_PAYLOAD_BYTES};
+        let body = body();
+        let statement = statement();
+        let payload = encode_da_payload(&body.transactions).unwrap();
+        assert_eq!(statement.da_commitment, da_commitment(700_771, 1, &payload));
+        assert_ne!(statement.da_commitment, da_commitment(700_771, 2, &payload));
+        let mut reordered = body.clone();
+        reordered.transactions.reverse();
+        let other =
+            SettlementStatementV3::from_executed(B256::repeat_byte(14), &header(&reordered), &reordered, context())
+                .unwrap();
+        assert_ne!(other.da_commitment, statement.da_commitment);
+        let empty = NodeBodyV2::default();
+        let deposit_only =
+            SettlementStatementV3::from_executed(B256::repeat_byte(14), &header(&empty), &empty, context()).unwrap();
+        assert_eq!(
+            (deposit_only.user_tx_count, deposit_only.da_commitment),
+            (0, B256::ZERO)
+        );
+        let huge = NodeBodyV2 {
+            deposits: Vec::new(),
+            transactions: alloc::vec![Bytes::from(alloc::vec![0x02u8; MAX_DA_PAYLOAD_BYTES])],
+        };
+        assert!(matches!(
+            SettlementStatementV3::from_executed(B256::repeat_byte(14), &header(&huge), &huge, context()),
+            Err(SettlementStatementV2Error::DataAvailability(DaPayloadError::TooLarge))
+        ));
     }
 
     /// Golden vector: pins the complete V3 byte layout. Any change to field

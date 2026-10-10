@@ -139,9 +139,16 @@ fn v3_statement_settles_a_block_with_user_transactions() {
     preimage.extend_from_slice(&1u32.to_be_bytes());
     preimage.extend_from_slice(&100_000_000u64.to_be_bytes());
     assert_eq!(v3.deposits_hash, keccak256(&preimage));
+    assert_eq!((v3.withdrawal_root, v3.withdrawal_count), (B256::ZERO, 0));
+    // M3: the executed user transactions, published as one L1 DA batch.
+    let payload = bloch_l2_evm::data_availability::encode_da_payload(&body.transactions).unwrap();
     assert_eq!(
-        (v3.withdrawal_root, v3.withdrawal_count, v3.da_commitment),
-        (B256::ZERO, 0, B256::ZERO)
+        v3.da_commitment,
+        bloch_l2_evm::data_availability::da_commitment(spec.chain_id, v3.base.l2_number, &payload)
+    );
+    assert_eq!(
+        bloch_l2_evm::data_availability::decode_da_payload(&payload).unwrap(),
+        body.transactions
     );
     let bytes = v3.encode();
     assert!(bytes.starts_with(SETTLEMENT_STATEMENT_V3_TAG));
