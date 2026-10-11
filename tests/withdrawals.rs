@@ -584,3 +584,31 @@ fn print_shared_withdrawal_vectors() {
     });
     println!("{}", serde_json::to_string_pretty(&fixture).unwrap());
 }
+
+/// Shared L1 claim vector (`tests/fixtures/l2-claim-v1/vectors.json`,
+/// identical copy in the native repository, which pins the 0x16 frame, intent
+/// root and txid). The L2 side checks what it owns: the claimed leaf is leaf 1
+/// of the 3-leaf vector tree, its proof folds to the vector root, and the
+/// nullifier a relayer looks up is keccak256("BLOCH:L2:CLAIM:1" || chain_id
+/// BE8 || index BE8).
+#[test]
+fn shared_claim_vector() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/l2-claim-v1/vectors.json")).unwrap();
+    let hex = |v: &serde_json::Value| -> B256 { v.as_str().unwrap().parse().unwrap() };
+    let chain_id = fixture["chain_id"].as_u64().unwrap();
+    let (index, count) = (fixture["index"].as_u64().unwrap(), fixture["count"].as_u64().unwrap());
+    let vector_leaf = |i: u64| withdrawal_leaf(chain_id, i, B256::repeat_byte((i % 255) as u8 + 1), 1_000_000 + i);
+    let leaf = withdrawal_leaf(chain_id, index, hex(&fixture["l1_recipient"]), fixture["sats"].as_u64().unwrap());
+    assert_eq!(leaf, hex(&fixture["leaf"]));
+    assert_eq!(leaf, vector_leaf(index));
+    let tree = WithdrawalTree::new((0..count).map(vector_leaf).collect()).unwrap();
+    assert_eq!(tree.root(), hex(&fixture["root"]));
+    assert!(verify_withdrawal_proof(leaf, index, &tree.proof(index).unwrap(), tree.root()));
+    let mut preimage = b"BLOCH:L2:CLAIM:1".to_vec();
+    preimage.extend_from_slice(&chain_id.to_be_bytes());
+    preimage.extend_from_slice(&index.to_be_bytes());
+    assert_eq!(keccak256(&preimage), hex(&fixture["nullifier"]));
+    // The frame names this leaf: tag 0x16, version 1.
+    assert!(fixture["tx_hex"].as_str().unwrap().starts_with("1601"));
+}
