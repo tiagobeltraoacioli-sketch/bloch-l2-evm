@@ -173,6 +173,9 @@ fn native_policy(p: SettlementPolicyV1) -> Policy {
         chain_id: p.chain_id,
         initial_l2_parent: p.initial_l2_parent_hash.0,
         initial_l2_state: p.initial_l2_state_root.0,
+        // The V1 trust carries no M6 withdrawal attestor set: a genesis that
+        // pins one is refused here (like any V3 policy, see check_trust).
+        attestor_set: [0; 32],
     }
 }
 

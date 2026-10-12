@@ -206,3 +206,77 @@ fn extend_with_txs_selects_within_limits_defers_overflow_and_prunes() {
     let head = produce(&["head", "--target", db_s]).unwrap();
     assert_eq!(head["number"], 4);
 }
+
+/// `address`, `sign-tx` and `account`: the development key funds itself by a
+/// deposit, then a transfer and an outbox withdrawal signed by the tool are
+/// selected from the spool and leave one withdrawal leaf; the tool refuses a
+/// group-readable key and a withdrawal the outbox would revert.
+#[test]
+fn sign_tx_transfers_and_withdraws_from_a_development_key() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("db");
+    let pool = root.path().join("pool");
+    std::fs::create_dir(&pool).unwrap();
+    let (db_s, pool_s) = (db.to_str().unwrap(), pool.to_str().unwrap());
+    let key_file = root.path().join("k.hex");
+    std::fs::write(&key_file, hex::encode([7u8; 32]) + "\n").unwrap();
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let key_s = key_file.to_str().unwrap();
+    let sender = Address::from_public_key(key().verifying_key());
+    let address = produce(&["address", "--key", key_s]).unwrap();
+    assert_eq!(address["address"], hex::encode(sender));
+
+    let genesis = produce(&["init", "--target", db_s]).unwrap();
+    let deposits = root.path().join("deposits.json");
+    std::fs::write(
+        &deposits,
+        serde_json::json!([{"height": 3, "tx_index": 0, "txid": "11".repeat(32), "vout": 0,
+                            "sats": 20_000_000_000u64, "recipient": hex::encode(sender)}])
+        .to_string(),
+    )
+    .unwrap();
+    let parent = genesis["hash"].as_str().unwrap();
+    let one = produce(&["extend", "--target", db_s, "--parent", parent, "--anchor", &"ab".repeat(32),
+                        "--deposits", deposits.to_str().unwrap()])
+    .unwrap();
+    let account = produce(&["account", "--target", db_s, "--address", &hex::encode(sender)]).unwrap();
+    assert_eq!((account["balance_sats"].as_str(), account["nonce"].as_u64()), (Some("20000000000"), Some(0)));
+
+    let out = |name: &str| pool.join(name).to_str().unwrap().to_string();
+    let recipient = "cd".repeat(32);
+    let transfer = produce(&["sign-tx", "--key", key_s, "--nonce", "0", "--to", &"55".repeat(20),
+                             "--value-wei", "1000", "--out", &out("0.tx")])
+    .unwrap();
+    assert_eq!(transfer["from"], hex::encode(sender));
+    produce(&["sign-tx", "--key", key_s, "--nonce", "1", "--withdraw-to", &recipient, "--sats", "5000000000",
+              "--out", &out("1.tx")])
+    .unwrap();
+    // The outbox minimum and exclusive destinations are enforced before signing.
+    assert!(produce(&["sign-tx", "--key", key_s, "--nonce", "2", "--withdraw-to", &recipient, "--sats", "10",
+                      "--out", &out("2.tx")])
+    .unwrap_err()
+    .contains("minimum withdrawal"));
+    assert!(produce(&["sign-tx", "--key", key_s, "--nonce", "2", "--to", &"55".repeat(20), "--value-wei", "1",
+                      "--withdraw-to", &recipient, "--sats", "1000000", "--out", &out("2.tx")])
+    .is_err());
+    // An existing output is never overwritten.
+    assert!(produce(&["sign-tx", "--key", key_s, "--nonce", "0", "--to", &"55".repeat(20), "--value-wei", "1",
+                      "--out", &out("0.tx")])
+    .is_err());
+
+    let two = produce(&["extend", "--target", db_s, "--parent", one["hash"].as_str().unwrap(), "--anchor",
+                        &"cd".repeat(32), "--txs", pool_s])
+    .unwrap();
+    assert_eq!((two["transactions"].as_u64(), two["withdrawal_count"].as_u64()), (Some(2), Some(1)));
+    assert_eq!(two["withdrawals"][0]["l1_recipient"], recipient);
+    assert_eq!(two["withdrawals"][0]["sats"], 5_000_000_000u64);
+    let account = produce(&["account", "--target", db_s, "--address", &hex::encode(sender)]).unwrap();
+    assert_eq!(account["nonce"].as_u64(), Some(2));
+    let left: u64 = account["balance_sats"].as_str().unwrap().parse().unwrap();
+    assert!(left < 15_000_000_000 && left > 14_999_000_000, "{account}");
+    assert!(spool(&pool).is_empty());
+
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(produce(&["address", "--key", key_s]).unwrap_err().contains("owner only"));
+}

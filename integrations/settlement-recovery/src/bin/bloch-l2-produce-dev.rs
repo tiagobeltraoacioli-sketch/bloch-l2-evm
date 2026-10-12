@@ -61,6 +61,10 @@ usage:
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
   bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
   bloch-l2-produce-dev withdrawal-proof --target DIR --index I [--number N] [--root HEX --count N]
+  bloch-l2-produce-dev account --target DIR --address HEX20
+  bloch-l2-produce-dev address --key FILE
+  bloch-l2-produce-dev sign-tx --key FILE --nonce N (--to HEX20 --value-wei N | --withdraw-to HEX32 --sats N)
+                               [--gas N] [--max-fee-wei N] --out FILE
 
 extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
 whose anchor is the native-selected source block. HEX is 64 lowercase hex
@@ -88,6 +92,13 @@ state after block N (and against --root/--count, e.g. a settled statement),
 and prints the 32 siblings of withdrawal I (bottom-up) with its leaf fields.
 extend and head report the outbox withdrawal_root / withdrawal_count after the
 block; extend also lists the withdrawals the block initiated.
+account prints the balance (wei and whole sats) and nonce of an L2 address at
+the head. address prints the L2 address of a development secp256k1 key FILE
+(64 hex characters). sign-tx writes one signed EIP-1559 transaction (hex, a
+txpool spool entry) from that key: a plain transfer, or with --withdraw-to an
+outbox initiateWithdrawal(l1Recipient) carrying --sats (the L1 recipient is
+the native owner script hash, SHA3-256 of the hybrid public key). The key
+FILE is a development hot key: never use it for value.
 Development only: no settlement or finality is implied.
 ";
 
@@ -185,6 +196,14 @@ fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFac
 
 fn run(args: &[String]) -> Result<String, String> {
     let (command, rest) = args.split_first().ok_or("missing command")?;
+    match command.as_str() {
+        "address" => {
+            only(rest, &["--key"])?;
+            return Ok(json!({"address": format!("{:x}", key_address(&read_key(option(rest, "--key")?)?)) }).to_string());
+        }
+        "sign-tx" => return sign_tx(rest),
+        _ => {}
+    }
     let target = PathBuf::from(option(rest, "--target")?);
     let runtime = RuntimeBuilder::new(RuntimeConfig::default()).build().map_err(|e| e.to_string())?;
     let result = (|| match command.as_str() {
@@ -423,12 +442,117 @@ fn run(args: &[String]) -> Result<String, String> {
             }
             withdrawal_proof(&factory, number, index, settled_commitment(rest)?)
         }
+        "account" => {
+            only(rest, &["--target", "--address"])?;
+            let address: Address = parse_address(option(rest, "--address")?)?;
+            let factory = open(&target, &runtime, false)?;
+            let state = factory.latest().map_err(|e| e.to_string())?;
+            let account = state.basic_account(&address).map_err(|e| e.to_string())?.unwrap_or_default();
+            let (sats, dust) = account.balance.div_rem(U256::from(bloch_l2_evm::ATOM_SCALE));
+            Ok(json!({"address": format!("{address:x}"), "number": factory.best_block_number().map_err(|e| e.to_string())?,
+                      "balance_wei": account.balance.to_string(), "balance_sats": sats.to_string(),
+                      "dust_wei": dust.to_string(), "nonce": account.nonce})
+            .to_string())
+        }
         other => Err(format!("unknown command {other}")),
     })();
     if !runtime.graceful_shutdown_with_timeout(Duration::from_secs(10)) {
         return Err("task runtime did not shut down".into());
     }
     result
+}
+
+fn parse_address(text: &str) -> Result<Address, String> {
+    let bytes = hex::decode(text.trim_start_matches("0x")).map_err(|_| "address must be hex")?;
+    if bytes.len() != 20 {
+        return Err("address must be 20 bytes".into());
+    }
+    Ok(Address::from_slice(&bytes))
+}
+
+/// Development secp256k1 key: one line of 64 hex characters, owner-only file.
+fn read_key(path: &str) -> Result<k256::ecdsa::SigningKey, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).map_err(|e| format!("--key: {e}"))?;
+    if !metadata.is_file() || metadata.len() > 200 || metadata.permissions().mode() & 0o077 != 0 {
+        return Err("--key must be a regular file readable by its owner only".into());
+    }
+    let text = fs::read_to_string(path).map_err(|e| format!("--key: {e}"))?;
+    let bytes = hex::decode(text.trim().trim_start_matches("0x")).map_err(|_| "--key must be hex")?;
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| "--key must be 32 bytes")?;
+    k256::ecdsa::SigningKey::from_bytes((&bytes).into()).map_err(|_| "--key is not a secp256k1 scalar".into())
+}
+
+fn key_address(key: &k256::ecdsa::SigningKey) -> Address {
+    let point = key.verifying_key().to_encoded_point(false);
+    Address::from_slice(&alloy_primitives::keccak256(&point.as_bytes()[1..])[12..])
+}
+
+fn sign_tx(rest: &[String]) -> Result<String, String> {
+    use alloy_consensus::{private::alloy_eips::eip2718::Encodable2718, SignableTransaction, TxEip1559, TxEnvelope};
+    only(rest, &["--key", "--nonce", "--to", "--value-wei", "--withdraw-to", "--sats", "--gas", "--max-fee-wei", "--out"])?;
+    let key = read_key(option(rest, "--key")?)?;
+    let decimal = |name: &str| -> Result<u128, String> {
+        option(rest, name)?.parse().map_err(|_| format!("{name} must be decimal"))
+    };
+    let nonce = u64::try_from(decimal("--nonce")?).map_err(|_| "--nonce too large")?;
+    let (to, value, input, default_gas) = match (option(rest, "--to"), option(rest, "--withdraw-to")) {
+        (Ok(to), Err(_)) => {
+            if option(rest, "--sats").is_ok() {
+                return Err("--sats goes with --withdraw-to".into());
+            }
+            (parse_address(to)?, U256::from(decimal("--value-wei")?), Vec::new(), 21_000)
+        }
+        (Err(_), Ok(recipient)) => {
+            if option(rest, "--value-wei").is_ok() {
+                return Err("--value-wei goes with --to".into());
+            }
+            let recipient = hash(recipient, "--withdraw-to")?;
+            let sats = u64::try_from(decimal("--sats")?).map_err(|_| "--sats too large")?;
+            if sats < bloch_l2_evm::withdrawal::MIN_WITHDRAWAL_SATS {
+                return Err("--sats is below the minimum withdrawal (the outbox would revert)".into());
+            }
+            let mut data = bloch_l2_evm::withdrawal::INITIATE_WITHDRAWAL_SELECTOR.to_vec();
+            data.extend_from_slice(recipient.as_slice());
+            (outbox(), bloch_l2_evm::sats_to_wei(sats), data, 100_000)
+        }
+        _ => return Err("give exactly one of --to or --withdraw-to".into()),
+    };
+    let gas_limit = match option(rest, "--gas") {
+        Ok(_) => u64::try_from(decimal("--gas")?).map_err(|_| "--gas too large")?,
+        Err(_) => default_gas,
+    };
+    let max_fee_per_gas = match option(rest, "--max-fee-wei") {
+        Ok(_) => decimal("--max-fee-wei")?,
+        Err(_) => 2_000_000_000,
+    };
+    let tx = TxEip1559 {
+        chain_id: rules().chain_id,
+        nonce,
+        to: alloy_primitives::TxKind::Call(to),
+        value,
+        input: input.into(),
+        gas_limit,
+        max_fee_per_gas,
+        max_priority_fee_per_gas: 1,
+        ..Default::default()
+    };
+    let signature: alloy_primitives::Signature = key
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .map_err(|e| e.to_string())?
+        .into();
+    let signed = tx.into_signed(signature);
+    let hash = *signed.hash();
+    let encoded = TxEnvelope::from(signed).encoded_2718();
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(option(rest, "--out")?)
+        .map_err(|e| format!("--out: {e}"))?;
+    writeln!(out, "{}", hex::encode(&encoded)).map_err(|e| format!("--out: {e}"))?;
+    Ok(json!({"hash": hex::encode(hash), "from": format!("{:x}", key_address(&key)), "nonce": nonce,
+              "to": format!("{to:x}"), "value_wei": value.to_string(), "gas_limit": gas_limit, "bytes": encoded.len()})
+    .to_string())
 }
 
 /// Native inbox records as L2 deposit mints. The native settlement rejects any

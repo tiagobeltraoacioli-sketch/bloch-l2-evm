@@ -41,6 +41,9 @@ bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos
 bloch-pos-node = { path = "../../../bloch-validator-payout/crates/bloch-pos-node" }
 serde_json = "1.0"
 libc = "0.2"
+# sign-tx / address (development keys only); the same pins as the dev-dependencies.
+alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
+k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 alloy-primitives = { version = "=1.6.1", default-features = false }
 reth-db-api = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/db-api" }
 reth-provider = { path = "../../../reth-bloch-rpc-snapshot/crates/storage/provider" }
