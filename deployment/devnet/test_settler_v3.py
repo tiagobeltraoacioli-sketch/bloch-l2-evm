@@ -507,9 +507,28 @@ class SettlerV3Test(unittest.TestCase):
         self.assertEqual([p.name for p in (self.root / 'pwork').iterdir() if p.name.startswith('job-')], [])
         self.assertEqual(run(job, SSH_ORIGINAL_COMMAND='sh -c id').returncode, 64)
         self.assertEqual(run(job[:-1]).returncode, 64)
+        config['max_memory_bytes'] = 1  # no test runner sits under a 1-byte cgroup cap
+        (self.root / 'prover.json').write_text(json.dumps(config))
+        refused = run(job)
+        self.assertEqual(refused.returncode, 70)
+        self.assertIn(b'memory cap', refused.stderr)
+        del config['max_memory_bytes']
         config['prover_sha256'] = '00' * 32
         (self.root / 'prover.json').write_text(json.dumps(config))
         self.assertEqual(run(job).returncode, 70)
+
+    def test_remote_prover_reads_the_tightest_cgroup_memory_cap(self):
+        cg = self.root / 'cg'
+        (cg / 'user.slice/user-9.slice/session-1.scope').mkdir(parents=True)
+        (cg / 'memory.max').write_text('max\n')
+        (cg / 'user.slice/memory.max').write_text('max\n')
+        (cg / 'user.slice/user-9.slice/memory.max').write_text(str(60 << 30) + '\n')
+        (cg / 'user.slice/user-9.slice/session-1.scope/memory.max').write_text('max\n')
+        proc = self.root / 'cgroup'
+        proc.write_text('0::/user.slice/user-9.slice/session-1.scope\n')
+        self.assertEqual(rp.cgroup_memory_cap(str(proc), str(cg)), 60 << 30)
+        (cg / 'user.slice/user-9.slice/memory.max').write_text('max\n')
+        self.assertIsNone(rp.cgroup_memory_cap(str(proc), str(cg)))
 
 
 if __name__ == '__main__':

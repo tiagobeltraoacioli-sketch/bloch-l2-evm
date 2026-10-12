@@ -16,7 +16,10 @@ the expected statement from the same request and artifact and reverifies the
 proof before writing it; the settler verifies it again locally before any
 submission, so this host is trusted for liveness only, never for validity.
 
-One proof at a time (an exclusive lock; a second job exits 75 = busy).
+One proof at a time (an exclusive lock; a second job exits 75 = busy). With
+`max_memory_bytes` in the config the job refuses to start unless one of its
+own cgroups (cgroup v2) caps memory at or below that value, so a prover sharing
+a host with other services can only exhaust its own slice.
 Holds no keys and reaches no network besides Docker for the pinned Gnark image.
 Exit codes: 0 proof written, 64 bad request, 70 prover failed, 75 busy.
 Dependency-free Python 3.9+.
@@ -68,6 +71,28 @@ def parse_job(stream):
     return request, artifact
 
 
+def cgroup_memory_cap(proc_cgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """Smallest memory.max over this process's cgroup v2 path and its ancestors (None if unlimited)."""
+    try:
+        text = Path(proc_cgroup).read_text()
+    except OSError:  # no cgroup v2 information: treat as unlimited
+        return None
+    line = next((l for l in text.splitlines() if l.startswith('0::')), None)
+    if line is None:
+        return None
+    path, caps = Path(root + line[3:].strip()), []
+    while True:
+        limit = path / 'memory.max'
+        if limit.is_file():
+            value = limit.read_text().strip()
+            if value != 'max':
+                caps.append(int(value))
+        if path == Path(root) or path.parent == path:
+            break
+        path = path.parent
+    return min(caps) if caps else None
+
+
 def fail(code, message):
     sys.stderr.write(f'remote_prover: {message}\n')
     sys.exit(code)
@@ -80,6 +105,10 @@ def main():
     for key in ('prover', 'guest'):
         if digest(c[key]) != c[key + '_sha256']:
             fail(70, f'{key} differs from its pin')
+    if c.get('max_memory_bytes'):
+        cap = cgroup_memory_cap()
+        if cap is None or cap > c['max_memory_bytes']:
+            fail(70, f'refusing to prove without a memory cap <= {c["max_memory_bytes"]} (cgroup cap {cap})')
     work = Path(c['workdir'])
     lock = (work / '.lock').open('w')
     try:
