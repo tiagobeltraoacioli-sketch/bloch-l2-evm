@@ -126,6 +126,15 @@ target/release/bloch-l2-produce-dev head --target /tmp/devnet4-l2-genesis > gene
 python3 ../../deployment/devnet/devnet4/make_l2_config.py \
   --identity ../sp1-execution/host/identity.json --genesis genesis.json \
   --native-policy "$NATIVE_POLICY" --out l2-config.bin
+
+# 7. (M6, recommended) attestor set: each attestor runs `bloch-pos ws-keygen`
+#    on their own machine and hands over the .pk only. Then append the set hash
+#    (l2-config.bin becomes 296 bytes; the native build must have
+#    devnet-l2-user-txs or it refuses the config).
+bloch-pos l2-claim attestor-set --threshold 2 \
+  --pubkey a0.pk --pubkey a1.pk --pubkey a2.pk --out attestors.txt
+bloch-pos l2-claim set-attestors --config l2-config.bin \
+  --attestors attestors.txt --out l2-config-attested.bin
 ```
 
 Step 4 requires the ignored helper test `print_policy_commitment_v3` in
@@ -196,9 +205,52 @@ by the first block (code hash = keccak of the 132-byte `OUTBOX_CODE`).
   root, and prints the 32 siblings and the leaf fields.
 * The settler checks each statement's withdrawal fields against the producer
   block and the accepted head and logs them (`transaction-built`).
-* **No L1 release yet (M5).** Withdrawn value leaves the L2 supply but
-  `escrow_sat` on L1 is unchanged: it is locked until the claim exists. Keep
-  withdrawals to development amounts.
+* The L1 release is the claim below (M5–M6).
+
+## Withdrawals, L1 side (M5–M6)
+
+`L2WithdrawClaim` (`0x16`) proves one outbox leaf against a withdrawal root the
+native chain retains and moves exactly `sats` from `escrow_sat` to a new output
+for `l1_recipient`; anyone may relay it, paying the fee from their own funding
+inputs. Rules (all consensus constants of the devnet4 build):
+
+* Maturity: the root's record must be at least 32 native blocks old (128 for
+  claims ≥ 100 BLCH). Proving against the newest matured root
+  (`getl2settlement.withdrawals.matured` / `matured_large`) always works.
+* Once per leaf (claimed bitmap, `withdrawals.claimed`).
+* Release window: each 32-block window releases at most max(10 BLCH, 10% of
+  the escrow at its first claim); the window's first claim always passes. A
+  refused claim (`RateLimited`) fits a later window
+  (`withdrawals.release_window`).
+* Attestors (when the L2 config carries a set): claims ≥ 100 BLCH must be
+  version 2, carrying k-of-n hybrid ML-DSA-65 + Falcon-1024 signatures over
+  `SHA3-256("BLOCH:L2:WITHDRAW-ATTEST:1" || network_domain || chain_id BE8 ||
+  root)`. The settlement proof (Groth16/BN254) is not post-quantum; an
+  attestor signs a root only after `reconstruct` from L1 data reproduced it, so
+  large releases need that independent check as well.
+
+Cycle:
+
+```bash
+bloch-l2-produce-dev withdrawal-proof --target DB --index I > proof.json
+# large claims only, each attestor on their machine (after reconstruct):
+bloch-pos l2-claim attest --genesis genesis.bin --proof proof.json \
+  --attestors attestors.txt --signer-index 0 --key a0.sk --out att0.txt
+bloch-pos l2-claim prepare --genesis genesis.bin --funding-pubkey relayer.pubkey.hex \
+  --input TXID:VOUT:SAT --proof proof.json \
+  --base-fee "$NEXT_BASE_FEE" --tip 0 \
+  [--attestors attestors.txt --attestation att0.txt --attestation att2.txt] \
+  --out claim-unsigned.hex
+bloch-pos l2-claim sign --genesis genesis.bin --tx claim-unsigned.hex \
+  --dir RELAYER_KEYSTORE --out claim.hex
+# then sendrawtransaction with the hex
+```
+
+The mempool checks the shape, the relayer signature and the attestation
+signatures; the proof, maturity, nullifier, window and set hash are checked in
+consensus. What these rules do not do: a forged settlement can still release
+claims below 100 BLCH up to the window cap (about 10% of the escrow per
+window); the window and delays only buy time to halt the network.
 
 ## Data availability (M3)
 
@@ -242,8 +294,8 @@ with `produce head` of the settler database.
 * `reconstruct --l1-follower` reads the follower store as-is (it trusts that
   the follower verified it). `tests/reconstruct.rs` covers both inputs with a
   synthetic store (unsigned envelopes), not a store written by a live follower.
-* Withdrawals: the L1 claim (`L2WithdrawClaim`, nullifiers, delay, escrow
-  release) is M5; until then withdrawn value is locked in the escrow.
+* Withdrawals: the dev values (32/128-block delays, 32-block window) are
+  minutes; mainnet needs days (M8). Small claims are not attested.
   `bloch-l2-settled-rpc`, `bloch-evm-export`, `bloch-evm-dev` and
   `bloch-l2-audit-dev` still construct `ChainSpec::testnet()`: they read the
   devnet4 database (same genesis) but would re-execute blocks under the rules
