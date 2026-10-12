@@ -343,6 +343,7 @@ mod tests {
                 chain_id: 700771,
                 initial_l2_parent: [4; 32],
                 initial_l2_state: [5; 32],
+                attestor_set: [0; 32],
             }
             .encode(),
         );

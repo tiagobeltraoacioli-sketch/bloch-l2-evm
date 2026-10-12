@@ -73,6 +73,7 @@ fn config(p: SettlementPolicyV1) -> L2Config {
         chain_id: p.chain_id,
         initial_l2_parent: p.initial_l2_parent_hash.0,
         initial_l2_state: p.initial_l2_state_root.0,
+        attestor_set: [0; 32],
     }
 }
 fn main() {
