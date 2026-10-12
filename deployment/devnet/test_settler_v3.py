@@ -15,6 +15,7 @@ import unittest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import settler_v3 as s  # noqa: E402
+import remote_prover as rp  # noqa: E402
 
 FRAME = HERE.parent.parent / 'tests/fixtures/native-settlement-v3/frame-async.hex'
 NETWORK, GENESIS, BLOCK, SOURCE, INBOX = 'aa' * 32, 'bb' * 32, 'cc' * 32, 'dd' * 32, 'ee' * 32
@@ -80,6 +81,7 @@ class Fake:
         self.da_payload = batch(produced_txs) if da_payload is None else da_payload
         self.da_records, self.include_da = [], True
         self.extend_extra = {}
+        self.remote_jobs, self.remote_fail = [], False
 
     def view(self):
         request = ''.join(x + '\n' for x in (NETWORK, GENESIS, BLOCK, '5', '4', SOURCE, INBOX))
@@ -144,6 +146,13 @@ class Fake:
                 out_path.write_text(da_frame(number, payload).hex() + '\n')
             else:
                 out_path.write_text(Path(argv[argv.index('--tx') + 1]).read_text())
+            return out
+        if name == 'ssh':
+            self.remote_jobs.append(rp.parse_job(__import__('io').BytesIO(kwargs['input'])))
+            if self.remote_fail:
+                out.returncode = 255
+            else:
+                kwargs['stdout'].write(artifact(self.values))
             return out
         if 'settlement-v3' in name:
             if argv[1] == 'prove-groth16':
@@ -402,6 +411,83 @@ class SettlerV3Test(unittest.TestCase):
                            ('truncated', artifact(good)[:-2]), ('empty', b'')):
             with self.subTest(name), self.assertRaises(s.Halt):
                 s.parse_proof_artifact(data)
+
+    # ---- remote prover (second CPU host) ----
+    def remote(self, **extra):
+        (self.root / 'known_hosts').write_text('prover ssh-ed25519 AAAA\n')
+        return {'target': 'prover@10.0.0.2', 'key': str(self.root / 'id'), 'known_hosts': str(self.root / 'known_hosts'),
+                'ssh': str(self.root / 'ssh'), **extra}
+
+    def test_remote_prover_proves_while_execute_and_verify_stay_local(self):
+        fake = Fake(self.root, statement())
+        self.assertTrue(self.settler(fake, remote_prover=self.remote()).cycle())
+        names = [(Path(c[0]).name, c[1]) for c in fake.calls if Path(c[0]).name != 'produce']
+        self.assertEqual(names, [('bloch-evm-sp1-settlement-v3', 'execute'), ('ssh', '-i'),
+                                 ('bloch-evm-sp1-settlement-v3', 'verify-groth16')])
+        ssh = next(c for c in fake.calls if Path(c[0]).name == 'ssh')
+        self.assertIn('StrictHostKeyChecking=yes', ssh)
+        self.assertEqual(ssh[-2:], ['prover@10.0.0.2', 'prove'])
+        [(request, data)] = fake.remote_jobs
+        work = next((self.root / 'work').iterdir())
+        self.assertEqual((request, data), ((work / 'native-request.txt').read_bytes(), b'artifact'))
+        proved = json.loads((work / 'proved.json').read_text())
+        self.assertEqual([x['where'] for x in proved['steps']], ['local', 'remote', 'local'])
+        self.assertEqual(len(fake.sent), 1)
+
+    def test_remote_failure_retries_or_falls_back_to_a_local_proof(self):
+        fake = Fake(self.root, statement())
+        fake.remote_fail = True
+        with self.assertRaisesRegex(RuntimeError, 'prover prove failed'):
+            self.settler(fake, remote_prover=self.remote()).cycle()
+        self.assertEqual(fake.sent, [])
+        self.assertFalse(any((self.root / 'work').glob('*/settlement.proof*')))
+        fake = Fake(self.root, statement())
+        fake.remote_fail = True
+        self.assertTrue(self.settler(fake, remote_prover=self.remote(fallback_local=True)).cycle())
+        provers = [c[1] for c in fake.calls if 'settlement-v3' in Path(c[0]).name]
+        self.assertEqual(provers, ['execute', 'prove-groth16', 'verify-groth16'])
+
+    def test_remote_prover_needs_a_pinned_host_key(self):
+        with self.assertRaisesRegex(s.Halt, 'remote_prover.key'):
+            self.settler(Fake(self.root, statement()), remote_prover={'target': 'p@h', 'known_hosts': 'x'})
+        with self.assertRaisesRegex(s.Halt, 'pin the prover host key'):
+            self.settler(Fake(self.root, statement()), remote_prover={**self.remote(), 'known_hosts': '/nonexistent'})
+
+    def test_remote_job_framing_is_exact(self):
+        import io
+        good = rp.MAGIC + struct.pack('>I', 3) + b'abc' + struct.pack('>Q', 2) + b'xy'
+        self.assertEqual(rp.parse_job(io.BytesIO(good)), (b'abc', b'xy'))
+        for name, data in (('magic', b'X' + good[1:]), ('trailing', good + b'\0'), ('truncated', good[:-1]),
+                           ('empty request', rp.MAGIC + struct.pack('>I', 0) + struct.pack('>Q', 2) + b'xy'),
+                           ('long request', rp.MAGIC + struct.pack('>I', 701) + b'a' * 701 + struct.pack('>Q', 1) + b'x'),
+                           ('huge artifact', rp.MAGIC + struct.pack('>I', 1) + b'a' + struct.pack('>Q', 1 << 40))):
+            with self.subTest(name), self.assertRaises(ValueError):
+                rp.parse_job(io.BytesIO(data))
+        self.assertEqual(s.REMOTE_MAGIC, rp.MAGIC)
+
+    def test_remote_prover_runs_the_pinned_prover_and_returns_only_the_proof(self):
+        import subprocess
+        prover = self.root / 'fake-settlement-v3'
+        prover.write_text('#!/bin/sh\n[ "$1 $2" = "prove-groth16 native-artifact" ] || exit 9\n'
+                          'cat "$BLOCH_NATIVE_L2_REQUEST" "$BLOCH_NATIVE_L2_ARTIFACT" > "$4"\n')
+        prover.chmod(0o755)
+        (self.root / 'pwork').mkdir()
+        config = {'prover': str(prover), 'prover_sha256': s.digest(prover), 'guest': str(self.root / 'settlement_v3'),
+                  'guest_sha256': s.digest(self.root / 'settlement_v3'), 'workdir': str(self.root / 'pwork'),
+                  'home': str(self.root / 'home'), 'prover_threads': 4, 'gnark_image': 'image'}
+        (self.root / 'prover.json').write_text(json.dumps(config))
+        job = rp.MAGIC + struct.pack('>I', 4) + b'req\n' + struct.pack('>Q', 3) + b'art'
+        env = {'PATH': '/usr/bin:/bin', 'BLOCH_REMOTE_PROVER_CONFIG': str(self.root / 'prover.json')}
+        run = lambda data, **e: subprocess.run([sys.executable, str(HERE / 'remote_prover.py')], input=data,  # noqa: E731
+                                               capture_output=True, env={**env, **e})
+        done = run(job, SSH_ORIGINAL_COMMAND='prove')
+        self.assertEqual((done.returncode, done.stdout), (0, b'req\nart'))
+        self.assertEqual([p.name for p in (self.root / 'pwork').iterdir() if p.name.startswith('job-')], [])
+        self.assertEqual(run(job, SSH_ORIGINAL_COMMAND='sh -c id').returncode, 64)
+        self.assertEqual(run(job[:-1]).returncode, 64)
+        config['prover_sha256'] = '00' * 32
+        (self.root / 'prover.json').write_text(json.dumps(config))
+        self.assertEqual(run(job).returncode, 70)
 
 
 if __name__ == '__main__':

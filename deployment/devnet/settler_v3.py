@@ -33,6 +33,13 @@ Differences, all deliberate:
   data availability (milestone M3) exists. The native verifier enforces the
   same rule independently (feature `devnet-l2-user-txs`).
 
+* `remote_prover` (optional, devnet4): the Groth16 proof is generated on a
+  second CPU host over SSH (`remote_prover.py`, a forced command bound to a
+  dedicated key). Only the request and the execution artifact leave this host;
+  `execute` before and `verify-groth16` after still run here with the pinned
+  local prover and guest, so a wrong or foreign remote proof is never
+  submitted. With `fallback_local` a failed remote attempt proves locally.
+
 Each cycle: read the native request all validators agree on, extend the
 canonical L2 database by exactly one block anchored to it, prove it, build the
 settlement transaction, submit it and wait for native acceptance. The worker
@@ -72,6 +79,9 @@ DA_MAX_INPUTS = 16
 # L2 -> L1 withdrawals (bloch_l2_evm::withdrawal, native l2_settlement::withdrawal).
 WITHDRAWAL_DOMAIN = b'BLOCH:L2:WITHDRAW:1'
 WITHDRAWAL_TREE_DEPTH = 32
+# remote_prover.py framing: magic, u32 request length, request, u64 artifact length, artifact.
+REMOTE_MAGIC = b'BLOCH:L2:PROVE:1\n'
+REMOTE_MAX_PROOF_BYTES = 1 << 20
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 256}  # bytes: one native DA batch
 
@@ -331,6 +341,15 @@ class Settler:
             if digest(da['signer']) != da['signer_sha256']:
                 raise Halt('da signer differs from its pin')
             self.da_script = hashlib.sha3_256(bytes.fromhex(Path(da['funding_pubkey']).read_text().strip())).hexdigest()
+        remote = self.c.get('remote_prover')
+        if remote is not None:
+            if not isinstance(remote, dict):
+                raise Halt('remote_prover must be an object')
+            for key in ('target', 'key', 'known_hosts'):
+                if not remote.get(key):
+                    raise Halt(f'remote_prover.{key} is required')
+            if not Path(remote['known_hosts']).is_file():
+                raise Halt('remote_prover.known_hosts must pin the prover host key')
         self.work = Path(self.c['workdir'])
 
     def native_view(self):
@@ -423,14 +442,51 @@ class Settler:
             if name == 'prove':
                 proof.unlink(missing_ok=True)
             start = self.clock()
-            with (directory / f'{name}.log').open('w') as out:
-                result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
-            steps.append({'name': name, 'exit_code': result.returncode, 'seconds': round(self.clock() - start, 1)})
+            if name == 'prove' and self.c.get('remote_prover'):
+                result = self.prove_remote(directory, proof)
+                where = 'remote'
+                if result.returncode and self.c['remote_prover'].get('fallback_local'):
+                    log('remote-prover-failed', directory=str(directory), exit_code=result.returncode)
+                    proof.unlink(missing_ok=True)
+                    where = 'local'
+                    with (directory / f'{name}.log').open('w') as out:
+                        result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+            else:
+                where = 'local'
+                with (directory / f'{name}.log').open('w') as out:
+                    result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+            steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
+                          'seconds': round(self.clock() - start, 1)})
             if result.returncode:
                 raise RuntimeError(f'prover {name} failed: see {directory}/{name}.log')
         (directory / 'proved.json').write_text(json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
+
+    def prove_remote(self, directory, proof):
+        """Groth16 on the remote prover; the caller still verifies it locally."""
+        r = self.c['remote_prover']
+        request = (directory / 'native-request.txt').read_bytes()
+        artifact = (directory / 'block.artifact').read_bytes()
+        frame = (REMOTE_MAGIC + struct.pack('>I', len(request)) + request
+                 + struct.pack('>Q', len(artifact)) + artifact)
+        argv = [r.get('ssh', '/usr/bin/ssh'), '-i', r['key'], '-p', str(r.get('port', 22)),
+                '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'UserKnownHostsFile=' + r['known_hosts'], '-o', 'ConnectTimeout=20',
+                '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', r['target'], 'prove']
+        partial = directory / 'settlement.proof.partial'
+        with partial.open('wb') as out, (directory / 'prove.log').open('w') as err:
+            result = self.run(argv, input=frame, stdout=out, stderr=err,
+                              timeout=r.get('timeout_seconds', 3600))
+        size = partial.stat().st_size
+        if result.returncode == 0 and not 0 < size <= REMOTE_MAX_PROOF_BYTES:
+            result.returncode = 70
+        if result.returncode == 0:
+            partial.replace(proof)
+        else:
+            partial.unlink(missing_ok=True)
+        log('remote-proof', target=r['target'], exit_code=result.returncode, bytes=size)
+        return result
 
     def check_v3(self, values, directory, previous=None):
         """V3-only pre-submit checks (the V2-prefix checks are in transaction()).
