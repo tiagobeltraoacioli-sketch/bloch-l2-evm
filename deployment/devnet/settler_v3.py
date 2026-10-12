@@ -33,12 +33,14 @@ Differences, all deliberate:
   data availability (milestone M3) exists. The native verifier enforces the
   same rule independently (feature `devnet-l2-user-txs`).
 
-* `remote_prover` (optional, devnet4): the Groth16 proof is generated on a
-  second CPU host over SSH (`remote_prover.py`, a forced command bound to a
+* `remote_prover` (optional, devnet4): the Groth16 proof may be generated on
+  a second CPU host over SSH (`remote_prover.py`, a forced command bound to a
   dedicated key). Only the request and the execution artifact leave this host;
   `execute` before and `verify-groth16` after still run here with the pinned
   local prover and guest, so a wrong or foreign remote proof is never
-  submitted. With `fallback_local` a failed remote attempt proves locally.
+  submitted. `order` lists where to prove, tried in turn until one succeeds:
+  ["local", "remote"] (default) keeps the remote host as a fallback,
+  ["remote", "local"] prefers it, ["remote"] never proves here.
 
 Each cycle: read the native request all validators agree on, extend the
 canonical L2 database by exactly one block anchored to it, prove it, build the
@@ -350,6 +352,10 @@ class Settler:
                     raise Halt(f'remote_prover.{key} is required')
             if not Path(remote['known_hosts']).is_file():
                 raise Halt('remote_prover.known_hosts must pin the prover host key')
+            order = remote.setdefault('order', ['local', 'remote'])
+            if not isinstance(order, list) or not order or len(set(order)) != len(order) \
+                    or not set(order) <= {'local', 'remote'}:
+                raise Halt('remote_prover.order must list "local" and/or "remote" once each')
         self.work = Path(self.c['workdir'])
 
     def native_view(self):
@@ -442,19 +448,19 @@ class Settler:
             if name == 'prove':
                 proof.unlink(missing_ok=True)
             start = self.clock()
-            if name == 'prove' and self.c.get('remote_prover'):
-                result = self.prove_remote(directory, proof)
-                where = 'remote'
-                if result.returncode and self.c['remote_prover'].get('fallback_local'):
-                    log('remote-prover-failed', directory=str(directory), exit_code=result.returncode)
+            order = self.c['remote_prover']['order'] if name == 'prove' and self.c.get('remote_prover') else ['local']
+            for where in order:
+                if name == 'prove':
                     proof.unlink(missing_ok=True)
-                    where = 'local'
+                if where == 'remote':
+                    result = self.prove_remote(directory, proof)
+                else:
                     with (directory / f'{name}.log').open('w') as out:
                         result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
-            else:
-                where = 'local'
-                with (directory / f'{name}.log').open('w') as out:
-                    result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                if result.returncode == 0:
+                    break
+                if name == 'prove':
+                    log('prover-failed', directory=str(directory), where=where, exit_code=result.returncode)
             steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
@@ -475,7 +481,7 @@ class Settler:
                 '-o', 'UserKnownHostsFile=' + r['known_hosts'], '-o', 'ConnectTimeout=20',
                 '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', r['target'], 'prove']
         partial = directory / 'settlement.proof.partial'
-        with partial.open('wb') as out, (directory / 'prove.log').open('w') as err:
+        with partial.open('wb') as out, (directory / 'prove-remote.log').open('w') as err:
             result = self.run(argv, input=frame, stdout=out, stderr=err,
                               timeout=r.get('timeout_seconds', 3600))
         size = partial.stat().st_size

@@ -420,7 +420,7 @@ class SettlerV3Test(unittest.TestCase):
 
     def test_remote_prover_proves_while_execute_and_verify_stay_local(self):
         fake = Fake(self.root, statement())
-        self.assertTrue(self.settler(fake, remote_prover=self.remote()).cycle())
+        self.assertTrue(self.settler(fake, remote_prover=self.remote(order=['remote'])).cycle())
         names = [(Path(c[0]).name, c[1]) for c in fake.calls if Path(c[0]).name != 'produce']
         self.assertEqual(names, [('bloch-evm-sp1-settlement-v3', 'execute'), ('ssh', '-i'),
                                  ('bloch-evm-sp1-settlement-v3', 'verify-groth16')])
@@ -438,14 +438,36 @@ class SettlerV3Test(unittest.TestCase):
         fake = Fake(self.root, statement())
         fake.remote_fail = True
         with self.assertRaisesRegex(RuntimeError, 'prover prove failed'):
-            self.settler(fake, remote_prover=self.remote()).cycle()
+            self.settler(fake, remote_prover=self.remote(order=['remote'])).cycle()
         self.assertEqual(fake.sent, [])
         self.assertFalse(any((self.root / 'work').glob('*/settlement.proof*')))
         fake = Fake(self.root, statement())
         fake.remote_fail = True
-        self.assertTrue(self.settler(fake, remote_prover=self.remote(fallback_local=True)).cycle())
+        self.assertTrue(self.settler(fake, remote_prover=self.remote(order=['remote', 'local'])).cycle())
         provers = [c[1] for c in fake.calls if 'settlement-v3' in Path(c[0]).name]
         self.assertEqual(provers, ['execute', 'prove-groth16', 'verify-groth16'])
+
+    def test_local_first_uses_the_remote_host_only_when_the_local_proof_fails(self):
+        fake = Fake(self.root, statement())
+        self.assertTrue(self.settler(fake, remote_prover=self.remote()).cycle())
+        self.assertEqual(fake.remote_jobs, [])
+        fake = Fake(self.root, statement())
+        run = fake.run
+
+        def local_fails(argv, **kwargs):
+            if 'settlement-v3' in Path(argv[0]).name and argv[1] == 'prove-groth16':
+                fake.calls.append([str(a) for a in argv])
+                return types.SimpleNamespace(returncode=137, stdout='', stderr='')
+            return run(argv, **kwargs)
+        fake.run = local_fails
+        self.assertTrue(self.settler(fake, remote_prover=self.remote(), workdir=str(self.root / 'work2')).cycle())
+        self.assertEqual(len(fake.remote_jobs), 1)
+        work = next((self.root / 'work2').iterdir())
+        self.assertEqual([x['where'] for x in json.loads((work / 'proved.json').read_text())['steps']],
+                         ['local', 'remote', 'local'])
+        for order in ([], ['remote', 'remote'], ['gpu']):
+            with self.subTest(order), self.assertRaisesRegex(s.Halt, 'order'):
+                self.settler(Fake(self.root, statement()), remote_prover=self.remote(order=order))
 
     def test_remote_prover_needs_a_pinned_host_key(self):
         with self.assertRaisesRegex(s.Halt, 'remote_prover.key'):
