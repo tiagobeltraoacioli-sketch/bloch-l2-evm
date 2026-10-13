@@ -17,6 +17,37 @@ exact V2 L2 header hash, state root, chain ID 700771 and execution domain to tha
 anchor. Its result is deliberately named `AuthenticatedL1Context`, not a
 finalized L2 block.
 
+## Ethereum-rollup finality, no checkpoint signatures (2026-10-13)
+
+The L2 takes its finality from the L1's own consensus, as an Ethereum rollup
+does. There is no recurring signing ceremony anywhere in the V3 pipeline:
+
+| L2 tag | Meaning | Source |
+|---|---|---|
+| `latest` | produced by the settlement worker | local canonical database |
+| `safe` | its settlement is accepted at the head of the operator's own L1 node | `getl2settlement` of that node (trusted as the node is) |
+| `finalized` | its settlement is in an L1 block finalized by FFG | `bloch-l2-native-follower`: replay of every L1 block from the pinned genesis with real PQ signatures, transition, Groth16 and FFG |
+
+`bloch-l2-settled-rpc` publishes the three tags (neither `safe` nor
+`finalized` regresses; both are checked against the local canonical headers)
+and `bloch_finality` reports them with their L1 anchors. Withdrawals follow
+the same rule: the native consensus admits an `L2WithdrawClaim` only against
+a settlement whose accepting block is FFG-finalized (native
+`withdrawal::record_finalized`).
+
+Weak subjectivity is the L1 node's concern, once, at its first sync (like
+Ethereum checkpoint sync); the Foundation's WS checkpoints (every 256 epochs)
+are not inputs of the L2. The WS-authorized cursor and checkpoint store below
+(`native-escrow-pq`, `native-state-proof::checkpoint_reader`,
+`settlement-recovery::cursor`) are the legacy 0x0E/V2 recovery path: no
+binary of the V3 pipeline calls them. The readiness requirement that used to
+read `native-checkpoint-authenticated` is now
+`native-finality-replay-verified`.
+
+Verified on devnet4 (2026-10-13): the follower verified 44,090 L1 blocks from
+genesis; the RPC reported latest 186 / safe 185 / finalized 184; a 1 BLCH claim
+was refused `NotFinalized` until the L1 finalized its settlement, then paid.
+
 ## Required path to a standard finalized tag
 
 1. Pin native network/genesis identity and authenticate a non-regressing native

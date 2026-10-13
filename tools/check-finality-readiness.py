@@ -14,7 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS = [
-    "native-checkpoint-authenticated",
+    "native-finality-replay-verified",
     "raw-header-ancestry-verified",
     "settlement-proof-transport-qualified",
     "native-settlement-consensus-active",

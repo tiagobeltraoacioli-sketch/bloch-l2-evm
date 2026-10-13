@@ -40,7 +40,10 @@ The caller supplies an exact candidate commitment retained outside this database
 `None` permits only an empty table. During full recovery, the previous candidate's
 settlement must match its retained record, including records before the selected
 floor. Its checkpoint is independently reauthenticated at its recorded epoch.
-A currently fresh checkpoint is required to stage a new observation. The final
+A currently fresh checkpoint is required to stage a new observation. (Legacy
+0x0E/WS cursor only: the V3 pipeline takes L1 finality from FFG replay —
+`bloch-l2-native-follower` — and needs no checkpoint signatures; see
+`docs/L2-FINALITY.md`, "Ethereum-rollup finality".) The final
 MDBX transaction compares the prior cursor and canonical tip before replacing
 the singleton. Generations, heights and epochs cannot regress. Both evidence
 stores stay locked until the returned value is dropped or consumed.

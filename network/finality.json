@@ -4,7 +4,7 @@
   "chainId": 700771,
   "requirements": [
     {
-      "id": "native-checkpoint-authenticated",
+      "id": "native-finality-replay-verified",
       "satisfied": false,
       "evidence": []
     },

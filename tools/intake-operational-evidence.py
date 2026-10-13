@@ -20,7 +20,7 @@ NAMESPACE = "bloch-l2-operational-evidence-v1"
 MAX_INPUT_BYTES = 64 * 1024
 MAX_DETAILS_BYTES = 1024 * 1024
 REQUIREMENTS = {
-    "native-checkpoint-authenticated", "raw-header-ancestry-verified",
+    "native-finality-replay-verified", "raw-header-ancestry-verified",
     "settlement-proof-transport-qualified", "native-settlement-consensus-active",
     "l2-settlement-inclusion-verified", "settlement-cursor-durable",
     "reth-finalized-tag-verified", "chain-identity", "production-genesis",
