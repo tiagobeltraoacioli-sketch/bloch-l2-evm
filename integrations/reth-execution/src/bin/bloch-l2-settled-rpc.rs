@@ -3,12 +3,18 @@
 //!
 //! Serves the canonical database written by the settlement worker, opened
 //! read-only, and follows its head. `safe`/`finalized` are published only in
-//! memory (never written to the database) and only from the native follower's
-//! status: the highest L2 block whose settlement lies inside the natively
-//! FFG-finalized prefix that the follower verified by real replay, provided that
-//! every listed settlement matches the local canonical header at its height.
-//! Finality never regresses; any inconsistency freezes it and is logged.
-//! Transactions are refused: this node produces no blocks.
+//! memory (never written to the database), from the native follower's status
+//! (schema v2), with the levels of an Ethereum rollup:
+//! - `finalized`: the highest L2 block whose settlement lies inside the
+//!   natively FFG-finalized prefix that the follower verified by real replay
+//!   from the pinned genesis, provided every listed settlement matches the local
+//!   canonical header at its height;
+//! - `safe`: the settlement the operator's own native node holds at its
+//!   canonical head (accepted on L1, not yet finalized), when it matches the
+//!   local canonical header; never below `finalized`.
+//! No checkpoint signature is involved. Neither level regresses; any
+//! inconsistency freezes it and is logged. `bloch_finality` reports both with
+//! their L1 anchors. Transactions are refused: this node produces no blocks.
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
@@ -32,8 +38,10 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000]\n\
-Read-only development RPC. safe/finalized come only from verified native FFG finality of L2 settlements.\n";
+const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2]\n\
+Read-only development RPC. finalized comes only from verified native FFG finality of L2 settlements;\n\
+safe from the settlement the local native node accepted at its head. --rules selects the settlement\n\
+execution rules the canonical database was written under (default v3: ChainSpec::testnet_v3).\n";
 
 struct Options {
     data_dir: PathBuf,
@@ -42,6 +50,7 @@ struct Options {
     network: String,
     port: u16,
     poll: Duration,
+    v3: bool,
 }
 
 fn parse() -> Result<Options> {
@@ -54,7 +63,7 @@ fn parse() -> Result<Options> {
     let mut map = std::collections::BTreeMap::new();
     for pair in args.chunks(2) {
         ensure!(
-            ["--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms"].contains(&pair[0].as_str()),
+            ["--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules"].contains(&pair[0].as_str()),
             "unknown option {}\n{USAGE}",
             pair[0]
         );
@@ -70,6 +79,11 @@ fn parse() -> Result<Options> {
         network: network.to_lowercase(),
         port: map.get("--port").map_or(Ok(8546), |v| v.parse())?,
         poll: Duration::from_millis(map.get("--poll-ms").map_or(Ok(2000), |v| v.parse())?),
+        v3: match map.get("--rules").map_or("v3", String::as_str) {
+            "v3" => true,
+            "v2" => false,
+            other => bail!("--rules must be v3 or v2, not {other}"),
+        },
     })
 }
 
@@ -85,13 +99,20 @@ fn create_view(data: &Path, view: &Path) -> Result<()> {
     Ok(())
 }
 
+type Header = reth_primitives_traits::SealedHeader<bloch_reth_execution::BlochNodeHeader>;
+
+/// What the follower's status proves against the local canonical chain.
+struct Levels {
+    finalized: Option<Header>,
+    /// `None` when the status has no safe settlement or it is not local yet.
+    safe: Option<Header>,
+    status: serde_json::Value,
+}
+
 /// The highest L2 header proven final by the follower's verified status, if
-/// every listed settlement matches the local canonical chain.
-fn verified_final_header(
-    status_path: &Path,
-    network: &str,
-    provider: &BlochBlockchainProvider,
-) -> Result<Option<reth_primitives_traits::SealedHeader<bloch_reth_execution::BlochNodeHeader>>> {
+/// every listed settlement matches the local canonical chain, and the safe
+/// header the local native node reports.
+fn verified_levels(status_path: &Path, network: &str, provider: &BlochBlockchainProvider) -> Result<Option<Levels>> {
     let bytes = match std::fs::read(status_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -99,7 +120,7 @@ fn verified_final_header(
     };
     ensure!(bytes.len() <= 16 * 1_048_576, "finality status too large");
     let status: serde_json::Value = serde_json::from_slice(&bytes)?;
-    ensure!(status["schema"] == "bloch.l2.native-follower-status.v1", "unexpected status schema");
+    ensure!(status["schema"] == "bloch.l2.native-follower-status.v2", "unexpected status schema");
     ensure!(status["network"] == network, "status is for another native network");
     ensure!(status["production_finality"] == false, "status claims production finality");
     let settlements = status["finalized_settlements"].as_array().ok_or_else(|| eyre::eyre!("no settlement list"))?;
@@ -116,7 +137,42 @@ fn verified_final_header(
         ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
         best = Some(local);
     }
-    Ok(best)
+    let finalized_number = best.as_ref().map_or(0, |h: &Header| h.0.number);
+    let safe = match status.get("safe_settlement").filter(|v| !v.is_null()) {
+        None => None,
+        Some(entry) => {
+            let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad safe l2_number"))?;
+            let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
+            ensure!(number >= finalized_number, "safe settlement {number} is below finalized {finalized_number}");
+            match provider.sealed_header(number)? {
+                // Not produced locally yet: keep the previous safe level.
+                None => None,
+                Some(local) => {
+                    ensure!(local.hash() == hash, "safe L2 block {number} differs from the local canonical header");
+                    Some(local)
+                }
+            }
+        }
+    };
+    Ok(Some(Levels { finalized: best, safe, status }))
+}
+
+fn level_json(header: &Option<Header>) -> serde_json::Value {
+    header.as_ref().map_or(serde_json::Value::Null, |h| {
+        serde_json::json!({"number": format!("0x{:x}", h.0.number), "hash": h.hash()})
+    })
+}
+
+/// `bloch_finality`: the L2 levels and their L1 anchors, named like the native
+/// node's `getchaininfo` finality fields.
+fn finality_rpc(view: Arc<std::sync::RwLock<serde_json::Value>>) -> jsonrpsee::RpcModule<()> {
+    let mut module = jsonrpsee::RpcModule::new(());
+    module
+        .register_method("bloch_finality", move |_, _, _| {
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>(view.read().map(|v| v.clone()).unwrap_or_default())
+        })
+        .expect("the finality method name is unique in a new module");
+    module
 }
 
 #[tokio::main]
@@ -127,7 +183,10 @@ async fn main() -> Result<()> {
     )
     .build()?;
     create_view(&options.data_dir, &options.view_dir)?;
-    let spec = Arc::new(BlochChainSpec::new(ChainSpec::testnet(), B256::repeat_byte(0xd3), 0)?);
+    // The rules the settlement worker executed under (bloch-l2-produce-dev
+    // writes V3 blocks with ChainSpec::testnet_v3).
+    let rules = || if options.v3 { ChainSpec::testnet_v3() } else { ChainSpec::testnet() };
+    let spec = Arc::new(BlochChainSpec::new(rules(), B256::repeat_byte(0xd3), 0)?);
     let factory: BlochProviderFactory = ProviderFactory::new(
         Arc::new(open_db_read_only(options.view_dir.join("db"), DatabaseArguments::default())?),
         spec.clone(),
@@ -137,7 +196,7 @@ async fn main() -> Result<()> {
     )?
     .with_read_only_sync(true);
     let provider: BlochBlockchainProvider = BlockchainProvider::new(factory.clone())?;
-    let kernel = ChainSpec::testnet();
+    let kernel = rules();
     let config = BlochEvmConfig::new(&kernel, spec.domain());
     let api = build_eth_api(
         RpcNodeCoreAdapter::new(
@@ -153,6 +212,8 @@ async fn main() -> Result<()> {
     module.merge(filter.into_rpc())?;
     module.merge(chain_identity_rpc(spec.clone()))?;
     module.merge(chain_status_rpc(spec.clone(), provider.clone()))?;
+    let finality = Arc::new(std::sync::RwLock::new(serde_json::Value::Null));
+    module.merge(finality_rpc(finality.clone()))?;
     let server = start_http_rpc(module, options.port).await?;
     println!(
         "SETTLED DEV RPC (read-only) at {}; finality only from verified native FFG settlement",
@@ -160,7 +221,8 @@ async fn main() -> Result<()> {
     );
     let state = provider.canonical_in_memory_state();
     let mut head_number = u64::MAX;
-    let mut finalized_number = 0u64;
+    let mut finalized: Option<Header> = None;
+    let mut safe: Option<Header> = None;
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     let mut interval = tokio::time::interval(options.poll);
     let result: Result<()> = async {
@@ -175,17 +237,53 @@ async fn main() -> Result<()> {
                         head_number = number;
                         println!("head block={} hash={}", number, header.hash());
                     }
-                    match verified_final_header(&options.status, &options.network, &provider) {
-                        Ok(Some(header)) if header.0.number > finalized_number => {
-                            finalized_number = header.0.number;
-                            state.set_safe(header.clone());
-                            state.set_finalized(header.clone());
-                            println!("finalized block={} hash={} (verified native FFG settlement)", finalized_number, header.hash());
+                    let number_of = |h: &Option<Header>| h.as_ref().map_or(0, |h| h.0.number);
+                    match verified_levels(&options.status, &options.network, &provider) {
+                        Ok(Some(levels)) => {
+                            match levels.finalized {
+                                Some(header) if header.0.number > number_of(&finalized) => {
+                                    state.set_finalized(header.clone());
+                                    println!("finalized block={} hash={} (verified native FFG settlement)", header.0.number, header.hash());
+                                    finalized = Some(header);
+                                }
+                                Some(header) if header.0.number < number_of(&finalized) => {
+                                    println!("finality status regressed to {}; keeping {}", header.0.number, number_of(&finalized));
+                                }
+                                _ => {}
+                            }
+                            // safe follows the local node's accepted head, and is never below finalized.
+                            let candidate = match levels.safe {
+                                Some(h) if h.0.number >= number_of(&finalized) => Some(h),
+                                _ => finalized.clone(),
+                            };
+                            match candidate {
+                                Some(header) if header.0.number > number_of(&safe) => {
+                                    state.set_safe(header.clone());
+                                    println!("safe block={} hash={} (settlement accepted on the native head)", header.0.number, header.hash());
+                                    safe = Some(header);
+                                }
+                                Some(header) if header.0.number < number_of(&safe) => {
+                                    println!("safe settlement regressed to {}; keeping {}", header.0.number, number_of(&safe));
+                                }
+                                _ => {}
+                            }
+                            let s = &levels.status;
+                            let latest = factory.sealed_header(head_number)?;
+                            *finality.write().expect("finality lock") = serde_json::json!({
+                                "latest": level_json(&latest),
+                                "safe": level_json(&safe),
+                                "finalized": level_json(&finalized),
+                                "finalized_height": number_of(&finalized),
+                                "l1": {
+                                    "finalized": {"epoch": s["native_finalized_epoch"], "root": s["native_finalized_block"],
+                                                  "slot": s["native_finalized_slot"]},
+                                    "verified_tip": s["verified_tip"], "verified_blocks": s["verified_blocks"],
+                                    "safe_settlement": s["safe_settlement"],
+                                },
+                                "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
+                            });
                         }
-                        Ok(Some(header)) if header.0.number < finalized_number => {
-                            println!("finality status regressed to {}; keeping {}", header.0.number, finalized_number);
-                        }
-                        Ok(_) => {}
+                        Ok(None) => {}
                         Err(error) => println!("finality not advanced: {error}"),
                     }
                 }

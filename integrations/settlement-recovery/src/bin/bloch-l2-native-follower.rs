@@ -9,6 +9,13 @@
 //! retained only after it verified. The status file lists every L2 settlement
 //! inside the verified finalized prefix; it is evidence for the L2 RPC finality
 //! publisher, not a consensus or production finality claim.
+//!
+//! Ethereum-rollup levels (status schema v2): `finalized` = settled in an L1
+//! block this process verified as FFG-finalized; `safe` = the settlement the
+//! operator's own L1 node reports as accepted at its canonical head
+//! (`getl2settlement`), like an OP node reading its L1 client. No checkpoint
+//! signature is involved: the only trust anchors are the pinned genesis and,
+//! for `safe` alone, the local node. Settlement statements V2 and V3 decode.
 #![cfg(unix)]
 
 use alloy_primitives::{hex, B256};
@@ -173,7 +180,14 @@ fn run(o: &Options) -> Result<(), String> {
     loop {
         match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index) {
             Ok(added) => {
-                if let Some(status) = status(&verifier, &policy)? {
+                let safe = match rpc(o.rpc_port, "getl2settlement", json!([])) {
+                    Ok(view) => safe_settlement(&view),
+                    Err(e) => {
+                        eprintln!("native follower: transient: {e}");
+                        None
+                    }
+                };
+                if let Some(status) = status(&verifier, &policy, safe)? {
                     write_atomic(&o.status, serde_json::to_string_pretty(&status).unwrap().as_bytes())?;
                 }
                 if added > 0 {
@@ -244,9 +258,36 @@ fn follow_once(
     Ok(count)
 }
 
+/// The L2 fields of a settlement statement, V2 or V3 (V3 adds the outbox).
+fn statement_json(statement: &[u8]) -> Result<Value, String> {
+    use bloch_l2_evm::proof_statement::{SettlementStatementV2, SettlementStatementV3, SETTLEMENT_STATEMENT_V3_TAG};
+    let (base, withdrawals) = if statement.starts_with(SETTLEMENT_STATEMENT_V3_TAG) {
+        let v3 = SettlementStatementV3::decode(statement).map_err(|_| "statement V3 decode")?;
+        (v3.base, json!({"root": hex::encode(v3.withdrawal_root), "count": v3.withdrawal_count}))
+    } else {
+        (SettlementStatementV2::decode(statement).map_err(|_| "statement decode")?, Value::Null)
+    };
+    Ok(json!({
+        "l2_number": base.l2_number, "l2_hash": hex::encode(base.l2_header_hash),
+        "l2_state_root": hex::encode(base.l2_state_root), "withdrawals": withdrawals,
+    }))
+}
+
+/// `safe`: the settlement the local node holds at its canonical head. Trusted
+/// as the operator's own node is; never used for `finalized`.
+fn safe_settlement(view: &Value) -> Option<Value> {
+    let accepted = view.get("accepted")?;
+    let statement = hex::decode(accepted.get("statement")?.as_str()?).ok()?;
+    let mut entry = statement_json(&statement).ok()?;
+    entry["commitment"] = accepted.get("commitment")?.clone();
+    entry["source"] = json!("local-native-node-head");
+    Some(entry)
+}
+
 fn status(
     verifier: &IncrementalNativeVerifierV1,
     policy: &bloch_l2_evm::native_settlement::SettlementPolicyV1,
+    safe: Option<Value>,
 ) -> Result<Option<Value>, String> {
     let verified = match verifier.snapshot() {
         Ok(v) => v,
@@ -257,15 +298,18 @@ fn status(
     let mut settlements = Vec::new();
     for (slot, block, bytes) in verified.finalized_settlements() {
         let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes).ok_or("settlement decode")?;
-        let st = bloch_l2_evm::proof_statement::SettlementStatementV2::decode(&tx.statement).map_err(|_| "statement decode")?;
-        settlements.push(json!({
-            "native_slot": slot, "native_block": hex::encode(block), "commitment": hex::encode(tx.commitment()),
-            "l2_number": st.l2_number, "l2_hash": hex::encode(st.l2_header_hash), "l2_state_root": hex::encode(st.l2_state_root),
-        }));
+        let mut entry = statement_json(&tx.statement)?;
+        entry["native_slot"] = json!(slot);
+        entry["native_block"] = json!(hex::encode(block));
+        entry["commitment"] = json!(hex::encode(tx.commitment()));
+        settlements.push(entry);
     }
+    // safe is never below finalized.
+    let finalized_number = settlements.last().and_then(|e| e["l2_number"].as_u64()).unwrap_or(0);
+    let safe = safe.filter(|e| e["l2_number"].as_u64().is_some_and(|n| n >= finalized_number));
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     Ok(Some(json!({
-        "schema": "bloch.l2.native-follower-status.v1",
+        "schema": "bloch.l2.native-follower-status.v2",
         "written_at_unix": now,
         "network": hex::encode(policy.network),
         "settlement_policy": hex::encode(report.settlement_policy),
@@ -276,6 +320,7 @@ fn status(
         "native_finalized_slot": report.finalized.slot,
         "native_finalized_epoch": report.finalized_epoch,
         "finalized_settlements": settlements,
+        "safe_settlement": safe,
         "production_finality": false,
     })))
 }

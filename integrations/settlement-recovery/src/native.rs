@@ -173,8 +173,8 @@ fn native_policy(p: SettlementPolicyV1) -> Policy {
         chain_id: p.chain_id,
         initial_l2_parent: p.initial_l2_parent_hash.0,
         initial_l2_state: p.initial_l2_state_root.0,
-        // The V1 trust carries no M6 withdrawal attestor set: a genesis that
-        // pins one is refused here (like any V3 policy, see check_trust).
+        // The V1 trust carries no M6 withdrawal attestor set; check_trust
+        // takes it from the pinned genesis.
         attestor_set: [0; 32],
     }
 }
@@ -284,9 +284,12 @@ fn check_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<
         || genesis.state_root() != trust.state_root.0
         || state.height() != 0
         || state.head().is_some()
-        || state.policy() != &native_policy(p)
+        // The M6 attestor set is not part of the V1 policy: it is taken from
+        // the pinned genesis itself (whose state root is checked above).
+        || state.policy() != &(Policy { attestor_set: state.policy().attestor_set, ..native_policy(p) })
         || p.first_l2_number != 1
-        || p.proof_policy.0 != bloch_l2_proof::policy_commitment()
+        || (p.proof_policy.0 != bloch_l2_proof::policy_commitment()
+            && p.proof_policy.0 != bloch_l2_proof::policy_commitment_v3())
     {
         return Err(E::Trust);
     }
