@@ -177,8 +177,9 @@ fn run(o: &Options) -> Result<(), String> {
     let mut index = OpenOptions::new().create(true).append(true).open(&index_path).map_err(|e| e.to_string())?;
 
     // 2. Follow finalized native blocks.
+    let mut walk = None;
     loop {
-        match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index) {
+        match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index, &mut walk) {
             Ok(added) => {
                 let safe = match rpc(o.rpc_port, "getl2settlement", json!([])) {
                     Ok(view) => safe_settlement(&view),
@@ -206,53 +207,69 @@ enum Follow {
     Halt(String),
 }
 
+/// A walk back from a finalized hint to the verified head that spans several
+/// rounds (more than `--max-fetch` blocks). Fetched blocks wait on disk as
+/// `<id>.pending` (unverified, never listed in the index); only their ids stay
+/// in memory, newest first.
+struct Walk {
+    ids: Vec<B256>,
+    cursor: B256,
+}
+
 fn follow_once(
     o: &Options,
     verifier: &mut IncrementalNativeVerifierV1,
     limits: NativeBlockLimitsV1,
     blocks_dir: &Path,
     index: &mut File,
+    walk: &mut Option<Walk>,
 ) -> Result<usize, Follow> {
-    let info = rpc(o.rpc_port, "getchaininfo", json!([])).map_err(Follow::Transient)?;
-    let hint: B256 = info["finalized"]["root"]
-        .as_str()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| Follow::Transient("getchaininfo has no finalized root".into()))?;
     let head = verifier.head();
-    if hint == head {
-        return Ok(0);
-    }
-    // Walk back from the hint to our verified head; the finalized prefix cannot reorganize.
-    let mut pending = Vec::new();
-    let mut cursor = hint;
-    while cursor != head {
-        if pending.len() >= o.max_fetch {
-            break; // too far behind: verify the oldest part first, the rest next round
+    if walk.is_none() {
+        let info = rpc(o.rpc_port, "getchaininfo", json!([])).map_err(Follow::Transient)?;
+        let hint: B256 = info["finalized"]["root"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| Follow::Transient("getchaininfo has no finalized root".into()))?;
+        if hint == head {
+            return Ok(0);
         }
-        let raw = rpc(o.rpc_port, "getblockraw", json!([hex::encode(cursor)])).map_err(Follow::Transient)?;
+        *walk = Some(Walk { ids: Vec::new(), cursor: hint });
+    }
+    let state = walk.as_mut().expect("walk set above");
+    // Walk back from the hint to our verified head; the finalized prefix cannot reorganize.
+    let mut fetched = 0;
+    while state.cursor != head {
+        if fetched >= o.max_fetch {
+            eprintln!("native follower: walking back to the verified head, {} blocks fetched so far", state.ids.len());
+            return Ok(0);
+        }
+        let raw = rpc(o.rpc_port, "getblockraw", json!([hex::encode(state.cursor)])).map_err(Follow::Transient)?;
         let bytes = hex::decode(raw.as_str().unwrap_or_default()).map_err(|_| Follow::Transient("bad raw hex".into()))?;
         if bytes.len() < 36 || bytes.len() > 4 * 1_048_576 {
             return Err(Follow::Halt("native block outside size bounds".into()));
         }
         let parent = B256::from_slice(&bytes[4..36]);
-        pending.push((cursor, bytes));
-        if parent.is_zero() || pending.len() > verifier.applied() + o.max_fetch + 1 {
+        let pending = blocks_dir.join(format!("{}.pending", hex::encode(state.cursor)));
+        fs::write(&pending, &bytes).map_err(|e| Follow::Halt(e.to_string()))?;
+        state.ids.push(state.cursor);
+        fetched += 1;
+        if parent.is_zero() || verifier.applied() + state.ids.len() > o.max_blocks {
             return Err(Follow::Halt("node's finalized chain does not descend from the verified head".into()));
         }
-        cursor = parent;
+        state.cursor = parent;
     }
-    if cursor != head {
-        // Partial walk: keep only the segment that reaches the verified head next time.
-        return Err(Follow::Transient(format!("more than {} blocks behind; fetching in rounds", o.max_fetch)));
-    }
-    pending.reverse();
-    let count = pending.len();
-    for (id, bytes) in pending {
+    let ids = std::mem::take(&mut state.ids);
+    *walk = None;
+    let count = ids.len();
+    for id in ids.into_iter().rev() {
+        let pending = blocks_dir.join(format!("{}.pending", hex::encode(id)));
+        let bytes = fs::read(&pending).map_err(|e| Follow::Halt(e.to_string()))?;
         let block = decode_block(&bytes, &id).map_err(Follow::Halt)?;
         verifier.apply(&block, limits).map_err(|e| Follow::Halt(format!("native block {}: {e}", hex::encode(id))))?;
         let path = blocks_dir.join(format!("{}.bin", hex::encode(id)));
-        let mut file = File::create(&path).map_err(|e| Follow::Halt(e.to_string()))?;
-        file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| Follow::Halt(e.to_string()))?;
+        File::open(&pending).and_then(|f| f.sync_all()).map_err(|e| Follow::Halt(e.to_string()))?;
+        fs::rename(&pending, &path).map_err(|e| Follow::Halt(e.to_string()))?;
         writeln!(index, "{}", hex::encode(id)).and_then(|_| index.sync_data()).map_err(|e| Follow::Halt(e.to_string()))?;
     }
     Ok(count)
