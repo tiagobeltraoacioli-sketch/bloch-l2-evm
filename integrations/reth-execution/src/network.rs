@@ -76,7 +76,11 @@ impl L2Network {
                 if domain.is_some() || genesis_time.is_some() {
                     return Err("--domain/--genesis-time apply only to --rules mainnet".into());
                 }
-                Ok(if rules == "v3" { Self::devnet_v3() } else { Self::devnet_v2() })
+                Ok(if rules == "v3" {
+                    Self::devnet_v3()
+                } else {
+                    Self::devnet_v2()
+                })
             }
             "mainnet" => {
                 let domain = domain.ok_or("--rules mainnet requires --domain HEX")?;
@@ -135,7 +139,10 @@ mod tests {
         assert_eq!(spec.chain().id(), 700_770);
         assert_eq!(spec.genesis_header().0.timestamp, 1_800_000_000);
         assert_eq!(spec.genesis_header().0.chain_id, 700_770);
-        assert_ne!(spec.genesis_hash(), L2Network::devnet_v3().chain_spec().unwrap().genesis_hash());
+        assert_ne!(
+            spec.genesis_hash(),
+            L2Network::devnet_v3().chain_spec().unwrap().genesis_hash()
+        );
         assert_eq!(
             L2Network::parse("mainnet", Some(&format!("0x{DOMAIN}")), Some("1800000000")).unwrap(),
             mainnet
@@ -146,11 +153,20 @@ mod tests {
             (Some(DOMAIN), Some("0")),
             (Some(DOMAIN), Some("228")),
             (Some(DOMAIN), Some("x")),
-            (Some("d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"), Some("1800000000")),
-            (Some("0000000000000000000000000000000000000000000000000000000000000000"), Some("1800000000")),
+            (
+                Some("d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"),
+                Some("1800000000"),
+            ),
+            (
+                Some("0000000000000000000000000000000000000000000000000000000000000000"),
+                Some("1800000000"),
+            ),
             (Some("70"), Some("1800000000")),
         ] {
-            assert!(L2Network::parse("mainnet", domain, time).is_err(), "{domain:?} {time:?}");
+            assert!(
+                L2Network::parse("mainnet", domain, time).is_err(),
+                "{domain:?} {time:?}"
+            );
         }
     }
 }

@@ -33,7 +33,7 @@ use bloch_settlement_recovery::reconstruct::{derive_settled_blocks, NativeBlockT
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
     prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec, BlochNextBlockEnvCtx,
-    BlochProviderFactory, BlochTables, CanonicalCoordinator,
+    BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
 };
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
 use reth_provider::{
@@ -53,7 +53,7 @@ use std::{
 };
 
 const USAGE: &str = "\
-usage:
+usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time SECS]):
   bloch-l2-produce-dev init   --target DIR
   bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
@@ -105,8 +105,58 @@ txpool spool entry) from that key: a plain transfer, or with --withdraw-to an
 outbox initiateWithdrawal(l1Recipient) carrying --sats (the L1 recipient is
 the native owner script hash, SHA3-256 of the hybrid public key). The key
 FILE is a development hot key: never use it for value.
+--rules mainnet selects ChainSpec::mainnet (chain id 700770) with the ceremony's
+--domain and wall-clock --genesis-time, and requires extend/reconstruct to use a
+--timestamp-rule from L2 block 1 (wall-clock time from genesis). The default
+(v3) keeps the devnet identity: ChainSpec::testnet_v3, domain d3..d3, genesis 0.
 Development only: no settlement or finality is implied.
 ";
+
+/// Network options accepted by every command.
+const NETWORK_OPTIONS: [&str; 3] = ["--rules", "--domain", "--genesis-time"];
+
+static NETWORK: std::sync::OnceLock<L2Network> = std::sync::OnceLock::new();
+
+fn network() -> &'static L2Network {
+    NETWORK.get_or_init(L2Network::devnet_v3)
+}
+
+/// Split the network options off the command's options and select the network.
+fn select_network(rest: &[String]) -> Result<Vec<String>, String> {
+    let mut kept = Vec::new();
+    let mut found = std::collections::BTreeMap::new();
+    for pair in rest.chunks(2) {
+        if pair.len() == 2 && NETWORK_OPTIONS.contains(&pair[0].as_str()) {
+            if found.insert(pair[0].clone(), pair[1].clone()).is_some() {
+                return Err(format!("{} repeated", pair[0]));
+            }
+        } else {
+            kept.extend_from_slice(pair);
+        }
+    }
+    let rules = found.get("--rules").map_or("v3", String::as_str);
+    if rules == "v2" {
+        return Err("the producer writes settlement V3 blocks: --rules v3 or mainnet".into());
+    }
+    let selected = L2Network::parse(
+        rules,
+        found.get("--domain").map(String::as_str),
+        found.get("--genesis-time").map(String::as_str),
+    )?;
+    if NETWORK.set(selected.clone()).is_err() && network() != &selected {
+        return Err("network selected twice".into());
+    }
+    Ok(kept)
+}
+
+/// On mainnet every block after genesis follows the wall-clock rule.
+fn checked_rule(rule: Option<TimestampRule>) -> Result<Option<TimestampRule>, String> {
+    if network().mainnet {
+        rule.as_ref().ok_or("--rules mainnet requires --timestamp-rule 1:L1_GENESIS_UNIX_SECS:L1_SLOT_MILLIS")?
+            .require_from_genesis()?;
+    }
+    Ok(rule)
+}
 
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -168,10 +218,11 @@ fn hash(value: &str, name: &str) -> Result<B256, String> {
     Ok(parsed)
 }
 
-/// The settlement V3 execution rules: testnet parameters plus the withdrawal
-/// outbox (the `settlement_v3` guest compiles the same `ChainSpec`).
+/// The selected execution rules: by default the settlement V3 rules (testnet
+/// parameters plus the withdrawal outbox; the `settlement_v3` guest compiles
+/// the same `ChainSpec`), or `ChainSpec::mainnet` with `--rules mainnet`.
 fn rules() -> ChainSpec {
-    ChainSpec::testnet_v3()
+    network().rules.clone()
 }
 
 fn outbox() -> Address {
@@ -179,9 +230,7 @@ fn outbox() -> Address {
 }
 
 fn spec() -> Result<Arc<BlochChainSpec>, String> {
-    BlochChainSpec::new(rules(), B256::repeat_byte(0xd3), 0)
-        .map(Arc::new)
-        .map_err(|e| e.to_string())
+    network().chain_spec().map(Arc::new).map_err(|e| e.to_string())
 }
 
 fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFactory, String> {
@@ -196,18 +245,36 @@ fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFac
         open_db(path.join("db"), DatabaseArguments::default())
     }
     .map_err(|e| e.to_string())?;
-    ProviderFactory::new(
+    let factory = ProviderFactory::new(
         Arc::new(db),
         spec()?,
         StaticFileProvider::read_write(path.join("static")).map_err(|e| e.to_string())?,
         RocksDBBuilder::new(path.join("rocks")).with_default_tables().build().map_err(|e| e.to_string())?,
         runtime.clone(),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if !create {
+        // A database opens only under the network (rules, domain, genesis) it was created for.
+        let sealed = <BlochProviderFactory as HeaderProvider>::sealed_header(&factory, 0).map_err(|e| e.to_string())?.ok_or("target has no genesis header")?;
+        let genesis: &bloch_reth_execution::BlochNodeHeader = sealed.header();
+        let selected = network();
+        if (genesis.0.chain_id, genesis.0.domain, genesis.0.timestamp)
+            != (selected.rules.chain_id, selected.domain, selected.genesis_timestamp)
+        {
+            return Err(format!(
+                "target was created for chain id {} domain {} genesis time {}, not the selected network (--rules)",
+                genesis.0.chain_id,
+                hex::encode(genesis.0.domain),
+                genesis.0.timestamp
+            ));
+        }
+    }
+    Ok(factory)
 }
 
 fn run(args: &[String]) -> Result<String, String> {
     let (command, rest) = args.split_first().ok_or("missing command")?;
+    let rest = &select_network(rest)?[..];
     match command.as_str() {
         "address" => {
             only(rest, &["--key"])?;
@@ -255,7 +322,7 @@ fn run(args: &[String]) -> Result<String, String> {
                     hex::encode(parent)
                 ));
             }
-            let rule = timestamp_rule(rest)?;
+            let rule = checked_rule(timestamp_rule(rest)?)?;
             let anchor_slot = match option(rest, "--anchor-slot") {
                 Ok(value) => Some(value.parse::<u64>().map_err(|_| "--anchor-slot must be decimal")?),
                 Err(_) => None,
@@ -366,7 +433,7 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "reconstruct" => {
             only(rest, &["--target", "--l1", "--l1-follower", "--chain-id", "--timestamp-rule"])?;
-            let rule = timestamp_rule(rest)?;
+            let rule = checked_rule(timestamp_rule(rest)?)?;
             let blocks = match (option(rest, "--l1"), option(rest, "--l1-follower")) {
                 (Ok(file), Err(_)) => read_l1_fixture(Path::new(file))?,
                 (Err(_), Ok(dir)) => read_l1_follower(Path::new(dir))?,

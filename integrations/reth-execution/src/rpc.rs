@@ -67,7 +67,11 @@ impl LatestDerivedPending {
         block_overrides: Option<&BlockOverrides>,
     ) -> BlochNextBlockEnvCtx {
         let successor = parent.0.timestamp.saturating_add(1);
-        let timestamp = if parent.0.timestamp >= WALL_CLOCK_FLOOR_SECS { successor.max(now) } else { successor };
+        let timestamp = if parent.0.timestamp >= WALL_CLOCK_FLOOR_SECS {
+            successor.max(now)
+        } else {
+            successor
+        };
         let overrides = block_overrides.cloned().unwrap_or_default();
         BlochNextBlockEnvCtx {
             timestamp: overrides.time.unwrap_or(timestamp),
@@ -144,7 +148,11 @@ pub fn serve_pending_blocks_as_latest(
         module.register_async_method(method, move |params, _, _| {
             let original = original.clone();
             async move {
-                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() {
+                    vec![]
+                } else {
+                    params.parse()?
+                };
                 original
                     .call::<_, serde_json::Value>(method, pending_param_as_latest(values))
                     .await
@@ -297,9 +305,8 @@ mod tests {
     #[test]
     fn only_a_pending_first_parameter_is_rewritten() {
         use serde_json::json;
-        let rewrite = |v: serde_json::Value| {
-            serde_json::Value::Array(pending_param_as_latest(v.as_array().unwrap().clone()))
-        };
+        let rewrite =
+            |v: serde_json::Value| serde_json::Value::Array(pending_param_as_latest(v.as_array().unwrap().clone()));
         assert_eq!(rewrite(json!(["pending", true])), json!(["latest", true]));
         assert_eq!(rewrite(json!(["latest", false])), json!(["latest", false]));
         assert_eq!(rewrite(json!(["0x10", false])), json!(["0x10", false]));
@@ -331,13 +338,22 @@ mod tests {
             })
             .unwrap();
         serve_pending_blocks_as_latest(&mut module).unwrap();
-        let block: Value = module.call("eth_getBlockByNumber", vec![json!("pending"), json!(true)]).await.unwrap();
+        let block: Value = module
+            .call("eth_getBlockByNumber", vec![json!("pending"), json!(true)])
+            .await
+            .unwrap();
         assert_eq!(block, json!({"tag": "latest", "full": true}));
-        let block: Value = module.call("eth_getBlockByNumber", vec![json!("0x5"), json!(false)]).await.unwrap();
+        let block: Value = module
+            .call("eth_getBlockByNumber", vec![json!("0x5"), json!(false)])
+            .await
+            .unwrap();
         assert_eq!(block, json!({"tag": "0x5", "full": false}));
         // Methods outside the block-shaped list keep their own pending handling.
         let balance: Value = module
-            .call("eth_getBalance", vec![json!("0x0000000000000000000000000000000000000000"), json!("pending")])
+            .call(
+                "eth_getBalance",
+                vec![json!("0x0000000000000000000000000000000000000000"), json!("pending")],
+            )
             .await
             .unwrap();
         assert_eq!(balance, json!("pending"));

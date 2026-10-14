@@ -61,8 +61,14 @@ fn chain_ids_do_not_cross_between_mainnet_and_devnets() {
     let for_devnet = sign(TESTNET_CHAIN_ID, 0, to, Bytes::new(), 21_000);
     assert!(decode_signed_transaction(&mainnet, &for_mainnet).is_ok());
     assert!(decode_signed_transaction(&devnet, &for_devnet).is_ok());
-    assert!(decode_signed_transaction(&mainnet, &for_devnet).is_err(), "700771 replayed on mainnet");
-    assert!(decode_signed_transaction(&devnet, &for_mainnet).is_err(), "700770 replayed on a devnet");
+    assert!(
+        decode_signed_transaction(&mainnet, &for_devnet).is_err(),
+        "700771 replayed on mainnet"
+    );
+    assert!(
+        decode_signed_transaction(&devnet, &for_mainnet).is_err(),
+        "700770 replayed on a devnet"
+    );
 }
 
 /// Runtime: `n = calldataload(0); sstore(n, blockhash(n))`.
@@ -117,8 +123,14 @@ fn blockhash_serves_exactly_the_last_256_blocks_and_a_router_sized_create_fits()
 
     // Blocks 2..=299 are empty.
     while parent.number < 299 {
-        let result =
-            execute_node_block(&spec, domain(), &mut state, &next(&spec, &parent), &NodeBodyV2::default()).unwrap();
+        let result = execute_node_block(
+            &spec,
+            domain(),
+            &mut state,
+            &next(&spec, &parent),
+            &NodeBodyV2::default(),
+        )
+        .unwrap();
         parent = result.header;
         hashes.push(parent.hash());
     }

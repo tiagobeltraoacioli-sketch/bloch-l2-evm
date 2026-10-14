@@ -464,7 +464,10 @@ mod tests {
         assert_eq!(MAINNET_CHAIN_ID, 700_770);
         // Only the chain id differs from the devnet4 settlement V3 rules.
         assert_eq!(
-            ChainSpec { chain_id: TESTNET_CHAIN_ID, ..mainnet.clone() },
+            ChainSpec {
+                chain_id: TESTNET_CHAIN_ID,
+                ..mainnet.clone()
+            },
             ChainSpec::testnet_v3()
         );
         assert!(mainnet.withdrawal_outbox.is_some());

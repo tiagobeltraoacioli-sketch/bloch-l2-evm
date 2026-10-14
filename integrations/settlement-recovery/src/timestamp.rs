@@ -37,6 +37,25 @@ impl TimestampRule {
         Ok(rule)
     }
 
+    /// The mainnet rule: wall-clock L2 time from the first block after
+    /// genesis (the genesis itself is stamped with wall-clock seconds by the
+    /// network profile), so no block of the chain is ever stamped `parent + 1`
+    /// by a development rule.
+    pub fn from_genesis(l1_genesis_time: u64, l1_slot_millis: u64) -> Result<Self, String> {
+        let rule = Self { from_l2_number: 1, l1_genesis_time, l1_slot_millis };
+        rule.require_from_genesis()?;
+        Ok(rule)
+    }
+
+    /// Refuse a rule that leaves any block after genesis on `parent + 1`
+    /// (devnet4 switched at block 228; mainnet must not).
+    pub fn require_from_genesis(&self) -> Result<(), String> {
+        if self.from_l2_number != 1 || self.l1_slot_millis == 0 {
+            return Err("the mainnet timestamp rule must apply from L2 block 1 (--timestamp-rule 1:GENESIS:SLOT_MS)".into());
+        }
+        Ok(())
+    }
+
     /// Start time (unix seconds) of native slot `slot`.
     pub fn l1_time(&self, slot: u64) -> Option<u64> {
         self.l1_genesis_time.checked_add(slot.checked_mul(self.l1_slot_millis)? / 1000)
@@ -86,6 +105,18 @@ mod tests {
         assert_eq!(next_timestamp(Some(&RULE), 10, 9, None), None);
         assert_eq!(next_timestamp(None, 1, u64::MAX, None), None);
         assert_eq!(next_timestamp(Some(&RULE), 10, 9, Some(u64::MAX)), None);
+    }
+
+    #[test]
+    fn mainnet_rule_starts_at_block_one() {
+        let rule = TimestampRule::from_genesis(1_000, 2_000).unwrap();
+        assert_eq!(rule.from_l2_number, 1);
+        assert_eq!(TimestampRule::parse("1:1000:2000").unwrap(), rule);
+        assert!(TimestampRule::from_genesis(1_000, 0).is_err());
+        assert!(RULE.require_from_genesis().is_err(), "a devnet-style switch at block 10");
+        // Block 1 already follows the anchored slot, even on a wall-clock genesis.
+        assert_eq!(next_timestamp(Some(&rule), 1, 1_050, Some(30)), Some(1_060));
+        assert_eq!(next_timestamp(Some(&rule), 1, 1_050, None), None);
     }
 
     #[test]
