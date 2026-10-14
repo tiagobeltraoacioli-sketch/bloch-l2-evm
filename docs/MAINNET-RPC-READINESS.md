@@ -209,8 +209,15 @@ dead code for them. To confirm the devnet vkeys are bit-identical, rebuild
 the devnet guest ELFs from this branch and compare their vkeys with the
 pinned ones (needs the SP1 toolchain).
 
-Other mainnet inputs still undecided (ceremony / M9): the V2 domain, the L2
-genesis timestamp, the native activation epoch and attestor set, a
+**Update (same day):** the program and genesis are now derived and pinned,
+see [MAINNET-PROGRAM.md](MAINNET-PROGRAM.md): guest `settlement_v3_mainnet`
+(ELF `203114bf…`, BN254 vkey `007139f7…`), domain `MAINNET_DOMAIN`
+(`1c3f8772…`, derived from the chain id and the Genesis-4 network), genesis
+timestamp 1786656679 (Genesis-4 slot 0), L2 genesis `632e45ae…` / state
+`2ad7e807…`, no premine; the devnet ELFs and vkeys were rebuilt from this
+branch and are bit-identical to the pinned ones.
+
+Other mainnet inputs still undecided (ceremony / M9): the native activation epoch and attestor set, a
 `network/eip155-700770.json` registration entry, and the prevrandao source
 (the development producer uses the constant `0x07…07`,
 `bloch-l2-produce-dev.rs:267`; contracts must not use `prevrandao` as

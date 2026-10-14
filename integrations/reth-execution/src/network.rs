@@ -129,6 +129,48 @@ mod tests {
         assert_eq!(v3.chain_spec().unwrap().genesis_hash(), old.genesis_hash());
     }
 
+    /// The pinned mainnet L2 genesis (2026-10-14): `MAINNET_DOMAIN`, the
+    /// Genesis-4 slot-0 time, no premine. These two hashes are the native
+    /// activation's `initial_l2_parent` / `initial_l2_state`.
+    #[test]
+    fn pinned_mainnet_genesis_has_no_premine() {
+        use bloch_l2_evm::chainspec::{BEACON_ROOTS_ADDRESS, BLOCK_INFO, MAINNET_DOMAIN, MAINNET_GENESIS_TIMESTAMP};
+        let spec = L2Network::mainnet(MAINNET_DOMAIN, MAINNET_GENESIS_TIMESTAMP)
+            .unwrap()
+            .chain_spec()
+            .unwrap();
+        assert_eq!(
+            format!("{:x}", spec.genesis_hash()),
+            "632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468"
+        );
+        assert_eq!(
+            format!("{:x}", spec.genesis_header().0.state_root),
+            "2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d"
+        );
+        assert_eq!(spec.genesis_header().0.timestamp, 1_786_656_679);
+        assert_eq!(spec.genesis().gas_limit, 30_000_000);
+        assert_eq!(spec.genesis().base_fee_per_gas, Some(1_000_000_000));
+        // The whole allocation: the EIP-4788 beacon-roots predeploy (code) and
+        // the BLOCK_INFO head record (storage), both with zero balance. The
+        // withdrawal outbox is installed by block 1; the vaults and the supply
+        // ledger are created lazily. No account holds value.
+        let alloc = &spec.genesis().alloc;
+        let mut addresses: Vec<_> = alloc.keys().copied().collect();
+        addresses.sort();
+        let mut expected = vec![BEACON_ROOTS_ADDRESS, BLOCK_INFO];
+        expected.sort();
+        assert_eq!(addresses, expected);
+        let shape: Vec<_> = expected
+            .iter()
+            .map(|a| (alloc[a].balance, alloc[a].nonce, alloc[a].storage.as_ref().map_or(0, |s| s.len())))
+            .collect();
+        assert!(alloc.values().all(|a| a.balance.is_zero()), "no premine: {shape:?}");
+        // System accounts carry nonce 1 (EIP-161 non-empty), never value.
+        assert!(alloc.values().all(|a| a.nonce == Some(1)), "{shape:?}");
+        assert!(alloc[&BEACON_ROOTS_ADDRESS].code.as_ref().is_some_and(|c| !c.is_empty()));
+        assert!(alloc[&BLOCK_INFO].code.as_ref().is_none_or(|c| c.is_empty()));
+    }
+
     #[test]
     fn mainnet_needs_the_ceremony_domain_and_a_wall_clock_genesis() {
         let mainnet = L2Network::parse("mainnet", Some(DOMAIN), Some("1800000000")).unwrap();
