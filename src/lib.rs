@@ -130,7 +130,7 @@ pub mod stubs;
 pub mod transactions;
 pub mod withdrawal;
 
-pub use chainspec::{ChainSpec, ChainSpecError};
+pub use chainspec::{ChainSpec, ChainSpecError, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID};
 pub use executor::{
     deposits_hash, execute_block, prepare_transaction_effects, validate_block_input, BlockContext, BlockExecutionError,
     BlockInput, CommittedTransaction, ExecutionOutcome, L2Header, PreparedTransaction, TxOutcome, SUPPORTED_TX_TYPES,

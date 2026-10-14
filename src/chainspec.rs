@@ -76,6 +76,15 @@ pub const BEACON_ROOTS_CODE: &[u8] = &hex!("3373ffffffffffffffffffffffffffffffff
 /// A `ChainSpec` knob so a future L1 change never touches the executor.
 pub const MAX_L1_SATS: u64 = 100_000_000_000 * SATS_PER_BLCH;
 
+/// EIP-155 chain id of the Bloch L2 development networks and the selected
+/// testnet (devnet2..devnet4). Unchanged by the mainnet profile.
+pub const TESTNET_CHAIN_ID: u64 = 700_771;
+
+/// EIP-155 chain id decided for the Bloch L2 **mainnet** (2026-10-14). Only
+/// [`ChainSpec::mainnet`] uses it; a transaction signed for 700771 never
+/// authenticates under it and vice versa.
+pub const MAINNET_CHAIN_ID: u64 = 700_770;
+
 /// Genesis / consensus-parameter knobs for the Bloch EVM L2, mirroring
 /// `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1's ChainSpec.
 ///
@@ -185,7 +194,7 @@ impl ChainSpec {
     /// The testnet / zero-value parameter set from the design.
     pub fn testnet() -> Self {
         Self {
-            chain_id: 700_771,
+            chain_id: TESTNET_CHAIN_ID,
             spec_id: SpecId::CANCUN,
             gas_limit: 30_000_000,
             block_time_secs: 2,
@@ -211,6 +220,21 @@ impl ChainSpec {
         Self {
             withdrawal_outbox: Some(crate::withdrawal::L2_TO_L1_MESSAGE_PASSER),
             ..Self::testnet()
+        }
+    }
+
+    /// The Bloch L2 **mainnet** execution rules: the settlement V3 rules
+    /// ([`Self::testnet_v3`]: Cancun, 30M block gas, withdrawal outbox, the
+    /// same vaults and fee knobs) under chain id [`MAINNET_CHAIN_ID`].
+    ///
+    /// The chain id is part of the configuration commitment, so this is a
+    /// different program identity from every devnet: the SP1 settlement guest
+    /// built for it has its own vkey (see `docs/MAINNET-RPC-READINESS.md`).
+    /// The devnet constructors are unchanged.
+    pub fn mainnet() -> Self {
+        Self {
+            chain_id: MAINNET_CHAIN_ID,
+            ..Self::testnet_v3()
         }
     }
 
@@ -430,6 +454,27 @@ mod tests {
             U256::from(100_000_000_000u64) * U256::from(10u64).pow(U256::from(18)),
             "100 billion × 10^18 wei"
         );
+    }
+
+    #[test]
+    fn mainnet_is_the_v3_rules_under_its_own_chain_id() {
+        let mainnet = ChainSpec::mainnet();
+        mainnet.validate().expect("the mainnet spec is valid");
+        assert_eq!(mainnet.chain_id, 700_770);
+        assert_eq!(MAINNET_CHAIN_ID, 700_770);
+        // Only the chain id differs from the devnet4 settlement V3 rules.
+        assert_eq!(
+            ChainSpec { chain_id: TESTNET_CHAIN_ID, ..mainnet.clone() },
+            ChainSpec::testnet_v3()
+        );
+        assert!(mainnet.withdrawal_outbox.is_some());
+        // The DEX router creation needs ~3.9M gas: the block gas limit and the
+        // deposit-free per-block budget must hold it with a wide margin.
+        assert_eq!(mainnet.gas_limit, 30_000_000);
+        assert!(mainnet.gas_limit >= 4_000_000);
+        // The devnet identities are untouched.
+        assert_eq!(ChainSpec::testnet().chain_id, 700_771);
+        assert_eq!(ChainSpec::testnet_v3().chain_id, 700_771);
     }
 
     #[test]
