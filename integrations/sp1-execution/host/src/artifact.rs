@@ -15,6 +15,12 @@ pub fn load_selected_artifact(path: impl AsRef<Path>) -> Result<ExecutionArtifac
 /// [`load_selected_artifact`] under the execution rules a program embeds
 /// (settlement V3: `ChainSpec::testnet_v3`, the withdrawal outbox).
 pub fn load_selected_artifact_for(path: impl AsRef<Path>, spec: &ChainSpec) -> Result<ExecutionArtifact> {
+    load_selected_artifact_in(path, spec, B256::repeat_byte(0xd3))
+}
+
+/// [`load_selected_artifact_for`] under the V2 domain a program embeds (the
+/// development domain `0xd3…d3`, or `MAINNET_DOMAIN` for the mainnet guest).
+pub fn load_selected_artifact_in(path: impl AsRef<Path>, spec: &ChainSpec, domain: B256) -> Result<ExecutionArtifact> {
     let mut file = crate::open_regular(path.as_ref(), false)?;
     let length = file.metadata()?.len();
     if length == 0 || length > MAX_ARTIFACT_BYTES as u64 {
@@ -28,5 +34,5 @@ pub fn load_selected_artifact_for(path: impl AsRef<Path>, spec: &ChainSpec) -> R
         return Err(invalid("execution artifact length changed while reading"));
     }
     // The guest embeds exactly this policy. A transport cannot choose another.
-    ExecutionArtifact::decode(&bytes, spec, B256::repeat_byte(0xd3))
+    ExecutionArtifact::decode(&bytes, spec, domain)
 }

@@ -5,6 +5,11 @@
 //! commits the 766-byte V3 statement, and `native-artifact` does NOT refuse L2
 //! blocks with user transactions. Deposits must still equal the consumed
 //! native inbox range; the native chain checks them via `deposits_hash`.
+//!
+//! A leading `--mainnet` selects the mainnet program (`settlement_v3_mainnet`:
+//! `ChainSpec::mainnet`, chain id 700770, `MAINNET_DOMAIN`) for every mode;
+//! without it the harness checks the devnet `settlement_v3` program
+//! (`ChainSpec::testnet_v3`, domain `0xd3…d3`), unchanged.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -19,6 +24,39 @@ use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, SP1PublicVal
 use std::{error::Error, ffi::OsStr, fs, io, process::Command, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// The program the harness qualifies, selected once from the command line.
+static MAINNET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn mainnet() -> bool {
+    *MAINNET.get().unwrap_or(&false)
+}
+
+/// The execution rules the selected guest compiles.
+fn spec() -> ChainSpec {
+    if mainnet() {
+        ChainSpec::mainnet()
+    } else {
+        ChainSpec::testnet_v3()
+    }
+}
+
+/// The V2 domain the selected guest compiles.
+fn domain() -> B256 {
+    if mainnet() {
+        bloch_l2_evm::chainspec::MAINNET_DOMAIN
+    } else {
+        B256::repeat_byte(0xd3)
+    }
+}
+
+fn program_name() -> &'static str {
+    if mainnet() {
+        "settlement_v3_mainnet"
+    } else {
+        "settlement_v3"
+    }
+}
 const QUALIFICATION_GNARK_IMAGE: &str =
     "ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d";
 
@@ -38,9 +76,13 @@ fn stdin(fixture: &fixture::Fixture, context: SettlementContextV2) -> SP1Stdin {
 }
 
 fn expect(execution: fixture::Fixture, context: SettlementContextV2) -> Result<Qualification> {
+    expect_in(&spec(), domain(), execution, context)
+}
+
+fn expect_in(spec: &ChainSpec, domain: B256, execution: fixture::Fixture, context: SettlementContextV2) -> Result<Qualification> {
     let expected = execute_settlement_statement_v3(
-        &ChainSpec::testnet_v3(),
-        B256::repeat_byte(0xd3),
+        spec,
+        domain,
         &execution.witness,
         &execution.context,
         &execution.body,
@@ -114,7 +156,7 @@ fn native_artifact_qualification(
         return Err(io::Error::other("invalid native request position").into());
     }
     let previous_settlement = hash(7, true)?;
-    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact_for(artifact, &ChainSpec::testnet_v3())?;
+    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact_in(artifact, &spec(), domain())?;
     if (artifact.header().number == 1) != (previous_settlement == B256::ZERO) {
         return Err(io::Error::other("only L2 block 1 may have no previous settlement").into());
     }
@@ -165,8 +207,9 @@ fn native_artifact_qualification(
 
 fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification> {
     match name {
-        "empty" => expect(fixture::fixture_empty_with(&ChainSpec::testnet_v3())?, synthetic_context(identity, 0)),
+        "empty" => expect(fixture::fixture_empty_in(&spec(), domain())?, synthetic_context(identity, 0)),
         // Deposit plus a signed deploy and call: two user transactions.
+        "contract" if mainnet() => Err(io::Error::other("the contract fixture is devnet-only (development domain)").into()),
         "contract" => expect(fixture::fixture_with(&ChainSpec::testnet_v3())?, synthetic_context(identity, 1)),
         #[cfg(feature = "node-artifact")]
         "native-artifact" => {
@@ -188,11 +231,16 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
 
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3 <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
+    let selected = args.first().map(String::as_str) == Some("--mainnet");
+    if selected {
+        args.remove(0);
+    }
+    MAINNET.set(selected).expect("program selected once");
     if args.first().map(String::as_str) == Some("identity") {
         return print_identity(args.get(1).filter(|_| args.len() == 2).ok_or(
-            "usage: bloch-evm-sp1-settlement-v3 identity TRUSTED_SETTLEMENT_V3_ELF",
+            "usage: bloch-evm-sp1-settlement-v3 [--mainnet] identity TRUSTED_SETTLEMENT_V3_ELF",
         )?)
         .await;
     }
@@ -291,7 +339,7 @@ async fn print_identity(elf_path: &str) -> Result<()> {
     let bytes = fs::read(elf_path)?;
     let trusted = TrustedProgram::from_trusted_elf(Elf::from(bytes)).await?;
     let identity = trusted.identity();
-    let spec = ChainSpec::testnet_v3();
+    let spec = spec();
     #[cfg(feature = "source-settlement")]
     let policy = {
         use sha2::Digest;
@@ -307,9 +355,10 @@ async fn print_identity(elf_path: &str) -> Result<()> {
     #[cfg(not(feature = "source-settlement"))]
     let policy = "null".to_string();
     println!(
-        "{{\"program\":\"settlement_v3\",\"chain_id\":{},\"domain\":\"{:x}\",\"configuration\":\"{:x}\",\"elf_keccak\":\"{:x}\",\"vkey_koalabear\":\"{:x}\",\"vkey_bn254\":\"{:x}\",\"sp1_circuit_version\":\"{}\",\"proof_policy_v3\":{}}}",
+        "{{\"program\":\"{}\",\"chain_id\":{},\"domain\":\"{:x}\",\"configuration\":\"{:x}\",\"elf_keccak\":\"{:x}\",\"vkey_koalabear\":\"{:x}\",\"vkey_bn254\":\"{:x}\",\"sp1_circuit_version\":\"{}\",\"proof_policy_v3\":{}}}",
+        program_name(),
         spec.chain_id,
-        B256::repeat_byte(0xd3),
+        domain(),
         bloch_l2_evm::proof_statement::configuration_commitment(&spec)?,
         identity.elf_keccak(),
         identity.verifying_key_hash(),
@@ -343,6 +392,38 @@ mod tests {
         assert!(require_release_gnark_environment(None, Some(pinned)).is_ok());
         assert!(require_release_gnark_environment(Some(OsStr::new("dev")), Some(pinned)).is_err());
         assert!(require_release_gnark_environment(None, None).is_err());
+    }
+
+    /// The mainnet program's statement: configuration of chain id 700770 and
+    /// the mainnet domain, never the devnet ones.
+    #[test]
+    fn mainnet_statement_binds_the_mainnet_rules_and_domain() {
+        use bloch_l2_evm::chainspec::MAINNET_DOMAIN;
+        let program = [B256::repeat_byte(9), B256::repeat_byte(10), B256::repeat_byte(11)];
+        let main = expect_in(
+            &ChainSpec::mainnet(),
+            MAINNET_DOMAIN,
+            fixture::fixture_empty_in(&ChainSpec::mainnet(), MAINNET_DOMAIN).unwrap(),
+            synthetic_context_for(program, 0),
+        )
+        .unwrap();
+        let dev = expect_in(
+            &ChainSpec::testnet_v3(),
+            B256::repeat_byte(0xd3),
+            fixture::fixture_empty_in(&ChainSpec::testnet_v3(), B256::repeat_byte(0xd3)).unwrap(),
+            synthetic_context_for(program, 0),
+        )
+        .unwrap();
+        let (m, d) = (main.expected.encode(), dev.expected.encode());
+        assert_eq!(m.len(), d.len());
+        assert_ne!(m, d);
+        let configuration = bloch_l2_evm::proof_statement::configuration_commitment(&ChainSpec::mainnet()).unwrap();
+        assert!(m.windows(32).any(|w| w == configuration.as_slice()));
+        assert!(m.windows(32).any(|w| w == MAINNET_DOMAIN.as_slice()));
+        assert!(!m.windows(32).any(|w| w == B256::repeat_byte(0xd3).as_slice()));
+        // The devnet harness keeps the devnet program parameters.
+        assert!(!mainnet());
+        assert_eq!((spec(), domain(), program_name()), (ChainSpec::testnet_v3(), B256::repeat_byte(0xd3), "settlement_v3"));
     }
 
     /// The V3 harness accepts the user-transaction fixture that V2's

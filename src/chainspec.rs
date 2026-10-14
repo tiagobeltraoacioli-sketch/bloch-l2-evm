@@ -5,7 +5,7 @@
 //! zero-value parameters; chain id 700771 is the selected testnet identity but
 //! remains blocked on public registration and a frozen production genesis.
 
-use alloy_primitives::{address, hex, Address, U256};
+use alloy_primitives::{address, hex, Address, B256, U256};
 use revm::primitives::hardfork::SpecId;
 
 use crate::scale::SATS_PER_BLCH;
@@ -84,6 +84,36 @@ pub const TESTNET_CHAIN_ID: u64 = 700_771;
 /// [`ChainSpec::mainnet`] uses it; a transaction signed for 700771 never
 /// authenticates under it and vice versa.
 pub const MAINNET_CHAIN_ID: u64 = 700_770;
+
+/// The Bloch L1 (Genesis-4) admission network domain: SHA3-256 of the
+/// canonical encoding of `genesis/mainnet.manifest` (file SHA-256
+/// `7eef82a7…b2dd`), pinned in the native node as the live admission domain.
+/// It is the native policy's `identities[0]`; here it only seeds
+/// [`MAINNET_DOMAIN`].
+pub const GENESIS4_NETWORK_DOMAIN: B256 =
+    B256::new(hex!("f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966"));
+
+/// Domain tag of [`MAINNET_DOMAIN`].
+pub const MAINNET_DOMAIN_TAG: &[u8] = b"BLOCH:L2:MAINNET-DOMAIN:1";
+
+/// The V2 header domain of the Bloch L2 mainnet, compiled into its
+/// settlement guest:
+/// `keccak256("BLOCH:L2:MAINNET-DOMAIN:1" || MAINNET_CHAIN_ID (u64 BE) || GENESIS4_NETWORK_DOMAIN)`.
+/// Derived from public values only (no ceremony secret): it binds the L2 to
+/// its chain id and to the L1 network it settles on, and differs from the
+/// development domain `0xd3…d3` and from zero.
+pub const MAINNET_DOMAIN: B256 =
+    B256::new(hex!("1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733"));
+
+/// L2 mainnet genesis timestamp (unix seconds): the Genesis-4 slot-0 time
+/// (`genesis_time_ms / 1000` of `genesis/mainnet.manifest`). A fixed public
+/// value no later than any native slot an L2 block can anchor to, so the
+/// wall-clock rule from L2 block 1 never has to move time backwards.
+pub const MAINNET_GENESIS_TIMESTAMP: u64 = 1_786_656_679;
+
+/// Genesis-4 slot duration in milliseconds (`slot_ms` of the manifest), the
+/// third field of the mainnet timestamp rule `1:GENESIS:SLOT_MS`.
+pub const GENESIS4_SLOT_MS: u64 = 30_000;
 
 /// Genesis / consensus-parameter knobs for the Bloch EVM L2, mirroring
 /// `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1's ChainSpec.
@@ -454,6 +484,22 @@ mod tests {
             U256::from(100_000_000_000u64) * U256::from(10u64).pow(U256::from(18)),
             "100 billion × 10^18 wei"
         );
+    }
+
+    #[test]
+    fn mainnet_domain_is_derived_from_the_chain_id_and_the_l1_network() {
+        let mut preimage = MAINNET_DOMAIN_TAG.to_vec();
+        preimage.extend_from_slice(&MAINNET_CHAIN_ID.to_be_bytes());
+        preimage.extend_from_slice(GENESIS4_NETWORK_DOMAIN.as_slice());
+        let derived = alloy_primitives::keccak256(&preimage);
+        assert_eq!(MAINNET_DOMAIN, derived);
+        assert!(!MAINNET_DOMAIN.is_zero());
+        assert_ne!(MAINNET_DOMAIN, B256::repeat_byte(0xd3));
+        // Genesis-4 clock (manifest genesis_time_ms 1786656679962, slot_ms
+        // 30000): wall-clock seconds, after the 2020-01-01 floor.
+        assert_eq!(MAINNET_GENESIS_TIMESTAMP, 1_786_656_679_962 / 1000);
+        assert!(MAINNET_GENESIS_TIMESTAMP >= 1_577_836_800);
+        assert_eq!(GENESIS4_SLOT_MS, 30_000);
     }
 
     #[test]

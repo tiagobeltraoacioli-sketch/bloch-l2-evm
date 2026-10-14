@@ -243,7 +243,13 @@ pub fn fixture_empty() -> Result<Fixture, Box<dyn Error>> {
 
 /// [`fixture_empty`] under the given execution rules.
 pub fn fixture_empty_with(spec: &ChainSpec) -> Result<Fixture, Box<dyn Error>> {
-    let (fixture, _, outcome) = execute_fixture_with(spec, NodeBodyV2::default(), B256::repeat_byte(8))?;
+    fixture_empty_in(spec, B256::repeat_byte(0xd3))
+}
+
+/// [`fixture_empty_with`] under the given V2 domain (the mainnet guest
+/// compiles `MAINNET_DOMAIN`).
+pub fn fixture_empty_in(spec: &ChainSpec, domain: B256) -> Result<Fixture, Box<dyn Error>> {
+    let (fixture, _, outcome) = execute_fixture_in(spec, domain, NodeBodyV2::default(), B256::repeat_byte(8))?;
     ensure(
         outcome.transactions.is_empty() && outcome.receipts.is_empty(),
         "empty fixture has transactions",
@@ -263,7 +269,15 @@ pub(crate) fn execute_fixture_with(
     body: NodeBodyV2,
     anchor_root: B256,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
-    let domain = B256::repeat_byte(0xd3);
+    execute_fixture_in(spec, B256::repeat_byte(0xd3), body, anchor_root)
+}
+
+pub(crate) fn execute_fixture_in(
+    spec: &ChainSpec,
+    domain: B256,
+    body: NodeBodyV2,
+    anchor_root: B256,
+) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
     let mut pre_state = genesis_v2(spec, 0)?;
     let previous_state_root = pre_state.commit_root();
     let parent = node_head(spec, domain, &pre_state)?;
