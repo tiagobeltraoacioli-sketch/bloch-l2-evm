@@ -72,6 +72,15 @@ struct HeaderJson {
     sha3_uncles: B256,
     #[serde(default)]
     nonce: B64,
+    // Cancun header fields as Ethereum clients read them: no blobs are ever
+    // carried (zero blob gas, zero excess), and the EIP-4788 root a block
+    // writes is its Bloch anchor root. RPC projections only, like the above.
+    #[serde(default, with = "alloy_serde::quantity")]
+    blob_gas_used: u64,
+    #[serde(default, with = "alloy_serde::quantity")]
+    excess_blob_gas: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_beacon_block_root: Option<B256>,
     domain: B256,
     #[serde(with = "alloy_serde::quantity")]
     chain_id: u64,
@@ -109,6 +118,9 @@ impl Serialize for BlochRpcHeader {
             extra_data: self.extra_data().clone(),
             sha3_uncles: self.ommers_hash(),
             nonce: B64::ZERO,
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+            parent_beacon_block_root: Some(self.header.0.anchor_root),
             domain: self.header.0.domain,
             chain_id: self.header.0.chain_id,
             number: self.header.0.number,
@@ -138,9 +150,12 @@ impl<'de> Deserialize<'de> for BlochRpcHeader {
             || !json.extra_data.is_empty()
             || json.sha3_uncles != empty_ommers()
             || json.nonce != B64::ZERO
+            || json.blob_gas_used != 0
+            || json.excess_blob_gas != 0
+            || json.parent_beacon_block_root.is_some_and(|root| root != json.anchor_root)
         {
             return Err(serde::de::Error::custom(
-                "Bloch V2 RPC requires zero difficulty and nonce, empty extraData and no ommers",
+                "Bloch V2 RPC requires zero difficulty, nonce and blob gas, empty extraData, no ommers and parentBeaconBlockRoot = anchorRoot",
             ));
         }
         let header = BlochNodeHeader(NodeHeaderV2 {
@@ -241,10 +256,10 @@ impl BlockHeader for BlochRpcHeader {
         Some(self.header.0.base_fee_per_gas)
     }
     fn blob_gas_used(&self) -> Option<u64> {
-        None
+        Some(0)
     }
     fn excess_blob_gas(&self) -> Option<u64> {
-        None
+        Some(0)
     }
     fn parent_beacon_block_root(&self) -> Option<B256> {
         Some(self.header.0.anchor_root)
@@ -328,10 +343,17 @@ mod tests {
             serde_json::to_value(alloy_consensus::EMPTY_OMMER_ROOT_HASH).unwrap()
         );
         assert_eq!(json["nonce"], "0x0000000000000000");
-        // Ethereum clients decode it as a standard header.
+        assert_eq!(json["blobGasUsed"], "0x0");
+        assert_eq!(json["excessBlobGas"], "0x0");
+        assert_eq!(json["parentBeaconBlockRoot"], json["anchorRoot"]);
+        // Ethereum clients decode it as a standard Cancun header.
         let ethereum: alloy_rpc_types_eth::Header = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(ethereum.hash, header.0.hash());
         assert_eq!(ethereum.number, 2);
+        assert_eq!(ethereum.inner.blob_gas_used, Some(0));
+        assert_eq!(ethereum.inner.excess_blob_gas, Some(0));
+        assert_eq!(ethereum.inner.parent_beacon_block_root, Some(header.0.anchor_root));
+        assert_eq!(ethereum.inner.ommers_hash, alloy_consensus::EMPTY_OMMER_ROOT_HASH);
         let decoded: BlochRpcHeader = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.as_consensus(), &header);
         assert_eq!(decoded.hash(), header.0.hash());
@@ -351,6 +373,9 @@ mod tests {
             ("extraData", "0x01"),
             ("nonce", "0x0000000000000001"),
             ("sha3Uncles", "0x0000000000000000000000000000000000000000000000000000000000000001"),
+            ("blobGasUsed", "0x1"),
+            ("excessBlobGas", "0x1"),
+            ("parentBeaconBlockRoot", "0x0000000000000000000000000000000000000000000000000000000000000001"),
         ] {
             let mut json = serde_json::to_value(&rpc).unwrap();
             json[field] = serde_json::json!(value);
@@ -362,6 +387,9 @@ mod tests {
         old.as_object_mut().unwrap().remove("extraData");
         old.as_object_mut().unwrap().remove("sha3Uncles");
         old.as_object_mut().unwrap().remove("nonce");
+        old.as_object_mut().unwrap().remove("blobGasUsed");
+        old.as_object_mut().unwrap().remove("excessBlobGas");
+        old.as_object_mut().unwrap().remove("parentBeaconBlockRoot");
         assert_eq!(serde_json::from_value::<BlochRpcHeader>(old).unwrap(), rpc);
         for field in ["hash", "domain", "depositsHash", "parentStateRoot", "receiptsRoot"] {
             let mut json = serde_json::to_value(&rpc).unwrap();

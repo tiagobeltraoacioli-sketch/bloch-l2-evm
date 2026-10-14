@@ -16,6 +16,19 @@
 //! inconsistency freezes it and is logged. `bloch_finality` reports both with
 //! their L1 anchors.
 //!
+//! `pending` is answered as Ethereum clients expect from a rollup node that
+//! publishes no pending block: state at `pending` is the latest state;
+//! `eth_call`/`eth_estimateGas` at `pending` run in the next-block environment
+//! derived from the latest header (number + 1, wall-clock timestamp, no
+//! deposits; RPC-only, never built or stored); block-shaped queries
+//! (`eth_getBlockByNumber("pending")`, ...) return the latest block; with
+//! `--txpool`, `eth_getTransactionCount(addr, "pending")` also counts the
+//! sender's consecutive spooled nonces (the sequencer's view).
+//!
+//! `--rules mainnet --domain HEX --genesis-time SECS` serves the mainnet
+//! profile (chain id 700770, wall-clock genesis); `v3`/`v2` keep the devnet
+//! identity.
+//!
 //! With `--txpool DIR` it is also the development sequencer's front door:
 //! `eth_sendRawTransaction` authenticates the canonical signed bytes (EIP-2718
 //! encoding, chain id, low-s ECDSA signature, size) and checks the nonce
@@ -26,8 +39,8 @@
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    build_eth_api, chain_identity_rpc, chain_status_rpc, start_http_rpc, BlochBlockchainProvider, BlochChainSpec,
-    BlochEvmConfig, BlochProviderFactory,
+    build_eth_api_with, chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc,
+    BlochBlockchainProvider, BlochEvmConfig, BlochProviderFactory, L2Network, PendingPolicy,
 };
 use eyre::{bail, ensure, Result};
 use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
@@ -46,11 +59,13 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2] [--txpool DIR]\n\
+const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2|mainnet [--domain HEX --genesis-time SECS]] [--txpool DIR]\n\
 Development RPC over the settled database; with --txpool, eth_sendRawTransaction spools authenticated\n\
 transactions for the settlement worker (the sequencer). finalized comes only from verified native FFG finality of L2 settlements;\n\
 safe from the settlement the local native node accepted at its head. --rules selects the settlement\n\
-execution rules the canonical database was written under (default v3: ChainSpec::testnet_v3).\n";
+execution rules the canonical database was written under (default v3: ChainSpec::testnet_v3; mainnet:\n\
+ChainSpec::mainnet, chain id 700770, with the ceremony's --domain and wall-clock --genesis-time).\n\
+pending: latest state, next-block environment for calls/estimates, latest block for block queries.\n";
 
 struct Options {
     data_dir: PathBuf,
@@ -59,7 +74,7 @@ struct Options {
     network: String,
     port: u16,
     poll: Duration,
-    v3: bool,
+    l2: L2Network,
     txpool: Option<PathBuf>,
 }
 
@@ -79,7 +94,10 @@ fn parse() -> Result<Options> {
     let mut map = std::collections::BTreeMap::new();
     for pair in args.chunks(2) {
         ensure!(
-            ["--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules", "--txpool"].contains(&pair[0].as_str()),
+            [
+                "--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules", "--domain",
+                "--genesis-time", "--txpool",
+            ].contains(&pair[0].as_str()),
             "unknown option {}\n{USAGE}",
             pair[0]
         );
@@ -95,11 +113,12 @@ fn parse() -> Result<Options> {
         network: network.to_lowercase(),
         port: map.get("--port").map_or(Ok(8546), |v| v.parse())?,
         poll: Duration::from_millis(map.get("--poll-ms").map_or(Ok(2000), |v| v.parse())?),
-        v3: match map.get("--rules").map_or("v3", String::as_str) {
-            "v3" => true,
-            "v2" => false,
-            other => bail!("--rules must be v3 or v2, not {other}"),
-        },
+        l2: L2Network::parse(
+            map.get("--rules").map_or("v3", String::as_str),
+            map.get("--domain").map(String::as_str),
+            map.get("--genesis-time").map(String::as_str),
+        )
+        .map_err(|e| eyre::eyre!("{e}\n{USAGE}"))?,
         txpool: map.get("--txpool").map(PathBuf::from),
     })
 }
@@ -158,6 +177,90 @@ fn sequencer_rpc(spec: ChainSpec, pool: PathBuf, provider: BlochBlockchainProvid
         })
         .expect("the send method name is unique in a new module");
     module
+}
+
+/// Sender and nonce of each spool entry, cached by file name (entries are
+/// immutable: written once by rename, removed by the producer).
+type SpoolIndex = std::collections::HashMap<std::ffi::OsString, Option<(alloy_primitives::Address, u64)>>;
+
+/// The sender's next nonce in the sequencer's view: `latest` plus every
+/// consecutive nonce already waiting in the spool.
+fn spooled_next_nonce(
+    spec: &ChainSpec,
+    pool: &Path,
+    index: &std::sync::Mutex<SpoolIndex>,
+    sender: alloy_primitives::Address,
+    latest: u64,
+) -> std::io::Result<u64> {
+    let mut index = index.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut present = std::collections::HashSet::new();
+    let mut nonces = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(pool)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|x| x != "tx") {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
+        let known = match index.get(&name) {
+            Some(known) => *known,
+            None => {
+                let decoded = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| alloy_primitives::hex::decode(text.trim()).ok())
+                    .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
+                    .map(|tx| (tx.sender(), tx.environment().nonce));
+                index.insert(name.clone(), decoded);
+                decoded
+            }
+        };
+        present.insert(name);
+        if let Some((from, nonce)) = known {
+            if from == sender {
+                nonces.insert(nonce);
+            }
+        }
+    }
+    index.retain(|name, _| present.contains(name));
+    let mut next = latest;
+    while nonces.contains(&next) {
+        next += 1;
+    }
+    Ok(next)
+}
+
+/// `eth_getTransactionCount(addr, "pending")` in the sequencer's view (see
+/// [`spooled_next_nonce`]); other tags go to the upstream handler unchanged.
+fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spec: ChainSpec, pool: PathBuf) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    ensure!(module.remove_method("eth_getTransactionCount").is_some(), "eth API lacks eth_getTransactionCount");
+    let index = Arc::new(std::sync::Mutex::new(SpoolIndex::new()));
+    module.register_async_method("eth_getTransactionCount", move |params, _, _| {
+        let (original, spec, pool, index) = (original.clone(), spec.clone(), pool.clone(), index.clone());
+        async move {
+            let mut values: Vec<serde_json::Value> = params.parse()?;
+            let pending = values.get(1).and_then(|v| v.as_str()) == Some("pending");
+            if pending {
+                values[1] = serde_json::Value::String("latest".into());
+            }
+            let upstream = |error| match error {
+                jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                other => rpc_error(other.to_string()),
+            };
+            let count: alloy_primitives::U64 =
+                original.call("eth_getTransactionCount", values.clone()).await.map_err(upstream)?;
+            if !pending {
+                return Ok(count);
+            }
+            let sender: alloy_primitives::Address = serde_json::from_value(values[0].clone())
+                .map_err(|e| jsonrpsee::types::ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+            tokio::task::spawn_blocking(move || spooled_next_nonce(&spec, &pool, &index, sender, count.to()))
+                .await
+                .map_err(|e| rpc_error(e.to_string()))?
+                .map(alloy_primitives::U64::from)
+                .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))
+        }
+    })?;
+    Ok(())
 }
 
 /// RocksDB's read-only secondary needs a writable scratch directory beside
@@ -256,10 +359,10 @@ async fn main() -> Result<()> {
     )
     .build()?;
     create_view(&options.data_dir, &options.view_dir)?;
-    // The rules the settlement worker executed under (bloch-l2-produce-dev
-    // writes V3 blocks with ChainSpec::testnet_v3).
-    let rules = || if options.v3 { ChainSpec::testnet_v3() } else { ChainSpec::testnet() };
-    let spec = Arc::new(BlochChainSpec::new(rules(), B256::repeat_byte(0xd3), 0)?);
+    // The rules, domain and genesis the settlement worker executed under
+    // (bloch-l2-produce-dev writes devnet V3 blocks with ChainSpec::testnet_v3).
+    let rules = || options.l2.rules.clone();
+    let spec = Arc::new(options.l2.chain_spec()?);
     let factory: BlochProviderFactory = ProviderFactory::new(
         Arc::new(open_db_read_only(options.view_dir.join("db"), DatabaseArguments::default())?),
         spec.clone(),
@@ -271,7 +374,7 @@ async fn main() -> Result<()> {
     let provider: BlochBlockchainProvider = BlockchainProvider::new(factory.clone())?;
     let kernel = rules();
     let config = BlochEvmConfig::new(&kernel, spec.domain());
-    let api = build_eth_api(
+    let api = build_eth_api_with(
         RpcNodeCoreAdapter::new(
             provider.clone(),
             NoopTransactionPool::default(),
@@ -279,6 +382,7 @@ async fn main() -> Result<()> {
             config,
         ),
         runtime.clone(),
+        PendingPolicy::LatestDerived,
     );
     let filter = EthFilter::new(api.clone(), reth_rpc_eth_types::EthConfig::default().filter_config(), runtime.clone());
     let mut module = api.into_rpc().remove_context();
@@ -293,6 +397,10 @@ async fn main() -> Result<()> {
     module.merge(chain_status_rpc(spec.clone(), provider.clone()))?;
     let finality = Arc::new(std::sync::RwLock::new(serde_json::Value::Null));
     module.merge(finality_rpc(finality.clone()))?;
+    serve_pending_blocks_as_latest(&mut module)?;
+    if let Some(pool) = &options.txpool {
+        spool_pending_nonce(&mut module, rules(), pool.clone())?;
+    }
     let server = start_http_rpc(module, options.port).await?;
     println!(
         "SETTLED DEV RPC at {}; finality only from verified native FFG settlement; {}",
@@ -378,4 +486,68 @@ async fn main() -> Result<()> {
         bail!("runtime graceful shutdown timed out");
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+    use alloy_eips::eip2718::Encodable2718;
+    use alloy_primitives::{Address, Signature, TxKind};
+    use k256::ecdsa::SigningKey;
+
+    fn spool(dir: &Path, spec: &ChainSpec, key: u8, nonce: u64) {
+        let key = SigningKey::from_bytes((&[key; 32]).into()).unwrap();
+        let tx = TxEip1559 {
+            chain_id: spec.chain_id,
+            nonce,
+            to: TxKind::Call(Address::repeat_byte(9)),
+            gas_limit: 21_000,
+            max_fee_per_gas: 2_000_000_000,
+            ..Default::default()
+        };
+        let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let signed = TxEnvelope::from(tx.into_signed(signature));
+        let name = format!("{}.tx", alloy_primitives::hex::encode(signed.tx_hash()));
+        std::fs::write(dir.join(name), format!("{}\n", alloy_primitives::hex::encode(signed.encoded_2718()))).unwrap();
+    }
+
+    fn address(key: u8) -> Address {
+        Address::from_public_key(SigningKey::from_bytes((&[key; 32]).into()).unwrap().verifying_key())
+    }
+
+    #[test]
+    fn pending_nonce_counts_only_the_senders_consecutive_spool_entries() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let index = std::sync::Mutex::new(SpoolIndex::new());
+        let next = |sender, latest| spooled_next_nonce(&spec, dir.path(), &index, sender, latest).unwrap();
+        assert_eq!(next(address(1), 5), 5);
+        for nonce in [5, 6, 8] {
+            spool(dir.path(), &spec, 1, nonce);
+        }
+        spool(dir.path(), &spec, 2, 0);
+        // A transaction for another chain id never counts.
+        spool(dir.path(), &ChainSpec::testnet_v3(), 1, 7);
+        std::fs::write(dir.path().join("junk.tx"), "zz\n").unwrap();
+        std::fs::write(dir.path().join(".partial"), "00\n").unwrap();
+        assert_eq!(next(address(1), 5), 7, "5 and 6 are spooled, 7 is missing");
+        assert_eq!(next(address(1), 4), 4, "a gap below the spool stays the next nonce");
+        assert_eq!(next(address(2), 0), 1);
+        assert_eq!(next(address(3), 9), 9);
+        // The producer consumed nonce 5: the cache follows the directory.
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let decoded = alloy_primitives::hex::decode(text.trim())
+                .ok()
+                .and_then(|raw| bloch_l2_evm::decode_signed_transaction(&spec, &raw).ok());
+            if decoded.is_some_and(|tx| tx.sender() == address(1) && tx.environment().nonce == 5) {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        assert_eq!(next(address(1), 6), 7);
+        assert_eq!(next(address(1), 5), 5);
+        assert_eq!(index.lock().unwrap().len(), 5);
+    }
 }

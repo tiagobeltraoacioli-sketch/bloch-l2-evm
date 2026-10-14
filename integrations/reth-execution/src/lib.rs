@@ -28,6 +28,8 @@ pub use execute::{execute_next_block, prepare_genesis, validate_and_execute_bloc
 pub mod finality_cursor;
 pub mod lifecycle;
 pub mod maintenance;
+pub mod network;
+pub use network::{L2Network, DEVNET_DOMAIN};
 pub mod payload;
 pub mod pool;
 pub mod proof_export;
@@ -49,7 +51,10 @@ pub use lifecycle::{
 pub use maintenance::{pool_maintenance, MaintenanceConfigError};
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
 pub use pool::{pooled_from_raw, BlochPoolError, BlochTransactionValidator};
-pub use rpc::{build_eth_api, rpc_converter, BlochRpcComponents, BlochRpcConverter, NoDerivedPending};
+pub use rpc::{
+    build_eth_api, build_eth_api_with, rpc_converter, serve_pending_blocks_as_latest, BlochRpcComponents, BlochRpcConverter,
+    LatestDerivedPending, NoDerivedPending, PendingPolicy,
+};
 pub use rpc_identity::{
     chain_identity_rpc, chain_status_rpc, BlochChainIdentity, BlochChainStatus, CHAIN_IDENTITY_FORMAT,
     CHAIN_STATUS_FORMAT, HEADER_FORMAT,
