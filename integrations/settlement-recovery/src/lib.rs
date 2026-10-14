@@ -25,6 +25,7 @@ pub mod history;
 pub mod native;
 pub mod proof;
 pub mod reconstruct;
+pub mod timestamp;
 
 /// Explicit host inputs. Policies, floors and epoch must come from independent
 /// trusted sources, never from the files or RPC claims being audited. The host

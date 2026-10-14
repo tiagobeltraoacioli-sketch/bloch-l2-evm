@@ -51,6 +51,10 @@ impl HeaderResponse for BlochRpcHeader {
     }
 }
 
+const fn empty_ommers() -> B256 {
+    alloy_consensus::EMPTY_OMMER_ROOT_HASH
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HeaderJson {
@@ -62,6 +66,12 @@ struct HeaderJson {
     difficulty: U256,
     #[serde(default)]
     extra_data: Bytes,
+    // Constant post-merge Ethereum header fields that Ethereum clients
+    // (alloy, forge, cast, ethers) require; neither is a V2 consensus field.
+    #[serde(rename = "sha3Uncles", default = "empty_ommers")]
+    sha3_uncles: B256,
+    #[serde(default)]
+    nonce: B64,
     domain: B256,
     #[serde(with = "alloy_serde::quantity")]
     chain_id: u64,
@@ -97,6 +107,8 @@ impl Serialize for BlochRpcHeader {
             size: self.size,
             difficulty: self.difficulty(),
             extra_data: self.extra_data().clone(),
+            sha3_uncles: self.ommers_hash(),
+            nonce: B64::ZERO,
             domain: self.header.0.domain,
             chain_id: self.header.0.chain_id,
             number: self.header.0.number,
@@ -122,9 +134,13 @@ impl Serialize for BlochRpcHeader {
 impl<'de> Deserialize<'de> for BlochRpcHeader {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let json = HeaderJson::deserialize(deserializer)?;
-        if json.difficulty != U256::ZERO || !json.extra_data.is_empty() {
+        if json.difficulty != U256::ZERO
+            || !json.extra_data.is_empty()
+            || json.sha3_uncles != empty_ommers()
+            || json.nonce != B64::ZERO
+        {
             return Err(serde::de::Error::custom(
-                "Bloch V2 RPC requires zero difficulty and empty extraData",
+                "Bloch V2 RPC requires zero difficulty and nonce, empty extraData and no ommers",
             ));
         }
         let header = BlochNodeHeader(NodeHeaderV2 {
@@ -219,7 +235,7 @@ impl BlockHeader for BlochRpcHeader {
         Some(self.header.0.prevrandao)
     }
     fn nonce(&self) -> Option<B64> {
-        None
+        Some(B64::ZERO)
     }
     fn base_fee_per_gas(&self) -> Option<u64> {
         Some(self.header.0.base_fee_per_gas)
@@ -307,7 +323,15 @@ mod tests {
         assert_eq!(json["mixHash"], serde_json::to_value(header.0.prevrandao).unwrap());
         assert!(json.get("beneficiary").is_none());
         assert!(json.get("prevrandao").is_none());
-        assert!(json.get("sha3Uncles").is_none());
+        assert_eq!(
+            json["sha3Uncles"],
+            serde_json::to_value(alloy_consensus::EMPTY_OMMER_ROOT_HASH).unwrap()
+        );
+        assert_eq!(json["nonce"], "0x0000000000000000");
+        // Ethereum clients decode it as a standard header.
+        let ethereum: alloy_rpc_types_eth::Header = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(ethereum.hash, header.0.hash());
+        assert_eq!(ethereum.number, 2);
         let decoded: BlochRpcHeader = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.as_consensus(), &header);
         assert_eq!(decoded.hash(), header.0.hash());
@@ -322,7 +346,12 @@ mod tests {
             .convert_header(SealedHeader::new(header.clone(), B256::ZERO), 1)
             .is_err());
         let rpc = BlochRpcHeader::new(header, 1);
-        for (field, value) in [("difficulty", "0x1"), ("extraData", "0x01")] {
+        for (field, value) in [
+            ("difficulty", "0x1"),
+            ("extraData", "0x01"),
+            ("nonce", "0x0000000000000001"),
+            ("sha3Uncles", "0x0000000000000000000000000000000000000000000000000000000000000001"),
+        ] {
             let mut json = serde_json::to_value(&rpc).unwrap();
             json[field] = serde_json::json!(value);
             assert!(serde_json::from_value::<BlochRpcHeader>(json).is_err(), "{field}");
@@ -331,6 +360,8 @@ mod tests {
         let mut old = serde_json::to_value(&rpc).unwrap();
         old.as_object_mut().unwrap().remove("difficulty");
         old.as_object_mut().unwrap().remove("extraData");
+        old.as_object_mut().unwrap().remove("sha3Uncles");
+        old.as_object_mut().unwrap().remove("nonce");
         assert_eq!(serde_json::from_value::<BlochRpcHeader>(old).unwrap(), rpc);
         for field in ["hash", "domain", "depositsHash", "parentStateRoot", "receiptsRoot"] {
             let mut json = serde_json::to_value(&rpc).unwrap();

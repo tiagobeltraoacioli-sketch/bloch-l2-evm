@@ -43,6 +43,8 @@ pub struct SettledBlockInputs {
     pub parent_hash: B256,
     pub previous_state_root: B256,
     pub anchor: B256,
+    /// Native slot of the anchored block (the L2 timestamp rule's L1 origin).
+    pub anchor_slot: u64,
     pub deposits: Vec<DepositMint>,
     pub transactions: Vec<Bytes>,
     pub header_hash: B256,
@@ -219,6 +221,7 @@ pub fn derive_settled_blocks(
                         parent_hash: base.l2_parent_hash,
                         previous_state_root: base.l2_previous_state_root,
                         anchor: base.l1_block,
+                        anchor_slot: base.l1_slot,
                         deposits,
                         transactions,
                         header_hash: base.l2_header_hash,

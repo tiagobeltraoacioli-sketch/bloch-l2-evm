@@ -30,6 +30,7 @@ use bloch_l2_evm::{
     ChainSpec,
 };
 use bloch_settlement_recovery::reconstruct::{derive_settled_blocks, NativeBlockTransactions};
+use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
     prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator,
@@ -56,10 +57,12 @@ usage:
   bloch-l2-produce-dev init   --target DIR
   bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
+                              [--timestamp-rule FROM:GENESIS:SLOT_MS --anchor-slot N]
   bloch-l2-produce-dev export --target DIR --number N --out FILE
   bloch-l2-produce-dev head   --target DIR
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
   bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
+                                   [--timestamp-rule FROM:GENESIS:SLOT_MS]
   bloch-l2-produce-dev withdrawal-proof --target DIR --index I [--number N] [--root HEX --count N]
   bloch-l2-produce-dev account --target DIR --address HEX20
   bloch-l2-produce-dev address --key FILE
@@ -67,7 +70,10 @@ usage:
                                [--gas N] [--max-fee-wei N] --out FILE
 
 extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
-whose anchor is the native-selected source block. HEX is 64 lowercase hex
+whose anchor is the native-selected source block. With --timestamp-rule
+FROM:L1_GENESIS_UNIX_SECS:L1_SLOT_MILLIS, blocks from L2 number FROM on take the
+start time of the anchored native slot (--anchor-slot), never less than parent + 1;
+reconstruct must be given the same rule. HEX is 64 lowercase hex
 characters without 0x. --deposits is a JSON list of native inbox records
 ({height,tx_index,txid,vout,sats,recipient}) minted at block start, in order.
 --txs is the pending pool: a JSON list of signed transaction hex strings, or a
@@ -134,6 +140,12 @@ fn option<'a>(args: &'a [String], name: &str) -> Result<&'a str, String> {
         }
     }
     found.ok_or_else(|| format!("missing {name}"))
+}
+
+/// `--timestamp-rule FROM:GENESIS:SLOT_MS`: L2 time follows the anchored L1 slot from
+/// L2 block FROM on (see `timestamp.rs`); absent, every block is `parent + 1`.
+fn timestamp_rule(args: &[String]) -> Result<Option<TimestampRule>, String> {
+    option(args, "--timestamp-rule").ok().map(TimestampRule::parse).transpose()
 }
 
 fn only(args: &[String], allowed: &[&str]) -> Result<(), String> {
@@ -222,7 +234,10 @@ fn run(args: &[String]) -> Result<String, String> {
         "extend" => {
             only(
                 rest,
-                &["--target", "--parent", "--anchor", "--deposits", "--txs", "--max-gas", "--max-bytes", "--max-txs"],
+                &[
+                    "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
+                    "--max-gas", "--max-bytes", "--max-txs",
+                ],
             )?;
             let deposits = match rest.chunks(2).find(|p| p[0] == "--deposits") {
                 Some(pair) => read_deposits(Path::new(&pair[1]))?,
@@ -240,7 +255,13 @@ fn run(args: &[String]) -> Result<String, String> {
                     hex::encode(parent)
                 ));
             }
-            let timestamp = head.0.timestamp.checked_add(1).ok_or("timestamp overflow")?;
+            let rule = timestamp_rule(rest)?;
+            let anchor_slot = match option(rest, "--anchor-slot") {
+                Ok(value) => Some(value.parse::<u64>().map_err(|_| "--anchor-slot must be decimal")?),
+                Err(_) => None,
+            };
+            let timestamp = next_timestamp(rule.as_ref(), head.0.number + 1, head.0.timestamp, anchor_slot)
+                .ok_or("timestamp overflow, or --anchor-slot missing under --timestamp-rule")?;
             let attributes = BlochNextBlockEnvCtx {
                 timestamp,
                 prevrandao: B256::repeat_byte(7),
@@ -344,7 +365,8 @@ fn run(args: &[String]) -> Result<String, String> {
             .to_string())
         }
         "reconstruct" => {
-            only(rest, &["--target", "--l1", "--l1-follower", "--chain-id"])?;
+            only(rest, &["--target", "--l1", "--l1-follower", "--chain-id", "--timestamp-rule"])?;
+            let rule = timestamp_rule(rest)?;
             let blocks = match (option(rest, "--l1"), option(rest, "--l1-follower")) {
                 (Ok(file), Err(_)) => read_l1_fixture(Path::new(file))?,
                 (Err(_), Ok(dir)) => read_l1_follower(Path::new(dir))?,
@@ -372,7 +394,8 @@ fn run(args: &[String]) -> Result<String, String> {
                     return Err(format!("L2 block {}: rebuilt parent differs from the settled parent", block.number));
                 }
                 let attributes = BlochNextBlockEnvCtx {
-                    timestamp: head.0.timestamp.checked_add(1).ok_or("timestamp overflow")?,
+                    timestamp: next_timestamp(rule.as_ref(), block.number, head.0.timestamp, Some(block.anchor_slot))
+                        .ok_or("timestamp overflow")?,
                     prevrandao: B256::repeat_byte(7),
                     anchor_root: block.anchor,
                     deposits: block.deposits.clone(),

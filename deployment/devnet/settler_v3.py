@@ -373,8 +373,11 @@ class Settler:
             raise Halt(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         return json.loads(result.stdout)
 
-    def extend_arguments(self, parent, anchor, deposits):
+    def extend_arguments(self, parent, anchor, deposits, anchor_slot=None):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
+        if self.c.get('timestamp_rule'):
+            # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
+            args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
         if self.c['user_transactions']:
             args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
@@ -402,7 +405,8 @@ class Settler:
         if head['number'] == number - 1:
             if head['hash'] != parent:
                 raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
-            block = self.produce(*self.extend_arguments(parent, anchor, deposits))
+            anchor_slot = int(source['request'].splitlines()[3])
+            block = self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
             produced.write_text(json.dumps(block, sort_keys=True) + '\n')
