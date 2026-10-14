@@ -228,7 +228,7 @@ pub fn verify_native_finality(
         byte_count = byte_count
             .checked_add(304 + block.envelope.proposer_sig.len())
             .ok_or(E::Limit)?;
-        if block.envelope.proposer_sig.len() > 8_192 {
+        if block.envelope.proposer_sig.len() > MAX_CONSENSUS_SIGNATURE_BYTES {
             return Err(E::Limit);
         }
         atts = atts.checked_add(block.attestations.len()).ok_or(E::Limit)?;
@@ -237,7 +237,7 @@ pub fn verify_native_finality(
             return Err(E::Limit);
         }
         for att in &block.attestations {
-            if att.signature.len() > 8_192 {
+            if att.signature.len() > MAX_CONSENSUS_SIGNATURE_BYTES {
                 return Err(E::Limit);
             }
             byte_count = byte_count.checked_add(132 + att.signature.len()).ok_or(E::Limit)?;
@@ -309,7 +309,7 @@ pub struct NativeBlockLimitsV1 {
 impl Default for NativeBlockLimitsV1 {
     fn default() -> Self {
         Self {
-            signature_bytes: 8_192,
+            signature_bytes: MAX_CONSENSUS_SIGNATURE_BYTES,
             attestations: 4_096,
             transactions: 4_096,
             proofs: 64,
@@ -317,6 +317,12 @@ impl Default for NativeBlockLimitsV1 {
         }
     }
 }
+
+/// Largest proposer or vote signature replayed: a hybrid signature (at most
+/// 4,593 bytes) or, from native KES activation on, a forward-secure KES
+/// signature (`bloch_pos_committee::kes::MAX_SIGNATURE_LEN` = 8,871 bytes:
+/// leaf key, leaf signature and up to a 16-level path).
+pub const MAX_CONSENSUS_SIGNATURE_BYTES: usize = 9_216;
 
 /// Real native replay that advances one block at a time and can be queried
 /// between blocks. It holds the complete committed state from the pinned
