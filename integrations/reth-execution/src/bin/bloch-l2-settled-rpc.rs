@@ -14,7 +14,15 @@
 //!   local canonical header; never below `finalized`.
 //! No checkpoint signature is involved. Neither level regresses; any
 //! inconsistency freezes it and is logged. `bloch_finality` reports both with
-//! their L1 anchors. Transactions are refused: this node produces no blocks.
+//! their L1 anchors.
+//!
+//! With `--txpool DIR` it is also the development sequencer's front door:
+//! `eth_sendRawTransaction` authenticates the canonical signed bytes (EIP-2718
+//! encoding, chain id, low-s ECDSA signature, size) and checks the nonce
+//! against the head, then writes one `<hash>.tx` spool entry (hex) atomically
+//! into the pool the settlement worker selects from. Inclusion, fees, balance
+//! and gas are decided by the producer, which drops invalid entries with a
+//! reason. Without `--txpool`, transactions are refused.
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
@@ -26,7 +34,7 @@ use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
     providers::{BlockchainProvider, RocksDBBuilder, StaticFileProvider},
-    BlockNumReader, HeaderProvider, ProviderFactory,
+    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, StateProviderFactory,
 };
 use reth_rpc::EthFilter;
 use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
@@ -38,8 +46,9 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2]\n\
-Read-only development RPC. finalized comes only from verified native FFG finality of L2 settlements;\n\
+const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2] [--txpool DIR]\n\
+Development RPC over the settled database; with --txpool, eth_sendRawTransaction spools authenticated\n\
+transactions for the settlement worker (the sequencer). finalized comes only from verified native FFG finality of L2 settlements;\n\
 safe from the settlement the local native node accepted at its head. --rules selects the settlement\n\
 execution rules the canonical database was written under (default v3: ChainSpec::testnet_v3).\n";
 
@@ -51,7 +60,14 @@ struct Options {
     port: u16,
     poll: Duration,
     v3: bool,
+    txpool: Option<PathBuf>,
 }
+
+/// Spool entries accepted while the producer has not yet consumed them; the
+/// producer itself refuses a pool above 16,384 entries.
+const MAX_SPOOL_ENTRIES: usize = 4_096;
+/// Highest nonce gap accepted ahead of the head account nonce.
+const MAX_NONCE_AHEAD: u64 = 64;
 
 fn parse() -> Result<Options> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,7 +79,7 @@ fn parse() -> Result<Options> {
     let mut map = std::collections::BTreeMap::new();
     for pair in args.chunks(2) {
         ensure!(
-            ["--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules"].contains(&pair[0].as_str()),
+            ["--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules", "--txpool"].contains(&pair[0].as_str()),
             "unknown option {}\n{USAGE}",
             pair[0]
         );
@@ -84,7 +100,64 @@ fn parse() -> Result<Options> {
             "v2" => false,
             other => bail!("--rules must be v3 or v2, not {other}"),
         },
+        txpool: map.get("--txpool").map(PathBuf::from),
     })
+}
+
+fn rpc_error(message: impl Into<String>) -> jsonrpsee::types::ErrorObjectOwned {
+    jsonrpsee::types::ErrorObjectOwned::owned(-32000, message.into(), None::<()>)
+}
+
+/// `eth_sendRawTransaction` into the settlement worker's spool directory.
+fn sequencer_rpc(spec: ChainSpec, pool: PathBuf, provider: BlochBlockchainProvider) -> jsonrpsee::RpcModule<()> {
+    let mut module = jsonrpsee::RpcModule::new(());
+    module
+        .register_blocking_method("eth_sendRawTransaction", move |params, _, _| {
+            let raw: alloy_primitives::Bytes = params.one()?;
+            let tx = bloch_l2_evm::decode_signed_transaction(&spec, &raw)
+                .map_err(|e| rpc_error(format!("transaction rejected: {e:?}")))?;
+            let hash = tx.hash();
+            let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
+            if pool.join(&name).exists() {
+                return Ok(hash); // already known, not yet consumed
+            }
+            let nonce = provider
+                .latest()
+                .and_then(|state| state.basic_account(&tx.sender()))
+                .map_err(|e| rpc_error(format!("state unavailable: {e}")))?
+                .map_or(0, |account| account.nonce);
+            let sent = tx.environment().nonce;
+            if sent < nonce {
+                return Err(rpc_error(format!("nonce too low: next nonce is {nonce}")));
+            }
+            if sent > nonce + MAX_NONCE_AHEAD {
+                return Err(rpc_error(format!("nonce too high: next nonce is {nonce}")));
+            }
+            let entries = std::fs::read_dir(&pool)
+                .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().is_some_and(|x| x == "tx"))
+                .count();
+            if entries >= MAX_SPOOL_ENTRIES {
+                return Err(rpc_error("txpool full"));
+            }
+            // Write beside, then rename: the producer only reads complete *.tx files.
+            let partial = pool.join(format!(".{}.partial", alloy_primitives::hex::encode(hash)));
+            let written = std::fs::write(&partial, format!("{}\n", alloy_primitives::hex::encode(tx.raw())))
+                .and_then(|()| {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o600))
+                })
+                .and_then(|()| std::fs::rename(&partial, pool.join(&name)));
+            if let Err(error) = written {
+                let _ = std::fs::remove_file(&partial);
+                return Err(rpc_error(format!("txpool write failed: {error}")));
+            }
+            println!("spooled tx={hash} from={} nonce={sent}", tx.sender());
+            Ok(hash)
+        })
+        .expect("the send method name is unique in a new module");
+    module
 }
 
 /// RocksDB's read-only secondary needs a writable scratch directory beside
@@ -209,6 +282,12 @@ async fn main() -> Result<()> {
     );
     let filter = EthFilter::new(api.clone(), reth_rpc_eth_types::EthConfig::default().filter_config(), runtime.clone());
     let mut module = api.into_rpc().remove_context();
+    if let Some(pool) = &options.txpool {
+        ensure!(std::fs::symlink_metadata(pool)?.is_dir(), "--txpool {} is not a directory", pool.display());
+        // Replace the no-pool method of the read-only API with the spooling one.
+        ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
+        module.merge(sequencer_rpc(rules(), pool.clone(), provider.clone()))?;
+    }
     module.merge(filter.into_rpc())?;
     module.merge(chain_identity_rpc(spec.clone()))?;
     module.merge(chain_status_rpc(spec.clone(), provider.clone()))?;
@@ -216,8 +295,9 @@ async fn main() -> Result<()> {
     module.merge(finality_rpc(finality.clone()))?;
     let server = start_http_rpc(module, options.port).await?;
     println!(
-        "SETTLED DEV RPC (read-only) at {}; finality only from verified native FFG settlement",
-        server.http_url().unwrap_or_default()
+        "SETTLED DEV RPC at {}; finality only from verified native FFG settlement; {}",
+        server.http_url().unwrap_or_default(),
+        options.txpool.as_ref().map_or("transactions refused".to_string(), |p| format!("eth_sendRawTransaction spools to {}", p.display()))
     );
     let state = provider.canonical_in_memory_state();
     let mut head_number = u64::MAX;
