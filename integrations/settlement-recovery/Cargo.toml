@@ -30,6 +30,10 @@ devnet-l2-deposits = ["bloch-pos-committee/devnet-l2-deposits", "bloch-pos-node/
 # Development networks admitting settlement V3 user transactions and their L1
 # data-availability transactions (0x15); a follower without it halts on them.
 devnet-l2-user-txs = ["devnet-l2-deposits", "bloch-pos-committee/devnet-l2-user-txs", "bloch-pos-node/devnet-l2-user-txs"]
+# Development networks with forward-secure (KES) validator keys: registrations
+# (0x17) and, from the compiled activation epoch, KES-signed proposals and votes.
+# A follower must replay with exactly the validators' schedule.
+devnet-kes = ["bloch-pos-committee/devnet-kes", "bloch-pos-node/devnet-kes"]
 
 [dependencies]
 bloch-l2-evm = { path = "../.." }
