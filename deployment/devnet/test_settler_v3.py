@@ -173,6 +173,7 @@ class Ports:
     def __init__(self, fake, **modes):
         self.fake, self.modes, self.calls = fake, {int(k[1:]): v for k, v in modes.items()}, []
         self.chaininfo, self.utxos, self.reject = {}, {}, set()
+        self.moving, self.script, self.reads = False, {}, 0  # head motion between reads
 
     def rpc(self, port, method, params=()):
         self.calls.append((port, method))
@@ -182,7 +183,13 @@ class Ports:
         if mode == 'erroring':
             raise s.RpcError(f"{method}: {{'code': -32004, 'message': 'consensus thread did not answer within 10s'}}")
         if method == 'getl2settlement':
-            view = {**self.fake.view(), 'native_height': 200}
+            self.reads += 1
+            view = {**self.fake.view(), 'native_height': 200 + (self.reads if self.moving else 0)}
+            if self.moving:  # per-head bookkeeping the worker does not read
+                view['withdrawals'] = {'count': 0, 'roots': [{'finalized': self.reads % 2 == 0}]}
+                view['inbox'] = {'count': 1, 'consumed': 0, 'escrow_sat': str(5000 + self.reads)}
+            if self.script.get(port):
+                view.update(self.script[port].pop(0))
             if mode == 'lagging':
                 view.update(native_height=150, accepted=None, data_availability=[],
                             source={**view['source'], 'block': '0c' * 32})
@@ -727,10 +734,68 @@ class SettlerV3Test(unittest.TestCase):
         for modes, code in (({}, 0), ({'p3': 'down'}, 0), ({'p2': 'conflicting', 'p3': 'lagging'}, 2),
                             ({'p1': 'down', 'p2': 'down'}, 2)):
             ports = Ports(fake, **modes)
+            ports.moving = True
             with mock.patch.object(s, 'log'):
-                self.assertEqual(s.check_rpc(config, rpc=ports.rpc), code, modes)
+                self.assertEqual(s.check_rpc(config, rpc=ports.rpc, sleep=lambda _: None), code, modes)
             self.assertEqual({m for _, m in ports.calls}, {'getl2settlement'})
         self.assertEqual((fake.sent, fake.calls), ([], []))
+
+    # ---- head moves between reads ----
+    def test_quorum_head_moving_between_reads_still_agrees(self):
+        # native_height, inbox totals and withdrawal flags change on every read:
+        # the worker does not use them, so they do not split the quorum.
+        for modes in ({}, {'p1': 'down'}):
+            with self.subTest(modes=modes):
+                self.tearDown(), self.setUp()
+                fake = Fake(self.root, statement())
+                ports = Ports(fake, **modes)
+                ports.moving = True
+                with mock.patch.object(s, 'log') as logged:
+                    self.assertTrue(self.quorum_settler(ports).cycle())
+                self.assertNotIn('rpc-no-quorum', self.events(logged))
+                self.assertEqual(len(fake.sent), 1)
+
+    def test_quorum_split_by_a_new_source_is_reread_before_no_quorum(self):
+        # 18940 down; 18942 already saw the next source, 18941 catches up one read later.
+        fake = Fake(self.root, statement())
+        ports = Ports(fake, p1='down')
+        ports.moving = True
+        moved = {**fake.view()['source'], 'block': '0d' * 32}
+        ports.script = {2: [{}, {'source': moved}], 3: [{'source': moved}, {'source': moved}]}
+        sleeps = []
+        endpoints = s.Endpoints([1, 2, 3], 2, ports.rpc, lambda: 0, sleeps.append)
+        with mock.patch.object(s, 'log') as logged:
+            view, support = endpoints.agreed('getl2settlement', project=s.settlement_view)
+        self.assertEqual((view['source']['block'], support), ('0d' * 32, [2, 3]))
+        self.assertEqual(sleeps, [s.QUORUM_RETRY_SECONDS])
+        self.assertNotIn('rpc-no-quorum', self.events(logged))
+        self.assertNotIn('native_height', view, 'only the safety-relevant projection is returned')
+
+    def test_quorum_persistent_split_is_logged_once_after_the_retries(self):
+        fake = Fake(self.root, statement())
+        ports = Ports(fake, p1='down', p2='conflicting')
+        ports.moving = True
+        sleeps = []
+        endpoints = s.Endpoints([1, 2, 3], 2, ports.rpc, lambda: 0, sleeps.append)
+        with mock.patch.object(s, 'log') as logged:
+            for _ in range(2):
+                self.assertEqual(endpoints.agreed('getl2settlement', project=s.settlement_view), (None, []))
+        self.assertEqual(self.events(logged).count('rpc-no-quorum'), 1)
+        self.assertEqual(ports.count(2), 2 * s.QUORUM_READ_ATTEMPTS, 'every attempt is a fresh read')
+        self.assertEqual(len(sleeps), 2 * (s.QUORUM_READ_ATTEMPTS - 1))
+
+    def test_quorum_projection_keeps_every_field_the_worker_reads(self):
+        view = {**Fake(self.root, statement()).view(), 'native_height': 7, 'genesis': GENESIS, 'asynchronous': True,
+                'inbox': {}, 'withdrawals': {}}
+        self.assertEqual(set(s.settlement_view(view)),
+                         {'network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability'})
+        # A difference in any used field (here the DA records) still splits the quorum.
+        fake = Fake(self.root, statement())
+        ports = Ports(fake, p1='down')
+        ports.script = {3: [{'data_availability': [{'l2_number': 1, 'commitment': '55' * 32, 'height': 9}]}] * 3}
+        endpoints = s.Endpoints([1, 2, 3], 2, ports.rpc, lambda: 0, lambda _: None)
+        with mock.patch.object(s, 'log'):
+            self.assertEqual(endpoints.agreed('getl2settlement', project=s.settlement_view), (None, []))
 
 if __name__ == '__main__':
     unittest.main()

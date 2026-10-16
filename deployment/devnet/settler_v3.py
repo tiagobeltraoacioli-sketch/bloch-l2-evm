@@ -51,7 +51,11 @@ Differences, all deliberate:
   L1 consensus validates the transaction itself. The DA base fee and funding
   outputs also need a quorum of answers. A failing endpoint is skipped with
   exponential backoff; with every endpoint healthy and in agreement the worker
-  behaves as before. `--check-rpc` prints the per-endpoint view and the quorum
+  behaves as before. `getl2settlement` takes no block argument (it answers from
+  each node's head), so the quorum compares only the fields the worker uses
+  (`SETTLEMENT_VIEW_FIELDS`), not the per-block `native_height` or withdrawal
+  bookkeeping, and a split read is retried a few times within seconds before
+  it counts as no quorum. `--check-rpc` prints the per-endpoint view and the quorum
   decision and exits without producing, proving or submitting anything.
 
 Each cycle: read the native request all validators agree on, extend the
@@ -98,6 +102,10 @@ REMOTE_MAGIC = b'BLOCH:L2:PROVE:1\n'
 REMOTE_MAX_PROOF_BYTES = 1 << 20
 RPC_BACKOFF_SECONDS, RPC_MAX_BACKOFF_SECONDS = 10, 300
 RPC_DIVERGED_LOG_AFTER = 3  # consecutive reads outside the quorum before an endpoint is reported
+QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy endpoints straddle a block
+# The getl2settlement fields the worker reads; everything else (native_height,
+# inbox totals, withdrawal bookkeeping) moves with every head and is not used.
+SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 256}  # bytes: one native DA batch
 
@@ -289,6 +297,13 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'))
 
 
+def settlement_view(view):
+    """The safety-relevant projection of a getl2settlement answer."""
+    if not isinstance(view, dict):
+        return view
+    return {k: view[k] for k in SETTLEMENT_VIEW_FIELDS if k in view}
+
+
 def rpc_quorum(config):
     """`rpc_quorum` from the configuration (default: strict majority of `rpc_ports`)."""
     ports = config.get('rpc_ports')
@@ -313,8 +328,8 @@ class Endpoints:
     fewer than `quorum` endpoints are out of backoff, all are probed.
     """
 
-    def __init__(self, ports, quorum, rpc, clock):
-        self.ports, self.quorum, self.rpc, self.clock = list(ports), quorum, rpc, clock
+    def __init__(self, ports, quorum, rpc, clock, sleep=time.sleep):
+        self.ports, self.quorum, self.rpc, self.clock, self.sleep = list(ports), quorum, rpc, clock, sleep
         self.faults = len(self.ports) - quorum  # endpoints that may be wrong or missing
         self.state = {p: {'failures': 0, 'retry_at': 0.0, 'diverged': 0} for p in self.ports}
         self.split = False
@@ -361,16 +376,23 @@ class Endpoints:
                                f'{need} needed')
         return answers
 
-    def agreed(self, method, params=()):
-        """(answer, supporting ports) when a quorum returned the identical answer, else (None, [])."""
-        answers = self.gather(method, params)
-        groups = {}
-        for port, answer in answers.items():
-            groups.setdefault(canonical(answer), []).append(port)
-        support = max(groups.values(), key=len)
-        if len(support) < self.quorum:
+    def agreed(self, method, params=(), project=lambda answer: answer):
+        """(projected answer, supporting ports) when a quorum returned the identical
+        projected answer, else (None, []). A split is re-read (all endpoints, fresh)
+        up to QUORUM_READ_ATTEMPTS times: answers from different reads are never mixed."""
+        for attempt in range(QUORUM_READ_ATTEMPTS):
+            if attempt:
+                self.sleep(QUORUM_RETRY_SECONDS)
+            answers = {port: project(answer) for port, answer in self.gather(method, params).items()}
+            groups = {}
+            for port, answer in answers.items():
+                groups.setdefault(canonical(answer), []).append(port)
+            support = max(groups.values(), key=len)
+            if len(support) >= self.quorum:
+                break
+        else:
             if not self.split:
-                log('rpc-no-quorum', method=method, quorum=self.quorum,
+                log('rpc-no-quorum', method=method, quorum=self.quorum, attempts=QUORUM_READ_ATTEMPTS,
                     groups=sorted((sorted(g) for g in groups.values()), key=len, reverse=True))
             self.split = True
             return None, []
@@ -506,12 +528,12 @@ class Settler:
                     or not set(order) <= {'local', 'remote'}:
                 raise Halt('remote_prover.order must list "local" and/or "remote" once each')
         self.work = Path(self.c['workdir'])
-        self.native = Endpoints(self.c['rpc_ports'], rpc_quorum(self.c), self.rpc, self.clock)
+        self.native = Endpoints(self.c['rpc_ports'], rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
 
     def native_view(self):
         """The settlement view a quorum of validator RPCs reports identically, or None."""
-        view, support = self.native.agreed('getl2settlement')
+        view, support = self.native.agreed('getl2settlement', project=settlement_view)
         if view is None:
             return None  # validators momentarily disagree; retry later
         if view['network'] != self.c['network'] or view['chain_id'] != CHAIN_ID:
@@ -817,10 +839,10 @@ class Settler:
         return self.submit_and_wait(number, directory, tx, view)
 
 
-def check_rpc(config, rpc=rpc):
+def check_rpc(config, rpc=rpc, sleep=time.sleep):
     """Read-only: print each endpoint's settlement view and the quorum decision."""
     try:
-        endpoints = Endpoints(config['rpc_ports'], rpc_quorum(config), rpc, time.monotonic)
+        endpoints = Endpoints(config['rpc_ports'], rpc_quorum(config), rpc, time.monotonic, sleep)
     except Halt as error:
         log('halt', reason=str(error))
         return 3
@@ -828,13 +850,14 @@ def check_rpc(config, rpc=rpc):
         try:
             view = rpc(port, 'getl2settlement')
             accepted = view.get('accepted')
-            log('rpc-endpoint-view', port=port, view_sha256=hashlib.sha256(canonical(view).encode()).hexdigest(),
+            log('rpc-endpoint-view', port=port,
+                view_sha256=hashlib.sha256(canonical(settlement_view(view)).encode()).hexdigest(),
                 native_height=view.get('native_height'), source_height=(view.get('source') or {}).get('height'),
                 accepted=statement_fields(accepted['statement'])['l2_number'] if accepted else None)
         except Exception as error:
             log('rpc-endpoint-view', port=port, error=f'{type(error).__name__}: {error}'[:300])
     try:
-        view, support = endpoints.agreed('getl2settlement')
+        view, support = endpoints.agreed('getl2settlement', project=settlement_view)
     except RuntimeError as error:
         log('rpc-check', quorum=endpoints.quorum, ok=False, reason=str(error))
         return 2
