@@ -48,6 +48,8 @@ bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos
 bloch-pos-node = { path = "../../../bloch-validator-payout/crates/bloch-pos-node" }
 serde_json = "1.0"
 libc = "0.2"
+# SHA3-256 of a funded manifest = its network admission domain (the native rule).
+sha3 = "0.10"
 # sign-tx / address (development keys only); the same pins as the dev-dependencies.
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }

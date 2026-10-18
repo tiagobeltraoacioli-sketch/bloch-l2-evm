@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Read-only RPC for the natively settled development L2.
+//! Read-only RPC for the natively settled L2 (devnet 700771, mainnet 700770).
 //!
 //! Serves the canonical database written by the settlement worker, opened
 //! read-only, and follows its head. `safe`/`finalized` are published only in
@@ -60,7 +60,7 @@ use std::{
 };
 
 const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2|mainnet [--domain HEX --genesis-time SECS]] [--txpool DIR]\n\
-Development RPC over the settled database; with --txpool, eth_sendRawTransaction spools authenticated\n\
+RPC over the settled database; with --txpool, eth_sendRawTransaction spools authenticated\n\
 transactions for the settlement worker (the sequencer). finalized comes only from verified native FFG finality of L2 settlements;\n\
 safe from the settlement the local native node accepted at its head. --rules selects the settlement\n\
 execution rules the canonical database was written under (default v3: ChainSpec::testnet_v3; mainnet:\n\
@@ -288,7 +288,12 @@ struct Levels {
 /// The highest L2 header proven final by the follower's verified status, if
 /// every listed settlement matches the local canonical chain, and the safe
 /// header the local native node reports.
-fn verified_levels(status_path: &Path, network: &str, provider: &BlochBlockchainProvider) -> Result<Option<Levels>> {
+fn verified_levels(
+    status_path: &Path,
+    network: &str,
+    chain_id: u64,
+    provider: &BlochBlockchainProvider,
+) -> Result<Option<Levels>> {
     let bytes = match std::fs::read(status_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -300,7 +305,8 @@ fn verified_levels(status_path: &Path, network: &str, provider: &BlochBlockchain
     ensure!(status["network"] == network, "status is for another native network");
     ensure!(status["production_finality"] == false, "status claims production finality");
     let settlements = status["finalized_settlements"].as_array().ok_or_else(|| eyre::eyre!("no settlement list"))?;
-    let mut best = None;
+    let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
+    let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);
     let mut expected_number = 1u64;
     for entry in settlements {
         let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad l2_number"))?;
@@ -333,10 +339,95 @@ fn verified_levels(status_path: &Path, network: &str, provider: &BlochBlockchain
     Ok(Some(Levels { finalized: best, safe, status }))
 }
 
+/// Whether the status proves the local L2 genesis final: the follower reports
+/// `l2_genesis.finalized` once the native block that installed the L2 with this
+/// genesis (`initial_l2_parent`) is inside its verified finalized prefix. A
+/// status for another chain id or another L2 genesis is refused.
+fn final_genesis(status: &serde_json::Value, chain_id: u64, local_genesis: B256) -> Result<bool> {
+    if let Some(id) = status.get("chain_id").filter(|v| !v.is_null()) {
+        ensure!(id.as_u64() == Some(chain_id), "status is for chain id {id}, this RPC serves {chain_id}");
+    }
+    let Some(genesis) = status.get("l2_genesis").filter(|v| !v.is_null()) else { return Ok(false) };
+    let hash: B256 = genesis["hash"].as_str().unwrap_or_default().parse()?;
+    ensure!(hash == local_genesis, "the native L2 genesis {hash} differs from the local genesis {local_genesis}");
+    Ok(genesis["finalized"] == true)
+}
+
 fn level_json(header: &Option<Header>) -> serde_json::Value {
     header.as_ref().map_or(serde_json::Value::Null, |h| {
         serde_json::json!({"number": format!("0x{:x}", h.0.number), "hash": h.hash()})
     })
+}
+
+/// `net_*` and `web3_*`, which wallets (MetaMask's network check calls
+/// `net_version`) and libraries query besides `eth_chainId`. The node has no
+/// peers: the settled RPC serves one operator's canonical chain.
+fn net_web3_rpc(chain_id: u64) -> jsonrpsee::RpcModule<()> {
+    let mut module = jsonrpsee::RpcModule::new(());
+    let version = chain_id.to_string();
+    module
+        .register_method("net_version", move |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>(version.clone()))
+        .expect("unique");
+    module.register_method("net_listening", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>(true)).expect("unique");
+    module.register_method("net_peerCount", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x0")).expect("unique");
+    module
+        .register_method("web3_clientVersion", |_, _, _| {
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>(concat!("bloch-l2-settled-rpc/v", env!("CARGO_PKG_VERSION")))
+        })
+        .expect("unique");
+    module
+        .register_method("web3_sha3", |params, _, _| {
+            let data: alloy_primitives::Bytes = params.one()?;
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>(alloy_primitives::keccak256(&data))
+        })
+        .expect("unique");
+    module
+}
+
+/// Verified finalized settlements by L2 number (only entries `verified_levels`
+/// already matched against the local canonical chain).
+type SettlementIndex = std::collections::BTreeMap<u64, serde_json::Value>;
+
+/// The public fields of each finalized settlement in a verified status.
+fn settlement_index(status: &serde_json::Value) -> SettlementIndex {
+    status["finalized_settlements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let number = entry["l2_number"].as_u64()?;
+            let mut out = serde_json::Map::new();
+            for key in ["l2_number", "l2_hash", "l2_state_root", "commitment", "native_slot", "native_block", "withdrawals"] {
+                out.insert(key.into(), entry.get(key).cloned().unwrap_or(serde_json::Value::Null));
+            }
+            out.insert("finalized".into(), true.into());
+            Some((number, serde_json::Value::Object(out)))
+        })
+        .collect()
+}
+
+/// `bloch_settlement(number)`: the native L1 settlement that finalized L2 block
+/// `number` (hex quantity or integer), or `null` when it is not (yet) inside
+/// the verified finalized prefix.
+fn settlement_rpc(index: Arc<std::sync::RwLock<SettlementIndex>>) -> jsonrpsee::RpcModule<()> {
+    let mut module = jsonrpsee::RpcModule::new(());
+    module
+        .register_method("bloch_settlement", move |params, _, _| {
+            let value: serde_json::Value = params.one()?;
+            let number = match &value {
+                serde_json::Value::Number(n) => n.as_u64(),
+                serde_json::Value::String(text) => {
+                    text.strip_prefix("0x").and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                }
+                _ => None,
+            }
+            .ok_or_else(|| jsonrpsee::types::ErrorObjectOwned::owned(-32602, "block number must be a hex quantity or an integer", None::<()>))?;
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>(
+                index.read().ok().and_then(|i| i.get(&number).cloned()).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .expect("the settlement method name is unique in a new module");
+    module
 }
 
 /// `bloch_finality`: the L2 levels and their L1 anchors, named like the native
@@ -394,16 +485,20 @@ async fn main() -> Result<()> {
     }
     module.merge(filter.into_rpc())?;
     module.merge(chain_identity_rpc(spec.clone()))?;
+    module.merge(net_web3_rpc(kernel.chain_id))?;
     module.merge(chain_status_rpc(spec.clone(), provider.clone()))?;
     let finality = Arc::new(std::sync::RwLock::new(serde_json::Value::Null));
     module.merge(finality_rpc(finality.clone()))?;
+    let settlements = Arc::new(std::sync::RwLock::new(SettlementIndex::new()));
+    module.merge(settlement_rpc(settlements.clone()))?;
     serve_pending_blocks_as_latest(&mut module)?;
     if let Some(pool) = &options.txpool {
         spool_pending_nonce(&mut module, rules(), pool.clone())?;
     }
     let server = start_http_rpc(module, options.port).await?;
     println!(
-        "SETTLED DEV RPC at {}; finality only from verified native FFG settlement; {}",
+        "SETTLED L2 RPC (chain id {}) at {}; finality only from verified native FFG settlement; {}",
+        kernel.chain_id,
         server.http_url().unwrap_or_default(),
         options.txpool.as_ref().map_or("transactions refused".to_string(), |p| format!("eth_sendRawTransaction spools to {}", p.display()))
     );
@@ -426,10 +521,13 @@ async fn main() -> Result<()> {
                         println!("head block={} hash={}", number, header.hash());
                     }
                     let number_of = |h: &Option<Header>| h.as_ref().map_or(0, |h| h.0.number);
-                    match verified_levels(&options.status, &options.network, &provider) {
+                    // Block 0 is a real level (the final L2 genesis): compare
+                    // against "nothing published yet", not against number 0.
+                    let above = |h: &Header, current: &Option<Header>| current.as_ref().is_none_or(|c| h.0.number > c.0.number);
+                    match verified_levels(&options.status, &options.network, kernel.chain_id, &provider) {
                         Ok(Some(levels)) => {
                             match levels.finalized {
-                                Some(header) if header.0.number > number_of(&finalized) => {
+                                Some(header) if above(&header, &finalized) => {
                                     state.set_finalized(header.clone());
                                     println!("finalized block={} hash={} (verified native FFG settlement)", header.0.number, header.hash());
                                     finalized = Some(header);
@@ -445,7 +543,7 @@ async fn main() -> Result<()> {
                                 _ => finalized.clone(),
                             };
                             match candidate {
-                                Some(header) if header.0.number > number_of(&safe) => {
+                                Some(header) if above(&header, &safe) => {
                                     state.set_safe(header.clone());
                                     println!("safe block={} hash={} (settlement accepted on the native head)", header.0.number, header.hash());
                                     safe = Some(header);
@@ -456,12 +554,14 @@ async fn main() -> Result<()> {
                                 _ => {}
                             }
                             let s = &levels.status;
+                            *settlements.write().expect("settlement lock") = settlement_index(s);
                             let latest = factory.sealed_header(head_number)?;
                             *finality.write().expect("finality lock") = serde_json::json!({
                                 "latest": level_json(&latest),
                                 "safe": level_json(&safe),
                                 "finalized": level_json(&finalized),
                                 "finalized_height": number_of(&finalized),
+                                "l2_genesis": s["l2_genesis"],
                                 "l1": {
                                     "finalized": {"epoch": s["native_finalized_epoch"], "root": s["native_finalized_block"],
                                                   "slot": s["native_finalized_slot"]},
@@ -514,6 +614,52 @@ mod tests {
 
     fn address(key: u8) -> Address {
         Address::from_public_key(SigningKey::from_bytes((&[key; 32]).into()).unwrap().verifying_key())
+    }
+
+    #[test]
+    fn genesis_is_final_only_when_the_status_says_so_for_this_chain_and_genesis() {
+        let local = B256::repeat_byte(0x63);
+        let status = |chain: serde_json::Value, genesis: serde_json::Value| serde_json::json!({"chain_id": chain, "l2_genesis": genesis});
+        let entry = |hash: B256, finalized: bool| serde_json::json!({"hash": alloy_primitives::hex::encode(hash), "finalized": finalized});
+        // Older (devnet v2) statuses carry neither field.
+        assert!(!final_genesis(&serde_json::json!({}), 700_770, local).unwrap());
+        assert!(!final_genesis(&status(700_770.into(), serde_json::Value::Null), 700_770, local).unwrap());
+        assert!(!final_genesis(&status(700_770.into(), entry(local, false)), 700_770, local).unwrap());
+        assert!(final_genesis(&status(700_770.into(), entry(local, true)), 700_770, local).unwrap());
+        assert!(final_genesis(&status(serde_json::Value::Null, entry(local, true)), 700_770, local).unwrap());
+        assert!(final_genesis(&status(700_771.into(), entry(local, true)), 700_770, local).is_err());
+        assert!(final_genesis(&status(700_770.into(), entry(B256::repeat_byte(1), true)), 700_770, local).is_err());
+        assert!(final_genesis(&status(700_770.into(), serde_json::json!({"finalized": true})), 700_770, local).is_err());
+    }
+
+    #[tokio::test]
+    async fn net_and_web3_answer_like_an_ethereum_node() {
+        let module = net_web3_rpc(700_770);
+        let version: String = module.call("net_version", jsonrpsee::rpc_params![]).await.unwrap();
+        assert_eq!(version, "700770");
+        let listening: bool = module.call("net_listening", jsonrpsee::rpc_params![]).await.unwrap();
+        assert!(listening);
+        let peers: String = module.call("net_peerCount", jsonrpsee::rpc_params![]).await.unwrap();
+        assert_eq!(peers, "0x0");
+        let client: String = module.call("web3_clientVersion", jsonrpsee::rpc_params![]).await.unwrap();
+        assert!(client.starts_with("bloch-l2-settled-rpc/v"));
+        let hash: B256 = module.call("web3_sha3", jsonrpsee::rpc_params!["0x"]).await.unwrap();
+        assert_eq!(hash, alloy_primitives::KECCAK256_EMPTY);
+    }
+
+    #[test]
+    fn settlement_index_exposes_only_the_public_fields_of_finalized_entries() {
+        let status = serde_json::json!({"finalized_settlements": [
+            {"l2_number": 1, "l2_hash": "aa", "l2_state_root": "bb", "commitment": "cc", "native_slot": 187300,
+             "native_block": "dd", "withdrawals": {"root": "ee", "count": 0}, "extra": 1},
+            {"l2_number": "bad"},
+        ]});
+        let index = settlement_index(&status);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[&1]["native_slot"], 187300);
+        assert_eq!(index[&1]["finalized"], true);
+        assert!(index[&1].get("extra").is_none());
+        assert!(settlement_index(&serde_json::json!({})).is_empty());
     }
 
     #[test]

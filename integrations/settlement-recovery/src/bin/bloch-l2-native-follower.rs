@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Continuous native finality verifier for the development network.
+//! Continuous native finality verifier for the L2 (devnet and mainnet).
 //!
 //! On start it re-verifies its locally retained history from the pinned genesis
 //! with real signatures, Groth16 and FFG (no stored state is trusted). It then
-//! follows a loopback validator RPC, fetching only new canonical envelopes up to
-//! the node-reported finalized root. That root is a fetch hint: the finality the
+//! follows a native node RPC (loopback `--rpc-port`, or a read-only remote
+//! `--rpc-url`), fetching only new canonical envelopes up to the node-reported
+//! finalized root. The source is untrusted for finality: a wrong or withheld
+//! block halts or stalls the replay, it cannot forge a finalized level.
+//!
+//! Mainnet (`BPOSMAN1` Genesis-4 manifest + `--carryover`): the genesis has no
+//! L2 registry; the native transition installs it at the epoch-5850 flag day and
+//! the follower halts unless it installs exactly the pinned mainnet policy
+//! (`bloch_settlement_recovery::mainnet`). Once that activation block is inside
+//! the verified finalized prefix the status reports the L2 genesis as final
+//! (`l2_genesis.finalized`), so the RPC publishes block 0 as `finalized`
+//! before the first settlement. That root is a fetch hint: the finality the
 //! status file reports is the one this process derived by replay. A block is
 //! retained only after it verified. The status file lists every L2 settlement
 //! inside the verified finalized prefix; it is evidence for the L2 RPC finality
@@ -23,6 +33,8 @@ use bloch_pos_committee::interfaces::{ProposalEnvelope, StateReader};
 use bloch_pos_node::codec;
 use bloch_settlement_recovery::{
     history::load_native_manifest,
+    history::load_flag_day_manifest,
+    mainnet,
     native::{IncrementalNativeVerifierV1, NativeBlockLimitsV1, NativeGenesisTrustV1, NativeReplayBlockV1},
 };
 use serde_json::{json, Value};
@@ -36,16 +48,22 @@ use std::{
 };
 
 const USAGE: &str = "\
-usage: bloch-l2-native-follower --manifest PATH --network-pin HEX --rpc-port N --state DIR --status FILE
+usage: bloch-l2-native-follower --manifest PATH --network-pin HEX (--rpc-port N | --rpc-url http://HOST:PORT)
+                                --state DIR --status FILE [--carryover TSV]
                                 [--poll-seconds N] [--max-blocks N] [--max-fetch N]
-Development only. Re-verifies retained history from genesis on start, then follows
-finalized native blocks from a loopback RPC and writes verified finality status.
+Re-verifies retained history from the pinned genesis on start, then follows finalized
+native blocks from a native node RPC (read-only methods: getchaininfo, getblockraw,
+getl2settlement) and writes verified finality status. A BPOSMAN3 manifest is a
+development network with the L2 at genesis; the Genesis-4 mainnet manifest
+(BPOSMAN1, --network-pin f47d3e49...1966) needs --carryover (the decompressed
+carryover.tsv) and the L2 is checked at its epoch-5850 activation.
 ";
 
 struct Options {
     manifest: PathBuf,
+    carryover: Option<PathBuf>,
     pin: B256,
-    rpc_port: u16,
+    rpc: (String, u16),
     state: PathBuf,
     status: PathBuf,
     poll: Duration,
@@ -82,7 +100,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut map = std::collections::BTreeMap::new();
     for pair in args.chunks(2) {
         let name = pair[0].strip_prefix("--").ok_or("options must start with --")?;
-        if !["manifest", "network-pin", "rpc-port", "state", "status", "poll-seconds", "max-blocks", "max-fetch"].contains(&name) {
+        if ![
+            "manifest", "carryover", "network-pin", "rpc-port", "rpc-url", "state", "status", "poll-seconds", "max-blocks",
+            "max-fetch",
+        ]
+        .contains(&name)
+        {
             return Err(format!("unknown option --{name}"));
         }
         if map.insert(name.to_owned(), pair[1].clone()).is_some() {
@@ -97,10 +120,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if pin_text.len() != 64 || !pin_text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return Err("--network-pin must be 64 lowercase hex characters".into());
     }
+    let rpc = match (map.get("rpc-port"), map.get("rpc-url")) {
+        (Some(port), None) => ("127.0.0.1".to_owned(), port.parse().map_err(|_| "bad --rpc-port")?),
+        (None, Some(url)) => parse_rpc_url(url)?,
+        _ => return Err("exactly one of --rpc-port and --rpc-url is required".into()),
+    };
     Ok(Options {
         manifest: PathBuf::from(get("manifest")?),
+        carryover: map.get("carryover").map(PathBuf::from),
         pin: pin_text.parse().map_err(|_| "bad --network-pin")?,
-        rpc_port: get("rpc-port")?.parse().map_err(|_| "bad --rpc-port")?,
+        rpc,
         state: PathBuf::from(get("state")?),
         status: PathBuf::from(get("status")?),
         poll: Duration::from_secs(num("poll-seconds", 10)?.clamp(1, 600)),
@@ -109,14 +138,36 @@ fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 
-/// Minimal loopback JSON-RPC client (HTTP/1.0, connection closed per call).
-fn rpc(port: u16, method: &str, params: Value) -> Result<Value, String> {
+/// `http://HOST:PORT` (optional trailing `/`; no path, query, user or TLS).
+fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
+    let rest = url.strip_prefix("http://").ok_or("--rpc-url must start with http://")?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let (host, port) = rest.rsplit_once(':').ok_or("--rpc-url needs an explicit :PORT")?;
+    if host.is_empty()
+        || host.len() > 253
+        || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err("--rpc-url host must be a hostname or IPv4 address".into());
+    }
+    Ok((host.to_owned(), port.parse().map_err(|_| "bad --rpc-url port")?))
+}
+
+/// Minimal JSON-RPC client (HTTP/1.0, connection closed per call). Only
+/// read-only native methods are ever called.
+fn rpc((host, port): &(String, u16), method: &str, params: Value) -> Result<Value, String> {
+    use std::net::ToSocketAddrs;
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("rpc connect: {e}"))?;
+    let address = (host.as_str(), *port)
+        .to_socket_addrs()
+        .map_err(|e| format!("rpc resolve: {e}"))?
+        .next()
+        .ok_or("rpc resolve: no address")?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|e| format!("rpc connect: {e}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
     write!(
         stream,
-        "POST / HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        "POST / HTTP/1.0\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
         body
     )
@@ -152,9 +203,38 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn run(o: &Options) -> Result<(), String> {
-    let (_, genesis, policy) = load_native_manifest(&o.manifest, o.pin, 1_048_576).map_err(|e| e.to_string())?;
-    let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
-    let mut verifier = IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?;
+    let magic = {
+        let mut head = [0u8; 8];
+        File::open(&o.manifest).and_then(|mut f| f.read_exact(&mut head)).map_err(|e| format!("manifest: {e}"))?;
+        head
+    };
+    let (mut verifier, policy) = if &magic == b"BPOSMAN3" {
+        if o.carryover.is_some() {
+            return Err("--carryover applies only to a funded (BPOSMAN1/2) manifest".into());
+        }
+        let (_, genesis, policy) = load_native_manifest(&o.manifest, o.pin, 1_048_576).map_err(|e| e.to_string())?;
+        let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
+        (IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?, policy)
+    } else {
+        // Only the mainnet flag day is pinned in this build.
+        if o.pin != mainnet::MAINNET_NETWORK {
+            return Err(format!("a funded manifest must be the Genesis-4 mainnet ({})", mainnet::MAINNET_NETWORK));
+        }
+        let started = SystemTime::now();
+        let (_, genesis) = load_flag_day_manifest(&o.manifest, o.carryover.as_deref(), o.pin, 1_048_576)
+            .map_err(|e| e.to_string())?;
+        let policy = mainnet::mainnet_settlement_policy();
+        let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
+        eprintln!(
+            "native follower: mainnet genesis {} state root {} loaded in {:?}",
+            hex::encode(genesis.head().as_bytes()),
+            hex::encode(genesis.state_root()),
+            started.elapsed().unwrap_or_default()
+        );
+        let verifier = IncrementalNativeVerifierV1::new_flag_day(&genesis, trust, mainnet::MAINNET_ATTESTOR_SET, o.max_blocks)
+            .map_err(|e| e.to_string())?;
+        (verifier, policy)
+    };
     let limits = NativeBlockLimitsV1::default();
     let blocks_dir = o.state.join("blocks");
     fs::create_dir_all(&blocks_dir).map_err(|e| e.to_string())?;
@@ -181,7 +261,7 @@ fn run(o: &Options) -> Result<(), String> {
     loop {
         match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index, &mut walk) {
             Ok(added) => {
-                let safe = match rpc(o.rpc_port, "getl2settlement", json!([])) {
+                let safe = match rpc(&o.rpc, "getl2settlement", json!([])) {
                     Ok(view) => safe_settlement(&view),
                     Err(e) => {
                         eprintln!("native follower: transient: {e}");
@@ -226,7 +306,7 @@ fn follow_once(
 ) -> Result<usize, Follow> {
     let head = verifier.head();
     if walk.is_none() {
-        let info = rpc(o.rpc_port, "getchaininfo", json!([])).map_err(Follow::Transient)?;
+        let info = rpc(&o.rpc, "getchaininfo", json!([])).map_err(Follow::Transient)?;
         let hint: B256 = info["finalized"]["root"]
             .as_str()
             .and_then(|s| s.parse().ok())
@@ -244,7 +324,7 @@ fn follow_once(
             eprintln!("native follower: walking back to the verified head, {} blocks fetched so far", state.ids.len());
             return Ok(0);
         }
-        let raw = rpc(o.rpc_port, "getblockraw", json!([hex::encode(state.cursor)])).map_err(Follow::Transient)?;
+        let raw = rpc(&o.rpc, "getblockraw", json!([hex::encode(state.cursor)])).map_err(Follow::Transient)?;
         let bytes = hex::decode(raw.as_str().unwrap_or_default()).map_err(|_| Follow::Transient("bad raw hex".into()))?;
         if bytes.len() < 36 || bytes.len() > 4 * 1_048_576 {
             return Err(Follow::Halt("native block outside size bounds".into()));
@@ -336,6 +416,16 @@ fn status(
         "native_finalized_block": hex::encode(report.finalized.block),
         "native_finalized_slot": report.finalized.slot,
         "native_finalized_epoch": report.finalized_epoch,
+        "chain_id": policy.chain_id,
+        // The L2 genesis is final once the native block that installed the
+        // registry with it (`initial_l2_parent`) is inside the finalized prefix.
+        "l2_genesis": verified.l2_activation().map(|(block, finalized)| json!({
+            "hash": hex::encode(policy.initial_l2_parent_hash),
+            "state_root": hex::encode(policy.initial_l2_state_root),
+            "activation_block": hex::encode(block.block),
+            "activation_slot": block.slot,
+            "finalized": finalized,
+        })),
         "finalized_settlements": settlements,
         "safe_settlement": safe,
         "production_finality": false,

@@ -198,6 +198,7 @@ impl Fixture {
             ]),
             chain,
             finalized_index,
+            l2_activation_index: Some(0),
         }
     }
 }

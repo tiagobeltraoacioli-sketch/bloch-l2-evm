@@ -255,3 +255,45 @@ feature (`native-kes-20261014`, `a3003098`); settlement-recovery built with
   against the same native checkout: the committed native FFG fixtures do not
   match that native revision. Not caused by this branch; regenerate the
   fixtures or pin the native revision they were made with.
+
+## Mainnet follower and settled RPC (2026-10-18)
+
+Branch `codex/l2-mainnet-follower-rpc-20261018`. Package:
+`deployment/mainnet/follower-rpc/` (`build.sh`, `install.sh`, two units, the
+native feature shim and the mainnet `settlement-recovery` lock).
+
+- **Follower on Genesis-4.** `bloch-l2-native-follower` accepts the funded
+  `BPOSMAN1` mainnet manifest with `--carryover` (the decompressed
+  `carryover.tsv`; checked against the manifest commitment by the native
+  loader) and `--network-pin f47d3e49…1966` (SHA3-256 of the file). The genesis
+  has no L2 registry: `IncrementalNativeVerifierV1::new_flag_day` replays with
+  real signatures and FFG and halts unless the native transition installs
+  exactly the pinned policy (`settlement_recovery::mainnet`, = native
+  `l2_settlement::mainnet::PROGRAM` + attestor set `1c06adbb…`). Status gains
+  `chain_id` and `l2_genesis` (activation block/slot, `finalized`).
+- **Remote L1 source.** `--rpc-url http://HOST:PORT` (read-only
+  `getchaininfo`/`getblockraw`/`getl2settlement`); the source cannot forge
+  finality, only stall it. `safe` still comes from that node's head.
+- **Settled RPC.** Publishes block 0 as `safe`/`finalized` once the activation
+  is inside the verified finalized prefix; refuses a status for another chain
+  id or L2 genesis; adds `net_version`/`net_listening`/`net_peerCount`/
+  `web3_clientVersion`/`web3_sha3` and `bloch_settlement(number)` (finalized
+  settlement of an L2 block: commitment, native slot/block).
+- **Native build.** Against `bloch-sis-pow` `78b7343a` the crate needs the two
+  devnet feature names added empty (`native-feature-shim.py`) and a lock with
+  three extra entries (`settlement-recovery.mainnet.Cargo.lock`).
+
+Live run on 45.77.142.123 (scratch, loopback 19145, L1 source
+`http://80.240.16.185:8080`): genesis + carryover load 59 s; 154,767 blocks
+fetched (~3 ms/block) and verified from Genesis-4 in ~56 min (~2.7–5.5k
+blocks/min), RSS < 0.6 GB; activation `618c9b80…` at slot 187200 matched the
+pin; FFG finalized epoch 5943; L2 `latest`/`safe`/`finalized` = block 0
+`632e45ae…f468`.
+
+**Finality lag.** The follower fetches up to the node's finalized root, and its
+own replayed state proves finality ~2–3 epochs behind that root (observed:
+node finalized epoch 5946, follower 5943), i.e. ≈ 50 min on top of L1 finality.
+Replaying to the node's head would be equally sound (finality is still what
+the replayed FFG state says), but the verifier holds one branch: a reorg of the
+unfinalized tip would halt it. Doing it needs a retained state at the
+finalized block and a rollback/re-replay of the new branch. Not done here.
