@@ -42,6 +42,22 @@ Differences, all deliberate:
   ["local", "remote"] (default) keeps the remote host as a fallback,
   ["remote", "local"] prefers it, ["remote"] never proves here.
 
+* native RPC quorum (devnet4, 2026-10-16): the worker no longer needs every
+  validator RPC in `rpc_ports`. Safety-relevant reads (the `getl2settlement`
+  view: request, accepted head, pending deposits, DA records) are used only
+  when at least `rpc_quorum` endpoints (default: a strict majority, 2 of 3)
+  return the identical answer; a minority answer is never used. Submission
+  (`sendrawtransaction`) goes to the first usable endpoint that takes it, since
+  L1 consensus validates the transaction itself. The DA base fee and funding
+  outputs also need a quorum of answers. A failing endpoint is skipped with
+  exponential backoff; with every endpoint healthy and in agreement the worker
+  behaves as before. `getl2settlement` takes no block argument (it answers from
+  each node's head), so the quorum compares only the fields the worker uses
+  (`SETTLEMENT_VIEW_FIELDS`), not the per-block `native_height` or withdrawal
+  bookkeeping, and a split read is retried a few times within seconds before
+  it counts as no quorum. `--check-rpc` prints the per-endpoint view and the quorum
+  decision and exits without producing, proving or submitting anything.
+
 Each cycle: read the native request all validators agree on, extend the
 canonical L2 database by exactly one block anchored to it, prove it, build the
 settlement transaction, submit it and wait for native acceptance. The worker
@@ -84,12 +100,22 @@ WITHDRAWAL_TREE_DEPTH = 32
 # remote_prover.py framing: magic, u32 request length, request, u64 artifact length, artifact.
 REMOTE_MAGIC = b'BLOCH:L2:PROVE:1\n'
 REMOTE_MAX_PROOF_BYTES = 1 << 20
+RPC_BACKOFF_SECONDS, RPC_MAX_BACKOFF_SECONDS = 10, 300
+RPC_DIVERGED_LOG_AFTER = 3  # consecutive reads outside the quorum before an endpoint is reported
+QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy endpoints straddle a block
+# The getl2settlement fields the worker reads; everything else (native_height,
+# inbox totals, withdrawal bookkeeping) moves with every head and is not used.
+SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 256}  # bytes: one native DA batch
 
 
 class Halt(Exception):
     """Divergence that requires an operator; the unit must not auto-repair it."""
+
+
+class RpcError(RuntimeError):
+    """The endpoint answered with a JSON-RPC error."""
 
 
 def log(event, **fields):
@@ -263,8 +289,153 @@ def rpc(port, method, params=()):
     with urllib.request.urlopen(request, timeout=15) as response:
         reply = json.loads(response.read())
     if 'error' in reply:
-        raise RuntimeError(f'{method}: {reply["error"]}')
+        raise RpcError(f'{method}: {reply["error"]}')
     return reply['result']
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+
+def settlement_view(view):
+    """The safety-relevant projection of a getl2settlement answer."""
+    if not isinstance(view, dict):
+        return view
+    return {k: view[k] for k in SETTLEMENT_VIEW_FIELDS if k in view}
+
+
+def rpc_quorum(config):
+    """`rpc_quorum` from the configuration (default: strict majority of `rpc_ports`)."""
+    ports = config.get('rpc_ports')
+    if not isinstance(ports, list) or not ports or len(set(ports)) != len(ports) \
+            or not all(isinstance(p, int) and not isinstance(p, bool) for p in ports):
+        raise Halt('rpc_ports must list distinct integer ports')
+    quorum = config.get('rpc_quorum', len(ports) // 2 + 1)
+    if not isinstance(quorum, int) or isinstance(quorum, bool) or not len(ports) < 2 * quorum <= 2 * len(ports):
+        raise Halt('rpc_quorum must be a strict majority of rpc_ports')
+    return quorum
+
+
+class Endpoints:
+    """The native validator RPCs: quorum for safety-relevant reads, any one for submission.
+
+    `agreed` returns an answer only when at least `quorum` endpoints returned
+    the identical value; a value reported by fewer endpoints is never used.
+    Because the quorum is a strict majority, two different answers can never
+    both reach it. An endpoint that raises (transport or JSON-RPC error) is
+    skipped for an exponential backoff; an endpoint that answers outside the
+    quorum (lagging, replaying, forked) is reported but still queried. When
+    fewer than `quorum` endpoints are out of backoff, all are probed.
+    """
+
+    def __init__(self, ports, quorum, rpc, clock, sleep=time.sleep):
+        self.ports, self.quorum, self.rpc, self.clock, self.sleep = list(ports), quorum, rpc, clock, sleep
+        self.faults = len(self.ports) - quorum  # endpoints that may be wrong or missing
+        self.state = {p: {'failures': 0, 'retry_at': 0.0, 'diverged': 0} for p in self.ports}
+        self.split = False
+
+    def usable(self):
+        ready, now = [], None
+        for port in self.ports:
+            state = self.state[port]
+            if state['failures']:
+                now = self.clock() if now is None else now
+                if now < state['retry_at']:
+                    continue
+            ready.append(port)
+        return ready if len(ready) >= self.quorum else list(self.ports)
+
+    def call(self, port, method, params=()):
+        try:
+            result = self.rpc(port, method, params)
+        except Exception as error:
+            state = self.state[port]
+            state['failures'] += 1
+            delay = min(RPC_MAX_BACKOFF_SECONDS, RPC_BACKOFF_SECONDS << min(state['failures'] - 1, 16))
+            state['retry_at'] = self.clock() + delay
+            log('rpc-endpoint-failed', port=port, method=method, failures=state['failures'], backoff_seconds=delay,
+                reason=f'{type(error).__name__}: {error}'[:300])
+            raise
+        state = self.state[port]
+        if state['failures']:
+            log('rpc-endpoint-recovered', port=port, method=method, after_failures=state['failures'])
+            state['failures'], state['retry_at'] = 0, 0.0
+        return result
+
+    def gather(self, method, params=(), need=None):
+        """{port: answer} from the usable endpoints; raises unless `need` (default quorum) answered."""
+        answers = {}
+        for port in self.usable():
+            try:
+                answers[port] = self.call(port, method, params)
+            except Exception:  # logged by call(); the quorum decides below
+                pass
+        need = self.quorum if need is None else need
+        if len(answers) < need:
+            raise RuntimeError(f'{method}: {len(answers)} of {len(self.ports)} RPC endpoints answered, '
+                               f'{need} needed')
+        return answers
+
+    def agreed(self, method, params=(), project=lambda answer: answer):
+        """(projected answer, supporting ports) when a quorum returned the identical
+        projected answer, else (None, []). A split is re-read (all endpoints, fresh)
+        up to QUORUM_READ_ATTEMPTS times: answers from different reads are never mixed."""
+        for attempt in range(QUORUM_READ_ATTEMPTS):
+            if attempt:
+                self.sleep(QUORUM_RETRY_SECONDS)
+            answers = {port: project(answer) for port, answer in self.gather(method, params).items()}
+            groups = {}
+            for port, answer in answers.items():
+                groups.setdefault(canonical(answer), []).append(port)
+            support = max(groups.values(), key=len)
+            if len(support) >= self.quorum:
+                break
+        else:
+            if not self.split:
+                log('rpc-no-quorum', method=method, quorum=self.quorum, attempts=QUORUM_READ_ATTEMPTS,
+                    groups=sorted((sorted(g) for g in groups.values()), key=len, reverse=True))
+            self.split = True
+            return None, []
+        if self.split:
+            log('rpc-quorum-restored', method=method, ports=sorted(support))
+            self.split = False
+        for port in answers:
+            state = self.state[port]
+            if port in support:
+                if state['diverged'] >= RPC_DIVERGED_LOG_AFTER:
+                    log('rpc-endpoint-agrees', port=port, method=method)
+                state['diverged'] = 0
+            else:
+                state['diverged'] += 1
+                if state['diverged'] == RPC_DIVERGED_LOG_AFTER:
+                    log('rpc-endpoint-diverged', port=port, method=method, quorum_ports=sorted(support))
+        return answers[support[0]], sorted(support)
+
+    def bounded_value(self, method, field):
+        """An integer field no larger than one reported by an honest endpoint: the
+        (faults + 1)-th largest of at least `quorum` answers (the median of three)."""
+        values = sorted(int(a[field]) for a in self.gather(method).values())
+        return values[max(0, len(values) - 1 - self.faults)]
+
+    def common_utxos(self, script):
+        """Outputs that at least `quorum` endpoints report as unspent."""
+        seen, first = {}, {}
+        for answer in self.gather('getutxos', [script, 64]).values():
+            for key, u in {(u['txid'], int(u['vout']), str(u['value_sat'])): u
+                           for u in answer.get('utxos', [])}.items():
+                seen[key] = seen.get(key, 0) + 1
+                first.setdefault(key, u)
+        return [first[k] for k in seen if seen[k] >= self.quorum]
+
+    def submit(self, tx_hex):
+        """sendrawtransaction on the first usable endpoint that accepts it: (port, response)."""
+        errors = []
+        for port in self.usable():
+            try:
+                return port, self.call(port, 'sendrawtransaction', [tx_hex])
+            except Exception as error:
+                errors.append(f'{port}: {type(error).__name__}: {error}'[:200])
+        raise RuntimeError('sendrawtransaction failed on every RPC endpoint: ' + '; '.join(errors))
 
 
 def statement_fields(hex_statement):
@@ -357,14 +528,25 @@ class Settler:
                     or not set(order) <= {'local', 'remote'}:
                 raise Halt('remote_prover.order must list "local" and/or "remote" once each')
         self.work = Path(self.c['workdir'])
+        self.native = Endpoints(self.c['rpc_ports'], rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
+        self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
 
     def native_view(self):
-        views = [self.rpc(p, 'getl2settlement') for p in self.c['rpc_ports']]
-        if len({json.dumps(v, sort_keys=True) for v in views}) != 1:
+        """The settlement view a quorum of validator RPCs reports identically, or None."""
+        view, support = self.native.agreed('getl2settlement', project=settlement_view)
+        if view is None:
             return None  # validators momentarily disagree; retry later
-        view = views[0]
         if view['network'] != self.c['network'] or view['chain_id'] != CHAIN_ID:
             raise Halt('native network identity changed')
+        accepted = view.get('accepted')
+        number = statement_fields(accepted['statement'])['l2_number'] if accepted else 0
+        unanimous = len(support) == len(self.native.ports)
+        if not unanimous and number < self.accepted_floor:
+            # A partial quorum must not move the accepted head backwards (two stale
+            # endpoints); a unanimous view is trusted as before.
+            log('rpc-quorum-view-behind', accepted=number, seen=self.accepted_floor, ports=support)
+            return None
+        self.accepted_floor = number if unanimous else max(self.accepted_floor, number)
         return view
 
     def produce(self, *args):
@@ -555,9 +737,8 @@ class Settler:
         if self.da_recorded(number, commitment):
             return True
         da = self.c['da']
-        port = self.c['rpc_ports'][0]
-        base_fee = str(self.rpc(port, 'getchaininfo')['next_base_fee_millisat_per_gas'])
-        utxos = self.rpc(port, 'getutxos', [self.da_script, 64]).get('utxos', [])
+        base_fee = str(self.native.bounded_value('getchaininfo', 'next_base_fee_millisat_per_gas'))
+        utxos = self.native.common_utxos(self.da_script)
         utxos = sorted(utxos, key=lambda u: (-int(u['value_sat']), u['txid'], u['vout']))[:DA_MAX_INPUTS]
         if not utxos:
             raise Halt('the DA funding key has no spendable outputs')
@@ -588,8 +769,9 @@ class Settler:
         payload = bytes.fromhex((directory / 'da-payload.hex').read_text().strip())
         if da_frame_fields(tx) != (CHAIN_ID, number, payload):
             raise Halt('signed DA transaction does not carry this block batch')
-        response = self.rpc(port, 'sendrawtransaction', [tx.hex()])
-        log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'))
+        port, response = self.native.submit(tx.hex())
+        log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'),
+            port=port)
         deadline = self.clock() + da.get('inclusion_timeout_seconds', 300)
         while self.clock() < deadline:
             self.sleep(6)
@@ -628,8 +810,8 @@ class Settler:
         if current is None or current['source'] != view['source'] or current.get('accepted') != view.get('accepted'):
             log('request-moved-before-submit', number=number)
             return False
-        response = self.rpc(self.c['rpc_ports'][0], 'sendrawtransaction', [tx.hex()])
-        log('submitted', number=number, response=response.get('status'), tx_hash=response.get('tx_hash'))
+        port, response = self.native.submit(tx.hex())
+        log('submitted', number=number, response=response.get('status'), tx_hash=response.get('tx_hash'), port=port)
         deadline = self.clock() + self.c['acceptance_timeout_seconds']
         while self.clock() < deadline:
             self.sleep(6)
@@ -657,8 +839,37 @@ class Settler:
         return self.submit_and_wait(number, directory, tx, view)
 
 
+def check_rpc(config, rpc=rpc, sleep=time.sleep):
+    """Read-only: print each endpoint's settlement view and the quorum decision."""
+    try:
+        endpoints = Endpoints(config['rpc_ports'], rpc_quorum(config), rpc, time.monotonic, sleep)
+    except Halt as error:
+        log('halt', reason=str(error))
+        return 3
+    for port in endpoints.ports:
+        try:
+            view = rpc(port, 'getl2settlement')
+            accepted = view.get('accepted')
+            log('rpc-endpoint-view', port=port,
+                view_sha256=hashlib.sha256(canonical(settlement_view(view)).encode()).hexdigest(),
+                native_height=view.get('native_height'), source_height=(view.get('source') or {}).get('height'),
+                accepted=statement_fields(accepted['statement'])['l2_number'] if accepted else None)
+        except Exception as error:
+            log('rpc-endpoint-view', port=port, error=f'{type(error).__name__}: {error}'[:300])
+    try:
+        view, support = endpoints.agreed('getl2settlement', project=settlement_view)
+    except RuntimeError as error:
+        log('rpc-check', quorum=endpoints.quorum, ok=False, reason=str(error))
+        return 2
+    ok = view is not None and view['network'] == config['network'] and view['chain_id'] == CHAIN_ID
+    log('rpc-check', quorum=endpoints.quorum, ok=ok, ports=support)
+    return 0 if ok else 2
+
+
 def main():
     config = json.loads(CONFIG.read_text())
+    if sys.argv[1:] == ['--check-rpc']:
+        sys.exit(check_rpc(config))
     try:
         settler = Settler(config)
     except Halt as error:

@@ -34,6 +34,9 @@ devnet-l2-user-txs = ["devnet-l2-deposits", "bloch-pos-committee/devnet-l2-user-
 # (0x17) and, from the compiled activation epoch, KES-signed proposals and votes.
 # A follower must replay with exactly the validators' schedule.
 devnet-kes = ["bloch-pos-committee/devnet-kes", "bloch-pos-node/devnet-kes"]
+# Development networks with the light-client roster (state component 0x23)
+# from the compiled activation epoch: the follower's state roots must include it.
+devnet-lc-roster = ["bloch-pos-committee/devnet-lc-roster", "bloch-pos-node/devnet-lc-roster"]
 
 [dependencies]
 bloch-l2-evm = { path = "../.." }
