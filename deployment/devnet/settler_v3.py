@@ -644,7 +644,7 @@ class Settler:
         if (directory / 'proved.json').exists():
             return proof
         # Docker mounts host paths: temporary files must live in a host-visible directory.
-        env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
+        env = {'PATH': self.c.get('prover_path', '/usr/bin:/bin'), 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
                'RAYON_NUM_THREADS': str(self.c['prover_threads']), 'SP1_CIRCUIT_MODE': 'release',
                'SP1_GNARK_IMAGE': self.c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(directory / 'native-request.txt'),
