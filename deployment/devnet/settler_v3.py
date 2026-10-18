@@ -84,7 +84,8 @@ PROOF_BYTES = 356
 ASYNC_SETTLEMENT_TAG = 0x13  # native L2SettlementAsync after the 2026-10-10 renumbering
 TRANSACTION_BYTES = 1 + 32 + VALUES_BYTES + PROOF_BYTES  # 1155
 SP1_CIRCUIT_VERSION = b'v6.1.0'
-CHAIN_ID = 700771
+CHAIN_ID = 700771  # default; config 'chain_id' (700770 = mainnet path) overrides it, see configure_chain
+MAINNET_CHAIN_ID = 700770
 # V3 field offsets after the tag (bloch_l2_evm::proof_statement::settlement_v3_layout).
 DEPOSITS_HASH, TRANSACTIONS_ROOT, RECEIPTS_ROOT, USER_TX_COUNT = 568, 600, 632, 664
 WITHDRAWAL_ROOT, WITHDRAWAL_COUNT, DA_COMMITMENT, V3_END = 672, 704, 712, 744
@@ -484,9 +485,29 @@ def parse_proof_artifact(data):
     return values, proof
 
 
+def configure_chain(config):
+    """Chain id and mainnet-path arguments (private mainnet rehearsal, 2026-10-18).
+
+    `chain_id` (default 700771). 700770 selects the mainnet program path: every
+    producer call gets `network_args` (`--rules mainnet --domain HEX --genesis-time
+    SECS`, required) and the prover runs with `--mainnet` before its mode."""
+    global CHAIN_ID
+    CHAIN_ID = int(config.get('chain_id', 700771))
+    if CHAIN_ID == MAINNET_CHAIN_ID:
+        args = config.get('network_args') or []
+        if args[:2] != ['--rules', 'mainnet'] or '--domain' not in args or '--genesis-time' not in args:
+            raise Halt('chain 700770 requires network_args --rules mainnet --domain HEX --genesis-time SECS')
+    elif config.get('network_args'):
+        raise Halt('network_args is only for the mainnet path (chain_id 700770)')
+    return CHAIN_ID
+
+
 class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
         self.c = {**DEFAULTS, **config}
+        configure_chain(self.c)
+        self.network_args = list(self.c.get('network_args') or [])
+        self.prover_args = ['--mainnet'] if CHAIN_ID == MAINNET_CHAIN_ID else []
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
         for key in ('prover', 'guest', 'l2_config'):
             if digest(self.c[key]) != self.c[key + '_sha256']:
@@ -497,7 +518,7 @@ class Settler:
             raise Halt('user_transactions must be true or false')
         if self.c['user_transactions']:
             # Production guard (M2.6): user transactions stay on development networks only.
-            if self.c['network_kind'] != 'devnet':
+            if self.c['network_kind'] not in ('devnet', 'mainnet-rehearsal'):
                 raise Halt('user_transactions is refused outside development networks')
             pool = Path(self.c.get('txpool_dir', ''))
             if not self.c.get('txpool_dir') or not pool.is_dir():
@@ -550,7 +571,7 @@ class Settler:
         return view
 
     def produce(self, *args):
-        result = self.run([self.c['produce'], *args], capture_output=True, text=True, timeout=300)
+        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
         if result.returncode:
             raise Halt(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         return json.loads(result.stdout)
@@ -630,7 +651,7 @@ class Settler:
                'BLOCH_NATIVE_L2_ARTIFACT': str(directory / 'block.artifact')}
         steps = []
         for name, args in (('execute', ['execute']), ('prove', ['prove-groth16']), ('verify', ['verify-groth16'])):
-            argv = [self.c['prover'], *args, 'native-artifact', self.c['guest']] + ([] if name == 'execute' else [str(proof)])
+            argv = [self.c['prover'], *self.prover_args, *args, 'native-artifact', self.c['guest']] + ([] if name == 'execute' else [str(proof)])
             if name == 'prove':
                 proof.unlink(missing_ok=True)
             start = self.clock()
@@ -868,6 +889,7 @@ def check_rpc(config, rpc=rpc, sleep=time.sleep):
 
 def main():
     config = json.loads(CONFIG.read_text())
+    configure_chain(config)
     if sys.argv[1:] == ['--check-rpc']:
         sys.exit(check_rpc(config))
     try:

@@ -37,6 +37,11 @@ devnet-kes = ["bloch-pos-committee/devnet-kes", "bloch-pos-node/devnet-kes"]
 # Development networks with the light-client roster (state component 0x23)
 # from the compiled activation epoch: the follower's state roots must include it.
 devnet-lc-roster = ["bloch-pos-committee/devnet-lc-roster", "bloch-pos-node/devnet-lc-roster"]
+# QUALIFICATION BUILDS ONLY (private mainnet-path rehearsal): replay a private
+# L1 built with the native `l2-activation-rehearsal-mainnet-policy` feature and
+# the same BLOCH_L2_REHEARSAL_ACTIVATION_EPOCH (mainnet policy values, the
+# private network's identities 0..1). Never for a funded network.
+l2-activation-rehearsal-mainnet-policy = ["bloch-pos-committee/l2-activation-rehearsal-mainnet-policy", "bloch-pos-node/l2-activation-rehearsal-mainnet-policy"]
 
 [dependencies]
 bloch-l2-evm = { path = "../.." }
