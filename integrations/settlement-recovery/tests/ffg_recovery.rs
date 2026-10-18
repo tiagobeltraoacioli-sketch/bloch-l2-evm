@@ -132,10 +132,13 @@ fn corrupt_proposer_attester_proof_body_and_foreign_branch_are_rejected() {
     *b[1].transactions[0].last_mut().unwrap() ^= 1;
     assert!(verify_native_finality(&genesis, trust(), &b, NativeReplayLimitsV1::default()).is_err());
     let mut b = original.clone();
+    // An unsigned retarget is refused by the native transition (the vote
+    // signature covers the target). Validly signed foreign votes are covered
+    // by tests/ffg_foreign_vote.rs.
     b[3].attestations[0].data.target_root = [9; 32];
     assert!(matches!(
         verify_native_finality(&genesis, trust(), &b, NativeReplayLimitsV1::default()),
-        Err(NativeFinalityErrorV1::VoteBranch)
+        Err(NativeFinalityErrorV1::Transition { block: 3, .. })
     ));
     let mut b = original;
     b.remove(0);
