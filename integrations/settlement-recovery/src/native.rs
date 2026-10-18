@@ -277,7 +277,21 @@ fn check_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<
     use NativeFinalityErrorV1 as E;
     let p = trust.settlement_policy;
     let policy_commitment = p.commitment().map_err(|_| E::Trust)?;
-    let state = genesis.l2_settlement().ok_or(E::Trust)?;
+    let Some(state) = genesis.l2_settlement() else {
+        // Flag-day network: no L2 at genesis; the boundary will install
+        // `activation_for(network)`, which must be exactly this policy.
+        let activation = bloch_pos_committee::l2_settlement::activation_for(Some(p.network.0)).ok_or(E::Trust)?;
+        if trust.state_root == B256::ZERO
+            || genesis.slot() != 0
+            || genesis.state_root() != trust.state_root.0
+            || activation.policy != (Policy { attestor_set: activation.policy.attestor_set, ..native_policy(p) })
+            || p.first_l2_number != 1
+            || p.proof_policy.0 != bloch_l2_proof::policy_commitment_v3()
+        {
+            return Err(E::Trust);
+        }
+        return Ok(policy_commitment);
+    };
     if trust.state_root == B256::ZERO
         || genesis.slot() != 0
         || genesis.head().as_bytes() != &p.genesis.0
@@ -355,8 +369,11 @@ impl IncrementalNativeVerifierV1 {
             trust,
             policy_commitment,
             state: genesis.clone(),
-            chain: vec![(0, p.genesis)],
-            positions: BTreeMap::from([(p.genesis, (0, 0))]),
+            // The native genesis block id (equal to p.genesis on a genesis-L2
+            // network, checked in check_trust; a flag-day network's id 1 is the
+            // activation policy's).
+            chain: vec![(0, B256::from(*genesis.head().as_bytes()))],
+            positions: BTreeMap::from([(B256::from(*genesis.head().as_bytes()), (0, 0))]),
             settlements: BTreeMap::new(),
             final_epoch: 0,
             final_index: 0,

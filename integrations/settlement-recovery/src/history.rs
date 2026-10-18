@@ -198,6 +198,12 @@ pub fn load_native_manifest(
         manifest_path.file_name().ok_or(E::Path)?,
         limits.manifest_bytes,
     )?;
+    // A network whose L2 is installed at a flag day (running-network activation,
+    // M8/M9: Genesis-4 mainnet) has no L2 in its genesis manifest: the policy is
+    // the one this native build installs for the pinned network domain.
+    if bytes.len() >= 8 && &bytes[..8] != b"BPOSMAN3" {
+        return load_activated_manifest(&bytes, independent_network);
+    }
     // Check the count before the native decoder allocates its validator vector.
     if bytes.len() < 28 || &bytes[..8] != b"BPOSMAN3" {
         return Err(E::Encoding("async manifest required"));
@@ -227,6 +233,50 @@ pub fn load_native_manifest(
     let state = genesis.l2_settlement().ok_or(E::Identity)?;
     let native = state.policy();
     if B256::from(native.identities[0]) != independent_network {
+        return Err(E::Identity);
+    }
+    let policy = SettlementPolicyV1 {
+        network: native.identities[0].into(),
+        genesis: native.identities[1].into(),
+        domain: native.identities[2].into(),
+        configuration: native.identities[3].into(),
+        program_elf_keccak: native.identities[4].into(),
+        program_vkey_koalabear: native.identities[5].into(),
+        program_vkey_bn254: native.identities[6].into(),
+        proof_policy: native.proof_policy.into(),
+        chain_id: native.chain_id,
+        first_l2_number: 1,
+        initial_l2_parent_hash: native.initial_l2_parent.into(),
+        initial_l2_state_root: native.initial_l2_state.into(),
+    };
+    policy.commitment().map_err(|_| E::Identity)?;
+    Ok((manifest, genesis, policy))
+}
+
+/// Flag-day networks: the manifest carries no L2; the network domain is the
+/// SHA3-256 of the manifest encoding and must equal the independent pin; the
+/// settlement policy is `l2_settlement::activation_for(pin)` of the linked
+/// native consensus (the same function the validators' boundary calls).
+fn load_activated_manifest(
+    bytes: &[u8],
+    independent_network: B256,
+) -> Result<(Manifest, CommittedState, SettlementPolicyV1), NativeHistoryErrorV1> {
+    use sha3::{Digest, Sha3_256};
+    use NativeHistoryErrorV1 as E;
+    let manifest = Manifest::decode(bytes).map_err(|_| E::Encoding("manifest"))?;
+    if manifest.encode() != bytes || manifest.carryover.is_some() {
+        // A carryover manifest needs its snapshot to build the genesis state
+        // (Genesis-4 mainnet): not supported by this follower yet.
+        return Err(E::Encoding("noncanonical or carryover manifest"));
+    }
+    let digest: [u8; 32] = Sha3_256::digest(bytes).into();
+    if B256::from(digest) != independent_network {
+        return Err(E::Identity);
+    }
+    let activation = bloch_pos_committee::l2_settlement::activation_for(Some(digest)).ok_or(E::Identity)?;
+    let native = &activation.policy;
+    let genesis = manifest.genesis_state();
+    if genesis.l2_settlement().is_some() || native.identities[0] != digest {
         return Err(E::Identity);
     }
     let policy = SettlementPolicyV1 {

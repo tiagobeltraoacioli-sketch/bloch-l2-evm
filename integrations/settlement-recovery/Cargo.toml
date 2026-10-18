@@ -33,10 +33,10 @@ devnet-l2-user-txs = ["devnet-l2-deposits", "bloch-pos-committee/devnet-l2-user-
 # Development networks with forward-secure (KES) validator keys: registrations
 # (0x17) and, from the compiled activation epoch, KES-signed proposals and votes.
 # A follower must replay with exactly the validators' schedule.
-devnet-kes = ["bloch-pos-committee/devnet-kes", "bloch-pos-node/devnet-kes"]
+# devnet-kes = ["bloch-pos-committee/devnet-kes", "bloch-pos-node/devnet-kes"]
 # Development networks with the light-client roster (state component 0x23)
 # from the compiled activation epoch: the follower's state roots must include it.
-devnet-lc-roster = ["bloch-pos-committee/devnet-lc-roster", "bloch-pos-node/devnet-lc-roster"]
+# devnet-lc-roster = ["bloch-pos-committee/devnet-lc-roster", "bloch-pos-node/devnet-lc-roster"]
 # QUALIFICATION BUILDS ONLY (private mainnet-path rehearsal): replay a private
 # L1 built with the native `l2-activation-rehearsal-mainnet-policy` feature and
 # the same BLOCH_L2_REHEARSAL_ACTIVATION_EPOCH (mainnet policy values, the
@@ -52,6 +52,7 @@ bloch-crypto = { path = "../../../bloch-validator-payout/crates/bloch-crypto", d
 bloch-pos-committee = { path = "../../../bloch-validator-payout/crates/bloch-pos-committee" }
 bloch-pos-node = { path = "../../../bloch-validator-payout/crates/bloch-pos-node" }
 serde_json = "1.0"
+sha3 = { version = "0.10", default-features = false }
 libc = "0.2"
 # sign-tx / address (development keys only); the same pins as the dev-dependencies.
 alloy-consensus = { version = "=2.2.0", default-features = false, features = ["k256"] }
