@@ -267,6 +267,63 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(q.TIMESTAMP_RULE, '1:1786656679:30000')
         self.assertEqual(q.l1_slot_time(187200), 1792272679)
 
+    # ---- shadow mode: the settler produces, the shadow rebuilds and compares ----
+    def settler_dir(self, number=1, block=SOURCE_BLOCK):
+        d = self.root / 'settler-work' / f'{number:08d}-{block[:16]}'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def reference(self, txs=0):
+        """What an honest settler (same deterministic producer) writes for block 1."""
+        ref = FakeProducer(txs=txs)
+        deposits = self.root / 'ref-deposits.json'
+        deposits.write_text('[]')
+        opts = {'--parent': q.L2_GENESIS_HASH, '--anchor': SOURCE_BLOCK, '--anchor-slot': str(SLOT),
+                '--deposits': str(deposits), '--timestamp-rule': q.TIMESTAMP_RULE}
+        if txs:
+            opts['--txs'] = 'x'
+        return ref.extend(opts)
+
+    def test_shadow_waits_for_the_settler_then_matches(self):
+        seq, producer, _ = self.make([view()] * 3, settler_workdir=str(self.root / 'settler-work'))
+        self.assertIsNone(seq.step())
+        self.assertNotIn('extend', producer.calls)
+        (self.settler_dir() / 'block.json').write_text(json.dumps(self.reference()))
+        job = seq.step()
+        self.assertEqual((job['status'], job['number']), ('shadow-matched', 1))
+
+    def test_shadow_halts_on_a_divergent_settler_block(self):
+        seq, _, _ = self.make([view()] * 3, settler_workdir=str(self.root / 'settler-work'))
+        bad = {**self.reference(), 'state_root': '99' * 32}
+        (self.settler_dir() / 'block.json').write_text(json.dumps(bad))
+        with self.assertRaisesRegex(q.Halt, r"differs from the independent rebuild in \['state_root'\]"):
+            seq.step()
+
+    def test_shadow_replays_the_settler_da_transactions(self):
+        producer = FakeProducer(txs=2)
+        seen = {}
+        orig = producer.extend
+        def extend(o):
+            seen['txs'] = json.loads(Path(o['--txs']).read_text())
+            self.assertNotIn('--max-gas', o)
+            return orig(o)
+        producer.extend = extend
+        seq, _, _ = self.make([view()] * 3, producer, settler_workdir=str(self.root / 'settler-work'))
+        d = self.settler_dir()
+        (d / 'block.json').write_text(json.dumps(self.reference(txs=2)))
+        self.assertIsNone(seq.step())  # DA batch not written yet: wait, do not halt
+        (d / 'da-payload.hex').write_text(batch(2).hex() + '\n')
+        job = seq.step()
+        self.assertEqual(seen['txs'], ['0200', '0201'])
+        self.assertEqual(job['da']['commitment'], q.da_commitment(1, batch(2)).hex())
+
+    def test_shadow_configuration_guards(self):
+        with self.assertRaisesRegex(q.Halt, 'leave user_transactions false'):
+            q.Sequencer({**self.config, 'settler_workdir': '/x', 'user_transactions': True,
+                         'txpool_dir': str(self.root)})
+        with self.assertRaisesRegex(q.Halt, 'must not be the shadow workdir'):
+            q.Sequencer({**self.config, 'settler_workdir': self.config['workdir']})
+
 
 if __name__ == '__main__':
     unittest.main()

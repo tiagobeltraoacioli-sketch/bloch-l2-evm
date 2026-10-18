@@ -17,13 +17,27 @@ block. So the producer makes exactly one unsettled L2 block at a time:
       -> write `job.json`: the handoff to the prover / settler.
 
 It never proves, signs, submits or publishes anything, never reads a key and
-only issues read-only `getl2settlement` calls. The job directory layout is the
-one `settler_v3.py` writes (`work/<number:08d>-<anchor[:16]>/` with
-`deposits.json`, `block.json`, `block.artifact`, `native-request.txt`,
-`da-payload.hex`), byte for byte, so a settler that finds the block already
-produced takes its "reuse" path. The canonical database must have exactly one
-writer: run either this unit or a settler that produces, never both; a
-settler may instead call `sequencer_mainnet.py step` once per cycle.
+only issues read-only `getl2settlement` calls.
+
+ONE WRITER. On mainnet the producer is the settler (`settler_v3.py`,
+`network_kind: "mainnet"`, branch codex/l2-mainnet-settler-20261018): it
+extends its own canonical database inside its cycle, exactly as on devnet4.
+This script therefore runs in one of two modes:
+
+* shadow (the installed unit; `settler_workdir` set): an independent second
+  producer on its OWN database. For every block the settler has produced
+  (`<settler_workdir>/<number:08d>-<anchor[:16]>/block.json`) it rebuilds the
+  same block from the native view alone (plus, with user transactions, the
+  transactions of the settler's DA batch `da-payload.hex`, i.e. exactly what
+  goes to L1) and halts (exit 3) unless hash, state root, timestamp, deposits,
+  transactions and withdrawal root/count are identical. Its head must also be
+  the parent of every statement the native chain accepts. It catches a
+  non-deterministic, mis-pinned or mis-configured producer before the proof,
+  and needs no access to the settler's database (read-only on its work dir).
+* producer (`settler_workdir` absent): the stage on its own, for tests and
+  rehearsals, writing the settler_v3 job layout (`deposits.json`,
+  `block.json`, `block.artifact`, `native-request.txt`, `da-payload.hex`)
+  plus `job.json`. Never point it at a database a settler also writes.
 
 Commands (configuration: $BLOCH_SEQUENCER_CONFIG or --config FILE):
   init    create the canonical database at the pinned mainnet L2 genesis
@@ -72,6 +86,10 @@ DEFAULTS = {'poll_seconds': 15, 'user_transactions': False, 'max_block_gas': 15_
 
 class Halt(Exception):
     """A divergence an operator must review; never auto-repaired."""
+
+
+class RetryLater(Exception):
+    """An input another process is still writing; the next step retries."""
 
 
 def log(event, **fields):
@@ -197,7 +215,36 @@ class Sequencer:
                 value = self.c[key]
                 if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= cap:
                     raise Halt(f'{key} must be a positive integer <= {cap}')
+        self.shadow = bool(self.c.get('settler_workdir'))
+        if self.shadow:
+            if self.c['user_transactions']:
+                raise Halt('shadow mode takes the transactions from the settler DA batch: leave user_transactions false')
+            if Path(self.c['settler_workdir']).resolve() == Path(self.c['workdir']).resolve():
+                raise Halt('settler_workdir must not be the shadow workdir')
         self.work = Path(self.c['workdir'])
+
+    # ---- shadow mode: the settler (settler_v3.py) is the producer; this rebuilds and compares ----
+    def settler_block(self, number, source):
+        path = Path(self.c['settler_workdir']) / f'{number:08d}-{source["block"][:16]}' / 'block.json'
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text())
+
+    def settler_transactions(self, number, source, settler_block):
+        """The signed transactions of the settler's block, from its canonical DA batch."""
+        path = Path(self.c['settler_workdir']) / f'{number:08d}-{source["block"][:16]}' / 'da-payload.hex'
+        if not path.is_file():
+            raise RetryLater(f'settler block {number} has transactions but no da-payload.hex yet')
+        payload = bytes.fromhex(path.read_text().strip())
+        count = da_batch_count(payload)
+        if count != settler_block['transactions']:
+            raise Halt(f'settler DA batch of block {number} does not hold its {settler_block["transactions"]} transactions')
+        txs, at = [], 4
+        for _ in range(count):
+            size = int.from_bytes(payload[at:at + 4], 'big')
+            txs.append(payload[at + 4:at + 4 + size].hex())
+            at += 4 + size
+        return txs
 
     # ---- external calls ----
     def produce(self, *args):
@@ -275,10 +322,13 @@ class Sequencer:
         tmp.write_text(text)
         os.replace(tmp, path)
 
-    def extend_args(self, parent, anchor, deposits, anchor_slot):
+    def extend_args(self, parent, anchor, deposits, anchor_slot, shadow_txs=None):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor,
                 '--deposits', str(deposits), '--timestamp-rule', TIMESTAMP_RULE, '--anchor-slot', str(anchor_slot)]
-        if self.c['user_transactions']:
+        if shadow_txs is not None:
+            # Exactly the transactions the settler's DA batch carries; protocol limits.
+            args += ['--txs', str(shadow_txs)]
+        elif self.c['user_transactions']:
             args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
         return args
@@ -297,7 +347,11 @@ class Sequencer:
             planned = self.plan(view)
             if planned is None:
                 return None
-            return self.produce_job(view, *planned)
+            try:
+                return self.produce_job(view, *planned)
+            except RetryLater as wait:
+                log('waiting', reason=str(wait))
+                return None
 
     def produce_job(self, view, number, parent, source, pending, anchor_slot):
         anchor = source['block']
@@ -309,18 +363,26 @@ class Sequencer:
             if head['number'] != number or head['hash'] != job['hash']:
                 raise Halt(f'job {number} exists but the L2 head is {head["number"]} {head["hash"]}')
             return job
+        settler_block, shadow_txs = None, None
+        if self.shadow:
+            settler_block = self.settler_block(number, source)
+            if settler_block is None:
+                return None  # the settler has not produced this block yet
         directory.mkdir(parents=True, exist_ok=True)
         deposits = directory / 'deposits.json'
         self.write_once(deposits, json.dumps(pending, sort_keys=True))
+        if settler_block is not None and settler_block.get('transactions', 0):
+            shadow_txs = directory / 'settler-transactions.json'
+            self.write_once(shadow_txs, json.dumps(self.settler_transactions(number, source, settler_block)))
         head = self.produce('head', '--target', self.c['l2_db'])
         produced = directory / 'block.json'
         if head['number'] == number - 1:
             if head['hash'] != parent:
                 raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
-            block = self.produce(*self.extend_args(parent, anchor, deposits, anchor_slot))
+            block = self.produce(*self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs))
             if block['number'] != number or block['parent'] != parent or block['anchor'] != anchor:
                 raise Halt('producer extended a different block than requested')
-            if block.get('transactions', 0) and not self.c['user_transactions']:
+            if block.get('transactions', 0) and not self.c['user_transactions'] and not self.shadow:
                 raise Halt('producer included user transactions while user_transactions is false')
             if block['deposits'] != len(pending):
                 raise Halt('producer minted a different number of deposits than the native inbox lists')
@@ -365,7 +427,16 @@ class Sequencer:
                 raise Halt('DA batch does not hold exactly the block transactions')
             da = {'payload_bytes': len(payload), 'commitment': da_commitment(number, payload).hex(),
                   'payload_sha256': hashlib.sha256(payload).hexdigest()}
-        job = {'status': 'ready-for-prover', 'chain_id': CHAIN_ID, 'number': number, 'hash': block['hash'],
+        if settler_block is not None:
+            fields = ('number', 'hash', 'state_root', 'parent', 'anchor', 'timestamp', 'deposits', 'transactions',
+                      'withdrawal_root', 'withdrawal_count')
+            differ = [k for k in fields if block.get(k) != settler_block.get(k, 0 if k == 'transactions' else None)]
+            if differ:
+                raise Halt(f'settler block {number} differs from the independent rebuild in {differ}: '
+                           f'settler {settler_block.get("hash")}, shadow {block["hash"]}')
+            log('shadow-match', number=number, hash=block['hash'], state_root=block['state_root'],
+                transactions=block.get('transactions', 0))
+        job = {'status': 'shadow-matched' if self.shadow else 'ready-for-prover', 'chain_id': CHAIN_ID, 'number': number, 'hash': block['hash'],
                'parent': parent, 'state_root': block['state_root'], 'timestamp': block['timestamp'],
                'anchor': anchor, 'anchor_slot': anchor_slot, 'anchor_height': source['height'],
                'deposits': block['deposits'], 'transactions': block.get('transactions', 0),
