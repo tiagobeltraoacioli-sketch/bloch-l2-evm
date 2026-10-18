@@ -420,18 +420,11 @@ impl IncrementalNativeVerifierV1 {
         if block.envelope.header.parent != self.state.head().as_bytes()[..] {
             return Err(E::Ancestry);
         }
-        for att in &block.attestations {
-            let a = &att.data;
-            if checkpoint(&self.chain, a.source_epoch).map(|h| h.0) != Some(a.source_root)
-                || checkpoint(&self.chain, a.target_epoch).map(|h| h.0) != Some(a.target_root)
-                || !self
-                    .positions
-                    .get(&B256::from(a.head))
-                    .is_some_and(|(slot, _)| *slot <= a.slot)
-            {
-                return Err(E::VoteBranch);
-            }
-        }
+        // Votes for another branch are valid native blocks: the transition keeps
+        // only votes linking from its justified checkpoint and tallies by target,
+        // so a foreign vote cannot move finality. Refusing the block here halted
+        // on a chain every node accepts (devnet4 slot 186817, after a fork). The
+        // finalized-on-this-branch check below is what binds finality.
         let transactions = block
             .transactions
             .iter()
