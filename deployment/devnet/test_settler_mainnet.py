@@ -407,6 +407,26 @@ class MainnetSettlerTest(unittest.TestCase):
         self.assertIn('copy of the settled L2 database',
                       json.loads((self.root / 'd2/dry-run-report.json').read_text())['reason'])
 
+    def test_remote_prover_passes_the_mainnet_flag(self):
+        import struct
+        import subprocess
+        import remote_prover as rp
+        prover = self.root / 'fake-settlement-v3'
+        prover.write_text('#!/bin/sh\n[ "$1 $2 $3" = "--mainnet prove-groth16 native-artifact" ] || exit 9\n'
+                          'cat "$BLOCH_NATIVE_L2_REQUEST" "$BLOCH_NATIVE_L2_ARTIFACT" > "$5"\n')
+        prover.chmod(0o755)
+        (self.root / 'pwork').mkdir()
+        guest = self.root / 'settlement_v3_mainnet'
+        config = {'prover': str(prover), 'prover_sha256': s.digest(prover), 'guest': str(guest),
+                  'guest_sha256': s.digest(guest), 'workdir': str(self.root / 'pwork'), 'mainnet': True,
+                  'home': str(self.root / 'home'), 'prover_threads': 4, 'gnark_image': 'image'}
+        (self.root / 'prover.json').write_text(json.dumps(config))
+        job = rp.MAGIC + struct.pack('>I', 4) + b'req\n' + struct.pack('>Q', 3) + b'art'
+        done = subprocess.run([sys.executable, str(HERE / 'remote_prover.py')], input=job, capture_output=True,
+                              env={'PATH': '/usr/bin:/bin', 'BLOCH_REMOTE_PROVER_CONFIG': str(self.root / 'prover.json'),
+                                   'SSH_ORIGINAL_COMMAND': 'prove'})
+        self.assertEqual((done.returncode, done.stdout), (0, b'req\nart'), done.stderr)
+
     # ---- fees ----
     def test_da_fee_estimate_follows_the_native_fee_market(self):
         # tx_bytes = 8471 + 36 * inputs + payload; gas = 5000 + 16 * tx_bytes + 72748 * inputs; ceil(gas * fee / 1000).

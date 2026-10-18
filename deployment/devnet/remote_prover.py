@@ -130,7 +130,10 @@ def main():
                'SP1_GNARK_IMAGE': c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(job / 'native-request.txt'),
                'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact')}
-        argv = [c['prover'], 'prove-groth16', 'native-artifact', c['guest'], str(proof)]
+        # `"mainnet": true` proves the mainnet program (settlement_v3_mainnet); the settler
+        # verifies the result locally with the same flag, so a wrong program is never submitted.
+        argv = [c['prover'], *(['--mainnet'] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
+                c['guest'], str(proof)]
         with (work / 'last-prove.log').open('w') as log:
             try:
                 result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=log,
