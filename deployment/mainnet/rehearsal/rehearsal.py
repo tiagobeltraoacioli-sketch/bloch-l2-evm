@@ -26,6 +26,7 @@ OUT, RUN = R / 'out', R / 'run'
 BIN = OUT / 'bloch-pos'
 PRODUCE = OUT / 'bloch-l2-produce-dev'
 PROVER = OUT / 'bloch-evm-sp1-settlement-v3'
+GUARDED = OUT / 'bloch-evm-sp1-settlement-v3-guarded'  # memory guard around PROVER (45.77 is shared)
 ELF = OUT / 'settlement_v3_mainnet'
 N = 4
 RPC = [19301 + i for i in range(N)]
@@ -184,10 +185,10 @@ def settler():
         'network': s['network_domain'], 'network_kind': 'mainnet-rehearsal', 'chain_id': 700770, 'network_args': NET_ARGS,
         'l2_genesis': L2_GENESIS, 'rpc_ports': RPC, 'produce': str(PRODUCE), 'l2_db': str(RUN / 'canonical'),
         'workdir': str(RUN / 'work'), 'home': str(R / 'home'), 'prover_path': f'{R}/shim:/usr/bin:/bin',
-        'prover': str(PROVER), 'prover_sha256': sha(PROVER), 'guest': str(ELF), 'guest_sha256': sha(ELF),
+        'prover': str(GUARDED), 'prover_sha256': sha(GUARDED), 'guest': str(ELF), 'guest_sha256': sha(ELF),
         'l2_config': str(RUN / 'l2-config.bin'), 'l2_config_sha256': sha(RUN / 'l2-config.bin'),
-        'gnark_image': GNARK, 'prover_threads': 6, 'timestamp_rule': f'1:{genesis_secs}:{SLOT_MS}',
-        'acceptance_timeout_seconds': 900, 'idle_seconds': 10, 'max_consecutive_failures': 5,
+        'gnark_image': GNARK, 'prover_threads': 20, 'timestamp_rule': f'1:{genesis_secs}:{SLOT_MS}',
+        'acceptance_timeout_seconds': 900, 'idle_seconds': 10, 'max_consecutive_failures': 100,
         'user_transactions': True, 'txpool_dir': str(RUN / 'txpool'),
         'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 256,
         'da': {'signer': str(BIN), 'signer_sha256': sha(BIN), 'genesis': str(RUN / 'genesis.blg'),
