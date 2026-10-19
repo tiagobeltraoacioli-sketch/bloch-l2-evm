@@ -134,9 +134,14 @@ pinned Gnark image; prover in a `systemd --user` scope with MemoryMax and CPUQuo
 |---|---|---|---|---|---|
 | A | mainnet L2 block 1 as the live chain requests it (empty; hash `0ff59c11…ab25`) | 529 004 | 13 min 58 s | 20.4 GB | ~18.5 GB |
 | B | 1 deposit + 4 transfers + 1 withdrawal | 1 573 036 | 13 min 57 s | 30.8 GB | ~18.5 GB |
-| C | 1 deposit + 200 transfers (4.2 M gas) | 33 565 458 | see C row note | | |
+| C | 1 deposit + 200 transfers (4.2 M gas) | 33 565 458 | not measured (see below) | ≥ 28.6 GB after 90 s | |
 
-8 threads, 800 % quota (530–634 % used). Wall time is dominated by the fixed
+8 threads, 800 % quota (530–634 % used). Block C executed (3.0 s) but its proof
+was stopped three times by the benchmark's guard (kill the mainnet prover when
+host MemAvailable < 32 GB, then < 24 GB on the first try) because devnet4's own
+settler proof was running at the same time; C's prover already held 28.6 GB 90 s
+in, so a 200-transfer block needs the full 40 GB slice and must be measured on the
+dedicated host. Wall time is dominated by the fixed
 recursion/wrap/Gnark cost, not by the block's EVM work. The Gnark Groth16 step runs
 in a Docker container under dockerd, OUTSIDE the prover's cgroup, and peaks at
 ~18.5 GB: a proof needs ~50 GB at its peak (prover + container), not "a few GB".
@@ -161,8 +166,8 @@ vCPU / 64 GB (one block per ~13–15 min).
 45.77.142.123 must NOT host mainnet proving: devnet4's settler already proves
 there continuously (16 threads, local first, ~28 GB + ~18.5 GB Gnark, back to back),
 on top of ~33 GB of validators and services. During this benchmark MemAvailable
-fell to 13.6 GB when proofs overlapped, and a watchdog had to stop the mainnet run
-of block C at 23.7 GB. 140.82.35.231 (devnet4's remote prover) runs mainnet
+fell to 13.6 GB when proofs overlapped, and the guard stopped every attempt at
+block C (23.7, 28.9 and 31.9 GB available). 140.82.35.231 (devnet4's remote prover) runs mainnet
 validators and is also not suitable.
 
 ### Install (prover host; not executed)
