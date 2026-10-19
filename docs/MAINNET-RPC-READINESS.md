@@ -256,6 +256,15 @@ feature (`native-kes-20261014`, `a3003098`); settlement-recovery built with
   match that native revision. Not caused by this branch; regenerate the
   fixtures or pin the native revision they were made with.
 
+## Mainnet release candidate build (2026-10-18)
+
+`deployment/mainnet/build-release.sh WORK [OUT]` is the single pinned build of
+`bloch-l2-native-follower`, `bloch-l2-produce-dev` and `bloch-l2-settled-rpc`
+against native `78b7343a` (inert devnet feature shim and the mainnet
+`settlement-recovery` lock applied once, restored afterwards); it checks the
+built producer reproduces the pinned L2 genesis and writes `SHA256SUMS` and
+`build.json`. `follower-rpc/build.sh` and `build-sequencer.sh` are wrappers.
+
 ## Mainnet follower and settled RPC (2026-10-18)
 
 Branch `codex/l2-mainnet-follower-rpc-20261018`. Package:
