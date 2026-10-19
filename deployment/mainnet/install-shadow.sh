@@ -9,7 +9,7 @@
 #   install-shadow.sh OUT_DIR [--start]
 #   install-shadow.sh --rollback
 #
-# OUT_DIR is build-sequencer.sh's WORK/out (bloch-l2-produce-dev, sequencer_mainnet.py, SHA256SUMS).
+# OUT_DIR is build-release.sh's OUT (bloch-l2-produce-dev, sequencer_mainnet.py, SHA256SUMS; RC 2026-10-18 pins).
 # What it does: verifies both files against the pins below, creates
 # /var/lib/bloch-l2-mainnet-shadow/{work,tmp} owned by the settler user, writes the config, creates
 # the shadow L2 database at the pinned mainnet genesis (refuses any other hash), runs a read-only
@@ -21,7 +21,7 @@
 # /opt/bloch/l2-mainnet-shadow, its config and /var/lib/bloch-l2-mainnet-shadow aside with a
 # timestamp. The settler is not touched; nothing on L1 depends on the shadow.
 set -euo pipefail
-PRODUCE_SHA256=aedd83af1939e9559c9461fb355705552e4c4bcab807af51b0c11e3431e004cf
+PRODUCE_SHA256=192eda33d2763dbf80f158948b00e852053a13883ebd9649492b38551d4c1d08
 SEQUENCER_SHA256=15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2
 UNIT=bloch-l2-mainnet-shadow.service
 OPT=/opt/bloch/l2-mainnet-shadow
