@@ -106,10 +106,24 @@ pub struct VerifiedNativeFinalityV1 {
     positions: BTreeMap<B256, (u64, usize)>,
     finalized_index: usize,
     settlements: BTreeMap<B256, Vec<u8>>,
+    /// Chain index of the block whose post-state first holds the L2
+    /// settlement registry (0 = configured at genesis); `None` before a
+    /// flag-day activation.
+    l2_activation_index: Option<usize>,
 }
 impl VerifiedNativeFinalityV1 {
     pub const fn report(&self) -> &NativeFinalityReportV1 {
         &self.report
+    }
+
+    /// The native block that installed the L2 settlement registry with the
+    /// pinned policy (the genesis block when the manifest configured it) and
+    /// whether it lies inside the verified FFG-finalized prefix. Once it does,
+    /// the L2 genesis (`initial_l2_parent`) is final.
+    pub fn l2_activation(&self) -> Option<(FinalizedCheckpoint, bool)> {
+        let index = self.l2_activation_index?;
+        let (slot, block) = *self.chain.get(index)?;
+        Some((FinalizedCheckpoint { block, slot }, index <= self.finalized_index))
     }
 
     /// Exact accepted bytes in native order, restricted to the finalized prefix.
@@ -296,6 +310,25 @@ fn check_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<
     Ok(policy_commitment)
 }
 
+/// Trust for a genesis without an L2 registry (flag-day activation): the same
+/// anchors as [`check_trust`] except the registry, which must be absent here.
+fn check_flag_day_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<B256, NativeFinalityErrorV1> {
+    use NativeFinalityErrorV1 as E;
+    let p = trust.settlement_policy;
+    let policy_commitment = p.commitment().map_err(|_| E::Trust)?;
+    if trust.state_root == B256::ZERO
+        || genesis.l2_settlement().is_some()
+        || genesis.slot() != 0
+        || genesis.head().as_bytes() != &p.genesis.0
+        || genesis.state_root() != trust.state_root.0
+        || p.first_l2_number != 1
+        || p.proof_policy.0 != bloch_l2_proof::policy_commitment_v3()
+    {
+        return Err(E::Trust);
+    }
+    Ok(policy_commitment)
+}
+
 /// Per-block bounds for continuous verification, where no whole-history budget
 /// applies. All are checked before any signature or proof work on that block.
 #[derive(Clone, Copy, Debug)]
@@ -341,6 +374,12 @@ pub struct IncrementalNativeVerifierV1 {
     applied: usize,
     max_blocks: usize,
     poisoned: bool,
+    /// Chain index of the block that installed the L2 registry; `None` while a
+    /// flag-day network has not activated it yet.
+    l2_activation: Option<usize>,
+    /// The withdrawal attestor-set hash a flag-day activation must install
+    /// (not part of the V1 policy). Unused when genesis configures the L2.
+    expected_attestor_set: [u8; 32],
 }
 
 impl IncrementalNativeVerifierV1 {
@@ -349,6 +388,36 @@ impl IncrementalNativeVerifierV1 {
             return Err(NativeFinalityErrorV1::Limit);
         }
         let policy_commitment = check_trust(genesis, trust)?;
+        Self::start(genesis, trust, policy_commitment, max_blocks, Some(0), [0; 32])
+    }
+
+    /// A network whose genesis carries no L2 registry and whose native
+    /// transition installs it at a flag day (Bloch mainnet: Genesis-4, epoch
+    /// 5850). The pinned policy and attestor-set hash must be exactly what the
+    /// replayed transition installs; any other installation halts the replay.
+    /// Before activation no settlement can be accepted natively, so the
+    /// verified finality simply carries no settlements.
+    pub fn new_flag_day(
+        genesis: &CommittedState,
+        trust: NativeGenesisTrustV1,
+        attestor_set: B256,
+        max_blocks: usize,
+    ) -> Result<Self, NativeFinalityErrorV1> {
+        if genesis.validator_count() > 4_096 || max_blocks == 0 || attestor_set.is_zero() {
+            return Err(NativeFinalityErrorV1::Limit);
+        }
+        let policy_commitment = check_flag_day_trust(genesis, trust)?;
+        Self::start(genesis, trust, policy_commitment, max_blocks, None, attestor_set.0)
+    }
+
+    fn start(
+        genesis: &CommittedState,
+        trust: NativeGenesisTrustV1,
+        policy_commitment: B256,
+        max_blocks: usize,
+        l2_activation: Option<usize>,
+        expected_attestor_set: [u8; 32],
+    ) -> Result<Self, NativeFinalityErrorV1> {
         let p = trust.settlement_policy;
         Ok(Self {
             transition: Transition::new(NativeConsensusVerifierV1),
@@ -363,7 +432,14 @@ impl IncrementalNativeVerifierV1 {
             applied: 0,
             max_blocks,
             poisoned: false,
+            l2_activation,
+            expected_attestor_set,
         })
+    }
+
+    /// Chain index of the block that installed the L2 registry, if any yet.
+    pub const fn l2_activation_index(&self) -> Option<usize> {
+        self.l2_activation
     }
 
     /// Head of the verified branch (the pinned genesis before any block).
@@ -452,6 +528,18 @@ impl IncrementalNativeVerifierV1 {
             return Err(E::Ancestry);
         }
         self.chain.push((block.envelope.header.slot, id));
+        if self.l2_activation.is_none() {
+            if let Some(registry) = self.state.l2_settlement() {
+                let pinned = Policy {
+                    attestor_set: self.expected_attestor_set,
+                    ..native_policy(self.trust.settlement_policy)
+                };
+                if registry.policy() != &pinned {
+                    return Err(E::Trust);
+                }
+                self.l2_activation = Some(self.chain.len() - 1);
+            }
+        }
         for (tx, bytes) in transactions.iter().zip(&block.transactions) {
             if matches!(
                 tx,
@@ -504,6 +592,7 @@ impl IncrementalNativeVerifierV1 {
             positions: self.positions.clone(),
             finalized_index: self.final_index,
             settlements: self.settlements.clone(),
+            l2_activation_index: self.l2_activation,
         })
     }
 }

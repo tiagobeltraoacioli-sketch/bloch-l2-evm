@@ -1,0 +1,44 @@
+# Bloch L2 MAINNET (chain id 700770) native follower: L2 finalized from a real
+# FFG replay of Bloch L1 mainnet from the pinned Genesis-4 manifest. The L1 RPC
+# is untrusted for finality (read-only methods only). Installed by install.sh.
+[Unit]
+Description=Bloch L2 mainnet native follower (FFG replay from Genesis-4)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bloch-l2-follower-main
+Group=bloch-l2-follower-main
+UMask=0022
+EnvironmentFile=/etc/bloch-l2-mainnet/follower.env
+ExecStart=/opt/bloch/l2-mainnet/bloch-l2-native-follower --manifest /etc/bloch-l2-mainnet/public/mainnet.manifest --carryover /etc/bloch-l2-mainnet/public/carryover.tsv --network-pin f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --rpc-url ${BLOCH_L1_RPC_URL} --state /var/lib/bloch-l2-mainnet-follower/native --status /var/lib/bloch-l2-mainnet-follower/status.json --poll-seconds 10
+Restart=on-failure
+RestartSec=30
+# Exit 3 = verification halt (a block or activation that does not verify): do not loop.
+RestartPreventExitStatus=3
+ReadWritePaths=/var/lib/bloch-l2-mainnet-follower
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+# install.sh writes the L1 RPC host into a drop-in (IPAddressAllow=localhost HOST).
+IPAddressAllow=localhost
+LimitCORE=0
+# Observed 2026-10-18: full mainnet replay (~155k blocks, ~56 min) stayed under 0.6 GB RSS.
+MemoryMax=6G
+CPUQuota=200%
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1990,6 +1990,7 @@ dependencies = [
  "reth-provider",
  "reth-tasks",
  "serde_json",
+ "sha3 0.10.9",
  "tempfile",
 ]
 

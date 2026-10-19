@@ -247,6 +247,57 @@ pub fn load_native_manifest(
     Ok((manifest, genesis, policy))
 }
 
+/// Read and validate a funded native manifest (`BPOSMAN1`/`BPOSMAN2`, e.g. the
+/// Genesis-4 mainnet manifest) whose genesis carries no L2 registry: the L2 is
+/// installed later by a native flag day (see
+/// [`crate::native::IncrementalNativeVerifierV1::new_flag_day`]). The SHA3-256
+/// of the exact file bytes is the network admission domain and must equal the
+/// independent pin. A manifest committing to a carryover needs the matching
+/// snapshot (decompressed TSV); it is checked against the manifest's
+/// commitment by the native loader, so it adds no trust.
+pub fn load_flag_day_manifest(
+    manifest_path: &Path,
+    carryover_path: Option<&Path>,
+    independent_network: B256,
+    manifest_limit: u64,
+) -> Result<(Manifest, CommittedState), NativeHistoryErrorV1> {
+    use sha3::Digest;
+    use NativeHistoryErrorV1 as E;
+    if manifest_limit == 0 || manifest_limit > MIB || independent_network.is_zero() {
+        return Err(E::Limit);
+    }
+    let parent = manifest_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let directory = open_directory(parent)?;
+    let bytes = read_public_file(&directory, manifest_path.file_name().ok_or(E::Path)?, manifest_limit)?;
+    if bytes.len() < 28 || !(&bytes[..8] == b"BPOSMAN1" || &bytes[..8] == b"BPOSMAN2") {
+        return Err(E::Encoding("funded BPOSMAN1/BPOSMAN2 manifest required"));
+    }
+    let digest: [u8; 32] = sha3::Sha3_256::digest(&bytes).into();
+    if B256::from(digest) != independent_network {
+        return Err(E::Identity);
+    }
+    let mut manifest = Manifest::decode(&bytes).map_err(|_| E::Encoding("manifest"))?;
+    if matches!(manifest.format, ManifestFormat::V3L2Async(_)) || manifest.encode() != bytes {
+        return Err(E::Encoding("noncanonical manifest"));
+    }
+    match (&manifest.carryover, carryover_path) {
+        (Some(_), Some(path)) => {
+            manifest.ingest_carryover(path).map_err(|_| E::Encoding("carryover snapshot"))?;
+        }
+        (Some(_), None) => return Err(E::Encoding("the manifest commits to a carryover; --carryover is required")),
+        (None, Some(_)) => return Err(E::Encoding("the manifest commits to no carryover")),
+        (None, None) => {}
+    }
+    let genesis = manifest.genesis_state();
+    if genesis.l2_settlement().is_some() {
+        return Err(E::Encoding("genesis already configures the L2"));
+    }
+    Ok((manifest, genesis))
+}
+
 fn open_at(directory: &File, name: &OsStr, flags: libc::c_int) -> Result<File, NativeHistoryErrorV1> {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
