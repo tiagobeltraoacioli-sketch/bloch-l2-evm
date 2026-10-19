@@ -156,7 +156,7 @@ class Fake:
                 kwargs['stdout'].write(artifact(self.values))
             return out
         if 'settlement-v3' in name:
-            if argv[1] == 'prove-groth16':
+            if 'prove-groth16' in argv:
                 Path(argv[-1]).write_bytes(artifact(self.values))
             return out
         raise AssertionError(argv)
@@ -313,8 +313,8 @@ class SettlerV3Test(unittest.TestCase):
 
     def test_user_transactions_are_refused_outside_devnet_and_need_a_pool(self):
         fake = Fake(self.root, statement())
-        with self.assertRaisesRegex(s.Halt, 'outside development networks'):
-            self.user_settler(fake, network_kind='mainnet')
+        with self.assertRaisesRegex(s.Halt, 'network_kind must be'):
+            self.user_settler(fake, network_kind='testnet')
         with self.assertRaisesRegex(s.Halt, 'da signer configuration'):
             self.settler(fake, user_transactions=True, txpool_dir=str(self.root / 'txpool'))
         with self.assertRaisesRegex(s.Halt, 'signer differs from its pin'):
@@ -327,8 +327,9 @@ class SettlerV3Test(unittest.TestCase):
             self.settler(fake, user_transactions='yes')
         with self.assertRaisesRegex(s.Halt, 'max_block_gas'):
             self.user_settler(fake, max_block_gas=0)
-        # Deposit-only stays allowed on any network kind.
-        self.settler(fake, network_kind='mainnet')
+        # The mainnet profile has its own pins (test_settler_mainnet.py).
+        with self.assertRaisesRegex(s.Halt, 'Genesis-4 admission domain'):
+            self.settler(fake, network_kind='mainnet')
 
     # ---- V3 pre-submit checks ----
     def test_v3_fields_are_checked_before_submission(self):
@@ -425,12 +426,29 @@ class SettlerV3Test(unittest.TestCase):
         fake.include_da = False
         self.assertFalse(self.user_settler(fake).cycle())
         self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG], 'no settlement before the DA record')
-        # Next cycle: a new DA attempt (fresh files); once included, it settles.
+        # Next cycle, same base fee and inputs unspent: the same signed bytes are rebroadcast
+        # (no second DA spending the same outputs); once included, it settles.
         fake.include_da = True
         self.assertTrue(self.user_settler(fake).cycle())
         self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual(fake.sent[0], fake.sent[1])
         prepares = [c for c in fake.calls if Path(c[0]).name == 'bloch-pos' and c[2] == 'prepare']
-        self.assertTrue(prepares[0][-1].endswith('da-unsigned-0.hex') and prepares[1][-1].endswith('da-unsigned-1.hex'))
+        self.assertEqual(len(prepares), 1)
+        self.assertTrue(prepares[0][-1].endswith('da-unsigned-0.hex'))
+
+    def test_da_is_prepared_again_when_the_base_fee_moved(self):
+        # Consensus needs exact conservation at the including block's base fee.
+        fake = Fake(self.root, statement(user_txs=2), produced_txs=2)
+        fake.include_da = False
+        self.assertFalse(self.user_settler(fake).cycle())
+        rpc = fake.rpc
+        fake.rpc = lambda port, method, params=(): ({'next_base_fee_millisat_per_gas': '11'}
+                                                    if method == 'getchaininfo' else rpc(port, method, params))
+        fake.include_da = True
+        self.assertTrue(self.user_settler(fake).cycle())
+        prepares = [c for c in fake.calls if Path(c[0]).name == 'bloch-pos' and c[2] == 'prepare']
+        self.assertEqual([p[-1].rsplit('/', 1)[1] for p in prepares], ['da-unsigned-0.hex', 'da-unsigned-1.hex'])
+        self.assertEqual(prepares[1][prepares[1].index('--base-fee') + 1], '11')
 
     def test_da_commitment_must_match_the_block_batch(self):
         wrong = Fake(self.root, statement(user_txs=2), produced_txs=2, da_payload=batch(2)[:-1] + b'\x09')

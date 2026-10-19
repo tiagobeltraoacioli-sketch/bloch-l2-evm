@@ -58,6 +58,36 @@ Differences, all deliberate:
   it counts as no quorum. `--check-rpc` prints the per-endpoint view and the quorum
   decision and exits without producing, proving or submitting anything.
 
+* mainnet profile (`network_kind: "mainnet"`, Bloch L2 chain 700770, native
+  activation at epoch 5850): every identity is pinned in `MAINNET` and checked
+  against the configuration and, by quorum, against the live network
+  (admission domain, native genesis, chain id, async mode, activated profile,
+  3-of-5 attestor set hash); the 264-byte l2-config.bin must equal the bytes
+  `mainnet_l2_config()` derives from the pins (proof policy V3 154869964f…);
+  the guest must be `settlement_v3_mainnet` (SHA-256 203114bf…); the producer
+  gets `--rules mainnet --domain … --genesis-time …` and the wall-clock
+  timestamp rule from block 1, the prover `--mainnet`. The native RPCs are
+  `rpc_urls` (at least three distinct hosts, quorum at least two) instead of
+  loopback `rpc_ports`. User transactions are admitted by the activated
+  profile and stay a configuration switch (DA fees are paid by the dedicated
+  fee key; the 0x13 settlement itself pays no fee).
+
+* submission robustness (2026-10-18; devnet4 looped on block 231 while its L1
+  was halted): the signed bytes of a block are reused until it is accepted or
+  its request moves; a `duplicate` answer means the node already holds or
+  recently included those bytes; "one L2 proof is already pending" and
+  retryable refusals wait; the same bytes are rebroadcast every
+  `resubmit_seconds`; an acceptance timeout records whether the L1 head moved
+  (`l1-not-advancing`) and never counts as a worker failure; a terminal
+  refusal (policy/source/successor/proof) is re-checked against the quorum
+  view and halts unless the request moved; a different statement accepted
+  for the same L2 block halts (another settler).
+
+* `--dry-run [--prove]`: builds the next settlement against the live network
+  in a scratch copy of the L2 database and validates it (identity, request,
+  producer, SP1 execute; with --prove also Groth16 + every pre-submit check)
+  without ever calling sendrawtransaction or signing anything.
+
 Each cycle: read the native request all validators agree on, extend the
 canonical L2 database by exactly one block anchored to it, prove it, build the
 settlement transaction, submit it and wait for native acceptance. The worker
@@ -70,10 +100,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 CONFIG = Path(os.environ.get('BLOCH_SETTLER_CONFIG', '/etc/bloch-l2-devnet4-settler/config.json'))
@@ -107,7 +139,59 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
-            'max_block_bytes': 114_688, 'max_block_txs': 256}  # bytes: one native DA batch
+            'max_block_bytes': 114_688, 'max_block_txs': 256,  # bytes: one native DA batch
+            'poll_seconds': 6, 'resubmit_seconds': 120}
+NETWORK_KINDS = ('devnet', 'mainnet')
+
+# ---- Bloch L2 mainnet (chain 700770), activated on Genesis-4 at epoch 5850 ----
+# Sources: bloch-sis-pow l2_settlement::mainnet (release 78b7343a), docs/MAINNET-PROGRAM.md.
+MAINNET = {
+    'chain_id': 700770,
+    'network': 'f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966',  # admission domain
+    'genesis': '9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415',  # native genesis id
+    'l2_domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
+    'configuration': '8ec1c804e67190434fdf72b723103d26938797e90e1b652d366a1b053e3d8f2b',
+    'elf_keccak': '6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073',
+    'vkey_koalabear': '389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e',
+    'vkey_bn254': '007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e',
+    'proof_policy': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
+    'l2_genesis': '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468',
+    'l2_genesis_state': '2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d',
+    'guest_sha256': '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473',  # settlement_v3_mainnet
+    'genesis_time': 1786656679,
+    'slot_ms': 30_000,
+    'attestor_set': '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b',  # 3-of-5
+}
+MAINNET_L2_CONFIG_SHA256 = '292f4fa8d5a949a26c20317cfc9360d53afda4779b298f1841107985ca5c4f6b'
+MAINNET_TIMESTAMP_RULE = f"1:{MAINNET['genesis_time']}:{MAINNET['slot_ms']}"
+MAINNET_PRODUCE_ARGS = ('--rules', 'mainnet', '--domain', MAINNET['l2_domain'],
+                        '--genesis-time', str(MAINNET['genesis_time']))
+MAINNET_DEFAULTS = {'poll_seconds': 15, 'resubmit_seconds': 300, 'timestamp_rule': MAINNET_TIMESTAMP_RULE}
+
+
+def mainnet_l2_config():
+    """The 264-byte l2-config.bin of chain 700770 (layout of devnet4/make_l2_config.py)."""
+    out = b''.join(bytes.fromhex(MAINNET[k]) for k in ('l2_domain', 'configuration', 'elf_keccak',
+                                                         'vkey_koalabear', 'vkey_bn254', 'proof_policy'))
+    out += MAINNET['chain_id'].to_bytes(8, 'little')
+    return out + bytes.fromhex(MAINNET['l2_genesis']) + bytes.fromhex(MAINNET['l2_genesis_state'])
+
+
+# ---- L1 fee estimate for the DA (0x15) transaction (bloch-pos-committee fee_market, l2_da) ----
+GAS_PER_BYTE, TX_FLAT_GAS, HYBRID_VERIFY_GAS = 16, 5_000, 72_748
+PQ_KEY_BYTES, PQ_SIGNATURE_MAX = 3_749, 4_593
+MIN_BASE_FEE_MILLISAT_PER_GAS = 10
+
+
+def da_fee_sat(payload_bytes, inputs=1, base_fee_millisat_per_gas=MIN_BASE_FEE_MILLISAT_PER_GAS, tip=0):
+    """Satoshis a 0x15 transaction pays: declared bytes = the witness-free encoding
+    plus the worst-case signature (what `bloch-pos l2-da prepare` declares),
+    gas = flat + 16/byte + one hybrid verification per input, rounded up."""
+    tx_bytes = 1 + 32 + 4 + PQ_KEY_BYTES + 4 + 36 * inputs + 8 + 8 + 4 + payload_bytes + 8 + 32 + 8 + 16 + 4 \
+        + PQ_SIGNATURE_MAX
+    gas = TX_FLAT_GAS + GAS_PER_BYTE * tx_bytes + HYBRID_VERIFY_GAS * inputs
+    part = lambda price: -(-gas * price // 1000)  # noqa: E731
+    return part(base_fee_millisat_per_gas) + part(tip)
 
 
 class Halt(Exception):
@@ -242,9 +326,9 @@ def check_withdrawals(values, previous):
     return root, count
 
 
-def da_commitment(number, payload):
+def da_commitment(number, payload, chain_id=CHAIN_ID):
     """keccak256("BLOCH:L2:DA:1" || chain_id BE8 || l2_block_number BE8 || payload)."""
-    return keccak256(DA_DOMAIN + CHAIN_ID.to_bytes(8, 'big') + int(number).to_bytes(8, 'big') + payload)
+    return keccak256(DA_DOMAIN + chain_id.to_bytes(8, 'big') + int(number).to_bytes(8, 'big') + payload)
 
 
 def da_batch_count(payload):
@@ -283,9 +367,14 @@ def da_frame_fields(tx):
     return chain, number, take(at + 20, size)
 
 
+def endpoint_url(endpoint):
+    """A loopback port (devnets) or an http(s) URL (mainnet `rpc_urls`)."""
+    return endpoint if isinstance(endpoint, str) else f'http://127.0.0.1:{endpoint}'
+
+
 def rpc(port, method, params=()):
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}).encode()
-    request = urllib.request.Request(f'http://127.0.0.1:{port}', data=body, headers={'Content-Type': 'application/json'})
+    request = urllib.request.Request(endpoint_url(port), data=body, headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=15) as response:
         reply = json.loads(response.read())
     if 'error' in reply:
@@ -304,12 +393,62 @@ def settlement_view(view):
     return {k: view[k] for k in SETTLEMENT_VIEW_FIELDS if k in view}
 
 
-def rpc_quorum(config):
-    """`rpc_quorum` from the configuration (default: strict majority of `rpc_ports`)."""
+def identity_view(view):
+    """The static identity fields of a getl2settlement answer (checked once at start)."""
+    if not isinstance(view, dict):
+        return view
+    profile, withdrawals = view.get('profile') or {}, view.get('withdrawals') or {}
+    return {'network': view.get('network'), 'genesis': view.get('genesis'), 'chain_id': view.get('chain_id'),
+            'asynchronous': view.get('asynchronous'), 'activated': profile.get('activated'),
+            'user_transactions': profile.get('user_transactions'), 'attestor_set': withdrawals.get('attestor_set')}
+
+
+def check_mainnet_config(c):
+    """Every mainnet pin the configuration can get wrong, before any RPC."""
+    if c.get('network') != MAINNET['network']:
+        raise Halt('mainnet network must be the Genesis-4 admission domain')
+    if c.get('l2_genesis') != MAINNET['l2_genesis']:
+        raise Halt('mainnet l2_genesis differs from the pinned L2 genesis')
+    if Path(c['l2_config']).read_bytes() != mainnet_l2_config():
+        raise Halt('mainnet l2_config differs from the pinned program (proof policy V3)')
+    if c.get('guest_sha256') != MAINNET['guest_sha256'] or 'settlement_v3_mainnet' not in Path(c['guest']).name:
+        raise Halt('mainnet guest must be the pinned settlement_v3_mainnet ELF')
+    if c.get('timestamp_rule') != MAINNET_TIMESTAMP_RULE:
+        raise Halt(f'mainnet timestamp_rule must be {MAINNET_TIMESTAMP_RULE}')
+    if 'rpc_urls' not in c:
+        raise Halt('mainnet needs rpc_urls on independent hosts')
+    endpoints = rpc_endpoints(c)
+    if len(endpoints) < 3 or rpc_quorum(c) < 2:
+        raise Halt('mainnet needs at least three rpc_urls and a quorum of at least two')
+    for key in ('poll_seconds', 'resubmit_seconds', 'acceptance_timeout_seconds'):
+        if not isinstance(c.get(key), int) or c[key] <= 0:
+            raise Halt(f'{key} must be a positive integer')
+
+
+def rpc_endpoints(config):
+    """The native RPC endpoints: `rpc_urls` (http(s) URLs, one per host) or loopback `rpc_ports`."""
+    if 'rpc_urls' in config:
+        if 'rpc_ports' in config:
+            raise Halt('configure rpc_urls or rpc_ports, not both')
+        urls = config['rpc_urls']
+        if not isinstance(urls, list) or not urls or not all(isinstance(u, str) for u in urls):
+            raise Halt('rpc_urls must list http(s) URLs')
+        hosts = [urllib.parse.urlsplit(u).hostname for u in urls]
+        if not all(urllib.parse.urlsplit(u).scheme in ('http', 'https') and h for u, h in zip(urls, hosts)):
+            raise Halt('rpc_urls must list http(s) URLs')
+        if len(set(hosts)) != len(hosts):
+            raise Halt('rpc_urls must name distinct hosts (one failure domain each)')
+        return list(urls)
     ports = config.get('rpc_ports')
     if not isinstance(ports, list) or not ports or len(set(ports)) != len(ports) \
             or not all(isinstance(p, int) and not isinstance(p, bool) for p in ports):
         raise Halt('rpc_ports must list distinct integer ports')
+    return list(ports)
+
+
+def rpc_quorum(config):
+    """`rpc_quorum` from the configuration (default: strict majority of the endpoints)."""
+    ports = rpc_endpoints(config)
     quorum = config.get('rpc_quorum', len(ports) // 2 + 1)
     if not isinstance(quorum, int) or isinstance(quorum, bool) or not len(ports) < 2 * quorum <= 2 * len(ports):
         raise Halt('rpc_quorum must be a strict majority of rpc_ports')
@@ -428,14 +567,39 @@ class Endpoints:
         return [first[k] for k in seen if seen[k] >= self.quorum]
 
     def submit(self, tx_hex):
-        """sendrawtransaction on the first usable endpoint that accepts it: (port, response)."""
+        """sendrawtransaction on the first usable endpoint that accepts it: (port, response).
+        Raises SubmitRefused with every endpoint's reason when none does."""
         errors = []
         for port in self.usable():
             try:
                 return port, self.call(port, 'sendrawtransaction', [tx_hex])
             except Exception as error:
-                errors.append(f'{port}: {type(error).__name__}: {error}'[:200])
-        raise RuntimeError('sendrawtransaction failed on every RPC endpoint: ' + '; '.join(errors))
+                errors.append((port, f'{type(error).__name__}: {error}'[:300]))
+        raise SubmitRefused(errors)
+
+
+# Native sendrawtransaction refusals (bloch-pos-node rpc.rs / engine.rs, release 78b7343a).
+TX_REFUSED, TX_REFUSED_RETRYABLE, MEMPOOL_FULL, TX_REFUSED_SOURCE_CAP = -32008, -32009, -32003, -32010
+ONE_PROOF_PENDING = 'one L2 proof is already pending'
+
+
+class SubmitRefused(RuntimeError):
+    """No endpoint took the transaction. `kind()` is 'terminal' only when every
+    endpoint that answered judged these bytes invalid for a reason other than
+    another proof already pending; anything else (transport failure, full
+    mempool, retryable bar, a pending proof) is 'retry'."""
+
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__('sendrawtransaction failed on every RPC endpoint: '
+                         + '; '.join(f'{p}: {e}'[:200] for p, e in errors))
+
+    def kind(self):
+        refusals = [e for _, e in self.errors if e.startswith('RpcError')]
+        if not refusals or len(refusals) < len(self.errors):
+            return 'retry'
+        terminal = [e for e in refusals if f"'code': {TX_REFUSED}," in e and ONE_PROOF_PENDING not in e]
+        return 'terminal' if len(terminal) == len(refusals) else 'retry'
 
 
 def statement_fields(hex_statement):
@@ -486,8 +650,15 @@ def parse_proof_artifact(data):
 
 class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
-        self.c = {**DEFAULTS, **config}
+        kind = config.get('network_kind', DEFAULTS['network_kind'])
+        if kind not in NETWORK_KINDS:
+            raise Halt('network_kind must be "devnet" or "mainnet"')
+        self.mainnet = kind == 'mainnet'
+        self.c = {**DEFAULTS, **(MAINNET_DEFAULTS if self.mainnet else {}), **config}
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
+        self.chain_id = MAINNET['chain_id'] if self.mainnet else CHAIN_ID
+        self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet else []
+        self.prover_args = ['--mainnet'] if self.mainnet else []
         for key in ('prover', 'guest', 'l2_config'):
             if digest(self.c[key]) != self.c[key + '_sha256']:
                 raise Halt(f'{key} differs from its pin')
@@ -495,10 +666,11 @@ class Settler:
             raise Halt('settler_v3 requires the settlement V3 prover and guest')
         if not isinstance(self.c['user_transactions'], bool):
             raise Halt('user_transactions must be true or false')
+        if self.mainnet:
+            check_mainnet_config(self.c)
         if self.c['user_transactions']:
-            # Production guard (M2.6): user transactions stay on development networks only.
-            if self.c['network_kind'] != 'devnet':
-                raise Halt('user_transactions is refused outside development networks')
+            # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
+            # development networks and the activated mainnet profile (checked live as well).
             pool = Path(self.c.get('txpool_dir', ''))
             if not self.c.get('txpool_dir') or not pool.is_dir():
                 raise Halt('user_transactions requires an existing txpool_dir')
@@ -528,15 +700,39 @@ class Settler:
                     or not set(order) <= {'local', 'remote'}:
                 raise Halt('remote_prover.order must list "local" and/or "remote" once each')
         self.work = Path(self.c['workdir'])
-        self.native = Endpoints(self.c['rpc_ports'], rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
+        self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
+        self.identity_checked = False
+        self.dry_run = False
+
+    def check_identity(self):
+        """Once per process: the network a quorum reports is the configured one;
+        on mainnet also the async, activated profile with the pinned attestor set."""
+        if self.identity_checked:
+            return True
+        view, _ = self.native.agreed('getl2settlement', project=identity_view)
+        if view is None:
+            return False
+        if view.get('network') != self.c['network'] or view.get('chain_id') != self.chain_id:
+            raise Halt('native network identity differs from the configuration')
+        if self.mainnet:
+            expected = {'network': MAINNET['network'], 'genesis': MAINNET['genesis'], 'chain_id': MAINNET['chain_id'],
+                        'asynchronous': True, 'activated': True, 'attestor_set': MAINNET['attestor_set']}
+            got = {k: view.get(k) for k in expected}
+            if got != expected:
+                raise Halt(f'mainnet L2 identity differs from the pins: {got}')
+            if self.c['user_transactions'] and view.get('user_transactions') is not True:
+                raise Halt('the native L2 profile does not admit user transactions')
+        self.identity_checked = True
+        log('identity-checked', network=view['network'], chain_id=view['chain_id'], mainnet=self.mainnet)
+        return True
 
     def native_view(self):
         """The settlement view a quorum of validator RPCs reports identically, or None."""
         view, support = self.native.agreed('getl2settlement', project=settlement_view)
         if view is None:
             return None  # validators momentarily disagree; retry later
-        if view['network'] != self.c['network'] or view['chain_id'] != CHAIN_ID:
+        if view['network'] != self.c['network'] or view['chain_id'] != self.chain_id:
             raise Halt('native network identity changed')
         accepted = view.get('accepted')
         number = statement_fields(accepted['statement'])['l2_number'] if accepted else 0
@@ -550,7 +746,7 @@ class Settler:
         return view
 
     def produce(self, *args):
-        result = self.run([self.c['produce'], *args], capture_output=True, text=True, timeout=300)
+        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
         if result.returncode:
             raise Halt(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         return json.loads(result.stdout)
@@ -618,7 +814,7 @@ class Settler:
         request.write_text(text)
         return number, directory
 
-    def prove(self, directory):
+    def prove(self, directory, stages=('execute', 'prove', 'verify')):
         proof = directory / 'settlement.proof'
         if (directory / 'proved.json').exists():
             return proof
@@ -630,7 +826,10 @@ class Settler:
                'BLOCH_NATIVE_L2_ARTIFACT': str(directory / 'block.artifact')}
         steps = []
         for name, args in (('execute', ['execute']), ('prove', ['prove-groth16']), ('verify', ['verify-groth16'])):
-            argv = [self.c['prover'], *args, 'native-artifact', self.c['guest']] + ([] if name == 'execute' else [str(proof)])
+            if name not in stages:
+                continue
+            argv = [self.c['prover'], *self.prover_args, *args, 'native-artifact', self.c['guest']] \
+                + ([] if name == 'execute' else [str(proof)])
             if name == 'prove':
                 proof.unlink(missing_ok=True)
             start = self.clock()
@@ -651,6 +850,9 @@ class Settler:
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
                 raise RuntimeError(f'prover {name} failed: see {directory}/{name}.log')
+        if 'verify' not in stages:
+            log('prover-stages-done', directory=str(directory), steps=steps)
+            return None
         (directory / 'proved.json').write_text(json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
@@ -710,7 +912,7 @@ class Settler:
         payload = self.da_payload(number(264), directory)
         if da_batch_count(payload) != users:
             raise Halt('DA batch does not hold exactly the statement user transactions')
-        if field(DA_COMMITMENT) != da_commitment(number(264), payload):
+        if field(DA_COMMITMENT) != da_commitment(number(264), payload, self.chain_id):
             raise Halt('statement da_commitment does not match the block DA batch')
         return users
 
@@ -739,22 +941,40 @@ class Settler:
         da = self.c['da']
         base_fee = str(self.native.bounded_value('getchaininfo', 'next_base_fee_millisat_per_gas'))
         utxos = self.native.common_utxos(self.da_script)
+        balance = sum(int(u['value_sat']) for u in utxos)
+        payload_bytes = len((directory / 'da-payload.hex').read_text().strip()) // 2
+        estimate = da_fee_sat(payload_bytes, 1, int(base_fee), int(da.get('tip_millisat_per_gas', 0)))
+        if balance < int(da.get('low_balance_sat', 0)):
+            log('da-funding-low', balance_sat=balance, low_balance_sat=int(da['low_balance_sat']),
+                funding_script=self.da_script)
         utxos = sorted(utxos, key=lambda u: (-int(u['value_sat']), u['txid'], u['vout']))[:DA_MAX_INPUTS]
         if not utxos:
             raise Halt('the DA funding key has no spendable outputs')
-        env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'BLOCH_KEYSTORE_PASSPHRASE_FILE': da['passphrase_file']}
+        if self.dry_run:
+            raise Halt(f'dry run never signs or broadcasts the DA batch (fee estimate {estimate} sat)')
         attempt = 0
         while (directory / f'da-unsigned-{attempt}.hex').exists():
             attempt += 1
+        # Rebroadcast the last signed bytes while they can still be included: consensus needs exact
+        # conservation at the including block's base fee, and every input must still be unspent.
+        last = directory / f'da-meta-{attempt - 1}.json'
+        if attempt and last.exists() and (directory / f'da-signed-{attempt - 1}.hex').exists():
+            meta = json.loads(last.read_text())
+            unspent = {f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos}
+            if meta['base_fee'] == base_fee and set(meta['inputs']) <= unspent:
+                tx = bytes.fromhex((directory / f'da-signed-{attempt - 1}.hex').read_text().strip())
+                return self.submit_da(number, directory, tx, commitment, attempt - 1, estimate)
+        env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'BLOCH_KEYSTORE_PASSPHRASE_FILE': da['passphrase_file']}
         unsigned, signed = directory / f'da-unsigned-{attempt}.hex', directory / f'da-signed-{attempt}.hex'
-        result = None
+        result, inputs = None, []
         for count in range(1, len(utxos) + 1):
             unsigned.unlink(missing_ok=True)
             argv = [da['signer'], 'l2-da', 'prepare', '--genesis', da['genesis'], '--funding-pubkey', da['funding_pubkey'],
-                    '--chain-id', str(CHAIN_ID), '--number', str(number), '--payload', str(directory / 'da-payload.hex'),
+                    '--chain-id', str(self.chain_id), '--number', str(number), '--payload', str(directory / 'da-payload.hex'),
                     '--base-fee', base_fee, '--tip', str(da.get('tip_millisat_per_gas', 0)), '--out', str(unsigned)]
-            for u in utxos[:count]:
-                argv[3:3] = ['--input', f"{u['txid']}:{u['vout']}:{u['value_sat']}"]
+            inputs = [f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos[:count]]
+            for item in inputs:
+                argv[3:3] = ['--input', item]
             result = self.run(argv, env=env, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 break
@@ -767,14 +987,19 @@ class Settler:
             raise Halt(f'DA signer refused: {result.stderr.strip()[:400]}')
         tx = bytes.fromhex(signed.read_text().strip())
         payload = bytes.fromhex((directory / 'da-payload.hex').read_text().strip())
-        if da_frame_fields(tx) != (CHAIN_ID, number, payload):
+        if da_frame_fields(tx) != (self.chain_id, number, payload):
             raise Halt('signed DA transaction does not carry this block batch')
+        (directory / f'da-meta-{attempt}.json').write_text(json.dumps({'base_fee': base_fee, 'inputs': inputs}) + '\n')
+        return self.submit_da(number, directory, tx, commitment, attempt, estimate)
+
+    def submit_da(self, number, directory, tx, commitment, attempt, estimate):
+        da = self.c['da']
         port, response = self.native.submit(tx.hex())
         log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'),
-            port=port)
+            port=port, attempt=attempt, fee_estimate_sat=estimate)
         deadline = self.clock() + da.get('inclusion_timeout_seconds', 300)
         while self.clock() < deadline:
-            self.sleep(6)
+            self.sleep(self.c['poll_seconds'])
             if self.da_recorded(number, commitment):
                 log('da-included', number=number, commitment=commitment.hex())
                 return True
@@ -799,33 +1024,104 @@ class Settler:
         tx = bytes([ASYNC_SETTLEMENT_TAG]) + config[160:192] + values + proof
         if len(tx) != TRANSACTION_BYTES:
             raise Halt('settlement transaction has the wrong length')
+        if self.mainnet and (tx[1:33].hex() != MAINNET['proof_policy']
+                             or int.from_bytes(values[T + 256:T + 264], 'big') != MAINNET['chain_id']):
+            raise Halt('settlement does not carry the mainnet proof policy and chain id')
         (directory / 'transaction.bin').write_bytes(tx)
         root, count = withdrawal_fields(values)
         log('transaction-built', directory=str(directory), user_transactions=users, bytes=len(tx),
             withdrawal_root=root.hex(), withdrawal_count=count)
         return tx
 
+    def l1_height(self):
+        """The native head height no larger than an honest endpoint reports, or None."""
+        try:
+            return self.native.bounded_value('getchaininfo', 'height')
+        except Exception:  # noqa: BLE001 - only a diagnostic
+            return None
+
+    def accepted_outcome(self, number, values, current):
+        """'ours' when the quorum view accepted exactly these values for `number`,
+        None while it has not; halts when anything else was accepted there."""
+        accepted = current and current.get('accepted')
+        if not accepted:
+            return None
+        seen = statement_fields(accepted['statement'])['l2_number']
+        if seen < number:
+            return None
+        if seen == number and bytes.fromhex(accepted['statement']) == values:
+            return 'ours'
+        raise Halt(f'native accepted L2 block {seen} with a statement this worker did not submit '
+                   f'(another settler?) while settling {number}')
+
+    def broadcast(self, number, directory, tx, record):
+        """Submit (or rebroadcast) the same bytes. True when some endpoint holds them,
+        False when every refusal was transient; a terminal refusal returns 'terminal'."""
+        try:
+            port, response = self.native.submit(tx.hex())
+        except SubmitRefused as refused:
+            kind = refused.kind()
+            log('submit-refused', number=number, kind=kind, errors=[f'{p}: {e}'[:300] for p, e in refused.errors])
+            return 'terminal' if kind == 'terminal' else False
+        record['attempts'] = record.get('attempts', 0) + 1
+        record.setdefault('first_unix', int(time.time()))
+        record['last_status'] = response.get('status')
+        (directory / 'submitted.json').write_text(json.dumps(record, indent=2) + '\n')
+        log('submitted' if response.get('status') != 'duplicate' else 'submitted-duplicate', number=number,
+            response=response.get('status'), tx_hash=response.get('tx_hash'), port=port, attempt=record['attempts'])
+        return True
+
     def submit_and_wait(self, number, directory, tx, view):
+        values = tx[33:33 + VALUES_BYTES]
         current = self.native_view()
+        if current is not None and self.accepted_outcome(number, values, current) == 'ours':
+            return self.record_accepted(number, directory, current['accepted'])
         if current is None or current['source'] != view['source'] or current.get('accepted') != view.get('accepted'):
             log('request-moved-before-submit', number=number)
             return False
-        port, response = self.native.submit(tx.hex())
-        log('submitted', number=number, response=response.get('status'), tx_hash=response.get('tx_hash'), port=port)
+        path = directory / 'submitted.json'
+        record = json.loads(path.read_text()) if path.exists() else {}
+        if record.get('tx_sha256') not in (None, hashlib.sha256(tx).hexdigest()):
+            raise Halt(f'{directory} was submitted with other settlement bytes')
+        record['tx_sha256'] = hashlib.sha256(tx).hexdigest()
+        if self.dry_run:
+            raise Halt('dry run never broadcasts')
+        height = self.l1_height()
+        sent = self.broadcast(number, directory, tx, record)
+        last_sent = self.clock()
         deadline = self.clock() + self.c['acceptance_timeout_seconds']
         while self.clock() < deadline:
-            self.sleep(6)
+            self.sleep(self.c['poll_seconds'])
             current = self.native_view()
-            accepted = current and current.get('accepted')
-            if accepted and statement_fields(accepted['statement'])['l2_number'] == number:
-                (directory / 'accepted.json').write_text(json.dumps(accepted, indent=2) + '\n')
-                log('accepted', number=number, commitment=accepted['commitment'],
-                    l2_hash=statement_fields(accepted['statement'])['l2_hash'])
-                return True
-        log('acceptance-timeout', number=number)
+            if current is None:
+                continue
+            if self.accepted_outcome(number, values, current) == 'ours':
+                return self.record_accepted(number, directory, current['accepted'])
+            if current['source'] != view['source']:
+                log('request-moved-after-submit', number=number)
+                return False
+            if sent == 'terminal':
+                # The bytes are invalid against the request they were built for: never loop on them.
+                raise Halt(f'native nodes refuse the settlement of L2 block {number} '
+                           '(policy, source, successor or proof) while its request is unchanged')
+            if self.clock() - last_sent >= self.c['resubmit_seconds'] or not sent:
+                sent, last_sent = self.broadcast(number, directory, tx, record), self.clock()
+        now = self.l1_height()
+        log('acceptance-timeout', number=number, l1_height_at_submit=height, l1_height_now=now,
+            submitted=bool(sent))
+        if height is not None and now is not None and now <= height:
+            log('l1-not-advancing', number=number, l1_height=now)  # the L1 is stalled; nothing to fix here
         return False
 
+    def record_accepted(self, number, directory, accepted):
+        (directory / 'accepted.json').write_text(json.dumps(accepted, indent=2) + '\n')
+        log('accepted', number=number, commitment=accepted['commitment'],
+            l2_hash=statement_fields(accepted['statement'])['l2_hash'])
+        return True
+
     def cycle(self):
+        if not self.check_identity():
+            return False
         view = self.native_view()
         if view is None or view.get('source') is None:
             return False
@@ -842,7 +1138,7 @@ class Settler:
 def check_rpc(config, rpc=rpc, sleep=time.sleep):
     """Read-only: print each endpoint's settlement view and the quorum decision."""
     try:
-        endpoints = Endpoints(config['rpc_ports'], rpc_quorum(config), rpc, time.monotonic, sleep)
+        endpoints = Endpoints(rpc_endpoints(config), rpc_quorum(config), rpc, time.monotonic, sleep)
     except Halt as error:
         log('halt', reason=str(error))
         return 3
@@ -861,15 +1157,101 @@ def check_rpc(config, rpc=rpc, sleep=time.sleep):
     except RuntimeError as error:
         log('rpc-check', quorum=endpoints.quorum, ok=False, reason=str(error))
         return 2
-    ok = view is not None and view['network'] == config['network'] and view['chain_id'] == CHAIN_ID
+    chain_id = MAINNET['chain_id'] if config.get('network_kind') == 'mainnet' else CHAIN_ID
+    ok = view is not None and view['network'] == config['network'] and view['chain_id'] == chain_id
     log('rpc-check', quorum=endpoints.quorum, ok=ok, ports=support)
     return 0 if ok else 2
+
+
+def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
+    """Build and validate the next settlement against the live network in a scratch
+    directory. Never signs, never calls sendrawtransaction, never writes the live
+    L2 database or work directory. Exit 0 when everything checked passes."""
+    base = Path(out) if out else Path(config['workdir']).parent / time.strftime('dry-run-%Y%m%dT%H%M%SZ', time.gmtime())
+    base.mkdir(parents=True)
+    report = {'dry_run': True, 'broadcast': False, 'network_kind': config.get('network_kind', 'devnet'),
+              'directory': str(base)}
+
+    def done(ok, **fields):
+        report.update(ok=ok, **fields)
+        (base / 'dry-run-report.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+        log('dry-run', **report)
+        return 0 if ok else 2
+
+    class NoBroadcast:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __call__(self, port, method, params=()):
+            if method == 'sendrawtransaction':
+                raise Halt('dry run never broadcasts')
+            return self.inner(port, method, params)
+
+    try:
+        settler = Settler({**config, 'workdir': str(base / 'work'), 'l2_db': str(base / 'canonical')},
+                          rpc=NoBroadcast(rpc), run=run, sleep=sleep, clock=clock)
+        settler.dry_run = True
+        report['chain_id'] = settler.chain_id
+        if not settler.check_identity():
+            return done(False, reason='no RPC quorum on the network identity')
+        view = settler.native_view()
+        if view is None or view.get('source') is None:
+            return done(False, reason='no RPC quorum on the settlement view, or no source yet')
+        source, accepted = view['source'], view.get('accepted')
+        report['native'] = {'source_height': source.get('height'), 'source_slot': source.get('slot'),
+                            'source_block': source.get('block'), 'inbox_count': source.get('inbox_count'),
+                            'pending_deposits': len(source.get('pending', [])),
+                            'accepted_l2_number': statement_fields(accepted['statement'])['l2_number'] if accepted else 0,
+                            'data_availability_records': len(view.get('data_availability', []))}
+        live = Path(config['l2_db'])
+        if accepted:
+            if not live.is_dir():
+                return done(False, reason=f'native accepted L2 block {report["native"]["accepted_l2_number"]}: '
+                                          'the dry run needs a copy of the settled L2 database (l2_db)')
+            shutil.copytree(live, base / 'canonical')  # stop the settler first: a live RocksDB copy may be torn
+        else:
+            settler.produce('init', '--target', str(base / 'canonical'))
+            head = settler.produce('head', '--target', str(base / 'canonical'))
+            if head.get('number') != 0 or head.get('hash') != config['l2_genesis']:
+                return done(False, reason=f'producer L2 genesis {head.get("hash")} differs from {config["l2_genesis"]}')
+        number, directory = settler.prepare_block(view)
+        block = json.loads((directory / 'block.json').read_text()) if (directory / 'block.json').exists() else {}
+        report['l2_block'] = {'number': number, **{k: block[k] for k in ('hash', 'deposits', 'transactions',
+                                                                          'withdrawal_count') if k in block}}
+        report['native_request'] = (directory / 'native-request.txt').read_text().splitlines()
+        if not prove:
+            settler.prove(directory, stages=('execute',))
+            return done(True, sp1_execute='matched', proof='skipped: --prove also builds and verifies Groth16',
+                        settlement_fee_sat=0)
+        proof = settler.prove(directory)
+        tx = settler.transaction(directory, proof, accepted)
+        values = tx[33:33 + VALUES_BYTES]
+        users = int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big')
+        fee = {'settlement_fee_sat': 0}
+        if users:
+            payload = settler.da_payload(number, directory)
+            base_fee = settler.native.bounded_value('getchaininfo', 'next_base_fee_millisat_per_gas')
+            fee['da_fee_estimate_sat'] = da_fee_sat(len(payload), 1, base_fee)
+            fee['da_payload_bytes'] = len(payload)
+        (base / 'settlement-tx.hex').write_text(tx.hex() + '\n')
+        return done(True, sp1_execute='matched', proof='groth16 verified locally',
+                    transaction={'tag': hex(tx[0]), 'bytes': len(tx), 'sha256': hashlib.sha256(tx).hexdigest(),
+                                 'proof_policy': tx[1:33].hex(), 'user_transactions': users,
+                                 'file': str(base / 'settlement-tx.hex')}, **fee)
+    except Halt as error:
+        return done(False, reason=str(error))
 
 
 def main():
     config = json.loads(CONFIG.read_text())
     if sys.argv[1:] == ['--check-rpc']:
         sys.exit(check_rpc(config))
+    if sys.argv[1:2] == ['--dry-run']:
+        extra = sys.argv[2:]
+        out = extra[extra.index('--out') + 1] if '--out' in extra else None
+        if not set(extra) - {out} <= {'--prove', '--out'}:
+            raise SystemExit('usage: settler_v3.py --dry-run [--prove] [--out NEW_DIR]')
+        sys.exit(dry_run(config, prove='--prove' in extra, out=out))
     try:
         settler = Settler(config)
     except Halt as error:
