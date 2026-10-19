@@ -1,0 +1,57 @@
+# Bloch L2 MAINNET (chain 700770) withdrawal attestor agent: signs, with this operator's sealed key,
+# only withdrawal roots it rebuilt from L1 and that are FFG-finalized on its own follower's replay.
+# Installed by ../install-attestor.sh (which writes the RPC/drop allow-list drop-in). No listener.
+[Unit]
+Description=Bloch L2 mainnet withdrawal attestor agent
+After=network-online.target bloch-l2-attestor-follower.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bloch-l2-attestor
+Group=bloch-l2-attestor
+UMask=0077
+ExecStart=/usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py run --config /etc/bloch-l2-attestor/config.json
+# The sealed key's passphrase (root-only 0400 file). systemd hands the service a private copy in
+# $CREDENTIALS_DIRECTORY; the key itself is opened only inside bloch-pos, per signature.
+LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase
+Restart=on-failure
+RestartSec=60
+# Exit 3 = pin/identity halt or a refused rebuild: operator review, no restart loop.
+RestartPreventExitStatus=3
+ReadWritePaths=/var/lib/bloch-l2-attestor
+ReadOnlyPaths=/var/lib/bloch-l2-attestor-follower /etc/bloch-l2-attestor
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+# install-attestor.sh adds the three RPC hosts and the attestation drop host in a drop-in.
+IPAddressAllow=localhost
+LimitCORE=0
+# Argon2id (256 MiB) per signature plus one L2 rebuild (reth database) at a time.
+MemoryMax=8G
+CPUQuota=400%
+TasksMax=512
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

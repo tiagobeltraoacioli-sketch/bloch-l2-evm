@@ -222,6 +222,9 @@ For a large claim:
 
 Nothing needs signing until the first ≥ 100 BLCH withdrawal exists.
 
+**Implemented:** `deployment/mainnet/attestor/` (agent, hardened units, install/rollback, claimant
+aggregator, key handoff kit). Its README describes the cycle; the notes below are the original design.
+
 **Signing without recurring manual work.** Each of the five operators runs an *attestor agent*
 on their own host, with their own key. The keys stay in `~/Desktop/L2-MAINNET-ATESTADORES` until
 each one is moved to its operator; they never sit on the settler host. The agent has these parts:
