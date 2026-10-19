@@ -207,6 +207,9 @@ Description=Bloch L2 MAINNET settlement worker (chain 700770; 0x13 settlements, 
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+# Retryable failures (RPC, prover, producer refusals) exit 1 after max_consecutive_failures
+# with backoff; never let the start rate limit turn that into a permanent stop.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

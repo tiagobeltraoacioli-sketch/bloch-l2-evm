@@ -44,6 +44,40 @@ pub fn mainnet_settlement_policy() -> SettlementPolicyV1 {
     }
 }
 
+/// The V1 settlement policy of a native activation (attestor set excluded).
+pub fn policy_from_activation(policy: &bloch_pos_committee::l2_settlement::Policy) -> SettlementPolicyV1 {
+    let id = |i: usize| B256::from(policy.identities[i]);
+    SettlementPolicyV1 {
+        network: id(0),
+        genesis: id(1),
+        domain: id(2),
+        configuration: id(3),
+        program_elf_keccak: id(4),
+        program_vkey_koalabear: id(5),
+        program_vkey_bn254: id(6),
+        proof_policy: policy.proof_policy.into(),
+        chain_id: policy.chain_id,
+        first_l2_number: 1,
+        initial_l2_parent_hash: policy.initial_l2_parent.into(),
+        initial_l2_state_root: policy.initial_l2_state.into(),
+    }
+}
+
+/// The policy and withdrawal attestor-set hash a flag-day network bound to
+/// `network` must install: the pinned mainnet values for Genesis-4; for any
+/// other network only what the linked native consensus itself installs there
+/// (`activation_for`), which is `None` unless the native crates are built with
+/// the qualification feature `l2-activation-rehearsal-mainnet-policy` (private
+/// mainnet-path rehearsal; never a funded network).
+pub fn flag_day_policy(network: B256) -> Option<(SettlementPolicyV1, B256)> {
+    if network == MAINNET_NETWORK {
+        return Some((mainnet_settlement_policy(), MAINNET_ATTESTOR_SET));
+    }
+    let activation = bloch_pos_committee::l2_settlement::activation_for(Some(network.0))?;
+    let policy = policy_from_activation(&activation.policy);
+    (policy.network == network).then_some((policy, activation.policy.attestor_set.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +105,19 @@ mod tests {
             MAINNET_NETWORK,
             b256!("f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966")
         );
+    }
+
+    #[test]
+    fn flag_day_policy_is_the_pin_and_matches_the_native_mainnet_activation() {
+        let (policy, attestors) = flag_day_policy(MAINNET_NETWORK).unwrap();
+        assert_eq!(policy, mainnet_settlement_policy());
+        assert_eq!(attestors, MAINNET_ATTESTOR_SET);
+        // The linked native release installs exactly these values at the flag day.
+        let native = bloch_pos_committee::l2_settlement::activation_for(Some(MAINNET_NETWORK.0))
+            .expect("the native release pins the mainnet activation");
+        assert_eq!(policy_from_activation(&native.policy), policy);
+        assert_eq!(B256::from(native.policy.attestor_set), MAINNET_ATTESTOR_SET);
+        // Release builds (no qualification feature) give no other network a policy.
+        assert!(flag_day_policy(B256::repeat_byte(0x42)).is_none());
     }
 }

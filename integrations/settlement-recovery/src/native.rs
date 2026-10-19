@@ -312,14 +312,21 @@ fn check_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<
 
 /// Trust for a genesis without an L2 registry (flag-day activation): the same
 /// anchors as [`check_trust`] except the registry, which must be absent here.
+/// The policy's genesis identity must be this genesis block, unless the policy
+/// is exactly the one the linked native consensus installs for this network
+/// (`l2_settlement::activation_for`): a qualification build
+/// (`l2-activation-rehearsal-mainnet-policy`) binds identities 0..1 to the
+/// private network with derived labels, so its genesis identity is not a block id.
 fn check_flag_day_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -> Result<B256, NativeFinalityErrorV1> {
     use NativeFinalityErrorV1 as E;
     let p = trust.settlement_policy;
     let policy_commitment = p.commitment().map_err(|_| E::Trust)?;
+    let installed_natively = bloch_pos_committee::l2_settlement::activation_for(Some(p.network.0))
+        .is_some_and(|a| a.policy == Policy { attestor_set: a.policy.attestor_set, ..native_policy(p) });
     if trust.state_root == B256::ZERO
         || genesis.l2_settlement().is_some()
         || genesis.slot() != 0
-        || genesis.head().as_bytes() != &p.genesis.0
+        || (genesis.head().as_bytes() != &p.genesis.0 && !installed_natively)
         || genesis.state_root() != trust.state_root.0
         || p.first_l2_number != 1
         || p.proof_policy.0 != bloch_l2_proof::policy_commitment_v3()
@@ -418,14 +425,17 @@ impl IncrementalNativeVerifierV1 {
         l2_activation: Option<usize>,
         expected_attestor_set: [u8; 32],
     ) -> Result<Self, NativeFinalityErrorV1> {
-        let p = trust.settlement_policy;
+        // The native genesis block id: equal to the policy's genesis identity
+        // (checked by check_trust / check_flag_day_trust) except on a
+        // qualification flag-day network, whose identity 1 is a derived label.
+        let id = B256::from(*genesis.head().as_bytes());
         Ok(Self {
             transition: Transition::new(NativeConsensusVerifierV1),
             trust,
             policy_commitment,
             state: genesis.clone(),
-            chain: vec![(0, p.genesis)],
-            positions: BTreeMap::from([(p.genesis, (0, 0))]),
+            chain: vec![(0, id)],
+            positions: BTreeMap::from([(id, (0, 0))]),
             settlements: BTreeMap::new(),
             final_epoch: 0,
             final_index: 0,

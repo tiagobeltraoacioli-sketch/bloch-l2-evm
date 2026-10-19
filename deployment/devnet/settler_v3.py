@@ -72,6 +72,21 @@ Differences, all deliberate:
   profile and stay a configuration switch (DA fees are paid by the dedicated
   fee key; the 0x13 settlement itself pays no fee).
 
+* mainnet-rehearsal profile (`network_kind: "mainnet-rehearsal"`): the private
+  mainnet-path rehearsal of 2026-10-18 (native qualification build
+  `l2-activation-rehearsal-mainnet-policy`). Same program path as mainnet
+  (chain 700770, pinned l2-config, guest and L2 genesis, producer `--rules
+  mainnet`, prover `--mainnet`) on a private network whose identity, RPC ports
+  and timestamp rule come from the configuration; refused on Genesis-4.
+  `prover_path` sets the prover's PATH (e.g. a docker shim directory).
+
+* producer failures (security review 2026-10-18, finding 2): a producer
+  refusal is retryable, never a permanent halt. When an extend with the
+  user-transaction spool fails, the same block is retried once without the
+  spool (deposits only), so a poisoned spool cannot stop settlement; any other
+  producer failure is retried with backoff up to `max_consecutive_failures`,
+  then the process exits 1 and its unit restarts it (Restart=on-failure).
+
 * submission robustness (2026-10-18; devnet4 looped on block 231 while its L1
   was halted): the signed bytes of a block are reused until it is accepted or
   its request moves; a `duplicate` answer means the node already holds or
@@ -141,7 +156,9 @@ SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'acc
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 256,  # bytes: one native DA batch
             'poll_seconds': 6, 'resubmit_seconds': 120}
-NETWORK_KINDS = ('devnet', 'mainnet')
+NETWORK_KINDS = ('devnet', 'mainnet', 'mainnet-rehearsal')
+# Kinds that run the mainnet L2 program path (chain 700770, --rules mainnet, prover --mainnet).
+MAINNET_PATH_KINDS = ('mainnet', 'mainnet-rehearsal')
 
 # ---- Bloch L2 mainnet (chain 700770), activated on Genesis-4 at epoch 5850 ----
 # Sources: bloch-sis-pow l2_settlement::mainnet (release 78b7343a), docs/MAINNET-PROGRAM.md.
@@ -192,6 +209,10 @@ def da_fee_sat(payload_bytes, inputs=1, base_fee_millisat_per_gas=MIN_BASE_FEE_M
     gas = TX_FLAT_GAS + GAS_PER_BYTE * tx_bytes + HYBRID_VERIFY_GAS * inputs
     part = lambda price: -(-gas * price // 1000)  # noqa: E731
     return part(base_fee_millisat_per_gas) + part(tip)
+
+
+class ProducerError(RuntimeError):
+    """bloch-l2-produce-dev refused a command: retryable (bounded), never a permanent halt."""
 
 
 class Halt(Exception):
@@ -425,6 +446,27 @@ def check_mainnet_config(c):
             raise Halt(f'{key} must be a positive integer')
 
 
+def check_rehearsal_config(c):
+    """mainnet-rehearsal: the mainnet program and L2 genesis on a private network, never Genesis-4."""
+    if c.get('network') == MAINNET['network']:
+        raise Halt('mainnet-rehearsal never runs on the Genesis-4 network; use network_kind "mainnet"')
+    if c.get('l2_genesis') != MAINNET['l2_genesis']:
+        raise Halt('mainnet-rehearsal l2_genesis differs from the pinned L2 genesis')
+    if Path(c['l2_config']).read_bytes() != mainnet_l2_config():
+        raise Halt('mainnet-rehearsal l2_config differs from the pinned program (proof policy V3)')
+    if c.get('guest_sha256') != MAINNET['guest_sha256']:
+        raise Halt('mainnet-rehearsal guest must be the pinned settlement_v3_mainnet ELF')
+
+
+def check_chain_overrides(c, chain_id, network_args):
+    """`chain_id` / `network_args` (written by the 2026-10-18 rehearsal driver) are derived from
+    network_kind; they may be repeated in a configuration, never changed."""
+    if 'chain_id' in c and c['chain_id'] != chain_id:
+        raise Halt(f'chain_id {c["chain_id"]} does not match network_kind (chain {chain_id})')
+    if 'network_args' in c and list(c['network_args']) != list(network_args):
+        raise Halt('network_args do not match network_kind (only the mainnet path takes --rules mainnet)')
+
+
 def rpc_endpoints(config):
     """The native RPC endpoints: `rpc_urls` (http(s) URLs, one per host) or loopback `rpc_ports`."""
     if 'rpc_urls' in config:
@@ -652,13 +694,19 @@ class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
         kind = config.get('network_kind', DEFAULTS['network_kind'])
         if kind not in NETWORK_KINDS:
-            raise Halt('network_kind must be "devnet" or "mainnet"')
+            raise Halt('network_kind must be "devnet", "mainnet" or "mainnet-rehearsal"')
         self.mainnet = kind == 'mainnet'
+        # mainnet-rehearsal: the private mainnet-path rehearsal (native qualification build
+        # l2-activation-rehearsal-mainnet-policy): the mainnet program, chain id, producer and
+        # prover arguments, on a private network whose identity comes from the configuration.
+        self.rehearsal = kind == 'mainnet-rehearsal'
+        self.mainnet_path = kind in MAINNET_PATH_KINDS
         self.c = {**DEFAULTS, **(MAINNET_DEFAULTS if self.mainnet else {}), **config}
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
-        self.chain_id = MAINNET['chain_id'] if self.mainnet else CHAIN_ID
-        self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet else []
-        self.prover_args = ['--mainnet'] if self.mainnet else []
+        self.chain_id = MAINNET['chain_id'] if self.mainnet_path else CHAIN_ID
+        self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet_path else []
+        self.prover_args = ['--mainnet'] if self.mainnet_path else []
+        check_chain_overrides(self.c, self.chain_id, self.network_args)
         for key in ('prover', 'guest', 'l2_config'):
             if digest(self.c[key]) != self.c[key + '_sha256']:
                 raise Halt(f'{key} differs from its pin')
@@ -668,6 +716,8 @@ class Settler:
             raise Halt('user_transactions must be true or false')
         if self.mainnet:
             check_mainnet_config(self.c)
+        elif self.rehearsal:
+            check_rehearsal_config(self.c)
         if self.c['user_transactions']:
             # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
             # development networks and the activated mainnet profile (checked live as well).
@@ -723,6 +773,8 @@ class Settler:
                 raise Halt(f'mainnet L2 identity differs from the pins: {got}')
             if self.c['user_transactions'] and view.get('user_transactions') is not True:
                 raise Halt('the native L2 profile does not admit user transactions')
+        elif self.rehearsal and view.get('asynchronous') is not True:
+            raise Halt('the rehearsal network does not run the asynchronous mainnet profile')
         self.identity_checked = True
         log('identity-checked', network=view['network'], chain_id=view['chain_id'], mainnet=self.mainnet)
         return True
@@ -748,15 +800,32 @@ class Settler:
     def produce(self, *args):
         result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
         if result.returncode:
-            raise Halt(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
-        return json.loads(result.stdout)
+            raise ProducerError(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            raise ProducerError(f'producer printed no JSON for {args[0]}') from None
 
-    def extend_arguments(self, parent, anchor, deposits, anchor_slot=None):
+    def extend(self, parent, anchor, deposits, anchor_slot, number):
+        """Extend by one block. With the user-transaction spool, a producer refusal is retried once
+        without it (deposits only): the spool is untrusted input and must not stop settlement."""
+        try:
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
+        except ProducerError as error:
+            if not self.c['user_transactions']:
+                raise
+            head = self.produce('head', '--target', self.c['l2_db'])
+            if head['number'] != number - 1:
+                raise  # the block was committed before the failure; the next cycle reuses it
+            log('producer-refused-spool', number=number, reason=str(error)[:400])
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
+
+    def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
         if self.c.get('timestamp_rule'):
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
-        if self.c['user_transactions']:
+        if self.c['user_transactions'] and spool:
             args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
         return args
@@ -784,7 +853,7 @@ class Settler:
             if head['hash'] != parent:
                 raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
             anchor_slot = int(source['request'].splitlines()[3])
-            block = self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
+            block = self.extend(parent, anchor, deposits, anchor_slot, number)
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
             produced.write_text(json.dumps(block, sort_keys=True) + '\n')
@@ -819,7 +888,7 @@ class Settler:
         if (directory / 'proved.json').exists():
             return proof
         # Docker mounts host paths: temporary files must live in a host-visible directory.
-        env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
+        env = {'PATH': self.c.get('prover_path', '/usr/bin:/bin'), 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
                'RAYON_NUM_THREADS': str(self.c['prover_threads']), 'SP1_CIRCUIT_MODE': 'release',
                'SP1_GNARK_IMAGE': self.c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(directory / 'native-request.txt'),
@@ -1024,7 +1093,7 @@ class Settler:
         tx = bytes([ASYNC_SETTLEMENT_TAG]) + config[160:192] + values + proof
         if len(tx) != TRANSACTION_BYTES:
             raise Halt('settlement transaction has the wrong length')
-        if self.mainnet and (tx[1:33].hex() != MAINNET['proof_policy']
+        if self.mainnet_path and (tx[1:33].hex() != MAINNET['proof_policy']
                              or int.from_bytes(values[T + 256:T + 264], 'big') != MAINNET['chain_id']):
             raise Halt('settlement does not carry the mainnet proof policy and chain id')
         (directory / 'transaction.bin').write_bytes(tx)
@@ -1157,7 +1226,7 @@ def check_rpc(config, rpc=rpc, sleep=time.sleep):
     except RuntimeError as error:
         log('rpc-check', quorum=endpoints.quorum, ok=False, reason=str(error))
         return 2
-    chain_id = MAINNET['chain_id'] if config.get('network_kind') == 'mainnet' else CHAIN_ID
+    chain_id = MAINNET['chain_id'] if config.get('network_kind') in MAINNET_PATH_KINDS else CHAIN_ID
     ok = view is not None and view['network'] == config['network'] and view['chain_id'] == chain_id
     log('rpc-check', quorum=endpoints.quorum, ok=ok, ports=support)
     return 0 if ok else 2
@@ -1238,7 +1307,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
                     transaction={'tag': hex(tx[0]), 'bytes': len(tx), 'sha256': hashlib.sha256(tx).hexdigest(),
                                  'proof_policy': tx[1:33].hex(), 'user_transactions': users,
                                  'file': str(base / 'settlement-tx.hex')}, **fee)
-    except Halt as error:
+    except (Halt, ProducerError) as error:
         return done(False, reason=str(error))
 
 

@@ -216,22 +216,22 @@ fn run(o: &Options) -> Result<(), String> {
         let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
         (IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?, policy)
     } else {
-        // Only the mainnet flag day is pinned in this build.
-        if o.pin != mainnet::MAINNET_NETWORK {
-            return Err(format!("a funded manifest must be the Genesis-4 mainnet ({})", mainnet::MAINNET_NETWORK));
-        }
+        // The mainnet flag day is pinned in this build; any other flag-day
+        // network only in a qualification build of the native crates
+        // (private mainnet-path rehearsal), see mainnet::flag_day_policy.
+        let (policy, attestor_set) = mainnet::flag_day_policy(o.pin)
+            .ok_or_else(|| format!("a funded manifest must be the Genesis-4 mainnet ({})", mainnet::MAINNET_NETWORK))?;
         let started = SystemTime::now();
         let (_, genesis) = load_flag_day_manifest(&o.manifest, o.carryover.as_deref(), o.pin, 1_048_576)
             .map_err(|e| e.to_string())?;
-        let policy = mainnet::mainnet_settlement_policy();
         let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
         eprintln!(
-            "native follower: mainnet genesis {} state root {} loaded in {:?}",
+            "native follower: flag-day genesis {} state root {} loaded in {:?}",
             hex::encode(genesis.head().as_bytes()),
             hex::encode(genesis.state_root()),
             started.elapsed().unwrap_or_default()
         );
-        let verifier = IncrementalNativeVerifierV1::new_flag_day(&genesis, trust, mainnet::MAINNET_ATTESTOR_SET, o.max_blocks)
+        let verifier = IncrementalNativeVerifierV1::new_flag_day(&genesis, trust, attestor_set, o.max_blocks)
             .map_err(|e| e.to_string())?;
         (verifier, policy)
     };
