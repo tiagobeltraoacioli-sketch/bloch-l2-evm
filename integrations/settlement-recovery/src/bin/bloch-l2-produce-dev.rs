@@ -369,8 +369,12 @@ fn run(args: &[String]) -> Result<String, String> {
                 }));
             for index in finished {
                 if let Some(file) = &pool[index].0 {
-                    fs::remove_file(file).map_err(|e| format!("prune {}: {e}", file.display()))?;
-                    pruned += 1;
+                    // The settled RPC may have evicted it meanwhile: gone is pruned.
+                    match fs::remove_file(file) {
+                        Ok(()) => pruned += 1,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(format!("prune {}: {e}", file.display())),
+                    }
                 }
             }
             let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
@@ -689,14 +693,18 @@ fn read_pool(path: &Path) -> Result<Vec<(Option<PathBuf>, alloy_primitives::Byte
         }
         // Order does not affect selection; sort only for stable reports.
         files.sort();
-        files
-            .into_iter()
-            .map(|file| {
-                let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-                // Undecodable text still becomes a (dropped) candidate, so the file is pruned.
-                Ok((Some(file), decode(&text).unwrap_or_default()))
-            })
-            .collect::<Result<Vec<_>, String>>()?
+        let mut entries = Vec::with_capacity(files.len());
+        for file in files {
+            let text = match fs::read_to_string(&file) {
+                Ok(text) => text,
+                // Evicted by the settled RPC between listing and reading.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{}: {e}", file.display())),
+            };
+            // Undecodable text still becomes a (dropped) candidate, so the file is pruned.
+            entries.push((Some(file), decode(&text).unwrap_or_default()));
+        }
+        entries
     } else {
         let list: Vec<String> =
             serde_json::from_slice(&fs::read(path).map_err(|e| format!("--txs: {e}"))?).map_err(|e| format!("--txs: {e}"))?;

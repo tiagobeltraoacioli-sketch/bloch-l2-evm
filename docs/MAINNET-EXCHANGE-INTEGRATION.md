@@ -167,6 +167,14 @@ A user withdrawal on the L2 is an ordinary L2 transfer.
   appear. `eth_getTransactionCount(addr, "pending")` counts the spooled
   nonces. Do not replace or rebroadcast a transaction that is not yet
   included unless it is still missing after two block intervals.
+- Admission limits of `eth_sendRawTransaction` (checked against the settled
+  head): the sender must hold `value + gas × maxFeePerGas`; the nonce may be at
+  most 16 above the account nonce; `maxFeePerGas` must cover the next base fee;
+  at most 16 pending transactions per sender; a same-nonce replacement needs
+  +10 % on both fee fields. Pending entries older than 3 hours, or no longer
+  valid at the head, are evicted. Refusals are JSON-RPC error `-32000` with the
+  reason (`insufficient funds…`, `nonce too high…`, `too many pending
+  transactions…`, `replacement transaction underpriced…`, `txpool full`).
 - Per-block capacity is set by the sequencer (on devnet4: 256 transactions,
   15 M gas, 112 KiB of batch data per block). Batch hot-wallet payouts
   accordingly.

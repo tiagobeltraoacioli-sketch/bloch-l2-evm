@@ -31,11 +31,17 @@
 //!
 //! With `--txpool DIR` it is also the development sequencer's front door:
 //! `eth_sendRawTransaction` authenticates the canonical signed bytes (EIP-2718
-//! encoding, chain id, low-s ECDSA signature, size) and checks the nonce
-//! against the head, then writes one `<hash>.tx` spool entry (hex) atomically
-//! into the pool the settlement worker selects from. Inclusion, fees, balance
-//! and gas are decided by the producer, which drops invalid entries with a
-//! reason. Without `--txpool`, transactions are refused.
+//! encoding, chain id, low-s ECDSA signature, size), then admits it against
+//! the head state (security review 2026-10-18, finding 2): the sender holds
+//! `value + gas_limit * max_fee`, the nonce is at most 16 above the head nonce,
+//! the fee cap covers the next base fee, at most 16 entries per sender (a
+//! same-nonce replacement needs a 10% fee bump), at most 4,096 entries in all;
+//! when full, stale entries (used nonce, gap, unfunded, underpriced, older than
+//! 3 h, undecodable) are evicted, then the cheapest deferred one if the new
+//! transaction pays more. Stale entries are also swept every minute. It writes
+//! one `<hash>.tx` spool entry (hex) atomically into the pool the settlement
+//! worker selects from; the producer still decides inclusion and drops invalid
+//! entries with a reason. Without `--txpool`, transactions are refused.
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
@@ -78,11 +84,32 @@ struct Options {
     txpool: Option<PathBuf>,
 }
 
-/// Spool entries accepted while the producer has not yet consumed them; the
-/// producer itself refuses a pool above 16,384 entries.
-const MAX_SPOOL_ENTRIES: usize = 4_096;
-/// Highest nonce gap accepted ahead of the head account nonce.
-const MAX_NONCE_AHEAD: u64 = 64;
+/// Admission bounds of the spool (security review 2026-10-18, finding 2: an
+/// unauthenticated sender must not be able to fill the pool the producer
+/// reads). The producer itself refuses a pool above 16,384 entries.
+#[derive(Clone, Copy, Debug)]
+struct SpoolLimits {
+    /// Entries in the spool, all senders.
+    max_entries: usize,
+    /// Entries per sender.
+    max_per_sender: usize,
+    /// Highest nonce accepted above the sender's head nonce.
+    max_nonce_gap: u64,
+    /// Age after which an entry the producer never took is evicted.
+    ttl: Duration,
+    /// Fee bump (percent) a same-nonce replacement must offer.
+    replace_bump_percent: u128,
+}
+
+const SPOOL_LIMITS: SpoolLimits = SpoolLimits {
+    max_entries: 4_096,
+    max_per_sender: 16,
+    max_nonce_gap: 16,
+    ttl: Duration::from_secs(3 * 3_600),
+    replace_bump_percent: 10,
+};
+/// Periodic eviction of stale spool entries (also done under pressure at admission).
+const SPOOL_SWEEP: Duration = Duration::from_secs(60);
 
 fn parse() -> Result<Options> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -127,61 +154,330 @@ fn rpc_error(message: impl Into<String>) -> jsonrpsee::types::ErrorObjectOwned {
     jsonrpsee::types::ErrorObjectOwned::owned(-32000, message.into(), None::<()>)
 }
 
+/// What admission needs from one spooled transaction (decoded once per file).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SpoolMeta {
+    sender: alloy_primitives::Address,
+    nonce: u64,
+    /// Fee cap per gas (`max_fee_per_gas`, or the legacy gas price).
+    max_fee: u128,
+    /// Priority fee per gas (the gas price for legacy transactions).
+    priority: u128,
+    /// `value + gas_limit * max_fee`: what the sender must hold at the head.
+    cost: alloy_primitives::U256,
+}
+
+impl SpoolMeta {
+    fn of(tx: &bloch_l2_evm::AuthenticatedTransaction) -> Self {
+        let env = tx.environment();
+        Self {
+            sender: tx.sender(),
+            nonce: env.nonce,
+            max_fee: env.gas_price,
+            priority: env.gas_priority_fee.unwrap_or(env.gas_price),
+            cost: env.value.saturating_add(
+                alloy_primitives::U256::from(env.gas_limit).saturating_mul(alloy_primitives::U256::from(env.gas_price)),
+            ),
+        }
+    }
+}
+
+/// One `*.tx` file of the spool; `meta` is `None` for bytes that do not decode
+/// as a transaction of this chain (always evictable).
+#[derive(Clone, Debug)]
+struct SpoolEntry {
+    name: std::ffi::OsString,
+    meta: Option<SpoolMeta>,
+    modified: std::time::SystemTime,
+}
+
+/// Sender and fee fields of each spool entry, cached by file name (entries are
+/// immutable: written once by rename, removed by the producer or by eviction).
+type SpoolIndex = std::collections::HashMap<std::ffi::OsString, Option<SpoolMeta>>;
+
+/// Read the spool directory, decoding only names not yet in `index`; the index
+/// forgets names that disappeared. Entries removed while scanning are skipped.
+fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io::Result<Vec<SpoolEntry>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(pool)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|x| x != "tx") {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(time) => time,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let meta = match index.get(&name) {
+            Some(meta) => *meta,
+            None => {
+                let meta = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| alloy_primitives::hex::decode(text.trim()).ok())
+                    .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
+                    .map(|tx| SpoolMeta::of(&tx));
+                index.insert(name.clone(), meta);
+                meta
+            }
+        };
+        entries.push(SpoolEntry { name, meta, modified });
+    }
+    let present: std::collections::HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
+    index.retain(|name, _| present.contains(name));
+    Ok(entries)
+}
+
+/// The head facts admission is decided against: per-sender `(nonce, balance)`
+/// of the latest settled state and the next block's base fee.
+struct SpoolHead<'a> {
+    account: &'a mut dyn FnMut(alloy_primitives::Address) -> (u64, alloy_primitives::U256),
+    next_base_fee: u128,
+    now: std::time::SystemTime,
+}
+
+impl SpoolHead<'_> {
+    /// Why `entry` can no longer be included and may be evicted, if it cannot.
+    fn stale(&mut self, entry: &SpoolEntry, limits: SpoolLimits) -> Option<&'static str> {
+        let Some(meta) = entry.meta else { return Some("undecodable") };
+        let (nonce, balance) = (self.account)(meta.sender);
+        if meta.nonce < nonce {
+            Some("nonce already used")
+        } else if meta.nonce > nonce.saturating_add(limits.max_nonce_gap) {
+            Some("nonce gap")
+        } else if balance < meta.cost {
+            Some("insufficient balance")
+        } else if meta.max_fee < self.next_base_fee {
+            Some("underpriced")
+        } else if self.now.duration_since(entry.modified).is_ok_and(|age| age > limits.ttl) {
+            Some("expired")
+        } else {
+            None
+        }
+    }
+}
+
+/// Admission of `new` into a spool holding `entries`: the names to evict
+/// first, or the refusal sent to the client.
+///
+/// - the sender must hold `value + gas_limit * max_fee` at the head, its nonce
+///   must lie in `[head nonce, head nonce + max_nonce_gap]`, and the fee cap
+///   must cover the next block's base fee;
+/// - a same-nonce entry of the sender is replaced only by a fee bump;
+/// - at most `max_per_sender` entries per sender;
+/// - when the spool is full, stale entries (used nonce, gap, unfunded,
+///   underpriced, expired, undecodable) are evicted; then the lowest-fee entry
+///   deferred behind a nonce gap, else the lowest-fee entry overall provided
+///   it pays less than `new`.
+fn plan_admission(
+    entries: &[SpoolEntry],
+    new: &SpoolMeta,
+    head: &mut SpoolHead<'_>,
+    limits: SpoolLimits,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    let (nonce, balance) = (head.account)(new.sender);
+    if new.nonce < nonce {
+        return Err(format!("nonce too low: next nonce is {nonce}"));
+    }
+    if new.nonce > nonce.saturating_add(limits.max_nonce_gap) {
+        return Err(format!("nonce too high: next nonce is {nonce}, at most {} ahead is accepted", limits.max_nonce_gap));
+    }
+    if balance < new.cost {
+        return Err(format!("insufficient funds for gas * price + value: balance {balance}, cost {}", new.cost));
+    }
+    if new.max_fee < head.next_base_fee {
+        return Err(format!("max fee per gas {} below the next base fee {}", new.max_fee, head.next_base_fee));
+    }
+    let mut evict = Vec::new();
+    let mut own = Vec::new();
+    for entry in entries.iter().filter(|e| e.meta.is_some_and(|m| m.sender == new.sender)) {
+        if head.stale(entry, limits).is_some() {
+            evict.push(entry.name.clone());
+        } else {
+            own.push(entry);
+        }
+    }
+    if let Some(old) = own.iter().find(|e| e.meta.is_some_and(|m| m.nonce == new.nonce)) {
+        let old_meta = old.meta.expect("own entries decode");
+        let bumped = |old: u128, new: u128| new.saturating_mul(100) >= old.saturating_mul(100 + limits.replace_bump_percent);
+        if !bumped(old_meta.max_fee, new.max_fee) || !bumped(old_meta.priority, new.priority) {
+            return Err(format!("replacement transaction underpriced: needs a {}% fee bump", limits.replace_bump_percent));
+        }
+        evict.push(old.name.clone());
+        own.retain(|e| e.name != old.name);
+    }
+    if own.len() >= limits.max_per_sender {
+        return Err(format!("too many pending transactions from this sender (limit {})", limits.max_per_sender));
+    }
+    if entries.len() - evict.len() < limits.max_entries {
+        return Ok(evict);
+    }
+    // Full: drop every stale entry of any sender.
+    let mut live = Vec::new();
+    for entry in entries {
+        if evict.contains(&entry.name) {
+            continue;
+        }
+        if head.stale(entry, limits).is_some() {
+            evict.push(entry.name.clone());
+        } else {
+            live.push(entry);
+        }
+    }
+    if live.len() < limits.max_entries {
+        return Ok(evict);
+    }
+    // Still full: an entry deferred behind a nonce gap of its sender (cannot be
+    // included next) is displaced first, the cheapest of them; otherwise the
+    // cheapest entry, only by a transaction paying more.
+    let mut next = std::collections::HashMap::new();
+    for entry in &live {
+        let meta = entry.meta.expect("live entries decode");
+        next.entry(meta.sender).or_insert_with(|| (head.account)(meta.sender).0);
+    }
+    let mut nonces: std::collections::HashMap<alloy_primitives::Address, std::collections::BTreeSet<u64>> =
+        std::collections::HashMap::new();
+    for entry in &live {
+        let meta = entry.meta.expect("live entries decode");
+        nonces.entry(meta.sender).or_default().insert(meta.nonce);
+    }
+    let gapped = |meta: &SpoolMeta| {
+        let mut expected = next[&meta.sender];
+        for n in &nonces[&meta.sender] {
+            if *n == meta.nonce {
+                return *n != expected;
+            }
+            if *n == expected {
+                expected += 1;
+            }
+        }
+        true
+    };
+    let victim = live
+        .iter()
+        .filter(|e| e.meta.is_some_and(|m| m.sender != new.sender))
+        .min_by_key(|e| {
+            let meta = e.meta.expect("live entries decode");
+            (!gapped(&meta), meta.max_fee, std::cmp::Reverse(e.modified))
+        })
+        .filter(|e| e.meta.is_some_and(|m| gapped(&m) || m.max_fee < new.max_fee));
+    match victim {
+        Some(entry) => {
+            evict.push(entry.name.clone());
+            Ok(evict)
+        }
+        None => Err("txpool full".into()),
+    }
+}
+
+/// Remove spool files; a file the producer already consumed is not an error.
+fn evict_spool(pool: &Path, names: &[std::ffi::OsString], reason: &str) {
+    for name in names {
+        match std::fs::remove_file(pool.join(name)) {
+            Ok(()) => println!("evicted tx file={} ({reason})", Path::new(name).display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => println!("evict {} failed: {e}", Path::new(name).display()),
+        }
+    }
+}
+
+/// The settled RPC's spool: one lock serializes admission, eviction and the
+/// pending-nonce view, so the caps hold under concurrent requests.
+struct Spool {
+    spec: ChainSpec,
+    dir: PathBuf,
+    index: std::sync::Mutex<SpoolIndex>,
+    limits: SpoolLimits,
+}
+
+impl Spool {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SpoolIndex> {
+        self.index.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Head facts of the latest settled state of `provider`.
+    fn with_head<T>(
+        &self,
+        provider: &BlochBlockchainProvider,
+        f: impl FnOnce(&mut SpoolHead<'_>) -> T,
+    ) -> Result<T, String> {
+        let best = provider.best_block_number().map_err(|e| format!("state unavailable: {e}"))?;
+        let header = provider
+            .sealed_header(best)
+            .map_err(|e| format!("state unavailable: {e}"))?
+            .ok_or("state unavailable: head header missing")?;
+        let next_base_fee = u128::from(self.spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used));
+        let state = provider.latest().map_err(|e| format!("state unavailable: {e}"))?;
+        let mut cache = std::collections::HashMap::new();
+        let mut account = |address| {
+            *cache.entry(address).or_insert_with(|| {
+                state
+                    .basic_account(&address)
+                    .ok()
+                    .flatten()
+                    .map_or((0, alloy_primitives::U256::ZERO), |a| (a.nonce, a.balance))
+            })
+        };
+        Ok(f(&mut SpoolHead { account: &mut account, next_base_fee, now: std::time::SystemTime::now() }))
+    }
+
+    /// Admit authenticated `raw` bytes, or say why not.
+    fn submit(&self, provider: &BlochBlockchainProvider, raw: &[u8]) -> Result<B256, String> {
+        let tx = bloch_l2_evm::decode_signed_transaction(&self.spec, raw).map_err(|e| format!("transaction rejected: {e:?}"))?;
+        let hash = tx.hash();
+        let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
+        let mut index = self.lock();
+        if self.dir.join(&name).exists() {
+            return Ok(hash); // already known, not yet consumed
+        }
+        let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
+        let meta = SpoolMeta::of(&tx);
+        let evict = self.with_head(provider, |head| plan_admission(&entries, &meta, head, self.limits))??;
+        evict_spool(&self.dir, &evict, "displaced at admission");
+        // Write beside, then rename: the producer only reads complete *.tx files.
+        let partial = self.dir.join(format!(".{}.partial", alloy_primitives::hex::encode(hash)));
+        let written = std::fs::write(&partial, format!("{}\n", alloy_primitives::hex::encode(tx.raw())))
+            .and_then(|()| {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o600))
+            })
+            .and_then(|()| std::fs::rename(&partial, self.dir.join(&name)));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("txpool write failed: {error}"));
+        }
+        index.insert(name.into(), Some(meta));
+        println!("spooled tx={hash} from={} nonce={}", meta.sender, meta.nonce);
+        Ok(hash)
+    }
+
+    /// Evict every stale entry (run periodically, not only under pressure).
+    fn sweep(&self, provider: &BlochBlockchainProvider) -> Result<usize, String> {
+        let mut index = self.lock();
+        let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
+        let stale = self.with_head(provider, |head| {
+            entries.iter().filter_map(|e| head.stale(e, self.limits).map(|why| (e.name.clone(), why))).collect::<Vec<_>>()
+        })?;
+        for (name, why) in &stale {
+            evict_spool(&self.dir, std::slice::from_ref(name), why);
+        }
+        Ok(stale.len())
+    }
+}
+
 /// `eth_sendRawTransaction` into the settlement worker's spool directory.
-fn sequencer_rpc(spec: ChainSpec, pool: PathBuf, provider: BlochBlockchainProvider) -> jsonrpsee::RpcModule<()> {
+fn sequencer_rpc(spool: Arc<Spool>, provider: BlochBlockchainProvider) -> jsonrpsee::RpcModule<()> {
     let mut module = jsonrpsee::RpcModule::new(());
     module
         .register_blocking_method("eth_sendRawTransaction", move |params, _, _| {
             let raw: alloy_primitives::Bytes = params.one()?;
-            let tx = bloch_l2_evm::decode_signed_transaction(&spec, &raw)
-                .map_err(|e| rpc_error(format!("transaction rejected: {e:?}")))?;
-            let hash = tx.hash();
-            let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
-            if pool.join(&name).exists() {
-                return Ok(hash); // already known, not yet consumed
-            }
-            let nonce = provider
-                .latest()
-                .and_then(|state| state.basic_account(&tx.sender()))
-                .map_err(|e| rpc_error(format!("state unavailable: {e}")))?
-                .map_or(0, |account| account.nonce);
-            let sent = tx.environment().nonce;
-            if sent < nonce {
-                return Err(rpc_error(format!("nonce too low: next nonce is {nonce}")));
-            }
-            if sent > nonce + MAX_NONCE_AHEAD {
-                return Err(rpc_error(format!("nonce too high: next nonce is {nonce}")));
-            }
-            let entries = std::fs::read_dir(&pool)
-                .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.path().extension().is_some_and(|x| x == "tx"))
-                .count();
-            if entries >= MAX_SPOOL_ENTRIES {
-                return Err(rpc_error("txpool full"));
-            }
-            // Write beside, then rename: the producer only reads complete *.tx files.
-            let partial = pool.join(format!(".{}.partial", alloy_primitives::hex::encode(hash)));
-            let written = std::fs::write(&partial, format!("{}\n", alloy_primitives::hex::encode(tx.raw())))
-                .and_then(|()| {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o600))
-                })
-                .and_then(|()| std::fs::rename(&partial, pool.join(&name)));
-            if let Err(error) = written {
-                let _ = std::fs::remove_file(&partial);
-                return Err(rpc_error(format!("txpool write failed: {error}")));
-            }
-            println!("spooled tx={hash} from={} nonce={sent}", tx.sender());
-            Ok(hash)
+            spool.submit(&provider, &raw).map_err(rpc_error)
         })
         .expect("the send method name is unique in a new module");
     module
 }
-
-/// Sender and nonce of each spool entry, cached by file name (entries are
-/// immutable: written once by rename, removed by the producer).
-type SpoolIndex = std::collections::HashMap<std::ffi::OsString, Option<(alloy_primitives::Address, u64)>>;
 
 /// The sender's next nonce in the sequencer's view: `latest` plus every
 /// consecutive nonce already waiting in the spool.
@@ -193,34 +489,12 @@ fn spooled_next_nonce(
     latest: u64,
 ) -> std::io::Result<u64> {
     let mut index = index.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut present = std::collections::HashSet::new();
-    let mut nonces = std::collections::BTreeSet::new();
-    for entry in std::fs::read_dir(pool)? {
-        let path = entry?.path();
-        if path.extension().is_none_or(|x| x != "tx") {
-            continue;
-        }
-        let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
-        let known = match index.get(&name) {
-            Some(known) => *known,
-            None => {
-                let decoded = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|text| alloy_primitives::hex::decode(text.trim()).ok())
-                    .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
-                    .map(|tx| (tx.sender(), tx.environment().nonce));
-                index.insert(name.clone(), decoded);
-                decoded
-            }
-        };
-        present.insert(name);
-        if let Some((from, nonce)) = known {
-            if from == sender {
-                nonces.insert(nonce);
-            }
-        }
-    }
-    index.retain(|name, _| present.contains(name));
+    let nonces: std::collections::BTreeSet<u64> = scan_spool(spec, pool, &mut index)?
+        .into_iter()
+        .filter_map(|e| e.meta)
+        .filter(|m| m.sender == sender)
+        .map(|m| m.nonce)
+        .collect();
     let mut next = latest;
     while nonces.contains(&next) {
         next += 1;
@@ -230,12 +504,11 @@ fn spooled_next_nonce(
 
 /// `eth_getTransactionCount(addr, "pending")` in the sequencer's view (see
 /// [`spooled_next_nonce`]); other tags go to the upstream handler unchanged.
-fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spec: ChainSpec, pool: PathBuf) -> Result<()> {
+fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spool: Arc<Spool>) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     ensure!(module.remove_method("eth_getTransactionCount").is_some(), "eth API lacks eth_getTransactionCount");
-    let index = Arc::new(std::sync::Mutex::new(SpoolIndex::new()));
     module.register_async_method("eth_getTransactionCount", move |params, _, _| {
-        let (original, spec, pool, index) = (original.clone(), spec.clone(), pool.clone(), index.clone());
+        let (original, spool) = (original.clone(), spool.clone());
         async move {
             let mut values: Vec<serde_json::Value> = params.parse()?;
             let pending = values.get(1).and_then(|v| v.as_str()) == Some("pending");
@@ -253,11 +526,13 @@ fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spec: ChainSpec, p
             }
             let sender: alloy_primitives::Address = serde_json::from_value(values[0].clone())
                 .map_err(|e| jsonrpsee::types::ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
-            tokio::task::spawn_blocking(move || spooled_next_nonce(&spec, &pool, &index, sender, count.to()))
-                .await
-                .map_err(|e| rpc_error(e.to_string()))?
-                .map(alloy_primitives::U64::from)
-                .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))
+            tokio::task::spawn_blocking(move || {
+                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, count.to())
+            })
+            .await
+            .map_err(|e| rpc_error(e.to_string()))?
+            .map(alloy_primitives::U64::from)
+            .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))
         }
     })?;
     Ok(())
@@ -477,12 +752,22 @@ async fn main() -> Result<()> {
     );
     let filter = EthFilter::new(api.clone(), reth_rpc_eth_types::EthConfig::default().filter_config(), runtime.clone());
     let mut module = api.into_rpc().remove_context();
-    if let Some(pool) = &options.txpool {
-        ensure!(std::fs::symlink_metadata(pool)?.is_dir(), "--txpool {} is not a directory", pool.display());
-        // Replace the no-pool method of the read-only API with the spooling one.
-        ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
-        module.merge(sequencer_rpc(rules(), pool.clone(), provider.clone()))?;
-    }
+    let spool = match &options.txpool {
+        Some(pool) => {
+            ensure!(std::fs::symlink_metadata(pool)?.is_dir(), "--txpool {} is not a directory", pool.display());
+            let spool = Arc::new(Spool {
+                spec: rules(),
+                dir: pool.clone(),
+                index: std::sync::Mutex::new(SpoolIndex::new()),
+                limits: SPOOL_LIMITS,
+            });
+            // Replace the no-pool method of the read-only API with the spooling one.
+            ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
+            module.merge(sequencer_rpc(spool.clone(), provider.clone()))?;
+            Some(spool)
+        }
+        None => None,
+    };
     module.merge(filter.into_rpc())?;
     module.merge(chain_identity_rpc(spec.clone()))?;
     module.merge(net_web3_rpc(kernel.chain_id))?;
@@ -492,8 +777,8 @@ async fn main() -> Result<()> {
     let settlements = Arc::new(std::sync::RwLock::new(SettlementIndex::new()));
     module.merge(settlement_rpc(settlements.clone()))?;
     serve_pending_blocks_as_latest(&mut module)?;
-    if let Some(pool) = &options.txpool {
-        spool_pending_nonce(&mut module, rules(), pool.clone())?;
+    if let Some(spool) = &spool {
+        spool_pending_nonce(&mut module, spool.clone())?;
     }
     let server = start_http_rpc(module, options.port).await?;
     println!(
@@ -508,6 +793,7 @@ async fn main() -> Result<()> {
     let mut safe: Option<Header> = None;
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     let mut interval = tokio::time::interval(options.poll);
+    let mut last_sweep = std::time::Instant::now();
     let result: Result<()> = async {
         loop {
             tokio::select! {
@@ -519,6 +805,16 @@ async fn main() -> Result<()> {
                         state.set_canonical_head(header.clone());
                         head_number = number;
                         println!("head block={} hash={}", number, header.hash());
+                    }
+                    if let Some(spool) = spool.as_ref().filter(|_| last_sweep.elapsed() >= SPOOL_SWEEP) {
+                        last_sweep = std::time::Instant::now();
+                        let (spool, provider) = (spool.clone(), provider.clone());
+                        match tokio::task::spawn_blocking(move || spool.sweep(&provider)).await {
+                            Ok(Ok(0)) => {}
+                            Ok(Ok(evicted)) => println!("spool sweep evicted {evicted} stale entries"),
+                            Ok(Err(error)) => println!("spool sweep failed: {error}"),
+                            Err(error) => println!("spool sweep failed: {error}"),
+                        }
                     }
                     let number_of = |h: &Option<Header>| h.as_ref().map_or(0, |h| h.0.number);
                     // Block 0 is a real level (the final L2 genesis): compare
@@ -695,5 +991,131 @@ mod tests {
         assert_eq!(next(address(1), 6), 7);
         assert_eq!(next(address(1), 5), 5);
         assert_eq!(index.lock().unwrap().len(), 5);
+    }
+
+    fn signed(spec: &ChainSpec, key: u8, nonce: u64, max_fee: u128, value: u64) -> Vec<u8> {
+        let key = SigningKey::from_bytes((&[key; 32]).into()).unwrap();
+        let tx = TxEip1559 {
+            chain_id: spec.chain_id,
+            nonce,
+            to: TxKind::Call(Address::repeat_byte(9)),
+            gas_limit: 21_000,
+            max_fee_per_gas: max_fee,
+            max_priority_fee_per_gas: max_fee / 2,
+            value: alloy_primitives::U256::from(value),
+            ..Default::default()
+        };
+        let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        TxEnvelope::from(tx.into_signed(signature)).encoded_2718()
+    }
+
+    fn meta(spec: &ChainSpec, key: u8, nonce: u64, max_fee: u128) -> SpoolMeta {
+        SpoolMeta::of(&bloch_l2_evm::decode_signed_transaction(spec, &signed(spec, key, nonce, max_fee, 0)).unwrap())
+    }
+
+    fn entry(spec: &ChainSpec, name: &str, key: u8, nonce: u64, max_fee: u128) -> SpoolEntry {
+        SpoolEntry { name: name.into(), meta: Some(meta(spec, key, nonce, max_fee)), modified: std::time::SystemTime::now() }
+    }
+
+    const GWEI: u128 = 1_000_000_000;
+    const LIMITS: SpoolLimits =
+        SpoolLimits { max_entries: 8, max_per_sender: 3, max_nonce_gap: 4, ttl: Duration::from_secs(600), replace_bump_percent: 10 };
+
+    /// Plan against head nonces/balances per key (absent: nonce 0, rich).
+    fn plan(
+        entries: &[SpoolEntry],
+        new: &SpoolMeta,
+        accounts: &[(u8, u64, u128)],
+        base_fee: u128,
+    ) -> Result<Vec<String>, String> {
+        let table: std::collections::HashMap<Address, (u64, alloy_primitives::U256)> = accounts
+            .iter()
+            .map(|(key, nonce, balance)| (address(*key), (*nonce, alloy_primitives::U256::from(*balance))))
+            .collect();
+        let mut account = |a: Address| table.get(&a).copied().unwrap_or((0, alloy_primitives::U256::from(u128::MAX)));
+        let mut head = SpoolHead { account: &mut account, next_base_fee: base_fee, now: std::time::SystemTime::now() };
+        plan_admission(entries, new, &mut head, LIMITS)
+            .map(|names| names.into_iter().map(|n| n.into_string().unwrap()).collect())
+    }
+
+    #[test]
+    fn admission_checks_balance_nonce_window_and_base_fee_at_the_head() {
+        let spec = ChainSpec::mainnet();
+        let new = meta(&spec, 1, 5, 2 * GWEI);
+        assert_eq!(new.cost, alloy_primitives::U256::from(21_000u128 * 2 * GWEI));
+        assert_eq!(plan(&[], &new, &[(1, 5, 21_000 * 2 * GWEI)], GWEI), Ok(vec![]));
+        let poor = plan(&[], &new, &[(1, 5, 21_000 * 2 * GWEI - 1)], GWEI).unwrap_err();
+        assert!(poor.starts_with("insufficient funds"), "{poor}");
+        // value counts too
+        let costly = SpoolMeta::of(
+            &bloch_l2_evm::decode_signed_transaction(&spec, &signed(&spec, 1, 5, 2 * GWEI, 1)).unwrap(),
+        );
+        assert!(plan(&[], &costly, &[(1, 5, 21_000 * 2 * GWEI)], GWEI).unwrap_err().starts_with("insufficient funds"));
+        assert!(plan(&[], &new, &[(1, 6, u128::MAX)], GWEI).unwrap_err().starts_with("nonce too low"));
+        assert_eq!(plan(&[], &meta(&spec, 1, 9, 2 * GWEI), &[(1, 5, u128::MAX)], GWEI), Ok(vec![]));
+        assert!(plan(&[], &meta(&spec, 1, 10, 2 * GWEI), &[(1, 5, u128::MAX)], GWEI).unwrap_err().starts_with("nonce too high"));
+        assert!(plan(&[], &new, &[(1, 5, u128::MAX)], 3 * GWEI).unwrap_err().contains("below the next base fee"));
+    }
+
+    #[test]
+    fn a_sender_is_capped_and_replaces_only_with_a_fee_bump() {
+        let spec = ChainSpec::mainnet();
+        let mine: Vec<_> = (0..3).map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
+        let cap = plan(&mine, &meta(&spec, 1, 3, 2 * GWEI), &[], GWEI).unwrap_err();
+        assert!(cap.starts_with("too many pending transactions"), "{cap}");
+        // Another sender is not affected.
+        assert_eq!(plan(&mine, &meta(&spec, 2, 0, 2 * GWEI), &[], GWEI), Ok(vec![]));
+        // Same nonce: a <10% bump is refused, a 10% bump replaces the old file.
+        let low = plan(&mine, &meta(&spec, 1, 1, 2 * GWEI + GWEI / 10), &[], GWEI).unwrap_err();
+        assert!(low.starts_with("replacement transaction underpriced"), "{low}");
+        assert_eq!(plan(&mine, &meta(&spec, 1, 1, 22 * GWEI / 10), &[], GWEI), Ok(vec!["m1.tx".into()]));
+        // Entries whose nonce the head already used do not count and are evicted.
+        assert_eq!(plan(&mine, &meta(&spec, 1, 3, 2 * GWEI), &[(1, 2, u128::MAX)], GWEI), Ok(vec!["m0.tx".into(), "m1.tx".into()]));
+    }
+
+    #[test]
+    fn a_full_spool_evicts_stale_then_deferred_cheap_entries_or_refuses() {
+        let spec = ChainSpec::mainnet();
+        // Eight entries from eight senders (cap 8): key k at nonce 0, fee (k + 1) gwei.
+        let mut full: Vec<_> = (10..18u8).map(|k| entry(&spec, &format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI)).collect();
+        // Full and nothing stale: a transaction paying no more than the cheapest is refused.
+        assert_eq!(plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[], GWEI), Err("txpool full".into()));
+        // A better-paying one displaces the cheapest (k10, 2 gwei).
+        assert_eq!(plan(&full, &meta(&spec, 1, 0, 3 * GWEI), &[], GWEI), Ok(vec!["k10.tx".into()]));
+        // An entry deferred behind a nonce gap goes first, even if it pays more.
+        full[7] = entry(&spec, "gap.tx", 17, 2, 9 * GWEI);
+        assert_eq!(plan(&full, &meta(&spec, 1, 0, 3 * GWEI), &[], GWEI), Ok(vec!["gap.tx".into()]));
+        // Stale entries (used nonce, unfunded, underpriced, expired, undecodable) go without displacing anyone.
+        full[0] = entry(&spec, "used.tx", 10, 0, 2 * GWEI);
+        full[1] = entry(&spec, "poor.tx", 11, 0, 3 * GWEI);
+        full[2].modified = std::time::SystemTime::now() - Duration::from_secs(601);
+        full[3] = SpoolEntry { name: "junk.tx".into(), meta: None, modified: std::time::SystemTime::now() };
+        let evicted = plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[(10, 1, u128::MAX), (11, 0, 1)], GWEI).unwrap();
+        assert_eq!(evicted, vec!["used.tx", "poor.tx", "k12.tx", "junk.tx"]);
+        // Base fee above an entry's cap: underpriced, evicted under pressure.
+        let cheap: Vec<_> = (10..18u8).map(|k| entry(&spec, &format!("c{k}.tx"), k, 0, 2 * GWEI)).collect();
+        assert_eq!(plan(&cheap, &meta(&spec, 1, 0, 4 * GWEI), &[], 3 * GWEI).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn scan_skips_vanished_files_and_tracks_fees() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = SpoolIndex::new();
+        std::fs::write(dir.path().join("a.tx"), format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
+        std::fs::write(dir.path().join("b.tx"), "zz\n").unwrap();
+        std::fs::write(dir.path().join(".c.partial"), "00\n").unwrap();
+        let mut entries = scan_spool(&spec, dir.path(), &mut index).unwrap();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].meta.unwrap().max_fee, 2 * GWEI);
+        assert_eq!(entries[0].meta.unwrap().priority, GWEI);
+        assert!(entries[1].meta.is_none());
+        std::fs::remove_file(dir.path().join("a.tx")).unwrap();
+        assert_eq!(scan_spool(&spec, dir.path(), &mut index).unwrap().len(), 1);
+        assert_eq!(index.len(), 1);
+        // Evicting a file the producer already removed is not an error.
+        evict_spool(dir.path(), &["a.tx".into(), "b.tx".into()], "test");
+        assert!(scan_spool(&spec, dir.path(), &mut index).unwrap().is_empty());
     }
 }
