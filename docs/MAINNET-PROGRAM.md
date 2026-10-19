@@ -112,3 +112,84 @@ whole committed policy (the boundary block's state root carries the L2 leaf),
 so the fixture must be regenerated whenever the PROGRAM or the native test
 chain changes. Proving took 14 min wall and 20 GB peak RSS at 6 threads on
 45.77.142.123.
+
+## Mainnet prover (2026-10-18)
+
+Reproduced on 2026-10-18 from `codex/l2-mainnet-ops-20261018` (75c238b; the guest
+sources are unchanged since f0d53fe): `build-reproducible.sh --clean` on macOS
+x86_64 rebuilt `settlement_v3_mainnet` byte-identically (SHA-256 `203114bf…c473`,
+174 s; the devnet ELFs `6fa44f9c…`, `2b63bb74…`, `63994ed7…` also identical). The
+host built from the same commit (`bloch-evm-sp1-settlement-v3` SHA-256
+`df63301f…6348`, rustc 1.98.1, Linux) prints with `--mainnet identity` exactly the
+values the native activation pins (release 78b7343a `l2_settlement::mainnet::PROGRAM`):
+ELF Keccak `6e4c8440…c073`, KoalaBear `389cfbde…ac0e`, BN254 `007139f7…ac0e`, policy
+`15486996…747d`, configuration `8ec1c804…8f2b`.
+
+### Measured proofs (45.77.142.123, Intel Cascade Lake, 32 vCPU, 125 GB, shared)
+
+`deployment/mainnet/prover/bench-prove-blocks.sh` (real Groth16, SP1 circuit v6.1.0,
+pinned Gnark image; prover in a `systemd --user` scope with MemoryMax and CPUQuota):
+
+| Block | Content | Guest cycles | Prove wall | Prover peak RSS | Gnark container |
+|---|---|---|---|---|---|
+| A | mainnet L2 block 1 as the live chain requests it (empty; hash `0ff59c11…ab25`) | 529 004 | 13 min 58 s | 20.4 GB | ~18.5 GB |
+| B | 1 deposit + 4 transfers + 1 withdrawal | 1 573 036 | 13 min 57 s | 30.8 GB | ~18.5 GB |
+| C | 1 deposit + 200 transfers (4.2 M gas) | 33 565 458 | not measured (see below) | ≥ 28.6 GB after 90 s | |
+
+8 threads, 800 % quota (530–634 % used). Block C executed (3.0 s) but its proof
+was stopped three times by the benchmark's guard (kill the mainnet prover when
+host MemAvailable < 32 GB, then < 24 GB on the first try) because devnet4's own
+settler proof was running at the same time; C's prover already held 28.6 GB 90 s
+in, so a 200-transfer block needs the full 40 GB slice and must be measured on the
+dedicated host. Wall time is dominated by the fixed
+recursion/wrap/Gnark cost, not by the block's EVM work. The Gnark Groth16 step runs
+in a Docker container under dockerd, OUTSIDE the prover's cgroup, and peaks at
+~18.5 GB: a proof needs ~50 GB at its peak (prover + container), not "a few GB".
+
+Block A is the real block the mainnet settler will prove first (request = live
+`getl2settlement` source + zero previous settlement + inbox 0/0/0): proof SHA-256
+`85c92a55…52e3`, canonical public values `42779c77…7426` (766 B), canonical proof
+`5dbe0322…7f71` (356 B); it verifies offline with the pinned host. It goes stale
+as soon as the native source moves (a new deposit) or block 1 settles.
+
+### Sizing
+
+Settlement is sequential: block n+1's request carries block n's accepted
+settlement, so proofs cannot be parallelised across machines; the L2 block period
+is bounded by one proof plus L1 inclusion. On this CPU class: one L2 block per
+~15 min with 8 threads, ~12–13 min with 16 (devnet4's settler measures 700–860 s at
+16 threads). Recommended dedicated prover host: 32 vCPU (x86_64, AVX-512 helps),
+64 GB RAM (peak ~50 GB: 40 GB slice + ~18.5 GB container), 100 GB SSD (7.9 GB Groth16
+circuits + Docker image + work), Docker with the pinned image pulled. Minimum: 16
+vCPU / 64 GB (one block per ~13–15 min).
+
+45.77.142.123 must NOT host mainnet proving: devnet4's settler already proves
+there continuously (16 threads, local first, ~28 GB + ~18.5 GB Gnark, back to back),
+on top of ~33 GB of validators and services. During this benchmark MemAvailable
+fell to 13.6 GB when proofs overlapped, and the guard stopped every attempt at
+block C (23.7, 28.9 and 31.9 GB available). 140.82.35.231 (devnet4's remote prover) runs mainnet
+validators and is also not suitable.
+
+### Install (prover host; not executed)
+
+Wiring as devnet4: the settler sends one framed job over SSH to a forced command
+(`remote_prover.py --config /etc/bloch-l2-mainnet-prover/config.json`, `"mainnet":
+true`) and re-runs `execute`/`verify-groth16` locally before submitting.
+
+```sh
+# on the new prover host, as root, with docker installed and the image pulled:
+docker pull ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d
+# copy bloch-evm-sp1-settlement-v3, settlement_v3_mainnet, remote_prover.py and
+# install-prover-mainnet.py into one directory; write SHA256SUMS of the first three
+sha256sum bloch-evm-sp1-settlement-v3 settlement_v3_mainnet remote_prover.py > SHA256SUMS
+python3 install-prover-mainnet.py install --settler-pubkey settler-prover.pub \
+  --settler-host SETTLER_IP --circuits /path/to/.sp1/circuits --memory-gib 40 --threads 12 --dry-run
+python3 install-prover-mainnet.py install --settler-pubkey settler-prover.pub \
+  --settler-host SETTLER_IP --circuits /path/to/.sp1/circuits --memory-gib 40 --threads 12
+# settler host: install-settler-mainnet.py configure --remote-prover bloch-l2-prover-mainnet@PROVER_IP ...
+# then one end-to-end check (proves and verifies, submits nothing):
+selfcheck-remote-prover.sh bloch-l2-prover-mainnet@PROVER_IP KEY KNOWN_HOSTS A/native-request.txt \
+  A/block.artifact /opt/.../bloch-evm-sp1-settlement-v3 /opt/.../settlement_v3_mainnet /tmp/selfcheck.proof
+# rollback (refuses while a proof runs; new jobs are cut first):
+python3 install-prover-mainnet.py rollback --dry-run && python3 install-prover-mainnet.py rollback
+```

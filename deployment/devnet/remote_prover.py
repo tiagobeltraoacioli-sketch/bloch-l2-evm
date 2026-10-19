@@ -21,6 +21,12 @@ One proof at a time (an exclusive lock; a second job exits 75 = busy). With
 own cgroups (cgroup v2) caps memory at or below that value, so a prover sharing
 a host with other services can only exhaust its own slice.
 Holds no keys and reaches no network besides Docker for the pinned Gnark image.
+
+Mainnet (chain 700770): the same script serves the `settlement_v3_mainnet`
+program when its config has `"mainnet": true` (the pinned host then runs with
+`--mainnet`, i.e. ChainSpec::mainnet and MAINNET_DOMAIN). A forced command may
+name its config explicitly (`remote_prover.py --config PATH`), so a devnet and a
+mainnet prover can share one release of this file without sharing a config.
 Exit codes: 0 proof written, 64 bad request, 70 prover failed, 75 busy.
 Dependency-free Python 3.9+.
 """
@@ -93,6 +99,15 @@ def cgroup_memory_cap(proc_cgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
     return min(caps) if caps else None
 
 
+def config_path(argv, environ):
+    """The config file: `--config PATH` on the forced command line, else the environment/default."""
+    if not argv:
+        return Path(environ.get('BLOCH_REMOTE_PROVER_CONFIG', str(CONFIG)))
+    if len(argv) == 2 and argv[0] == '--config' and argv[1].startswith('/'):
+        return Path(argv[1])
+    raise ValueError('usage: remote_prover.py [--config /ABSOLUTE/PATH]')
+
+
 def fail(code, message):
     sys.stderr.write(f'remote_prover: {message}\n')
     sys.exit(code)
@@ -101,7 +116,12 @@ def fail(code, message):
 def main():
     if os.environ.get('SSH_ORIGINAL_COMMAND', 'prove') != 'prove':
         fail(64, 'only the "prove" command is served')
-    c = json.loads(CONFIG.read_text())
+    try:
+        c = json.loads(config_path(sys.argv[1:], os.environ).read_text())
+    except (ValueError, OSError) as error:
+        fail(64 if isinstance(error, ValueError) and 'usage' in str(error) else 70, f'config: {error}')
+    if not isinstance(c.get('mainnet', False), bool):
+        fail(70, 'config: mainnet must be a boolean')
     for key in ('prover', 'guest'):
         if digest(c[key]) != c[key + '_sha256']:
             fail(70, f'{key} differs from its pin')
@@ -130,7 +150,10 @@ def main():
                'SP1_GNARK_IMAGE': c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(job / 'native-request.txt'),
                'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact')}
-        argv = [c['prover'], 'prove-groth16', 'native-artifact', c['guest'], str(proof)]
+        # `"mainnet": true` proves the mainnet program (settlement_v3_mainnet); the settler
+        # verifies the result locally with the same flag, so a wrong program is never submitted.
+        argv = [c['prover'], *(['--mainnet'] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
+                c['guest'], str(proof)]
         with (work / 'last-prove.log').open('w') as log:
             try:
                 result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=log,
