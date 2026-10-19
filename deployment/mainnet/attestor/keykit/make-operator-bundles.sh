@@ -35,6 +35,7 @@ die() { echo "error: $*" >&2; exit 1; }
 sha256() { if command -v shasum >/dev/null; then shasum -a 256 "$1"; else sha256sum "$1"; fi | cut -d' ' -f1; }
 
 MODE=${1:-}; [ $# -gt 0 ] && shift
+ARGS=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
     --keys-dir) KEYS=$2; shift 2;; --out) OUT=$2; shift 2;; --bloch-pos) BIN=$2; shift 2;;
@@ -102,7 +103,7 @@ seal)
     chmod 600 "$OUT/attestor-$i.sealed"
   done
   cp "$SET" "$OUT/attestors.set"
-  echo "Sealed ${INDICES[*]} into $OUT. Next: $0 verify (types each passphrase once more)."
+  echo "Sealed ${INDICES[*]} into $OUT. Next: $0 verify ${ARGS[*]:-} (types each passphrase once more)."
   ;;
 verify)
   for i in "${INDICES[@]}"; do
@@ -118,6 +119,7 @@ verify)
   done
   (cd "$OUT" && for i in "${INDICES[@]}"; do printf '%s  attestor-%s.sealed\n' "$(sha256 "attestor-$i.sealed")" "$i"; done) > "$OUT/BUNDLES.sha256"
   echo "Verified ${INDICES[*]}. Bundle hashes: $OUT/BUNDLES.sha256 (public; give each operator its line)."
+  echo "Next: two offline backups per bundle and the handoff (KEY-HANDOFF-CHECKLIST.md steps 3-4); shred-originals only after that."
   ;;
 shred-originals)
   for i in "${INDICES[@]}"; do

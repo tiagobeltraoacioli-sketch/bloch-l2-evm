@@ -8,6 +8,7 @@
 #        [--publish-url https://drop.example/attest --publish-token-file FILE] \
 #        [--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'] \
 #        [--alert-command '["/usr/local/bin/notify-attestor","{event}"]'] [--dry-run]
+#        [--prefix DIR [--rehearsal-set attestors.set]]
 #   sudo ./install-attestor.sh rollback [--purge-key]
 #   sudo ./install-attestor.sh status
 #
@@ -21,6 +22,11 @@
 # passphrase in /etc/bloch-l2-attestor/keystore.passphrase (root, 0400), handed to the agent via
 # systemd LoadCredential. The host never holds a plaintext key file. Keep the transport bundle
 # offline as the backup; remove the copy you brought to this host after install.
+#
+# --prefix DIR (rehearsal/staging): install every file under DIR instead of /opt, /etc and
+# /var/lib, as the invoking user, without useradd, chown or systemctl (units are written to
+# DIR/systemd and never loaded). --rehearsal-set FILE (only with --prefix) accepts a THROWAWAY
+# attestor set instead of the pinned one, to rehearse the owner flow end to end without real keys.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 OPT=/opt/bloch/l2-attestor ETC=/etc/bloch-l2-attestor STATE=/var/lib/bloch-l2-attestor
@@ -38,22 +44,39 @@ host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad 
 ip_of() { getent ahostsv4 "$1" | awk 'NR==1{print $1}'; }
 
 cmd_install() {
-  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=()
+  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET=
   while [ $# -gt 0 ]; do
     case $1 in
       --artifacts) ART=$2; shift 2;; --index) INDEX=$2; shift 2;; --bundle) BUNDLE=$2; shift 2;;
       --l1-rpc-url) L1=$2; shift 2;; --rpc) RPCS+=("$2"); shift 2;;
       --publish-url) PUB_URL=$2; shift 2;; --publish-token-file) PUB_TOKEN=$2; shift 2;;
       --publish-command) PUB_CMD=$2; shift 2;; --alert-command) ALERT=$2; shift 2;;
-      --dry-run) DRY=1; shift;; *) die "unknown option $1";;
+      --dry-run) DRY=1; shift;; --prefix) PREFIX=$2; shift 2;; --rehearsal-set) RSET=$2; shift 2;;
+      *) die "unknown option $1";;
     esac
   done
+  [ -z "$RSET" ] || [ -n "$PREFIX" ] || die "--rehearsal-set needs --prefix (never on a real install)"
+  local SETF="$HERE/public/attestors.set"
+  if [ -n "$PREFIX" ]; then
+    mkdir -p "$PREFIX"; PREFIX=$(cd "$PREFIX" && pwd)
+    [ "$PREFIX" != / ] || die "--prefix / is a real install; drop --prefix"
+    OPT=$PREFIX$OPT ETC=$PREFIX$ETC STATE=$PREFIX$STATE FSTATE=$PREFIX$FSTATE UNITS=$PREFIX/systemd
+    echo "REHEARSAL: installing under $PREFIX as $(id -un); no users, no chown, no systemctl" >&2
+  fi
+  if [ -n "$RSET" ]; then
+    SETF=$(cd "$(dirname "$RSET")" && pwd)/$(basename "$RSET")
+    SET_FILE_SHA256=$(sha256sum "$SETF" | cut -d' ' -f1)
+    SET_HASH=$(python3 -I -c 'import hashlib,sys
+l=[x.strip() for x in open(sys.argv[1]) if x.strip()]; k=[bytes.fromhex(x) for x in l[1:]]
+print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".join(k)).hexdigest())' "$SETF")
+    echo "REHEARSAL: THROWAWAY attestor set $SET_HASH (not the pinned 1c06adbb…)" >&2
+  fi
   [ -n "$ART" ] && [ -n "$INDEX" ] && [ -n "$BUNDLE" ] && [ -n "$L1" ] || { sed -n 3,12p "$0"; exit 2; }
   [[ $INDEX =~ ^[0-4]$ ]] || die "--index must be 0..4"
   [ ${#RPCS[@]} -gt 0 ] || RPCS=("${DEFAULT_RPCS[@]}")
   [ ${#RPCS[@]} -eq 3 ] || die "give exactly three --rpc URLs (quorum 2-of-3)"
   [[ $L1 =~ ^http://[A-Za-z0-9.-]+:[0-9]+/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
-  [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || die "run as root"
+  [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$PREFIX" ] || die "run as root"
   [ -z "$PUB_URL$PUB_CMD" ] && echo "WARNING: no --publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
   [ -z "$PUB_TOKEN" ] || [ -n "$PUB_URL" ] || die "--publish-token-file goes with --publish-url"
   for f in "$UNITS/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor-follower.service" "$OPT/bloch-pos" "$ETC/attestor.sealed"; do
@@ -68,7 +91,7 @@ cmd_install() {
     grep -q "  $b\$" "$ART/SHA256SUMS" || die "SHA256SUMS does not cover $b"
   done
   echo "$MANIFEST_SHA256  $ART/mainnet.manifest" | sha256sum -c --strict || die "mainnet.manifest is not Genesis-4"
-  echo "$SET_FILE_SHA256  $HERE/public/attestors.set" | sha256sum -c --strict || die "attestors.set is not the pinned set"
+  echo "$SET_FILE_SHA256  $SETF" | sha256sum -c --strict || die "attestors.set is not the pinned set"
   echo "$(cut -d' ' -f1 "$ART/carryover.tsv.gz.sha256")  $ART/carryover.tsv.gz" | sha256sum -c --strict \
     || die "carryover.tsv.gz does not match carryover.tsv.gz.sha256"
   "$ART/bloch-pos" l2-claim --help | grep -q 'seal-key' || die "$ART/bloch-pos has no l2-claim seal-key (build the attestor-keystore branch)"
@@ -77,16 +100,21 @@ cmd_install() {
   grep -qx "set_hash $SET_HASH" <<<"$info" || die "$BUNDLE belongs to another attestor set"
 
   # 2. Users and directories.
-  for u in $USER_AGENT $USER_FOLLOWER; do
-    id "$u" >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin "$u"
-  done
+  local own_agent=(-o $USER_AGENT -g $USER_AGENT) own_follower=(-o $USER_FOLLOWER -g $USER_FOLLOWER)
+  if [ -n "$PREFIX" ]; then own_agent=() own_follower=()
+  else
+    for u in $USER_AGENT $USER_FOLLOWER; do
+      id "$u" >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin "$u"
+    done
+  fi
   # $ETC stays traversable (the follower reads public/); the secrets are restricted per file.
   run install -d -m 0755 "$OPT" "$ETC" "$ETC/public"
-  run install -d -m 0700 -o $USER_AGENT -g $USER_AGENT "$STATE"
-  run install -d -m 0755 -o $USER_FOLLOWER -g $USER_FOLLOWER "$FSTATE"
+  run install -d -m 0700 "${own_agent[@]}" "$STATE"
+  run install -d -m 0755 "${own_follower[@]}" "$FSTATE"
   run install -m 0755 "$ART/bloch-pos" "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
   run install -m 0644 "$HERE/attestor_agent.py" "$HERE/attestor_lib.py" "$HERE/aggregate_attestation.py" "$OPT/"
-  run install -m 0644 "$ART/mainnet.manifest" "$HERE/public/attestors.set" "$ETC/public/"
+  run install -m 0644 "$ART/mainnet.manifest" "$ETC/public/"
+  run install -m 0644 "$SETF" "$ETC/public/attestors.set"
   if [ $DRY = 1 ]; then echo "+ gunzip carryover.tsv.gz > $ETC/public/carryover.tsv"
   else gunzip -c "$ART/carryover.tsv.gz" > "$ETC/public/carryover.tsv"; chmod 0644 "$ETC/public/carryover.tsv"; fi
 
@@ -99,7 +127,7 @@ cmd_install() {
     "$OPT/bloch-pos" l2-claim seal-key --sealed "$BUNDLE" --attestors "$ETC/public/attestors.set" --signer-index "$INDEX" \
       --passphrase-file "$ETC/keystore.passphrase" --out "$ETC/attestor.sealed" \
       || { shred -u "$ETC/keystore.passphrase"; die "re-seal failed (nothing installed for the key)"; }
-    chown root:$USER_AGENT "$ETC/attestor.sealed"; chmod 0440 "$ETC/attestor.sealed"
+    [ -n "$PREFIX" ] || chown root:$USER_AGENT "$ETC/attestor.sealed"; chmod 0440 "$ETC/attestor.sealed"
     "$OPT/bloch-pos" l2-claim key-check --sealed "$ETC/attestor.sealed" --attestors "$ETC/public/attestors.set" \
       --signer-index "$INDEX" --passphrase-file "$ETC/keystore.passphrase" || die "host key check failed"
   fi
@@ -118,23 +146,23 @@ assert isinstance(c,list) and all(isinstance(a,str) for a in c), "argv list"
 print(json.dumps(p+[{"kind":"command","argv":c}]))' "$publish" "$PUB_CMD")
   [ -z "$ALERT" ] || alert=$ALERT
   local config
-  config=$(python3 - "$INDEX" "$sum_pos" "$sum_produce" "$publish" "$alert" "${RPCS[@]}" <<'PY'
+  config=$(python3 - "$INDEX" "$sum_pos" "$sum_produce" "$publish" "$alert" "$OPT" "$ETC" "$STATE" "$FSTATE" "${RPCS[@]}" <<'PY'
 import json, sys
-index, pos, produce, publish, alert, *rpcs = sys.argv[1:]
+index, pos, produce, publish, alert, opt, etc, state, fstate, *rpcs = sys.argv[1:]
 print(json.dumps({
-    'signer_index': int(index), 'bloch_pos': '/opt/bloch/l2-attestor/bloch-pos', 'bloch_pos_sha256': pos,
-    'produce': '/opt/bloch/l2-attestor/bloch-l2-produce-dev', 'produce_sha256': produce,
-    'manifest': '/etc/bloch-l2-attestor/public/mainnet.manifest', 'attestors': '/etc/bloch-l2-attestor/public/attestors.set',
-    'sealed_key': '/etc/bloch-l2-attestor/attestor.sealed', 'passphrase_credential': 'passphrase',
-    'follower_status': '/var/lib/bloch-l2-attestor-follower/status.json',
-    'follower_native': '/var/lib/bloch-l2-attestor-follower/native', 'state_dir': '/var/lib/bloch-l2-attestor',
+    'signer_index': int(index), 'bloch_pos': f'{opt}/bloch-pos', 'bloch_pos_sha256': pos,
+    'produce': f'{opt}/bloch-l2-produce-dev', 'produce_sha256': produce,
+    'manifest': f'{etc}/public/mainnet.manifest', 'attestors': f'{etc}/public/attestors.set',
+    'sealed_key': f'{etc}/attestor.sealed', 'passphrase_credential': 'passphrase',
+    'follower_status': f'{fstate}/status.json',
+    'follower_native': f'{fstate}/native', 'state_dir': state,
     'rpc_urls': rpcs, 'rpc_quorum': 2, 'poll_seconds': 60, 'daily_cap_sat': 1000 * 10**8, 'max_single_sat': 1000 * 10**8,
-    'pause_file': '/etc/bloch-l2-attestor/PAUSE', 'approvals_file': '/etc/bloch-l2-attestor/approvals.txt',
+    'pause_file': f'{etc}/PAUSE', 'approvals_file': f'{etc}/approvals.txt',
     'publish': json.loads(publish), 'alert_command': json.loads(alert)}, indent=1))
 PY
 )
   if [ $DRY = 1 ]; then echo "+ write $ETC/config.json:"; echo "$config"
-  else (umask 027; echo "$config" > "$ETC/config.json"); chown root:$USER_AGENT "$ETC/config.json"; fi
+  else (umask 027; echo "$config" > "$ETC/config.json"); [ -n "$PREFIX" ] || chown root:$USER_AGENT "$ETC/config.json"; fi
 
   # 5. Units (not enabled, not started) and the network allow-list.
   local allow_agent="localhost" h ip
@@ -146,12 +174,21 @@ PY
   if [ $DRY = 1 ]; then echo "+ units, follower.env ($L1), drop-ins: agent IPAddressAllow=$allow_agent; follower IPAddressAllow=localhost $ip"
   else
     printf 'BLOCH_L1_RPC_URL=%s\n' "$L1" > "$ETC/follower.env"; chmod 0644 "$ETC/follower.env"
+    [ -z "$PREFIX" ] || mkdir -p "$UNITS"
     install -m 0644 "$HERE/systemd/bloch-l2-attestor.service" "$HERE/systemd/bloch-l2-attestor-follower.service" "$UNITS/"
     install -d "$UNITS/bloch-l2-attestor.service.d" "$UNITS/bloch-l2-attestor-follower.service.d"
     printf '[Service]\nIPAddressAllow=%s\n' "$allow_agent" > "$UNITS/bloch-l2-attestor.service.d/network.conf"
     [ -z "$PUB_TOKEN" ] || printf 'LoadCredential=publish-token:%s/publish-token\n' "$ETC" >> "$UNITS/bloch-l2-attestor.service.d/network.conf"
     printf '[Service]\nIPAddressAllow=localhost %s\n' "$ip" > "$UNITS/bloch-l2-attestor-follower.service.d/l1-rpc.conf"
-    systemctl daemon-reload
+    [ -n "$PREFIX" ] || systemctl daemon-reload
+  fi
+  if [ -n "$PREFIX" ]; then
+    cat <<MSG
+REHEARSAL install of attestor $INDEX under $PREFIX (units in $UNITS, not loaded). Check the host key:
+  $OPT/bloch-pos l2-claim key-check --sealed $ETC/attestor.sealed \\
+       --attestors $ETC/public/attestors.set --signer-index $INDEX --passphrase-file $ETC/keystore.passphrase
+MSG
+    return 0
   fi
   cat <<MSG
 Installed attestor $INDEX, NOT started. Next (each step is read-only until the last):

@@ -24,6 +24,7 @@ signing by itself. Operators act only on alerts.
 | `keykit/` | Key distribution for the key holder. See `keykit/KEY-HANDOFF-CHECKLIST.md`. |
 | `public/` | The pinned `attestors.set` and the five public keys. |
 | `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`). |
+| `tests/rehearse_owner_flow.sh` | End-to-end owner rehearsal with throwaway keys (`tty_driver.py` types the passphrases). |
 
 The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keystore-20261019`
 (dd287b6c + one CLI-only commit). That commit adds:
@@ -114,6 +115,13 @@ Notes:
 - `check` prints `check-ok`. It covers the pins, opening the key, the follower, the RPC quorum and
   the rebuild check.
 - When everything works, delete the bundle copy from the host. The operator keeps the offline backup.
+
+Rehearsal without root or systemd: `install … --prefix /scratch/host-I` installs every file under
+that directory as the invoking user, writes the units to `/scratch/host-I/systemd` without loading
+them, and prints a `key-check` command instead of the systemd steps. `--rehearsal-set FILE` (only
+with `--prefix`) accepts a throwaway attestor set. `tests/rehearse_owner_flow.sh` runs the whole
+owner flow this way with throwaway keys (seal, verify, install for 3 operators, check, sign a
+synthetic root, aggregate 3-of-5, native verify, shred). Rehearsed on 2026-10-19 on 209.250.236.240.
 
 To roll back, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
 and the key. `--purge-key` also shreds the host key and passphrase.
