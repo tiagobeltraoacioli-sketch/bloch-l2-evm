@@ -69,6 +69,10 @@ Consensus code is unchanged. The other binaries come from the RC pinned build (`
    - The agent signs with `bloch-pos l2-claim attest --sealed`. The key is opened inside bloch-pos
      only.
    - It checks the partial: signer index, and the digest over the pinned network, chain and root.
+   - It checks the signature length. A claim admits attestor signatures of at most 4,593 bytes,
+     but a valid Falcon-1024 part can make the hybrid signature longer. The agent then signs
+     again (fresh randomness, `resign-oversized` event), at most 64 times, and halts if none fits.
+     The aggregator also skips a partial whose signature is longer than 4,593 bytes.
    - It writes the partial to `/var/lib/bloch-l2-attestor/outbox/700770/<root>/attestor-<I>.partial`
      (plus a `.json` file).
    - The operator's feed serves the outbox. It also pushes to any optional push target, retrying failures every cycle.

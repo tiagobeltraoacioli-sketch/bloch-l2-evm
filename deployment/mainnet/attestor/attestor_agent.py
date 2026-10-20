@@ -372,12 +372,23 @@ class Agent:
         with tempfile.TemporaryDirectory(dir=self.state_dir) as scratch:
             proof = Path(scratch) / 'proof.json'
             proof.write_text(json.dumps(doc) + '\n')
-            out = Path(scratch) / 'partial'
-            self.native('attest', '--genesis', self.c['manifest'], '--proof', str(proof),
-                        '--attestors', self.c['attestors'], '--signer-index', str(self.index),
-                        '--sealed', self.c['sealed_key'], '--passphrase-file', self.passphrase_file(), '--out', str(out))
-            text = out.read_text()
-            index, digest, _ = lib.parse_partial(text)
+            # Falcon-1024 signatures vary in length: re-sign (fresh randomness) until the hybrid
+            # signature fits the claim's ATTESTOR_SIGNATURE_MAX, a bounded number of times.
+            for attempt in range(lib.SIGN_FIT_ATTEMPTS):
+                out = Path(scratch) / f'partial-{attempt}'
+                self.native('attest', '--genesis', self.c['manifest'], '--proof', str(proof),
+                            '--attestors', self.c['attestors'], '--signer-index', str(self.index),
+                            '--sealed', self.c['sealed_key'], '--passphrase-file', self.passphrase_file(),
+                            '--out', str(out))
+                text = out.read_text()
+                try:
+                    index, digest, _ = lib.parse_partial(text)
+                    break
+                except lib.OversizedSignature as e:
+                    log('resign-oversized', root=root, attempt=attempt + 1, error=str(e))
+            else:
+                raise Halt(f'no attestation signature fit {lib.ATTESTOR_SIGNATURE_MAX} bytes in '
+                           f'{lib.SIGN_FIT_ATTEMPTS} attempts')
             if index != self.index or digest != lib.attestation_digest(self.pins.network, self.pins.chain_id, root):
                 raise Halt('the partial signs another index, network, chain or root')
             tmp = final.with_suffix('.tmp')

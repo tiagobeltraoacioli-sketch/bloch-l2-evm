@@ -156,6 +156,18 @@ class LibTest(unittest.TestCase):
         self.assertFalse(lib.claimed(view, 512))
         self.assertFalse(lib.claimed(view, 300))
 
+    def test_partial_signature_bound_is_the_claim_admission_bound(self):
+        digest = 'cd' * 32
+        for size in (2000, 4000, lib.ATTESTOR_SIGNATURE_MAX):
+            text = f'1\n{digest}\n{"ab" * size}\n'
+            self.assertEqual(lib.parse_partial(text), (1, digest, 'ab' * size))
+        for size in (lib.ATTESTOR_SIGNATURE_MAX + 1, 4775):
+            with self.assertRaises(lib.OversizedSignature):
+                lib.parse_partial(f'1\n{digest}\n{"ab" * size}\n')
+        # Still a ValueError: every caller that skips malformed partials skips oversized ones too.
+        self.assertTrue(issubclass(lib.OversizedSignature, ValueError))
+        self.assertEqual((lib.ATTESTOR_SIGNATURE_MAX, lib.SIGN_FIT_ATTEMPTS), (4 + 3309 + 1280, 64))
+
 
 @unittest.skipUnless(NATIVE, f'needs BLOCH_POS ({BLOCH_POS}) with seal-key and MAINNET_MANIFEST')
 class AgentTest(unittest.TestCase):
@@ -351,6 +363,94 @@ class AgentTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             aggregate_attestation.aggregate(self.claim_proof(2, 0), [str(self.case / 'none')], self.case / 'agg4',
                                             BLOCH_POS, MANIFEST, str(self.set_file), pins=self.pins)
+
+    # ------------------------------------------------------------------ signature length bound
+    @staticmethod
+    def inflate(path, size=lib.ATTESTOR_SIGNATURE_MAX + 1):
+        """Rewrite a partial so its signature is `size` bytes (as a long Falcon-1024 signature would be)."""
+        lines = path.read_text().split('\n')
+        lines[2] = (lines[2] + '00' * size)[:2 * size]
+        path.write_text('\n'.join(lines))
+
+    def test_oversized_signature_is_resigned_until_it_fits(self):
+        agent = self.agent(0)
+        real, calls = agent.native, []
+
+        def native(*args):
+            done = real(*args)
+            if args[0] == 'attest':
+                calls.append(args)
+                if len(calls) <= 2:
+                    self.inflate(Path(args[args.index('--out') + 1]))
+            return done
+
+        agent.native = native
+        result, events = self.once(agent)
+        self.assertEqual(result, 'ok')
+        resigned = [e for e in events if e['event'] == 'resign-oversized']
+        self.assertEqual([e['attempt'] for e in resigned], [1, 2], events)
+        self.assertEqual(sorted(e['l2_number'] for e in events if e['event'] == 'signed'), [2, 3])
+        for number in (2, 3):
+            index, digest, signature = lib.parse_partial(self.partial(0, number).read_text())
+            self.assertLessEqual(len(signature) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+            self.assertEqual(digest, lib.attestation_digest(lib.NATIVE_NETWORK, lib.CHAIN_ID, self.root(number)))
+        # The partial that was kept is the native signature, unchanged: it verifies natively.
+        for i in (2, 4):
+            self.assertEqual(self.once(self.agent(i))[0], 'ok')
+        proof = self.claim_proof(3)
+        sources = [str(self.case / f'agent{i}' / 'outbox') for i in (0, 2, 4)]
+        summary = aggregate_attestation.aggregate(proof, sources, self.case / 'agg', BLOCH_POS, MANIFEST,
+                                                  str(self.set_file), pins=self.pins)
+        self.assertEqual(summary['signers'], [0, 2, 4])
+        self.assertIn('attestation ok: 3-of-5', summary['native_verify'])
+
+    def test_signatures_that_never_fit_halt_after_bounded_attempts(self):
+        agent = self.agent(0)
+        calls = []
+
+        def native(*args):
+            calls.append(args[0])
+            out = Path(args[args.index('--out') + 1])
+            digest = lib.attestation_digest(lib.NATIVE_NETWORK, lib.CHAIN_ID, self.root(2))
+            out.write_text(f'0\n{digest}\n{"ab" * (lib.ATTESTOR_SIGNATURE_MAX + 1)}\n')
+            return ''
+
+        agent.native = native
+        with self.assertRaises(attestor_agent.Halt) as halted:
+            self.once(agent)
+        self.assertEqual(calls, ['attest'] * lib.SIGN_FIT_ATTEMPTS)
+        self.assertIn(str(lib.ATTESTOR_SIGNATURE_MAX), str(halted.exception))
+        self.assertFalse(self.partial(0, 2).exists())
+
+    def test_real_attest_signatures_kept_by_the_agent_fit(self):
+        """Many native signatures through the agent's loop: every kept partial fits the bound."""
+        agent = self.agent(1)
+        doc = json.loads(self.claim_proof(3).read_text())
+        with contextlib.redirect_stdout(io.StringIO()):
+            for n in range(12):
+                partial = agent.sign(doc, self.root(3))
+                signature = lib.parse_partial(partial.read_text())[2]
+                self.assertLessEqual(len(signature) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+                partial.unlink()
+
+    def test_aggregator_skips_an_oversized_partial_and_uses_another_source(self):
+        for i in (0, 2, 4):
+            self.assertEqual(self.once(self.agent(i))[0], 'ok')
+        proof = self.claim_proof(3)
+        sources = [str(self.case / f'agent{i}' / 'outbox') for i in (0, 2, 4)]
+        bad = self.case / 'bad'
+        shutil.copytree(sources[0], bad)
+        self.inflate(bad / lib.partial_relpath(lib.CHAIN_ID, self.root(3), 0))
+        summary = aggregate_attestation.aggregate(proof, [str(bad)] + sources, self.case / 'agg', BLOCH_POS,
+                                                  MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(summary['signers'], [0, 2, 4])
+        self.assertTrue(any('admits at most' in p for p in summary['problems']), summary['problems'])
+        kept = lib.parse_partial((self.case / 'agg' / 'attestor-0.partial').read_text())[2]
+        self.assertLessEqual(len(kept) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+        # With only the oversized copy of attestor 0 there are not enough admissible partials.
+        with self.assertRaises(SystemExit):
+            aggregate_attestation.aggregate(proof, [str(bad)] + sources[1:], self.case / 'agg2', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
 
     def test_second_cycle_signs_nothing_new(self):
         agent = self.agent(1)
