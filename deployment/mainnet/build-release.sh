@@ -20,10 +20,18 @@
 #   * Cargo lock: 78b7343a resolves three extra lock entries; the build uses
 #     follower-rpc/settlement-recovery.mainnet.Cargo.lock (--locked) and restores the tree's lock.
 # Env: JOBS (default 8), TOOLCHAIN (default 1.98.1), CARGO_TARGET_DIR (default WORK/l2-target).
+#
+# L1 hard forks (docs/L2-HARD-FORK-OPERATOR-STEPS.md): the follower and the producer RUN the native
+# transition, so they must be rebuilt against the native release that arms a fork BEFORE its epoch,
+# or they halt at it (state-root mismatch). NATIVE_COMMIT selects that release (default: the running
+# one); NATIVE_LOCK (default: follower-rpc/settlement-recovery.mainnet.Cargo.lock) must be the lock
+# resolved against it. build.json records every L1 activation epoch the binaries were compiled with
+# (l1_activation_epochs, read from the native params.rs; "inert" = u64::MAX) so the operator can
+# compare them with the release notice.
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-NATIVE_COMMIT=78b7343a347d2c53944a7058b7cb1c2ca4efe842
+NATIVE_COMMIT=${NATIVE_COMMIT:-78b7343a347d2c53944a7058b7cb1c2ca4efe842}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
 TOOLCHAIN=${TOOLCHAIN:-1.98.1}
 JOBS=${JOBS:-8}
@@ -35,6 +43,7 @@ N=$W/src/bloch-validator-payout
 RETH=$W/src/reth-bloch-rpc-snapshot
 HERE=$L2/deployment/mainnet
 SR=$L2/integrations/settlement-recovery
+NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.mainnet.Cargo.lock}
 log() { echo "== $* ($(date -u +%FT%TZ))"; }
 die() { echo "build-release: $*" >&2; exit 2; }
 
@@ -56,7 +65,11 @@ log "mainnet Cargo lock for settlement-recovery"
 cp "$SR/Cargo.lock" "$W/settlement-recovery.tree.Cargo.lock"
 restore() { cp "$W/settlement-recovery.tree.Cargo.lock" "$SR/Cargo.lock"; }
 trap restore EXIT
-cp "$HERE/follower-rpc/settlement-recovery.mainnet.Cargo.lock" "$SR/Cargo.lock"
+cp "$NATIVE_LOCK" "$SR/Cargo.lock"
+
+log "L1 activation epochs compiled in"
+GATES=$(python3 "$HERE/l1_gates.py" "$N/crates/bloch-pos-committee/src/params.rs")
+echo "$GATES"
 
 log "follower + producer (settlement-recovery, no features)"
 nice cargo "+$TOOLCHAIN" build --release --locked --manifest-path "$SR/Cargo.toml" \
@@ -82,10 +95,10 @@ rm -rf "$G"
 
 (cd "$OUT" && sha256sum bloch-l2-native-follower bloch-l2-produce-dev bloch-l2-settled-rpc sequencer_mainnet.py > SHA256SUMS)
 python3 - "$OUT" "$HEAD" "$L2_COMMIT" "$L2_DIRTY" "$NATIVE_COMMIT" "$RETH_COMMIT" "$TOOLCHAIN" \
-  "$(sha256sum "$HERE/follower-rpc/settlement-recovery.mainnet.Cargo.lock" | cut -d' ' -f1)" <<'PY'
+  "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" "$GATES" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
-out, head, l2, dirty, native, reth, toolchain, lock = sys.argv[1:]
+out, head, l2, dirty, native, reth, toolchain, lock, gates = sys.argv[1:]
 genesis = json.loads(head)
 pins = {'hash': '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468',
         'state_root': '2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d'}
@@ -95,6 +108,7 @@ rustc = subprocess.run(['rustc', f'+{toolchain}', '--version'], capture_output=T
 report = {'chain_id': 700770, 'l2_commit': l2, 'l2_tracked_changes': int(dirty),
           'native': f'{native} (+ inert devnet-kes/devnet-lc-roster shim)', 'reth_snapshot': reth,
           'rustc': rustc, 'features': [], 'settlement_recovery_lock_sha256': lock, 'l2_genesis': genesis,
+          'l1_activation_epochs': json.loads(gates),
           'sha256': dict(l.split()[::-1] for l in (Path(out) / 'SHA256SUMS').read_text().splitlines())}
 (Path(out) / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps(report, indent=2))

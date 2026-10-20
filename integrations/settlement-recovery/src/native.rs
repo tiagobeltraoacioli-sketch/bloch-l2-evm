@@ -81,6 +81,41 @@ impl SignatureVerifier for NativeConsensusVerifierV1 {
     fn verify_with_key(&self, key: &[u8], root: &[u8; 32], signature: &[u8]) -> bool {
         bloch_crypto::crypto::verify(key, root, signature)
     }
+    /// L1 hard fork SIG_CANONICAL (audit e9b52781): the transition wraps this
+    /// verifier in its epoch's `PolicyVerifier`, which calls this method. The
+    /// trait default ignores the policy, which after the fork would refuse
+    /// every v2 proposer/vote signature and halt the replay. Same mapping as
+    /// the node's `HybridVerifier`. Compiled when the native checkout has the
+    /// method (see build.rs).
+    #[cfg(bloch_native_sig_policy)]
+    fn verify_with_key_under(
+        &self,
+        policy: bloch_pos_committee::attestation::SignaturePolicy,
+        key: &[u8],
+        root: &[u8; 32],
+        signature: &[u8],
+    ) -> bool {
+        use bloch_crypto::crypto::SignaturePolicy as C;
+        use bloch_pos_committee::attestation::SignaturePolicy as P;
+        let policy = match policy {
+            P::Compatible => C::Compatible,
+            P::CanonicalUnbound => C::CanonicalUnbound,
+            P::Bound => C::Bound,
+        };
+        bloch_crypto::crypto::verify_with_policy(policy, key, root, signature)
+    }
+    /// L1 hard fork HF3_SLH_SUITE_EPOCH: eUTXO spend witnesses may use suite
+    /// 0x0003 from the fork. The trait default answers the pre-fork verdict
+    /// and would halt the replay at the first such spend. Same mapping as the
+    /// node's `HybridVerifier`. Compiled when the native checkout has the
+    /// method (see build.rs). Written against the HF3 working tree of
+    /// 2026-10-20 (codex/hf3-slhdsa-20261020, uncommitted): if the HF2+HF3
+    /// integration composes it with the signature policy differently, this
+    /// fails to compile rather than diverge; follow the node's mapping.
+    #[cfg(bloch_native_spend_at_epoch)]
+    fn verify_spend_at_epoch(&self, key: &[u8], root: &[u8; 32], signature: &[u8], epoch: u64) -> bool {
+        bloch_crypto::crypto::verify_at_epoch(key, root, signature, epoch)
+    }
     fn verify_l2_settlement(&self, policy: &[u8; 32], program: &[u8; 32], values: &[u8], proof: &[u8]) -> bool {
         bloch_l2_proof::verify(policy, program, values, proof)
     }
@@ -686,5 +721,29 @@ mod deposit_conformance {
             let l2 = alloy_primitives::keccak256(alloy_rlp::encode(&body));
             assert_eq!(expected_body_commitment(&records[..n]), l2.0, "{n} deposits");
         }
+    }
+}
+
+#[cfg(all(test, bloch_native_sig_policy))]
+mod sig_policy {
+    use super::NativeConsensusVerifierV1;
+    use bloch_pos_committee::attestation::SignatureVerifier;
+
+    /// The replay verifier applies each L1 signature policy exactly as the
+    /// node does, so a follower built against a SIG_CANONICAL release keeps
+    /// following across the activation epoch.
+    #[test]
+    fn replay_verifier_honours_the_native_signature_policy() {
+        use bloch_pos_committee::attestation::{PolicyVerifier, SignaturePolicy::*};
+        let (pk, sk) = bloch_crypto::crypto::generate_keypair();
+        let root = [0x5B; 32];
+        let v1 = bloch_crypto::crypto::sign(&sk, &root).unwrap();
+        let v2 = bloch_crypto::crypto::sign_bound(&sk, &root).unwrap();
+        let under = |p| PolicyVerifier::new(&NativeConsensusVerifierV1, p);
+        assert!(under(Compatible).verify_with_key(&pk, &root, &v1));
+        assert!(!under(Compatible).verify_with_key(&pk, &root, &v2));
+        assert!(under(CanonicalUnbound).verify_with_key(&pk, &root, &v1));
+        assert!(under(Bound).verify_with_key(&pk, &root, &v2));
+        assert!(!under(Bound).verify_with_key(&pk, &root, &v1));
     }
 }

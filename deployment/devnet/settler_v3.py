@@ -1021,6 +1021,9 @@ class Settler:
             raise Halt('the DA funding key has no spendable outputs')
         if self.dry_run:
             raise Halt(f'dry run never signs or broadcasts the DA batch (fee estimate {estimate} sat)')
+        form = self.da_signature_form()
+        if form is None:
+            return False
         attempt = 0
         while (directory / f'da-unsigned-{attempt}.hex').exists():
             attempt += 1
@@ -1030,7 +1033,7 @@ class Settler:
         if attempt and last.exists() and (directory / f'da-signed-{attempt - 1}.hex').exists():
             meta = json.loads(last.read_text())
             unspent = {f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos}
-            if meta['base_fee'] == base_fee and set(meta['inputs']) <= unspent:
+            if meta['base_fee'] == base_fee and set(meta['inputs']) <= unspent and meta.get('form', []) == form:
                 tx = bytes.fromhex((directory / f'da-signed-{attempt - 1}.hex').read_text().strip())
                 return self.submit_da(number, directory, tx, commitment, attempt - 1, estimate)
         env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'BLOCH_KEYSTORE_PASSPHRASE_FILE': da['passphrase_file']}
@@ -1050,7 +1053,7 @@ class Settler:
         if result is None or result.returncode:
             raise Halt(f'DA prepare failed: {(result.stderr if result else "").strip()[:400]}')
         result = self.run([da['signer'], 'l2-da', 'sign', '--genesis', da['genesis'], '--tx', str(unsigned),
-                           '--dir', da['keystore_dir'], '--out', str(signed)],
+                           '--dir', da['keystore_dir'], *form, '--out', str(signed)],
                           env=env, capture_output=True, text=True, timeout=300)
         if result.returncode:
             raise Halt(f'DA signer refused: {result.stderr.strip()[:400]}')
@@ -1058,8 +1061,33 @@ class Settler:
         payload = bytes.fromhex((directory / 'da-payload.hex').read_text().strip())
         if da_frame_fields(tx) != (self.chain_id, number, payload):
             raise Halt('signed DA transaction does not carry this block batch')
-        (directory / f'da-meta-{attempt}.json').write_text(json.dumps({'base_fee': base_fee, 'inputs': inputs}) + '\n')
+        (directory / f'da-meta-{attempt}.json').write_text(json.dumps({'base_fee': base_fee, 'inputs': inputs,
+                                                                       'form': form}) + '\n')
         return self.submit_da(number, directory, tx, commitment, attempt, estimate)
+
+    def da_signature_form(self):
+        """The `l2-da sign` signature flags for the next DA transaction (L1 hard fork
+        SIG_CANONICAL_ACTIVATION_EPOCH, read from the pinned signer): [] while the gate is inert or the
+        signer predates it (the pre-fork command line), else `--for-epoch <L1 head epoch>`. None = wait:
+        from one epoch before the activation until it, a transaction signed now could be included on
+        either side of the fork, so the DA batch (and with it this block's settlement) waits, at most
+        about one epoch. Signed bytes are reused only in the form they were signed for."""
+        da = self.c['da']
+        result = self.run([da['signer'], 'l2-da', 'signature-forms'], capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            return []
+        activation = None
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == 'sig_canonical_activation_epoch' and parts[1] != 'inert':
+                activation = int(parts[1])
+        if activation is None:
+            return []
+        epoch = self.native.bounded_value('getchaininfo', 'epoch')
+        if activation - 1 <= epoch < activation:
+            log('da-paused-signature-fork', epoch=epoch, activation_epoch=activation)
+            return None
+        return ['--for-epoch', str(epoch)]
 
     def submit_da(self, number, directory, tx, commitment, attempt, estimate):
         da = self.c['da']

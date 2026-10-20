@@ -83,6 +83,8 @@ class Fake:
         self.da_records, self.include_da = [], True
         self.extend_extra = {}
         self.remote_jobs, self.remote_fail = [], False
+        # `bloch-pos l2-da signature-forms` of the pinned signer, and the L1 head epoch.
+        self.sig_forms, self.epoch = 'sig_canonical_activation_epoch inert\n', 100
 
     def view(self):
         request = ''.join(x + '\n' for x in (NETWORK, GENESIS, BLOCK, '5', '4', SOURCE, INBOX))
@@ -95,7 +97,7 @@ class Fake:
         if method == 'getl2settlement':
             return self.view()
         if method == 'getchaininfo':
-            return {'next_base_fee_millisat_per_gas': '10'}
+            return {'next_base_fee_millisat_per_gas': '10', 'epoch': self.epoch}
         if method == 'getutxos':
             return {'utxos': [{'txid': '33' * 32, 'vout': 0, 'value_sat': '9000000', 'script_hash': params[0]},
                               {'txid': '34' * 32, 'vout': 1, 'value_sat': '1000', 'script_hash': params[0]}]}
@@ -133,6 +135,10 @@ class Fake:
             elif command == 'export':
                 Path(argv[argv.index('--out') + 1]).write_bytes(b'artifact')
                 out.stdout = json.dumps({'number': self.head, 'hash': '51' * 32, 'anchor': BLOCK, 'bytes': 8})
+            return out
+        if name == 'bloch-pos' and argv[2:] == ['signature-forms']:
+            assert argv[1] == 'l2-da'
+            out.stdout = self.sig_forms
             return out
         if name == 'bloch-pos':
             assert argv[1] == 'l2-da' and kwargs['env']['BLOCH_KEYSTORE_PASSPHRASE_FILE']
@@ -449,6 +455,28 @@ class SettlerV3Test(unittest.TestCase):
         prepares = [c for c in fake.calls if Path(c[0]).name == 'bloch-pos' and c[2] == 'prepare']
         self.assertEqual([p[-1].rsplit('/', 1)[1] for p in prepares], ['da-unsigned-0.hex', 'da-unsigned-1.hex'])
         self.assertEqual(prepares[1][prepares[1].index('--base-fee') + 1], '11')
+
+    def test_da_signature_form_follows_the_l1_signature_fork(self):
+        """L1 SIG_CANONICAL armed at 101 in the pinned signer: the DA batch is signed for the head epoch,
+        waits during the epoch before the fork, and is signed again (never reused) across it."""
+        fake = Fake(self.root, statement(user_txs=2), produced_txs=2)
+        signs = lambda: [c for c in fake.calls if Path(c[0]).name == 'bloch-pos' and c[2] == 'sign']  # noqa: E731
+        # Inert (every release before the fork): the exact pre-fork command line.
+        fake.include_da = False
+        self.assertFalse(self.user_settler(fake).cycle())
+        self.assertNotIn('--for-epoch', signs()[-1])
+        fake.sig_forms = 'sig_canonical_activation_epoch 101\n'
+        fake.epoch = 99
+        self.assertFalse(self.user_settler(fake).cycle())
+        self.assertEqual(signs()[-1][signs()[-1].index('--for-epoch') + 1], '99', 'v1 bytes are not reused')
+        fake.epoch = 100
+        before = len(fake.sent)
+        self.assertFalse(self.user_settler(fake).cycle())
+        self.assertEqual(len(fake.sent), before, 'nothing is signed or sent the epoch before the fork')
+        fake.epoch, fake.include_da = 101, True
+        self.assertTrue(self.user_settler(fake).cycle())
+        self.assertEqual(signs()[-1][signs()[-1].index('--for-epoch') + 1], '101')
+        self.assertEqual(len(signs()), 3)
 
     def test_da_commitment_must_match_the_block_batch(self):
         wrong = Fake(self.root, statement(user_txs=2), produced_txs=2, da_payload=batch(2)[:-1] + b'\x09')
