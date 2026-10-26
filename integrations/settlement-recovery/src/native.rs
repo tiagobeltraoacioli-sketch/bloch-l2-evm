@@ -99,6 +99,11 @@ impl SignatureVerifier for NativeConsensusVerifierV1 {
         use bloch_pos_committee::attestation::SignaturePolicy as P;
         let policy = match policy {
             P::Compatible => C::Compatible,
+            // L1 MLDSA_PIN_ACTIVATION_EPOCH: historical byte forms, ML-DSA half
+            // judged by the pinned FIPS 204 verifier (`SignaturePolicy::consensus`
+            // and `::transaction` select it). Same as the node's `crypto_policy`.
+            #[cfg(bloch_native_mldsa_pin)]
+            P::CompatiblePinned => C::CompatiblePinned,
             P::CanonicalUnbound => C::CanonicalUnbound,
             P::Bound => C::Bound,
         };
@@ -107,14 +112,31 @@ impl SignatureVerifier for NativeConsensusVerifierV1 {
     /// L1 hard fork HF3_SLH_SUITE_EPOCH: eUTXO spend witnesses may use suite
     /// 0x0003 from the fork. The trait default answers the pre-fork verdict
     /// and would halt the replay at the first such spend. Same mapping as the
-    /// node's `HybridVerifier`. Compiled when the native checkout has the
-    /// method (see build.rs). Written against the HF3 working tree of
-    /// 2026-10-20 (codex/hf3-slhdsa-20261020, uncommitted): if the HF2+HF3
-    /// integration composes it with the signature policy differently, this
-    /// fails to compile rather than diverge; follow the node's mapping.
+    /// node's `HybridVerifier` (bloch-pos-node `keys.rs`): `verify_spend` with
+    /// the gate decided by the ONE HF3 constant in bloch-pos-committee
+    /// (`params::hf3_slh_suite_active`); bloch-crypto holds no activation
+    /// epoch of its own. Composition with the transaction policy is the
+    /// native `PolicyVerifier`'s job (it routes only suite-0x0003 keys here).
+    /// Compiled when the native checkout has the method (see build.rs).
     #[cfg(bloch_native_spend_at_epoch)]
     fn verify_spend_at_epoch(&self, key: &[u8], root: &[u8; 32], signature: &[u8], epoch: u64) -> bool {
-        bloch_crypto::crypto::verify_at_epoch(key, root, signature, epoch)
+        bloch_crypto::crypto::verify_spend(
+            key,
+            root,
+            signature,
+            bloch_pos_committee::params::hf3_slh_suite_active(epoch),
+        )
+    }
+    /// KES leaves are signed in the canonical, suite-bound v2 form from the
+    /// first KES signature, independent of any signature-policy flag day
+    /// (native review F-1). `kes::verify` calls this after the Merkle path
+    /// checks out. The trait default is the v1 `verify_with_key`, which
+    /// refuses every v2 leaf: the follower would halt at the first
+    /// KES-signed proposal or vote. Same mapping as the node's
+    /// `HybridVerifier`. Compiled when the native trait has it (build.rs).
+    #[cfg(bloch_native_kes_leaf)]
+    fn verify_kes_leaf(&self, leaf_pk: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        bloch_crypto::crypto::verify_bound(leaf_pk, message, signature)
     }
     fn verify_l2_settlement(&self, policy: &[u8; 32], program: &[u8; 32], values: &[u8], proof: &[u8]) -> bool {
         bloch_l2_proof::verify(policy, program, values, proof)
@@ -395,8 +417,9 @@ impl Default for NativeBlockLimitsV1 {
 
 /// Largest proposer or vote signature replayed: a hybrid signature (at most
 /// 4,593 bytes) or, from native KES activation on, a forward-secure KES
-/// signature (`bloch_pos_committee::kes::MAX_SIGNATURE_LEN` = 8,871 bytes:
-/// leaf key, leaf signature and up to a 16-level path).
+/// signature (`bloch_pos_committee::kes::MAX_SIGNATURE_LEN` = 9,053 bytes in
+/// native 78d4921c: leaf key, leaf signature and up to a 16-level path;
+/// pinned by the test `kes_signature_fits_the_replay_bound`).
 pub const MAX_CONSENSUS_SIGNATURE_BYTES: usize = 9_216;
 
 /// Real native replay that advances one block at a time and can be queried
@@ -745,5 +768,177 @@ mod sig_policy {
         assert!(under(CanonicalUnbound).verify_with_key(&pk, &root, &v1));
         assert!(under(Bound).verify_with_key(&pk, &root, &v2));
         assert!(!under(Bound).verify_with_key(&pk, &root, &v1));
+    }
+}
+
+/// Parity of [`NativeConsensusVerifierV1`] with the native node's
+/// `HybridVerifier` (bloch-pos-node `src/keys.rs`, not exported by that crate,
+/// so each test states the node's mapping as the `bloch_crypto` call it makes
+/// and checks the replay verifier against it). Every test goes through the
+/// same wrapper the native transition uses (`PolicyVerifier`) where the
+/// transition does.
+#[cfg(test)]
+mod node_parity {
+    use super::NativeConsensusVerifierV1;
+    use bloch_pos_committee::attestation::SignatureVerifier;
+
+    /// The replay verifier as it was before the trait grew a method: only the
+    /// required `verify_with_key`, every other method on the trait default.
+    /// A test double for "the default would have answered".
+    struct TraitDefaults;
+    impl SignatureVerifier for TraitDefaults {
+        fn verify_with_key(&self, key: &[u8], root: &[u8; 32], signature: &[u8]) -> bool {
+            bloch_crypto::crypto::verify(key, root, signature)
+        }
+    }
+
+    /// KES signatures can be as large as the native decoder admits; the replay
+    /// size bound must not refuse a valid one before the transition sees it.
+    #[cfg(bloch_native_kes_leaf)]
+    #[test]
+    fn kes_signature_fits_the_replay_bound() {
+        assert!(bloch_pos_committee::kes::MAX_SIGNATURE_LEN <= super::MAX_CONSENSUS_SIGNATURE_BYTES);
+    }
+
+    /// (a) KES leaves: node `verify_kes_leaf` = `bloch_crypto::crypto::verify_bound`.
+    #[cfg(bloch_native_kes_leaf)]
+    #[test]
+    fn kes_leaf_is_judged_in_the_bound_form_like_the_node() {
+        use bloch_pos_committee::attestation::{PolicyVerifier, SignaturePolicy::*};
+        use bloch_pos_committee::kes::{self, KesPublic, KesSignature};
+        let leaves_kp: Vec<_> = (0..2).map(|_| bloch_crypto::crypto::generate_keypair()).collect();
+        let leaves: Vec<[u8; 32]> = leaves_kp.iter().map(|(pk, _)| kes::leaf_hash(pk)).collect();
+        let start = 40;
+        let public = KesPublic::new(1, kes::merkle_root(&leaves), start);
+        let (pk, sk) = &leaves_kp[1];
+        let message = [0xC3; 32];
+        let bound = bloch_crypto::crypto::sign_bound(sk, &message).unwrap();
+        let v1 = bloch_crypto::crypto::sign(sk, &message).unwrap();
+        let encode = |sig: &[u8]| {
+            KesSignature { index: 1, leaf_pk: pk.clone(), sig: sig.to_vec(), path: kes::auth_path(&leaves, 1) }.encode()
+        };
+        let (kes_bound, kes_v1) = (encode(&bound), encode(&v1));
+
+        // The leaf check itself: exactly the node's verdicts.
+        let v = NativeConsensusVerifierV1;
+        assert_eq!(v.verify_kes_leaf(pk, &message, &bound), bloch_crypto::crypto::verify_bound(pk, &message, &bound));
+        assert_eq!(v.verify_kes_leaf(pk, &message, &v1), bloch_crypto::crypto::verify_bound(pk, &message, &v1));
+        assert!(v.verify_kes_leaf(pk, &message, &bound));
+        assert!(!v.verify_kes_leaf(pk, &message, &v1), "a v1 leaf is not a KES leaf");
+        // The trait default (what the follower at 0044697 ran) refuses the
+        // honest bound leaf: the follower would halt at the first KES block.
+        assert!(!TraitDefaults.verify_kes_leaf(pk, &message, &bound));
+        assert!(!TraitDefaults.verify_kes(&public, start + 1, &message, &kes_bound));
+
+        // The whole KES check (path + leaf), bare and through every policy
+        // wrapper the transition can put around it: forwarded unchanged.
+        let period = start + 1;
+        assert!(v.verify_kes(&public, period, &message, &kes_bound));
+        assert!(!v.verify_kes(&public, period, &message, &kes_v1));
+        assert!(!v.verify_kes(&public, start, &message, &kes_bound), "wrong period / leaf index");
+        assert!(!v.verify_kes(&public, period, &[0xC4; 32], &kes_bound), "other message");
+        let mut policies = vec![Compatible, CanonicalUnbound, Bound];
+        #[cfg(bloch_native_mldsa_pin)]
+        policies.push(CompatiblePinned);
+        for p in policies {
+            let w = PolicyVerifier::new(&v, p);
+            assert!(w.verify_kes(&public, period, &message, &kes_bound), "{p:?}");
+            assert!(!w.verify_kes(&public, period, &message, &kes_v1), "{p:?}");
+            assert!(!PolicyVerifier::new(&TraitDefaults, p).verify_kes(&public, period, &message, &kes_bound), "{p:?}");
+        }
+    }
+
+    /// (b) The node's `crypto_policy`: every committee policy maps to the
+    /// bloch-crypto policy of the same name, including `CompatiblePinned`.
+    /// An honest signature cannot tell the pinned ML-DSA backend from the
+    /// CPU-dispatching one (they disagree only on crafted edge cases, for which
+    /// no fixture exists in the native crates), so the mapping is pinned by
+    /// equality with the exact bloch-crypto entry point the node calls, on
+    /// both signature forms, and by the epochs that select the policy.
+    #[cfg(bloch_native_sig_policy)]
+    #[test]
+    fn every_signature_policy_maps_like_the_node() {
+        use bloch_crypto::crypto::SignaturePolicy as C;
+        use bloch_pos_committee::attestation::{PolicyVerifier, SignaturePolicy as P};
+        let (pk, sk) = bloch_crypto::crypto::generate_keypair();
+        let root = [0x6D; 32];
+        let v1 = bloch_crypto::crypto::sign(&sk, &root).unwrap();
+        let v2 = bloch_crypto::crypto::sign_bound(&sk, &root).unwrap();
+        let mut table = vec![(P::Compatible, C::Compatible), (P::CanonicalUnbound, C::CanonicalUnbound), (P::Bound, C::Bound)];
+        #[cfg(bloch_native_mldsa_pin)]
+        table.push((P::CompatiblePinned, C::CompatiblePinned));
+        for (p, c) in table {
+            for sig in [&v1, &v2] {
+                let node = bloch_crypto::crypto::verify_with_policy(c, &pk, &root, sig);
+                assert_eq!(NativeConsensusVerifierV1.verify_with_key_under(p, &pk, &root, sig), node, "{p:?}");
+                assert_eq!(PolicyVerifier::new(&NativeConsensusVerifierV1, p).verify_with_key(&pk, &root, sig), node, "{p:?}");
+            }
+        }
+        #[cfg(bloch_native_mldsa_pin)]
+        {
+            use bloch_pos_committee::params::{MLDSA_PIN_ACTIVATION_EPOCH as PIN, SIG_CANONICAL_ACTIVATION_EPOCH as CANON};
+            let pinned = |sig: &[u8]| bloch_crypto::crypto::verify_pinned(&pk, &root, sig);
+            assert!(NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v1));
+            assert!(!NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v2));
+            assert_eq!(NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v1), pinned(&v1));
+            if PIN != u64::MAX {
+                // Transactions are judged under CompatiblePinned from the pin
+                // epoch on (and never under a canonical policy).
+                assert_eq!(P::transaction(PIN), P::CompatiblePinned);
+                for e in [PIN, PIN + 1, CANON.max(PIN).saturating_add(1_000)] {
+                    assert_eq!(P::transaction(e), P::CompatiblePinned, "epoch {e}");
+                    let w = PolicyVerifier::new(&NativeConsensusVerifierV1, P::transaction(e));
+                    assert!(w.verify_with_key(&pk, &root, &v1), "epoch {e}: v1 transaction witness");
+                    assert_eq!(w.verify_with_key(&pk, &root, &v1), pinned(&v1));
+                }
+                if PIN < CANON {
+                    assert_eq!(P::consensus(PIN), P::CompatiblePinned);
+                }
+            }
+        }
+    }
+
+    /// (c) HF3 spends: node `verify_spend_at_epoch` =
+    /// `bloch_crypto::crypto::verify_spend(.., params::hf3_slh_suite_active(epoch))`.
+    #[cfg(bloch_native_spend_at_epoch)]
+    #[test]
+    fn spend_at_epoch_uses_the_hf3_gate_like_the_node() {
+        use bloch_pos_committee::attestation::{PolicyVerifier, SignaturePolicy};
+        use bloch_pos_committee::params::{hf3_slh_suite_active, HF3_SLH_SUITE_EPOCH as GATE};
+        let (slh_pk, slh_sk) = bloch_crypto::crypto::slhdsa_suite::generate_keypair();
+        let (pk, sk) = bloch_crypto::crypto::generate_keypair();
+        let root = [0x3A; 32];
+        let slh_sig = bloch_crypto::crypto::sign(&slh_sk, &root).unwrap();
+        let mut forged = slh_sig.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        let sig = bloch_crypto::crypto::sign(&sk, &root).unwrap();
+        let v = NativeConsensusVerifierV1;
+        let mut epochs = vec![0, 5_850, 7_359, 7_360, 8_620, u64::MAX - 1];
+        if GATE != u64::MAX {
+            epochs.extend([GATE.saturating_sub(1), GATE, GATE + 1]);
+        }
+        for e in epochs {
+            let gate = hf3_slh_suite_active(e);
+            let node = |k: &[u8], s: &[u8]| bloch_crypto::crypto::verify_spend(k, &root, s, gate);
+            assert_eq!(v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), node(&slh_pk, &slh_sig), "epoch {e}");
+            assert_eq!(v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), gate, "epoch {e}");
+            assert!(!v.verify_spend_at_epoch(&slh_pk, &root, &forged, e), "epoch {e}");
+            assert!(v.verify_spend_at_epoch(&pk, &root, &sig, e), "epoch {e}: 0x0001 spends unchanged");
+            assert_eq!(v.verify_spend_at_epoch(&pk, &root, &sig, e), node(&pk, &sig), "epoch {e}");
+            // Through the transaction-policy wrapper, as the transition calls it.
+            #[cfg(bloch_native_sig_policy)]
+            {
+                let w = PolicyVerifier::new(&v, SignaturePolicy::transaction(e));
+                assert_eq!(w.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), gate, "epoch {e}");
+                assert!(w.verify_spend_at_epoch(&pk, &root, &sig, e), "epoch {e}");
+            }
+            // The trait default never accepts the new suite.
+            assert!(!TraitDefaults.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), "epoch {e}");
+        }
+        if GATE != u64::MAX {
+            assert!(!v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, GATE - 1));
+            assert!(v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, GATE));
+        }
     }
 }
