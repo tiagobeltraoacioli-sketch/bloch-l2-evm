@@ -1,8 +1,8 @@
 # Bloch L2 (chain 700770) across the L1 hard forks HF1, HF2, HF3: operator steps
 
-Status: **plan, nothing armed.** Written 2026-10-20 (mainnet epoch ~6090). Every L1 gate below is
-`u64::MAX` (inert) on its branch. When a release arms a gate, read this document with the epoch from
-that release's notice. The epoch number is binding.
+Status: **armed release 78d4921c (2026-10-26), see §0.** Written 2026-10-20 (mainnet epoch ~6090)
+as a plan with every gate inert; §0 records the armed release and the L2 build that follows it. Read
+this document with the epochs from the release notice. The epoch numbers are binding.
 `epoch_start_utc(E) = 2026-08-13 21:31:19 + E × 960 s` (1 epoch = 16 min, 90 epochs/day).
 
 The L2 activated natively at L1 epoch 5850. Its follower, producer and attestor hosts run the L1
@@ -14,6 +14,45 @@ and withdrawal-claim (0x16) formats, their signing, the deposit/withdraw tooling
 `l2-claim`, the attestor kit, `bloch-l2-bridge.py`) and the user-visible flow stay exactly as today.
 Nothing in this plan changes them. §5 lists precisely where an L1 fork as currently drafted would still
 reach them, so the owner can decide.
+
+## 0. Armed release: native 78d4921c (HF1 + HF2 + HF3)
+
+The L1 release `78d4921c3ec6ba41829f3878eed47f8d3bb96230` arms HF1 (claim finality and frozen set at
+7180, own-target votes at 7186), HF2 (slashing v2, growth cap, `SIG_CANONICAL` and `MLDSA_PIN` at
+7270), HF3 (PQ migration, suite 0x0003 for spends, KES registration at 7360) and KES enforcement at
+8620. `LATTICE` and `SLASHING_ECONOMICS_V2` stay inert. Every L2 follower and producer must run a build
+against it **before epoch 7178** (2026-11-01 15:39 UTC).
+
+- **Build commit:** the tip of bloch-l2-evm `codex/hf-l2-native-verifier-78d4921c-20261026`. Its
+  verifier code is commit `a776134` (on top of `0044697`); the tip adds only this document. `0044697`
+  alone does **not** build against 78d4921c (it called a `bloch_crypto` function the release does not
+  have and missed the `CompatiblePinned` policy), and even patched to compile it would have **halted at
+  the first KES-signed block**, because `verify_kes_leaf` stayed on the trait default (v1 form).
+- **Build:** `NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
+  NATIVE_LOCK=<settlement-recovery lock resolved against 78d4921c> build-release.sh WORK OUT`. The lock
+  differs from the mainnet lock only by `bloch-finality-cert`, `bloch-mldsa-clean` (native path
+  crates) and `fips205 0.4.1` (crates.io).
+- **Check `OUT/build.json`:** `l2_tracked_changes` = 0, the pinned L2 genesis reproduced, and
+  `l1_activation_epochs` = 7180, 7180, 7186, 7270 ×4, 7360 ×3, 8620, with `"inert"` only for
+  `LATTICE` and `SLASHING_ECONOMICS_V2`.
+- **Verifier parity with the node:** `NativeConsensusVerifierV1` overrides exactly what the node's
+  `HybridVerifier` (bloch-pos-node `src/keys.rs`) overrides, with the same `bloch_crypto` call:
+
+  | Native `SignatureVerifier` method | Node `HybridVerifier` | L2 `NativeConsensusVerifierV1` |
+  | --- | --- | --- |
+  | `verify_with_key` | `crypto::verify` | `crypto::verify` |
+  | `verify_with_key_under` | `crypto::verify_with_policy(crypto_policy(p))`, 4 policies | same, 4 policies (`CompatiblePinned` behind `bloch_native_mldsa_pin`) |
+  | `verify_spend_at_epoch` | `crypto::verify_spend(.., params::hf3_slh_suite_active(epoch))` | same |
+  | `verify_kes` | trait default (`kes::verify` → `verify_kes_leaf`) | trait default |
+  | `verify_kes_leaf` | `crypto::verify_bound` | `crypto::verify_bound` (`bloch_native_kes_leaf`) |
+  | `verify_l2_settlement` | `bloch_l2_proof::verify` | `bloch_l2_proof::verify` |
+
+  `build.rs` now fails the build if the native trait gains a method not in this table, so a new
+  default can no longer be inherited silently.
+- **Tests** (`integrations/settlement-recovery`, against the 78d4921c checkout, with the lock above):
+  `cargo test --locked --lib node_parity` must run 4 tests (KES leaf in bound form, the 4-policy
+  mapping incl. `CompatiblePinned`, `verify_spend_at_epoch` across the HF3 gate, KES size bound), and
+  `cargo test --locked --lib sig_policy` 1 test.
 
 ## 1. The forks, as they touch the L2
 
@@ -27,7 +66,7 @@ reach them, so the owner can decide.
 
 | Component | HF1 | HF2 | HF3 |
 | --- | --- | --- | --- |
-| **Native follower** (`bloch-l2-native-follower`: settler host, attestor hosts, settled-RPC source) | **Rebuild** against the HF1 native release. Otherwise a state-root mismatch at the CF epoch halts it. Its own-chain finality check (`checkpoint(chain, finalized.epoch) == finalized.root`) already matches CF and p2a. | **Rebuild + code change (done):** `NativeConsensusVerifierV1` overrides `verify_with_key_under`. The trait default applies the pre-fork rule and would halt the follower at `A`. | **Rebuild + code change (done, untested against a committed tree):** override `verify_spend_at_epoch`. The default is fail-closed and would halt at the first 0x0003 spend. The build shim accepts a tree that defines `devnet-kes`/`devnet-lc-roster` itself (done). |
+| **Native follower** (`bloch-l2-native-follower`: settler host, attestor hosts, settled-RPC source) | **Rebuild** against the HF1 native release. Otherwise a state-root mismatch at the CF epoch halts it. Its own-chain finality check (`checkpoint(chain, finalized.epoch) == finalized.root`) already matches CF and p2a. | **Rebuild + code change (done):** `NativeConsensusVerifierV1` overrides `verify_with_key_under`. The trait default applies the pre-fork rule and would halt the follower at `A`. | **Rebuild + code change (done, tested against 78d4921c, §0):** override `verify_spend_at_epoch` (fail-closed default would halt at the first 0x0003 spend) and `verify_kes_leaf` (v1 default would halt at the first KES-signed block). The build shim accepts a tree that defines `devnet-kes`/`devnet-lc-roster` itself (done). |
 | **Producer / settler** (`bloch-l2-produce-dev`, `settler_v3.py`) | Rebuild: `reconstruct --l1-follower` decodes L1 blocks. The settlement 0x13 is unchanged. | 0x13 carries no signature, so it is unchanged. **DA batch 0x15** (only with `user_transactions`, off on mainnet today): signed `--for-epoch <head>` and **paused during epoch `A−1`** (done). | Rebuild. |
 | **Prover** (SP1 `settlement_v3_mainnet`, gnark; host 136) | **No change.** The guest does not link the L1 consensus crate, so program vkey and proof policy `154869964f…` are unchanged. Do not rebuild the guest. | No change. | No change. |
 | **Attestor hosts** (3-of-5, set `1c06adbb…`) | Rebuild their follower and producer and update the SHA-256 pins in `config.json`. The signing kit is unchanged. | Rebuild. Signing is unchanged by owner decision. See §5.2 for what HF2 as drafted would do to it. | Not affected by suite 0x0003 (§6). |
@@ -40,6 +79,7 @@ reach them, so the owner can decide.
 | Repo / branch | Content |
 | --- | --- |
 | bloch-l2-evm `codex/hf-l2-compat-20261020` (from 79f5f66) | `settlement-recovery`: `build.rs` probes the native tree and turns on the `verify_with_key_under` (HF2) and `verify_spend_at_epoch` (HF3) overrides, plus a unit test. Settler DA form/pause. `build-release.sh` with `NATIVE_COMMIT`/`NATIVE_LOCK` and `l1_activation_epochs` in `build.json` (`l1_gates.py`). The shim accepts KES/LC trees. This document. |
+| bloch-l2-evm `codex/hf-l2-native-verifier-78d4921c-20261026` (from 0044697) | `settlement-recovery` against the armed release 78d4921c: `verify_spend_at_epoch` via `verify_spend` + `hf3_slh_suite_active`, the `CompatiblePinned` arm, the `verify_kes_leaf` override, the trait-method guard in `build.rs`, and node-parity tests (§0). **The L2 build commit for 78d4921c.** |
 | bloch-sis-pow `codex/hf-l2-compat-20261020` (from `codex/hf2-sigdet-20261020`) | `l2-da sign --for-epoch/--sig-policy`, `l2-da signature-forms`. **Deposit and claim CLIs untouched.** |
 | bloch-sis-pow `codex/hf-l2-compat-lc-20261020` (from `codex/bloch-lc-20261014`) | LC `verify_bound`, `EpochVerifier`, and a mirrored `SIG_CANONICAL_ACTIVATION_EPOCH` (to be replaced by a re-export at the mainnet port). |
 
@@ -92,11 +132,11 @@ attestor hosts, the settled-RPC host, and the L1 RPCs the L2 reads.
 ### 4.3 HF3
 
 1. Do the common steps with the HF3 release. The follower must carry the `verify_spend_at_epoch`
-   override (`bloch_native_spend_at_epoch`). Check `l1_activation_epochs` for the KES and LC gates.
-2. For the HF2+HF3 integration: consensus wrappers (`PolicyVerifier`, any cache or budget wrapper)
-   must forward `verify_spend_at_epoch`. The follower's override must compose with the v2 policy
-   exactly as the node's `HybridVerifier` does. If the merged API differs, the probe-gated code fails
-   to compile. Fix it to mirror the node.
+   (`bloch_native_spend_at_epoch`) and `verify_kes_leaf` (`bloch_native_kes_leaf`) overrides. Check
+   `l1_activation_epochs` for the KES and LC gates.
+2. HF2+HF3 composition (resolved in 78d4921c): the native `PolicyVerifier` forwards
+   `verify_kes`/`verify_kes_leaf` unchanged and routes only suite-0x0003 spends to
+   `verify_spend_at_epoch`; the follower's overrides mirror the node's `HybridVerifier` (§0 table).
 3. Light client mainnet launch:
    - port the LC to the HF line and use the re-exported constant;
    - take roster weights from the frozen finality set;
@@ -160,6 +200,12 @@ program, so a new step program cannot extend the old proof chain:
 
 ### 5.2 HF2 `SIG_CANONICAL`, as drafted, DOES reach deposits and claims (decision needed)
 
+**Superseded in the armed release 78d4921c:** `apply_transaction` judges every transaction witness
+(including 0x14 and 0x16 with the attestor partials) under `SignaturePolicy::transaction(epoch)`, which
+is `Compatible`/`CompatiblePinned` and never a canonical policy, so v1 signatures stay valid before and
+after `A`. Only consensus messages (votes, proposer signatures, slashing evidence, KES leaves) move to
+the bound form. The text below describes the 2026-10-20 sigdet branch and is kept for the record.
+
 `codex/hf2-sigdet-20261020` wraps the verifier for every transaction in a block
 (`apply_transaction` → `PolicyVerifier::consensus(epoch)`). After `A`, consensus would refuse:
 
@@ -214,9 +260,9 @@ to 0x0003 still funds deposits and claims from a 0x0001 key.
 - §5.2 decision (exempt 0x14/0x16 from `SIG_CANONICAL`, or not).
 - §5.1: CF's coupling in `hf1_gates_coherent`, if the owner wants CF optional.
 - LC roster derived from the frozen finality set, at the LC mainnet port.
-- HF2+HF3 verifier composition and wrapper forwarding.
 - The committed tip of `codex/hf2-sigdet-20261020` (2e7cb51b) does not compile: `bloch-crypto`
   `verify_bound` lacks a `pqcrypto_traits::sign::DetachedSignature` import. A fix is in progress in
   that worktree. The branches here were tested with a local, uncommitted import.
-- A `settlement-recovery.mainnet.Cargo.lock` resolved against each HF release (`NATIVE_LOCK`).
+- A `settlement-recovery.mainnet.Cargo.lock` resolved against each later HF release (`NATIVE_LOCK`;
+  the 78d4921c one exists on the build host, §0).
 - SP1 builds of the LC programs with the new verifier (not run here).
