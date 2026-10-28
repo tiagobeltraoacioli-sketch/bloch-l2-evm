@@ -1,6 +1,7 @@
 # Bloch L2 (chain 700770) across the L1 hard forks HF1, HF2, HF3: operator steps
 
-Status: **armed release 78d4921c (2026-10-26), see §0.** Written 2026-10-20 (mainnet epoch ~6090)
+Status: **armed release 78d4921c (2026-10-26); L1 fleet on fa980367 = 78d4921c + mesh transport
+(2026-10-28), see §0.** Written 2026-10-20 (mainnet epoch ~6090)
 as a plan with every gate inert; §0 records the armed release and the L2 build that follows it. Read
 this document with the epochs from the release notice. The epoch numbers are binding.
 `epoch_start_utc(E) = 2026-08-13 21:31:19 + E × 960 s` (1 epoch = 16 min, 90 epochs/day).
@@ -22,6 +23,32 @@ The L1 release `78d4921c3ec6ba41829f3878eed47f8d3bb96230` arms HF1 (claim finali
 7270), HF3 (PQ migration, suite 0x0003 for spends, KES registration at 7360) and KES enforcement at
 8620. `LATTICE` and `SLASHING_ECONOMICS_V2` stay inert. Every L2 follower and producer must run a build
 against it **before epoch 7178** (2026-11-01 15:39 UTC).
+
+**L1 fleet on fa980367 (same L2 build).** The L1 fleet runs native
+`fa9803671dbf426228a7ded5f569cfcad7b299c2` with `--mesh-security offer`. It is 78d4921c plus two
+commits: `0b239d52` ("net: post-quantum mesh security for the devnet transport (--mesh-security)")
+and `fa980367` (a rehearsal script). **The L2 build against 78d4921c is the correct build for an L1
+running fa980367. Do not rebuild the L2 against fa980367.** Evidence (`git diff 78d4921c fa980367`):
+
+- Changed files: `crates/bloch-pos-node/{Cargo.toml, src/mesh_pq.rs (new), src/net.rs, src/main.rs,
+  src/engine.rs (Config: `MeshPlan`), src/engine/replay_bench.rs}`, `Cargo.lock` and
+  `scripts/mesh-pq-rehearsal.py`. `params.rs` is unchanged, so the activation epochs are identical.
+- No crate the L2 links changed: `bloch-pos-committee`, `bloch-crypto`, `bloch-finality-cert`,
+  `bloch-mldsa-clean` and `bloch-l2-proof` have an empty diff. The L2 also links `bloch-pos-node`,
+  but only its library target (`src/lib.rs` = `codec` + `genesis`, incl. `genesis_l2.rs`), and none of
+  those files changed. All changed node files belong to the `bloch-pos` binary.
+- `Cargo.lock`: only the `bloch-pos-node` dependency list (+ `getrandom 0.2.17`, `hkdf`,
+  `pqcrypto-mlkem`, `rand_core 0.6.4`, `x25519-dalek`) and one new package, `pqcrypto-mlkem 0.1.1`.
+  The settlement-recovery `NATIVE_LOCK` resolved against 78d4921c stays the correct lock for the
+  78d4921c build. Do **not** point `NATIVE_COMMIT` at fa980367: `build-release.sh` would refuse the
+  checkout, and with a 78d4921c lock `cargo --locked` would fail, because the node package's
+  manifest now declares those new dependencies. The L2 binaries would not change anyway.
+- Qualification of fa980367 on L1: full-history replay identical to 78d4921c, 0 gates changed.
+  The new transport is the L1 nodes' peer-to-peer mesh. The L2 reads L1 only over RPC.
+
+**Status 2026-10-28.** The L1 fleet, including the RPC endpoints the L2 reads (80.240.16.185,
+199.247.22.8, 45.77.67.251, port 8080), runs fa980367. The T−2 requirement (§4) is met. Remaining:
+every L2 follower and producer on the 78d4921c build before epoch 7178 (2026-11-01 15:39 UTC).
 
 - **Build commit:** the tip of bloch-l2-evm `codex/hf-l2-native-verifier-78d4921c-20261026`. Its
   verifier code is commit `a776134` (on top of `0044697`); the tip adds only this document. `0044697`
@@ -101,7 +128,11 @@ attestor hosts, the settled-RPC host, and the L1 RPCs the L2 reads.
   - the follower's `native_finalized_epoch` advances;
   - `rebuild-check-ok` appears in the logs.
 - **T−2:** the L1 RPC endpoints the L2 reads (`--l1-rpc-url`, settler and attestor `rpc_urls`) must
-  run `N`. A follower behind an un-upgraded L1 node stalls at the fork.
+  run `N`. A follower behind an un-upgraded L1 node stalls at the fork. A later L1 commit on top of `N`
+  also qualifies when it leaves the consensus transition identical and changes no crate the L2 links
+  (§0). For the HF1–HF3 release: `N` = 78d4921c, and the L1 RPCs (80.240.16.185, 199.247.22.8,
+  45.77.67.251, port 8080) run fa980367 = 78d4921c + mesh transport. **Met (2026-10-28).** The L2
+  build stays the one against 78d4921c.
 - **T0:** watch the follower (`verified_slot` advances), settler acceptance and attestor logs. If an L2
   follower halts at the gate with `Transition` or `StateRootMismatch`, it is not running `N`: stop it
   and reinstall. Never skip a block.
