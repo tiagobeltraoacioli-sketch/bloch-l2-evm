@@ -7,8 +7,8 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
 
   sudo python3 install-settler-mainnet.py prepare --release DIR
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
-      settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the mainnet release
-      78b7343a, SHA-256 fa9996ed...) and mainnet.manifest (SHA-256 7eef82a7...).
+      settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
+      78d4921c, SHA-256 700631b0...) and mainnet.manifest (SHA-256 7eef82a7...).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
       whose passphrase is generated here and never printed. Prints the funding
@@ -52,7 +52,9 @@ RPC_URLS = ['http://80.240.16.185:8080', 'http://199.247.22.8:8080', 'http://45.
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 PINS = {
     'settlement_v3_mainnet': '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473',
-    'bloch-pos': 'fa9996eda48a8d3a5beff249c1c7d9f666d9e8207c4f0a1825ba3dba3889fc18',  # release 78b7343a
+    # Armed release 78d4921c (HF1 7180/7186, HF2 7270, HF3 7360, KES 8620), canonical container,
+    # source-digest 35c2b943... Used only as the DA keygen and DA signer.
+    'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
 }
 FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
@@ -103,7 +105,7 @@ def prepare(args):
     settler = settler_module(source)
     assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
     build = run([source / 'bloch-pos', '--version']) + run([source / 'bloch-pos', 'buildinfo'])
-    assert '78b7343a' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+    assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
     run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', STATE,
          '--shell', '/usr/sbin/nologin', '--groups', 'docker', USER])
     owner = pwd.getpwnam(USER)

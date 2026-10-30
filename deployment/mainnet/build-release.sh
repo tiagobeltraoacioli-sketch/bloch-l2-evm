@@ -1,6 +1,6 @@
 #!/bin/bash
 # THE pinned build of the Bloch L2 MAINNET binaries (chain 700770) against the native release that
-# runs Genesis-4 mainnet (bloch-sis-pow 78b7343a, L2 activation at epoch 5850). One recipe for:
+# runs Genesis-4 mainnet (bloch-sis-pow 78d4921c armed release, L2 activation at epoch 5850). One recipe for:
 #   bloch-l2-native-follower   (settlement-recovery, no features)
 #   bloch-l2-produce-dev       (settlement-recovery, no features; settler producer + shadow)
 #   bloch-l2-settled-rpc       (reth-execution)
@@ -11,7 +11,7 @@
 #
 # WORK/src must hold, as siblings (the layout every L2 integration crate expects):
 #   bloch-l2-evm             this tree (a git checkout: its commit and cleanliness are recorded)
-#   bloch-validator-payout   bloch-sis-pow at exactly 78b7343a, clean
+#   bloch-validator-payout   bloch-sis-pow at exactly NATIVE_COMMIT, clean
 #   reth-bloch-rpc-snapshot  8eb21017 + the devnet4 working-tree change (reth-snapshot.patch)
 # Handled once, here:
 #   * native feature shim: settlement-recovery forwards devnet-kes / devnet-lc-roster, which the
@@ -24,14 +24,15 @@
 # L1 hard forks (docs/L2-HARD-FORK-OPERATOR-STEPS.md): the follower and the producer RUN the native
 # transition, so they must be rebuilt against the native release that arms a fork BEFORE its epoch,
 # or they halt at it (state-root mismatch). NATIVE_COMMIT selects that release (default: the running
-# one); NATIVE_LOCK (default: follower-rpc/settlement-recovery.mainnet.Cargo.lock) must be the lock
+# one); NATIVE_LOCK (default: follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock, sha256
+# 26bf4453...; the 78b7343a lock is settlement-recovery.mainnet.Cargo.lock) must be the lock
 # resolved against it. build.json records every L1 activation epoch the binaries were compiled with
 # (l1_activation_epochs, read from the native params.rs; "inert" = u64::MAX) so the operator can
 # compare them with the release notice.
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-NATIVE_COMMIT=${NATIVE_COMMIT:-78b7343a347d2c53944a7058b7cb1c2ca4efe842}
+NATIVE_COMMIT=${NATIVE_COMMIT:-78d4921c3ec6ba41829f3878eed47f8d3bb96230}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
 TOOLCHAIN=${TOOLCHAIN:-1.98.1}
 JOBS=${JOBS:-8}
@@ -43,7 +44,7 @@ N=$W/src/bloch-validator-payout
 RETH=$W/src/reth-bloch-rpc-snapshot
 HERE=$L2/deployment/mainnet
 SR=$L2/integrations/settlement-recovery
-NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.mainnet.Cargo.lock}
+NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock}
 log() { echo "== $* ($(date -u +%FT%TZ))"; }
 die() { echo "build-release: $*" >&2; exit 2; }
 

@@ -57,7 +57,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | `bloch-evm-sp1-settlement-v3` | `build-program.sh` (45.77.142.123 `~/l2-program-mainnet-20261014/out`) | `617d191f…86b3` |
 | `bloch-l2-produce-dev` | any build that has `--rules mainnet` | not a pin |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
-| `bloch-pos` | mainnet release 78b7343a | `fa9996ed…fc18` (enforced) |
+| `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
 
 ## 1. Prepare (local only)
