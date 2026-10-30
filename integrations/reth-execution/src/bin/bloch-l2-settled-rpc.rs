@@ -53,7 +53,7 @@ use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
     providers::{BlockchainProvider, RocksDBBuilder, StaticFileProvider},
-    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, StateProviderFactory,
+    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory,
 };
 use reth_rpc::EthFilter;
 use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
@@ -61,7 +61,10 @@ use reth_tasks::{RuntimeBuilder, RuntimeConfig, TokioConfig};
 use reth_transaction_pool::noop::NoopTransactionPool;
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -397,10 +400,13 @@ impl Spool {
         self.index.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Head facts of the latest settled state of `provider`.
+    /// Head facts of the database tip. The tip is read from the database, not
+    /// from the RPC's in-memory canonical head (refreshed every --poll-ms), so
+    /// a block the producer has just committed (and whose transactions it has
+    /// removed from the spool) is never mistaken for a spool gap.
     fn with_head<T>(
         &self,
-        provider: &BlochBlockchainProvider,
+        provider: &BlochProviderFactory,
         f: impl FnOnce(&mut SpoolHead<'_>) -> T,
     ) -> Result<T, String> {
         let best = provider.best_block_number().map_err(|e| format!("state unavailable: {e}"))?;
@@ -424,7 +430,7 @@ impl Spool {
     }
 
     /// Admit authenticated `raw` bytes, or say why not.
-    fn submit(&self, provider: &BlochBlockchainProvider, raw: &[u8]) -> Result<B256, String> {
+    fn submit(&self, provider: &BlochProviderFactory, raw: &[u8]) -> Result<B256, String> {
         let tx = bloch_l2_evm::decode_signed_transaction(&self.spec, raw).map_err(|e| format!("transaction rejected: {e:?}"))?;
         let hash = tx.hash();
         let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
@@ -454,7 +460,7 @@ impl Spool {
     }
 
     /// Evict every stale entry (run periodically, not only under pressure).
-    fn sweep(&self, provider: &BlochBlockchainProvider) -> Result<usize, String> {
+    fn sweep(&self, provider: &BlochProviderFactory) -> Result<usize, String> {
         let mut index = self.lock();
         let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
         let stale = self.with_head(provider, |head| {
@@ -468,7 +474,7 @@ impl Spool {
 }
 
 /// `eth_sendRawTransaction` into the settlement worker's spool directory.
-fn sequencer_rpc(spool: Arc<Spool>, provider: BlochBlockchainProvider) -> jsonrpsee::RpcModule<()> {
+fn sequencer_rpc(spool: Arc<Spool>, provider: BlochProviderFactory) -> jsonrpsee::RpcModule<()> {
     let mut module = jsonrpsee::RpcModule::new(());
     module
         .register_blocking_method("eth_sendRawTransaction", move |params, _, _| {
@@ -502,13 +508,24 @@ fn spooled_next_nonce(
     Ok(next)
 }
 
+/// The sender's nonce at the database tip (see [`Spool::with_head`]).
+fn tip_nonce(factory: &BlochProviderFactory, sender: alloy_primitives::Address) -> Result<u64, String> {
+    let state = factory.latest().map_err(|e| format!("state unavailable: {e}"))?;
+    Ok(state.basic_account(&sender).map_err(|e| format!("state unavailable: {e}"))?.map_or(0, |a| a.nonce))
+}
+
 /// `eth_getTransactionCount(addr, "pending")` in the sequencer's view (see
-/// [`spooled_next_nonce`]); other tags go to the upstream handler unchanged.
-fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spool: Arc<Spool>) -> Result<()> {
+/// [`spooled_next_nonce`]), counted from the later of the RPC's `latest` and
+/// the database tip; other tags go to the upstream handler unchanged.
+fn spool_pending_nonce(
+    module: &mut jsonrpsee::RpcModule<()>,
+    spool: Arc<Spool>,
+    factory: BlochProviderFactory,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     ensure!(module.remove_method("eth_getTransactionCount").is_some(), "eth API lacks eth_getTransactionCount");
     module.register_async_method("eth_getTransactionCount", move |params, _, _| {
-        let (original, spool) = (original.clone(), spool.clone());
+        let (original, spool, factory) = (original.clone(), spool.clone(), factory.clone());
         async move {
             let mut values: Vec<serde_json::Value> = params.parse()?;
             let pending = values.get(1).and_then(|v| v.as_str()) == Some("pending");
@@ -527,14 +544,53 @@ fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spool: Arc<Spool>)
             let sender: alloy_primitives::Address = serde_json::from_value(values[0].clone())
                 .map_err(|e| jsonrpsee::types::ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
             tokio::task::spawn_blocking(move || {
-                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, count.to())
+                let latest = tip_nonce(&factory, sender)?.max(count.to());
+                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, latest)
+                    .map_err(|e| format!("txpool unavailable: {e}"))
             })
             .await
             .map_err(|e| rpc_error(e.to_string()))?
             .map(alloy_primitives::U64::from)
-            .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))
+            .map_err(rpc_error)
         }
     })?;
+    Ok(())
+}
+
+/// Lookups by transaction hash that read the database directly, while state
+/// reads at `latest` follow the in-memory head the poll loop refreshes every
+/// --poll-ms.
+const HEAD_BOUND_METHODS: [&str; 2] = ["eth_getTransactionReceipt", "eth_getTransactionByHash"];
+
+/// Answer a mined transaction or its receipt only once its block is at or
+/// below the served head (`null` until then, as an Ethereum node does before
+/// it imports the block). Without this, a client that sees its receipt and
+/// then reads `latest` (forge script, ethers `wait()` followed by a call) can
+/// read the state before its own transaction for up to one poll interval.
+fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    for method in HEAD_BOUND_METHODS {
+        ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
+        let (original, head) = (original.clone(), head.clone());
+        module.register_async_method(method, move |params, _, _| {
+            let (original, head) = (original.clone(), head.clone());
+            async move {
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
+                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                    other => rpc_error(other.to_string()),
+                })?;
+                let number = result
+                    .get("blockNumber")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(match number {
+                    Some(number) if number > head.load(Ordering::Acquire) => serde_json::Value::Null,
+                    _ => result,
+                })
+            }
+        })?;
+    }
     Ok(())
 }
 
@@ -763,7 +819,7 @@ async fn main() -> Result<()> {
             });
             // Replace the no-pool method of the read-only API with the spooling one.
             ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
-            module.merge(sequencer_rpc(spool.clone(), provider.clone()))?;
+            module.merge(sequencer_rpc(spool.clone(), factory.clone()))?;
             Some(spool)
         }
         None => None,
@@ -777,8 +833,10 @@ async fn main() -> Result<()> {
     let settlements = Arc::new(std::sync::RwLock::new(SettlementIndex::new()));
     module.merge(settlement_rpc(settlements.clone()))?;
     serve_pending_blocks_as_latest(&mut module)?;
+    let served_head = Arc::new(AtomicU64::new(0));
+    hide_blocks_above_head(&mut module, served_head.clone())?;
     if let Some(spool) = &spool {
-        spool_pending_nonce(&mut module, spool.clone())?;
+        spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
     let server = start_http_rpc(module, options.port).await?;
     println!(
@@ -803,13 +861,14 @@ async fn main() -> Result<()> {
                     if number != head_number {
                         let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
                         state.set_canonical_head(header.clone());
+                        served_head.store(number, Ordering::Release);
                         head_number = number;
                         println!("head block={} hash={}", number, header.hash());
                     }
                     if let Some(spool) = spool.as_ref().filter(|_| last_sweep.elapsed() >= SPOOL_SWEEP) {
                         last_sweep = std::time::Instant::now();
-                        let (spool, provider) = (spool.clone(), provider.clone());
-                        match tokio::task::spawn_blocking(move || spool.sweep(&provider)).await {
+                        let (spool, factory) = (spool.clone(), factory.clone());
+                        match tokio::task::spawn_blocking(move || spool.sweep(&factory)).await {
                             Ok(Ok(0)) => {}
                             Ok(Ok(evicted)) => println!("spool sweep evicted {evicted} stale entries"),
                             Ok(Err(error)) => println!("spool sweep failed: {error}"),
@@ -926,6 +985,38 @@ mod tests {
         assert!(final_genesis(&status(700_771.into(), entry(local, true)), 700_770, local).is_err());
         assert!(final_genesis(&status(700_770.into(), entry(B256::repeat_byte(1), true)), 700_770, local).is_err());
         assert!(final_genesis(&status(700_770.into(), serde_json::json!({"finalized": true})), 700_770, local).is_err());
+    }
+
+    #[tokio::test]
+    async fn receipts_and_mined_transactions_wait_for_the_served_head() {
+        let mut module = jsonrpsee::RpcModule::new(());
+        for method in HEAD_BOUND_METHODS {
+            module
+                .register_method(method, |params, _, _| {
+                    let hash: String = params.one()?;
+                    Ok::<_, jsonrpsee::types::ErrorObjectOwned>(match hash.as_str() {
+                        "unknown" => serde_json::Value::Null,
+                        "pending" => serde_json::json!({"hash": "pending", "blockNumber": null}),
+                        _ => serde_json::json!({"hash": hash, "blockNumber": "0x5"}),
+                    })
+                })
+                .unwrap();
+        }
+        let head = Arc::new(AtomicU64::new(4));
+        hide_blocks_above_head(&mut module, head.clone()).unwrap();
+        for method in HEAD_BOUND_METHODS {
+            let at: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["mined"]).await.unwrap();
+            assert!(at.is_null(), "{method} above the head");
+            let unknown: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["unknown"]).await.unwrap();
+            assert!(unknown.is_null());
+            let pending: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["pending"]).await.unwrap();
+            assert_eq!(pending["hash"], "pending");
+        }
+        head.store(5, Ordering::Release);
+        for method in HEAD_BOUND_METHODS {
+            let at: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["mined"]).await.unwrap();
+            assert_eq!(at["blockNumber"], "0x5", "{method} at the head");
+        }
     }
 
     #[tokio::test]

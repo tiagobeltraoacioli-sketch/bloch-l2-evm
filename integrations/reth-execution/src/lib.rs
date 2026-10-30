@@ -59,7 +59,7 @@ pub use rpc_identity::{
     chain_identity_rpc, chain_status_rpc, BlochChainIdentity, BlochChainStatus, CHAIN_IDENTITY_FORMAT,
     CHAIN_STATUS_FORMAT, HEADER_FORMAT,
 };
-pub use rpc_transport::{start_http_rpc, start_ws_rpc, RPC_MAX_REQUEST_BYTES, RPC_MAX_RESPONSE_BYTES};
+pub use rpc_transport::{start_http_rpc, start_ws_rpc, RPC_MAX_HTTP_CONNECTIONS, RPC_MAX_REQUEST_BYTES, RPC_MAX_RESPONSE_BYTES};
 pub use rpc_types::{BlochHeaderConverter, BlochRpcHeader, BlochRpcTypes};
 /// Complete type selection for a provider; does not launch a node or Engine API.
 #[derive(Clone, Debug, Default)]
