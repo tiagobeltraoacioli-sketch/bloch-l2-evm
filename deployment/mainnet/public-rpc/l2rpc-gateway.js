@@ -60,6 +60,7 @@ const METHODS = {
   bloch_settlement: 'read',
   bloch_chainIdentity: 'read',
   bloch_chainStatus: 'read',
+  bloch_getWithdrawalProof: 'read',
 };
 
 const EXPLAINED = {
