@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Unit tests for l2_monitor.py with a fake RPC transport (no network).
+"""Unit tests for l2_monitor.py with fake RPC, command and HTTP transports (no network, no systemd).
 
 Run: python3 -m unittest discover -s deployment/mainnet -p 'test_l2_monitor.py' -v
 """
 import copy
+import hashlib
 import io
 import json
 import os
@@ -17,40 +18,69 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import l2_monitor as m  # noqa: E402
 
-NOW = 1_800_000_000
-L2 = 'http://l2'
+EPOCH = 7000
+NOW = m.epoch_start(EPOCH) + 100
+L2A, L2B = 'http://l2a', 'http://l2b'
 L1 = ['http://l1a', 'http://l1b', 'http://l1c']
 BLCH_WEI = 10 ** 18
+GENESIS = m.MAINNET_PINS['l2_genesis_hash']
 
 
-def block(number, age):
-    return {'number': hex(number), 'timestamp': hex(NOW - age), 'hash': '0x' + f'{number:064x}',
+def block(number, age, h=None):
+    return {'number': hex(number), 'timestamp': hex(NOW - age), 'hash': '0x' + (h or f'{number:064x}'),
             'baseFeePerGas': hex(10 ** 9)}
 
 
+def hard_forks():
+    return {name: {'activation_epoch': (m.V2_COMPILED_GATES[c] if not isinstance(m.V2_COMPILED_GATES[c], list)
+                                        else 7270), 'active': False}
+            for name, c in m.GATE_CONSTANTS.items()} | {'hf3_lattice_emergency': {'activation_epoch': None,
+                                                                                   'active': False}}
+
+
 def healthy():
-    """A mainnet snapshot shaped like the devnet4 replies of 2026-10-18."""
+    """A live mainnet snapshot: settlement 5 min old, L1 finality 2 epochs, follower 3 epochs (structural)."""
     l1 = {
-        'height': 154813, 'epoch': 5944, 'finalized_height': 154736,
-        'finalized': {'epoch': 5942, 'root': 'aa' * 32},
+        'height': 186000, 'epoch': EPOCH, 'slot': EPOCH * 32 + 3, 'finalized_height': 185930,
+        'finalized': {'epoch': EPOCH - 2, 'root': 'aa' * 32}, 'hard_forks': hard_forks(),
     }
     settlement = {
-        'chain_id': 700770,
+        'chain_id': 700770, 'network': m.MAINNET_PINS['network'], 'genesis': m.MAINNET_PINS['genesis'],
+        'native_height': 34000, 'profile': {'activated': True},
+        'source': {'slot': (NOW - 300 - m.L1_GENESIS_TIME) // 30, 'height': 101},
         'inbox': {'count': 3, 'consumed': 3, 'escrow_sat': str(124 * 10 ** 8)},
         'data_availability': [],
         'withdrawals': {'escrow_conserved': True, 'released_sat': str(176 * 10 ** 8),
+                        'attestor_set': m.MAINNET_PINS['attestor_set'], 'roots': [],
                         'release_window': {'window': 7, 'cap_sat': str(10 ** 9), 'remaining_sat': str(10 ** 9)}},
         'accepted': {'commitment': 'cc' * 32},
     }
+    backend = {
+        'eth_chainId': '0xab162',
+        'latest': block(101, 5 * 60), 'safe': block(100, 17 * 60), 'finalized': block(95, 100 * 60),
+        'bloch_finality': {'finalized_height': 95,
+                           'l1': {'verified_blocks': 185930, 'finalized': {'epoch': EPOCH - 5}}},
+        'ledger': {'0x0': 300 * BLCH_WEI, '0x2': 0, '0x3': 176 * BLCH_WEI},
+    }
     return {
-        'l2': {
-            'eth_chainId': '0xab162',
-            'latest': block(100, 5 * 60), 'safe': block(99, 17 * 60), 'finalized': block(95, 100 * 60),
-            'bloch_finality': {'finalized_height': 95, 'l1': {'verified_blocks': 154700}},
-            'ledger': {'0x0': 300 * BLCH_WEI, '0x2': 0, '0x3': 176 * BLCH_WEI},
-        },
+        'l2': {L2A: backend, L2B: copy.deepcopy(backend)},
         'l1': {url: {'info': copy.deepcopy(l1), 'l2': copy.deepcopy(settlement)} for url in L1},
     }
+
+
+def prelaunch():
+    """The live mainnet today: L2 at genesis, nothing ever settled (accepted null)."""
+    w = healthy()
+    for node in w['l1'].values():
+        node['l2']['accepted'] = None
+        node['l2']['source'] = {'slot': 187200, 'height': 1}
+        node['l2']['inbox'] = {'count': 0, 'consumed': 0, 'escrow_sat': '0'}
+        node['l2']['withdrawals']['released_sat'] = '0'
+    for b in w['l2'].values():
+        g = block(0, NOW - 1786656679, GENESIS)
+        b.update({'latest': g, 'safe': g, 'finalized': g, 'ledger': {'0x0': 0, '0x2': 0, '0x3': 0}})
+        b['bloch_finality']['finalized_height'] = 0
+    return w
 
 
 class Fake:
@@ -60,8 +90,8 @@ class Fake:
 
     def __call__(self, url, method, params):
         self.calls.append((url, method))
-        if url == L2:
-            w = self.world['l2']
+        if url in (L2A, L2B):
+            w = self.world['l2'].get(url)
             if w is None:
                 raise m.RpcError('connection refused')
             if method == 'eth_chainId':
@@ -82,22 +112,45 @@ class Fake:
         raise AssertionError(f'unexpected {method}')
 
 
-def run(world, *extra):
-    args = m.parse(['--profile', 'mainnet', '--l2-rpc', L2] + sum((['--l1-rpc', u] for u in L1), []) + list(extra))
+def run(world, *extra, phase='live', runner=None, fetch=None):
+    argv = ['--profile', 'mainnet', '--phase', phase, '--l2-rpc', f'A={L2A}', '--l2-rpc', f'B={L2B}']
+    argv += sum((['--l1-rpc', u] for u in L1), []) + list(extra)
+    args = m.parse(argv)
     fake = Fake(world)
-    return m.run(args, fake, now=NOW), fake
+    return m.run(args, fake, now=NOW, run_cmd=runner or (lambda a: (1, '')), fetch=fetch or (lambda u: None)), fake
 
 
 def level(report, name):
-    return next(c['level'] for c in report.checks if c['check'] == name)
+    found = [c['level'] for c in report.checks if c['check'] == name]
+    if not found:
+        raise AssertionError(f'no check {name}: {[c["check"] for c in report.checks]}')
+    return found[0]
+
+
+def partial(index, root, chain=700770):
+    digest = hashlib.sha3_256(m.ATTESTATION_DOMAIN + bytes.fromhex(m.MAINNET_PINS['network'])
+                              + chain.to_bytes(8, 'big') + bytes.fromhex(root)).hexdigest()
+    return f'{index}\n{digest}\n{"ab" * 3000}\n'.encode()
 
 
 class MonitorTests(unittest.TestCase):
     def test_healthy_snapshot_is_ok(self):
-        r, fake = run(healthy())
+        r, _ = run(healthy())
         self.assertEqual(m.LEVEL_NAMES[r.status], 'OK', json.dumps(r.checks, indent=1))
-        self.assertEqual(r.facts['l2_latest'], 100)
-        self.assertEqual(r.facts['l1_finalized_epoch'], 5942)
+        self.assertEqual(r.facts['l2_latest'], 101)
+        self.assertEqual(r.facts['l1_finalized_epoch'], EPOCH - 2)
+        self.assertEqual(r.facts['l2_settled_number'], 100)
+
+    def test_prelaunch_mainnet_today_is_ok_and_live_phase_alerts(self):
+        r, _ = run(prelaunch(), phase='prelaunch')
+        self.assertEqual(m.LEVEL_NAMES[r.status], 'OK', json.dumps(r.checks, indent=1))
+        r, _ = run(prelaunch(), phase='live')
+        self.assertEqual(level(r, 'settlement_age'), 'CRIT')
+        self.assertEqual(level(r, 'l2_head_age'), 'CRIT')
+
+    def test_prelaunch_with_a_settlement_asks_for_live_phase(self):
+        r, _ = run(healthy(), phase='prelaunch')
+        self.assertEqual(level(r, 'phase'), 'WARN')
 
     def test_only_read_only_methods_are_called(self):
         _, fake = run(healthy())
@@ -106,69 +159,25 @@ class MonitorTests(unittest.TestCase):
     def test_client_refuses_write_methods_without_io(self):
         transport = mock.Mock()
         client = m.Client(transport)
-        for method in ('eth_sendRawTransaction', 'sendrawtransaction', 'personal_sign', 'eth_sign'):
+        for method in ('eth_sendRawTransaction', 'sendrawtransaction', 'personal_sign', 'eth_sign', 'submitl2'):
             with self.assertRaises(PermissionError):
-                client.call(L2, method, [])
+                client.call(L2A, method, [])
         transport.assert_not_called()
 
-    def test_stale_head_is_critical(self):
-        w = healthy()
-        w['l2']['latest'] = block(100, 50 * 60)
-        r, _ = run(w)
-        self.assertEqual(level(r, 'l2_head_age'), 'CRIT')
-        self.assertEqual(r.status, m.CRIT)
+    def test_runner_refuses_anything_but_systemctl_show_and_journalctl(self):
+        for argv in (['systemctl', 'restart', 'x'], ['systemctl', 'stop', 'x'], ['rm', '-rf', '/']):
+            with self.assertRaises(PermissionError):
+                m.subprocess_runner(argv)
 
-    def test_settlement_backlog_warns_then_crits(self):
+    # ---- L1
+    def test_l1_finality_lag(self):
         w = healthy()
-        w['l2']['safe'] = block(98, 30 * 60)
-        self.assertEqual(level(run(w)[0], 'l2_unsafe_depth'), 'WARN')
-        w['l2']['safe'] = block(96, 60 * 60)
-        self.assertEqual(level(run(w)[0], 'l2_unsafe_depth'), 'CRIT')
-
-    def test_finality_stall(self):
-        w = healthy()
-        w['l2']['finalized'] = block(80, 5 * 3600)
-        w['l2']['bloch_finality']['finalized_height'] = 80
         for node in w['l1'].values():
-            node['info']['finalized']['epoch'] = 5934
-        r, _ = run(w)
-        self.assertEqual(level(r, 'l2_finalized_age'), 'CRIT')
-        self.assertEqual(level(r, 'l1_finality_lag'), 'CRIT')
-
-    def test_tag_inversion_is_critical(self):
-        w = healthy()
-        w['l2']['finalized'] = block(100, 5 * 60)
-        w['l2']['safe'] = block(99, 17 * 60)
-        w['l2']['bloch_finality']['finalized_height'] = 100
-        self.assertEqual(level(run(w)[0], 'l2_tag_order'), 'CRIT')
-
-    def test_nothing_settled_yet_is_a_warning(self):
-        w = healthy()
-        w['l2']['safe'] = None
-        w['l2']['finalized'] = None
-        r, _ = run(w)
-        self.assertEqual(level(r, 'l2_safe'), 'WARN')
-        self.assertEqual(level(r, 'l2_finalized'), 'WARN')
-        self.assertEqual(r.status, m.WARN)
-
-    def test_wrong_chain_id(self):
-        w = healthy()
-        w['l2']['eth_chainId'] = '0xab163'
-        self.assertEqual(level(run(w)[0], 'l2_chain_id'), 'CRIT')
-
-    def test_escrow_not_conserved_on_one_node(self):
-        w = healthy()
-        w['l1'][L1[1]]['l2']['withdrawals']['escrow_conserved'] = False
-        self.assertEqual(level(run(w)[0], 'escrow_conserved'), 'CRIT')
-
-    def test_escrow_backing_shortfall(self):
-        w = healthy()
-        w['l2']['ledger']['0x0'] = 301 * BLCH_WEI
-        r, _ = run(w)
-        self.assertEqual(level(r, 'escrow_backing'), 'CRIT')
-        w = healthy()
-        w['l2']['ledger']['0x3'] = 100 * BLCH_WEI
-        self.assertEqual(level(run(w)[0], 'claims_vs_withdrawn'), 'CRIT')
+            node['info']['finalized']['epoch'] = EPOCH - 5
+        self.assertEqual(level(run(w)[0], 'l1_finality_lag'), 'WARN')
+        for node in w['l1'].values():
+            node['info']['finalized']['epoch'] = EPOCH - 9
+        self.assertEqual(level(run(w)[0], 'l1_finality_lag'), 'CRIT')
 
     def test_one_l1_node_down_warns_majority_down_crits(self):
         w = healthy()
@@ -177,17 +186,154 @@ class MonitorTests(unittest.TestCase):
         del w['l1'][L1[1]]
         self.assertEqual(level(run(w)[0], 'l1_nodes'), 'CRIT')
 
-    def test_l2_rpc_down(self):
+    def test_l1_identity_pins(self):
         w = healthy()
-        w['l2'] = None
+        w['l1'][L1[2]]['l2']['withdrawals']['attestor_set'] = '00' * 32
+        self.assertEqual(level(run(w)[0], 'l1_l2_identity'), 'CRIT')
+        w = healthy()
+        w['l1'][L1[0]]['l2']['network'] = '11' * 32
+        self.assertEqual(level(run(w)[0], 'l1_l2_identity'), 'CRIT')
+
+    def test_l1_accepted_split_warns(self):
+        w = healthy()
+        w['l1'][L1[2]]['l2']['accepted']['commitment'] = 'dd' * 32
+        self.assertEqual(level(run(w)[0], 'l1_accepted_agreement'), 'WARN')
+
+    # ---- settlement age
+    def test_settlement_age(self):
+        w = healthy()
+        for node in w['l1'].values():
+            node['l2']['source']['slot'] = (NOW - 30 * 60 - m.L1_GENESIS_TIME) // 30
+        self.assertEqual(level(run(w)[0], 'settlement_age'), 'WARN')
+        for node in w['l1'].values():
+            node['l2']['source']['slot'] = (NOW - 50 * 60 - m.L1_GENESIS_TIME) // 30
+        self.assertEqual(level(run(w)[0], 'settlement_age'), 'CRIT')
+
+    # ---- L2 backends
+    def test_stale_head_is_critical(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
         r, _ = run(w)
-        self.assertEqual(level(r, 'l2_rpc'), 'CRIT')
+        self.assertEqual(level(r, 'l2_head_age'), 'CRIT')
         self.assertEqual(r.status, m.CRIT)
 
-    def test_follower_lag(self):
+    def test_unsafe_depth(self):
         w = healthy()
-        w['l2']['bloch_finality']['l1']['verified_blocks'] = 154736 - 400
-        self.assertEqual(level(run(w)[0], 'follower_lag'), 'CRIT')
+        for b in w['l2'].values():
+            b['safe'] = block(99, 30 * 60)
+        self.assertEqual(level(run(w)[0], 'l2_unsafe_depth'), 'WARN')
+        for b in w['l2'].values():
+            b['safe'] = block(96, 60 * 60)
+        self.assertEqual(level(run(w)[0], 'l2_unsafe_depth'), 'CRIT')
+
+    def test_tag_inversion_is_critical(self):
+        w = healthy()
+        w['l2'][L2B]['finalized'] = block(101, 5 * 60)
+        w['l2'][L2B]['bloch_finality']['finalized_height'] = 101
+        self.assertEqual(level(run(w)[0], 'l2_tag_order[B]'), 'CRIT')
+
+    def test_one_backend_down_warns_both_down_crits(self):
+        w = healthy()
+        del w['l2'][L2B]
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l2_rpc[B]'), 'CRIT')
+        self.assertEqual(level(r, 'l2_backends'), 'WARN')
+        del w['l2'][L2A]
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l2_backends'), 'CRIT')
+
+    def test_wrong_chain_id_on_one_backend(self):
+        w = healthy()
+        w['l2'][L2A]['eth_chainId'] = '0xab163'
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l2_rpc[A]'), 'CRIT')
+        self.assertEqual(r.facts['l2_primary_backend'], 'B')
+
+    def test_backends_disagree_on_a_block_is_critical(self):
+        w = healthy()
+        w['l2'][L2B]['finalized'] = block(95, 100 * 60, 'ee' * 32)
+        self.assertEqual(level(run(w)[0], 'l2_backends_agree'), 'CRIT')
+
+    def test_backend_finalized_spread(self):
+        w = healthy()
+        w['l2'][L2B]['finalized'] = block(90, 150 * 60)
+        w['l2'][L2B]['bloch_finality']['finalized_height'] = 90
+        self.assertEqual(level(run(w)[0], 'l2_backends_agree'), 'WARN')
+
+    def test_wrong_l2_genesis_is_critical(self):
+        w = prelaunch()
+        w['l2'][L2B]['finalized'] = block(0, 10, 'ab' * 32)
+        self.assertEqual(level(run(w, phase='prelaunch')[0], 'l2_genesis[B]'), 'CRIT')
+
+    def test_rpc_without_follower_status_warns(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['safe'] = None
+            b['finalized'] = None
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l2_safe'), 'WARN')
+        self.assertEqual(level(r, 'l2_finalized'), 'WARN')
+
+    def test_finalized_age(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['finalized'] = block(80, 5 * 3600)
+            b['bloch_finality']['finalized_height'] = 80
+        self.assertEqual(level(run(w)[0], 'l2_finalized_age'), 'CRIT')
+
+    # ---- follower
+    def test_follower_epoch_lag_three_is_structural(self):
+        r, _ = run(healthy())
+        self.assertEqual(level(r, 'follower_epoch_lag[A]'), 'OK')
+        w = healthy()
+        w['l2'][L2A]['bloch_finality']['l1']['finalized']['epoch'] = EPOCH - 2 - 5
+        self.assertEqual(level(run(w)[0], 'follower_epoch_lag[A]'), 'WARN')
+        w['l2'][L2A]['bloch_finality']['l1']['finalized']['epoch'] = EPOCH - 2 - 9
+        self.assertEqual(level(run(w)[0], 'follower_epoch_lag[A]'), 'CRIT')
+
+    def test_follower_verified_lag(self):
+        w = healthy()
+        w['l2'][L2B]['bloch_finality']['l1']['verified_blocks'] = 185930 - 400
+        self.assertEqual(level(run(w)[0], 'follower_verified_lag[B]'), 'CRIT')
+
+    def test_follower_status_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            good, stale, wrong = Path(d, 'a.json'), Path(d, 'b.json'), Path(d, 'c.json')
+            base = {'chain_id': 700770, 'network': m.MAINNET_PINS['network'], 'verified_blocks': 185930,
+                    'native_finalized_epoch': EPOCH - 5, 'l2_genesis': {'hash': GENESIS}, 'written_at_unix': NOW - 20}
+            good.write_text(json.dumps(base))
+            stale.write_text(json.dumps({**base, 'written_at_unix': NOW - 2000}))
+            wrong.write_text(json.dumps({**base, 'network': '00' * 32}))
+            r, _ = run(healthy(), '--follower-status', f'fa={good}', '--follower-status', f'fb={stale}',
+                       '--follower-status', f'fc={wrong}', '--follower-status', f'fd={d}/missing.json')
+        self.assertEqual(level(r, 'follower_status[fa]'), 'OK')
+        self.assertEqual(level(r, 'follower_epoch_lag[fa:status]'), 'OK')
+        self.assertEqual(level(r, 'follower_status[fb]'), 'CRIT')
+        self.assertEqual(level(r, 'follower_status[fc]'), 'CRIT')
+        self.assertEqual(level(r, 'follower_status[fd]'), 'CRIT')
+
+    # ---- escrow / reserves
+    def test_escrow_not_conserved_on_one_node(self):
+        w = healthy()
+        w['l1'][L1[1]]['l2']['withdrawals']['escrow_conserved'] = False
+        self.assertEqual(level(run(w)[0], 'escrow_conserved'), 'CRIT')
+
+    def test_escrow_backing_shortfall(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['ledger']['0x0'] = 301 * BLCH_WEI
+        r, _ = run(w)
+        self.assertEqual(level(r, 'escrow_backing'), 'CRIT')
+        w = healthy()
+        for b in w['l2'].values():
+            b['ledger']['0x3'] = 100 * BLCH_WEI
+        self.assertEqual(level(run(w)[0], 'claims_vs_withdrawn'), 'CRIT')
+
+    def test_reserve_ratio_fact(self):
+        r, _ = run(healthy())
+        self.assertEqual(r.facts['l2_outstanding_wei'], 124 * BLCH_WEI)
+        self.assertEqual(r.facts['reserve_ratio'], 1.0)
 
     def test_backlogs_and_release_window(self):
         w = healthy()
@@ -200,10 +346,126 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'da_backlog'), 'CRIT')
         self.assertEqual(level(r, 'release_window'), 'WARN')
 
-    def test_l1_accepted_split_warns(self):
+    # ---- gates
+    def test_gate_approaching(self):
+        r, _ = run(healthy())
+        self.assertEqual(level(r, 'l1_gates'), 'OK')  # 180 epochs ahead
         w = healthy()
-        w['l1'][L1[2]]['l2']['accepted']['commitment'] = 'dd' * 32
-        self.assertEqual(level(run(w)[0], 'l1_accepted_agreement'), 'WARN')
+        for node in w['l1'].values():
+            node['info']['epoch'] = 7100
+        r, _ = run(w, '--set', 'l1_finality_epochs_warn=200', '--set', 'l1_finality_epochs_crit=300',
+                   '--set', 'follower_epoch_lag_warn=200', '--set', 'follower_epoch_lag_crit=300')
+        self.assertEqual(level(r, 'l1_gates'), 'WARN')
+        for node in w['l1'].values():
+            node['info']['epoch'] = 7176
+        r, _ = run(w, '--set', 'l1_finality_epochs_warn=200', '--set', 'l1_finality_epochs_crit=300',
+                   '--set', 'follower_epoch_lag_warn=200', '--set', 'follower_epoch_lag_crit=300')
+        self.assertEqual(level(r, 'l1_gates'), 'CRIT')
+        self.assertIn('e7180', next(c['message'] for c in r.checks if c['check'] == 'l1_gates'))
+
+    def test_gate_mismatch_with_the_l2_build_is_critical(self):
+        w = healthy()
+        for node in w['l1'].values():
+            node['info']['hard_forks']['hf2_growth_cap']['activation_epoch'] = 7300
+        self.assertEqual(level(run(w)[0], 'l1_gates_vs_l2_build'), 'CRIT')
+
+    def test_gate_check_reads_build_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': {'HF1_CLAIM_FINALITY_EPOCH': 7181}}))
+            r, _ = run(healthy(), '--build-json', str(bj))
+        self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
+
+    def test_l1_without_hard_forks_warns(self):
+        w = healthy()
+        for node in w['l1'].values():
+            del node['info']['hard_forks']
+        self.assertEqual(level(run(w)[0], 'l1_gates'), 'WARN')
+
+    # ---- attestors
+    def attest_world(self, ages):
+        w = healthy()
+        roots = [{'l2_number': 50 + i, 'root': f'{i + 1:064x}', 'count': i + 1, 'height': 34000 - age,
+                  'finalized': True} for i, age in enumerate(ages)]
+        for node in w['l1'].values():
+            node['l2']['withdrawals']['roots'] = roots
+        return w, roots
+
+    def test_attestor_signatures_per_round(self):
+        w, roots = self.attest_world([500, 400, 10])
+        with tempfile.TemporaryDirectory() as d:
+            def put(root, signers):
+                for i in signers:
+                    q = Path(d, '700770', root['root'], f'attestor-{i}.partial')
+                    q.parent.mkdir(parents=True, exist_ok=True)
+                    q.write_bytes(partial(i, root['root']))
+            put(roots[0], [0, 1, 2, 3, 4])
+            put(roots[1], [0, 1, 2, 4])
+            put(roots[2], [0])  # within the grace period: not judged yet
+            r, _ = run(w, '--attest-drop', d)
+            self.assertEqual(level(r, 'attestors'), 'WARN')
+            self.assertIn('#3 (1)', next(c['message'] for c in r.checks if c['check'] == 'attestors'))
+            for i in (1, 2, 4):
+                os.remove(Path(d, '700770', roots[1]['root'], f'attestor-{i}.partial'))
+            r, _ = run(w, '--attest-drop', d)
+            self.assertEqual(level(r, 'attestors'), 'CRIT')
+            self.assertEqual([x['signatures'] for x in r.facts['attestation_rounds']], [5, 1, 1])
+
+    def test_attestor_partial_must_match_index_and_digest(self):
+        w, roots = self.attest_world([500])
+        root = roots[0]['root']
+        good = {f'https://drop/700770/{root}/attestor-{i}.partial': partial(i, root) for i in range(3)}
+        good[f'https://drop/700770/{root}/attestor-3.partial'] = partial(4, root)       # wrong index
+        good[f'https://drop/700770/{root}/attestor-4.partial'] = partial(4, 'ff' * 32)  # wrong root
+        r, _ = run(w, '--attest-drop', 'https://drop', fetch=good.get)
+        self.assertEqual(r.facts['attestation_rounds'][0]['signers'], [0, 1, 2])
+        self.assertEqual(level(r, 'attestors'), 'WARN')
+
+    def test_rounds_without_partials_are_not_faults(self):
+        w, _ = self.attest_world([500, 400])
+        with tempfile.TemporaryDirectory() as d:
+            r, _ = run(w, '--attest-drop', d)
+        self.assertEqual(level(r, 'attestors'), 'OK')
+
+    # ---- units and logs
+    def test_units_and_journal_events(self):
+        def runner(argv):
+            unit = argv[2]
+            if argv[0] == 'systemctl':
+                if unit == 'shadow.service':
+                    return 0, 'LoadState=loaded\nActiveState=failed\nSubState=failed\nNRestarts=0\nExecMainStatus=3\nResult=exit-code\n'
+                if unit == 'missing.service':
+                    return 0, 'LoadState=not-found\n'
+                return 0, 'LoadState=loaded\nActiveState=active\nSubState=running\nNRestarts=1\nExecMainStatus=0\nResult=success\n'
+            t = m.datetime.datetime.fromtimestamp(NOW - 60, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            old = m.datetime.datetime.fromtimestamp(NOW - 7200, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            if unit == 'settler.service':
+                lines = [{'time': old, 'event': 'halt', 'reason': 'old'},
+                         {'time': t, 'event': 'prover-failed', 'exit_code': 1},
+                         {'time': t, 'event': 'remote-proof', 'exit_code': 137},
+                         {'time': t, 'event': 'accepted', 'number': 7}]
+            elif unit == 'shadow.service':
+                lines = [{'time': t, 'event': 'halt', 'reason': 'block 7 differs from the settler'}]
+            else:
+                lines = [{'time': t, 'event': 'shadow-match'}]
+            return 0, '\n'.join('Oct 30 host python3[1]: ' + json.dumps(x) for x in lines)
+        r, _ = run(healthy(), '--unit', 'settler=settler.service', '--unit', 'shadow=shadow.service',
+                   '--unit', 'missing.service', '--unit', 'ok=ok.service', runner=runner)
+        self.assertEqual(level(r, 'unit[settler]'), 'OK')
+        self.assertEqual(level(r, 'events[settler]'), 'WARN')
+        self.assertIn('prover-failed x2', next(c['message'] for c in r.checks if c['check'] == 'events[settler]'))
+        self.assertEqual(level(r, 'unit[shadow]'), 'CRIT')
+        self.assertEqual(level(r, 'events[shadow]'), 'CRIT')
+        self.assertEqual(level(r, 'unit[missing.service]'), 'CRIT')
+        self.assertEqual(level(r, 'events[ok]'), 'OK')
+
+    def test_repeated_warn_events_escalate(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d, 'settler.log')
+            t = m.datetime.datetime.fromtimestamp(NOW - 30, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            log.write_text('\n'.join(json.dumps({'time': t, 'event': 'rpc-no-quorum'}) for _ in range(5)) + '\nnot json\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+        self.assertEqual(level(r, 'events[settler]'), 'CRIT')
 
     def test_heartbeat_files(self):
         with tempfile.TemporaryDirectory() as d:
@@ -218,21 +480,87 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'file:follower'), 'CRIT')
         self.assertEqual(level(r, 'file:missing'), 'CRIT')
 
+    def test_binary_pins(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Path(d, 'bloch-l2-produce-dev')
+            b.write_bytes(b'not the v2 build')
+            r, _ = run(healthy(), '--binary', str(b))
+            self.assertEqual(level(r, 'binary[bloch-l2-produce-dev]'), 'CRIT')
+            with mock.patch.dict(m.V2_SHA256, {'bloch-l2-produce-dev': hashlib.sha256(b.read_bytes()).hexdigest()}):
+                r, _ = run(healthy(), '--binary', str(b))
+            self.assertEqual(level(r, 'binary[bloch-l2-produce-dev]'), 'OK')
+
     def test_threshold_override(self):
-        w = healthy()
-        r, _ = run(w, '--set', 'head_age_warn=60')
+        r, _ = run(healthy(), '--set', 'head_age_warn=60')
         self.assertEqual(level(r, 'l2_head_age'), 'WARN')
         with self.assertRaises(SystemExit):
-            run(w, '--set', 'nonsense=1')
+            run(healthy(), '--set', 'nonsense=1')
+
+    # ---- alerts
+    def alert_args(self, d, cfg, dry=False):
+        path = Path(d, 'alert.json')
+        path.write_text(json.dumps({'state_file': str(Path(d, 'state.json')), **cfg}))
+        argv = ['--alert-config', str(path)] + (['--alert-dry-run'] if dry else [])
+        return m.parse(argv)
+
+    def test_alert_on_change_realert_and_recovery(self):
+        sent = []
+
+        def sender(cfg, text, payload, timeout, dry):
+            sent.append((payload['event'], text))
+            return ['webhook']
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            args = self.alert_args(d, {'webhook_url': 'https://hook', 'realert_seconds': 600})
+            bad, _ = run(w)
+            self.assertEqual(m.handle_alerts(args, bad, NOW, sender), 'raise')
+            self.assertIn('CRIT l2_head_age', sent[-1][1])
+            self.assertIsNone(m.handle_alerts(args, bad, NOW + 60, sender))   # unchanged: quiet
+            self.assertEqual(m.handle_alerts(args, bad, NOW + 700, sender), 'raise')  # reminder
+            good, _ = run(healthy())
+            self.assertEqual(m.handle_alerts(args, good, NOW + 800, sender), 'recover')
+            self.assertIsNone(m.handle_alerts(args, good, NOW + 900, sender))
+        self.assertEqual([e for e, _ in sent], ['raise', 'raise', 'recover'])
+
+    def test_placeholder_targets_send_nothing_and_say_so(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            args = self.alert_args(d, {'webhook_url': 'TBD-owner',
+                                       'telegram': {'bot_token_file': 'TBD-owner', 'chat_id': 'TBD-owner'}})
+            r, _ = run(w)
+            with mock.patch.object(m.urllib.request, 'urlopen') as urlopen:
+                m.handle_alerts(args, r, NOW)
+            urlopen.assert_not_called()
+        self.assertEqual(level(r, 'alert_delivery'), 'WARN')
+
+    def test_dry_run_alert_does_not_send_or_persist(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            tok = Path(d, 'tok')
+            tok.write_text('123:abc')
+            args = self.alert_args(d, {'webhook_url': 'https://hook',
+                                       'telegram': {'bot_token_file': str(tok), 'chat_id': '-100'}}, dry=True)
+            r, _ = run(w)
+            with mock.patch.object(m.urllib.request, 'urlopen') as urlopen:
+                m.handle_alerts(args, r, NOW)
+            urlopen.assert_not_called()
+            self.assertFalse(Path(d, 'state.json').exists())
+        self.assertEqual(len(r.facts['alert']['sent']), 2)
 
     def test_main_prints_json_and_returns_status(self):
         fake = Fake(healthy())
         with mock.patch.object(m, 'http_transport', return_value=fake), mock.patch.object(m.time, 'time', return_value=NOW):
             out = io.StringIO()
             with redirect_stdout(out):
-                code = m.main(['--l2-rpc', L2, '--l1-rpc', L1[0], '--json'])
+                code = m.main(['--l2-rpc', L2A, '--l1-rpc', L1[0], '--json'])
         doc = json.loads(out.getvalue())
-        self.assertEqual(code, m.OK)
+        self.assertEqual(code, m.OK, json.dumps(doc['checks'], indent=1))
         self.assertEqual(doc['status'], 'OK')
 
 

@@ -1,0 +1,33 @@
+[Unit]
+Description=Bloch L2 mainnet (700770) read-only monitor (no keys, no chain writes; alerts to the configured webhook/Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bloch-l2-monitor
+Group=bloch-l2-monitor
+# systemctl show / journalctl of the L2 units (read-only) need the systemd-journal group.
+SupplementaryGroups=systemd-journal
+EnvironmentFile=/etc/bloch-l2-monitor/monitor.env
+StateDirectory=bloch-l2-monitor
+# Exit 1/2/3 = WARN/CRIT/UNKNOWN: reported through the alert config, not a unit failure.
+SuccessExitStatus=1 2 3
+ExecStart=/usr/bin/python3 -I /opt/bloch/l2-monitor/l2_monitor.py $MONITOR_ARGS --alert-config /etc/bloch-l2-monitor/alert.json
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/bloch-l2-monitor /opt/bloch/l2-monitor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+Nice=10

@@ -1,0 +1,8 @@
+{
+  "webhook_url": "TBD-owner",
+  "webhook_bearer_file": "",
+  "telegram": {"bot_token_file": "TBD-owner", "chat_id": "TBD-owner"},
+  "min_level": "WARN",
+  "realert_seconds": 3600,
+  "state_file": "/var/lib/bloch-l2-monitor/alert.state"
+}
