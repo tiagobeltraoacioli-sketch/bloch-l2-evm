@@ -3,75 +3,95 @@
     {
       "name": "execute",
       "exit_code": 0,
-      "seconds": 5.57489323313348,
-      "log_sha256": "fe861bd85d225b8b31cdc2f54827d45a15a95556a10a1ae32da8a1a40b60d706"
+      "seconds": 11.351983785629272,
+      "log_sha256": "b26ab191bd6ee7367711da29802bd47ddf0e2d6c15829fe73530f2e1663573d3"
     },
     {
       "name": "prove",
       "exit_code": 0,
-      "seconds": 633.5215171359014,
-      "log_sha256": "876151dc3f0620d7cbe3ece12a492120f80dcb8f3674c0216c4c456c0fe34f39"
+      "seconds": 895.6900446414948,
+      "log_sha256": "49ce454327e4c44cb316495ddac18210ca1737b3a51702d88141c832812a62b6"
     },
     {
       "name": "verify",
       "exit_code": 0,
-      "seconds": 4.800491194007918,
-      "log_sha256": "17bd629194f6937a53ee3b561b6d365d4e120d3736c298afb749d34ba504a2bf"
+      "seconds": 6.088646650314331,
+      "log_sha256": "3d5c4126550daf8b836afdccc2e21250f15a5f2c07ca0e036189d5c63698e21e"
     }
   ],
+  "generated_at": "2026-10-30T22:46:04Z",
   "runtime_updated": false,
   "operational_private_keys_read": false,
-  "request_sha256": "2e7d7135ebf3b8e32b56dabe01a686f6f1735d1960906f5670685cc046f00ac4",
-  "host_sha256": "6896ceb7e2ca81aca468225c34d520251b472f79cc37967b8236baa817983aad",
+  "request_sha256": "99bc82072f1d363eec95a3ad543539b63ab78713944594712cf4ffe615c4912c",
+  "host_binary": "bloch-evm-sp1-settlement-v2 (integrations/sp1-execution/host, default features), mode native-empty",
+  "host_sha256": "d9c779f9eb145e3cd50196ee0cd80d5d43a144df62a3f7c6d997372d1eada7c4",
   "guest_sha256": "8e24512ffa42d7c7e87db8c10df8c2a1d09c3977170e6615d559f9b5f9da8c4b",
+  "generator": "examples/qualify_native_ffg.rs (release build)",
+  "generator_sha256": "edfd075cb63c205e9d290d0b3681aa1b10e40dedc6c5845ecfaad7cde7e59837",
+  "sp1_gnark_image": "ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d",
+  "sp1_circuit_version": "v6.1.0",
   "ok": true,
-  "proof_sha256": "defc0cc20c306c3c3aec1a4d6787b6ced3f55dfcfe2f701304bf61bb54c3cbe6",
-  "original_prover_unchanged": true,
+  "sp1_proof_sha256": "d128274f1cea997314f0f08c80b334cb9d6a1eba922d0a70a95ce8b6c3ffa75e",
   "classification": "real-proof-disposable-pq-native-ffg-rehearsal",
-  "genesis_state_root": "a18d390fd74edb85ccce6be661a21dfa3aa645759142ecc1292fe6631963078c",
-  "bootstrap_sha256": "0dd49ba339ff3b442d819ea28ccecf97cc486819379c83d278d6bcd21c480afe",
-  "canonical_proof_sha256": "181e3459dbd31a14f3900da381cdc428f9a28dbb08bd3d5bd43fcb67c05c77b0",
-  "public_values_sha256": "c8905ee7701d32525bc3b04fbf11853f5d9a1c699311e82fa40f148ee986e9b3",
-  "wrapper_vk_sha256": "4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
-  "native_revision": "7eb589049121ff98baab99a565e046b495b877c2",
+  "genesis_state_root": "43a0e6842cfa5c194879cb344ce5ad99b2814c31b52a0cc9d81d374e18be4184",
+  "bootstrap_sha256": "2d15c462a805caf9fa7026ded141d4bba115429ad40153f945cabe966c4f9d26",
+  "canonical_proof_sha256": "675a1652cb7e9b8777b5f53c2ce9211aaa7f87baa21fe3a63f37f286f67cb89e",
+  "public_values_sha256": "2820a16a316e39dbe8c3205b3230a64770ac53bf6fed969ff8b30b3d8c586e8e",
+  "wrapper_vk_sha256": "b316d345d55a20c42e5ca8fe3d5aa0f8d46b2fd675f0302407829c20a0979372",
+  "native_revision": "78d4921c (release/hf123-armado-20261025) with the inert devnet-kes/devnet-lc-roster Cargo feature shim",
+  "settlement_recovery_lock_sha256": "26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8",
+  "toolchain": "1.98.1",
+  "native_wire_tags": {
+    "settlement": "0x12",
+    "async_settlement": "0x13"
+  },
+  "regenerated_because": "native 7eb58904 -> 78d4921c changed the genesis state commitment and renumbered the L2 settlement wire tag (0x0e -> 0x12); the 2026-10-01 fixtures no longer replay",
+  "previous_fixture": {
+    "native_revision": "7eb589049121ff98baab99a565e046b495b877c2",
+    "genesis_state_root": "a18d390fd74edb85ccce6be661a21dfa3aa645759142ecc1292fe6631963078c",
+    "proof_sha256": "defc0cc20c306c3c3aec1a4d6787b6ced3f55dfcfe2f701304bf61bb54c3cbe6",
+    "canonical_proof_sha256": "181e3459dbd31a14f3900da381cdc428f9a28dbb08bd3d5bd43fcb67c05c77b0",
+    "public_values_sha256": "c8905ee7701d32525bc3b04fbf11853f5d9a1c699311e82fa40f148ee986e9b3",
+    "bootstrap_sha256": "0dd49ba339ff3b442d819ea28ccecf97cc486819379c83d278d6bcd21c480afe"
+  },
   "native_block_and_ffg_signatures": "genuine ML-DSA-65/Falcon-1024, disposable test validators",
   "production_authority": false,
   "fixture_files": [
     {
       "path": "bootstrap.json",
-      "sha256": "0dd49ba339ff3b442d819ea28ccecf97cc486819379c83d278d6bcd21c480afe"
+      "sha256": "2d15c462a805caf9fa7026ded141d4bba115429ad40153f945cabe966c4f9d26"
     },
     {
       "path": "canonical.proof",
-      "sha256": "181e3459dbd31a14f3900da381cdc428f9a28dbb08bd3d5bd43fcb67c05c77b0"
+      "sha256": "675a1652cb7e9b8777b5f53c2ce9211aaa7f87baa21fe3a63f37f286f67cb89e"
     },
     {
       "path": "canonical.values",
-      "sha256": "c8905ee7701d32525bc3b04fbf11853f5d9a1c699311e82fa40f148ee986e9b3"
+      "sha256": "2820a16a316e39dbe8c3205b3230a64770ac53bf6fed969ff8b30b3d8c586e8e"
     },
     {
       "path": "conflict.json",
-      "sha256": "dc65ad4c920e4f2fcbd2d06f509f65e2e08aadb31a3d9454f53c2b3665cddd93"
+      "sha256": "b36cc6a8510156999ceca9ca4db74d01a60549b67f61d84e4decd4056c8b2b8c"
     },
     {
       "path": "duplicates.json",
-      "sha256": "7830321bdb77f8fa5ec3ee196a7bf3a923ddde53d9f133e175c61a7027c5b341"
+      "sha256": "31dafa1b8b0d4569a167397cc2b71a456cdf726434e6c0adf88a49dc6c3df667"
     },
     {
       "path": "full.json",
-      "sha256": "dcd1d798c1c36f30ce5d4a0f16e73fd658d1fa9fc698a9ec35c5751322810f38"
+      "sha256": "4ab20c876904068e8eb5427dccb2ad6d23b721d9f221ba633377a6940a154d75"
     },
     {
       "path": "insufficient.json",
-      "sha256": "181d9ac4b42698ee565e7cc7680d8517787695a021d8b02398b686bcff43e241"
+      "sha256": "0980b240faa8e50729e29bb2620fefadc0d6b168de48b09efe12cd171c7dc14d"
     },
     {
       "path": "native-request.txt",
-      "sha256": "2e7d7135ebf3b8e32b56dabe01a686f6f1735d1960906f5670685cc046f00ac4"
+      "sha256": "99bc82072f1d363eec95a3ad543539b63ab78713944594712cf4ffe615c4912c"
     },
     {
       "path": "two.json",
-      "sha256": "029ede1ec8a9f0d75c2ef4be4ac251465676d24cc747a52bc1b167f4a9f87d98"
+      "sha256": "52f50fa82b2b1337fd756f0c5272e7befc1ff904f2b5d6e0486cc549c2d9e239"
     }
   ],
   "scope": "One isolated, empty-inbox L2 settlement; native epochs 0-3. Fresh PQ keys in the generator process only. No live validator or economic finality qualification."
