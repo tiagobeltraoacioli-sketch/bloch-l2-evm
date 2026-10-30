@@ -193,6 +193,8 @@ class AgentTest(unittest.TestCase):
         cls.pins = lib.Pins(lib.CHAIN_ID, lib.NATIVE_NETWORK, lib.NATIVE_GENESIS, cls.set_hash,
                             lib.sha256_file(MANIFEST), L2_GENESIS, [], '1:0:30000', lib.LARGE_CLAIM_SAT)
         cls.produce = HERE / 'fake_produce.py'
+        cls.follower_bin = cls.tmp / 'bloch-l2-native-follower'
+        cls.follower_bin.write_text('#!/bin/sh\n# stands in for the follower binary (only hashed by the agent)\n')
         cls.rpc = FakeRpc()
 
     @classmethod
@@ -264,6 +266,7 @@ class AgentTest(unittest.TestCase):
         config = {
             'signer_index': index, 'bloch_pos': BLOCH_POS, 'bloch_pos_sha256': lib.sha256_file(BLOCH_POS),
             'produce': str(self.produce), 'produce_sha256': lib.sha256_file(self.produce), 'manifest': MANIFEST,
+            'follower': str(self.follower_bin), 'follower_sha256': lib.sha256_file(self.follower_bin),
             'attestors': str(self.set_file), 'sealed_key': str(self.sealed[index]),
             'passphrase_file': str(self.passes[index]), 'follower_status': str(self.status),
             'follower_native': str(self.case / 'native'), 'state_dir': str(self.case / f'agent{index}'),
@@ -450,6 +453,23 @@ class AgentTest(unittest.TestCase):
     def test_binary_pin_mismatch_halts(self):
         with self.assertRaises(attestor_agent.Halt):
             self.agent(0, produce_sha256='00' * 32).check_identity(key='none')
+
+    def test_follower_pin_mismatch_halts(self):
+        swapped = self.case / 'true-follower'
+        swapped.write_text('#!/bin/sh\nexit 0\n')
+        with self.assertRaisesRegex(attestor_agent.Halt, 'follower differs from its pinned SHA-256'):
+            self.agent(0, follower=str(swapped)).check_identity(key='none')
+
+    def test_check_command_with_a_pre_pin_config_halts_with_exit_3(self):
+        config = self.case / 'config.json'
+        old = {k: v for k, v in self.agent(3).c.items() if k not in ('follower', 'follower_sha256')}
+        config.write_text(json.dumps(old))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), unittest.mock.patch.object(attestor_agent, 'PINS', self.pins):
+            code = attestor_agent.main(['check', '--config', str(config)])
+        self.assertEqual(code, 3, out.getvalue())
+        self.assertIn('install-attestor.sh upgrade', out.getvalue())
+        self.assertNotIn('check-ok', out.getvalue())
 
     def test_dry_run_signs_nothing(self):
         _, events = self.once(self.agent(0, dry_run=True))
