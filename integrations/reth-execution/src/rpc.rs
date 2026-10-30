@@ -231,13 +231,16 @@ where
     >,
 {
     let converter = rpc_converter(components.provider().chain_spec());
+    // eth_call may not burn more gas than one block can hold (reth's default cap is 50M).
+    let gas_cap = reth_rpc_eth_types::gas_oracle::GasCap(components.provider().chain_spec().execution().gas_limit);
     let components = BlochRpcComponents {
         evm: components.evm_config().clone().for_rpc(),
         inner: components,
     };
     let builder = EthApiBuilder::new_with_components(components)
         .with_rpc_converter(converter)
-        .task_spawner(runtime);
+        .task_spawner(runtime)
+        .gas_cap(gas_cap);
     match pending {
         PendingPolicy::Unavailable => builder.with_pending_env_builder(NoDerivedPending).build(),
         PendingPolicy::LatestDerived => builder
