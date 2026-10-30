@@ -59,7 +59,7 @@ use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
     providers::{BlockchainProvider, RocksDBBuilder, StaticFileProvider},
-    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, ReceiptProvider, StateProviderFactory,
+    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, StateProviderFactory,
 };
 use reth_rpc::EthFilter;
 use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
@@ -725,6 +725,7 @@ fn finality_rpc(view: Arc<std::sync::RwLock<serde_json::Value>>) -> jsonrpsee::R
 
 /// Refresh the outbox counter at the head and index newly finalized blocks.
 fn follow_withdrawals(proofs: &withdrawal_proofs::Shared, reader: &BlochBlockchainProvider, status: &serde_json::Value) {
+    use reth_provider::ReceiptProvider;
     use std::sync::atomic::Ordering;
     let counter = reader
         .latest()
