@@ -517,7 +517,7 @@ class AgentTest(unittest.TestCase):
 class KeykitTest(unittest.TestCase):
     """make-operator-bundles.sh on FRESH throwaway keys (passphrase files via the test hook)."""
 
-    def test_seal_verify_and_shred_with_throwaway_keys(self):
+    def test_seal_verify_package_backup_shred_release_with_throwaway_keys(self):
         tmp = Path(tempfile.mkdtemp(prefix='keykit-'))
         old = os.umask(0o077)
         try:
@@ -531,7 +531,7 @@ class KeykitTest(unittest.TestCase):
                 *[x for i in range(5) for x in ('--pubkey', keys / f'attestor-{i}.pk')], '--out', keys / 'attestors.set')
             expect = lib.set_hash(*lib.read_set(keys / 'attestors.set'))
             kit = HERE.parent / 'keykit' / 'make-operator-bundles.sh'
-            env = {**os.environ, 'KEYKIT_PASSFILE_DIR': str(passes)}
+            env = {**os.environ, 'KEYKIT_PASSFILE_DIR': str(passes), 'KEYKIT_SKIP_SEARCH': '1'}
             common = ['--keys-dir', str(keys), '--out', str(out), '--bloch-pos', BLOCH_POS]
 
             def kit_run(*args, extra=('--expect-set-hash', expect)):
@@ -548,6 +548,18 @@ class KeykitTest(unittest.TestCase):
             self.assertEqual(len((out / 'BUNDLES.sha256').read_text().splitlines()), 5)
             (passes / 'pass-2').write_text('a-wrong-passphrase-here\n')
             self.assertIn('authentication failed', kit_run('verify', '--index', '2').stderr)
+            self.assertIn('not packaged', kit_run('shred-originals').stderr)
+            done = kit_run('package')
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(len((out / 'PACKAGES.sha256').read_text().splitlines()), 5)
+            self.assertIn('need 2', kit_run('shred-originals').stderr)
+            for label in ('usb-A', 'usb-B'):
+                media = tmp / label
+                media.mkdir()
+                for i in range(5):
+                    shutil.copy(out / f'operator-{i}.tar', media)
+                done = kit_run('backup-check', '--media', str(media), '--label', label)
+                self.assertEqual(done.returncode, 0, done.stderr)
             done = kit_run('shred-originals')
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual(sorted(p.name for p in keys.glob('*.sk')), [])
@@ -556,6 +568,16 @@ class KeykitTest(unittest.TestCase):
             for i in (0, 4):
                 run(BLOCH_POS, 'l2-claim', 'key-check', '--sealed', out / f'attestor-{i}.sealed', '--attestors',
                     keys / 'attestors.set', '--signer-index', i, '--passphrase-file', passes / f'pass-{i}')
+            self.assertIn('WARNING', kit_run('status').stdout)
+            self.assertIn('no operator-check-ok', kit_run('release-owner-copy', '--index', '0').stderr)
+            for i in (0, 1, 3):
+                self.assertEqual(kit_run('record', '--index', str(i), '--event', 'operator-check-ok').returncode, 0)
+                done = kit_run('release-owner-copy', '--index', str(i))
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertFalse((out / f'operator-{i}.tar').exists())
+            status = kit_run('status').stdout
+            self.assertIn('(not released): 2 of 5', status)
+            self.assertNotIn('WARNING', status)
         finally:
             os.umask(old)
             shutil.rmtree(tmp, ignore_errors=True)

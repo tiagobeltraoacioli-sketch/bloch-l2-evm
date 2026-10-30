@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Drive an interactive command through a real pty, answering passphrase / DESTROY prompts the way
+"""Drive an interactive command through a real pty, answering passphrase / DESTROY / RELEASE prompts the way
 the owner would type them. Rehearsal only (throwaway passphrases from PASSDIR/pass-I).
 
   tty_driver.py PASSDIR DEFAULT_INDEX -- CMD ARGS...
@@ -39,6 +39,11 @@ while True:
     if re.search(r'Type DESTROY (\d) to overwrite', last):
         i = re.findall(r'Type DESTROY (\d)', tail)[-1]
         os.write(fd, f'DESTROY {i}\n'.encode())
+        buf = b''
+        answered += 1
+    elif re.search(r'Type RELEASE (\d)', last):
+        i = re.findall(r'Type RELEASE (\d)', tail)[-1]
+        os.write(fd, f'RELEASE {i}\n'.encode())
         buf = b''
         answered += 1
     elif re.search(r'passphrase', last, re.I):
