@@ -42,6 +42,12 @@
 //! one `<hash>.tx` spool entry (hex) atomically into the pool the settlement
 //! worker selects from; the producer still decides inclusion and drops invalid
 //! entries with a reason. Without `--txpool`, transactions are refused.
+//!
+//! `bloch_getWithdrawalProof(index, root?)` serves Merkle proofs of outbox
+//! withdrawals covered by finalized settlements (`settled_rpc/withdrawal_proofs.rs`).
+#[path = "settled_rpc/withdrawal_proofs.rs"]
+mod withdrawal_proofs;
+
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
@@ -53,7 +59,7 @@ use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
     providers::{BlockchainProvider, RocksDBBuilder, StaticFileProvider},
-    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, StateProviderFactory,
+    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, ReceiptProvider, StateProviderFactory,
 };
 use reth_rpc::EthFilter;
 use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
@@ -717,6 +723,50 @@ fn finality_rpc(view: Arc<std::sync::RwLock<serde_json::Value>>) -> jsonrpsee::R
     module
 }
 
+/// Refresh the outbox counter at the head and index newly finalized blocks.
+fn follow_withdrawals(proofs: &withdrawal_proofs::Shared, reader: &BlochBlockchainProvider, status: &serde_json::Value) {
+    use std::sync::atomic::Ordering;
+    let counter = reader
+        .latest()
+        .and_then(|state| state.storage(proofs.outbox, B256::ZERO))
+        .map(|slot| u64::try_from(slot.unwrap_or_default()).unwrap_or(u64::MAX));
+    match counter {
+        Ok(count) => proofs.latest_count.store(count, Ordering::Relaxed),
+        Err(error) => println!("withdrawal proofs: outbox counter unavailable: {error}"),
+    }
+    let indexed = match proofs.index.read() {
+        Ok(index) if !index.is_frozen() => index.indexed(),
+        _ => return,
+    };
+    let entries = match withdrawal_proofs::final_entries(status, indexed) {
+        Ok(entries) => entries,
+        Err(error) => {
+            println!("withdrawal proofs: unreadable finality status: {error}");
+            return;
+        }
+    };
+    if let Some(last) = entries.last() {
+        proofs.finalized.store(last.number, Ordering::Relaxed);
+    }
+    let outbox = proofs.outbox;
+    let result = proofs.catch_up(&entries, |number| {
+        let receipts = reader
+            .receipts_by_block(number.into())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no receipts for finalized block {number}"))?;
+        receipts
+            .iter()
+            .flat_map(|receipt| receipt.logs.iter())
+            .filter_map(|log| bloch_l2_evm::withdrawal::Withdrawal::from_log(outbox, log))
+            .map(|w| w.map_err(|e| format!("block {number}: {e}")))
+            .collect()
+    });
+    if let Err(error) = result {
+        let frozen = proofs.index.read().map_or(true, |index| index.is_frozen());
+        println!("withdrawal proofs{}: {error}", if frozen { " FROZEN" } else { " not advanced" });
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = parse()?;
@@ -776,6 +826,11 @@ async fn main() -> Result<()> {
     module.merge(finality_rpc(finality.clone()))?;
     let settlements = Arc::new(std::sync::RwLock::new(SettlementIndex::new()));
     module.merge(settlement_rpc(settlements.clone()))?;
+    let withdrawal_proofs = kernel.withdrawal_outbox.map(|outbox| withdrawal_proofs::Shared::new(kernel.chain_id, outbox));
+    if let Some(proofs) = &withdrawal_proofs {
+        module.merge(withdrawal_proofs::rpc(proofs.clone()))?;
+    }
+    let mut proof_task: Option<tokio::task::JoinHandle<()>> = None;
     serve_pending_blocks_as_latest(&mut module)?;
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone())?;
@@ -851,6 +906,12 @@ async fn main() -> Result<()> {
                             }
                             let s = &levels.status;
                             *settlements.write().expect("settlement lock") = settlement_index(s);
+                            if let Some(proofs) = withdrawal_proofs.as_ref().filter(|_| proof_task.as_ref().is_none_or(|t| t.is_finished())) {
+                                proof_task = Some(tokio::task::spawn_blocking({
+                                    let (proofs, reader, status) = (proofs.clone(), provider.clone(), s.clone());
+                                    move || follow_withdrawals(&proofs, &reader, &status)
+                                }));
+                            }
                             let latest = factory.sealed_header(head_number)?;
                             *finality.write().expect("finality lock") = serde_json::json!({
                                 "latest": level_json(&latest),
@@ -877,6 +938,12 @@ async fn main() -> Result<()> {
     }
     .await;
     let _ = server.stop();
+    if let Some(proofs) = &withdrawal_proofs {
+        proofs.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(task) = proof_task {
+        let _ = task.await;
+    }
     let _ = std::fs::remove_dir_all(&options.view_dir);
     if !runtime.graceful_shutdown_with_timeout(Duration::from_secs(10)) {
         bail!("runtime graceful shutdown timed out");
