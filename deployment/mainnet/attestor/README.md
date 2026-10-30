@@ -18,12 +18,13 @@ signing by itself. Operators act only on alerts.
 | `attestor_agent.py` | The agent: `run`, `once [--dry-run]`, `check [--no-key]`. Python standard library only. |
 | `attestor_lib.py` | Pins, withdrawal tree, set hash, attestation digest. All mirror the native code. |
 | `aggregate_attestation.py` | Claimant tool. Collects any 3 partials, verifies them natively and prints the `prepare` arguments. |
-| `install-attestor.sh` | `install`, `rollback [--purge-key]` and `status` on an operator host. |
+| `install-attestor.sh` | `install`, `upgrade`, `upgrade-rollback`, `rollback [--purge-key]` (uninstall) and `status` on an operator host. |
 | `systemd/bloch-l2-attestor.service` | The hardened agent unit: no listener, `IPAddressDeny=any` plus an allow-list, `LoadCredential`. |
 | `systemd/bloch-l2-attestor-follower.service` | The agent's own native follower (FFG replay from Genesis-4). |
 | `keykit/` | Key distribution for the key holder. See `keykit/KEY-HANDOFF-CHECKLIST.md`. |
 | `public/` | The pinned `attestors.set` and the five public keys. |
-| `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`). |
+| `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`) and `python3 -m unittest -v test_upgrade` (no native binary; follower pin and `upgrade`/`upgrade-rollback`). |
+| `tests/rehearse_upgrade.sh` | Rehearsal of `upgrade`/`upgrade-rollback` on old-kit `--prefix` installs against live L1 (`rehearsal_services.sh` stands in for systemctl, `rehearsal_check.py` runs `check` with a throwaway set). |
 | `tests/rehearse_owner_flow.sh` | End-to-end owner rehearsal with throwaway keys (`tty_driver.py` types the passphrases). |
 
 The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keystore-20261019`
@@ -123,8 +124,93 @@ with `--prefix`) accepts a throwaway attestor set. `tests/rehearse_owner_flow.sh
 owner flow this way with throwaway keys (seal, verify, install for 3 operators, check, sign a
 synthetic root, aggregate 3-of-5, native verify, shred). Rehearsed on 2026-10-19 on 209.250.236.240.
 
-To roll back, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
-and the key. `--purge-key` also shreds the host key and passphrase.
+To uninstall, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
+and the key. `--purge-key` also shreds the host key and passphrase. It is not a binary rollback: for
+that, see `upgrade-rollback` below.
+
+## Binary pins
+
+`config.json` pins three binaries by SHA-256: `bloch_pos_sha256`, `produce_sha256` and (since the
+2026-10-30 kit) `follower_sha256`, the follower named by `follower`. The agent checks all three at
+`check` and at the start of `run`/`once`. A mismatch halts it with exit 3, and the unit does not
+restart. The follower pin matters because the follower's `status.json` is what the agent treats as
+L1 finality: a replaced follower could report any settlement as finalized.
+
+**Configs written by an older kit have no `follower_sha256`.** With this kit's agent they halt with
+`config lacks follower and follower_sha256: the follower binary is not pinned …` (exit 3). This is
+deliberate. The alternatives were worse:
+
+- Warning and continuing would leave the gap open, and a warning in the journal is easy to miss.
+- Pinning whatever follower is installed at first start would also pin a swapped binary.
+
+The kit's agent scripts reach a host only through `install` or `upgrade`. Both write the pin
+together with the scripts, from the published hashes. So the halt fires only if someone copies the
+new scripts by hand. The fix is `install-attestor.sh upgrade`. Older agents ignore the extra keys,
+so an old agent with a new `config.json` keeps working (this is the state after a partial rollback).
+
+The pin covers the file on disk. The agent checks it only at start, so restart the agent after any
+binary swap (`upgrade` does this). The running follower process is not inspected; the agent's
+sandbox cannot see other users' processes. `upgrade` starts the follower only after the new file
+is pinned.
+
+## Upgrade (HF1–HF3: follower and producer v2)
+
+The L1 hard forks start at epoch 7180 (HF1, 2026-11-01 16:11 UTC). Each attestor host must run the
+v2 follower and producer **before epoch 7178 (15:39 UTC)**:
+
+- `bloch-l2-native-follower` `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a`
+- `bloch-l2-produce-dev` `7c1cc62bf5fb5aa142dced01156e3a51ddb6239096034400558ef46586025a3c`
+
+These hashes are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
+`--produce-sha256` only for a later corrected build whose hashes the coordinator published.
+
+Upgrade **one host at a time**, so that at least 3 of 5 stay up. Each host is down for about
+50–60 min. Run the upgrade inside `tmux` or `screen`:
+
+```
+sudo ./install-attestor.sh upgrade --artifacts /root/hf123
+```
+
+`/root/hf123` holds the two files (a `SHA256SUMS` there is optional; if present it must agree). The
+script does the manual procedure and stops at the first failure:
+
+1. It checks both files against the published SHA-256 before it touches anything.
+2. It creates `/etc/bloch-l2-attestor/PAUSE`, then stops `bloch-l2-attestor` and
+   `bloch-l2-attestor-follower`.
+3. It backs up `/opt/bloch/l2-attestor` to `/opt/bloch/l2-attestor.pre-hf123`, and `config.json` to
+   `config.json.pre-hf123`. It moves the follower's `status.json` to `status.json.pre-hf123`, so
+   that the agent cannot accept the old follower's last status as fresh.
+4. It installs the two binaries and this kit's agent scripts (`attestor_agent.py`,
+   `attestor_lib.py`, `aggregate_attestation.py`). The key, the passphrase, `bloch-pos`, the units
+   and the state do not change.
+5. It re-hashes the installed files.
+6. It writes `produce_sha256`, `follower` and `follower_sha256` into `config.json` (atomically,
+   keeping its owner and mode) and checks every pin against the disk.
+7. It starts the follower and waits until a new `status.json` appears (the re-verify of the retained
+   L1 history: about 50–60 min; `--wait-timeout`, default 2 h).
+8. It runs `attestor_agent.py check` as at install. The run must print `check-ok`. A
+   `check-not-ready` result is retried 10 times.
+9. It waits until `native_finalized_epoch` advances (`--advance-timeout`, default 40 min).
+10. It removes `PAUSE` and starts the agent (`--no-unpause` stops before this step).
+
+At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower c18752fd, produce
+7c1cc62b`. Post that line in the operators' channel; the next operator then starts.
+
+If a step fails, `PAUSE` stays in place, the agent stays stopped and the follower keeps running.
+Fix the cause, then continue from the follower start with
+`sudo ./install-attestor.sh upgrade --resume`. A second `upgrade` on an upgraded host changes
+nothing. Keep the `.pre-hf123` backups until after epoch 7360.
+
+**Rollback, before HF1 only:** `sudo ./install-attestor.sh upgrade-rollback`. It restores the
+backed-up binaries, agent scripts and `config.json`, moves `status.json` aside, and then repeats
+steps 7–10 with the old follower. It also works after a failed upgrade. It is refused from 70
+minutes before epoch 7180 on, because the old follower's re-verify could not finish before the
+fork, and an old follower cannot follow the chain past it. After that, keep `PAUSE` and fix forward
+with the published build. Partials already signed stay valid either way.
+
+Rehearsal without root or systemd: `upgrade`/`upgrade-rollback --prefix DIR --service-cmd CMD
+--check-cmd CMD` run against a `--prefix` install. `CMD start|stop|is-active follower|agent` stands
+in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
 
 ## Claimant (≥ 100 BLCH)
 
