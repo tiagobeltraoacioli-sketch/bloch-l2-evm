@@ -725,7 +725,7 @@ fn finality_rpc(view: Arc<std::sync::RwLock<serde_json::Value>>) -> jsonrpsee::R
 
 /// Refresh the outbox counter at the head and index newly finalized blocks.
 fn follow_withdrawals(proofs: &withdrawal_proofs::Shared, reader: &BlochBlockchainProvider, status: &serde_json::Value) {
-    use reth_provider::ReceiptProvider;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
     use std::sync::atomic::Ordering;
     let counter = reader
         .latest()
