@@ -1,0 +1,12 @@
+# One finalized epoch is 16 minutes of 30 s slots; the refresh exits at once when the tip did not move.
+[Unit]
+Description=Bloch L2 replica database refresh timer
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+Unit=bloch-l2-replica-refresh.service
+
+[Install]
+WantedBy=timers.target
