@@ -49,7 +49,8 @@ STATE = Path('/var/lib/bloch-l2-mainnet-prover')
 FILES = ('bloch-evm-sp1-settlement-v3', 'settlement_v3_mainnet', 'remote_prover.py')
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473'
-# bloch-sis-pow l2_settlement::mainnet::PROGRAM (release 78b7343a, active since epoch 5850).
+# bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
+# in the armed release 78d4921c and in fa980367).
 PINNED = {
     'chain_id': 700770,
     'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
