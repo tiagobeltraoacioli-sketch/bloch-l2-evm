@@ -34,14 +34,14 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 |---|---|
 | TLS | Cloudflare Origin CA certificate; `ssl_verify_client on` with the Authenticated Origin Pulls CA; requests whose TCP peer is not a Cloudflare range get 403 |
 | Client IP | `CF-Connecting-IP`, trusted only from Cloudflare ranges |
-| CORS | allowlist: `https://blochl1.com`, `https://blochdex.com`, `https://blochbridge.com` and their `www.` names; preflight 204, max-age 1 day; `--cors-any` for `*`. Requests without `Origin` (wallet extensions, servers, forge) are not affected |
+| CORS | **production: any origin** (`setup-gateway.sh` passes `--cors-any`, owner decision of 2026-10-30). `render.py` alone defaults to an allowlist: `https://blochl1.com`, `https://blochdex.com`, `https://blochbridge.com` and their `www.` names; preflight 204, max-age 1 day. Requests without `Origin` (wallet extensions, servers, forge) are not affected |
 | Methods | `eth_*` reads, `net_*`, `web3_*`, `bloch_finality`, `bloch_settlement`, `bloch_chainIdentity`, `bloch_chainStatus`, `eth_sendRawTransaction`. Everything else gets -32601. Filters, subscriptions and node signing get an explanation |
 | Local answers | `eth_chainId`, `net_version` |
 | Body / batch | 512 KiB (the settled RPC's own cap), at most 100 calls per batch (ethers v6 batches up to 100), and an empty batch is refused |
 | eth_getLogs | at most 2,000 blocks per call (tags resolved against the probed head) and 256 addresses |
 | Per IP | 20 HTTP req/s, burst 100 (`limit_req`), 32 connections (`limit_conn`), 1,200 calls/min (a batch counts each call), 30 `eth_sendRawTransaction`/min, 16 simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`) in flight. Over a limit: HTTP 429 and JSON-RPC -32005 with `Retry-After` |
 | Timeouts | client header/body 10 s (slow-body clients never reach the backend; nginx buffers the whole request), upstream connect 2 s, read 30 s (tx 15 s) |
-| Backend connections | `max_conns` shared across workers: reads 48, sequencer paths and the inbound peer path 12 each. That stays below the settled RPC's 100-connection cap (v2). Idle keepalive is 4/2 per worker for 20 s. Set `worker_processes 4`. Raise `--backend-conns` (e.g. 400) only with a settled RPC that accepts more connections (gateway branch: 1,024) |
+| Backend connections | `max_conns` shared across workers: reads 48, sequencer paths and the inbound peer path 12 each. That stays below the settled RPC's 100-connection cap (v2). Idle keepalive is 4/2 per worker for 20 s. Set `worker_processes 4`. `setup-gateway.sh` passes `--backend-conns 400` for settled RPC v2.1 (1,024 connections); 48 is `render.py`'s default for a 100-connection binary |
 | Routing | reads go to the freshest backend from the probe (ties stay local), with the other as nginx backup on error/timeout/429/502/503/504. Pending nonce goes to the sequencer first. Transactions go to the sequencer only, never retried |
 | Failure | reads: 503 + -32053 (retryable) with the caller's ids. tx: -32052 "outcome unknown" if the sequencer did not answer, or -32053 `submitted:false` if the probe already saw it down |
 | Health | `GET /health` (public) and `http://127.0.0.1:18958/health` (local): chain id, per-backend ok/head/finalized/age, sequencer reachability. 200 if any backend is ok, else 503. No addresses |

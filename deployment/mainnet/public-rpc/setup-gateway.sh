@@ -9,7 +9,9 @@
 #
 # Env (plan/apply): ROLE (sequencer|replica), NAME (shown by /health),
 #   PEER (the other host's IP:18956), PEER_ALLOW (the other host's IP),
-#   EXTRA (more render.py flags, optional).
+#   EXTRA (more render.py flags, optional; a later --backend-conns overrides the default).
+# Production defaults: CORS open to any origin; --backend-conns 400, which needs settled RPC v2.1
+# (1,024 connections) and must be lowered to 48 for an older binary.
 # Files the owner places first (see README.md):
 #   /etc/ssl/bloch-l2rpc/origin.pem, origin.key   Cloudflare Origin CA certificate for l2rpc.blochl1.com
 #   /etc/ssl/bloch-l2rpc/cloudflare-aop-ca.pem     Cloudflare Authenticated Origin Pulls CA
@@ -28,7 +30,7 @@ render_to() {
   : "${ROLE:?set ROLE}" "${NAME:?set NAME}" "${PEER:?set PEER}" "${PEER_ALLOW:?set PEER_ALLOW}"
   # shellcheck disable=SC2086
   python3 "$HERE/render.py" --role "$ROLE" --name "$NAME" --out "$1" --peer "$PEER" --peer-allow "$PEER_ALLOW" \
-    --peer-listen "0.0.0.0:$PEER_PORT" --peer-dir "$PEERDIR" ${EXTRA:-}
+    --peer-listen "0.0.0.0:$PEER_PORT" --peer-dir "$PEERDIR" --cors-any --backend-conns 400 ${EXTRA:-}
 }
 
 check() {

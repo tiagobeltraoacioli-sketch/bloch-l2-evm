@@ -17,16 +17,18 @@
 #   * native feature shim: settlement-recovery forwards devnet-kes / devnet-lc-roster, which the
 #     mainnet release does not define; follower-rpc/native-feature-shim.py adds them as EMPTY
 #     features (no code) to the scratch native checkout. They are never enabled.
-#   * Cargo lock: 78b7343a resolves three extra lock entries; the build uses
-#     follower-rpc/settlement-recovery.mainnet.Cargo.lock (--locked) and restores the tree's lock.
+#   * Cargo lock: the release pins exactly one lock, follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock
+#     (sha256 26bf4453...). It is the only committed lock that resolves native 78d4921c, and the build
+#     refuses any other lock for that commit. integrations/settlement-recovery/Cargo.lock is a byte copy.
 # Env: JOBS (default 8), TOOLCHAIN (default 1.98.1), CARGO_TARGET_DIR (default WORK/l2-target).
 #
 # L1 hard forks (docs/L2-HARD-FORK-OPERATOR-STEPS.md): the follower and the producer RUN the native
 # transition, so they must be rebuilt against the native release that arms a fork BEFORE its epoch,
 # or they halt at it (state-root mismatch). NATIVE_COMMIT selects that release (default: the running
-# one); NATIVE_LOCK (default: follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock, sha256
-# 26bf4453...; the 78b7343a lock is settlement-recovery.mainnet.Cargo.lock) must be the lock
-# resolved against it. build.json records every L1 activation epoch the binaries were compiled with
+# one); NATIVE_LOCK (default: the pinned lock above) must be the lock resolved against it. Only a
+# different NATIVE_COMMIT may use a different lock. settlement-recovery.mainnet.Cargo.lock
+# (43be49f5..., native 78b7343a) is kept for the historical rehearsal/build.sh only and cannot build
+# this release. build.json records every L1 activation epoch the binaries were compiled with
 # (l1_activation_epochs, read from the native params.rs; "inert" = u64::MAX) so the operator can
 # compare them with the release notice.
 set -euo pipefail
@@ -45,11 +47,17 @@ RETH=$W/src/reth-bloch-rpc-snapshot
 HERE=$L2/deployment/mainnet
 SR=$L2/integrations/settlement-recovery
 NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock}
+RELEASE_NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
+RELEASE_LOCK_SHA256=26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8
 log() { echo "== $* ($(date -u +%FT%TZ))"; }
 die() { echo "build-release: $*" >&2; exit 2; }
 
 for d in "$L2" "$N" "$RETH"; do [ -d "$d" ] || die "missing $d"; done
 [ ! -e "$OUT" ] || die "$OUT exists; choose a new OUT"
+if [ "$NATIVE_COMMIT" = "$RELEASE_NATIVE_COMMIT" ]; then
+  [ "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" = "$RELEASE_LOCK_SHA256" ] \
+    || die "$NATIVE_LOCK is not the pinned lock $RELEASE_LOCK_SHA256 of native $RELEASE_NATIVE_COMMIT"
+fi
 [ "$(git -C "$N" rev-parse HEAD)" = "$NATIVE_COMMIT" ] || die "native checkout is not $NATIVE_COMMIT"
 [ "$(git -C "$RETH" rev-parse HEAD)" = "$RETH_COMMIT" ] || die "reth snapshot is not $RETH_COMMIT"
 grep -q 'pub const L2_SETTLEMENT_ACTIVATION_EPOCH: u64 = 5_850;' "$N/crates/bloch-pos-committee/src/params.rs" \
