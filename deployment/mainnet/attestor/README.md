@@ -21,11 +21,12 @@ signing by itself. Operators act only on alerts.
 | `install-attestor.sh` | `install`, `upgrade`, `upgrade-rollback`, `rollback [--purge-key]` (uninstall) and `status` on an operator host. |
 | `systemd/bloch-l2-attestor.service` | The hardened agent unit: no listener, `IPAddressDeny=any` plus an allow-list, `LoadCredential`. |
 | `systemd/bloch-l2-attestor-follower.service` | The agent's own native follower (FFG replay from Genesis-4). |
-| `keykit/` | Key distribution for the key holder. See `keykit/KEY-HANDOFF-CHECKLIST.md`. |
+| `keykit/` | Key custody for the key holder: seal, verify, package, backup-check, shred, release (`make-operator-bundles.sh`, `KEY-HANDOFF-CHECKLIST.md`); operator side: `check-operator-bundle.sh`, `OPERATOR-ONBOARDING.md`, `OPERATOR-INSTALL.template.md`, pins `operator-pins-v2.sha256`. |
 | `public/` | The pinned `attestors.set` and the five public keys. |
 | `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`) and `python3 -m unittest -v test_upgrade` (no native binary; follower pin and `upgrade`/`upgrade-rollback`). |
 | `tests/rehearse_upgrade.sh` | Rehearsal of `upgrade`/`upgrade-rollback` on old-kit `--prefix` installs against live L1 (`rehearsal_services.sh` stands in for systemctl, `rehearsal_check.py` runs `check` with a throwaway set). |
 | `tests/rehearse_owner_flow.sh` | End-to-end owner rehearsal with throwaway keys (`tty_driver.py` types the passphrases). |
+| `tests/rehearse_custody_flow.sh` | Custody rehearsal with throwaway keys: `owner` part (macOS or Linux) and `operator` part (Linux, v2 artifacts). |
 
 The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keystore-20261019`
 (dd287b6c + one CLI-only commit). That commit adds:

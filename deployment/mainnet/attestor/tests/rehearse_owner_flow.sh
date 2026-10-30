@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Dry rehearsal of the attestor OWNER flow with THROWAWAY keys (never the real ones), Linux host:
-#   keys -> keykit seal (tty) -> verify (tty) -> offline copy read-back -> install-attestor.sh install
+#   keys -> keykit seal (tty) -> verify (tty) -> package + backup-check -> offline copy read-back -> install-attestor.sh install
 #   --prefix (no systemd, tty transport passphrase) for operators 0, 2, 4 -> host key check + agent
 #   identity check on the installed config.json -> each signs a synthetic withdrawal root with its
 #   host-sealed key -> aggregate 3-of-5 -> native verify-attestation -> keykit shred-originals (tty).
@@ -48,6 +48,13 @@ step "2b. wrong passphrase is refused"
 cp "$PASS/pass-1" "$W/good-1"; echo 'definitely the wrong passphrase' > "$PASS/pass-1"
 if $TTY "$PASS" 1 -- bash "$K/keykit/make-operator-bundles.sh" verify --index 1 --keys-dir "$KEYS" --out "$OUT" --bloch-pos "$POS" --expect-set-hash "$SETHASH"; then echo UNEXPECTED; exit 1; fi
 cp "$W/good-1" "$PASS/pass-1"
+
+step "2c. kit package + backup-check on two media (shred-originals requires both)"
+bash "$K/keykit/make-operator-bundles.sh" package --keys-dir "$KEYS" --out "$OUT" --bloch-pos "$POS" --expect-set-hash "$SETHASH"
+for m in pkg-A pkg-B; do
+  mkdir -p "$W/$m"; cp "$OUT"/operator-*.tar "$OUT/PACKAGES.sha256" "$W/$m/"
+  bash "$K/keykit/make-operator-bundles.sh" backup-check --keys-dir "$KEYS" --out "$OUT" --expect-set-hash "$SETHASH" --media "$W/$m" --label "$m"
+done
 
 step "3. offline backup read-back (sha256 vs BUNDLES.sha256)"
 mkdir -p "$W/usb-A"; cp "$OUT"/attestor-*.sealed "$OUT/BUNDLES.sha256" "$W/usb-A/"
@@ -137,6 +144,7 @@ if "$POS" l2-claim verify-attestation --genesis "$MAN" --proof "$W/proof.json" -
   --expect-set-hash 1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b; then echo UNEXPECTED; exit 1; fi
 
 step "9. kit shred-originals (tty: DESTROY I) on the throwaway originals"
+export KEYKIT_SKIP_SEARCH=1
 $TTY "$PASS" 0 -- bash "$K/keykit/make-operator-bundles.sh" shred-originals --keys-dir "$KEYS" --out "$OUT" --bloch-pos "$POS" --expect-set-hash "$SETHASH"
 ls -l "$KEYS"
 step "REHEARSAL OK"
