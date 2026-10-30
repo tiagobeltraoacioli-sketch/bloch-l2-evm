@@ -2,7 +2,6 @@
 # Rendered by render.py; do not edit the rendered copy. http{} context.
 # Needs the njs module (Ubuntu 24.04: libnginx-mod-http-js; nginx.org: nginx-module-njs).
 
-server_tokens off;
 js_path "@JS_DIR@";
 js_import l2rpc from l2rpc-gateway.js;
 js_shared_dict_zone zone=l2rate:16m timeout=120s type=number evict;
@@ -10,11 +9,6 @@ js_shared_dict_zone zone=l2state:1m;
 js_var $l2_failure;
 js_var $l2_methods "-";
 js_set $l2_failure_body l2rpc.failure;
-
-# Client address: Cloudflare's CF-Connecting-IP, trusted only from Cloudflare.
-@REAL_IP_FROM@
-real_ip_header CF-Connecting-IP;
-real_ip_recursive off;
 
 # 1 when the TCP peer is a Cloudflare edge (checked before realip rewrites it).
 geo $realip_remote_addr $l2_from_edge {
@@ -79,6 +73,12 @@ server {
     server_name @SERVER_NAME@;
 @PUBLIC_LISTEN@
 @PUBLIC_TLS@
+
+    # Client address: Cloudflare's CF-Connecting-IP, trusted only from Cloudflare.
+@REAL_IP_FROM@
+    real_ip_header CF-Connecting-IP;
+    real_ip_recursive off;
+    server_tokens off;
 
     access_log @LOG_DIR@/l2rpc-access.log l2rpc buffer=64k flush=5s;
     error_log @LOG_DIR@/l2rpc-error.log warn;

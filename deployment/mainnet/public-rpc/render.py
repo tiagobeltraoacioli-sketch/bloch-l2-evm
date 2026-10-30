@@ -138,6 +138,7 @@ upstream l2_peer_in {{
 server {{
     listen {o.peer_listen} ssl;
     server_name l2rpc-peer;
+    server_tokens off;
     ssl_certificate {o.peer_dir}/self.crt;
     ssl_certificate_key {o.peer_dir}/self.key;
     ssl_client_certificate {o.peer_dir}/peer.crt;
@@ -194,7 +195,7 @@ server {{
         'JS_DIR': str(out),
         'CONF_DIR': str(out),
         'LOG_DIR': o.log_dir,
-        'REAL_IP_FROM': '\n'.join(f'set_real_ip_from {r};' for r in edge),
+        'REAL_IP_FROM': '\n'.join(f'    set_real_ip_from {r};' for r in edge),
         'EDGE_GEO': '\n'.join(f'    {r} 1;' for r in edge),
         'CORS_MAP': cors,
         'REQ_RATE': str(o.req_rate),
