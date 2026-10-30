@@ -54,8 +54,8 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | File | Source | SHA-256 |
 | --- | --- | --- |
 | `settler_v3.py` | this branch, `deployment/devnet/` | (recorded in the `/opt` path) |
-| `bloch-evm-sp1-settlement-v3` | `build-program.sh` (45.77.142.123 `~/l2-program-mainnet-20261014/out`) | `617d191f…86b3` |
-| `bloch-l2-produce-dev` | any build that has `--rules mainnet` | not a pin |
+| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | not a pin: its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
+| `bloch-l2-produce-dev` | `build-release.sh` against native 78d4921c (v2 `7c1cc62b…5a3c`) | not a pin |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
