@@ -1,0 +1,13 @@
+{
+  "name": "bloch-l2-rpc-gateway-compat",
+  "private": true,
+  "type": "module",
+  "description": "ethers/viem/MetaMask-sequence checks against the Bloch L2 public RPC gateway",
+  "scripts": {
+    "compat": "node compat.mjs"
+  },
+  "dependencies": {
+    "ethers": "6.17.0",
+    "viem": "2.57.13"
+  }
+}

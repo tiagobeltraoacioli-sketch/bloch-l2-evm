@@ -1,0 +1,229 @@
+# Bloch L2 mainnet public JSON-RPC gateway (chain id 700770): @NAME@, role @ROLE@.
+# Rendered by render.py; do not edit the rendered copy. http{} context.
+# Needs the njs module (Ubuntu 24.04: libnginx-mod-http-js; nginx.org: nginx-module-njs).
+
+js_path "@JS_DIR@";
+js_import l2rpc from l2rpc-gateway.js;
+js_shared_dict_zone zone=l2rate:16m timeout=120s type=number evict;
+js_shared_dict_zone zone=l2state:1m;
+js_var $l2_failure;
+js_var $l2_methods "-";
+js_set $l2_failure_body l2rpc.failure;
+
+# 1 when the TCP peer is a Cloudflare edge (checked before realip rewrites it).
+geo $realip_remote_addr $l2_from_edge {
+    default 0;
+@EDGE_GEO@
+}
+
+map $http_origin $l2_cors_origin {
+    default "";
+@CORS_MAP@
+}
+
+limit_req_zone $binary_remote_addr zone=l2req:32m rate=@REQ_RATE@r/s;
+limit_conn_zone $binary_remote_addr zone=l2conn:16m;
+
+log_format l2rpc escape=json '{"t":"$time_iso8601","ip":"$remote_addr","edge":"$realip_remote_addr",'
+    '"st":$status,"rt":$request_time,"bytes":$body_bytes_sent,"req":$request_length,'
+    '"m":"$l2_methods","up":"$upstream_addr","ust":"$upstream_status","urt":"$upstream_response_time",'
+    '"origin":"$http_origin"}';
+
+# Backends. local = this host's settled RPC; peer = the other host's settled RPC
+# through the loopback mTLS hop below. The settled RPC accepts 100 connections
+# (jsonrpsee default in v2) and answers 429 above that, so every path to it is
+# capped (max_conns, shared across workers through the zones): reads
+# @BC@, sequencer paths and the peer listener @BCQ@ each, total below 100.
+# Idle keepalive connections are kept few and short; with W nginx workers up to
+# W x 10 idle connections can exist on top of the active ones, so keep
+# worker_processes small (README: 4). A backend 429 is retried on the other one.
+upstream l2_read_local {
+    zone l2_read_local 64k;
+    server @LOCAL_RPC@ max_conns=@BC@ max_fails=1 fail_timeout=5s;
+@PEER_BACKUP@
+    keepalive 4;
+    keepalive_timeout 20s;
+    keepalive_requests 1000;
+}
+upstream l2_read_peer {
+    zone l2_read_peer 64k;
+@PEER_PRIMARY@
+    server @LOCAL_RPC@ max_conns=@BCQ@ backup;
+    keepalive 2;
+    keepalive_timeout 20s;
+}
+# Transactions: the sequencer host only (its settled RPC spools to the txpool
+# the settlement worker reads). Never a second server.
+upstream l2_seq {
+    zone l2_seq 64k;
+    server @SEQ_ADDR@ max_conns=@BCQ@;
+    keepalive 2;
+    keepalive_timeout 20s;
+}
+upstream l2_seqread {
+    zone l2_seqread 64k;
+    server @SEQ_ADDR@ max_conns=@BCQ@ max_fails=1 fail_timeout=5s;
+@SEQREAD_BACKUP@
+    keepalive 2;
+    keepalive_timeout 20s;
+}
+
+# ------------------------------------------------------------------ public
+server {
+    server_name @SERVER_NAME@;
+@PUBLIC_LISTEN@
+@PUBLIC_TLS@
+
+    # Client address: Cloudflare's CF-Connecting-IP, trusted only from Cloudflare.
+@REAL_IP_FROM@
+    real_ip_header CF-Connecting-IP;
+    real_ip_recursive off;
+    server_tokens off;
+
+    access_log @LOG_DIR@/l2rpc-access.log l2rpc buffer=64k flush=5s;
+    error_log @LOG_DIR@/l2rpc-error.log warn;
+
+    client_max_body_size @MAX_BODY@;
+    client_body_buffer_size @MAX_BODY@;
+    client_body_in_single_buffer on;
+    client_body_timeout 10s;
+    reset_timedout_connection on;
+    client_header_timeout 10s;
+    large_client_header_buffers 4 8k;
+    keepalive_timeout 65s;
+    keepalive_requests 1000;
+    send_timeout 30s;
+
+    limit_req zone=l2req burst=@REQ_BURST@ nodelay;
+    limit_req_status 429;
+    limit_req_log_level notice;
+    limit_conn l2conn @CONN_PER_IP@;
+    limit_conn_status 429;
+    limit_conn_log_level notice;
+
+    gzip on;
+    gzip_types application/json;
+    gzip_min_length 1024;
+
+    add_header Access-Control-Allow-Origin $l2_cors_origin always;
+    add_header Access-Control-Allow-Methods "POST, GET, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Content-Type, Accept" always;
+    add_header Access-Control-Max-Age 86400 always;
+    add_header Vary Origin always;
+    add_header X-Content-Type-Options nosniff always;
+
+    if ($l2_from_edge = 0) {
+        return 403;
+    }
+
+    error_page 413 = @l2_too_large;
+    error_page 429 = @l2_limited;
+    error_page 405 = @l2_method;
+
+    location = / {
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        if ($request_method = GET) {
+            return 200 '{"chainId":"0xab162","rpc":"POST JSON-RPC 2.0 here","health":"/health"}';
+        }
+        if ($request_method != POST) {
+            return 405;
+        }
+        default_type application/json;
+        js_content l2rpc.handle;
+    }
+
+    location = /health {
+        limit_except GET HEAD { deny all; }
+        js_content l2rpc.health;
+    }
+
+    location = /_l2/local {
+        internal;
+        error_page 429 502 503 504 = @l2_unavailable;
+        proxy_intercept_errors on;
+        proxy_pass http://l2_read_local/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_next_upstream error timeout http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream_tries 2;
+        proxy_read_timeout 30s;
+    }
+    location = /_l2/peer {
+        internal;
+        error_page 429 502 503 504 = @l2_unavailable;
+        proxy_intercept_errors on;
+        proxy_pass http://l2_read_peer/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_next_upstream error timeout http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream_tries 2;
+        proxy_read_timeout 30s;
+    }
+    location = /_l2/seqread {
+        internal;
+        error_page 429 502 503 504 = @l2_unavailable;
+        proxy_intercept_errors on;
+        proxy_pass http://l2_seqread/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_next_upstream error timeout http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream_tries 2;
+        proxy_read_timeout 30s;
+    }
+    location = /_l2/seq {
+        internal;
+        error_page 429 502 503 504 = @l2_unavailable;
+        proxy_intercept_errors on;
+        proxy_pass http://l2_seq/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_read_timeout 15s;
+        proxy_next_upstream off;
+    }
+
+    location @l2_unavailable {
+        default_type application/json;
+        add_header Cache-Control no-store always;
+        add_header Access-Control-Allow-Origin $l2_cors_origin always;
+        add_header Vary Origin always;
+        return 503 $l2_failure_body;
+    }
+    location @l2_too_large {
+        default_type application/json;
+        add_header Access-Control-Allow-Origin $l2_cors_origin always;
+        add_header Vary Origin always;
+        return 413 '{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Request body too large (at most @MAX_BODY@)."}}';
+    }
+    location @l2_limited {
+        default_type application/json;
+        add_header Retry-After 1 always;
+        add_header Access-Control-Allow-Origin $l2_cors_origin always;
+        add_header Vary Origin always;
+        return 429 '{"jsonrpc":"2.0","id":null,"error":{"code":-32005,"message":"Rate limited: too many requests or connections from this client."}}';
+    }
+    location @l2_method {
+        default_type application/json;
+        add_header Access-Control-Allow-Origin $l2_cors_origin always;
+        add_header Vary Origin always;
+        return 405 '{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Use POST with a JSON-RPC 2.0 body."}}';
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+# ------------------- probe (js_periodic) and local health (loopback only)
+server {
+    listen 127.0.0.1:@PROBE_PORT@;
+    access_log off;
+    location = /health {
+        js_content l2rpc.health;
+    }
+    location = /_probe {
+        allow 127.0.0.1;
+        deny all;
+        js_fetch_timeout 3s;
+        js_periodic l2rpc.probe interval=@PROBE_INTERVAL@ jitter=1;
+        return 204;
+    }
+}
+@PEER_SERVERS@

@@ -18,6 +18,11 @@ pub const RPC_MAX_RESPONSE_BYTES: u32 = 64 * 1024 * 1024;
 /// 2,000 `eth_estimateGas` in a 320 KB body kept one connection busy for 41 s
 /// in the 2026-10-30 spool rehearsal.
 pub const RPC_MAX_BATCH_CALLS: u32 = 100;
+/// Concurrent HTTP connections. The listener is loopback-only and fronted by
+/// the public gateway, whose nginx workers each keep a pool of idle upstream
+/// connections; jsonrpsee's default of 100 answers 429 once those pools and a
+/// burst exceed it, so the cap is set well above the gateway's pools.
+pub const RPC_MAX_HTTP_CONNECTIONS: u32 = 1024;
 
 /// Start the supplied upstream EthApi module on IPv4 loopback.
 ///
@@ -33,7 +38,8 @@ pub async fn start_http_rpc(module: RpcModule<()>, port: u16) -> Result<RpcServe
         ServerConfig::builder()
             .max_request_body_size(RPC_MAX_REQUEST_BYTES)
             .max_response_body_size(RPC_MAX_RESPONSE_BYTES)
-            .set_batch_request_config(BatchRequestConfig::Limit(RPC_MAX_BATCH_CALLS)),
+            .set_batch_request_config(BatchRequestConfig::Limit(RPC_MAX_BATCH_CALLS))
+            .max_connections(RPC_MAX_HTTP_CONNECTIONS),
     )
     .with_http_address(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
     .start(&modules)
