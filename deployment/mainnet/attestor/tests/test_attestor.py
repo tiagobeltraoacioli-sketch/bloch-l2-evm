@@ -325,6 +325,13 @@ class AgentTest(unittest.TestCase):
         if STATUS_SCHEMA == 'v3':
             document['schema'] = 'bloch.l2.native-follower-status.v3'
             settlements = document.pop('finalized_settlements')
+            # A follower's list is contiguous from block 1; this fixture leaves out blocks without a test purpose.
+            listed = {e['l2_number'] for e in settlements}
+            top = max(listed, default=0)
+            settlements += [{'l2_number': b['number'], 'l2_hash': b['hash'], 'l2_state_root': b['state_root'],
+                             'native_slot': 100 + b['number'], 'native_block': h(f'n{b["number"]}')}
+                            for b in self.blocks if b['number'] < top and b['number'] not in listed]
+            settlements.sort(key=lambda e: e['l2_number'])
             lines = [json.dumps(e, separators=(',', ':')).encode() + b'\n' for e in settlements]
             name = self.status.stem + '.settlements.jsonl'
             self.status.with_name(name).write_bytes(b''.join(lines))
