@@ -24,7 +24,7 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 | `setup-gateway.sh` | owner script: `peer-cert`, `plan`, `apply`, `rollback` (root, on each host) |
 | `cloudflare-ips-v4.txt`, `-v6.txt` | Cloudflare edge ranges (realip, edge check, firewall); refresh from cloudflare.com/ips before apply |
 | `tests/pair.sh` | private two-gateway rig (unprivileged nginx, loopback, throwaway certificates) |
-| `tests/test_gateway.py` | 115 integration checks (protocol, allowlist, limits, CORS, routing, failover) |
+| `tests/test_gateway.py` | integration checks (protocol, allowlist, limits, CORS, routing, failover, follower status with `--status-files`) |
 | `tests/rig-*.sh` | private settled-RPC copies, private block producer, ab load test |
 | `compat/` | ethers v6 / viem / MetaMask call sequence (`compat.mjs`, `write.mjs`), Foundry (`foundry.sh`, `foundry-write.sh`) |
 
@@ -45,6 +45,7 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 | Backend connections | `max_conns` shared across workers: reads 48, sequencer paths and the inbound peer path 12 each. That stays below the settled RPC's 100-connection cap (v2). Idle keepalive is 4/2 per worker for 20 s. Set `worker_processes 4`. `setup-gateway.sh` passes `--backend-conns 400` for settled RPC v2.1 (1,024 connections); 48 is `render.py`'s default for a 100-connection binary |
 | Routing | reads go to the freshest backend from the probe (ties stay local), with the other as nginx backup on error/timeout/429/502/503/504. Pending nonce goes to the sequencer first. Transactions go to the sequencer only, never retried |
 | Failure | reads: 503 + -32053 (retryable) with the caller's ids. tx: -32052 "outcome unknown" if the sequencer did not answer, or -32053 `submitted:false` if the probe already saw it down |
+| Finality reads | A call at `safe` or `finalized`, `bloch_finality` and `bloch_settlement` go to a backend whose follower status is valid and younger than `--max-status-age` (default 900 s, as the monitor's CRIT), and to the other one when the first answers that its levels are closed (-32001). A stale status alone refuses nothing: with both backends old, reads are still served and `/health` says `finalityCurrent: false` with HTTP 200. Both closed: -32001 reaches the client. Other reads are not affected. |
 | Health | `GET /health` (public) and `http://127.0.0.1:18958/health` (local): chain id, per-backend ok/head/finalized/age, sequencer reachability. 200 if any backend is ok, else 503. No addresses |
 | Logs | JSON access log with the client IP, method names (first 4), upstream and timings; no bodies |
 

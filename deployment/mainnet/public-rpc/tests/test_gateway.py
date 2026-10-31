@@ -14,6 +14,7 @@ spool's answer is checked to come from the sequencer, not from the gateway).
 import argparse
 import http.client
 import json
+import os
 import random
 import ssl
 import subprocess
@@ -207,6 +208,74 @@ def wait_health(url, pred, timeout=20):
     return False
 
 
+def finality(a, b, status_a, status_b):
+    """Follower status of the backends: act on age and closed levels. Restores both files."""
+    saved_a, saved_b = open(status_a).read(), open(status_b).read()
+
+    def stamp(path, text, age):
+        document = json.loads(text)
+        document['written_at_unix'] = int(time.time()) - age
+        temporary = path + '.test'
+        with open(temporary, 'w') as f:
+            json.dump(document, f)
+        os.replace(temporary, path)
+
+    def age(url):
+        return ((call(url, 'bloch_finality')[2].get('result') or {}).get('status') or {}).get('age_s')
+
+    def seen(url, side, pred):
+        return wait_health(url, lambda s, r: pred(r[side].get('followerStatus') or {}, r))
+
+    try:
+        stamp(status_a, saved_a, 0)
+        stamp(status_b, saved_b, 0)
+        check('finality: both fresh, /health current', seen(a, 'local', lambda f, r: f.get('state') == 'ok' and f.get('ageS', 9999) < 60) and seen(a, 'peer', lambda f, r: f.get('ageS', 9999) < 60))
+        stamp(status_a, saved_a, 7200)
+        check('finality: /health shows the old status of A', seen(a, 'local', lambda f, r: f.get('ageS', 0) >= 7200 and r['local']['finalityCurrent'] is False and r['finalityCurrent'] is True))
+        ages = [age(a) for _ in range(5)]
+        check('finality: old status on A, finality reads go to the peer', all(x is not None and x < 900 for x in ages), ages)
+        s, _, r = call(a, 'eth_blockNumber')
+        check('finality: old status does not touch other reads', r.get('result', '').startswith('0x'), r)
+        stamp(status_b, saved_b, 7200)
+        check('finality: both old, /health 200 and not current', wait_health(a, lambda s, r: s == 200 and r['finalityCurrent'] is False))
+        s, _, r = call(a, 'eth_getBlockByNumber', ['finalized', False])
+        check('finality: both old, finalized is still served', (r.get('result') or {}).get('hash') == GENESIS, r)
+        stamp(status_b, saved_b, 0)
+        stamp(status_a, saved_a, 0)
+        check('finality: fresh again', seen(a, 'local', lambda f, r: f.get('ageS', 9999) < 60))
+
+        # Closed on A: the first reads race the probe, so these exercise the retry as well as the routing.
+        os.remove(status_a)
+        codes, ends = [], time.time() + 8
+        while time.time() < ends:
+            _, _, r = call(a, 'eth_getBlockByNumber', ['finalized', False])
+            codes.append((r.get('error') or {}).get('code') or ((r.get('result') or {}).get('hash') == GENESIS))
+            time.sleep(0.05)
+        check(f'finality: A closes, every finalized read of {len(codes)} is answered by a backend with open levels', all(c is True for c in codes), set(map(str, codes)))
+        check('finality: /health shows A as not valid', seen(a, 'local', lambda f, r: f.get('state') == 'missing' and r['local']['ok'] is True))
+        batch = [{'jsonrpc': '2.0', 'id': 1, 'method': 'eth_blockNumber', 'params': []},
+                 {'jsonrpc': '2.0', 'id': 2, 'method': 'eth_getBlockByNumber', 'params': ['safe', False]},
+                 {'jsonrpc': '2.0', 'id': 3, 'method': 'eth_getLogs', 'params': [{'fromBlock': 'finalized', 'toBlock': 'finalized'}]},
+                 {'jsonrpc': '2.0', 'id': 4, 'method': 'bloch_settlement', 'params': ['0x1']},
+                 {'jsonrpc': '2.0', 'id': 5, 'method': 'eth_getBalance', 'params': ['0x' + '00' * 20, {'blockNumber': 'finalized'}]}]
+        s, _, r = request(a, batch)
+        check('finality: a mixed batch stays in order, finalized parts answered', [x['id'] for x in r] == [1, 2, 3, 4, 5] and all('error' not in x for x in r), r)
+        os.remove(status_b)
+        check('finality: both closed, seen', wait_health(a, lambda s, r: (r['peer'].get('followerStatus') or {}).get('state') == 'missing'))
+        s, _, r = call(a, 'eth_getBlockByNumber', ['finalized', False], id=9)
+        check('finality: both closed, -32001 reaches the client with its id', r.get('id') == 9 and (r.get('error') or {}).get('code') == -32001, r)
+        s, _, r = call(a, 'eth_blockNumber')
+        check('finality: both closed, latest still answers', r.get('result', '').startswith('0x'), r)
+        s, _, r = call(a, 'bloch_finality')
+        check('finality: both closed, bloch_finality says so', (r.get('result') or {}).get('status', {}).get('state') == 'missing', r)
+    finally:
+        with open(status_a, 'w') as f:
+            f.write(saved_a)
+        with open(status_b, 'w') as f:
+            f.write(saved_b)
+    check('finality: reopened', wait_health(a, lambda s, r: (r['local'].get('followerStatus') or {}).get('state') == 'ok' and (r['peer'].get('followerStatus') or {}).get('state') == 'ok'))
+
+
 def failover(a, b, raw, cmds):
     stop_a, start_a, stop_b, start_b = cmds
     sh(stop_a)
@@ -245,6 +314,7 @@ def main():
     p.add_argument('--sender')
     p.add_argument('--skip-limits', action='store_true')
     p.add_argument('--failover', nargs=4)
+    p.add_argument('--status-files', nargs=2, metavar=('A', 'B'), help='follower status files of the backends behind A and B')
     o = p.parse_args()
     basic(o.a, 'A')
     basic(o.b, 'B')
@@ -253,6 +323,8 @@ def main():
     if not o.skip_limits:
         limits(o.a)
         simulations(o.a)
+    if o.status_files:
+        finality(o.a, o.b, *o.status_files)
     if o.failover:
         failover(o.a, o.b, o.raw_tx, o.failover)
     failed = [n for n, ok in results if not ok]

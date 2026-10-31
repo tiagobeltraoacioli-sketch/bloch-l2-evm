@@ -9,10 +9,15 @@
 //   read     to the fresher of the local settled RPC and the peer host's
 //            (nginx upstream with the other one as backup)
 //   seqread  the sequencer first (it counts the spool), then the other
+//   finality a call at `safe` or `finalized`, bloch_finality or bloch_settlement:
+//            to a backend whose follower status is valid and younger than
+//            cfg.maxStatusAgeS, and once more to the other backend when the
+//            first has closed those levels. A stale status alone never refuses
+//            a read: old finality is still true, and /health reports the age.
 //   tx       eth_sendRawTransaction, the sequencer only, never retried
 //
-// Backend freshness comes from a js_periodic probe (chain id, head, finalized)
-// kept in a shared dictionary; /health reports it.
+// Backend freshness comes from a js_periodic probe (chain id, head, finalized,
+// follower status) kept in a shared dictionary; /health reports it.
 import cfg from 'l2rpc-config.js';
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -83,6 +88,18 @@ const EXPLAINED = {
 // njs subrequests so the slot is released when the backend answers.
 const SIMULATIONS = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true };
 
+// Position of the block parameter of each method that takes a tag.
+const TAG_POSITION = {
+  eth_getBlockByNumber: 0, eth_getBlockReceipts: 0, eth_getBlockTransactionCountByNumber: 0,
+  eth_getUncleCountByBlockNumber: 0, eth_getUncleByBlockNumberAndIndex: 0, eth_getTransactionByBlockNumberAndIndex: 0,
+  eth_feeHistory: 1, eth_getBalance: 1, eth_getCode: 1, eth_getTransactionCount: 1, eth_call: 1, eth_estimateGas: 1,
+  eth_createAccessList: 1, eth_getStorageAt: 2, eth_getProof: 2,
+};
+// Answered from the follower status, so the same choice of backend applies.
+const FINALITY_METHODS = { bloch_finality: true, bloch_settlement: true };
+// The settled RPC's answer while its safe and finalized levels are closed.
+const LEVELS_CLOSED = -32001;
+
 const HEX_QTY = /^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const HASH32 = /^0x[0-9a-fA-F]{64}$/;
 
@@ -140,6 +157,54 @@ function readTarget() {
   if (lOk) return 'local';
   if (pOk) return 'peer';
   return 'local';
+}
+
+function isLevel(v) {
+  return v === 'finalized' || v === 'safe';
+}
+
+function namesFinalityLevel(method, params) {
+  if (!Array.isArray(params)) return false;
+  if (method === 'eth_getLogs') {
+    const f = params[0];
+    return !!f && typeof f === 'object' && (isLevel(f.fromBlock) || isLevel(f.toBlock));
+  }
+  if (!has(TAG_POSITION, method)) return false;
+  const v = params[TAG_POSITION[method]];
+  return isLevel(v) || (!!v && typeof v === 'object' && isLevel(v.blockNumber));
+}
+
+// A backend answering, with a valid follower status younger than the threshold. A backend that
+// reports no status (before v2.1) counts as current: there is nothing to act on.
+function finalityCurrent(s) {
+  return fresh(s) && s.ok && (s.statusState === null || (s.statusState === 'ok' && s.statusAge !== null && s.statusAge <= cfg.maxStatusAgeS));
+}
+
+// A backend whose levels are open, even on an old status.
+function finalityOpen(s) {
+  return fresh(s) && s.ok && (s.statusState === null || s.statusState === 'ok');
+}
+
+// 'local' or 'peer': the first backend for a finality read. Current beats open beats the read target.
+function finalityTarget() {
+  const l = readState('local');
+  const p = cfg.peerProbeUrl ? readState('peer') : null;
+  for (const good of [finalityCurrent, finalityOpen]) {
+    const lGood = good(l);
+    const pGood = good(p);
+    if (lGood && pGood) return readTarget();
+    if (lGood) return 'local';
+    if (pGood) return 'peer';
+  }
+  return readTarget();
+}
+
+function closedAnswer(reply) {
+  if (!reply || typeof reply !== 'object') return false;
+  if (reply.error && reply.error.code === LEVELS_CLOSED) return true;
+  // bloch_finality names a state; only an answer with the member can say the levels are closed.
+  const status = reply.result && typeof reply.result === 'object' ? reply.result.status : null;
+  return !!status && typeof status === 'object' && status.state !== undefined && status.state !== 'ok';
 }
 
 function sequencerDown() {
@@ -208,6 +273,7 @@ function classify(call) {
   if (m === 'eth_getTransactionCount' && Array.isArray(call.params) && call.params[1] === 'pending') {
     return { route: 'seqread' };
   }
+  if (route === 'read' && (FINALITY_METHODS[m] === true || namesFinalityLevel(m, call.params))) return { route: 'finality' };
   return { route: route };
 }
 
@@ -238,40 +304,63 @@ function unavailable(id, route) {
   return err(id, -32053, 'No healthy L2 backend; retry shortly.');
 }
 
+const BACKEND = { local: '/_l2/local', peer: '/_l2/peer' };
+
 function location(route) {
   if (route === 'tx') return '/_l2/seq';
   if (route === 'seqread') return '/_l2/seqread';
+  if (route === 'finality') return BACKEND[finalityTarget()];
   return readTarget() === 'local' ? '/_l2/local' : '/_l2/peer';
 }
 
+// One upstream round trip for `calls`; the answers by id, empty on any failure.
+async function roundTrip(r, where, calls) {
+  const reply = await r.subrequest(where, { method: 'POST', body: JSON.stringify(calls.map((x) => x.call)) });
+  const byId = {};
+  if (reply.status === 200) {
+    try {
+      const parsed = JSON.parse(reply.responseText);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((item) => {
+          if (item && typeof item === 'object') byId[JSON.stringify(item.id)] = item;
+        });
+      }
+    } catch (e) {
+      // no answers
+    }
+  }
+  return byId;
+}
+
+// Finality calls the first backend could not answer because it closed its levels (or did not answer
+// at all) go once to the other one. Its answer replaces the first only if it is not closed too.
+async function retryFinality(r, first, calls, byId) {
+  const again = calls.filter((c) => c.call.id !== undefined && (!byId[JSON.stringify(c.call.id)] || closedAnswer(byId[JSON.stringify(c.call.id)])));
+  if (!again.length || !cfg.peerProbeUrl) return;
+  const other = first === BACKEND.local ? BACKEND.peer : BACKEND.local;
+  const second = await roundTrip(r, other, again);
+  again.forEach((c) => {
+    const key = JSON.stringify(c.call.id);
+    if (second[key] && !closedAnswer(second[key])) byId[key] = second[key];
+    else if (!byId[key] && second[key]) byId[key] = second[key];
+  });
+}
+
 async function forwardParts(r, parts) {
-  // parts: [{route, calls: [{index, call}]}]; one upstream round trip per route.
+  // parts: [{route, calls: [{index, call}]}]; one upstream round trip per route, plus a retry for finality.
   const results = await Promise.all(
-    parts.map((p) =>
-      r
-        .subrequest(location(p.route), { method: 'POST', body: JSON.stringify(p.calls.map((x) => x.call)) })
-        .then((reply) => ({ p: p, reply: reply }))
-    )
+    parts.map(async (p) => {
+      const where = location(p.route);
+      const byId = await roundTrip(r, where, p.calls);
+      if (p.route === 'finality') await retryFinality(r, where, p.calls, byId);
+      return { p: p, byId: byId };
+    })
   );
   const out = [];
   results.forEach((x) => {
-    let parsed = null;
-    if (x.reply.status === 200) {
-      try {
-        parsed = JSON.parse(x.reply.responseText);
-      } catch (e) {
-        parsed = null;
-      }
-    }
-    const byId = {};
-    if (Array.isArray(parsed)) {
-      parsed.forEach((item) => {
-        if (item && typeof item === 'object') byId[JSON.stringify(item.id)] = item;
-      });
-    }
     x.p.calls.forEach((c) => {
       if (c.call.id === undefined) return;
-      const hit = byId[JSON.stringify(c.call.id)];
+      const hit = x.byId[JSON.stringify(c.call.id)];
       out.push({ index: c.index, reply: hit || unavailable(c.call.id, x.p.route) });
     });
   });
@@ -341,7 +430,7 @@ async function handle(r) {
 
   // Fast path: no simulation, everything forwardable shares one route and
   // nothing was answered here, so nginx proxies the original body unchanged.
-  if (sims === 0 && replies.length === 0 && routeList.length === 1) {
+  if (sims === 0 && replies.length === 0 && routeList.length === 1 && routeList[0] !== 'finality') {
     const route = routeList[0];
     const failures = forward.filter((f) => f.call.id !== undefined).map((f) => unavailable(f.call.id, route));
     r.variables.l2_failure = JSON.stringify(batch ? failures : failures[0] || err(null, -32053, 'No healthy L2 backend; retry shortly.'));
@@ -383,10 +472,11 @@ const PROBE_BODY = JSON.stringify([
   { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] },
   { jsonrpc: '2.0', id: 2, method: 'eth_blockNumber', params: [] },
   { jsonrpc: '2.0', id: 3, method: 'eth_getBlockByNumber', params: ['finalized', false] },
+  { jsonrpc: '2.0', id: 4, method: 'bloch_finality', params: [] },
 ]);
 
 async function probeOne(name, url) {
-  const s = { ok: false, head: null, finalized: null, ts: Date.now(), error: null };
+  const s = { ok: false, head: null, finalized: null, statusState: null, statusAge: null, ts: Date.now(), error: null };
   try {
     const reply = await ngx.fetch(url, {
       method: 'POST',
@@ -403,6 +493,11 @@ async function probeOne(name, url) {
     if (s.head === null) throw new Error('no head');
     const fin = by[3] && by[3].result;
     s.finalized = fin && typeof fin === 'object' ? qty(fin.number) : null;
+    const signal = by[4] && by[4].result && by[4].result.status;
+    if (signal && typeof signal === 'object') {
+      s.statusState = typeof signal.state === 'string' ? signal.state : 'unknown';
+      s.statusAge = typeof signal.age_s === 'number' ? signal.age_s : null;
+    }
     s.ok = true;
   } catch (e) {
     s.error = String(e.message || e).slice(0, 120);
@@ -417,7 +512,15 @@ async function probe() {
 
 function view(s) {
   if (s === null) return { ok: false, error: 'not probed yet' };
-  return { ok: fresh(s) && s.ok, head: s.head, finalized: s.finalized, ageMs: s.age, error: s.error || undefined };
+  return {
+    ok: fresh(s) && s.ok,
+    head: s.head,
+    finalized: s.finalized,
+    ageMs: s.age,
+    followerStatus: s.statusState === null ? undefined : { state: s.statusState, ageS: s.statusAge },
+    finalityCurrent: finalityCurrent(s),
+    error: s.error || undefined,
+  };
 }
 
 function health(r) {
@@ -432,6 +535,9 @@ function health(r) {
   };
   out.sequencer = cfg.role === 'sequencer' ? out.local.ok : !!(out.peer && out.peer.ok);
   out.ok = out.local.ok || !!(out.peer && out.peer.ok);
+  // Reads still work when this is false; alert on it.
+  out.finalityCurrent = out.local.finalityCurrent === true || !!(out.peer && out.peer.finalityCurrent === true);
+  out.maxStatusAgeS = cfg.maxStatusAgeS;
   r.headersOut['Content-Type'] = 'application/json';
   r.headersOut['Cache-Control'] = 'no-store';
   r.return(out.ok ? 200 : 503, JSON.stringify(out));

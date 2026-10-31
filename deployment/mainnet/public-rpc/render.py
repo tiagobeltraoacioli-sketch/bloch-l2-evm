@@ -94,6 +94,8 @@ def main():
     a.add_argument('--max-lag', type=int, default=0,
                    help='blocks the local backend may trail the peer and still take reads (0: reads go to the freshest backend, ties stay local)')
     a.add_argument('--probe-interval', default='3s')
+    a.add_argument('--max-status-age', type=int, default=900,
+                   help='seconds: older follower status sends finality reads to the other backend (matches the monitor CRIT)')
     a.add_argument('--log-dir', default='/var/log/nginx')
     a.add_argument('--standalone', action='store_true', help='also write nginx.conf for a private unprivileged test instance')
     a.add_argument('--njs-module', default='modules/ngx_http_js_module.so', help='load_module path for --standalone')
@@ -238,6 +240,7 @@ server {{
         'maxLogAddresses': 256,
         'maxLagBlocks': o.max_lag,
         'stateMaxAgeMs': 15000,
+        'maxStatusAgeS': o.max_status_age,
         'localProbeUrl': f'http://{local}/',
         'peerProbeUrl': f'http://{peer_out}/' if o.peer else None,
     }
