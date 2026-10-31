@@ -38,13 +38,17 @@ fn settlement() -> SettlementContextV2 {
 }
 
 fn statement_accepts(timestamp: u64) -> bool {
+    statement_accepts_with(timestamp, B256::repeat_byte(7))
+}
+
+fn statement_accepts_with(timestamp: u64, prevrandao: B256) -> bool {
     let spec = ChainSpec::mainnet();
     let pre = genesis_v2(&spec, MAINNET_GENESIS_TIMESTAMP).unwrap();
     let context = BlockContext {
         number: 1,
         timestamp,
         base_fee_per_gas: spec.next_base_fee(spec.initial_base_fee, 0),
-        prevrandao: B256::repeat_byte(7),
+        prevrandao,
         anchor_root: B256::repeat_byte(9),
     };
     let body = NodeBodyV2 { deposits: vec![], transactions: vec![] };
@@ -63,5 +67,14 @@ fn statement_must_refuse_a_timestamp_unrelated_to_the_anchored_slot() {
     assert!(
         !statement_accepts(rule + 10 * 365 * 24 * 3600),
         "the statement function accepts a timestamp ten years past the anchored slot"
+    );
+}
+
+#[test]
+fn statement_must_refuse_a_prevrandao_rebuilders_cannot_derive() {
+    let rule = MAINNET_GENESIS_TIMESTAMP + SLOT * SLOT_SECONDS;
+    assert!(
+        !statement_accepts_with(rule, B256::repeat_byte(0x99)),
+        "the statement function accepts a prevrandao other than the one rebuilders assume"
     );
 }

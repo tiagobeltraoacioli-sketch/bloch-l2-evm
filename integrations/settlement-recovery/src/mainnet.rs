@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(spec.genesis_header().0.chain_id, 700_770);
         assert_eq!(
             policy.configuration,
-            bloch_l2_evm::proof_statement::configuration_commitment(&bloch_l2_evm::ChainSpec::mainnet()).unwrap(),
+            bloch_l2_evm::proof_statement::configuration_commitment(&bloch_l2_evm::ChainSpec::mainnet_v1()).unwrap(),
         );
         assert_eq!(
             MAINNET_NETWORK,

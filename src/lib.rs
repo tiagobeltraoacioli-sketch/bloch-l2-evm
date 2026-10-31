@@ -123,7 +123,6 @@ pub mod proving;
 pub mod scale;
 #[cfg(feature = "serde")]
 pub mod serde_bounded;
-pub mod settlement_admission;
 pub mod state;
 pub mod stateroot;
 pub mod stubs;

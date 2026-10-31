@@ -53,7 +53,7 @@ use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::context_interface::Transaction;
 use revm::database::CacheDB;
 use revm::handler::{ExecuteEvm, SystemCallCommitEvm};
-use revm::state::{Account, EvmState};
+use revm::state::{Account, Bytecode, EvmState};
 use revm::{Context, Database, DatabaseCommit, DatabaseRef, MainBuilder, MainContext};
 
 use crate::chainspec::{ChainSpec, ChainSpecError, BEACON_ROOTS_ADDRESS};
@@ -1041,6 +1041,7 @@ impl<DB: DatabaseRef> BlockSession<DB> {
         )
         .map_err(db_error)?;
         install_outbox(&mut evm.ctx.journaled_state.database, spec)?;
+        install_fee_vault_sweep(&mut evm.ctx.journaled_state.database, spec)?;
         let sys = evm
             .system_call_commit(
                 BEACON_ROOTS_ADDRESS,
@@ -1222,6 +1223,22 @@ pub(crate) fn install_outbox<DB: DatabaseRef>(
     Ok(())
 }
 
+/// Install the sweep code at both fee vaults under a rule set that has it.
+/// `ensure_system_account` never overwrites a balance, so accumulated fees stay.
+pub(crate) fn install_fee_vault_sweep<DB: DatabaseRef>(
+    db: &mut CacheDB<DB>,
+    spec: &ChainSpec,
+) -> Result<(), BlockExecutionError> {
+    let Some(recipient) = spec.fee_vault_sweep else {
+        return Ok(());
+    };
+    let code = Bytecode::new_raw(Bytes::copy_from_slice(&crate::chainspec::fee_vault_sweep_code(recipient)));
+    for vault in [spec.base_fee_vault, spec.sequencer_fee_vault] {
+        ensure_system_account(db, vault, Some(&code)).map_err(db_error)?;
+    }
+    Ok(())
+}
+
 /// Merge sparse reads/writes without replacing an account's untouched storage.
 /// Deletion and clear markers remain until the block overlay reaches its backing.
 fn merge_candidate<DB>(db: &mut CacheDB<DB>, candidate: revm::database::Cache) {
@@ -1337,7 +1354,7 @@ mod tests {
     #[test]
     fn late_vault_read_failure_does_not_commit_candidate() {
         use core::cell::Cell;
-        use revm::state::{AccountInfo, Bytecode};
+        use revm::state::AccountInfo;
         #[derive(Debug)]
         struct Unavailable;
         impl core::fmt::Display for Unavailable {
