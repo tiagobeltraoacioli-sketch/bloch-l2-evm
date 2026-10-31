@@ -205,8 +205,16 @@ from the accepted head; it reuses a block left by a crash if its anchor is uncha
 If an L1 reorg removed an accepted, unfinalized settlement, the settler halts (exit 3) because its database is ahead of what L1 can accept. Stop the settler and every settled RPC on that database, then run the plan, which changes nothing:
 
 ```
-python3 deployment/mainnet/l2_reorg_recover.py --config settler.json --follower-state DIR
+sudo systemctl stop bloch-l2-mainnet-settler bloch-l2-mainnet-rpc
 ```
+
+`prepare` installs the tool next to the worker. `REL` is that release directory, `/opt/bloch/l2-mainnet-settler/<digest>`. Run it as the settler user, so the new database keeps the right owner:
+
+```
+sudo -u bloch-l2-mainnet-settler python3 REL/l2_reorg_recover.py --config /etc/bloch-l2-mainnet-settler/config.json --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json
+```
+
+`--follower-status` is required: the installed config does not name that file. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
 
 Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool, and keeps the old database for review.
 
