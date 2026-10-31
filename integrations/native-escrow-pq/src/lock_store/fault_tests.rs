@@ -11,9 +11,32 @@ const STAGES: [PublicationStage; 5] = [
     PublicationStage::Renamed,
     PublicationStage::DirectorySynced,
 ];
-struct Temp(PathBuf);
+/// `File::try_lock` is an flock on the open file description. A child spawned by a
+/// parallel test holds a copy of every open descriptor until its exec, so it can
+/// make a lock taken in this window look contended (`Locked`). Tests that own a
+/// temp directory therefore run one at a time.
+static TEMP_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+thread_local!(static HOLDS_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+struct Gate(Option<std::sync::MutexGuard<'static, ()>>);
+impl Gate {
+    fn take() -> Self {
+        if HOLDS_GATE.with(|held| held.replace(true)) {
+            return Self(None);
+        }
+        Self(Some(TEMP_GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())))
+    }
+}
+impl Drop for Gate {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            HOLDS_GATE.with(|held| held.set(false));
+        }
+    }
+}
+struct Temp(PathBuf, #[allow(dead_code)] Gate);
 impl Temp {
     fn new() -> Self {
+        let gate = Gate::take();
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = format!(
             "bloch-lock-fault-{}-{}-{}",
@@ -26,7 +49,7 @@ impl Temp {
         );
         let path = std::env::temp_dir().join(name);
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        Self(path)
+        Self(path, gate)
     }
 }
 impl Drop for Temp {
