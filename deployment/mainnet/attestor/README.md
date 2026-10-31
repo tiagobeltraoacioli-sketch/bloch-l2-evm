@@ -160,6 +160,12 @@ To uninstall, run `sudo ./install-attestor.sh rollback`. This removes the units 
 and the key. `--purge-key` also shreds the host key and passphrase. It is not a binary rollback: for
 that, see `upgrade-rollback` below.
 
+## Claimants: retry `l2-claim sign` on a shape error
+
+With the pinned `bloch-pos`, about 1 in 1,000 runs of `l2-claim sign` draws a Falcon signature over the size bound.
+It exits with `signed claim has an invalid shape: Shape` and writes no file. Run the same command again: each run
+signs anew. No funds or nonces are affected.
+
 ## Binary pins
 
 `config.json` pins three binaries by SHA-256: `bloch_pos_sha256`, `produce_sha256` and (since the
