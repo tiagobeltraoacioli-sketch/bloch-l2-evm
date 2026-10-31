@@ -469,7 +469,16 @@ def read_backend(client: Client, name: str, url: str, p: Dict[str, Any], r: Repo
     tag = f'[{name}]'
     try:
         chain_id = qty(client.call(url, 'eth_chainId'))
-        blocks = {t: client.call(url, 'eth_getBlockByNumber', [t, False]) for t in ('latest', 'safe', 'finalized')}
+        blocks = {'latest': client.call(url, 'eth_getBlockByNumber', ['latest', False])}
+        closed = []
+        for t in ('safe', 'finalized'):
+            try:
+                blocks[t] = client.call(url, 'eth_getBlockByNumber', [t, False])
+            except RpcError as e:
+                if '-32001' not in str(e):  # the settled RPC's "follower status lost or invalid": levels unavailable, RPC up
+                    raise
+                blocks[t] = None
+                closed.append(t)
     except (RpcError, ValueError) as e:
         r.add(f'l2_rpc{tag}', CRIT, f'L2 RPC unreachable or malformed: {e}')
         return None
@@ -502,6 +511,14 @@ def read_backend(client: Client, name: str, url: str, p: Dict[str, Any], r: Repo
     except RpcError as e:
         r.add(f'l2_finality_view{tag}', WARN, f'bloch_finality unavailable: {e}')
         finality = None
+    status = finality.get('status') if isinstance(finality, dict) else None
+    state = status.get('state') if isinstance(status, dict) else None
+    if closed or state in ('missing', 'invalid'):
+        r.add(f'l2_finality_closed{tag}', CRIT, f'{",".join(closed) or "levels"} unavailable: follower status {state or "lost or invalid"}; '
+                                                'latest still served')
+    elif isinstance(status, dict) and isinstance(status.get('age_s'), (int, float)):
+        r.graded(f'l2_status_age{tag}', float(status['age_s']), p['status_age_warn'], p['status_age_crit'],
+                 f'follower status behind this RPC is {status["age_s"]} s old')
     return {'name': name, 'url': url, 'num': num, 'ts': ts, 'hash': hashes, 'finality': finality,
             'base_fee': qty(latest.get('baseFeePerGas', '0x0'))}
 
