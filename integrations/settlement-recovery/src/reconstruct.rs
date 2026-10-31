@@ -27,9 +27,14 @@ use bloch_l2_evm::{
 use bloch_pos_committee::{l2_settlement::InboxRecord, transition::PosTransaction};
 use std::collections::BTreeMap;
 
-/// One native block: its height and canonical transaction bytes in order.
+/// One native block: its height on the L2 registry's own count and its
+/// canonical transaction bytes in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeBlockTransactions {
+    /// The value the native transition stores in `InboxRecord::height`: the
+    /// number of blocks applied since the L2 registry was installed. It equals
+    /// the chain height only on a network with the L2 at genesis; see
+    /// [`l2_registry_blocks`].
     pub height: u64,
     pub transactions: Vec<Vec<u8>>,
 }
@@ -118,6 +123,32 @@ fn mint(record: &InboxRecord) -> DepositMint {
             l1_sats: record.sats,
         },
     }
+}
+
+/// First native slot of the flag-day L2 installed by this build: the transition
+/// installs the registry in the first block at or past this slot.
+pub fn flag_day_first_slot() -> u64 {
+    bloch_pos_committee::params::L2_SETTLEMENT_ACTIVATION_EPOCH * bloch_pos_committee::params::SLOTS_PER_EPOCH
+}
+
+/// Number canonical native blocks `(slot, transactions)`, in chain order from
+/// native genesis, on the L2 registry's own count.
+///
+/// `first_slot` is `None` for an L2 configured at genesis: every block counts,
+/// so the height is the chain height. It is `Some` for a flag-day L2: the first
+/// block at or past that slot installs the registry and is height 1, because
+/// the transition advances the new registry within that same block. Earlier
+/// blocks cannot carry L2 transactions and are left out.
+pub fn l2_registry_blocks(
+    blocks: impl IntoIterator<Item = (u64, Vec<Vec<u8>>)>,
+    first_slot: Option<u64>,
+) -> Vec<NativeBlockTransactions> {
+    blocks
+        .into_iter()
+        .filter(|(slot, _)| first_slot.is_none_or(|first| *slot >= first))
+        .zip(1u64..)
+        .map(|((_, transactions), height)| NativeBlockTransactions { height, transactions })
+        .collect()
 }
 
 /// Derive the inputs of every L2 block settled in `blocks` for `chain_id`,
