@@ -20,7 +20,7 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
 dependencies, no keys) for the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (follower
-`c18752fd…`, produce-dev `fb0d5313…`, settled-rpc `1e76b99a…`). Its JSON-RPC
+`c18752fd…`, produce-dev `fb0d5313…`, settled-rpc `18be911a…`). Its JSON-RPC
 calls are limited to `eth_chainId`, `eth_blockNumber`,
 `eth_getBlockByNumber`, `eth_getStorageAt`, `bloch_finality`,
 `getchaininfo`, `getblockcount` and `getl2settlement`; any other method is
@@ -58,6 +58,13 @@ Options:
   epochs (default: the v2 epochs compiled into the monitor).
 - `--file NAME=PATH[:SECONDS]`: heartbeat age, WARN above SECONDS and CRIT
   above 5×SECONDS. `--set KEY=VALUE` overrides a threshold.
+- `--guardian-health NAME=PATH[:SECONDS]`: the `health_file` of a bridge guardian
+  (`guardiao.py`, bloch-l2-bridge). CRIT on `healthy` other than true (for example a
+  failed pause), on a missing or malformed file, and when no round has verified the
+  bridge yet. The age of the file and of the last verified round are WARN above SECONDS
+  (default 300) and CRIT above 3×SECONDS. Run it on the guardian's host: the file is
+  mode 0640, so add `bloch-guardiao` to `SupplementaryGroups=` of the monitor unit and
+  keep `/var/lib/bloch-guardiao` group-readable.
 - `--alert-config FILE` (`monitor/alert.json.example`): `webhook_url`
   (JSON POST with `text`, `status`, `checks`), `telegram.bot_token_file` +
   `telegram.chat_id`, `min_level`, `realert_seconds`. It alerts on a new or

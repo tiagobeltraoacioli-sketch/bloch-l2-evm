@@ -200,6 +200,16 @@ from the accepted head; it reuses a block left by a crash if its anchor is uncha
 | `da-funding-low` | Top up the DA fee key. |
 | `halt` (exit 3, no auto-restart) | Operator review. Causes: a foreign statement accepted for the same block (another settler), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
 
+## L2 reorg recovery
+
+If an L1 reorg removed an accepted, unfinalized settlement, the settler halts (exit 3) because its database is ahead of what L1 can accept. Stop the settler and every settled RPC on that database, then run the plan, which changes nothing:
+
+```
+python3 deployment/mainnet/l2_reorg_recover.py --config settler.json --follower-state DIR
+```
+
+Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool, and keeps the old database for review.
+
 ## Attestor signatures (3-of-5): when and how
 
 **When they are needed.** Only for L2→L1 withdrawal **claims of ≥ 100 BLCH**. They are not

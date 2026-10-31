@@ -62,6 +62,7 @@ Notes for integrators and frontends:
 - `sha3Uncles`, `nonce` and the `pending` tag are served by the v2 settled RPC itself. The DEX repo's `rpc_compat_proxy.py` is not needed anymore.
 - The L2 genesis has **no Multicall3** (`0xcA11…CA11`) and no CREATE2 deployer (`0x4e59…956C`). Unprotected (pre-EIP-155) legacy transactions are refused by the L2, so the canonical keyless deployments cannot be reproduced at those addresses. Deploy Multicall3 normally and set `chain.contracts.multicall3` in viem/wagmi. Foundry scripts that use `new X{salt: …}` need a CREATE2 factory deployed and passed with `--create2-deployer`.
 - ethers v6 reuses an identical `eth_getTransactionCount` answer for 250 ms (`cacheTimeout`), on every chain. Sending two transactions back to back from one wallet needs an explicit nonce or `cacheTimeout: -1`.
+- If a backend loses a valid follower status (file missing, unreadable, or inconsistent with its chain), `safe` and `finalized` queries answer error `-32001` and `bloch_settlement` answers null until a valid status returns; `latest` and numbered blocks keep working. `bloch_finality.status` gives `state` (`ok`, `missing`, `invalid`), `written_at_unix` and `age_s`. A stopped follower leaves `state: ok` with a growing `age_s`, and the levels stay served: read `age_s`, since no threshold is enforced.
 - `safe`/`finalized` stay at the genesis until the first settlement is finalized on L1. Wallets that confirm on `finalized` will wait until then.
 
 ### Settled RPC fix (in v2.1)
@@ -76,7 +77,7 @@ read the state from before its own transaction (forge script followed by
 2. counts the pending nonce and spool admission from the database tip, not from the in-memory head;
 3. raises the HTTP connection cap from jsonrpsee's 100 to 1,024 (`RPC_MAX_HTTP_CONNECTIONS`).
 
-Merged with the spool-dos fix and released as settled RPC v2.1, `1e76b99a…`.
+Merged with the spool-dos fix and released as settled RPC v2.1, `18be911a…`.
 
 ## Load (45.77, shared host, ab keep-alive, private copy)
 

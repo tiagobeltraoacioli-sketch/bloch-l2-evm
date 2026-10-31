@@ -501,6 +501,38 @@ class MonitorTests(unittest.TestCase):
             r, _ = run(healthy(), '--event-log', f'settler={log}')
         self.assertEqual(level(r, 'events[settler]'), 'CRIT')
 
+    def test_guardian_health(self):
+        good = {'t': NOW - 30, 'bridge': 'busdc', 'healthy': True, 'verified_t': NOW - 30, 'problems': {}}
+        cases = [
+            ('ok', good, 'OK', 'OK', 'OK'),
+            ('failed-pause', {**good, 'healthy': False, 'problems': {'pause-failed': {'t': NOW, 'detail': 'x'}}}, 'CRIT', 'OK', 'OK'),
+            ('dead', {**good, 't': NOW - 5000, 'verified_t': NOW - 5000}, 'OK', 'CRIT', 'CRIT'),
+            ('late', {**good, 't': NOW - 400, 'verified_t': NOW - 400}, 'OK', 'WARN', 'WARN'),
+            ('blind', {**good, 'verified_t': NOW - 5000}, 'OK', 'OK', 'CRIT'),
+            ('never', {**good, 'verified_t': None}, 'OK', 'OK', 'CRIT'),
+            ('old-format', {'t': NOW - 30, 'healthy': True, 'problems': {}}, 'OK', 'OK', 'CRIT'),
+            ('truthy', {**good, 'healthy': 'yes'}, 'CRIT', 'OK', 'OK'),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            args = []
+            for name, doc, *_ in cases:
+                Path(d, name).write_text(json.dumps(doc))
+                args += ['--guardian-health', f'{name}={d}/{name}']
+            Path(d, 'garbage').write_text('{half')
+            Path(d, 'list').write_text('[]')
+            Path(d, 'custom').write_text(json.dumps({**good, 't': NOW - 100, 'verified_t': NOW - 100}))
+            args += ['--guardian-health', f'garbage={d}/garbage', '--guardian-health', f'list={d}/list',
+                     '--guardian-health', f'missing={d}/none', '--guardian-health', f'custom={d}/custom:60']
+            r, _ = run(healthy(), *args)
+        for name, _, state, age, verified in cases:
+            self.assertEqual(level(r, f'guardian[{name}]'), state, name)
+            self.assertEqual(level(r, f'guardian_age[{name}]'), age, name)
+            self.assertEqual(level(r, f'guardian_verified[{name}]'), verified, name)
+        for name in ('garbage', 'list', 'missing'):
+            self.assertEqual(level(r, f'guardian[{name}]'), 'CRIT', name)
+        self.assertEqual(level(r, 'guardian_age[custom]'), 'WARN')
+        self.assertEqual(level(r, 'guardian_verified[custom]'), 'WARN')
+
     def test_heartbeat_files(self):
         with tempfile.TemporaryDirectory() as d:
             fresh, stale = Path(d, 'fresh'), Path(d, 'stale')

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only health monitor for the Bloch L2 mainnet (chain id 700770; devnet4 700771).
 
-Runbook: docs/MAINNET-OPS-RUNBOOK.md. Release: the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (L2 18b9e1d1, native
-78d4921c, follower c18752fd, produce-dev fb0d5313, settled-rpc 1e76b99a).
+Runbook: docs/MAINNET-OPS-RUNBOOK.md. Release: the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (L2 a39b04e4, native
+78d4921c, follower c18752fd, produce-dev fb0d5313, settled-rpc 18be911a).
 
 What it reads (it never writes to a chain, holds no key and opens no keystore):
   * every L2 settled-RPC backend (`--l2-rpc NAME=URL`, repeat): eth_chainId, the `latest`, `safe` and
@@ -11,7 +11,7 @@ What it reads (it never writes to a chain, holds no key and opens no keystore):
   * one or more L1 node RPCs (`--l1-rpc`, repeat): getchaininfo (incl. `hard_forks`) and getl2settlement;
   * optionally: follower `status.json` files, the attestation drop (directory or HTTP GET base), the
     state and journal of systemd units (`systemctl show`, `journalctl`, read-only), JSON-lines log files,
-    heartbeat-file ages and installed binaries' SHA-256.
+    heartbeat-file ages, bridge guardian health files and installed binaries' SHA-256.
 
 JSON-RPC calls are limited to READ_ONLY_METHODS; any other method is refused before a request is made.
 The only outbound writes are the alert notifications the owner configures (`--alert-config`).
@@ -70,14 +70,14 @@ MAINNET_PINS = {
 
 # ---- The v2.1 L2 build (bloch-l2-2026-10-30-v21-native-78d4921c: SHA256SUMS and build.json) ----
 V2_BUILD = {
-    'l2_commit': '18b9e1d1645782b8c3cb2c095161f7649dd32d72',
+    'l2_commit': 'a39b04e435b11bd2316dffe94d78df0163153c56',
     'native': '78d4921c3ec6ba41829f3878eed47f8d3bb96230',
     'native_lock_sha256': '26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8',
 }
 V2_SHA256 = {
     'bloch-l2-native-follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
     'bloch-l2-produce-dev': 'fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9',
-    'bloch-l2-settled-rpc': '1e76b99ad2a57dd6cfae1f4086529714d1bf3372cb578a348f4cfe9a37a91d38',
+    'bloch-l2-settled-rpc': '18be911a47f0ab8975e1f079c860adef08dfc43c4b5062eca7b040e2e6eee83f',
     'sequencer_mainnet.py': '15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2',
 }
 # getchaininfo.hard_forks name -> the params.rs constant the v2 follower/producer were compiled with,
@@ -125,6 +125,7 @@ _COMMON: Dict[str, Any] = {
     'inbox_backlog_warn': 50, 'inbox_backlog_crit': 500,
     'da_backlog_warn': 3, 'da_backlog_crit': 10,
     'file_age_warn': 120, 'file_age_crit': 600,
+    'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
     # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
     'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
@@ -843,6 +844,36 @@ def check_files(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> N
         r.graded(f'file:{name}', max(0.0, now - mtime), warn, crit, f'{path} written {now - mtime:.0f} s ago')
 
 
+def check_guardian_health(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """The bridge guardian's `health_file` (guardiao.py): alive, not reporting a problem, and still able to verify."""
+    for spec in specs:
+        name, _, rest = spec.partition('=')
+        path, _, limit = rest.partition(':')
+        warn = float(limit) if limit else p['guardian_age_warn']
+        crit = warn * 3
+        try:
+            doc = json.loads(Path(path).read_text())
+            if not isinstance(doc, dict):
+                raise ValueError('not an object')
+            written = float(doc['t'])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            r.add(f'guardian[{name}]', CRIT, f'{path}: {type(e).__name__}: {e}')
+            continue
+        r.graded(f'guardian_age[{name}]', max(0.0, now - written), warn, crit, f'{path} written {now - written:.0f} s ago')
+        problems = doc.get('problems')
+        ids = ', '.join(sorted(str(k) for k in problems)) if isinstance(problems, dict) else ''
+        if doc.get('healthy') is True:
+            r.add(f'guardian[{name}]', OK, 'healthy')
+        else:
+            r.add(f'guardian[{name}]', CRIT, f'unhealthy: {ids or "no problem listed"}')
+        verified = doc.get('verified_t')
+        if not isinstance(verified, (int, float)) or isinstance(verified, bool):
+            r.add(f'guardian_verified[{name}]', CRIT, 'no round has verified the bridge yet')
+        else:
+            r.graded(f'guardian_verified[{name}]', max(0.0, now - verified), warn, crit,
+                     f'last verified round {now - verified:.0f} s ago')
+
+
 def check_binaries(paths: List[str], r: Report) -> None:
     for path in paths:
         name = Path(path).name
@@ -981,6 +1012,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_units(args.unit or [], p, now, run_cmd, r)
     check_event_logs(args.event_log or [], p, now, r)
     check_files(args.file or [], p, now, r)
+    check_guardian_health(args.guardian_health or [], p, now, r)
     check_binaries(args.binary or [], r)
     return r
 
@@ -997,6 +1029,8 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--unit', action='append', help='[NAME=]UNIT: systemd state + journal failure events')
     a.add_argument('--event-log', action='append', help='[NAME=]PATH of a JSON-lines log (settler, shadow, ...)')
     a.add_argument('--file', action='append', help='NAME=PATH[:MAX_AGE_S] heartbeat file to age-check')
+    a.add_argument('--guardian-health', action='append',
+                   help='NAME=PATH[:MAX_AGE_S] health_file of a bridge guardian (WARN above MAX_AGE_S, CRIT above 3x)')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')
     a.add_argument('--build-json', help='build.json of the L2 build (default: the v2 pins compiled in)')
     a.add_argument('--set', action='append', help='override a threshold, KEY=VALUE')
