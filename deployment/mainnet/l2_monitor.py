@@ -594,7 +594,7 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
-STATUS_BYTES_PER_SETTLEMENT = 475  # measured, schema v2
+STATUS_BYTES_PER_SETTLEMENT = 555  # measured on a real follower status, schema v2
 
 
 def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: 'Report') -> None:

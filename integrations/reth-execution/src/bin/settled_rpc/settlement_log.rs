@@ -21,7 +21,7 @@ pub const STATUS_V2: &str = "bloch.l2.native-follower-status.v2";
 pub const STATUS_V3: &str = "bloch.l2.native-follower-status.v3";
 /// A v3 status holds a fixed number of entries; anything near this is not one.
 pub const MAX_STATUS_V3_BYTES: u64 = 16 * 1_048_576;
-/// A v2 status holds every settlement, about 475 bytes each: about 560,000 settlements.
+/// A v2 status holds every settlement, about 555 bytes each: about 480,000 settlements.
 pub const MAX_STATUS_V2_BYTES: u64 = 256 * 1_048_576;
 /// Entries of a v2 status compared with the local chain at each poll.
 const RECENT_V2: usize = 64;
