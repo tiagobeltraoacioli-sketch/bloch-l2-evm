@@ -189,14 +189,12 @@ function finalityOpen(s) {
 function finalityTarget() {
   const l = readState('local');
   const p = cfg.peerProbeUrl ? readState('peer') : null;
-  for (const good of [finalityCurrent, finalityOpen]) {
-    const lGood = good(l);
-    const pGood = good(p);
-    if (lGood && pGood) return readTarget();
-    if (lGood) return 'local';
-    if (pGood) return 'peer';
-  }
-  return readTarget();
+  const pick = (good) => {
+    if (good(l) && good(p)) return readTarget();
+    if (good(l)) return 'local';
+    return good(p) ? 'peer' : null;
+  };
+  return pick(finalityCurrent) || pick(finalityOpen) || readTarget();
 }
 
 function closedAnswer(reply) {
@@ -346,16 +344,16 @@ async function retryFinality(r, first, calls, byId) {
   });
 }
 
+async function forwardPart(r, p) {
+  const where = location(p.route);
+  const byId = await roundTrip(r, where, p.calls);
+  if (p.route === 'finality') await retryFinality(r, where, p.calls, byId);
+  return { p: p, byId: byId };
+}
+
 async function forwardParts(r, parts) {
   // parts: [{route, calls: [{index, call}]}]; one upstream round trip per route, plus a retry for finality.
-  const results = await Promise.all(
-    parts.map(async (p) => {
-      const where = location(p.route);
-      const byId = await roundTrip(r, where, p.calls);
-      if (p.route === 'finality') await retryFinality(r, where, p.calls, byId);
-      return { p: p, byId: byId };
-    })
-  );
+  const results = await Promise.all(parts.map((p) => forwardPart(r, p)));
   const out = [];
   results.forEach((x) => {
     x.p.calls.forEach((c) => {
