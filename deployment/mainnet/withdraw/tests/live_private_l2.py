@@ -29,6 +29,8 @@ import urllib.request
 
 HERE = Path(__file__).resolve()
 TOOL = HERE.parent.parent / 'bloch-l2-withdraw.py'
+sys.path.insert(0, str(HERE.parents[2] / 'attestor'))
+import attestor_lib  # noqa: E402
 NETWORK = 'f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966'
 GENESIS = '9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415'
 DOMAIN = '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733'
