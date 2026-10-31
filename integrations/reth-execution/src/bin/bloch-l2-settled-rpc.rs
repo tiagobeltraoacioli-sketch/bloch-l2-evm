@@ -244,13 +244,16 @@ struct SpoolEntry {
     name: std::ffi::OsString,
     meta: Option<SpoolMeta>,
     modified: std::time::SystemTime,
+    /// Monotonic time this process first saw the entry, and its wall-clock age then.
+    seen: std::time::Instant,
+    age_when_seen: Duration,
 }
 
 /// Sender and fee fields and modification time of each spool entry, cached by
 /// file name (entries are immutable: written once by rename, removed by the
 /// producer or by eviction), so a scan of a full spool costs one directory
 /// read rather than a stat and a decode per entry.
-type SpoolIndex = std::collections::HashMap<std::ffi::OsString, (Option<SpoolMeta>, std::time::SystemTime)>;
+type SpoolIndex = std::collections::HashMap<std::ffi::OsString, (Option<SpoolMeta>, std::time::SystemTime, std::time::Instant, Duration)>;
 
 /// Read the spool directory, decoding only names not yet in `index`; the index
 /// forgets names that disappeared. Entries removed while scanning are skipped.
@@ -263,7 +266,7 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io:
             continue;
         }
         let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
-        let (meta, modified) = match index.get(&name) {
+        let (meta, modified, seen, age_when_seen) = match index.get(&name) {
             Some(known) => *known,
             None => {
                 let modified = match entry.metadata().and_then(|m| m.modified()) {
@@ -276,11 +279,13 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io:
                     .and_then(|text| alloy_primitives::hex::decode(text.trim()).ok())
                     .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
                     .map(|tx| SpoolMeta::of(&tx));
-                index.insert(name.clone(), (meta, modified));
-                (meta, modified)
+                let seen = std::time::Instant::now();
+                let age = std::time::SystemTime::now().duration_since(modified).unwrap_or_default();
+                index.insert(name.clone(), (meta, modified, seen, age));
+                (meta, modified, seen, age)
             }
         };
-        entries.push(SpoolEntry { name, meta, modified });
+        entries.push(SpoolEntry { name, meta, modified, seen, age_when_seen });
     }
     let present: std::collections::HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
     index.retain(|name, _| present.contains(name));
@@ -296,6 +301,14 @@ struct SpoolHead<'a> {
 }
 
 impl SpoolHead<'_> {
+    /// Past the TTL by the wall clock, and confirmed by the monotonic clock for an entry this process
+    /// saw while it was young: a forward clock step must not evict acknowledged transactions. An
+    /// entry already past the TTL when first seen (after a restart) has only the wall clock to go by.
+    fn expired(&self, entry: &SpoolEntry, ttl: Duration) -> bool {
+        self.now.duration_since(entry.modified).is_ok_and(|age| age > ttl)
+            && (entry.age_when_seen > ttl || entry.seen.elapsed() > ttl)
+    }
+
     /// Why `entry` can no longer be included and may be evicted, if it cannot.
     fn stale(&mut self, entry: &SpoolEntry, limits: SpoolLimits) -> Option<&'static str> {
         let Some(meta) = entry.meta else { return Some("undecodable") };
@@ -308,7 +321,7 @@ impl SpoolHead<'_> {
             Some("insufficient balance")
         } else if meta.max_fee < self.next_base_fee {
             Some("underpriced")
-        } else if self.now.duration_since(entry.modified).is_ok_and(|age| age > limits.ttl) {
+        } else if self.expired(entry, limits.ttl) {
             Some("expired")
         } else {
             None
@@ -442,6 +455,19 @@ fn plan_admission(
     }
 }
 
+/// Remove `.<hash>.partial` files a crash left behind. Admission writes them under the spool lock,
+/// which the caller holds, so none of them can be in use.
+fn remove_leftover_partials(pool: &Path) {
+    let Ok(listing) = std::fs::read_dir(pool) else { return };
+    for entry in listing.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.ends_with(".partial") && std::fs::remove_file(entry.path()).is_ok() {
+            println!("removed leftover spool file {name}");
+        }
+    }
+}
+
 /// Remove spool files; a file the producer already consumed is not an error.
 fn evict_spool(pool: &Path, names: &[std::ffi::OsString], reason: &str) {
     for name in names {
@@ -524,7 +550,7 @@ impl Spool {
             let _ = std::fs::remove_file(&partial);
             return Err(format!("txpool write failed: {error}"));
         }
-        index.insert(name.into(), (Some(meta), std::time::SystemTime::now()));
+        index.insert(name.into(), (Some(meta), std::time::SystemTime::now(), std::time::Instant::now(), Duration::ZERO));
         println!("spooled tx={hash} from={} nonce={}", meta.sender, meta.nonce);
         Ok(hash)
     }
@@ -532,6 +558,7 @@ impl Spool {
     /// Evict every stale entry (run periodically, not only under pressure).
     fn sweep(&self, provider: &BlochProviderFactory) -> Result<usize, String> {
         let mut index = self.lock();
+        remove_leftover_partials(&self.dir);
         let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
         let stale = self.with_head(provider, |head| {
             entries.iter().filter_map(|e| head.stale(e, self.limits).map(|why| (e.name.clone(), why))).collect::<Vec<_>>()
@@ -1210,8 +1237,43 @@ mod tests {
         SpoolMeta::of(&bloch_l2_evm::decode_signed_transaction(spec, &signed(spec, key, nonce, max_fee, 0)).unwrap())
     }
 
+    #[test]
+    fn a_forward_clock_step_does_not_expire_an_entry_seen_while_young() {
+        let spec = ChainSpec::mainnet();
+        let mut young = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        // The wall clock now reads 4 h later, though this process saw the entry a moment ago.
+        let later = std::time::SystemTime::now() + Duration::from_secs(4 * 3_600);
+        let mut head = SpoolHead { account: &mut account, next_base_fee: GWEI, now: later };
+        assert_eq!(head.stale(&young, SPOOL_LIMITS), None);
+        // Really held past the TTL by the monotonic clock: it expires.
+        let ttl = SPOOL_LIMITS.ttl;
+        if let Some(earlier) = std::time::Instant::now().checked_sub(ttl + Duration::from_secs(1)) {
+            young.seen = earlier;
+            assert_eq!(head.stale(&young, SPOOL_LIMITS), Some("expired"));
+        }
+    }
+
+    #[test]
+    fn a_sweep_removes_only_leftover_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".abcd.partial"), "00\n").unwrap();
+        std::fs::write(dir.path().join("keep.tx"), "00\n").unwrap();
+        std::fs::write(dir.path().join("keep.partial"), "00\n").unwrap();
+        remove_leftover_partials(dir.path());
+        assert!(!dir.path().join(".abcd.partial").exists());
+        assert!(dir.path().join("keep.tx").exists());
+        assert!(dir.path().join("keep.partial").exists());
+    }
+
     fn entry(spec: &ChainSpec, name: &str, key: u8, nonce: u64, max_fee: u128) -> SpoolEntry {
-        SpoolEntry { name: name.into(), meta: Some(meta(spec, key, nonce, max_fee)), modified: std::time::SystemTime::now() }
+        SpoolEntry {
+            name: name.into(),
+            meta: Some(meta(spec, key, nonce, max_fee)),
+            modified: std::time::SystemTime::now(),
+            seen: std::time::Instant::now(),
+            age_when_seen: Duration::ZERO,
+        }
     }
 
     const GWEI: u128 = 1_000_000_000;
@@ -1292,7 +1354,14 @@ mod tests {
         full[0] = entry(&spec, "used.tx", 10, 0, 2 * GWEI);
         full[1] = entry(&spec, "poor.tx", 11, 0, 3 * GWEI);
         full[2].modified = std::time::SystemTime::now() - Duration::from_secs(601);
-        full[3] = SpoolEntry { name: "junk.tx".into(), meta: None, modified: std::time::SystemTime::now() };
+        full[2].age_when_seen = Duration::from_secs(601);
+        full[3] = SpoolEntry {
+            name: "junk.tx".into(),
+            meta: None,
+            modified: std::time::SystemTime::now(),
+            seen: std::time::Instant::now(),
+            age_when_seen: Duration::ZERO,
+        };
         let evicted = plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[(10, 1, u128::MAX), (11, 0, 1)], GWEI).unwrap();
         assert_eq!(evicted, vec!["used.tx", "poor.tx", "k12.tx", "junk.tx"]);
         // Base fee above an entry's cap: underpriced, evicted under pressure.
