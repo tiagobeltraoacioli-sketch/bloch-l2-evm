@@ -56,7 +56,7 @@ the value.
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8 (different sources on purpose). | P3 |
 | **D5** | **Attestor operators**: five people, five hosts, one index each, plus the publish URL and token for partials | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
 | **D6** | **Bloch Inc addresses** | **None is needed for the L2 core.** L2 fees go to the predeploy `0x4200…0011`, settlements pay no L1 fee, and the DA key is generated on the host. Still `TBD-owner`: (a) the L1 wallet that funds the DA key (5 BLCH, only when user transactions are enabled); (b) the L1 wallet and L2 recipient for the test deposit and test withdrawal; (c) the Bloch Inc Safe and bridge guardian addresses, which the DEX and bridge need later. Those are not part of this plan. | P12 |
-| **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `281d59389228304823ed4d38bc5ed3510bdd36e146717056a98a1f5d5ad1f0a8`) with the owner's minisign key before any install. `TBD-owner` key. | P2 |
+| **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `c2a55ba8e179585ea84f22d6e45f1e2f2c55215243585bf1b3eabc8425fa325c`) with the owner's minisign key before any install. `TBD-owner` key. | P2 |
 | **D8** | Retire the 10-18 scratch follower/RPC on 45.77 (they halt at HF1 anyway) | Stop them before or at G0. The owner runs `kill 1452988 1304666`. | none (hygiene) |
 | **D9** | Public gateway | `l2rpc.blochl1.com` through the nginx + njs gateway on A and B (`deployment/mainnet/public-rpc/`). The Worker of `codex/l2-mainnet-public-20261019` is retired: do not deploy it. CORS is open to any origin (decided 2026-10-30). Still open: DNS timing, and origin failover: one proxied A record with a manual switch to B (default), or paid Cloudflare Load Balancing. `TBD-owner`. | P11 |
 | **D10** | When to enable user transactions | Only after the P12 deposit test, the DA rehearsal R2, the gas-heavy measurement and the stuck-block rehearsal (§3.4). Until then deposits mint on the L2 but nobody can transact or withdraw. | P12 |
@@ -130,9 +130,7 @@ The 30 `bloch-expansion@` units on 136 are disabled and must stay so.
 
 ## 3. Pins: the v2.1 build and what stays
 
-### 3.1 v2.1 artifacts (L2 commit `9d08b546`, native 78d4921c, valid for the fa980367 fleet)
-
-**Provisional:** a pending producer tooling fix (report 28, F2) is expected to change `bloch-l2-produce-dev`. These hashes are final only once that fix is merged or explicitly excluded, and nothing here should be signed before then.
+### 3.1 v2.1 artifacts (L2 commit `18b9e1d1`, native 78d4921c, valid for the fa980367 fleet)
 
 Built twice from fresh trees and fresh targets at the reference WORK path
 `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2` (a bind mount in a private mount namespace).
@@ -141,20 +139,17 @@ Both builds are byte-identical. Source: `45.77.142.123:~/l2dexbridge-20261030/l2
 | Artifact | SHA-256 | v2 | Used by (phase) |
 | --- | --- | --- | --- |
 | `bloch-l2-native-follower` | `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a` | unchanged, byte-identical | follower A, follower B (P3), attestor hosts (P10) |
-| `bloch-l2-produce-dev` | `55dda83b8d97ec5ac3661c012a841d60741d56075c33b627d2aaa78e311728ae` | **changed**, was `7c1cc62b…`. Only the build ID and the symbol table differ; all loaded code and data are byte-identical (§3.1 note) | canonical DB init A/B (P3), settler release (P6), shadow (P7), replica rebuild B (P4), attestors (P10) |
+| `bloch-l2-produce-dev` | `fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9` | **changed**, was `7c1cc62b…` (see below) | canonical DB init A/B (P3), settler release (P6), shadow (P7), replica rebuild B (P4), attestors (P10) |
 | `bloch-l2-settled-rpc` | `1e76b99ad2a57dd6cfae1f4086529714d1bf3372cb578a348f4cfe9a37a91d38` | **changed**, was `4fc9fa1e…` | RPC A, RPC B (P4) |
 | `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | unchanged | shadow (P7) |
-| `build.json` | `5ac23f6747eee26b8b797f60c790fd43e1d6fe821eb43d25699bf4668af7a6ad` | changed | check `l2_commit` `9d08b546`, `l1_activation_epochs` 7180/7180/7186/7270×4/7360×3/8620 and `l2_tracked_changes: 0` |
-| `out/SHA256SUMS` | `d89aacf0f3312fd70f877feea33df97655f6d5b738310d15f7fff678bc98ed42` | changed | install.sh `sha256sum -c` |
-| release `SHA256SUMS` (signing target, D7) | `281d59389228304823ed4d38bc5ed3510bdd36e146717056a98a1f5d5ad1f0a8` | changed | owner signature |
+| `build.json` | `7baba441dba3adf9b24d4c90344d3a1fdea1b7b52c85126e64d58c64ec25c1a0` | changed | check `l2_commit` `18b9e1d1`, `l1_activation_epochs` 7180/7180/7186/7270×4/7360×3/8620 and `l2_tracked_changes: 0` |
+| `out/SHA256SUMS` | `0f3fae169e493df000c5fda7f476202bf6366ec4c4459efeec55eec2339ce0cd` | changed | install.sh `sha256sum -c` |
+| release `SHA256SUMS` (signing target, D7) | `c2a55ba8e179585ea84f22d6e45f1e2f2c55215243585bf1b3eabc8425fa325c` | changed | owner signature |
 | `NATIVE_LOCK` (settlement-recovery, 78d4921c) | `26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8` | unchanged | rebuilds. Committed as `deployment/mainnet/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock`, and `build-release.sh` refuses any other lock for this native commit. |
 
-Why the producer hash changed: `bloch-l2-produce-dev` links the `bloch-reth-execution` library, and v2.1
-adds `RPC_MAX_BATCH_CALLS` and `RPC_MAX_HTTP_CONNECTIONS` to it. That renames LLVM-generated internal symbols
-(`anon.<hash>`, `.llvm.<hash>`), which changes `.symtab`, `.strtab` and the build ID. `.text`, `.rodata`,
-`.data` and every other loaded section match v2 byte for byte, so the producer's behaviour is unchanged.
+Why the producer hash changed: `reconstruct` now numbers follower blocks on the L2 registry's count. Before this fix, the first settled deposit made every rebuild fail with `Deposits`. A block built by `extend` is unchanged: v2 and v2.1 produce the same hash and state root for the same inputs (one comparison, an empty block on a synthetic anchor). The guest and the consensus code are not touched.
 
-To reproduce: check out L2 `9d08b5460ff5c0b5f850799f896195030f68ac53`, native 78d4921c and reth 8eb21017 plus
+To reproduce: check out L2 `18b9e1d1645782b8c3cb2c095161f7649dd32d72`, native 78d4921c and reth 8eb21017 plus
 `reth-snapshot.patch`, then run `build-release.sh` at the WORK path above. A different WORK path gives
 different hashes, because cargo hashes the absolute paths of the native path dependencies.
 
@@ -189,7 +184,7 @@ The L2 source the guest compiles from has no diff against v2.
 | K3 | 10-19 runbook `curl` lines lack `Content-Type` | The L1 RPC refuses them. | Use the commands in this document. | all |
 | K4 | `install.sh` prints "~155k blocks, 30–40 min" | Cosmetic. The real figure is in §2. | none | P3 |
 | K5 | Replica B's canonical DB advances only by a manual `reconstruct` (no timer) | B drops out of the gateway rotation when it is more than 16 blocks behind A. It never serves wrong data. | Run the P4 refresh after each finalized settlement until a timer exists. | P4, P11 |
-| K6 | **Closed in v2.1.** The 8 `tests/ffg_recovery.rs` failures were stale fixtures, not a follower bug: the native genesis commitment changed, and the settlement wire tag moved from 0x0E to 0x12. | Fixtures regenerated against 78d4921c with a real proof. @@FFG_COUNT@@. No library or follower code changed. The legacy WS-checkpoint store fails closed on current chains, the release follower does not use it, and it is retired (owner decision). | none | P6 |
+| K6 | **Closed in v2.1.** The 8 `tests/ffg_recovery.rs` failures were stale fixtures, not a follower bug: the native genesis commitment changed, and the settlement wire tag moved from 0x0E to 0x12. | Fixtures regenerated against 78d4921c with a real proof. All 8 pass, and settlement-recovery passes 67 of 67. No library or follower code changed. The legacy WS-checkpoint store fails closed on current chains, the release follower does not use it, and it is retired (owner decision). | none | P6 |
 | K7 | `docs/L2-HARD-FORK-OPERATOR-STEPS.md` §4.2 step 2 still says to pin the compat-branch DA signer | Wrong for 78d4921c (report 05). | Follow D12. | P12 |
 | K8 | The per-transaction gas limit in the settled RPC is a constant, 15,000,000, equal to the settler's `max_block_gas` | If `max_block_gas` is lowered without changing the constant, the spool squat reopens below it. | Do not lower `max_block_gas` without a new settled-RPC build. | P12 |
 | K9 | A settler `extend` over a maximal spool needs about 1.5 GB RSS for about 5 s | Only relevant with user transactions on; the unit cap of 32 G covers it. | Keep it in mind when sizing a separate settler host. | P12 |
@@ -317,10 +312,10 @@ bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --verify /home/ubuntu/l2-go
 
 - `SHA256SUMS` is OK.
 - `install-shadow.sh --verify` prints `verify OK`.
-- The printed hashes match §3.1/§3.2: produce-dev `55dda83b…`, follower `c18752fd…`, settled-rpc
+- The printed hashes match §3.1/§3.2: produce-dev `fb0d5313…`, follower `c18752fd…`, settled-rpc
   `1e76b99a…`, sequencer `15daa26f…`, `settler_v3.py` `8589d5e2…`, `install-settler-mainnet.py` `16aba9b6…`, guest `203114bf…`, `bloch-pos`
   `700631b0…`, manifest `7eef82a7…`, `carryover.tsv.gz` `4d1e2738…`.
-- `artifacts/build.json` shows `l2_commit` `9d08b546`, `l2_tracked_changes: 0` and the HF epochs.
+- `artifacts/build.json` shows `l2_commit` `18b9e1d1`, `l2_tracked_changes: 0` and the HF epochs.
 
 **NO-GO:** any mismatch. Re-copy from the build host. Never use `~/l2-mainnet-install-20261019/out-release`
 or `release-settler/bloch-l2-produce-dev` (`3736860e…`, pre-HF), and never `4fc9fa1e…` (the settled RPC
@@ -595,7 +590,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    (`keykit/KEY-HANDOFF-CHECKLIST.md`). The keys never travel unsealed. This replaces `ATESTADORES.md`:
    the originals are now destroyed before the handoff, gated on verified bundles and two read-back media.
 2. Each operator host (§2 spec) gets an `ARTEFATOS` dir with:
-   - `bloch-l2-native-follower` `c18752fd…` and `bloch-l2-produce-dev` `55dda83b…`;
+   - `bloch-l2-native-follower` `c18752fd…` and `bloch-l2-produce-dev` `fb0d5313…`;
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;

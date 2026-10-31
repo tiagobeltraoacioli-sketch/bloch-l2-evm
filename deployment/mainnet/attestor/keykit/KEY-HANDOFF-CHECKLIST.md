@@ -95,7 +95,7 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh package
 
 - [ ] Each index prints `packaged attestor I: …/operator-I.tar (SHA-256)`. `PACKAGES.sha256` is public.
 - [ ] Each package holds the sealed key, the public key, the set, `IDENTITY.txt`,
-      `ARTIFACTS.sha256` (v2 follower `c18752fd…`, producer `55dda83b…`, `bloch-pos` `093909a2…`,
+      `ARTIFACTS.sha256` (v2 follower `c18752fd…`, producer `fb0d5313…`, `bloch-pos` `093909a2…`,
       manifest `7eef82a7…`, carryover `4d1e2738…`), `INSTALL.md`, `ONBOARDING.md`, the kit and
       `check-operator-bundle.sh`, all listed in `CONTENTS.sha256`.
 - [ ] Optional: `--artifacts DIR` embeds the Linux binaries after checking them against the pins.

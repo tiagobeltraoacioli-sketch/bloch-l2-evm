@@ -10,9 +10,9 @@
 #   install-shadow.sh OUT_DIR [--start]
 #   install-shadow.sh --rollback
 #
-# OUT_DIR is build-release.sh's OUT of the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (L2 9d08b546, native 78d4921c
+# OUT_DIR is build-release.sh's OUT of the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (L2 18b9e1d1, native 78d4921c
 # = the armed L1 release with HF1 e7180/7186, HF2 e7270, HF3 e7360, KES enforce e8620; settlement-
-# recovery lock 26bf4453...): bloch-l2-produce-dev 55dda83b..., sequencer_mainnet.py 15daa26f...
+# recovery lock 26bf4453...): bloch-l2-produce-dev fb0d5313..., sequencer_mainnet.py 15daa26f...
 # (unchanged since the RC), SHA256SUMS and build.json.
 # The producer RUNS the native transition, so a shadow built against a pre-HF native (the RC pin
 # 192eda33..., native 78b7343a) halts at HF1. Install the v2 build before epoch 7178.
@@ -28,10 +28,10 @@
 # /opt/bloch/l2-mainnet-shadow, its config and /var/lib/bloch-l2-mainnet-shadow aside with a
 # timestamp. The settler is not touched; nothing on L1 depends on the shadow.
 set -euo pipefail
-# v2.1 build bloch-l2-2026-10-30-v21-native-78d4921c (out/SHA256SUMS). v2 was 7c1cc62b... (same code, symbol names differ). The RC pin was 192eda33... (native 78b7343a, pre-HF).
-PRODUCE_SHA256=55dda83b8d97ec5ac3661c012a841d60741d56075c33b627d2aaa78e311728ae
+# v2.1 build bloch-l2-2026-10-30-v21-native-78d4921c (out/SHA256SUMS). v2 was 7c1cc62b... (no flag-day rebuild fix). The RC pin was 192eda33... (native 78b7343a, pre-HF).
+PRODUCE_SHA256=fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9
 SEQUENCER_SHA256=15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2
-L2_COMMIT=9d08b5460ff5c0b5f850799f896195030f68ac53
+L2_COMMIT=18b9e1d1645782b8c3cb2c095161f7649dd32d72
 NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
 NATIVE_LOCK_SHA256=26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8
 SETTLER_CONFIG=/etc/bloch-l2-mainnet-settler/config.json

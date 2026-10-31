@@ -40,7 +40,7 @@ to be trusted.
 ```
 
 It checks every bundle file, the pinned set, your public key, every artifact (including the v2
-follower `c18752fd…` and producer `55dda83b…`) and the sealed key header. With `--open` it asks for
+follower `c18752fd…` and producer `fb0d5313…`) and the sealed key header. With `--open` it asks for
 the **transport passphrase** (received over the third channel) and proves the key opens and signs
 for index @INDEX@. It must end with `BUNDLE OK for attestor @INDEX@`.
 
