@@ -38,6 +38,7 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 | Methods | `eth_*` reads, `net_*`, `web3_*`, `bloch_finality`, `bloch_settlement`, `bloch_chainIdentity`, `bloch_chainStatus`, `eth_sendRawTransaction`. Everything else gets -32601. Filters, subscriptions and node signing get an explanation |
 | Local answers | `eth_chainId`, `net_version` |
 | Body / batch | 512 KiB (the settled RPC's own cap), at most 100 calls per batch (ethers v6 batches up to 100), and an empty batch is refused |
+| Withdrawal proofs | `bloch_getWithdrawalProof` takes the read route and the per-IP call budget. It needs a settled RPC with the method. Clients verify every answer against L1 (`deployment/mainnet/withdraw/`) |
 | eth_getLogs | at most 2,000 blocks per call (tags resolved against the probed head) and 256 addresses |
 | Per IP | 20 HTTP req/s, burst 100 (`limit_req`), 32 connections (`limit_conn`), 1,200 calls/min (a batch counts each call), 30 `eth_sendRawTransaction`/min, 16 simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`) in flight. Over a limit: HTTP 429 and JSON-RPC -32005 with `Retry-After` |
 | Timeouts | client header/body 10 s (slow-body clients never reach the backend; nginx buffers the whole request), upstream connect 2 s, read 30 s (tx 15 s) |

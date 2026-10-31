@@ -77,6 +77,8 @@ def basic(url, label):
     check(f'{label} block by hash', (r.get('result') or {}).get('number') == '0x0', r)
     s, _, r = call(url, 'bloch_finality')
     check(f'{label} bloch_finality', (r.get('result') or {}).get('l2_genesis', {}).get('finalized') is True, r)
+    s, _, r = call(url, 'bloch_getWithdrawalProof', [2 ** 40])
+    check(f'{label} bloch_getWithdrawalProof reaches the backend', (r.get('error') or {}).get('code') == -32042, r)
     s, _, r = call(url, 'eth_call', [{'to': '0x4200000000000000000000000000000000000011', 'data': '0x'}, 'pending'])
     check(f'{label} eth_call pending', 'result' in r, r)
     s, _, r = call(url, 'eth_estimateGas', [{'from': '0x000000000000000000000000000000000000dEaD', 'to': '0x000000000000000000000000000000000000bEEF', 'value': '0x0'}])
