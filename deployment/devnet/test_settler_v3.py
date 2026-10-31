@@ -542,6 +542,40 @@ class SettlerV3Test(unittest.TestCase):
         provers = [c[1] for c in fake.calls if 'settlement-v3' in Path(c[0]).name]
         self.assertEqual(provers, ['execute', 'prove-groth16', 'verify-groth16'])
 
+    def test_local_fallback_is_refused_above_its_instruction_limit(self):
+        def counting(instructions):
+            fake = Fake(self.root, statement())
+            fake.remote_fail = True
+            run = fake.run
+
+            def report(argv, **kwargs):
+                result = run(argv, **kwargs)
+                if 'settlement-v3' in Path(argv[0]).name and argv[1] == 'execute' and instructions is not None:
+                    kwargs['stdout'].write(f'guest matched: {instructions} instructions in 1s\n')
+                    kwargs['stdout'].flush()
+                return result
+            fake.run = report
+            return fake
+        order = ['remote', 'local']
+        for n, (count, ok) in enumerate(((3_000_000, True), (3_000_001, False), (None, False))):
+            fake = counting(count)
+            settler = self.settler(fake, remote_prover=self.remote(order=order), workdir=str(self.root / f'w{n}'),
+                                   local_prove_max_instructions=3_000_000)
+            with self.subTest(count):
+                if ok:
+                    self.assertTrue(settler.cycle())
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'prover prove failed'):
+                        settler.cycle()
+                    self.assertEqual(fake.sent, [])
+                proves = [c[1] for c in fake.calls if 'settlement-v3' in Path(c[0]).name and c[1] == 'prove-groth16']
+                self.assertEqual(len(proves), 1 if ok else 0)
+
+    def test_local_prove_limit_must_be_a_positive_integer(self):
+        for bad in (0, -1, '5', True):
+            with self.subTest(bad), self.assertRaisesRegex(s.Halt, 'local_prove_max_instructions'):
+                self.settler(Fake(self.root, statement()), local_prove_max_instructions=bad)
+
     def test_local_first_uses_the_remote_host_only_when_the_local_proof_fails(self):
         fake = Fake(self.root, statement())
         self.assertTrue(self.settler(fake, remote_prover=self.remote()).cycle())

@@ -46,10 +46,14 @@ fn tree(outputs: &[EutxoEntry], evm: EvmCommitment) -> Smt {
         finalized: cp,
         leaked: vec![],
         next_epoch: 1,
+        finality_set: Default::default(),
+        own_checkpoints: Default::default(),
     };
     // The authoritative consensus builder performs the actual private leaf codecs.
     build_state_tree(&ConsensusState {
         written_off_sat: 0,
+        funded_delegation_lifecycle: &[],
+        funded_delegation_owners: &[],
         funded_validators: &[],
         stake_low_water: &[],
         randao_generations: &[],

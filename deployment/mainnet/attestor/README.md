@@ -18,13 +18,17 @@ signing by itself. Operators act only on alerts.
 | `attestor_agent.py` | The agent: `run`, `once [--dry-run]`, `check [--no-key]`. Python standard library only. |
 | `attestor_lib.py` | Pins, withdrawal tree, set hash, attestation digest. All mirror the native code. |
 | `aggregate_attestation.py` | Claimant tool. Collects any 3 partials, verifies them natively and prints the `prepare` arguments. |
-| `install-attestor.sh` | `install`, `rollback [--purge-key]` and `status` on an operator host. |
+| `sigfeed.py` | The read-only feed server and the bounded fetch client. The same file ships in the bridge signer (`sigfeed.sha256` pins it). |
+| `install-attestor.sh` | `install`, `upgrade`, `upgrade-rollback`, `rollback [--purge-key]` (uninstall) and `status` on an operator host. |
 | `systemd/bloch-l2-attestor.service` | The hardened agent unit: no listener, `IPAddressDeny=any` plus an allow-list, `LoadCredential`. |
+| `systemd/bloch-l2-attestor-feed.service` | The read-only feed (`--feed-port`): the agent's outbox only, no credential. |
 | `systemd/bloch-l2-attestor-follower.service` | The agent's own native follower (FFG replay from Genesis-4). |
-| `keykit/` | Key distribution for the key holder. See `keykit/KEY-HANDOFF-CHECKLIST.md`. |
+| `keykit/` | Key custody for the key holder: seal, verify, package, backup-check, shred, release (`make-operator-bundles.sh`, `KEY-HANDOFF-CHECKLIST.md`); operator side: `check-operator-bundle.sh`, `OPERATOR-ONBOARDING.md`, `OPERATOR-INSTALL.template.md`, pins `operator-pins-v2.sha256`. |
 | `public/` | The pinned `attestors.set` and the five public keys. |
-| `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`). |
+| `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`) and `python3 -m unittest -v test_upgrade` (no native binary; follower pin and `upgrade`/`upgrade-rollback`). |
+| `tests/rehearse_upgrade.sh` | Rehearsal of `upgrade`/`upgrade-rollback` on old-kit `--prefix` installs against live L1 (`rehearsal_services.sh` stands in for systemctl, `rehearsal_check.py` runs `check` with a throwaway set). |
 | `tests/rehearse_owner_flow.sh` | End-to-end owner rehearsal with throwaway keys (`tty_driver.py` types the passphrases). |
+| `tests/rehearse_custody_flow.sh` | Custody rehearsal with throwaway keys: `owner` part (macOS or Linux) and `operator` part (Linux, v2 artifacts). |
 
 The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keystore-20261019`
 (dd287b6c + one CLI-only commit). That commit adds:
@@ -66,9 +70,13 @@ Consensus code is unchanged. The other binaries come from the RC pinned build (`
    - The agent signs with `bloch-pos l2-claim attest --sealed`. The key is opened inside bloch-pos
      only.
    - It checks the partial: signer index, and the digest over the pinned network, chain and root.
+   - It checks the signature length. A claim admits attestor signatures of at most 4,593 bytes,
+     but a valid Falcon-1024 part can make the hybrid signature longer. The agent then signs
+     again (fresh randomness, `resign-oversized` event), at most 64 times, and halts if none fits.
+     The aggregator also skips a partial whose signature is longer than 4,593 bytes.
    - It writes the partial to `/var/lib/bloch-l2-attestor/outbox/700770/<root>/attestor-<I>.partial`
      (plus a `.json` file).
-   - It pushes the partial to every configured drop. Failed pushes are retried every cycle.
+   - The operator's feed serves the outbox. It also pushes to any optional push target, retrying failures every cycle.
    - It raises a `signed` alert.
 
 At startup and once a day, `rebuild-check` rebuilds the L2 and compares every finalized settlement.
@@ -78,19 +86,43 @@ Every root that covers an unclaimed large withdrawal is signed as soon as it is 
 about 2,880 blocks before the root can serve a large claim. So partials are already waiting when
 the claimant needs them.
 
-## Where partials go (the attestation drop)
+## Oversized signatures, and the `bloch-pos` pin
 
-Every drop uses the same layout: `<base>/700770/<root>/attestor-<I>.partial`. Configure one or
-both of these:
+The pinned `bloch-pos` (`093909a2…`, `keykit/operator-pins-v2.sha256`) has no `sign_fitting`, so `l2-claim attest` can write a
+signature above the claim's 4593-byte bound. The agent is the gate, and the pin does not need to move:
 
-- `--publish-url https://drop.example/attest` with `--publish-token-file`. This is an HTTP PUT with
-  a bearer token, for example a WebDAV or object-store endpoint that also serves GET. The token is
-  a systemd credential.
-- `--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'`, or any other
-  argv. The placeholders are `{file} {json} {relpath} {root} {chain} {index} {outbox}`.
+- `sign` writes `attest` output to a scratch directory, and only a partial that `attestor_lib.parse_partial` accepts reaches
+  the outbox. Above the bound it signs again with fresh randomness, at most 64 times, then halts.
+- The feed serves only the outbox, and push targets publish only from it, so an oversized partial is never published.
+- The fix reaches a host through the kit: `attestor_agent.py` and `attestor_lib.py`, copied by `install-attestor.sh` and covered
+  by `CONTENTS.sha256` in each operator package. Packages built before this commit do not have it, so build them from this commit.
+- **Do not run `l2-claim attest` by hand and publish the result.** `aggregate_attestation.py` and the monitor both ignore an
+  oversized partial, but a hand-made one costs that signer the round.
 
-Partials are public data: one signature over a public root. The drop needs integrity, not secrecy,
-and the aggregator verifies everything it fetches.
+## Where partials go (the operator's read-only feed)
+
+Each operator serves its own outbox: `bloch-l2-attestor-feed` runs `sigfeed.py serve` on one TCP port.
+
+    GET <base>/700770/<root>/attestor-<I>.partial
+
+- There is no shared drop, no token and no upload path. The aggregator and the monitor poll the five
+  feeds. Attestors never read each other, so one operator down costs exactly that operator's partial.
+- The feed is a separate unit from the agent. It holds no credential, sees only the outbox (a read-only
+  bind mount), accepts GET and HEAD, serves only the path shape above and caps connections per address.
+- Partials are public: one signature over a public root. The content authenticates itself, so a feed
+  can withhold but cannot forge. The aggregator treats each source as hostile (byte and time limits,
+  no redirects) and lets the native verifier choose among candidates, so a forged partial from one
+  source cannot displace a real one from another.
+- Plain HTTP is enough, because TLS adds no integrity here. An operator who wants HTTPS can put an
+  auto-renewing proxy in front; `sigfeed.py serve --tls-cert --tls-key` also works, but an expired
+  certificate takes the operator's feed down.
+- Monitor: pass `--attest-drop URL` once per feed.
+
+### Hosts with no inbound port
+
+The push options remain for these hosts: `--publish-command '["rsync","-a","{file}","me@my-host:/srv/{relpath}"]'`,
+or `--publish-url` with `--publish-token-file` for a PUT endpoint the operator controls. Either target
+must then serve the same paths over GET. This target belongs to that operator alone; it is not a shared drop.
 
 ## Operator install (each of the five hosts)
 
@@ -99,11 +131,12 @@ The host must not be a mainnet validator host or the settler. It needs 2 cores, 
 
 ```
 sudo ./install-attestor.sh install --artifacts DIR --index I --bundle attestor-I.sealed \
-     --l1-rpc-url http://80.240.16.185:8080 --publish-url https://drop.example/attest --publish-token-file token
+     --l1-rpc-url http://80.240.16.185:8080 --feed-port 8787
 sudo systemctl enable --now bloch-l2-attestor-follower
 sudo systemd-run --pipe --wait -p User=bloch-l2-attestor \
      -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase \
      /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
+sudo systemctl enable --now bloch-l2-attestor-feed
 sudo systemctl enable --now bloch-l2-attestor
 ```
 
@@ -123,8 +156,104 @@ with `--prefix`) accepts a throwaway attestor set. `tests/rehearse_owner_flow.sh
 owner flow this way with throwaway keys (seal, verify, install for 3 operators, check, sign a
 synthetic root, aggregate 3-of-5, native verify, shred). Rehearsed on 2026-10-19 on 209.250.236.240.
 
-To roll back, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
-and the key. `--purge-key` also shreds the host key and passphrase.
+To uninstall, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
+and the key. `--purge-key` also shreds the host key and passphrase. It is not a binary rollback: for
+that, see `upgrade-rollback` below.
+
+## Claimants: retry `l2-claim sign` on a shape error
+
+With the pinned `bloch-pos`, about 1 in 1,000 runs of `l2-claim sign` draws a Falcon signature over the size bound.
+It exits with `signed claim has an invalid shape: Shape` and writes no file. Run the same command again: each run
+signs anew. No funds or nonces are affected.
+
+## Binary pins
+
+`config.json` pins three binaries by SHA-256: `bloch_pos_sha256`, `produce_sha256` and (since the
+2026-10-30 kit) `follower_sha256`, the follower named by `follower`. The agent checks all three at
+`check` and at the start of `run`/`once`. A mismatch halts it with exit 3, and the unit does not
+restart. The follower pin matters because the follower's `status.json` is what the agent treats as
+L1 finality: a replaced follower could report any settlement as finalized.
+
+**Configs written by an older kit have no `follower_sha256`.** With this kit's agent they halt with
+`config lacks follower and follower_sha256: the follower binary is not pinned …` (exit 3). This is
+deliberate. The alternatives were worse:
+
+- Warning and continuing would leave the gap open, and a warning in the journal is easy to miss.
+- Pinning whatever follower is installed at first start would also pin a swapped binary.
+
+The kit's agent scripts reach a host only through `install` or `upgrade`. Both write the pin
+together with the scripts, from the published hashes. So the halt fires only if someone copies the
+new scripts by hand. The fix is `install-attestor.sh upgrade`. Older agents ignore the extra keys,
+so an old agent with a new `config.json` keeps working (this is the state after a partial rollback).
+
+The pin covers the file on disk. The agent checks it only at start, so restart the agent after any
+binary swap (`upgrade` does this). The running follower process is not inspected; the agent's
+sandbox cannot see other users' processes. `upgrade` starts the follower only after the new file
+is pinned.
+
+## Upgrade (HF1–HF3: follower and producer v2)
+
+The L1 hard forks start at epoch 7180 (HF1, 2026-11-01 16:11 UTC). Each attestor host must run the
+v2 follower and producer **before epoch 7178 (15:39 UTC)**:
+
+- `bloch-l2-native-follower` `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a`
+- `bloch-l2-produce-dev` `fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9`
+
+These hashes are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
+`--produce-sha256` only for a later corrected build whose hashes the coordinator published.
+
+Upgrade **one host at a time**, so that at least 3 of 5 stay up. Each host is down for about
+50–60 min. Run the upgrade inside `tmux` or `screen`:
+
+```
+sudo ./install-attestor.sh upgrade --artifacts /root/hf123
+```
+
+`/root/hf123` holds the two files (a `SHA256SUMS` there is optional; if present it must agree). The
+script does the manual procedure and stops at the first failure:
+
+1. It checks both files against the published SHA-256 before it touches anything.
+2. It creates `/etc/bloch-l2-attestor/PAUSE`, then stops `bloch-l2-attestor` and
+   `bloch-l2-attestor-follower`.
+3. It backs up `/opt/bloch/l2-attestor` to `/opt/bloch/l2-attestor.pre-hf123`, and `config.json` to
+   `config.json.pre-hf123`. It moves the follower's `status.json` to `status.json.pre-hf123`, so
+   that the agent cannot accept the old follower's last status as fresh.
+4. It installs the two binaries and this kit's agent scripts (`attestor_agent.py`,
+   `attestor_lib.py`, `aggregate_attestation.py`, `sigfeed.py`). It prepares
+   `bloch-l2-attestor-feed.service` without enabling it, and keeps an existing `feed.env` unless
+   `--feed-port` or `--feed-bind` is given (default `0.0.0.0:8787`; `--no-feed` skips the unit). A feed
+   that is already running is restarted. The key, the passphrase, `bloch-pos`, the other units and
+   the state do not change. **The host now needs inbound TCP 8787**: open it, then run the
+   `systemctl enable --now bloch-l2-attestor-feed` line the script prints. `upgrade-rollback` removes a
+   feed unit that the upgrade added.
+5. It re-hashes the installed files.
+6. It writes `produce_sha256`, `follower` and `follower_sha256` into `config.json` (atomically,
+   keeping its owner and mode) and checks every pin against the disk.
+7. It starts the follower and waits until a new `status.json` appears (the re-verify of the retained
+   L1 history: about 50–60 min; `--wait-timeout`, default 2 h).
+8. It runs `attestor_agent.py check` as at install. The run must print `check-ok`. A
+   `check-not-ready` result is retried 10 times.
+9. It waits until `native_finalized_epoch` advances (`--advance-timeout`, default 40 min).
+10. It removes `PAUSE` and starts the agent (`--no-unpause` stops before this step).
+
+At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower c18752fd, produce
+fb0d5313`. Post that line in the operators' channel; the next operator then starts.
+
+If a step fails, `PAUSE` stays in place, the agent stays stopped and the follower keeps running.
+Fix the cause, then continue from the follower start with
+`sudo ./install-attestor.sh upgrade --resume`. A second `upgrade` on an upgraded host changes
+nothing. Keep the `.pre-hf123` backups until after epoch 7360.
+
+**Rollback, before HF1 only:** `sudo ./install-attestor.sh upgrade-rollback`. It restores the
+backed-up binaries, agent scripts and `config.json`, moves `status.json` aside, and then repeats
+steps 7–10 with the old follower. It also works after a failed upgrade. It is refused from 70
+minutes before epoch 7180 on, because the old follower's re-verify could not finish before the
+fork, and an old follower cannot follow the chain past it. After that, keep `PAUSE` and fix forward
+with the published build. Partials already signed stay valid either way.
+
+Rehearsal without root or systemd: `upgrade`/`upgrade-rollback --prefix DIR --service-cmd CMD
+--check-cmd CMD` run against a `--prefix` install. `CMD start|stop|is-active follower|agent` stands
+in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
 
 ## Claimant (≥ 100 BLCH)
 

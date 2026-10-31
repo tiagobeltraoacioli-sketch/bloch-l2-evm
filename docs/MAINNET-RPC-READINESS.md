@@ -223,6 +223,40 @@ Other mainnet inputs still undecided (ceremony / M9): the native activation epoc
 `bloch-l2-produce-dev.rs:267`; contracts must not use `prevrandao` as
 randomness on this L2 either way).
 
+## R7. Spool and RPC resource limits (2026-10-30 rehearsal)
+
+`eth_sendRawTransaction` admits a transaction into the settlement worker's
+spool only if the worker could include it and the sender could pay for it:
+
+- the sender holds `value + gas_limit * max_fee` summed over this transaction
+  and its other live spool entries (a same-nonce replacement counts once);
+- the encoded transaction plus its DA framing fits one native DA batch
+  (114,688 bytes); larger ones are dropped by the producer without a fee;
+- the declared gas is at most 15,000,000 (the worker's `max_block_gas`) and at
+  least the intrinsic gas; the priority fee is not above the fee cap; CREATE
+  initcode is at most 49,152 bytes (EIP-3860);
+- unchanged: nonce window 16, 16 entries per sender, 10% replacement bump,
+  4,096 entries, 3 h TTL, stale sweep every 60 s.
+
+Before this, a funded sender could fill the whole spool with entries whose
+gas was above the worker's 15M block budget. Every block deferred them, so
+they held the spool for 3 h without paying, and newcomers paying no more than
+the attacker's fee were refused with `txpool full`. In the rehearsal every block
+after the flood was empty.
+
+RPC-wide limits: a JSON-RPC batch holds at most 100 calls
+(`RPC_MAX_BATCH_CALLS`), `eth_call` gas is capped at the block gas limit
+(30,000,000; reth's default is 50,000,000), and `eth_call`, `eth_estimateGas`,
+`eth_createAccessList`, `eth_callMany` and `eth_simulateV1` share 4 permits.
+A caller that waits 10 s for a permit gets error -32005. A spool scan stats
+only new files, so `eth_getTransactionCount(…, "pending")` and admissions stay
+cheap with a full spool.
+
+The settled RPC still accepts at most 100 concurrent connections (the jsonrpsee
+default) and has no timeout for request bodies. The public gateway must buffer
+request bodies (nginx does by default, with `client_body_timeout 10s`) so that
+slow or idle clients cannot hold the origin's connections.
+
 ## What needs the user or other terminals
 
 1. Build and deploy the new `bloch-l2-settled-rpc` where a live check is

@@ -1,6 +1,6 @@
 # Bloch L2 MAINNET (chain 700770) withdrawal attestor agent: signs, with this operator's sealed key,
 # only withdrawal roots it rebuilt from L1 and that are FFG-finalized on its own follower's replay.
-# Installed by ../install-attestor.sh (which writes the RPC/drop allow-list drop-in). No listener.
+# Installed by ../install-attestor.sh (which writes the RPC allow-list drop-in). No listener. The feed is a separate unit.
 [Unit]
 Description=Bloch L2 mainnet withdrawal attestor agent
 After=network-online.target bloch-l2-attestor-follower.service
@@ -44,7 +44,7 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
-# install-attestor.sh adds the three RPC hosts and the attestation drop host in a drop-in.
+# install-attestor.sh adds the three RPC hosts (and any optional push target) in a drop-in.
 IPAddressAllow=localhost
 LimitCORE=0
 # Argon2id (256 MiB) per signature plus one L2 rebuild (reth database) at a time.

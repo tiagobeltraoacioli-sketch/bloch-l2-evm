@@ -36,6 +36,12 @@
 //! `value + gas_limit * max_fee`, the nonce is at most 16 above the head nonce,
 //! the fee cap covers the next base fee, at most 16 entries per sender (a
 //! same-nonce replacement needs a 10% fee bump), at most 4,096 entries in all;
+//! the sender holds the summed cost of all its spooled entries; and the
+//! transaction is one the settlement worker can include at all (it fits one
+//! native DA batch, declares at most the worker's 15,000,000 block gas and at
+//! least its intrinsic gas, a priority fee not above its fee cap, initcode
+//! within EIP-3860), so a funded sender cannot hold spool slots for free with
+//! entries the producer defers forever or drops without charging a fee;
 //! when full, stale entries (used nonce, gap, unfunded, underpriced, older than
 //! 3 h, undecodable) are evicted, then the cheapest deferred one if the new
 //! transaction pays more. Stale entries are also swept every minute. It writes
@@ -53,7 +59,7 @@ use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
     providers::{BlockchainProvider, RocksDBBuilder, StaticFileProvider},
-    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory, StateProviderFactory,
+    AccountReader, BlockNumReader, HeaderProvider, ProviderFactory,
 };
 use reth_rpc::EthFilter;
 use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer, EthFilterApiServer};
@@ -61,7 +67,10 @@ use reth_tasks::{RuntimeBuilder, RuntimeConfig, TokioConfig};
 use reth_transaction_pool::noop::NoopTransactionPool;
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -99,6 +108,11 @@ struct SpoolLimits {
     ttl: Duration,
     /// Fee bump (percent) a same-nonce replacement must offer.
     replace_bump_percent: u128,
+    /// Highest declared gas: the settlement worker's per-block gas budget
+    /// (`max_block_gas`, deployment/mainnet/install-settler-mainnet.py). A
+    /// transaction above it is deferred by every block and would hold its slot
+    /// (and block its sender's later nonces) until the TTL without paying.
+    max_tx_gas: u64,
 }
 
 const SPOOL_LIMITS: SpoolLimits = SpoolLimits {
@@ -107,7 +121,15 @@ const SPOOL_LIMITS: SpoolLimits = SpoolLimits {
     max_nonce_gap: 16,
     ttl: Duration::from_secs(3 * 3_600),
     replace_bump_percent: 10,
+    max_tx_gas: 15_000_000,
 };
+/// Concurrent EVM simulations (`eth_call`, `eth_estimateGas`, ...): each may
+/// burn the full gas cap of CPU; beyond this many, callers wait (up to
+/// [`SIMULATION_WAIT`]) instead of occupying every core of the host.
+const MAX_CONCURRENT_SIMULATIONS: usize = 4;
+const SIMULATION_WAIT: Duration = Duration::from_secs(10);
+/// The methods that run the EVM on request.
+const SIMULATION_METHODS: [&str; 5] = ["eth_call", "eth_estimateGas", "eth_createAccessList", "eth_callMany", "eth_simulateV1"];
 /// Periodic eviction of stale spool entries (also done under pressure at admission).
 const SPOOL_SWEEP: Duration = Duration::from_secs(60);
 
@@ -182,6 +204,39 @@ impl SpoolMeta {
     }
 }
 
+/// Why the settlement worker could never include `tx` (so it must not take a
+/// spool slot): the producer defers it forever (gas above the block budget) or
+/// drops it without charging a fee (larger than one DA batch, below intrinsic
+/// gas, priority fee above the fee cap, oversized initcode).
+fn never_includable(spec: &ChainSpec, tx: &bloch_l2_evm::AuthenticatedTransaction, limits: SpoolLimits) -> Option<String> {
+    use bloch_l2_evm::data_availability::{da_framing_bytes, MAX_DA_PAYLOAD_BYTES};
+    use reth_revm::revm::{context_interface::cfg::gas::calculate_initial_tx_gas_for_tx, primitives::eip3860::MAX_INITCODE_SIZE};
+    let env = tx.environment();
+    let bytes = tx.raw().len();
+    if bytes.saturating_add(da_framing_bytes(1)) > MAX_DA_PAYLOAD_BYTES {
+        return Some(format!(
+            "transaction too large: {bytes} bytes, at most {} fit one L1 data-availability batch",
+            MAX_DA_PAYLOAD_BYTES - da_framing_bytes(1)
+        ));
+    }
+    let max_gas = limits.max_tx_gas.min(spec.gas_limit);
+    if env.gas_limit > max_gas {
+        return Some(format!("exceeds block gas limit: gas limit {} above {max_gas}", env.gas_limit));
+    }
+    if env.gas_priority_fee.is_some_and(|tip| tip > env.gas_price) {
+        return Some("max priority fee per gas higher than max fee per gas".into());
+    }
+    if env.kind.is_create() && env.data.len() > MAX_INITCODE_SIZE {
+        return Some(format!("max initcode size exceeded: {} bytes, at most {MAX_INITCODE_SIZE}", env.data.len()));
+    }
+    let gas = calculate_initial_tx_gas_for_tx(env.clone(), spec.spec_id);
+    let intrinsic = gas.initial_regular_gas.saturating_add(gas.initial_state_gas).max(gas.floor_gas);
+    if env.gas_limit < intrinsic {
+        return Some(format!("intrinsic gas too low: gas limit {}, needs {intrinsic}", env.gas_limit));
+    }
+    None
+}
+
 /// One `*.tx` file of the spool; `meta` is `None` for bytes that do not decode
 /// as a transaction of this chain (always evictable).
 #[derive(Clone, Debug)]
@@ -191,9 +246,11 @@ struct SpoolEntry {
     modified: std::time::SystemTime,
 }
 
-/// Sender and fee fields of each spool entry, cached by file name (entries are
-/// immutable: written once by rename, removed by the producer or by eviction).
-type SpoolIndex = std::collections::HashMap<std::ffi::OsString, Option<SpoolMeta>>;
+/// Sender and fee fields and modification time of each spool entry, cached by
+/// file name (entries are immutable: written once by rename, removed by the
+/// producer or by eviction), so a scan of a full spool costs one directory
+/// read rather than a stat and a decode per entry.
+type SpoolIndex = std::collections::HashMap<std::ffi::OsString, (Option<SpoolMeta>, std::time::SystemTime)>;
 
 /// Read the spool directory, decoding only names not yet in `index`; the index
 /// forgets names that disappeared. Entries removed while scanning are skipped.
@@ -206,21 +263,21 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io:
             continue;
         }
         let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
-        let modified = match entry.metadata().and_then(|m| m.modified()) {
-            Ok(time) => time,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        let meta = match index.get(&name) {
-            Some(meta) => *meta,
+        let (meta, modified) = match index.get(&name) {
+            Some(known) => *known,
             None => {
+                let modified = match entry.metadata().and_then(|m| m.modified()) {
+                    Ok(time) => time,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
                 let meta = std::fs::read_to_string(&path)
                     .ok()
                     .and_then(|text| alloy_primitives::hex::decode(text.trim()).ok())
                     .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
                     .map(|tx| SpoolMeta::of(&tx));
-                index.insert(name.clone(), meta);
-                meta
+                index.insert(name.clone(), (meta, modified));
+                (meta, modified)
             }
         };
         entries.push(SpoolEntry { name, meta, modified });
@@ -262,7 +319,8 @@ impl SpoolHead<'_> {
 /// Admission of `new` into a spool holding `entries`: the names to evict
 /// first, or the refusal sent to the client.
 ///
-/// - the sender must hold `value + gas_limit * max_fee` at the head, its nonce
+/// - the sender must hold `value + gas_limit * max_fee` at the head, summed
+///   over this transaction and its other live spool entries; its nonce
 ///   must lie in `[head nonce, head nonce + max_nonce_gap]`, and the fee cap
 ///   must cover the next block's base fee;
 /// - a same-nonce entry of the sender is replaced only by a fee bump;
@@ -310,6 +368,18 @@ fn plan_admission(
     }
     if own.len() >= limits.max_per_sender {
         return Err(format!("too many pending transactions from this sender (limit {})", limits.max_per_sender));
+    }
+    // Each entry alone being affordable is not enough: entries the balance
+    // cannot cover together are dropped by execution without paying a fee.
+    let pending = own
+        .iter()
+        .filter_map(|e| e.meta)
+        .fold(alloy_primitives::U256::ZERO, |sum, m| sum.saturating_add(m.cost));
+    if balance < pending.saturating_add(new.cost) {
+        return Err(format!(
+            "insufficient funds for this and the sender's pending transactions: balance {balance}, cost {}",
+            pending.saturating_add(new.cost)
+        ));
     }
     if entries.len() - evict.len() < limits.max_entries {
         return Ok(evict);
@@ -397,10 +467,13 @@ impl Spool {
         self.index.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Head facts of the latest settled state of `provider`.
+    /// Head facts of the database tip. The tip is read from the database, not
+    /// from the RPC's in-memory canonical head (refreshed every --poll-ms), so
+    /// a block the producer has just committed (and whose transactions it has
+    /// removed from the spool) is never mistaken for a spool gap.
     fn with_head<T>(
         &self,
-        provider: &BlochBlockchainProvider,
+        provider: &BlochProviderFactory,
         f: impl FnOnce(&mut SpoolHead<'_>) -> T,
     ) -> Result<T, String> {
         let best = provider.best_block_number().map_err(|e| format!("state unavailable: {e}"))?;
@@ -424,8 +497,11 @@ impl Spool {
     }
 
     /// Admit authenticated `raw` bytes, or say why not.
-    fn submit(&self, provider: &BlochBlockchainProvider, raw: &[u8]) -> Result<B256, String> {
+    fn submit(&self, provider: &BlochProviderFactory, raw: &[u8]) -> Result<B256, String> {
         let tx = bloch_l2_evm::decode_signed_transaction(&self.spec, raw).map_err(|e| format!("transaction rejected: {e:?}"))?;
+        if let Some(why) = never_includable(&self.spec, &tx, self.limits) {
+            return Err(why);
+        }
         let hash = tx.hash();
         let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
         let mut index = self.lock();
@@ -448,13 +524,13 @@ impl Spool {
             let _ = std::fs::remove_file(&partial);
             return Err(format!("txpool write failed: {error}"));
         }
-        index.insert(name.into(), Some(meta));
+        index.insert(name.into(), (Some(meta), std::time::SystemTime::now()));
         println!("spooled tx={hash} from={} nonce={}", meta.sender, meta.nonce);
         Ok(hash)
     }
 
     /// Evict every stale entry (run periodically, not only under pressure).
-    fn sweep(&self, provider: &BlochBlockchainProvider) -> Result<usize, String> {
+    fn sweep(&self, provider: &BlochProviderFactory) -> Result<usize, String> {
         let mut index = self.lock();
         let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
         let stale = self.with_head(provider, |head| {
@@ -468,7 +544,7 @@ impl Spool {
 }
 
 /// `eth_sendRawTransaction` into the settlement worker's spool directory.
-fn sequencer_rpc(spool: Arc<Spool>, provider: BlochBlockchainProvider) -> jsonrpsee::RpcModule<()> {
+fn sequencer_rpc(spool: Arc<Spool>, provider: BlochProviderFactory) -> jsonrpsee::RpcModule<()> {
     let mut module = jsonrpsee::RpcModule::new(());
     module
         .register_blocking_method("eth_sendRawTransaction", move |params, _, _| {
@@ -502,13 +578,24 @@ fn spooled_next_nonce(
     Ok(next)
 }
 
+/// The sender's nonce at the database tip (see [`Spool::with_head`]).
+fn tip_nonce(factory: &BlochProviderFactory, sender: alloy_primitives::Address) -> Result<u64, String> {
+    let state = factory.latest().map_err(|e| format!("state unavailable: {e}"))?;
+    Ok(state.basic_account(&sender).map_err(|e| format!("state unavailable: {e}"))?.map_or(0, |a| a.nonce))
+}
+
 /// `eth_getTransactionCount(addr, "pending")` in the sequencer's view (see
-/// [`spooled_next_nonce`]); other tags go to the upstream handler unchanged.
-fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spool: Arc<Spool>) -> Result<()> {
+/// [`spooled_next_nonce`]), counted from the later of the RPC's `latest` and
+/// the database tip; other tags go to the upstream handler unchanged.
+fn spool_pending_nonce(
+    module: &mut jsonrpsee::RpcModule<()>,
+    spool: Arc<Spool>,
+    factory: BlochProviderFactory,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     ensure!(module.remove_method("eth_getTransactionCount").is_some(), "eth API lacks eth_getTransactionCount");
     module.register_async_method("eth_getTransactionCount", move |params, _, _| {
-        let (original, spool) = (original.clone(), spool.clone());
+        let (original, spool, factory) = (original.clone(), spool.clone(), factory.clone());
         async move {
             let mut values: Vec<serde_json::Value> = params.parse()?;
             let pending = values.get(1).and_then(|v| v.as_str()) == Some("pending");
@@ -527,14 +614,88 @@ fn spool_pending_nonce(module: &mut jsonrpsee::RpcModule<()>, spool: Arc<Spool>)
             let sender: alloy_primitives::Address = serde_json::from_value(values[0].clone())
                 .map_err(|e| jsonrpsee::types::ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
             tokio::task::spawn_blocking(move || {
-                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, count.to())
+                let latest = tip_nonce(&factory, sender)?.max(count.to());
+                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, latest)
+                    .map_err(|e| format!("txpool unavailable: {e}"))
             })
             .await
             .map_err(|e| rpc_error(e.to_string()))?
             .map(alloy_primitives::U64::from)
-            .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))
+            .map_err(rpc_error)
         }
     })?;
+    Ok(())
+}
+
+/// Run the EVM-simulating methods ([`SIMULATION_METHODS`]) under one
+/// semaphore of `permits`: a caller that cannot get a permit within `wait` is
+/// told to retry. Other methods are unaffected.
+fn limit_simulations(module: &mut jsonrpsee::RpcModule<()>, permits: usize, wait: Duration) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    let gate = Arc::new(tokio::sync::Semaphore::new(permits));
+    for name in SIMULATION_METHODS {
+        if module.remove_method(name).is_none() {
+            continue;
+        }
+        let (original, gate) = (original.clone(), gate.clone());
+        module.register_async_method(name, move |params, _, _| {
+            let (original, gate) = (original.clone(), gate.clone());
+            async move {
+                let values: Vec<serde_json::Value> = params.parse()?;
+                let _permit = match tokio::time::timeout(wait, gate.acquire_owned()).await {
+                    Ok(Ok(permit)) => permit,
+                    _ => {
+                        return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                            -32005,
+                            format!("{name}: too many concurrent EVM simulations, retry later"),
+                            None::<()>,
+                        ))
+                    }
+                };
+                original.call::<_, serde_json::Value>(name, values).await.map_err(|error| match error {
+                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                    other => rpc_error(other.to_string()),
+                })
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Lookups by transaction hash that read the database directly, while state
+/// reads at `latest` follow the in-memory head the poll loop refreshes every
+/// --poll-ms.
+const HEAD_BOUND_METHODS: [&str; 2] = ["eth_getTransactionReceipt", "eth_getTransactionByHash"];
+
+/// Answer a mined transaction or its receipt only once its block is at or
+/// below the served head (`null` until then, as an Ethereum node does before
+/// it imports the block). Without this, a client that sees its receipt and
+/// then reads `latest` (forge script, ethers `wait()` followed by a call) can
+/// read the state before its own transaction for up to one poll interval.
+fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    for method in HEAD_BOUND_METHODS {
+        ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
+        let (original, head) = (original.clone(), head.clone());
+        module.register_async_method(method, move |params, _, _| {
+            let (original, head) = (original.clone(), head.clone());
+            async move {
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
+                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                    other => rpc_error(other.to_string()),
+                })?;
+                let number = result
+                    .get("blockNumber")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(match number {
+                    Some(number) if number > head.load(Ordering::Acquire) => serde_json::Value::Null,
+                    _ => result,
+                })
+            }
+        })?;
+    }
     Ok(())
 }
 
@@ -763,7 +924,7 @@ async fn main() -> Result<()> {
             });
             // Replace the no-pool method of the read-only API with the spooling one.
             ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
-            module.merge(sequencer_rpc(spool.clone(), provider.clone()))?;
+            module.merge(sequencer_rpc(spool.clone(), factory.clone()))?;
             Some(spool)
         }
         None => None,
@@ -777,9 +938,12 @@ async fn main() -> Result<()> {
     let settlements = Arc::new(std::sync::RwLock::new(SettlementIndex::new()));
     module.merge(settlement_rpc(settlements.clone()))?;
     serve_pending_blocks_as_latest(&mut module)?;
+    let served_head = Arc::new(AtomicU64::new(0));
+    hide_blocks_above_head(&mut module, served_head.clone())?;
     if let Some(spool) = &spool {
-        spool_pending_nonce(&mut module, spool.clone())?;
+        spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
+    limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT)?;
     let server = start_http_rpc(module, options.port).await?;
     println!(
         "SETTLED L2 RPC (chain id {}) at {}; finality only from verified native FFG settlement; {}",
@@ -803,13 +967,14 @@ async fn main() -> Result<()> {
                     if number != head_number {
                         let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
                         state.set_canonical_head(header.clone());
+                        served_head.store(number, Ordering::Release);
                         head_number = number;
                         println!("head block={} hash={}", number, header.hash());
                     }
                     if let Some(spool) = spool.as_ref().filter(|_| last_sweep.elapsed() >= SPOOL_SWEEP) {
                         last_sweep = std::time::Instant::now();
-                        let (spool, provider) = (spool.clone(), provider.clone());
-                        match tokio::task::spawn_blocking(move || spool.sweep(&provider)).await {
+                        let (spool, factory) = (spool.clone(), factory.clone());
+                        match tokio::task::spawn_blocking(move || spool.sweep(&factory)).await {
                             Ok(Ok(0)) => {}
                             Ok(Ok(evicted)) => println!("spool sweep evicted {evicted} stale entries"),
                             Ok(Err(error)) => println!("spool sweep failed: {error}"),
@@ -929,6 +1094,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipts_and_mined_transactions_wait_for_the_served_head() {
+        let mut module = jsonrpsee::RpcModule::new(());
+        for method in HEAD_BOUND_METHODS {
+            module
+                .register_method(method, |params, _, _| {
+                    let hash: String = params.one()?;
+                    Ok::<_, jsonrpsee::types::ErrorObjectOwned>(match hash.as_str() {
+                        "unknown" => serde_json::Value::Null,
+                        "pending" => serde_json::json!({"hash": "pending", "blockNumber": null}),
+                        _ => serde_json::json!({"hash": hash, "blockNumber": "0x5"}),
+                    })
+                })
+                .unwrap();
+        }
+        let head = Arc::new(AtomicU64::new(4));
+        hide_blocks_above_head(&mut module, head.clone()).unwrap();
+        for method in HEAD_BOUND_METHODS {
+            let at: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["mined"]).await.unwrap();
+            assert!(at.is_null(), "{method} above the head");
+            let unknown: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["unknown"]).await.unwrap();
+            assert!(unknown.is_null());
+            let pending: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["pending"]).await.unwrap();
+            assert_eq!(pending["hash"], "pending");
+        }
+        head.store(5, Ordering::Release);
+        for method in HEAD_BOUND_METHODS {
+            let at: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["mined"]).await.unwrap();
+            assert_eq!(at["blockNumber"], "0x5", "{method} at the head");
+        }
+    }
+
+    #[tokio::test]
     async fn net_and_web3_answer_like_an_ethereum_node() {
         let module = net_web3_rpc(700_770);
         let version: String = module.call("net_version", jsonrpsee::rpc_params![]).await.unwrap();
@@ -1018,8 +1215,14 @@ mod tests {
     }
 
     const GWEI: u128 = 1_000_000_000;
-    const LIMITS: SpoolLimits =
-        SpoolLimits { max_entries: 8, max_per_sender: 3, max_nonce_gap: 4, ttl: Duration::from_secs(600), replace_bump_percent: 10 };
+    const LIMITS: SpoolLimits = SpoolLimits {
+        max_entries: 8,
+        max_per_sender: 3,
+        max_nonce_gap: 4,
+        ttl: Duration::from_secs(600),
+        replace_bump_percent: 10,
+        max_tx_gas: 15_000_000,
+    };
 
     /// Plan against head nonces/balances per key (absent: nonce 0, rich).
     fn plan(
@@ -1117,5 +1320,127 @@ mod tests {
         // Evicting a file the producer already removed is not an error.
         evict_spool(dir.path(), &["a.tx".into(), "b.tx".into()], "test");
         assert!(scan_spool(&spec, dir.path(), &mut index).unwrap().is_empty());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authenticated(
+        spec: &ChainSpec,
+        key: u8,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee: u128,
+        priority: u128,
+        to: TxKind,
+        input: Vec<u8>,
+    ) -> bloch_l2_evm::AuthenticatedTransaction {
+        let key = SigningKey::from_bytes((&[key; 32]).into()).unwrap();
+        let tx = TxEip1559 {
+            chain_id: spec.chain_id,
+            nonce,
+            to,
+            gas_limit,
+            max_fee_per_gas: max_fee,
+            max_priority_fee_per_gas: priority,
+            input: input.into(),
+            ..Default::default()
+        };
+        let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        bloch_l2_evm::decode_signed_transaction(spec, &TxEnvelope::from(tx.into_signed(signature)).encoded_2718()).unwrap()
+    }
+
+    #[test]
+    fn transactions_the_worker_can_never_include_are_refused() {
+        let spec = ChainSpec::mainnet();
+        let call = TxKind::Call(Address::repeat_byte(9));
+        let check = |gas, max_fee, priority, to, input: Vec<u8>| {
+            never_includable(&spec, &authenticated(&spec, 1, 0, gas, max_fee, priority, to, input), SPOOL_LIMITS)
+        };
+        assert_eq!(check(21_000, 2 * GWEI, GWEI, call, vec![]), None);
+        assert_eq!(check(15_000_000, 2 * GWEI, GWEI, call, vec![]), None, "exactly the block budget");
+        // Deferred by every block (15M budget) although below the 30M protocol limit.
+        let above = check(15_000_001, 2 * GWEI, GWEI, call, vec![]).unwrap();
+        assert!(above.starts_with("exceeds block gas limit"), "{above}");
+        // Dropped by execution without a fee.
+        let low = check(20_999, 2 * GWEI, GWEI, call, vec![]).unwrap();
+        assert!(low.starts_with("intrinsic gas too low"), "{low}");
+        let data = check(21_000, 2 * GWEI, GWEI, call, vec![1; 10]).unwrap();
+        assert!(data.contains("needs 21160"), "16 gas per non-zero calldata byte: {data}");
+        assert_eq!(check(21_160, 2 * GWEI, GWEI, call, vec![1; 10]), None);
+        let create = check(21_000, 2 * GWEI, GWEI, TxKind::Create, vec![]).unwrap();
+        assert!(create.contains("needs 53000"), "{create}");
+        let tip = check(21_000, 2 * GWEI, 2 * GWEI + 1, call, vec![]).unwrap();
+        assert!(tip.starts_with("max priority fee per gas higher"), "{tip}");
+        let initcode = check(14_000_000, 2 * GWEI, GWEI, TxKind::Create, vec![0; 49_153]).unwrap();
+        assert!(initcode.starts_with("max initcode size exceeded"), "{initcode}");
+        // Larger than one DA batch (114,688 bytes with framing) yet under the 128 KiB envelope cap.
+        let big = check(14_000_000, 2 * GWEI, GWEI, call, vec![0; 120 * 1024]).unwrap();
+        assert!(big.starts_with("transaction too large"), "{big}");
+        let fits = 114_688 - bloch_l2_evm::data_availability::da_framing_bytes(1);
+        let near = authenticated(&spec, 1, 0, 14_000_000, 2 * GWEI, GWEI, call, vec![0; 110 * 1024]);
+        assert!(near.raw().len() <= fits);
+        assert_eq!(never_includable(&spec, &near, SPOOL_LIMITS), None);
+    }
+
+    #[test]
+    fn a_sender_must_cover_all_its_spooled_entries_together() {
+        let spec = ChainSpec::mainnet();
+        let one = 21_000 * 2 * GWEI;
+        let mine: Vec<_> = (0..2).map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
+        assert_eq!(plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 0, 3 * one)], GWEI), Ok(vec![]));
+        let over = plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 0, 3 * one - 1)], GWEI).unwrap_err();
+        assert!(over.starts_with("insufficient funds for this and the sender's pending"), "{over}");
+        // A replacement is counted once: the old entry no longer counts.
+        assert_eq!(plan(&mine, &meta(&spec, 1, 1, 22 * GWEI / 10), &[(1, 0, one + 21_000 * 22 * GWEI / 10)], GWEI), Ok(vec!["m1.tx".into()]));
+        // Entries the head already consumed do not count.
+        assert_eq!(plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 1, 2 * one)], GWEI), Ok(vec!["m0.tx".into()]));
+    }
+
+    #[test]
+    fn scan_stats_a_file_once_and_keeps_its_original_time() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = SpoolIndex::new();
+        let path = dir.path().join("old.tx");
+        std::fs::write(&path, format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(4 * 3_600);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let entries = scan_spool(&spec, dir.path(), &mut index).unwrap();
+        assert_eq!(entries[0].modified, old);
+        // Later scans take the time from the index (an expired entry stays expired).
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+        assert_eq!(scan_spool(&spec, dir.path(), &mut index).unwrap()[0].modified, old);
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let mut head = SpoolHead { account: &mut account, next_base_fee: GWEI, now: std::time::SystemTime::now() };
+        assert_eq!(head.stale(&entries[0], SPOOL_LIMITS), Some("expired"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simulations_share_a_bounded_number_of_permits() {
+        let mut module = jsonrpsee::RpcModule::new(());
+        module
+            .register_async_method("eth_call", |_, _, _| async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x")
+            })
+            .unwrap();
+        module.register_method("eth_chainId", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0xab162")).unwrap();
+        limit_simulations(&mut module, 1, Duration::from_millis(100)).unwrap();
+        let (first, second, other) = tokio::join!(
+            module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({}), "latest"]),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({}), "latest"]).await
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                module.call::<_, String>("eth_chainId", jsonrpsee::rpc_params![]).await
+            },
+        );
+        assert_eq!(first.unwrap(), "0x");
+        let busy = second.unwrap_err().to_string();
+        assert!(busy.contains("too many concurrent EVM simulations"), "{busy}");
+        assert_eq!(other.unwrap(), "0xab162", "methods outside the limiter are not gated");
+        // Once the permit is free the next call runs.
+        assert_eq!(module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})]).await.unwrap(), "0x");
     }
 }

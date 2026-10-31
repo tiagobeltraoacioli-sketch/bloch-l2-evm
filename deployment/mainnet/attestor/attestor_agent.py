@@ -69,6 +69,9 @@ DEFAULTS = {
     'alert_command': None,
     'command_timeout_seconds': 3600,
 }
+# The follower binary pin (kit 2026-10-30). Not in REQUIRED: a config written by an older kit still loads,
+# and check_identity halts (exit 3) with the migration instructions instead of a bare traceback.
+FOLLOWER_PIN = ('follower', 'follower_sha256')
 REQUIRED = ('signer_index', 'bloch_pos', 'bloch_pos_sha256', 'produce', 'produce_sha256', 'manifest',
             'attestors', 'sealed_key', 'follower_status', 'follower_native', 'state_dir', 'rpc_urls')
 
@@ -105,10 +108,21 @@ class Agent:
 
     # ---------------------------------------------------------------- identity
     def check_identity(self, key='open'):
-        """Pins of the binaries, the manifest and the set; the sealed key's header (`key` 'header') and that it
-        opens and signs for this index ('open'); 'none' skips the key (dry run). Halts on any mismatch."""
-        for name in ('bloch_pos', 'produce'):
-            if lib.sha256_file(self.c[name]) != self.c[f'{name}_sha256']:
+        """Pins of the binaries (bloch-pos, produce, and the follower that writes `follower_status`), the manifest
+        and the set; the sealed key's header (`key` 'header') and that it opens and signs for this index ('open');
+        'none' skips the key (dry run). Halts on any mismatch, and on a config without the follower pin."""
+        missing = [k for k in FOLLOWER_PIN if not self.c.get(k)]
+        if missing:
+            raise Halt(f'config lacks {" and ".join(missing)}: the follower binary is not pinned. This agent refuses to '
+                       'start until it is (an unpinned follower decides what the agent treats as finalized). Run '
+                       '`install-attestor.sh upgrade --artifacts DIR`, which installs the published follower, checks '
+                       'its SHA-256 and writes both keys. Never pin a hash taken from the installed file alone.')
+        for name in ('bloch_pos', 'produce', 'follower'):
+            try:
+                digest = lib.sha256_file(self.c[name])
+            except OSError as e:
+                raise Halt(f'{name} cannot be read for its SHA-256 pin: {e}') from None
+            if digest != self.c[f'{name}_sha256']:
                 raise Halt(f'{name} differs from its pinned SHA-256')
         if lib.sha256_file(self.c['manifest']) != self.pins.manifest_sha256:
             raise Halt('the manifest is not the pinned Genesis-4 mainnet.manifest')
@@ -372,12 +386,23 @@ class Agent:
         with tempfile.TemporaryDirectory(dir=self.state_dir) as scratch:
             proof = Path(scratch) / 'proof.json'
             proof.write_text(json.dumps(doc) + '\n')
-            out = Path(scratch) / 'partial'
-            self.native('attest', '--genesis', self.c['manifest'], '--proof', str(proof),
-                        '--attestors', self.c['attestors'], '--signer-index', str(self.index),
-                        '--sealed', self.c['sealed_key'], '--passphrase-file', self.passphrase_file(), '--out', str(out))
-            text = out.read_text()
-            index, digest, _ = lib.parse_partial(text)
+            # Falcon-1024 signatures vary in length: re-sign (fresh randomness) until the hybrid
+            # signature fits the claim's ATTESTOR_SIGNATURE_MAX, a bounded number of times.
+            for attempt in range(lib.SIGN_FIT_ATTEMPTS):
+                out = Path(scratch) / f'partial-{attempt}'
+                self.native('attest', '--genesis', self.c['manifest'], '--proof', str(proof),
+                            '--attestors', self.c['attestors'], '--signer-index', str(self.index),
+                            '--sealed', self.c['sealed_key'], '--passphrase-file', self.passphrase_file(),
+                            '--out', str(out))
+                text = out.read_text()
+                try:
+                    index, digest, _ = lib.parse_partial(text)
+                    break
+                except lib.OversizedSignature as e:
+                    log('resign-oversized', root=root, attempt=attempt + 1, error=str(e))
+            else:
+                raise Halt(f'no attestation signature fit {lib.ATTESTOR_SIGNATURE_MAX} bytes in '
+                           f'{lib.SIGN_FIT_ATTEMPTS} attempts')
             if index != self.index or digest != lib.attestation_digest(self.pins.network, self.pins.chain_id, root):
                 raise Halt('the partial signs another index, network, chain or root')
             tmp = final.with_suffix('.tmp')
@@ -462,7 +487,11 @@ def main(argv=None):
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--no-key', action='store_true', help='check: skip opening the sealed key')
     a = parser.parse_args(argv)
-    agent = Agent(load_config(a.config), pins=PINS, dry_run=a.dry_run)
+    try:
+        agent = Agent(load_config(a.config), pins=PINS, dry_run=a.dry_run)
+    except Halt as e:
+        log('halt', alert=True, reason=str(e))
+        return 3
     try:
         if a.command == 'check':
             identity = agent.check_identity(key='header' if a.no_key else 'open')

@@ -29,7 +29,9 @@ use bloch_l2_evm::{
     },
     ChainSpec,
 };
-use bloch_settlement_recovery::reconstruct::{derive_settled_blocks, NativeBlockTransactions};
+use bloch_settlement_recovery::reconstruct::{
+    derive_settled_blocks, flag_day_first_slot, l2_registry_blocks, NativeBlockTransactions,
+};
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
     prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec, BlochNextBlockEnvCtx,
@@ -740,11 +742,13 @@ fn read_l1_fixture(path: &Path) -> Result<Vec<NativeBlockTransactions>, String> 
 }
 
 /// A native follower state directory: `index` lists verified block ids from
-/// genesis (line i is height i), `blocks/<id>.bin` holds each envelope.
+/// native genesis, `blocks/<id>.bin` holds each envelope. Heights are the L2
+/// registry's count: the mainnet L2 was installed by a flag day, every other
+/// network this tool selects has it at genesis.
 fn read_l1_follower(dir: &Path) -> Result<Vec<NativeBlockTransactions>, String> {
     let index = fs::read_to_string(dir.join("index")).map_err(|e| format!("--l1-follower index: {e}"))?;
     let mut blocks = Vec::new();
-    for (i, line) in index.lines().enumerate() {
+    for line in index.lines() {
         if blocks.len() >= MAX_L1_BLOCKS {
             return Err(format!("--l1-follower holds more than {MAX_L1_BLOCKS} blocks"));
         }
@@ -754,9 +758,9 @@ fn read_l1_follower(dir: &Path) -> Result<Vec<NativeBlockTransactions>, String> 
         if B256::from(*envelope.block_id().as_bytes()) != id {
             return Err("native envelope does not match its index id".into());
         }
-        blocks.push(NativeBlockTransactions { height: i as u64 + 1, transactions: envelope.body.transactions });
+        blocks.push((envelope.header.slot, envelope.body.transactions));
     }
-    Ok(blocks)
+    Ok(l2_registry_blocks(blocks, network().mainnet.then(flag_day_first_slot)))
 }
 
 /// The outbox root and count in a state (the empty tree before the outbox

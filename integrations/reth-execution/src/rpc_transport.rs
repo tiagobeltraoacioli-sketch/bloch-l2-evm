@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Loopback transports for actual Reth RPC modules; no alternate JSON handlers.
-use jsonrpsee::{server::ServerConfig, RpcModule};
+use jsonrpsee::{
+    server::{BatchRequestConfig, ServerConfig},
+    RpcModule,
+};
 use reth_rpc_builder::{error::RpcError, RpcServerConfig, RpcServerHandle, TransportRpcModules};
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -10,6 +13,16 @@ pub const RPC_MAX_REQUEST_BYTES: u32 = 512 * 1024;
 /// A full block may contain 16 MiB of raw transactions, which expands beyond
 /// 32 MiB when represented as JSON hex alongside transaction metadata.
 pub const RPC_MAX_RESPONSE_BYTES: u32 = 64 * 1024 * 1024;
+/// Calls per JSON-RPC batch. An unlimited batch turns one HTTP request (one
+/// unit for a per-request gateway rate limit) into thousands of calls, e.g.
+/// 2,000 `eth_estimateGas` in a 320 KB body kept one connection busy for 41 s
+/// in the 2026-10-30 spool rehearsal.
+pub const RPC_MAX_BATCH_CALLS: u32 = 100;
+/// Concurrent HTTP connections. The listener is loopback-only and fronted by
+/// the public gateway, whose nginx workers each keep a pool of idle upstream
+/// connections; jsonrpsee's default of 100 answers 429 once those pools and a
+/// burst exceed it, so the cap is set well above the gateway's pools.
+pub const RPC_MAX_HTTP_CONNECTIONS: u32 = 1024;
 
 /// Start the supplied upstream EthApi module on IPv4 loopback.
 ///
@@ -24,7 +37,9 @@ pub async fn start_http_rpc(module: RpcModule<()>, port: u16) -> Result<RpcServe
     RpcServerConfig::http(
         ServerConfig::builder()
             .max_request_body_size(RPC_MAX_REQUEST_BYTES)
-            .max_response_body_size(RPC_MAX_RESPONSE_BYTES),
+            .max_response_body_size(RPC_MAX_RESPONSE_BYTES)
+            .set_batch_request_config(BatchRequestConfig::Limit(RPC_MAX_BATCH_CALLS))
+            .max_connections(RPC_MAX_HTTP_CONNECTIONS),
     )
     .with_http_address(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
     .start(&modules)
@@ -40,6 +55,7 @@ pub async fn start_ws_rpc(module: RpcModule<()>, port: u16) -> Result<RpcServerH
         ServerConfig::builder()
             .max_request_body_size(RPC_MAX_REQUEST_BYTES)
             .max_response_body_size(RPC_MAX_RESPONSE_BYTES)
+            .set_batch_request_config(BatchRequestConfig::Limit(RPC_MAX_BATCH_CALLS))
             .max_subscriptions_per_connection(64),
     )
     .with_ws_address(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))

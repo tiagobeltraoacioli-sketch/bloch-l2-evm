@@ -1,121 +1,165 @@
-# Mainnet attestor key handoff checklist
+# Mainnet attestor key custody and handoff checklist
 
 Applies to the five keys of set `1c06adbb…cc4b` (3-of-5) in `~/Desktop/L2-MAINNET-ATESTADORES`.
 
-**Goal:** each key is sealed for one operator and installed on that operator's host, with an offline
-backup. No plaintext `.sk` file is left on the Mac.
+**Goal:** each key is sealed for one operator and installed on that operator's host. Each operator
+holds an offline backup under a passphrase only they know. No plaintext `.sk` file is left anywhere,
+and the key holder ends with no key.
 
-**Rule:** no single person or machine ever holds three keys again after this handoff.
+**Rule:** after the handoff, no single person, machine or storage place holds three keys.
+
+Tool: `keykit/make-operator-bundles.sh` (owner side) and `keykit/check-operator-bundle.sh` (operator
+side, shipped inside each bundle). Rehearsal with throwaway keys: `tests/rehearse_custody_flow.sh`.
+
+## The risk until the handoff is done
+
+Today the key holder alone holds **5 of 5** keys in plaintext, in one folder on one Mac. The
+threshold is 3. Until at least three keys have left the holder's control, one compromised laptop,
+backup or person can sign any large withdrawal root. The set cannot be rotated without an L1 hard fork.
+
+The flow below shrinks that exposure in steps:
+
+| After | Plaintext keys | Keys the holder can still use alone |
+| --- | --- | --- |
+| today | 5 | 5 (plaintext) |
+| seal + verify + package + backups + shred (one sitting, offline) | 0 | 5 (sealed bundles + the five transport passphrases) |
+| operator I installs, re-seals its backup, holder runs `release-owner-copy I` | 0 | one fewer per operator |
+| three operators released | 0 | 2 (below the threshold) |
+| all five released | 0 | 0 |
+
+`status` prints the last column at any time and warns while it is 3 or more.
+
+## Recommended order
+
+1. **Choose the five operators and hosts first** (section 0). Do not seal before you know who
+   receives each index: sealing starts the clock.
+2. **Seal, verify, package, back up and shred in one offline sitting** (sections 1–5). The plaintext
+   then exists for hours, not days. Shredding before the handoff is safe because `verify` proved each
+   bundle opens and signs, `backup-check` proved two read-back copies, and the rehearsal proved a
+   bundle sealed on the Mac opens with the Linux `bloch-pos` on an operator host.
+3. **Hand off the first three operators as soon as they are ready**, one index at a time
+   (section 6). Release each index (section 7) as soon as that operator reports `check-ok` and a
+   re-sealed backup. After the third release you are below the threshold.
+4. **Then the last two.** Five running attestors tolerate two hosts down.
+5. Never give two indices to one person, one host, one hosting account, or one backup location.
+
+While you still hold three or more bundles:
+
+- keep the five passphrases on paper, in a different place from the bundles, never in a password
+  manager or a file on the same Mac;
+- keep the Mac offline when the bundles folder is mounted, and keep the backup media apart;
+- do not travel with all bundles together.
 
 ## 0. Before you start
 
-- [ ] Use the Mac, offline if you can (Wi‑Fi off).
-- [ ] FileVault is on (`fdesetup status`).
-- [ ] Desktop & Documents are not synced to iCloud (`defaults read com.apple.finder FXICloudDriveDesktop` prints `0`).
-- [ ] Time Machine has no destination, or you will exclude the folder.
-- [ ] Build `bloch-pos` from bloch-sis-pow `codex/l2-attestor-keystore-20261019` (e7d2c8b2):
-      `cargo build --release --bin bloch-pos` in `crates/bloch-pos-node` of the worktree
-      `~/worktrees/l2-attestor-keystore-20261019`. The kit's default `--bloch-pos` is
-      `~/worktrees/l2-attestor-keystore-20261019/target/release/bloch-pos`. Record its SHA-256.
-      This Mac binary is only for sealing; each operator host needs a **Linux** `bloch-pos` built
-      from the same commit, in its artifacts directory (step 4).
-- [ ] `~/L2-ATTESTOR-BUNDLES` does not exist yet (`seal` refuses to overwrite a bundle).
-- [ ] Run every command from the repository root (`cd ~/worktrees/l2-mainnet-attestor-20261019`),
-      or give the script's full path. The script needs no `sudo`.
-- [ ] Optional: rehearse the whole flow with throwaway keys on a Linux box first:
-      `tests/rehearse_owner_flow.sh` (see its header). It never reads the real key folder.
-- [ ] Choose five **different** passphrases, one per operator. Use 6 or more random words (diceware).
-      Never reuse one, never write one next to its bundle, and never send one over the channel that
-      carries the bundle.
-- [ ] For each index 0–4, agree who the operator is and which host they will use. A host must not
-      be a mainnet validator, the settler, or the host of another attestor.
+- [ ] Five operators chosen, one index each. Each one has a dedicated Ubuntu 24.04 x86_64 host that is
+      not a mainnet validator, the settler, or another attestor (see `OPERATOR-ONBOARDING.md`).
+- [ ] Build `bloch-pos` on the Mac from bloch-sis-pow `codex/l2-attestor-keystore-20261019`
+      (e7d2c8b2): `cargo build --release --bin bloch-pos` in `crates/bloch-pos-node` of
+      `~/worktrees/l2-attestor-keystore-20261019`. The rehearsal used the Mac build `1d69e683…`.
+      Operators use the Linux build pinned in `operator-pins-v2.sha256` (`093909a2…`).
+- [ ] Wi-Fi off. Then run `preflight`: it must show no `FAIL`.
 
-## 1. Seal (on the Mac)
+```
+deployment/mainnet/attestor/keykit/make-operator-bundles.sh preflight
+```
+
+- [ ] Choose five **different** passphrases (6+ random words each). Write each on its own paper slip,
+      labelled with the index only.
+
+## 1. Seal
 
 ```
 deployment/mainnet/attestor/keykit/make-operator-bundles.sh seal
 ```
 
-- [ ] The script prints `set 1c06adbb7fef042f… 3-of-5: public keys ['0', '1', '2', '3', '4'] match`.
-      This compares public keys only, against the pinned set.
-- [ ] For each operator, after `== attestor I: choose the passphrase for operator I`, type that
-      operator's passphrase at `New sealed-key passphrase:` and again at `Repeat passphrase:`.
-      Each index prints `sealed attestor I of 3-of-5 set 1c06adbb…`. Argon2id takes a few seconds
-      per key.
-- [ ] If a passphrase is mistyped (`passphrases do not match`), the script stops; the indices already
-      sealed stay. Re-run with only the rest, e.g. `seal --index 3 --index 4`.
-- [ ] Bundles appear in `~/L2-ATTESTOR-BUNDLES/attestor-I.sealed`, mode 0600. The folder is outside
-      Desktop and Documents.
+- [ ] It prints `set 1c06adbb7fef042f… 3-of-5: public keys ['0', '1', '2', '3', '4'] match`.
+- [ ] For each I, type passphrase I at `New sealed-key passphrase:` and `Repeat passphrase:`.
+      Each index prints `sealed attestor I of 3-of-5 set 1c06adbb…`.
+- [ ] A mistyped repeat stops the script; re-run with only the rest, e.g. `seal --index 3 --index 4`.
 
-## 2. Verify (on the Mac)
+## 2. Verify (the decrypt test)
 
 ```
 deployment/mainnet/attestor/keykit/make-operator-bundles.sh verify
 ```
 
-- [ ] For each operator, type the passphrase once more at `Sealed attestor key passphrase:`. Every
-      index prints `ok: sealed key opens and signs for attestor I of 3-of-5 set 1c06adbb…`.
-      A wrong passphrase prints `authentication failed` and stops; nothing is recorded for that index.
-- [ ] `~/L2-ATTESTOR-BUNDLES/BUNDLES.sha256` lists the five bundle hashes. This file is public.
+- [ ] Type each passphrase once. Each index prints
+      `ok: sealed key opens and signs for attestor I of 3-of-5 set 1c06adbb…`.
 
-## 3. Offline backups (before anything leaves the Mac)
+## 3. Package
 
-- [ ] For each operator, copy `attestor-I.sealed` and `BUNDLES.sha256` to **two** offline media,
-      such as USB drives, kept in different places.
-- [ ] Label each medium with the index only. Never write a passphrase on it.
-- [ ] The media can be kept by you or by the operator. Decide which and write it down.
-- [ ] On another machine, check that the media read back:
-      `shasum -a 256 attestor-I.sealed` must match `BUNDLES.sha256`.
+```
+deployment/mainnet/attestor/keykit/make-operator-bundles.sh package
+```
 
-## 4. Hand each bundle to its operator
+- [ ] Each index prints `packaged attestor I: …/operator-I.tar (SHA-256)`. `PACKAGES.sha256` is public.
+- [ ] Each package holds the sealed key, the public key, the set, `IDENTITY.txt`,
+      `ARTIFACTS.sha256` (v2 follower `c18752fd…`, producer `fb0d5313…`, `bloch-pos` `093909a2…`,
+      manifest `7eef82a7…`, carryover `4d1e2738…`), `INSTALL.md`, `ONBOARDING.md`, the kit and
+      `check-operator-bundle.sh`, all listed in `CONTENTS.sha256`.
+- [ ] Optional: `--artifacts DIR` embeds the Linux binaries after checking them against the pins.
 
-For each operator I:
+## 4. Two offline backups
 
-- [ ] Send the bundle file `attestor-I.sealed` over one channel, for example in person, by encrypted
-      file transfer, or with `scp` to the operator.
-- [ ] Send the passphrase over a **different** channel, for example in person, by phone, or in a
-      Signal message that disappears.
-- [ ] The operator checks the bundle hash against your `BUNDLES.sha256` line, read to them over a
-      third channel.
-- [ ] The operator has an artifacts directory on the host (Linux `bloch-pos` from e7d2c8b2, the RC
-      `bloch-l2-native-follower` and `bloch-l2-produce-dev`, `mainnet.manifest`,
-      `carryover.tsv.gz` + `.sha256`, and `SHA256SUMS` over the three binaries). See `../README.md`.
-- [ ] Before installing, the operator checks the bundle on the host:
-      `grep ' attestor-I.sealed$' BUNDLES.sha256 | sha256sum -c` prints `attestor-I.sealed: OK`.
-- [ ] The operator runs, as root, from `deployment/mainnet/attestor`:
-      `./install-attestor.sh install --artifacts DIR --index I --bundle /path/attestor-I.sealed --l1-rpc-url http://HOST:8080`
-      (plus `--publish-url`/`--publish-command`). It prints `Type the TRANSPORT passphrase…`; the
-      operator types it once at `Sealed attestor key passphrase:`. The key is re-sealed under a random
-      host passphrase and checked (`ok: sealed key opens and signs for attestor I …`). Nothing starts.
-- [ ] The operator starts **only the follower** and waits for its first replay (30–60 min) until
-      `status.json` shows `l2_genesis.finalized=true`. `check` before that ends in `check-not-ready`.
-- [ ] The operator runs `check` (the `systemd-run … attestor_agent.py check` line the installer
-      prints). It must print `check-ok`, including `signer_index I` and `set_hash 1c06adbb…`.
-- [ ] The operator starts the agent and deletes the copy of the bundle they brought to the host.
-- [ ] The operator confirms by a message that does not include the passphrase.
+- [ ] Copy every `operator-I.tar` and `PACKAGES.sha256` to two USB drives. Then, for each drive:
 
-**Gate before step 5:** at least three operators have `check-ok` on separate hosts. The first large
-claim needs three. Five is the target.
+```
+deployment/mainnet/attestor/keykit/make-operator-bundles.sh backup-check --media /Volumes/USB-A --label USB-A
+```
 
-## 5. Destroy the plaintext originals (on the Mac, only after steps 1–4)
+- [ ] Each index prints `ok: USB-A holds operator-I.tar`. Repeat with the second drive and a
+      different label. Store the drives in two different places, away from the passphrase slips.
+
+## 5. Destroy the plaintext originals (same sitting)
 
 ```
 deployment/mainnet/attestor/keykit/make-operator-bundles.sh shred-originals
 ```
 
-- [ ] For each index, type `DESTROY I`. The script refuses an index whose bundle has not been
-      verified, or that changed after verification.
-- [ ] Afterwards `ls ~/Desktop/L2-MAINNET-ATESTADORES` shows only `.pk` files and `attestors.set`.
-- [ ] Empty the Trash. Make sure no other copy exists: AirDrop, Downloads, Time Machine, an external
-      disk, or an earlier `cp`.
-- [ ] `~/L2-ATTESTOR-BUNDLES` may stay on the Mac, since it holds only sealed bundles. Delete it
-      after the offline backups are confirmed if you prefer.
+- [ ] It refuses an index that is not verified, not packaged, or not on two checked media.
+- [ ] Type `DESTROY I` for each index. It then runs `post-shred-check`: the keys folder must hold only
+      `.pk` files and `attestors.set`; nothing named `attestor-I.sk` in the Trash or Spotlight.
+- [ ] Empty the Trash. Check Downloads, AirDrop, mail drafts, chats and other disks by hand.
+
+## 6. Hand each bundle to its operator
+
+For each operator I:
+
+- [ ] Send `operator-I.tar` over one channel (in person, encrypted transfer, `scp`). Record it:
+      `record --index I --event bundle-delivered --note "channel"`.
+- [ ] Send passphrase I over a **different** channel (in person, phone, disappearing Signal message).
+      `record --index I --event passphrase-delivered`.
+- [ ] Read the `operator-I.tar` line of `PACKAGES.sha256` over a third channel.
+      `record --index I --event hash-confirmed`.
+- [ ] The operator follows `INSTALL.md` in the bundle: check, install, follower replay, `check-ok`,
+      agent start, re-seal of their backup under their own passphrase, delete the bundle copy.
+- [ ] The operator sends the reply from `ONBOARDING.md` section 6. Record it:
+      `record --index I --event operator-check-ok --note "host IP, epoch X->Y"` and
+      `record --index I --event endpoint-received --note "endpoint"`.
+
+## 7. Release your copy of index I
+
+Only after operator I has `check-ok` **and** has re-sealed their backup:
+
+- [ ] Delete `operator-I.tar` from both USB drives. (If you decided to keep an escrow copy of index I,
+      it goes to a custodian that holds no other index: `record --index I --event backup-to-escrow`.)
+- [ ] Destroy the paper slip with passphrase I.
+
+```
+deployment/mainnet/attestor/keykit/make-operator-bundles.sh release-owner-copy --index I
+```
+
+- [ ] Type `RELEASE I`. The Mac copies of bundle I are deleted. `status` shows one fewer key under
+      your control. When all five are released, wipe both drives.
+
+## 8. Afterwards
+
+- [ ] Keep `PACKAGES.sha256`, `CUSTODY-LEDGER.tsv` and a table: index → operator → host → endpoint.
+      None of these is secret.
+- [ ] Host lost: the operator reinstalls from their own re-sealed backup (`install-attestor.sh
+      install --bundle attestor-I.operator.sealed`), typing their own passphrase.
+- [ ] A bundle **and** its passphrase compromised: `sudo touch /etc/bloch-l2-attestor/PAUSE` on that
+      host and plan the set-rotation hard fork before a second key is at risk.
 
 Overwriting a file on an APFS SSD is best effort. FileVault keeps any leftover blocks encrypted at rest.
-
-## 6. Afterwards
-
-- [ ] Keep `BUNDLES.sha256` and a record of which operator holds which index, and where its backups are.
-- [ ] If an operator's host is lost, they reinstall from their offline bundle with their passphrase.
-- [ ] If a bundle **and** its passphrase are compromised, pause that agent. The set cannot be rotated
-      without a hard fork, so plan the fork before two keys are at risk.

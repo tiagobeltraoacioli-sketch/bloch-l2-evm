@@ -147,12 +147,26 @@ current epoch. The existing candidate encoding remains unchanged; it is not a
 saved native-finality capability. Restart requires fresh native replay as well as
 L2/history recovery. Generic compatibility APIs make no FFG claim.
 
-The additional `ffg_recovery.rs` qualification uses a new genuine Groth16 proof,
+Limitation (2026-10-30): this WS-checkpoint composition admits settlements only
+through the historical native envelope (tag 0x0E, devnet1-3 history). The pinned
+native consensus renumbered L2 settlement to 0x12 (async 0x13) and assigns 0x0E to
+funded delegation, so a settlement executed in a current native block can never
+be admitted to these stores and both entry points fail closed. The production
+follower does not use this path: it replays with
+`native::IncrementalNativeVerifierV1` and binds finalized asynchronous
+settlements through `async_cursor`.
+
+The additional `ffg_recovery.rs` qualification uses a genuine Groth16 proof,
 real proposer signatures and real FFG votes from three disposable test validators.
 Public fixtures retain the signed blocks, attestations and proof provenance;
 private keys remain in the generator process. Tests cover 2/3 and 3/3 agreement,
 two-round finalization, insufficient/duplicated/conflicting votes, branch and
-signature changes, bounds, stale checkpoint claims and recovery after restart.
+signature changes, bounds, stale checkpoint claims, restart-stable replay of the
+exact finalized settlement bytes and the fail-closed WS composition above. The
+fixtures were regenerated on 2026-10-30 against native `78d4921c` because the
+native genesis state commitment and the settlement wire tag had changed since the
+original `7eb58904` fixtures; regenerate them with `examples/qualify_native_ffg.rs`
+whenever the pinned native state commitment or wire format changes.
 These tests cover epochs 0–3 of the isolated fixture, not a live network or all
 activation/leak/fault regimes. Native consensus rules and their historical
 activation gates are replayed unchanged; this is not a new economic-finality

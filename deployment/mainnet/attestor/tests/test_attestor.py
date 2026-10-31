@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE.parent))
 import aggregate_attestation  # noqa: E402
 import attestor_agent  # noqa: E402
 import attestor_lib as lib  # noqa: E402
+import sigfeed  # noqa: E402
 
 BLOCH_POS = os.environ.get('BLOCH_POS', str(Path.home() / 'worktrees/l2-attestor-keystore-20261019/target/release/bloch-pos'))
 MANIFEST = os.environ.get('MAINNET_MANIFEST', str(Path.home() / 'worktrees/l2-attestor-keystore-20261019/genesis/mainnet.manifest'))
@@ -155,6 +156,18 @@ class LibTest(unittest.TestCase):
         self.assertFalse(lib.claimed(view, 512))
         self.assertFalse(lib.claimed(view, 300))
 
+    def test_partial_signature_bound_is_the_claim_admission_bound(self):
+        digest = 'cd' * 32
+        for size in (2000, 4000, lib.ATTESTOR_SIGNATURE_MAX):
+            text = f'1\n{digest}\n{"ab" * size}\n'
+            self.assertEqual(lib.parse_partial(text), (1, digest, 'ab' * size))
+        for size in (lib.ATTESTOR_SIGNATURE_MAX + 1, 4775):
+            with self.assertRaises(lib.OversizedSignature):
+                lib.parse_partial(f'1\n{digest}\n{"ab" * size}\n')
+        # Still a ValueError: every caller that skips malformed partials skips oversized ones too.
+        self.assertTrue(issubclass(lib.OversizedSignature, ValueError))
+        self.assertEqual((lib.ATTESTOR_SIGNATURE_MAX, lib.SIGN_FIT_ATTEMPTS), (4 + 3309 + 1280, 64))
+
 
 @unittest.skipUnless(NATIVE, f'needs BLOCH_POS ({BLOCH_POS}) with seal-key and MAINNET_MANIFEST')
 class AgentTest(unittest.TestCase):
@@ -193,6 +206,8 @@ class AgentTest(unittest.TestCase):
         cls.pins = lib.Pins(lib.CHAIN_ID, lib.NATIVE_NETWORK, lib.NATIVE_GENESIS, cls.set_hash,
                             lib.sha256_file(MANIFEST), L2_GENESIS, [], '1:0:30000', lib.LARGE_CLAIM_SAT)
         cls.produce = HERE / 'fake_produce.py'
+        cls.follower_bin = cls.tmp / 'bloch-l2-native-follower'
+        cls.follower_bin.write_text('#!/bin/sh\n# stands in for the follower binary (only hashed by the agent)\n')
         cls.rpc = FakeRpc()
 
     @classmethod
@@ -264,6 +279,7 @@ class AgentTest(unittest.TestCase):
         config = {
             'signer_index': index, 'bloch_pos': BLOCH_POS, 'bloch_pos_sha256': lib.sha256_file(BLOCH_POS),
             'produce': str(self.produce), 'produce_sha256': lib.sha256_file(self.produce), 'manifest': MANIFEST,
+            'follower': str(self.follower_bin), 'follower_sha256': lib.sha256_file(self.follower_bin),
             'attestors': str(self.set_file), 'sealed_key': str(self.sealed[index]),
             'passphrase_file': str(self.passes[index]), 'follower_status': str(self.status),
             'follower_native': str(self.case / 'native'), 'state_dir': str(self.case / f'agent{index}'),
@@ -350,6 +366,94 @@ class AgentTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             aggregate_attestation.aggregate(self.claim_proof(2, 0), [str(self.case / 'none')], self.case / 'agg4',
                                             BLOCH_POS, MANIFEST, str(self.set_file), pins=self.pins)
+
+    # ------------------------------------------------------------------ signature length bound
+    @staticmethod
+    def inflate(path, size=lib.ATTESTOR_SIGNATURE_MAX + 1):
+        """Rewrite a partial so its signature is `size` bytes (as a long Falcon-1024 signature would be)."""
+        lines = path.read_text().split('\n')
+        lines[2] = (lines[2] + '00' * size)[:2 * size]
+        path.write_text('\n'.join(lines))
+
+    def test_oversized_signature_is_resigned_until_it_fits(self):
+        agent = self.agent(0)
+        real, calls = agent.native, []
+
+        def native(*args):
+            done = real(*args)
+            if args[0] == 'attest':
+                calls.append(args)
+                if len(calls) <= 2:
+                    self.inflate(Path(args[args.index('--out') + 1]))
+            return done
+
+        agent.native = native
+        result, events = self.once(agent)
+        self.assertEqual(result, 'ok')
+        resigned = [e for e in events if e['event'] == 'resign-oversized']
+        self.assertEqual([e['attempt'] for e in resigned], [1, 2], events)
+        self.assertEqual(sorted(e['l2_number'] for e in events if e['event'] == 'signed'), [2, 3])
+        for number in (2, 3):
+            index, digest, signature = lib.parse_partial(self.partial(0, number).read_text())
+            self.assertLessEqual(len(signature) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+            self.assertEqual(digest, lib.attestation_digest(lib.NATIVE_NETWORK, lib.CHAIN_ID, self.root(number)))
+        # The partial that was kept is the native signature, unchanged: it verifies natively.
+        for i in (2, 4):
+            self.assertEqual(self.once(self.agent(i))[0], 'ok')
+        proof = self.claim_proof(3)
+        sources = [str(self.case / f'agent{i}' / 'outbox') for i in (0, 2, 4)]
+        summary = aggregate_attestation.aggregate(proof, sources, self.case / 'agg', BLOCH_POS, MANIFEST,
+                                                  str(self.set_file), pins=self.pins)
+        self.assertEqual(summary['signers'], [0, 2, 4])
+        self.assertIn('attestation ok: 3-of-5', summary['native_verify'])
+
+    def test_signatures_that_never_fit_halt_after_bounded_attempts(self):
+        agent = self.agent(0)
+        calls = []
+
+        def native(*args):
+            calls.append(args[0])
+            out = Path(args[args.index('--out') + 1])
+            digest = lib.attestation_digest(lib.NATIVE_NETWORK, lib.CHAIN_ID, self.root(2))
+            out.write_text(f'0\n{digest}\n{"ab" * (lib.ATTESTOR_SIGNATURE_MAX + 1)}\n')
+            return ''
+
+        agent.native = native
+        with self.assertRaises(attestor_agent.Halt) as halted:
+            self.once(agent)
+        self.assertEqual(calls, ['attest'] * lib.SIGN_FIT_ATTEMPTS)
+        self.assertIn(str(lib.ATTESTOR_SIGNATURE_MAX), str(halted.exception))
+        self.assertFalse(self.partial(0, 2).exists())
+
+    def test_real_attest_signatures_kept_by_the_agent_fit(self):
+        """Many native signatures through the agent's loop: every kept partial fits the bound."""
+        agent = self.agent(1)
+        doc = json.loads(self.claim_proof(3).read_text())
+        with contextlib.redirect_stdout(io.StringIO()):
+            for n in range(12):
+                partial = agent.sign(doc, self.root(3))
+                signature = lib.parse_partial(partial.read_text())[2]
+                self.assertLessEqual(len(signature) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+                partial.unlink()
+
+    def test_aggregator_skips_an_oversized_partial_and_uses_another_source(self):
+        for i in (0, 2, 4):
+            self.assertEqual(self.once(self.agent(i))[0], 'ok')
+        proof = self.claim_proof(3)
+        sources = [str(self.case / f'agent{i}' / 'outbox') for i in (0, 2, 4)]
+        bad = self.case / 'bad'
+        shutil.copytree(sources[0], bad)
+        self.inflate(bad / lib.partial_relpath(lib.CHAIN_ID, self.root(3), 0))
+        summary = aggregate_attestation.aggregate(proof, [str(bad)] + sources, self.case / 'agg', BLOCH_POS,
+                                                  MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(summary['signers'], [0, 2, 4])
+        self.assertTrue(any('admits at most' in p for p in summary['problems']), summary['problems'])
+        kept = lib.parse_partial((self.case / 'agg' / 'attestor-0.partial').read_text())[2]
+        self.assertLessEqual(len(kept) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+        # With only the oversized copy of attestor 0 there are not enough admissible partials.
+        with self.assertRaises(SystemExit):
+            aggregate_attestation.aggregate(proof, [str(bad)] + sources[1:], self.case / 'agg2', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
 
     def test_second_cycle_signs_nothing_new(self):
         agent = self.agent(1)
@@ -451,6 +555,23 @@ class AgentTest(unittest.TestCase):
         with self.assertRaises(attestor_agent.Halt):
             self.agent(0, produce_sha256='00' * 32).check_identity(key='none')
 
+    def test_follower_pin_mismatch_halts(self):
+        swapped = self.case / 'true-follower'
+        swapped.write_text('#!/bin/sh\nexit 0\n')
+        with self.assertRaisesRegex(attestor_agent.Halt, 'follower differs from its pinned SHA-256'):
+            self.agent(0, follower=str(swapped)).check_identity(key='none')
+
+    def test_check_command_with_a_pre_pin_config_halts_with_exit_3(self):
+        config = self.case / 'config.json'
+        old = {k: v for k, v in self.agent(3).c.items() if k not in ('follower', 'follower_sha256')}
+        config.write_text(json.dumps(old))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), unittest.mock.patch.object(attestor_agent, 'PINS', self.pins):
+            code = attestor_agent.main(['check', '--config', str(config)])
+        self.assertEqual(code, 3, out.getvalue())
+        self.assertIn('install-attestor.sh upgrade', out.getvalue())
+        self.assertNotIn('check-ok', out.getvalue())
+
     def test_dry_run_signs_nothing(self):
         _, events = self.once(self.agent(0, dry_run=True))
         self.assertEqual(len([e for e in events if e['event'] == 'would-sign']), 2)
@@ -503,6 +624,102 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(b['signers'], [1, 3, 4])
         drop.server.shutdown()
 
+    def feeds(self, signers):
+        """One real read-only feed per operator, serving only that agent's outbox (loopback)."""
+        servers = {}
+        for i in signers:
+            _, events = self.once(self.agent(i))
+            self.assertTrue([e for e in events if e['event'] == 'signed'], events)
+            servers[i] = sigfeed.FeedServer(self.case / f'agent{i}' / 'outbox').start()
+            self.addCleanup(servers[i].stop)
+        return servers, {i: f'http://127.0.0.1:{s.port}' for i, s in servers.items()}
+
+    def hostile_feed(self, answer):
+        """A source that answers each partial path with `answer(index, root)`: bytes, or None for a 404."""
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                parts = self.path.strip('/').split('/')
+                index = int(parts[-1].split('-')[1].split('.')[0])
+                body = answer(index, parts[-2])
+                self.send_response(200 if body is not None else 404)
+                self.send_header('Content-Length', str(len(body or b'')))
+                self.end_headers()
+                self.wfile.write(body or b'')
+
+            def log_message(self, *a):
+                pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f'http://127.0.0.1:{server.server_port}'
+
+    def forged(self, index, root):
+        """Right shape, right index, right digest, wrong signature: only the native verifier can tell."""
+        digest = lib.attestation_digest(self.pins.network, self.pins.chain_id, root)
+        return f'{index}\n{digest}\n{"ab" * 4000}\n'.encode()
+
+    def test_feed_aggregate_with_two_operators_down(self):
+        servers, urls = self.feeds(range(5))
+        proof = self.claim_proof(3)
+        servers[1].stop()
+        servers[4].stop()
+        a = aggregate_attestation.aggregate(proof, list(urls.values()), self.case / 'agg', BLOCH_POS, MANIFEST,
+                                            str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertIn('attestation ok', a['native_verify'])
+
+    def test_feed_withheld_below_threshold_refuses(self):
+        servers, urls = self.feeds((0, 1))
+        with self.assertRaises(SystemExit) as e:
+            aggregate_attestation.aggregate(self.claim_proof(3), list(urls.values()), self.case / 'agg', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertIn('only 2 of the 3', str(e.exception))
+
+    def test_feed_forged_partials_cannot_displace_real_ones(self):
+        _, urls = self.feeds((0, 2, 3))
+        evil = self.hostile_feed(self.forged)
+        a = aggregate_attestation.aggregate(self.claim_proof(3), [evil, *urls.values()], self.case / 'agg', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertIn('attestation ok', a['native_verify'])
+
+    def test_feed_only_forged_partials_are_refused(self):
+        evil = self.hostile_feed(self.forged)
+        out = self.case / 'agg'
+        with self.assertRaises(SystemExit) as e:
+            aggregate_attestation.aggregate(self.claim_proof(3), [evil], out, BLOCH_POS, MANIFEST, str(self.set_file),
+                                            pins=self.pins)
+        self.assertIn('native verification refused', str(e.exception))
+        self.assertEqual(list(out.glob('*.partial')), [])
+
+    def test_feed_garbage_replay_and_oversize_are_ignored(self):
+        servers, urls = self.feeds((0, 2, 3))
+        other_root = 'cd' * 32
+        answers = [lambda i, r: b'\x00\xff garbage',
+                   lambda i, r: b'x' * (sigfeed.MAX_FILE + 1),
+                   lambda i, r: self.forged(i, other_root),            # a real shape replayed from another root
+                   lambda i, r: self.forged((i + 1) % 5, r),           # another signer's index
+                   lambda i, r: f'{i}\n{"00" * 32}\nabcd\n'.encode()]
+        a = aggregate_attestation.aggregate(self.claim_proof(3), [self.hostile_feed(x) for x in answers] + list(urls.values()),
+                                            self.case / 'agg', BLOCH_POS, MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertTrue(a['problems'])
+
+    def test_feed_serves_only_partials_and_never_the_agent_json_or_state(self):
+        servers, urls = self.feeds((0,))
+        root = self.root(3)
+        rel = lib.partial_relpath(lib.CHAIN_ID, root, 0)
+        self.assertTrue(sigfeed.fetch(f'{urls[0]}/{rel}').startswith(b'0\n'))
+        self.assertTrue((self.case / 'agent0' / 'outbox' / (rel + '.json')).exists()
+                        or list((self.case / 'agent0' / 'outbox').rglob('*.json')))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/{rel}.json'))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/state.json'))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/700770/{root}/'))
+
+    def test_sigfeed_is_the_pinned_file(self):
+        pinned = (HERE.parent / 'sigfeed.sha256').read_text().split()[0]
+        self.assertEqual(hashlib.sha256((HERE.parent / 'sigfeed.py').read_bytes()).hexdigest(), pinned)
+
     def test_publish_failure_is_retried(self):
         publish = [{'kind': 'command', 'argv': ['false']}]
         agent = self.agent(2, publish=publish)
@@ -517,7 +734,7 @@ class AgentTest(unittest.TestCase):
 class KeykitTest(unittest.TestCase):
     """make-operator-bundles.sh on FRESH throwaway keys (passphrase files via the test hook)."""
 
-    def test_seal_verify_and_shred_with_throwaway_keys(self):
+    def test_seal_verify_package_backup_shred_release_with_throwaway_keys(self):
         tmp = Path(tempfile.mkdtemp(prefix='keykit-'))
         old = os.umask(0o077)
         try:
@@ -531,7 +748,7 @@ class KeykitTest(unittest.TestCase):
                 *[x for i in range(5) for x in ('--pubkey', keys / f'attestor-{i}.pk')], '--out', keys / 'attestors.set')
             expect = lib.set_hash(*lib.read_set(keys / 'attestors.set'))
             kit = HERE.parent / 'keykit' / 'make-operator-bundles.sh'
-            env = {**os.environ, 'KEYKIT_PASSFILE_DIR': str(passes)}
+            env = {**os.environ, 'KEYKIT_PASSFILE_DIR': str(passes), 'KEYKIT_SKIP_SEARCH': '1'}
             common = ['--keys-dir', str(keys), '--out', str(out), '--bloch-pos', BLOCH_POS]
 
             def kit_run(*args, extra=('--expect-set-hash', expect)):
@@ -548,6 +765,18 @@ class KeykitTest(unittest.TestCase):
             self.assertEqual(len((out / 'BUNDLES.sha256').read_text().splitlines()), 5)
             (passes / 'pass-2').write_text('a-wrong-passphrase-here\n')
             self.assertIn('authentication failed', kit_run('verify', '--index', '2').stderr)
+            self.assertIn('not packaged', kit_run('shred-originals').stderr)
+            done = kit_run('package')
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(len((out / 'PACKAGES.sha256').read_text().splitlines()), 5)
+            self.assertIn('need 2', kit_run('shred-originals').stderr)
+            for label in ('usb-A', 'usb-B'):
+                media = tmp / label
+                media.mkdir()
+                for i in range(5):
+                    shutil.copy(out / f'operator-{i}.tar', media)
+                done = kit_run('backup-check', '--media', str(media), '--label', label)
+                self.assertEqual(done.returncode, 0, done.stderr)
             done = kit_run('shred-originals')
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual(sorted(p.name for p in keys.glob('*.sk')), [])
@@ -556,6 +785,16 @@ class KeykitTest(unittest.TestCase):
             for i in (0, 4):
                 run(BLOCH_POS, 'l2-claim', 'key-check', '--sealed', out / f'attestor-{i}.sealed', '--attestors',
                     keys / 'attestors.set', '--signer-index', i, '--passphrase-file', passes / f'pass-{i}')
+            self.assertIn('WARNING', kit_run('status').stdout)
+            self.assertIn('no operator-check-ok', kit_run('release-owner-copy', '--index', '0').stderr)
+            for i in (0, 1, 3):
+                self.assertEqual(kit_run('record', '--index', str(i), '--event', 'operator-check-ok').returncode, 0)
+                done = kit_run('release-owner-copy', '--index', str(i))
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertFalse((out / f'operator-{i}.tar').exists())
+            status = kit_run('status').stdout
+            self.assertIn('(not released): 2 of 5', status)
+            self.assertNotIn('WARNING', status)
         finally:
             os.umask(old)
             shutil.rmtree(tmp, ignore_errors=True)

@@ -123,7 +123,9 @@ attestor hosts, the settled-RPC host, and the L1 RPCs the L2 reads.
   `"inert"` where the notice has a number, the build is wrong: do not install it.
 - **T−7 to T−2:** install on every L2 host. On start, the follower re-verifies retained history from
   Genesis-4, which takes **30–60 min** per host (longer as L1 grows). Upgrade one attestor host at a
-  time, keeping ≥ 3 of 5 up. Then check:
+  time, keeping ≥ 3 of 5 up. On an attestor host use `install-attestor.sh upgrade --artifacts DIR`
+  (`deployment/mainnet/attestor/README.md`, "Upgrade"): it pins the follower as well as the producer
+  in `config.json` and runs the checks below itself. Then check:
   - `attestor_agent.py check` prints `check-ok`;
   - the follower's `native_finalized_epoch` advances;
   - `rebuild-check-ok` appears in the logs.
@@ -295,5 +297,5 @@ to 0x0003 still funds deposits and claims from a 0x0001 key.
   `verify_bound` lacks a `pqcrypto_traits::sign::DetachedSignature` import. A fix is in progress in
   that worktree. The branches here were tested with a local, uncommitted import.
 - A `settlement-recovery.mainnet.Cargo.lock` resolved against each later HF release (`NATIVE_LOCK`;
-  the 78d4921c one exists on the build host, §0).
+  the 78d4921c one is committed as `follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock`, and `build-release.sh` requires it).
 - SP1 builds of the LC programs with the new verifier (not run here).

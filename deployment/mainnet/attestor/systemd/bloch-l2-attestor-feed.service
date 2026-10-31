@@ -1,0 +1,51 @@
+# Bloch L2 mainnet attestor: read-only HTTP feed of this operator's partials (public signatures over
+# public roots). It runs apart from the agent: it sees only the outbox, read-only, holds no credential
+# and has no path to the sealed key. Installed by ../install-attestor.sh --feed-port N.
+[Unit]
+Description=Bloch L2 mainnet attestor read-only partial feed
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/var/lib/bloch-l2-attestor/outbox
+
+[Service]
+Type=simple
+User=bloch-l2-attestor
+Group=bloch-l2-attestor
+EnvironmentFile=/etc/bloch-l2-attestor/feed.env
+ExecStart=/usr/bin/python3 -I /opt/bloch/l2-attestor/sigfeed.py serve --root /var/lib/bloch-l2-attestor/outbox --bind ${SIGFEED_BIND} --port ${SIGFEED_PORT}
+Restart=always
+RestartSec=10
+TemporaryFileSystem=/var/lib:ro
+BindReadOnlyPaths=/var/lib/bloch-l2-attestor/outbox
+InaccessiblePaths=-/etc/bloch-l2-attestor/attestor.sealed -/etc/bloch-l2-attestor/keystore.passphrase -/etc/bloch-l2-attestor/publish-token
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6
+LimitCORE=0
+MemoryMax=128M
+CPUQuota=50%
+TasksMax=128
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

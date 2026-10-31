@@ -5,7 +5,7 @@ use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
     build_eth_api, chain_identity_rpc, chain_status_rpc, prepare_genesis, start_http_rpc, BlochChainIdentity,
     BlochChainSpec, BlochChainStatus, BlochEvmConfig, BlochNodeTypes, BlochTables, BlochTransactionValidator,
-    CHAIN_IDENTITY_FORMAT, CHAIN_STATUS_FORMAT, HEADER_FORMAT, RPC_MAX_REQUEST_BYTES,
+    CHAIN_IDENTITY_FORMAT, CHAIN_STATUS_FORMAT, HEADER_FORMAT, RPC_MAX_BATCH_CALLS, RPC_MAX_REQUEST_BYTES,
 };
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder, rpc_params};
 use reth_chainspec::EthChainSpec;
@@ -157,6 +157,30 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
         response.starts_with("HTTP/1.1 413"),
         "oversized RPC response: {response}"
     );
+    // A batch carries at most RPC_MAX_BATCH_CALLS calls: one HTTP request must
+    // not become thousands of calls behind a per-request gateway rate limit.
+    let batch = |calls: u32| async move {
+        let body = format!(
+            "[{}]",
+            (0..calls).map(|i| format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"eth_chainId","params":[]}}"#)).collect::<Vec<_>>().join(",")
+        );
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response).to_string();
+        let json = response.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+        serde_json::from_str::<Value>(&json).unwrap_or(Value::Null)
+    };
+    let within = batch(RPC_MAX_BATCH_CALLS).await;
+    assert_eq!(within.as_array().map(Vec::len), Some(RPC_MAX_BATCH_CALLS as usize), "{within}");
+    let over = batch(RPC_MAX_BATCH_CALLS + 1).await;
+    assert!(over["error"]["message"].as_str().is_some_and(|m| m.contains("atch")), "over the batch limit: {over}");
     handle.stop().unwrap();
     drop(client);
     // The public upstream stop is asynchronous. Observe actual listener release,

@@ -17,7 +17,7 @@ Run as root from a directory holding:
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
-      --circuits DIR [--memory-gib 40] [--threads 12] [--dry-run]
+      --circuits DIR [--memory-gib 100] [--threads 24] [--dry-run]
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
 
 install refuses unless: the guest has the pinned SHA-256; the host's `--mainnet identity`
@@ -49,7 +49,8 @@ STATE = Path('/var/lib/bloch-l2-mainnet-prover')
 FILES = ('bloch-evm-sp1-settlement-v3', 'settlement_v3_mainnet', 'remote_prover.py')
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473'
-# bloch-sis-pow l2_settlement::mainnet::PROGRAM (release 78b7343a, active since epoch 5850).
+# bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
+# in the armed release 78d4921c and in fa980367).
 PINNED = {
     'chain_id': 700770,
     'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
@@ -60,8 +61,10 @@ PINNED = {
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
 }
-# Measured on 45.77.142.123 (Cascade Lake, 32 vCPU, 2026-10-18): prover peak RSS 20.4 GB (empty block)
-# to 30.8 GB (5 txs) at 8 threads. Below 32 GiB a proof can OOM.
+# Measured on 136.244.93.186 (Cascade Lake, 32 vCPU, 2026-10-30) at 8 threads: prover peak RSS 20.4 GiB
+# (empty block), 25.5 GiB (5 txs), 45.2 GiB (50 transfers), 96.5 GiB (200 transfers). The default 100 GiB
+# (MemoryHigh 96) is sized for the settler's max_block_txs 128 as transfers, about 72 GiB by extrapolation.
+# Gas-heavy blocks are unmeasured. Below 32 GiB even a small block can OOM.
 MIN_MEMORY_GIB = 32
 # The Gnark Groth16 container runs under dockerd, outside the slice, and peaks at ~18.5 GB.
 HEADROOM_GIB = 20
@@ -81,7 +84,7 @@ def digest(path):
 
 def check_sizes(memory_gib, threads):
     if memory_gib < MIN_MEMORY_GIB:
-        die(f'--memory-gib must be >= {MIN_MEMORY_GIB} (a mainnet proof peaks at ~31 GB)')
+        die(f'--memory-gib must be >= {MIN_MEMORY_GIB} (even a small mainnet proof peaks above 25 GiB)')
     if not 1 <= threads <= 63:
         die('--threads must be within 1..63')
 
@@ -251,8 +254,8 @@ def main(argv=None):
     i.add_argument('--settler-pubkey', required=True)
     i.add_argument('--settler-host', required=True)
     i.add_argument('--circuits', required=True)
-    i.add_argument('--memory-gib', type=int, default=40)
-    i.add_argument('--threads', type=int, default=12)
+    i.add_argument('--memory-gib', type=int, default=100)
+    i.add_argument('--threads', type=int, default=24)
     i.add_argument('--dry-run', action='store_true')
     r = sub.add_parser('rollback')
     r.add_argument('--dry-run', action='store_true')
