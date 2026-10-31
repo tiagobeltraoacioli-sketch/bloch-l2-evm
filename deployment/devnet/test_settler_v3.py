@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s deployment/devnet -p 'test_*.py' -v
 No network, no prover, no Docker: every external call is a stub.
 """
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -615,6 +616,24 @@ class SettlerV3Test(unittest.TestCase):
             with self.subTest(name), self.assertRaises(ValueError):
                 rp.parse_job(io.BytesIO(data))
         self.assertEqual(s.REMOTE_MAGIC, rp.MAGIC)
+
+    def test_a_full_disk_never_leaves_a_truncated_state_file(self):
+        target = self.root / 'state.json'
+        target.write_text('previous')
+        real = os.fsync
+        with mock.patch.object(s.os, 'fsync', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):
+                s.atomic_write(target, 'new')
+        self.assertEqual(target.read_text(), 'previous')
+        self.assertEqual([p.name for p in self.root.glob('.state.json*')], [])
+        self.assertIs(os.fsync, real)
+        s.atomic_write(target, 'new')
+        self.assertEqual(target.read_text(), 'new')
+        fresh = self.root / 'deposits.json'
+        with mock.patch.object(s.os, 'fsync', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):
+                s.atomic_write(fresh, '[]')
+        self.assertFalse(fresh.exists())  # the next cycle sees no file, not a conflicting empty one
 
     def test_remote_prover_stops_the_whole_group_when_the_client_disconnects(self):
         import os
