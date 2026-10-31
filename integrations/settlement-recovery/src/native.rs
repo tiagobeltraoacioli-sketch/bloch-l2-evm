@@ -4,7 +4,7 @@
 use alloy_primitives::B256;
 use bloch_l2_evm::{
     l1::FinalizedCheckpoint,
-    native_settlement::{store::SettlementReplayRecordV1, SettlementPolicyV1},
+    native_settlement::SettlementPolicyV1,
 };
 use bloch_pos_committee::{
     attestation::{Attestation, SignatureVerifier},
@@ -205,25 +205,6 @@ impl VerifiedNativeFinalityV1 {
                 .is_some_and(|(slot, index)| *slot == anchor.slot && *index <= self.finalized_index)
         {
             return Err(NativeFinalityErrorV1::NotFinalized);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn audit_record(&self, record: &SettlementReplayRecordV1<'_>) -> Result<(), NativeFinalityErrorV1> {
-        let admission = record.admission.ok_or(NativeFinalityErrorV1::Settlement)?;
-        let checkpoint = admission.checkpoint();
-        let receipt = bloch_native_escrow_pq::settlement_authority::CheckpointAuthorityReceiptV1::decode(
-            record.authority_audit.ok_or(NativeFinalityErrorV1::Settlement)?,
-        )
-        .map_err(|_| NativeFinalityErrorV1::Settlement)?;
-        self.check_checkpoint(checkpoint, receipt.checkpoint_epoch())?;
-        if !self
-            .positions
-            .get(&admission.block())
-            .is_some_and(|(slot, index)| *slot == admission.slot() && *index <= self.finalized_index)
-            || self.settlements.get(&admission.block()).map(Vec::as_slice) != Some(record.transaction)
-        {
-            return Err(NativeFinalityErrorV1::Settlement);
         }
         Ok(())
     }
@@ -668,7 +649,6 @@ impl IncrementalNativeVerifierV1 {
 /// Bind every finalized asynchronous settlement, in native order, to a bounded
 /// stopped-writer canonical L2 snapshot. Only full real-cryptography replay can
 /// construct `verified`; caller-supplied RPC heights are never authority.
-/// Existing 0x0E/WS stores retain their strict immediate-parent admission rule.
 pub fn audit_finalized_async_settlements(
     verified: &VerifiedNativeFinalityV1,
     source: &bloch_reth_execution::BlochProviderFactory,

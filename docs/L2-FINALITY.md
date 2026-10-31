@@ -37,10 +37,11 @@ a settlement whose accepting block is FFG-finalized (native
 
 Weak subjectivity is the L1 node's concern, once, at its first sync (like
 Ethereum checkpoint sync); the Foundation's WS checkpoints (every 256 epochs)
-are not inputs of the L2. The WS-authorized cursor and checkpoint store below
-(`native-escrow-pq`, `native-state-proof::checkpoint_reader`,
-`settlement-recovery::cursor`) are the legacy 0x0E/V2 recovery path: no
-binary of the V3 pipeline calls them. The readiness requirement that used to
+are not inputs of the L2. The legacy 0x0E/V2 recovery path (WS-authorized cursor,
+settlement store and settlement authority) was retired on
+2026-10-30; its descriptions further down in this document are historical. The
+checkpoint store (`native-escrow-pq`, `native-state-proof::checkpoint_reader`)
+remains as a separate integration, and no binary of the V3 pipeline calls it. The readiness requirement that used to
 read `native-checkpoint-authenticated` is now
 `native-finality-replay-verified`.
 
@@ -147,6 +148,12 @@ reviewed settlement transaction/state transition and validators execute its
 proof, inclusion of arbitrary bytes is not `native-settlement-consensus-active`
 or `l2-settlement-inclusion-verified`, cannot advance a finality cursor and must
 not populate Reth's `finalized` head.
+
+Historical note: the Unix store, the settlement authority and every
+`SettlementStoreV1` or `open_proof_verified_authority_stores` entry point named in
+this document were retired on 2026-10-30. The kernel and the `settlement_admission`
+adapter remain: the pinned SP1 guests compile that source, so removing it would
+change the mainnet ELF.
 
 The dormant `native_settlement` V1 kernel closes a narrower transition-shape
 gap: it has fixed canonical framing, pinned policy/program identities, exact

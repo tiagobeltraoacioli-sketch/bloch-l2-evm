@@ -18,7 +18,7 @@
 #     mainnet release does not define; follower-rpc/native-feature-shim.py adds them as EMPTY
 #     features (no code) to the scratch native checkout. They are never enabled.
 #   * Cargo lock: the release pins exactly one lock, follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock
-#     (sha256 26bf4453...). It is the only committed lock that resolves native 78d4921c, and the build
+#     (sha256 a3c38a46...). It is the only committed lock that resolves native 78d4921c, and the build
 #     refuses any other lock for that commit. integrations/settlement-recovery/Cargo.lock is a byte copy.
 # Env: JOBS (default 8), TOOLCHAIN (default 1.98.1), CARGO_TARGET_DIR (default WORK/l2-target).
 #
@@ -48,7 +48,7 @@ HERE=$L2/deployment/mainnet
 SR=$L2/integrations/settlement-recovery
 NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock}
 RELEASE_NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
-RELEASE_LOCK_SHA256=26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8
+RELEASE_LOCK_SHA256=a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9
 log() { echo "== $* ($(date -u +%FT%TZ))"; }
 die() { echo "build-release: $*" >&2; exit 2; }
 
