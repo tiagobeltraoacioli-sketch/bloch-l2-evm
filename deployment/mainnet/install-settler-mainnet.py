@@ -171,6 +171,11 @@ def configure(args):
                'keystore_dir': str(DA_DIR), 'passphrase_file': str(STATE / 'da.passphrase'),
                'tip_millisat_per_gas': 0, 'inclusion_timeout_seconds': 1800, 'low_balance_sat': LOW_BALANCE_SAT},
     }
+    state, status = option(args, '--follower-state'), option(args, '--follower-status')
+    assert bool(state) == bool(status), 'foreign settlement recovery takes both --follower-state and --follower-status'
+    if state:
+        # Outside /home (ProtectHome=true) and readable by the settler user. See SETTLER-RUNBOOK.md.
+        config['foreign_recovery'] = {'follower_state': state, 'follower_status': status}
     target = option(args, '--remote-prover')
     if target:
         host_key = Path(option(args, '--prover-host-key', '')).read_text().strip()
@@ -228,7 +233,7 @@ Environment=TMPDIR={STATE}/tmp
 ExecStart=/usr/bin/python3 -u {rel}/settler_v3.py
 Restart=on-failure
 RestartSec=60
-# exit 3 = halt for operator review (divergence, foreign settlement, refused proof): never auto-restart.
+# exit 3 = halt for operator review (divergence, off-rule foreign settlement, refused proof): never auto-restart.
 RestartPreventExitStatus=3
 UMask=0077
 NoNewPrivileges=true

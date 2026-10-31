@@ -102,6 +102,17 @@ Differences, all deliberate:
   view and halts unless the request moved; a different statement accepted
   for the same L2 block halts (another settler).
 
+* foreign settlements (security review 2026-10-30, F3; optional `foreign_recovery`): settling needs no
+  authorization, so a third party can settle a rule-conforming block the local database does not hold.
+  With `foreign_recovery` the worker waits until the native follower has finalized the accepted
+  settlement, rebuilds a NEW database from verified L1 blocks (`produce reconstruct`, which refuses an
+  off-rule block), requires its head to be the accepted hash, returns the user transactions of orphaned
+  local blocks to the spool, moves their work directories aside (so no DA batch of theirs is ever paid
+  again), swaps the databases and continues. A refused rebuild still halts (exit 3): that is an off-rule
+  block or local damage. Without `foreign_recovery` any foreign statement halts, as before. Readers of
+  the database must reopen it after a swap: the worker rewrites `<workdir>/../l2-db-generation.json`,
+  which a systemd path unit watches to restart the settled RPC.
+
 * `--dry-run [--prove]`: builds the next settlement against the live network
   in a scratch copy of the L2 database and validates it (identity, request,
   producer, SP1 execute; with --prove also Groth16 + every pre-submit check)
@@ -227,6 +238,10 @@ class Halt(Exception):
 
 class RpcError(RuntimeError):
     """The endpoint answered with a JSON-RPC error."""
+
+
+class ForeignSettlement(Exception):
+    """L1 accepted a settlement the local database does not hold: recoverable with `foreign_recovery`."""
 
 
 def log(event, **fields):
@@ -414,6 +429,18 @@ def da_frame_fields(tx):
     chain, number = int.from_bytes(take(at, 8), 'little'), int.from_bytes(take(at + 8, 8), 'little')
     size = int.from_bytes(take(at + 16, 4), 'little')
     return chain, number, take(at + 20, size)
+
+
+def da_batch_transactions(payload):
+    """The raw transactions of a canonical DA batch (u32 BE count, then u32 BE length + bytes each)."""
+    if da_batch_count(payload) is None:
+        raise Halt('malformed DA batch in an orphaned block')
+    out, at = [], 4
+    for _ in range(int.from_bytes(payload[:4], 'big')):
+        size = int.from_bytes(payload[at:at + 4], 'big')
+        out.append(payload[at + 4:at + 4 + size])
+        at += 4 + size
+    return out
 
 
 def endpoint_url(endpoint):
@@ -780,7 +807,14 @@ class Settler:
         limit = self.c.get('local_prove_max_instructions')
         if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
             raise Halt('local_prove_max_instructions must be a positive integer')
+        recovery = self.c.get('foreign_recovery')
+        if recovery is not None:
+            if not isinstance(recovery, dict) or not recovery.get('follower_state') or not recovery.get('follower_status'):
+                raise Halt('foreign_recovery needs follower_state and follower_status')
+            if not isinstance(recovery.get('keep', 2), int) or recovery.get('keep', 2) < 1:
+                raise Halt('foreign_recovery.keep must be a positive integer')
         self.work = Path(self.c['workdir'])
+        self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
         self.identity_checked = False
@@ -880,9 +914,13 @@ class Settler:
         atomic_write(deposits, deposits_text)
         head = self.produce('head', '--target', self.c['l2_db'])
         produced = directory / 'block.json'
+        if head['number'] < number - 1:
+            raise ForeignSettlement(f'native accepted L2 block {number - 1} with a statement this worker did not '
+                                    f'submit (another settler?): the local head is {head["number"]}')
         if head['number'] == number - 1:
             if head['hash'] != parent:
-                raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
+                raise ForeignSettlement(f'L2 head {head["hash"]} is not the accepted parent {parent} '
+                                        f'of block {number} (another settler?)')
             anchor_slot = int(source['request'].splitlines()[3])
             block = self.extend(parent, anchor, deposits, anchor_slot, number)
             if block.get('transactions', 0) and not self.c['user_transactions']:
@@ -893,6 +931,9 @@ class Settler:
                 deferred=len(block.get('deferred', [])), dropped=block.get('dropped', []))
         elif head['number'] == number:
             # Crash after extend: reuse only the block built on this exact parent and anchor.
+            if self.local_hash(number - 1) != parent:
+                raise ForeignSettlement(f'unsettled L2 block {number} does not extend the accepted parent {parent} '
+                                        '(another settler?)')
             probe = self.work / f'.probe-{number}.artifact'
             probe.unlink(missing_ok=True)
             info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe))
@@ -914,7 +955,24 @@ class Settler:
         atomic_write(request, text)
         return number, directory
 
-    def prove(self, directory, stages=('execute', 'prove', 'verify')):
+    def local_hash(self, number):
+        """The hash of block `number` in the local database."""
+        if number == 0:
+            return self.c['l2_genesis']
+        probe = self.work / f'.probe-{number}.artifact'
+        probe.unlink(missing_ok=True)
+        info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe))
+        probe.unlink(missing_ok=True)
+        return info['hash']
+
+    def request_moved(self, view):
+        """Whether a settlement was accepted or the request changed since `view` (None view: unknown, not moved)."""
+        current = self.native_view()
+        return current is not None and (current.get('accepted') != view.get('accepted')
+                                        or current['source'] != view['source'])
+
+    def prove(self, directory, stages=('execute', 'prove', 'verify'), view=None):
+        """The proof path. None when `view` is given and went stale after execute: no Groth16 for a dead block."""
         proof = directory / 'settlement.proof'
         if (directory / 'proved.json').exists():
             return proof
@@ -952,6 +1010,9 @@ class Settler:
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
                 raise RuntimeError(f'prover {name} failed: see {directory}/{name}.log')
+            if name == 'execute' and view is not None and self.request_moved(view):
+                log('request-moved-before-proof', directory=str(directory))
+                return None
         if 'verify' not in stages:
             log('prover-stages-done', directory=str(directory), steps=steps)
             return None
@@ -1195,8 +1256,8 @@ class Settler:
             return None
         if seen == number and bytes.fromhex(accepted['statement']) == values:
             return 'ours'
-        raise Halt(f'native accepted L2 block {seen} with a statement this worker did not submit '
-                   f'(another settler?) while settling {number}')
+        raise ForeignSettlement(f'native accepted L2 block {seen} with a statement this worker did not submit '
+                                f'(another settler?) while settling {number}')
 
     def broadcast(self, number, directory, tx, record):
         """Submit (or rebroadcast) the same bytes. True when some endpoint holds them,
@@ -1264,19 +1325,167 @@ class Settler:
         return True
 
     def cycle(self):
+        self.finish_swap()
         if not self.check_identity():
             return False
         view = self.native_view()
         if view is None or view.get('source') is None:
             return False
-        number, directory = self.prepare_block(view)
-        proof = self.prove(directory)
-        tx = self.transaction(directory, proof, view.get('accepted'))
-        values = tx[33:33 + VALUES_BYTES]
-        if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big') and \
-                not self.publish_da(number, directory, values):
+        try:
+            number, directory = self.prepare_block(view)
+            proof = self.prove(directory, view=view)
+            # A proof takes many minutes: never pay DA for a block another settlement made stale meanwhile.
+            if proof is None:
+                return False
+            if self.request_moved(view):
+                log('request-moved-after-proof', number=number)
+                return False
+            tx = self.transaction(directory, proof, view.get('accepted'))
+            values = tx[33:33 + VALUES_BYTES]
+            if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big') and \
+                    not self.publish_da(number, directory, values):
+                return False
+            return self.submit_and_wait(number, directory, tx, view)
+        except ForeignSettlement as foreign:
+            return self.recover_foreign(str(foreign))
+
+    # ---- foreign settlements: rebuild from L1 and continue ----
+    def recover_foreign(self, reason):
+        """Replace a database that does not hold the accepted settlement with one rebuilt from finalized L1
+        blocks. False while waiting; True once swapped. Halts when L1 data cannot reproduce the block."""
+        recovery = self.c.get('foreign_recovery')
+        if not recovery or self.dry_run:
+            raise Halt(reason)
+        view = self.native_view()
+        accepted = view and view.get('accepted')
+        if not accepted:
             return False
-        return self.submit_and_wait(number, directory, tx, view)
+        fields = statement_fields(accepted['statement'])
+        number, l2_hash = fields['l2_number'], fields['l2_hash']
+        status = json.loads(Path(recovery['follower_status']).read_text())
+        finals = {x['l2_number']: x['l2_hash'] for x in status.get('finalized_settlements', [])}
+        if finals.get(number) != l2_hash:
+            if self.waiting_for != l2_hash:
+                self.waiting_for = l2_hash
+                log('foreign-settlement-waiting-finality', number=number, l2_hash=l2_hash, reason=reason[:300])
+            return False
+        db = Path(self.c['l2_db'])
+        rebuilding = db.with_name(db.name + '.rebuilding')
+        shutil.rmtree(rebuilding, ignore_errors=True)
+        args = [self.c['produce'], 'reconstruct', '--target', str(rebuilding), '--l1-follower', recovery['follower_state']]
+        if self.c.get('timestamp_rule'):
+            args += ['--timestamp-rule', self.c['timestamp_rule']]
+        start = self.clock()
+        result = self.run([*args, *self.network_args], capture_output=True, text=True,
+                          timeout=recovery.get('rebuild_timeout_seconds', 3600))
+        if result.returncode:
+            shutil.rmtree(rebuilding, ignore_errors=True)
+            raise Halt(f'rebuild from L1 refused while recovering from a foreign settlement of L2 block {number}: the '
+                       f'block is off-rule, or the follower store is damaged: {result.stderr.strip()[:400]}')
+        document = json.loads(result.stdout)
+        blocks = {b['number']: b for b in document.get('blocks', [])}
+        rebuilt = blocks.get(number)
+        if document.get('head') != l2_hash or rebuilt is None or rebuilt['state_root'] != fields['l2_state_root']:
+            # Another settlement landed since the view was read; the next cycle starts over from a fresh view.
+            shutil.rmtree(rebuilding, ignore_errors=True)
+            log('foreign-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
+            return False
+        wrong = [n for n, h in finals.items() if n in blocks and blocks[n]['hash'] != h]
+        if wrong:
+            shutil.rmtree(rebuilding, ignore_errors=True)
+            raise Halt(f'rebuilt blocks {wrong[:8]} differ from the finalized settlements')
+        common, old_head = self.common_ancestor(blocks, number)
+        orphans = list(range(common + 1, old_head + 1))
+        respooled = self.respool_orphans(orphans)
+        stale = self.stale_directories(common, old_head, number)
+        proofs = sum((d / 'proved.json').exists() for d in stale)
+        da_paid = sum(len(list(d.glob('da-signed-*.hex'))) for d in stale)
+        stamp = time.time_ns()
+        ready = db.with_name(f'{db.name}.rebuilt-{stamp}')
+        rebuilding.rename(ready)
+        journal = {'rebuilt': str(ready), 'kept': str(db.with_name(f'{db.name}.orphaned-{stamp}')),
+                   'work_aside': str(self.work.parent / f'{self.work.name}-orphaned-{stamp}'),
+                   'stale': [d.name for d in stale], 'number': number, 'l2_hash': l2_hash}
+        atomic_write(self.recovery_journal(), json.dumps(journal, indent=2) + '\n')
+        self.finish_swap()
+        self.waiting_for = None
+        log('foreign-settlement-recovered', number=number, l2_hash=l2_hash, common_ancestor=common,
+            orphaned_blocks=orphans, respooled=respooled, wasted_proofs=proofs, wasted_da_signed=da_paid,
+            rebuild_seconds=round(self.clock() - start, 1), native_blocks=document.get('native_blocks'))
+        return True
+
+    def recovery_journal(self):
+        return Path(self.c['l2_db']).with_name(Path(self.c['l2_db']).name + '.recovery.json')
+
+    def common_ancestor(self, blocks, number):
+        """(highest local block on the rebuilt chain, local head). A missing database counts as genesis."""
+        if not Path(self.c['l2_db']).exists():
+            return 0, 0
+        old_head = self.produce('head', '--target', self.c['l2_db'])['number']
+        for candidate in range(min(old_head, number), 0, -1):
+            if self.local_hash(candidate) == blocks[candidate]['hash']:
+                return candidate, old_head
+        return 0, old_head
+
+    def respool_orphans(self, orphans):
+        """Return the user transactions of orphaned local blocks to the spool (whole files; idempotent). The
+        producer drops any of them the settled chain already executed. Returns the number of files written."""
+        if not self.c.get('txpool_dir'):
+            return 0
+        written = 0
+        for number in orphans:
+            path = self.work / f'.orphan-{number}.hex'
+            path.unlink(missing_ok=True)
+            try:
+                self.produce('da', '--target', self.c['l2_db'], '--number', str(number), '--out', str(path))
+            except ProducerError as error:
+                if 'no user transactions' in str(error):
+                    continue
+                raise
+            for raw in da_batch_transactions(bytes.fromhex(path.read_text().strip())):
+                target = Path(self.c['txpool_dir']) / f'{keccak256(raw).hex()}.tx'
+                if not target.exists():
+                    atomic_write(target, raw.hex() + '\n')
+                    written += 1
+            path.unlink()
+        return written
+
+    def stale_directories(self, common, old_head, accepted):
+        """Work directories of orphaned local blocks, and of blocks this worker never got accepted at or below
+        the accepted number. Their proofs and signed DA bytes must never be used again."""
+        stale = []
+        for path in sorted(self.work.iterdir()) if self.work.is_dir() else []:
+            head = path.name.split('-')[0]
+            if path.is_dir() and len(head) == 8 and head.isdigit():
+                number = int(head)
+                if common < number <= old_head or (number <= accepted and not (path / 'accepted.json').exists()):
+                    stale.append(path)
+        return stale
+
+    def finish_swap(self):
+        """Complete a journalled swap; every step is skipped once done, so a crash at any point resumes here."""
+        journal = self.recovery_journal()
+        if not journal.exists():
+            return
+        state = json.loads(journal.read_text())
+        db, rebuilt, kept = Path(self.c['l2_db']), Path(state['rebuilt']), Path(state['kept'])
+        if rebuilt.exists():
+            if db.exists():
+                db.rename(kept)
+            rebuilt.rename(db)
+        aside = Path(state['work_aside'])
+        aside.mkdir(exist_ok=True)
+        for name in state['stale']:
+            if (self.work / name).exists():
+                (self.work / name).rename(aside / name)
+        keep = self.c['foreign_recovery'].get('keep', 2) if self.c.get('foreign_recovery') else 2
+        for prefix, parent in ((f'{db.name}.orphaned-', db.parent), (f'{self.work.name}-orphaned-', self.work.parent)):
+            old = sorted((p for p in parent.iterdir() if p.name.startswith(prefix)), key=lambda p: int(p.name[len(prefix):]))
+            for path in old[:-keep]:
+                shutil.rmtree(path, ignore_errors=True)
+        atomic_write(self.work.parent / 'l2-db-generation.json', json.dumps(
+            {'database': str(db), 'number': state['number'], 'l2_hash': state['l2_hash'], 'time': int(time.time())}) + '\n')
+        journal.unlink()
 
 
 def check_rpc(config, rpc=rpc, sleep=time.sleep):
@@ -1382,7 +1591,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
                     transaction={'tag': hex(tx[0]), 'bytes': len(tx), 'sha256': hashlib.sha256(tx).hexdigest(),
                                  'proof_policy': tx[1:33].hex(), 'user_transactions': users,
                                  'file': str(base / 'settlement-tx.hex')}, **fee)
-    except (Halt, ProducerError) as error:
+    except (Halt, ProducerError, ForeignSettlement) as error:
         return done(False, reason=str(error))
 
 
