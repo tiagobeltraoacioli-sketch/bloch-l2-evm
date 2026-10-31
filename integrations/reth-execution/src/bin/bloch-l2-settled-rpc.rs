@@ -1269,7 +1269,12 @@ async fn main() -> Result<()> {
                 _ = interval.tick() => {
                     let number = factory.best_block_number()?;
                     if number != head_number {
-                        let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
+                        // The producer commits the block number before this read-only view can see the
+                        // header. That is a moment of a write, not a fault: the next tick has it.
+                        let Some(header) = factory.sealed_header(number)? else {
+                            println!("head block={number} not readable yet");
+                            continue;
+                        };
                         state.set_canonical_head(header.clone());
                         served_head.store(number, Ordering::Release);
                         head_number = number;
