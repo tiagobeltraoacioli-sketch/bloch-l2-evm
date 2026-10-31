@@ -507,6 +507,23 @@ class MonitorTests(unittest.TestCase):
             r, _ = run(healthy(), '--event-log', f'settler={log}')
         self.assertEqual(level(r, 'events[settler]'), 'CRIT')
 
+    def test_finality_closed_and_status_age(self):
+        world = healthy()
+        world['l2'][L2A]['safe'] = world['l2'][L2A]['finalized'] = None
+        world['l2'][L2A]['closed'] = True
+        world['l2'][L2A]['bloch_finality'] = {'status': {'state': 'missing', 'age_s': None}}
+        world['l2'][L2B]['bloch_finality']['status'] = {'state': 'ok', 'age_s': 5000}
+        r, _ = run(world)
+        self.assertEqual(level(r, 'l2_rpc[A]'), 'OK')
+        self.assertEqual(level(r, 'l2_finality_closed[A]'), 'CRIT')
+        self.assertEqual(level(r, 'l2_finality_status[B]'), 'CRIT')
+        world = healthy()
+        world['l2'][L2A]['bloch_finality']['status'] = {'state': 'ok', 'age_s': 30}
+        world['l2'][L2B]['bloch_finality']['status'] = {'state': 'ok', 'age_s': 400}
+        r, _ = run(world)
+        self.assertEqual(level(r, 'l2_finality_status[A]'), 'OK')
+        self.assertEqual(level(r, 'l2_finality_status[B]'), 'WARN')
+
     def test_guardian_health(self):
         good = {'t': NOW - 30, 'bridge': 'busdc', 'healthy': True, 'verified_t': NOW - 30, 'problems': {}}
         cases = [
