@@ -54,7 +54,7 @@ the value.
 | **D2** | **Prover host** | While user transactions are off, 136.244.93.186 co-located with the settler works (blocks are empty or deposit-only). Before user transactions (D10), a dedicated prover host is recommended: the worst-case caps do not fit on 136 (§2). `TBD-owner`. | P5, D10 |
 | **D3** | Follower B / replica RPC host | 45.77.142.123 works (light load) but it is the shared build host. Recommended: a small dedicated VPS (§2, "follower B"). `TBD-owner`. | P3, P4, P11 |
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8 (different sources on purpose). | P3 |
-| **D5** | **Attestor operators**: five people, five hosts, one index each, plus the publish URL and token for partials | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
+| **D5** | **Attestor operators**: five people, five hosts, one index each, plus each operator's feed URL | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
 | **D6** | **Bloch Inc addresses** | **None is needed for the L2 core.** L2 fees go to the predeploy `0x4200…0011`, settlements pay no L1 fee, and the DA key is generated on the host. Still `TBD-owner`: (a) the L1 wallet that funds the DA key (5 BLCH, only when user transactions are enabled); (b) the L1 wallet and L2 recipient for the test deposit and test withdrawal; (c) the Bloch Inc Safe and bridge guardian addresses, which the DEX and bridge need later. Those are not part of this plan. | P12 |
 | **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `c2a55ba8e179585ea84f22d6e45f1e2f2c55215243585bf1b3eabc8425fa325c`) with the owner's minisign key before any install. `TBD-owner` key. | P2 |
 | **D8** | Retire the 10-18 scratch follower/RPC on 45.77 (they halt at HF1 anyway) | Stop them before or at G0. The owner runs `kill 1452988 1304666`. | none (hygiene) |
@@ -105,7 +105,7 @@ on restart and about 65–80 min for a fresh install**, more on a busy host.
 | **Dedicated prover** (recommended before D10) | `TBD-owner` | **32** (24 threads in the slice) | **128 GB** (100 G slice + 18.5 G gnark outside it + OS) | ≥ 200 GB NVMe, Docker | 118.5 G worst case |
 | Settler alone (prover remote) | 136 | 8 | 32 GB, or 56 GB if the local proof fallback stays enabled (32 G unit + about 20 G gnark) | ≥ 100 GB | |
 | **B: follower B + replica RPC + nginx origin** | 45.77.142.123 or a dedicated VPS (D3) | **4** | **8 GB** | **≥ 80 GB** | Follower 6 G cap (0.6 GB used) + RPC 4 G cap. Replica rebuild about 110 MB. |
-| **Attestor host** (×5, one per operator) | `TBD-owner` (D5) | **4** (kit minimum 2) | **8 GB** | **≥ 80 GB** (kit minimum 40 GB) | Follower 0.6 GB + rebuild-check 0.1 GB + `bloch-pos` signing |
+| **Attestor host** (×5, one per operator; **inbound TCP 8787 open to everyone** for the read-only feed) | `TBD-owner` (D5) | **4** (kit minimum 2) | **8 GB** | **≥ 80 GB** (kit minimum 40 GB) | Follower 0.6 GB + rebuild-check 0.1 GB + `bloch-pos` signing |
 | Monitor | runs on A (and optionally on B) | n/a | < 50 MB | n/a | |
 
 **Cap check for all roles on 136 (125 GiB; the prover's `--memory-gib 100`, gnark 18.5 GiB outside the prover cgroup):**
@@ -604,6 +604,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
 sha256sum /opt/bloch/l2-attestor/bloch-l2-native-follower /opt/bloch/l2-attestor/bloch-l2-produce-dev
 ```
 
+   Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Build the operator packages from this branch: the agent's re-sign on an oversized signature is in its scripts, and `IDENTITY.txt` records the kit commit.
 4. Start the follower and wait about 65–80 min. Then run `attestor_agent.py check`, then start the
    agent. Fresh installs may run in parallel: there is no existing quorum to protect.
 

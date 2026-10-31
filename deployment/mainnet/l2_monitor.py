@@ -634,12 +634,17 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
 ATTESTATION_DOMAIN = b'BLOCH:L2:WITHDRAW-ATTEST:1'  # attestor/attestor_lib.py
 
 
+# funded::ADMISSION_PQ_SIGNATURE_MAX, the consensus bound on each attestor signature inside a claim.
+ATTESTOR_SIGNATURE_MAX = 4593
+
+
 def partial_ok(data: bytes, index: int, chain_id: int, root: str) -> bool:
     """Shape and digest of an `l2-claim attest` partial (index, digest, signature lines). The signature
-    itself is verified natively by aggregate_attestation.py; here a partial only counts as a vote."""
+    itself is verified natively by aggregate_attestation.py; here a partial only counts as a vote. A
+    signature above the claim's bound can never be used in a claim, so it is not a vote."""
     try:
         lines = [x.strip() for x in data.decode().splitlines() if x.strip()]
-        if len(lines) != 3 or int(lines[0]) != index or not 2000 <= len(bytes.fromhex(lines[2])) <= 20000:
+        if len(lines) != 3 or int(lines[0]) != index or not 2000 <= len(bytes.fromhex(lines[2])) <= ATTESTOR_SIGNATURE_MAX:
             return False
         digest = hashlib.sha3_256(ATTESTATION_DOMAIN + bytes.fromhex(MAINNET_PINS['network'])
                                   + chain_id.to_bytes(8, 'big') + bytes.fromhex(root)).hexdigest()

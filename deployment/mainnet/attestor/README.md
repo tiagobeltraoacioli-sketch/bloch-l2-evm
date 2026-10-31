@@ -18,8 +18,10 @@ signing by itself. Operators act only on alerts.
 | `attestor_agent.py` | The agent: `run`, `once [--dry-run]`, `check [--no-key]`. Python standard library only. |
 | `attestor_lib.py` | Pins, withdrawal tree, set hash, attestation digest. All mirror the native code. |
 | `aggregate_attestation.py` | Claimant tool. Collects any 3 partials, verifies them natively and prints the `prepare` arguments. |
+| `sigfeed.py` | The read-only feed server and the bounded fetch client. The same file ships in the bridge signer (`sigfeed.sha256` pins it). |
 | `install-attestor.sh` | `install`, `upgrade`, `upgrade-rollback`, `rollback [--purge-key]` (uninstall) and `status` on an operator host. |
 | `systemd/bloch-l2-attestor.service` | The hardened agent unit: no listener, `IPAddressDeny=any` plus an allow-list, `LoadCredential`. |
+| `systemd/bloch-l2-attestor-feed.service` | The read-only feed (`--feed-port`): the agent's outbox only, no credential. |
 | `systemd/bloch-l2-attestor-follower.service` | The agent's own native follower (FFG replay from Genesis-4). |
 | `keykit/` | Key custody for the key holder: seal, verify, package, backup-check, shred, release (`make-operator-bundles.sh`, `KEY-HANDOFF-CHECKLIST.md`); operator side: `check-operator-bundle.sh`, `OPERATOR-ONBOARDING.md`, `OPERATOR-INSTALL.template.md`, pins `operator-pins-v2.sha256`. |
 | `public/` | The pinned `attestors.set` and the five public keys. |
@@ -68,9 +70,13 @@ Consensus code is unchanged. The other binaries come from the RC pinned build (`
    - The agent signs with `bloch-pos l2-claim attest --sealed`. The key is opened inside bloch-pos
      only.
    - It checks the partial: signer index, and the digest over the pinned network, chain and root.
+   - It checks the signature length. A claim admits attestor signatures of at most 4,593 bytes,
+     but a valid Falcon-1024 part can make the hybrid signature longer. The agent then signs
+     again (fresh randomness, `resign-oversized` event), at most 64 times, and halts if none fits.
+     The aggregator also skips a partial whose signature is longer than 4,593 bytes.
    - It writes the partial to `/var/lib/bloch-l2-attestor/outbox/700770/<root>/attestor-<I>.partial`
      (plus a `.json` file).
-   - It pushes the partial to every configured drop. Failed pushes are retried every cycle.
+   - The operator's feed serves the outbox. It also pushes to any optional push target, retrying failures every cycle.
    - It raises a `signed` alert.
 
 At startup and once a day, `rebuild-check` rebuilds the L2 and compares every finalized settlement.
@@ -80,19 +86,43 @@ Every root that covers an unclaimed large withdrawal is signed as soon as it is 
 about 2,880 blocks before the root can serve a large claim. So partials are already waiting when
 the claimant needs them.
 
-## Where partials go (the attestation drop)
+## Oversized signatures, and the `bloch-pos` pin
 
-Every drop uses the same layout: `<base>/700770/<root>/attestor-<I>.partial`. Configure one or
-both of these:
+The pinned `bloch-pos` (`093909a2…`, `keykit/operator-pins-v2.sha256`) has no `sign_fitting`, so `l2-claim attest` can write a
+signature above the claim's 4593-byte bound. The agent is the gate, and the pin does not need to move:
 
-- `--publish-url https://drop.example/attest` with `--publish-token-file`. This is an HTTP PUT with
-  a bearer token, for example a WebDAV or object-store endpoint that also serves GET. The token is
-  a systemd credential.
-- `--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'`, or any other
-  argv. The placeholders are `{file} {json} {relpath} {root} {chain} {index} {outbox}`.
+- `sign` writes `attest` output to a scratch directory, and only a partial that `attestor_lib.parse_partial` accepts reaches
+  the outbox. Above the bound it signs again with fresh randomness, at most 64 times, then halts.
+- The feed serves only the outbox, and push targets publish only from it, so an oversized partial is never published.
+- The fix reaches a host through the kit: `attestor_agent.py` and `attestor_lib.py`, copied by `install-attestor.sh` and covered
+  by `CONTENTS.sha256` in each operator package. Packages built before this commit do not have it, so build them from this commit.
+- **Do not run `l2-claim attest` by hand and publish the result.** `aggregate_attestation.py` and the monitor both ignore an
+  oversized partial, but a hand-made one costs that signer the round.
 
-Partials are public data: one signature over a public root. The drop needs integrity, not secrecy,
-and the aggregator verifies everything it fetches.
+## Where partials go (the operator's read-only feed)
+
+Each operator serves its own outbox: `bloch-l2-attestor-feed` runs `sigfeed.py serve` on one TCP port.
+
+    GET <base>/700770/<root>/attestor-<I>.partial
+
+- There is no shared drop, no token and no upload path. The aggregator and the monitor poll the five
+  feeds. Attestors never read each other, so one operator down costs exactly that operator's partial.
+- The feed is a separate unit from the agent. It holds no credential, sees only the outbox (a read-only
+  bind mount), accepts GET and HEAD, serves only the path shape above and caps connections per address.
+- Partials are public: one signature over a public root. The content authenticates itself, so a feed
+  can withhold but cannot forge. The aggregator treats each source as hostile (byte and time limits,
+  no redirects) and lets the native verifier choose among candidates, so a forged partial from one
+  source cannot displace a real one from another.
+- Plain HTTP is enough, because TLS adds no integrity here. An operator who wants HTTPS can put an
+  auto-renewing proxy in front; `sigfeed.py serve --tls-cert --tls-key` also works, but an expired
+  certificate takes the operator's feed down.
+- Monitor: pass `--attest-drop URL` once per feed.
+
+### Hosts with no inbound port
+
+The push options remain for these hosts: `--publish-command '["rsync","-a","{file}","me@my-host:/srv/{relpath}"]'`,
+or `--publish-url` with `--publish-token-file` for a PUT endpoint the operator controls. Either target
+must then serve the same paths over GET. This target belongs to that operator alone; it is not a shared drop.
 
 ## Operator install (each of the five hosts)
 
@@ -101,11 +131,12 @@ The host must not be a mainnet validator host or the settler. It needs 2 cores, 
 
 ```
 sudo ./install-attestor.sh install --artifacts DIR --index I --bundle attestor-I.sealed \
-     --l1-rpc-url http://80.240.16.185:8080 --publish-url https://drop.example/attest --publish-token-file token
+     --l1-rpc-url http://80.240.16.185:8080 --feed-port 8787
 sudo systemctl enable --now bloch-l2-attestor-follower
 sudo systemd-run --pipe --wait -p User=bloch-l2-attestor \
      -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase \
      /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
+sudo systemctl enable --now bloch-l2-attestor-feed
 sudo systemctl enable --now bloch-l2-attestor
 ```
 
@@ -182,8 +213,13 @@ script does the manual procedure and stops at the first failure:
    `config.json.pre-hf123`. It moves the follower's `status.json` to `status.json.pre-hf123`, so
    that the agent cannot accept the old follower's last status as fresh.
 4. It installs the two binaries and this kit's agent scripts (`attestor_agent.py`,
-   `attestor_lib.py`, `aggregate_attestation.py`). The key, the passphrase, `bloch-pos`, the units
-   and the state do not change.
+   `attestor_lib.py`, `aggregate_attestation.py`, `sigfeed.py`). It prepares
+   `bloch-l2-attestor-feed.service` without enabling it, and keeps an existing `feed.env` unless
+   `--feed-port` or `--feed-bind` is given (default `0.0.0.0:8787`; `--no-feed` skips the unit). A feed
+   that is already running is restarted. The key, the passphrase, `bloch-pos`, the other units and
+   the state do not change. **The host now needs inbound TCP 8787**: open it, then run the
+   `systemctl enable --now bloch-l2-attestor-feed` line the script prints. `upgrade-rollback` removes a
+   feed unit that the upgrade added.
 5. It re-hashes the installed files.
 6. It writes `produce_sha256`, `follower` and `follower_sha256` into `config.json` (atomically,
    keeping its owner and mode) and checks every pin against the disk.

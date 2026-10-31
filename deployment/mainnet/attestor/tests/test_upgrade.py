@@ -267,6 +267,12 @@ class UpgradeScriptTest(unittest.TestCase):
                          {k: v for k, v in self.old_config.items() if k != 'produce_sha256'})
         self.assertEqual(os.stat(self.etc / 'config.json').st_mode & 0o777, 0o640)
         self.assertEqual((self.opt / 'attestor_agent.py').read_bytes(), (KIT / 'attestor_agent.py').read_bytes())
+        self.assertEqual((self.opt / 'sigfeed.py').read_bytes(), (KIT / 'sigfeed.py').read_bytes())
+        feed_unit = self.root / 'systemd/bloch-l2-attestor-feed.service'
+        self.assertEqual(feed_unit.read_bytes(), (KIT / 'systemd/bloch-l2-attestor-feed.service').read_bytes())
+        self.assertEqual((self.etc / 'feed.env').read_text(), 'SIGFEED_BIND=0.0.0.0\nSIGFEED_PORT=8787\n')
+        self.assertIn('open inbound TCP 8787', done.stdout)
+        self.assertNotIn('enable', (self.root / 'services.log').read_text())
         self.assertEqual((self.opt / 'bloch-l2-native-follower').read_bytes(), self.NEW_FOLLOWER)
         self.assertEqual((self.opt.parent / 'l2-attestor.pre-hf123/bloch-l2-native-follower').read_bytes(), self.OLD_FOLLOWER)
         self.assertEqual(json.loads((self.etc / 'config.json.pre-hf123').read_text()), self.old_config)
@@ -290,9 +296,42 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertEqual((self.opt / 'bloch-l2-native-follower').read_bytes(), self.OLD_FOLLOWER)
         self.assertEqual((self.opt / 'bloch-l2-produce-dev').read_bytes(), self.OLD_PRODUCE)
         self.assertIn('OLD-KIT-MARKER', (self.opt / 'attestor_agent.py').read_text())
+        self.assertFalse((self.opt / 'sigfeed.py').exists())
+        self.assertFalse(feed_unit.exists())
+        self.assertFalse((self.etc / 'feed.env').exists())
         self.assertEqual(self.state(), {'op': 'upgrade-rollback', 'tag': 'pre-hf123', 'phase': 'done',
                                         'moved_at': self.state()['moved_at']})
         self.assertIn('REPORT: attestor 2: upgrade-rollback check-ok', back.stdout)
+
+    def test_upgrade_keeps_an_existing_feed_and_its_settings(self):
+        units = self.root / 'systemd'
+        units.mkdir()
+        (units / 'bloch-l2-attestor-feed.service').write_text('old unit\n')
+        shutil.copy(KIT / 'sigfeed.py', self.opt / 'sigfeed.py')
+        (self.etc / 'feed.env').write_text('SIGFEED_BIND=10.0.0.1\nSIGFEED_PORT=9000\n')
+        done = self.upgrade(now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.etc / 'feed.env').read_text(), 'SIGFEED_BIND=10.0.0.1\nSIGFEED_PORT=9000\n')
+        self.assertIn('open inbound TCP 9000', done.stdout)
+        back = self.script('upgrade-rollback', now=FORK_UNIX - 86_400)
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertTrue((units / 'bloch-l2-attestor-feed.service').exists())
+        self.assertTrue((self.opt / 'sigfeed.py').exists())
+
+    def test_no_feed_skips_the_unit_but_not_the_script(self):
+        done = self.upgrade('--no-feed', now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue((self.opt / 'sigfeed.py').exists())
+        self.assertFalse((self.root / 'systemd/bloch-l2-attestor-feed.service').exists())
+        self.assertNotIn('open inbound', done.stdout)
+
+    def test_right_binaries_with_an_old_kit_are_not_already_upgraded(self):
+        self.assertEqual(self.upgrade(now=FORK_UNIX - 86_400).returncode, 0)
+        (self.opt / 'sigfeed.py').unlink()
+        done = self.upgrade('--tag', 'second', now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn('already upgraded', done.stdout)
+        self.assertTrue((self.opt / 'sigfeed.py').exists())
 
     def test_rollback_is_refused_close_to_and_after_hf1(self):
         self.assertEqual(self.upgrade(now=FORK_UNIX - 86_400).returncode, 0)

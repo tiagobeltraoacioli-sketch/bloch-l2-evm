@@ -10,6 +10,7 @@
 #        --l1-rpc-url http://HOST:8080 [--rpc http://H:8080 --rpc ... (3; default: the 3 public RPCs)] \
 #        [--publish-url https://drop.example/attest --publish-token-file FILE] \
 #        [--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'] \
+#        [--feed-port N [--feed-bind ADDR]] \
 #        [--alert-command '["/usr/local/bin/notify-attestor","{event}"]'] [--dry-run]
 #        [--prefix DIR [--rehearsal-set attestors.set]]
 #   sudo ./install-attestor.sh rollback [--purge-key]      (UNINSTALL: removes the units)
@@ -40,6 +41,14 @@
 # systemd LoadCredential. The host never holds a plaintext key file. Keep the transport bundle
 # offline as the backup; remove the copy you brought to this host after install.
 #
+# upgrade also installs sigfeed.py and prepares the feed unit (not enabled; feed.env 0.0.0.0:8787 unless it
+# exists or --feed-port/--feed-bind are given; --no-feed skips the unit), and it restarts a running feed.
+# Open inbound TCP 8787, then enable the unit. upgrade-rollback removes a feed that the upgrade added.
+#
+# --feed-port N: the default way to publish. Prepares bloch-l2-attestor-feed.service (not enabled, not
+# started), a read-only endpoint serving only the agent's outbox partials. It holds no credential, and
+# the agent keeps its no-listener unit. The push options above stay for operators with no inbound port.
+#
 # --prefix DIR (rehearsal/staging): install every file under DIR instead of /opt, /etc and
 # /var/lib, as the invoking user, without useradd, chown or systemctl (units are written to
 # DIR/systemd and never loaded). --rehearsal-set FILE (only with --prefix) accepts a THROWAWAY
@@ -62,17 +71,20 @@ host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad 
 ip_of() { getent ahostsv4 "$1" | awk 'NR==1{print $1}'; }
 
 cmd_install() {
-  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET=
+  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET= FEED_PORT= FEED_BIND=0.0.0.0
   while [ $# -gt 0 ]; do
     case $1 in
       --artifacts) ART=$2; shift 2;; --index) INDEX=$2; shift 2;; --bundle) BUNDLE=$2; shift 2;;
       --l1-rpc-url) L1=$2; shift 2;; --rpc) RPCS+=("$2"); shift 2;;
       --publish-url) PUB_URL=$2; shift 2;; --publish-token-file) PUB_TOKEN=$2; shift 2;;
       --publish-command) PUB_CMD=$2; shift 2;; --alert-command) ALERT=$2; shift 2;;
+      --feed-port) FEED_PORT=$2; shift 2;; --feed-bind) FEED_BIND=$2; shift 2;;
       --dry-run) DRY=1; shift;; --prefix) PREFIX=$2; shift 2;; --rehearsal-set) RSET=$2; shift 2;;
       *) die "unknown option $1";;
     esac
   done
+  [ -z "$FEED_PORT" ] || [[ $FEED_PORT =~ ^[0-9]{2,5}$ ]] || die "--feed-port must be a port number"
+  [[ $FEED_BIND =~ ^[0-9A-Fa-f:.]+$ ]] || die "--feed-bind must be an IP address"
   [ -z "$RSET" ] || [ -n "$PREFIX" ] || die "--rehearsal-set needs --prefix (never on a real install)"
   local SETF="$HERE/public/attestors.set"
   if [ -n "$PREFIX" ]; then
@@ -95,7 +107,7 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   [ ${#RPCS[@]} -eq 3 ] || die "give exactly three --rpc URLs (quorum 2-of-3)"
   [[ $L1 =~ ^http://[A-Za-z0-9.-]+:[0-9]+/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$PREFIX" ] || die "run as root"
-  [ -z "$PUB_URL$PUB_CMD" ] && echo "WARNING: no --publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
+  [ -n "$PUB_URL$PUB_CMD$FEED_PORT" ] || echo "WARNING: no --feed-port/--publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
   [ -z "$PUB_TOKEN" ] || [ -n "$PUB_URL" ] || die "--publish-token-file goes with --publish-url"
   for f in "$UNITS/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor-follower.service" "$OPT/bloch-pos" "$ETC/attestor.sealed"; do
     [ ! -e "$f" ] || die "$f exists; refusing to overwrite (rollback first)"
@@ -127,10 +139,10 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   fi
   # $ETC stays traversable (the follower reads public/); the secrets are restricted per file.
   run install -d -m 0755 "$OPT" "$ETC" "$ETC/public"
-  run install -d -m 0700 "${own_agent[@]}" "$STATE"
+  run install -d -m 0700 "${own_agent[@]}" "$STATE" "$STATE/outbox"
   run install -d -m 0755 "${own_follower[@]}" "$FSTATE"
   run install -m 0755 "$ART/bloch-pos" "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
-  run install -m 0644 "$HERE/attestor_agent.py" "$HERE/attestor_lib.py" "$HERE/aggregate_attestation.py" "$OPT/"
+  run install -m 0644 "$HERE/attestor_agent.py" "$HERE/attestor_lib.py" "$HERE/aggregate_attestation.py" "$HERE/sigfeed.py" "$OPT/"
   run install -m 0644 "$ART/mainnet.manifest" "$ETC/public/"
   run install -m 0644 "$SETF" "$ETC/public/attestors.set"
   if [ $DRY = 1 ]; then echo "+ gunzip carryover.tsv.gz > $ETC/public/carryover.tsv"
@@ -200,6 +212,10 @@ PY
     printf '[Service]\nIPAddressAllow=%s\n' "$allow_agent" > "$UNITS/bloch-l2-attestor.service.d/network.conf"
     [ -z "$PUB_TOKEN" ] || printf 'LoadCredential=publish-token:%s/publish-token\n' "$ETC" >> "$UNITS/bloch-l2-attestor.service.d/network.conf"
     printf '[Service]\nIPAddressAllow=localhost %s\n' "$ip" > "$UNITS/bloch-l2-attestor-follower.service.d/l1-rpc.conf"
+    if [ -n "$FEED_PORT" ]; then
+      install -m 0644 "$HERE/systemd/bloch-l2-attestor-feed.service" "$UNITS/"
+      printf 'SIGFEED_BIND=%s\nSIGFEED_PORT=%s\n' "$FEED_BIND" "$FEED_PORT" > "$ETC/feed.env"; chmod 0644 "$ETC/feed.env"
+    fi
     [ -n "$PREFIX" ] || systemctl daemon-reload
   fi
   if [ -n "$PREFIX" ]; then
@@ -216,7 +232,8 @@ Installed attestor $INDEX, NOT started. Next (each step is read-only until the l
   journalctl -fu bloch-l2-attestor-follower                    # wait for l2_genesis.finalized=true in $FSTATE/status.json
   sudo systemd-run --pipe --wait -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \\
        /usr/bin/python3 -I $OPT/attestor_agent.py check --config $ETC/config.json
-  sudo systemctl enable --now bloch-l2-attestor
+ ${FEED_PORT:+ sudo systemctl enable --now bloch-l2-attestor-feed                # read-only endpoint on TCP $FEED_PORT
+} sudo systemctl enable --now bloch-l2-attestor
   journalctl -fu bloch-l2-attestor -o cat                      # 'started', then 'waiting'/'awaiting-own-finality'/'signed'
 Then remove the transport bundle copy from this host ($BUNDLE); its offline backup stays with you.
 MSG
@@ -226,7 +243,7 @@ cmd_rollback() {
   local PURGE=0
   while [ $# -gt 0 ]; do case $1 in --purge-key) PURGE=1; shift;; --dry-run) DRY=1; shift;; *) die "unknown option $1";; esac; done
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || die "run as root"
-  for unit in bloch-l2-attestor bloch-l2-attestor-follower; do
+  for unit in bloch-l2-attestor-feed bloch-l2-attestor bloch-l2-attestor-follower; do
     run systemctl disable --now "$unit.service" || true
     run rm -rf "$UNITS/$unit.service" "$UNITS/$unit.service.d"
   done
@@ -242,7 +259,7 @@ cmd_rollback() {
 }
 
 cmd_status() {
-  systemctl --no-pager status bloch-l2-attestor bloch-l2-attestor-follower 2>/dev/null | sed -n '1,12p' || true
+  systemctl --no-pager status bloch-l2-attestor bloch-l2-attestor-follower bloch-l2-attestor-feed 2>/dev/null | sed -n '1,12p' || true
   [ -e "$ETC/PAUSE" ] && echo "PAUSED ($ETC/PAUSE exists)"
   [ -e "$STATE/state.json" ] && python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))
 print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
@@ -256,7 +273,8 @@ V2_FOLLOWER_SHA256=c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf
 V2_PRODUCE_SHA256=fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9
 L1_GENESIS_UNIX=1786656679 L1_EPOCH_SECONDS=960 HF1_EPOCH=7180
 ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF1 starts
-KIT_FILES=(attestor_agent.py attestor_lib.py aggregate_attestation.py)
+KIT_FILES=(attestor_agent.py attestor_lib.py aggregate_attestation.py sigfeed.py)
+FEED_UNIT=bloch-l2-attestor-feed.service FEED_PORT= FEED_BIND= NO_FEED=0
 SERVICE_CMD= CHECK_CMD= NOW_UNIX= TAG=pre-hf123 RESUME=0 UNPAUSE=1 WAIT_TIMEOUT=7200 ADVANCE_TIMEOUT=2400 POLL=30
 
 now() { echo "${NOW_UNIX:-$(date +%s)}"; }
@@ -325,9 +343,12 @@ upgrade_opts() {  # shared options; sets ART, FOLLOWER_SHA256, PRODUCE_SHA256 an
       --follower-sha256) FOLLOWER_SHA256=$2; shift 2;; --produce-sha256) PRODUCE_SHA256=$2; shift 2;;
       --prefix) PREFIX=$2; shift 2;; --service-cmd) SERVICE_CMD=$2; shift 2;; --check-cmd) CHECK_CMD=$2; shift 2;;
       --now-unix) NOW_UNIX=$2; shift 2;;
+      --feed-port) FEED_PORT=$2; shift 2;; --feed-bind) FEED_BIND=$2; shift 2;; --no-feed) NO_FEED=1; shift;;
       *) die "unknown option $1";;
     esac
   done
+  [ -z "$FEED_PORT" ] || [[ $FEED_PORT =~ ^[0-9]{2,5}$ ]] || die "--feed-port must be a port number"
+  [ -z "$FEED_BIND" ] || [[ $FEED_BIND =~ ^[0-9A-Fa-f:.]+$ ]] || die "--feed-bind must be an IP address"
   [[ $TAG =~ ^[A-Za-z0-9._-]+$ ]] || die "--tag: letters, digits, . _ - only"
   [[ $FOLLOWER_SHA256$PRODUCE_SHA256 =~ ^[0-9a-f]{128}$ ]] || die "--follower-sha256/--produce-sha256: 64 hex digits each"
   [[ $WAIT_TIMEOUT$ADVANCE_TIMEOUT =~ ^[0-9]+$ ]] && [[ $POLL =~ ^[1-9][0-9]*$ ]] || die "timeouts are seconds"
@@ -412,7 +433,7 @@ resume_or_fresh() {  # a recorded unfinished operation must be resumed (or rolle
     TAG=$(read_state tag) MOVED_AT=$(read_state moved_at)
     say "resume $OP (tag $TAG, phase $phase): pins on disk"
     verify_pins_on_disk
-    upgrade_tail; exit 0
+    upgrade_tail; [ "$OP" != upgrade ] || feed_note; exit 0
   fi
   if [ -n "$phase" ] && [ "$phase" != done ] && { [ "$OP" = upgrade ] || [ "$op" = upgrade-rollback ]; }; then
     die "an unfinished $op (phase $phase) is recorded in $ETC/upgrade.state: use --resume (or upgrade-rollback)"
@@ -420,17 +441,40 @@ resume_or_fresh() {  # a recorded unfinished operation must be resumed (or rolle
   return 0
 }
 
+feed_current() {  # the feed unit is installed as this kit ships it (or the operator opted out)
+  [ "$NO_FEED" = 1 ] || { cmp -s "$HERE/systemd/$FEED_UNIT" "$UNITS/$FEED_UNIT" && [ -s "$ETC/feed.env" ]; }
+}
+kit_current() {
+  local f
+  for f in "${KIT_FILES[@]}"; do cmp -s "$HERE/$f" "$OPT/$f" || return 1; done
+}
+install_feed() {  # prepare the read-only feed as `install --feed-port` does; never enables it
+  if [ "$NO_FEED" = 1 ]; then say "   feed unit skipped (--no-feed)"; return 0; fi
+  mkdir -p "$UNITS"
+  [ -e "$UNITS/$FEED_UNIT" ] || touch "$ETC/feed-added.$TAG"
+  install -m 0644 "$HERE/systemd/$FEED_UNIT" "$UNITS/"
+  if [ -n "$FEED_PORT$FEED_BIND" ] || [ ! -s "$ETC/feed.env" ]; then
+    printf 'SIGFEED_BIND=%s\nSIGFEED_PORT=%s\n' "${FEED_BIND:-0.0.0.0}" "${FEED_PORT:-8787}" > "$ETC/feed.env"; chmod 0644 "$ETC/feed.env"
+  fi
+  if [ -z "$SERVICE_CMD" ]; then systemctl daemon-reload; systemctl try-restart "$FEED_UNIT"; fi
+}
+feed_note() {
+  [ "$NO_FEED" = 0 ] && [ -s "$ETC/feed.env" ] || return 0
+  local port; port=$(sed -n 's/^SIGFEED_PORT=//p' "$ETC/feed.env")
+  say "feed: open inbound TCP $port to everyone, then: sudo systemctl enable --now ${FEED_UNIT%.service}"
+  say "feed: check from another host: curl -fsS http://<public IPv4>:$port/healthz"
+}
 cmd_upgrade() {
   OP=upgrade; upgrade_opts "$@"; resume_or_fresh
   [ -n "$ART" ] || { usage; exit 2; }
-  for f in "${KIT_FILES[@]}"; do [ -f "$HERE/$f" ] || die "kit file $HERE/$f missing"; done
+  for f in "${KIT_FILES[@]}" "systemd/$FEED_UNIT"; do [ -f "$HERE/$f" ] || die "kit file $HERE/$f missing"; done
   say "1. verify the new binaries against the published SHA-256"
   check_artifact bloch-l2-native-follower "$FOLLOWER_SHA256"
   check_artifact bloch-l2-produce-dev "$PRODUCE_SHA256"
   if [ "$(jget "$ETC/config.json" follower_sha256)" = "$FOLLOWER_SHA256" ] && \
      [ "$(jget "$ETC/config.json" produce_sha256)" = "$PRODUCE_SHA256" ] && \
-     [ "$(sha "$OPT/bloch-l2-native-follower")" = "$FOLLOWER_SHA256" ] && [ "$(sha "$OPT/bloch-l2-produce-dev")" = "$PRODUCE_SHA256" ]; then
-    say "already upgraded: installed binaries and config.json pins are the requested ones; nothing changed"; return 0
+     [ "$(sha "$OPT/bloch-l2-native-follower")" = "$FOLLOWER_SHA256" ] && [ "$(sha "$OPT/bloch-l2-produce-dev")" = "$PRODUCE_SHA256" ] && kit_current && feed_current; then
+    say "already upgraded: installed binaries, config.json pins, agent scripts and feed unit are the requested ones; nothing changed"; return 0
   fi
   for f in "$OPT.$TAG" "$ETC/config.json.$TAG"; do [ ! -e "$f" ] || die "$f exists (an earlier backup): choose another --tag"; done
   say "   installed now: follower $(sha "$OPT/bloch-l2-native-follower"), produce $(sha "$OPT/bloch-l2-produce-dev"), config produce_sha256 $(jget "$ETC/config.json" produce_sha256)"
@@ -441,9 +485,10 @@ cmd_upgrade() {
   MOVED_AT=$(date +%s)
   [ ! -e "$FSTATE/status.json" ] || mv "$FSTATE/status.json" "$FSTATE/status.json.$TAG"
   write_state stopped
-  say "4. install the two binaries and the agent scripts"
+  say "4. install the two binaries, the agent scripts and the feed unit (not enabled)"
   install -m 0755 "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
   for f in "${KIT_FILES[@]}"; do install -m 0644 "$HERE/$f" "$OPT/"; done
+  install_feed
   say "5. re-hash on disk"
   [ "$(sha "$OPT/bloch-l2-native-follower")" = "$FOLLOWER_SHA256" ] || upgrade_fail "installed follower hash differs"
   [ "$(sha "$OPT/bloch-l2-produce-dev")" = "$PRODUCE_SHA256" ] || upgrade_fail "installed produce hash differs"
@@ -452,6 +497,7 @@ cmd_upgrade() {
   verify_pins_on_disk
   write_state installed
   upgrade_tail
+  feed_note
 }
 
 cmd_upgrade_rollback() {
@@ -473,7 +519,16 @@ cmd_upgrade_rollback() {
   touch "$ETC/PAUSE"; svc stop agent || die "could not stop the agent"; svc stop follower || die "could not stop the follower"
   say "3. restore the binaries, agent scripts and config.json from .$TAG; move status.json aside"
   install -m 0755 "$OPT.$TAG/bloch-l2-native-follower" "$OPT.$TAG/bloch-l2-produce-dev" "$OPT/"
-  for f in "${KIT_FILES[@]}"; do [ ! -f "$OPT.$TAG/$f" ] || install -m 0644 "$OPT.$TAG/$f" "$OPT/"; done
+  for f in "${KIT_FILES[@]}"; do
+    if [ -f "$OPT.$TAG/$f" ]; then install -m 0644 "$OPT.$TAG/$f" "$OPT/"; else rm -f "$OPT/$f"; fi
+  done
+  if [ -e "$ETC/feed-added.$TAG" ]; then  # this upgrade added the feed: the restored kit may not carry sigfeed.py
+    [ -n "$SERVICE_CMD" ] || systemctl disable --now "$FEED_UNIT" 2>/dev/null || true
+    rm -f "$UNITS/$FEED_UNIT" "$ETC/feed.env" "$ETC/feed-added.$TAG"
+    [ -n "$SERVICE_CMD" ] || systemctl daemon-reload
+  elif [ -z "$SERVICE_CMD" ]; then
+    systemctl try-restart "$FEED_UNIT" 2>/dev/null || true
+  fi
   cp -a "$ETC/config.json.$TAG" "$ETC/config.json"
   MOVED_AT=$(date +%s)
   [ ! -e "$FSTATE/status.json" ] || mv "$FSTATE/status.json" "$FSTATE/status.json.rolled-back-$MOVED_AT"

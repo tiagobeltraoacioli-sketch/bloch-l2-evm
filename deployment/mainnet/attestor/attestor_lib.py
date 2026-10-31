@@ -30,6 +30,13 @@ LEAF_DOMAIN = b'BLOCH:L2:WITHDRAW:1'
 ATTESTOR_SET_DOMAIN = b'BLOCH:L2:ATTESTOR-SET:1'
 ATTESTATION_DOMAIN = b'BLOCH:L2:WITHDRAW-ATTEST:1'
 MAX_ATTESTORS = 7
+# funded::ADMISSION_PQ_SIGNATURE_MAX: the consensus bound on every attestor signature inside an L2
+# claim (4-byte suite header + 3309 ML-DSA-65 + 1280 Falcon-1024). Falcon-1024 signatures are
+# variable length, so a valid hybrid signature can reach 4775 bytes; one longer than this bound
+# verifies but makes the claim inadmissible. A signer re-signs (fresh randomness) until it fits.
+ATTESTOR_SIGNATURE_MAX = 4593
+# Bounded re-sign attempts before a signer gives up with an error.
+SIGN_FIT_ATTEMPTS = 64
 
 
 class Pins:
@@ -197,8 +204,14 @@ def attestation_digest(network_hex, chain_id, root_hex):
                             + bytes.fromhex(root_hex)).hexdigest()
 
 
+class OversizedSignature(ValueError):
+    """A well-formed partial whose signature exceeds ATTESTOR_SIGNATURE_MAX (re-sign it)."""
+
+
 def parse_partial(text):
-    """`(signer index, digest hex, signature hex)` of an `l2-claim attest` partial (3 hex lines)."""
+    """`(signer index, digest hex, signature hex)` of an `l2-claim attest` partial (3 hex lines).
+
+    Raises OversizedSignature if the signature is longer than the claim admits."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) != 3:
         raise ValueError('a partial has exactly 3 lines')
@@ -206,6 +219,9 @@ def parse_partial(text):
     bytes.fromhex(signature)
     if len(bytes.fromhex(digest)) != 32 or not 0 <= index < MAX_ATTESTORS or not 2000 <= len(signature) // 2 <= 20000:
         raise ValueError('malformed partial')
+    if len(signature) // 2 > ATTESTOR_SIGNATURE_MAX:
+        raise OversizedSignature(f'signature is {len(signature) // 2} bytes; a claim admits at most '
+                                 f'{ATTESTOR_SIGNATURE_MAX} (re-sign)')
     return index, digest, signature
 
 

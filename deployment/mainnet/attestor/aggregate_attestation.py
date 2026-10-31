@@ -9,9 +9,11 @@ attestor agents' partials, and verify it with the native code before any transac
 
 --proof   the claim's withdrawal proof (bloch-l2-produce-dev withdrawal-proof) against the root the
           claim will prove against: for >= 100 BLCH, getl2settlement withdrawals.matured_large.
---source  a drop holding `<chain>/<root>/attestor-<i>.partial` (an agent outbox directory, a
-          shared directory, or an HTTP(S) base URL). Several sources are merged; for each signer
-          the first well-formed partial over the expected digest is kept.
+--source  a feed holding `<chain>/<root>/attestor-<i>.partial` (an operator's read-only endpoint,
+          an agent outbox directory, or any HTTP(S) base URL). Give all of them: sources are untrusted.
+          Fetches are capped in bytes and wall-clock time. Every distinct well-formed partial over the
+          expected digest is a candidate, and the native verifier picks: a forged partial from one
+          source cannot displace a real one from another.
 --rpc     optional: require a 2-of-3 quorum to report the proof's root as matured_large now.
 
 Output: DIR/attestor-<i>.partial for the first `threshold` valid signers, DIR/aggregate.json, and
@@ -20,6 +22,7 @@ the `bloch-pos l2-claim prepare` arguments. The native `l2-claim verify-attestat
 Read-only: no key, no transaction.
 """
 import argparse
+import itertools
 import json
 from pathlib import Path
 import subprocess
@@ -28,17 +31,23 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import attestor_lib as lib  # noqa: E402
+import sigfeed  # noqa: E402
+
+MAX_NATIVE_TRIES = 1024
 
 
 def fetch(source, relpath):
+    """The partial's text, or None. An unreachable, oversized, slow or non-text source is simply absent."""
     if source.startswith(('http://', 'https://')):
         try:
-            with urllib.request.urlopen(source.rstrip('/') + '/' + relpath, timeout=20) as response:
-                return response.read(100_000).decode()
-        except Exception:  # noqa: BLE001 - a missing partial is normal
+            body = sigfeed.fetch(source.rstrip('/') + '/' + relpath, max_bytes=sigfeed.MAX_FILE, deadline=10.0)
+            return None if body is None else body.decode('ascii')
+        except (sigfeed.FetchError, UnicodeDecodeError):
             return None
     path = Path(source) / relpath
-    return path.read_text() if path.is_file() else None
+    if not path.is_file() or path.stat().st_size > sigfeed.MAX_FILE:
+        return None
+    return path.read_text()
 
 
 def rpc_matured_large(urls):
@@ -55,6 +64,18 @@ def rpc_matured_large(urls):
         answers[key] = answers.get(key, 0) + 1
     best = max(answers.items(), key=lambda kv: kv[1], default=(None, 0))
     return json.loads(best[0]) if best[1] >= 2 else 'no-quorum'
+
+
+def candidate_sets(candidates, threshold):
+    """Threshold-sized sets of (index, text), fewest second choices first, at most MAX_NATIVE_TRIES."""
+    sets = []
+    for indices in itertools.combinations(sorted(candidates), threshold):
+        for combo in itertools.product(*[[(i, t) for t in candidates[i]] for i in indices]):
+            sets.append(combo)
+            if len(sets) >= 8 * MAX_NATIVE_TRIES:
+                break
+    sets.sort(key=lambda combo: sum(candidates[i].index(t) for i, t in combo))
+    return sets[:MAX_NATIVE_TRIES]
 
 
 def aggregate(proof_path, sources, out, bloch_pos, genesis, attestors, pins=lib.MAINNET, rpc=()):
@@ -74,7 +95,7 @@ def aggregate(proof_path, sources, out, bloch_pos, genesis, attestors, pins=lib.
     if proof['sats'] < pins.large_claim_sat:
         print(f'note: {proof["sats"]} sat is below large_claim_sat; the claim needs no attestation', file=sys.stderr)
     digest = lib.attestation_digest(pins.network, pins.chain_id, root)
-    chosen, problems = {}, []
+    candidates, problems = {}, []
     for index in range(len(keys)):
         for source in sources:
             text = fetch(source, lib.partial_relpath(pins.chain_id, root, index))
@@ -88,29 +109,40 @@ def aggregate(proof_path, sources, out, bloch_pos, genesis, attestors, pins=lib.
             if signer != index or signed != digest:
                 problems.append(f'{source} attestor {index}: signs another index or digest')
                 continue
-            chosen[index] = text
-            break
-    if len(chosen) < threshold:
-        raise SystemExit(f'only {len(chosen)} of the {threshold} required partials for root {root} '
-                         f'(signers {sorted(chosen)}); problems: {problems}')
+            options = candidates.setdefault(index, [])
+            if text not in options:
+                options.append(text)
+    if len(candidates) < threshold:
+        raise SystemExit(f'only {len(candidates)} of the {threshold} required partials for root {root} '
+                         f'(signers {sorted(candidates)}); problems: {problems}')
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
-    files = []
-    for index in sorted(chosen)[:threshold]:
-        path = out / f'attestor-{index}.partial'
-        path.write_text(chosen[index])
-        files.append(str(path))
-    args = [bloch_pos, 'l2-claim', 'verify-attestation', '--genesis', genesis, '--proof', str(proof_path),
-            '--attestors', attestors, '--expect-set-hash', pins.set_hash]
-    for path in files:
-        args += ['--attestation', path]
-    done = subprocess.run(args, capture_output=True, text=True)
-    if done.returncode:
+    # Only the native code can check a signature, and only as a full set. Sets with no conflicting
+    # candidate come first, so the normal case takes one run.
+    native, chosen, files, refusals = None, {}, [], []
+    for picked in candidate_sets(candidates, threshold):
+        files = []
+        for index, text in picked:
+            path = out / f'attestor-{index}.partial'
+            path.write_text(text)
+            files.append(str(path))
+        args = [bloch_pos, 'l2-claim', 'verify-attestation', '--genesis', genesis, '--proof', str(proof_path),
+                '--attestors', attestors, '--expect-set-hash', pins.set_hash]
+        for path in files:
+            args += ['--attestation', path]
+        done = subprocess.run(args, capture_output=True, text=True)
+        if done.returncode == 0:
+            native, chosen = done, dict(picked)
+            break
+        refusals.append(done.stderr.strip()[:200])
         for path in files:
             Path(path).unlink()
-        raise SystemExit(f'native verification refused the attestation: {done.stderr.strip()}')
+    if native is None:
+        raise SystemExit(f'native verification refused the attestation ({len(refusals)} sets tried): '
+                         f'{refusals[-1] if refusals else ""}; problems: {problems}')
+    done = native
     summary = {'chain_id': pins.chain_id, 'root': root, 'digest': digest, 'set_hash': pins.set_hash,
-               'signers': sorted(chosen)[:threshold], 'available': sorted(chosen), 'withdrawal': proof,
+               'signers': sorted(chosen), 'available': sorted(candidates), 'withdrawal': proof,
                'native_verify': done.stdout.strip(), 'problems': problems,
                'prepare_args': ['--attestors', attestors] + [x for f in files for x in ('--attestation', f)]}
     (out / 'aggregate.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')

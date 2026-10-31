@@ -46,11 +46,12 @@ for index @INDEX@. It must end with `BUNDLE OK for attestor @INDEX@`.
 
 ## 4. Install (nothing starts yet)
 
-Replace `YOUR_DROP_URL` and `YOUR_TOKEN_FILE` with the drop the coordinator gave you, or use
-`--publish-command` for your own endpoint (see `kit/README.md`).
+This prepares a read-only endpoint on TCP 8787 that serves only your signatures. No drop and no
+token are involved. If your host cannot take an inbound port, see "Hosts with no inbound port" in
+`kit/README.md`.
 
 ```
-sudo kit/install-attestor.sh install --artifacts artifacts --index @INDEX@ --bundle attestor-@INDEX@.sealed --l1-rpc-url http://80.240.16.185:8080 --publish-url YOUR_DROP_URL --publish-token-file YOUR_TOKEN_FILE
+sudo kit/install-attestor.sh install --artifacts artifacts --index @INDEX@ --bundle attestor-@INDEX@.sealed --l1-rpc-url http://80.240.16.185:8080 --feed-port 8787
 ```
 
 Type the transport passphrase once at `Sealed attestor key passphrase:`. It must print

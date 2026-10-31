@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE.parent))
 import aggregate_attestation  # noqa: E402
 import attestor_agent  # noqa: E402
 import attestor_lib as lib  # noqa: E402
+import sigfeed  # noqa: E402
 
 BLOCH_POS = os.environ.get('BLOCH_POS', str(Path.home() / 'worktrees/l2-attestor-keystore-20261019/target/release/bloch-pos'))
 MANIFEST = os.environ.get('MAINNET_MANIFEST', str(Path.home() / 'worktrees/l2-attestor-keystore-20261019/genesis/mainnet.manifest'))
@@ -154,6 +155,18 @@ class LibTest(unittest.TestCase):
         self.assertTrue(lib.claimed(view, 513))
         self.assertFalse(lib.claimed(view, 512))
         self.assertFalse(lib.claimed(view, 300))
+
+    def test_partial_signature_bound_is_the_claim_admission_bound(self):
+        digest = 'cd' * 32
+        for size in (2000, 4000, lib.ATTESTOR_SIGNATURE_MAX):
+            text = f'1\n{digest}\n{"ab" * size}\n'
+            self.assertEqual(lib.parse_partial(text), (1, digest, 'ab' * size))
+        for size in (lib.ATTESTOR_SIGNATURE_MAX + 1, 4775):
+            with self.assertRaises(lib.OversizedSignature):
+                lib.parse_partial(f'1\n{digest}\n{"ab" * size}\n')
+        # Still a ValueError: every caller that skips malformed partials skips oversized ones too.
+        self.assertTrue(issubclass(lib.OversizedSignature, ValueError))
+        self.assertEqual((lib.ATTESTOR_SIGNATURE_MAX, lib.SIGN_FIT_ATTEMPTS), (4 + 3309 + 1280, 64))
 
 
 @unittest.skipUnless(NATIVE, f'needs BLOCH_POS ({BLOCH_POS}) with seal-key and MAINNET_MANIFEST')
@@ -354,6 +367,94 @@ class AgentTest(unittest.TestCase):
             aggregate_attestation.aggregate(self.claim_proof(2, 0), [str(self.case / 'none')], self.case / 'agg4',
                                             BLOCH_POS, MANIFEST, str(self.set_file), pins=self.pins)
 
+    # ------------------------------------------------------------------ signature length bound
+    @staticmethod
+    def inflate(path, size=lib.ATTESTOR_SIGNATURE_MAX + 1):
+        """Rewrite a partial so its signature is `size` bytes (as a long Falcon-1024 signature would be)."""
+        lines = path.read_text().split('\n')
+        lines[2] = (lines[2] + '00' * size)[:2 * size]
+        path.write_text('\n'.join(lines))
+
+    def test_oversized_signature_is_resigned_until_it_fits(self):
+        agent = self.agent(0)
+        real, calls = agent.native, []
+
+        def native(*args):
+            done = real(*args)
+            if args[0] == 'attest':
+                calls.append(args)
+                if len(calls) <= 2:
+                    self.inflate(Path(args[args.index('--out') + 1]))
+            return done
+
+        agent.native = native
+        result, events = self.once(agent)
+        self.assertEqual(result, 'ok')
+        resigned = [e for e in events if e['event'] == 'resign-oversized']
+        self.assertEqual([e['attempt'] for e in resigned], [1, 2], events)
+        self.assertEqual(sorted(e['l2_number'] for e in events if e['event'] == 'signed'), [2, 3])
+        for number in (2, 3):
+            index, digest, signature = lib.parse_partial(self.partial(0, number).read_text())
+            self.assertLessEqual(len(signature) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+            self.assertEqual(digest, lib.attestation_digest(lib.NATIVE_NETWORK, lib.CHAIN_ID, self.root(number)))
+        # The partial that was kept is the native signature, unchanged: it verifies natively.
+        for i in (2, 4):
+            self.assertEqual(self.once(self.agent(i))[0], 'ok')
+        proof = self.claim_proof(3)
+        sources = [str(self.case / f'agent{i}' / 'outbox') for i in (0, 2, 4)]
+        summary = aggregate_attestation.aggregate(proof, sources, self.case / 'agg', BLOCH_POS, MANIFEST,
+                                                  str(self.set_file), pins=self.pins)
+        self.assertEqual(summary['signers'], [0, 2, 4])
+        self.assertIn('attestation ok: 3-of-5', summary['native_verify'])
+
+    def test_signatures_that_never_fit_halt_after_bounded_attempts(self):
+        agent = self.agent(0)
+        calls = []
+
+        def native(*args):
+            calls.append(args[0])
+            out = Path(args[args.index('--out') + 1])
+            digest = lib.attestation_digest(lib.NATIVE_NETWORK, lib.CHAIN_ID, self.root(2))
+            out.write_text(f'0\n{digest}\n{"ab" * (lib.ATTESTOR_SIGNATURE_MAX + 1)}\n')
+            return ''
+
+        agent.native = native
+        with self.assertRaises(attestor_agent.Halt) as halted:
+            self.once(agent)
+        self.assertEqual(calls, ['attest'] * lib.SIGN_FIT_ATTEMPTS)
+        self.assertIn(str(lib.ATTESTOR_SIGNATURE_MAX), str(halted.exception))
+        self.assertFalse(self.partial(0, 2).exists())
+
+    def test_real_attest_signatures_kept_by_the_agent_fit(self):
+        """Many native signatures through the agent's loop: every kept partial fits the bound."""
+        agent = self.agent(1)
+        doc = json.loads(self.claim_proof(3).read_text())
+        with contextlib.redirect_stdout(io.StringIO()):
+            for n in range(12):
+                partial = agent.sign(doc, self.root(3))
+                signature = lib.parse_partial(partial.read_text())[2]
+                self.assertLessEqual(len(signature) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+                partial.unlink()
+
+    def test_aggregator_skips_an_oversized_partial_and_uses_another_source(self):
+        for i in (0, 2, 4):
+            self.assertEqual(self.once(self.agent(i))[0], 'ok')
+        proof = self.claim_proof(3)
+        sources = [str(self.case / f'agent{i}' / 'outbox') for i in (0, 2, 4)]
+        bad = self.case / 'bad'
+        shutil.copytree(sources[0], bad)
+        self.inflate(bad / lib.partial_relpath(lib.CHAIN_ID, self.root(3), 0))
+        summary = aggregate_attestation.aggregate(proof, [str(bad)] + sources, self.case / 'agg', BLOCH_POS,
+                                                  MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(summary['signers'], [0, 2, 4])
+        self.assertTrue(any('admits at most' in p for p in summary['problems']), summary['problems'])
+        kept = lib.parse_partial((self.case / 'agg' / 'attestor-0.partial').read_text())[2]
+        self.assertLessEqual(len(kept) // 2, lib.ATTESTOR_SIGNATURE_MAX)
+        # With only the oversized copy of attestor 0 there are not enough admissible partials.
+        with self.assertRaises(SystemExit):
+            aggregate_attestation.aggregate(proof, [str(bad)] + sources[1:], self.case / 'agg2', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+
     def test_second_cycle_signs_nothing_new(self):
         agent = self.agent(1)
         self.once(agent)
@@ -522,6 +623,102 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(a['signers'], [1, 3, 4])
         self.assertEqual(b['signers'], [1, 3, 4])
         drop.server.shutdown()
+
+    def feeds(self, signers):
+        """One real read-only feed per operator, serving only that agent's outbox (loopback)."""
+        servers = {}
+        for i in signers:
+            _, events = self.once(self.agent(i))
+            self.assertTrue([e for e in events if e['event'] == 'signed'], events)
+            servers[i] = sigfeed.FeedServer(self.case / f'agent{i}' / 'outbox').start()
+            self.addCleanup(servers[i].stop)
+        return servers, {i: f'http://127.0.0.1:{s.port}' for i, s in servers.items()}
+
+    def hostile_feed(self, answer):
+        """A source that answers each partial path with `answer(index, root)`: bytes, or None for a 404."""
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                parts = self.path.strip('/').split('/')
+                index = int(parts[-1].split('-')[1].split('.')[0])
+                body = answer(index, parts[-2])
+                self.send_response(200 if body is not None else 404)
+                self.send_header('Content-Length', str(len(body or b'')))
+                self.end_headers()
+                self.wfile.write(body or b'')
+
+            def log_message(self, *a):
+                pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f'http://127.0.0.1:{server.server_port}'
+
+    def forged(self, index, root):
+        """Right shape, right index, right digest, wrong signature: only the native verifier can tell."""
+        digest = lib.attestation_digest(self.pins.network, self.pins.chain_id, root)
+        return f'{index}\n{digest}\n{"ab" * 4000}\n'.encode()
+
+    def test_feed_aggregate_with_two_operators_down(self):
+        servers, urls = self.feeds(range(5))
+        proof = self.claim_proof(3)
+        servers[1].stop()
+        servers[4].stop()
+        a = aggregate_attestation.aggregate(proof, list(urls.values()), self.case / 'agg', BLOCH_POS, MANIFEST,
+                                            str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertIn('attestation ok', a['native_verify'])
+
+    def test_feed_withheld_below_threshold_refuses(self):
+        servers, urls = self.feeds((0, 1))
+        with self.assertRaises(SystemExit) as e:
+            aggregate_attestation.aggregate(self.claim_proof(3), list(urls.values()), self.case / 'agg', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertIn('only 2 of the 3', str(e.exception))
+
+    def test_feed_forged_partials_cannot_displace_real_ones(self):
+        _, urls = self.feeds((0, 2, 3))
+        evil = self.hostile_feed(self.forged)
+        a = aggregate_attestation.aggregate(self.claim_proof(3), [evil, *urls.values()], self.case / 'agg', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertIn('attestation ok', a['native_verify'])
+
+    def test_feed_only_forged_partials_are_refused(self):
+        evil = self.hostile_feed(self.forged)
+        out = self.case / 'agg'
+        with self.assertRaises(SystemExit) as e:
+            aggregate_attestation.aggregate(self.claim_proof(3), [evil], out, BLOCH_POS, MANIFEST, str(self.set_file),
+                                            pins=self.pins)
+        self.assertIn('native verification refused', str(e.exception))
+        self.assertEqual(list(out.glob('*.partial')), [])
+
+    def test_feed_garbage_replay_and_oversize_are_ignored(self):
+        servers, urls = self.feeds((0, 2, 3))
+        other_root = 'cd' * 32
+        answers = [lambda i, r: b'\x00\xff garbage',
+                   lambda i, r: b'x' * (sigfeed.MAX_FILE + 1),
+                   lambda i, r: self.forged(i, other_root),            # a real shape replayed from another root
+                   lambda i, r: self.forged((i + 1) % 5, r),           # another signer's index
+                   lambda i, r: f'{i}\n{"00" * 32}\nabcd\n'.encode()]
+        a = aggregate_attestation.aggregate(self.claim_proof(3), [self.hostile_feed(x) for x in answers] + list(urls.values()),
+                                            self.case / 'agg', BLOCH_POS, MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertTrue(a['problems'])
+
+    def test_feed_serves_only_partials_and_never_the_agent_json_or_state(self):
+        servers, urls = self.feeds((0,))
+        root = self.root(3)
+        rel = lib.partial_relpath(lib.CHAIN_ID, root, 0)
+        self.assertTrue(sigfeed.fetch(f'{urls[0]}/{rel}').startswith(b'0\n'))
+        self.assertTrue((self.case / 'agent0' / 'outbox' / (rel + '.json')).exists()
+                        or list((self.case / 'agent0' / 'outbox').rglob('*.json')))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/{rel}.json'))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/state.json'))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/700770/{root}/'))
+
+    def test_sigfeed_is_the_pinned_file(self):
+        pinned = (HERE.parent / 'sigfeed.sha256').read_text().split()[0]
+        self.assertEqual(hashlib.sha256((HERE.parent / 'sigfeed.py').read_bytes()).hexdigest(), pinned)
 
     def test_publish_failure_is_retried(self):
         publish = [{'kind': 'command', 'argv': ['false']}]

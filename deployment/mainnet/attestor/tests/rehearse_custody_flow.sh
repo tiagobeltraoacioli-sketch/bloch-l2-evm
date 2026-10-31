@@ -144,7 +144,7 @@ operator() {
     step "op $i.4 install into a scratch prefix (tty: transport passphrase once)"
     $TTY "$PASS" "$i" -- bash "$B/kit/install-attestor.sh" install --artifacts "$B/artifacts" --index "$i" \
       --bundle "$B/attestor-$i.sealed" --l1-rpc-url http://80.240.16.185:8080 --prefix "$H/root" \
-      --rehearsal-set "$B/attestors.set"
+      --rehearsal-set "$B/attestors.set" --feed-port 8787 --feed-bind 127.0.0.1
     E=$H/root/etc/bloch-l2-attestor O=$H/root/opt/bloch/l2-attestor
     "$O/bloch-pos" l2-claim key-check --sealed "$E/attestor.sealed" --attestors "$E/public/attestors.set" \
       --signer-index "$i" --passphrase-file "$E/keystore.passphrase"
@@ -153,6 +153,9 @@ operator() {
      done)
     python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["signer_index"]==int(sys.argv[2]); print("config.json signer_index", c["signer_index"], "produce_sha256", c["produce_sha256"][:16])' "$E/config.json" "$i"
     [ "$(awk '$1=="set_hash"{print $2}' "$B/IDENTITY.txt")" = "$SETHASH" ]
+    grep -qx 'SIGFEED_BIND=127.0.0.1' "$E/feed.env"; grep -qx 'SIGFEED_PORT=8787' "$E/feed.env"
+    [ -f "$H/root/systemd/bloch-l2-attestor-feed.service" ] || find "$H/root" -name bloch-l2-attestor-feed.service | grep -q .
+    [ "$(sha256sum "$O/sigfeed.py" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$B/kit/sigfeed.sha256")" ]
 
     step "op $i.5 remove the bundle copy from the host"
     shred -u "$B/attestor-$i.sealed" "$H/inbox/operator-$i.tar"
