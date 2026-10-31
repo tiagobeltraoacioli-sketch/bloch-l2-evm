@@ -97,6 +97,8 @@ class Fake:
             if method == 'eth_chainId':
                 return w['eth_chainId']
             if method == 'eth_getBlockByNumber':
+                if w.get('closed') and params[0] in ('safe', 'finalized'):
+                    raise m.RpcError('finality unavailable', m.FINALITY_CLOSED_CODE)
                 return w[params[0]]
             if method == 'bloch_finality':
                 return w['bloch_finality']
@@ -505,6 +507,38 @@ class MonitorTests(unittest.TestCase):
             r, _ = run(healthy(), '--event-log', f'settler={log}')
         self.assertEqual(level(r, 'events[settler]'), 'CRIT')
 
+    def test_guardian_health(self):
+        good = {'t': NOW - 30, 'bridge': 'busdc', 'healthy': True, 'verified_t': NOW - 30, 'problems': {}}
+        cases = [
+            ('ok', good, 'OK', 'OK', 'OK'),
+            ('failed-pause', {**good, 'healthy': False, 'problems': {'pause-failed': {'t': NOW, 'detail': 'x'}}}, 'CRIT', 'OK', 'OK'),
+            ('dead', {**good, 't': NOW - 5000, 'verified_t': NOW - 5000}, 'OK', 'CRIT', 'CRIT'),
+            ('late', {**good, 't': NOW - 400, 'verified_t': NOW - 400}, 'OK', 'WARN', 'WARN'),
+            ('blind', {**good, 'verified_t': NOW - 5000}, 'OK', 'OK', 'CRIT'),
+            ('never', {**good, 'verified_t': None}, 'OK', 'OK', 'CRIT'),
+            ('old-format', {'t': NOW - 30, 'healthy': True, 'problems': {}}, 'OK', 'OK', 'CRIT'),
+            ('truthy', {**good, 'healthy': 'yes'}, 'CRIT', 'OK', 'OK'),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            args = []
+            for name, doc, *_ in cases:
+                Path(d, name).write_text(json.dumps(doc))
+                args += ['--guardian-health', f'{name}={d}/{name}']
+            Path(d, 'garbage').write_text('{half')
+            Path(d, 'list').write_text('[]')
+            Path(d, 'custom').write_text(json.dumps({**good, 't': NOW - 100, 'verified_t': NOW - 100}))
+            args += ['--guardian-health', f'garbage={d}/garbage', '--guardian-health', f'list={d}/list',
+                     '--guardian-health', f'missing={d}/none', '--guardian-health', f'custom={d}/custom:60']
+            r, _ = run(healthy(), *args)
+        for name, _, state, age, verified in cases:
+            self.assertEqual(level(r, f'guardian[{name}]'), state, name)
+            self.assertEqual(level(r, f'guardian_age[{name}]'), age, name)
+            self.assertEqual(level(r, f'guardian_verified[{name}]'), verified, name)
+        for name in ('garbage', 'list', 'missing'):
+            self.assertEqual(level(r, f'guardian[{name}]'), 'CRIT', name)
+        self.assertEqual(level(r, 'guardian_age[custom]'), 'WARN')
+        self.assertEqual(level(r, 'guardian_verified[custom]'), 'WARN')
+
     def test_heartbeat_files(self):
         with tempfile.TemporaryDirectory() as d:
             fresh, stale = Path(d, 'fresh'), Path(d, 'stale')
@@ -621,6 +655,28 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(level(report, 'disk[state]'), want, (total, free))
         report, _ = run(healthy(), '--disk', 'state=/does/not/exist')
         self.assertEqual(level(report, 'disk[state]'), 'CRIT')
+
+    def test_closed_finality_is_named_and_the_backend_stays_up(self):
+        w = healthy()
+        w['l2'][L2A]['closed'] = True
+        w['l2'][L2A]['bloch_finality']['status'] = {'state': 'missing', 'written_at_unix': None, 'age_s': None}
+        report, _ = run(w)
+        self.assertEqual(level(report, 'l2_rpc[A]'), 'OK')
+        self.assertEqual(level(report, 'l2_finality_closed[A]'), 'CRIT')
+        self.assertEqual(level(report, 'l2_finality_status[A]'), 'CRIT')
+
+    def test_a_down_backend_is_still_unreachable(self):
+        w = healthy()
+        w['l2'][L2A] = None
+        report, _ = run(w)
+        self.assertEqual(level(report, 'l2_rpc[A]'), 'CRIT')
+        self.assertFalse([c for c in report.checks if c['check'] == 'l2_finality_closed[A]'])
+
+    def test_finality_status_age(self):
+        for age, want in ((20, 'OK'), (400, 'WARN'), (1000, 'CRIT')):
+            w = healthy()
+            w['l2'][L2A]['bloch_finality']['status'] = {'state': 'ok', 'written_at_unix': NOW - age, 'age_s': age}
+            self.assertEqual(level(run(w)[0], 'l2_finality_status[A]'), want, age)
 
 
 if __name__ == '__main__':

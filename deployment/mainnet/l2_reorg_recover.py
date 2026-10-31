@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Recover the settler's L2 database after an L1 reorg removed an accepted, unfinalized settlement.
+
+settler_v3 halts (exit 3) when the database is ahead of what L1 can still accept: "L2 head N cannot extend accepted
+settlement M", or an unsettled block with another anchor. This tool is the operator's repair. It never signs,
+broadcasts or edits a database in place:
+
+1. reads the accepted settlement from a quorum of native RPCs;
+2. refuses (exit 75, run again later) until the follower has finalized that settlement;
+3. rebuilds a NEW database from verified L1 blocks with `produce reconstruct` and requires its head to be exactly the
+   accepted L2 hash;
+4. returns the user transactions of orphaned blocks to the spool, from each block's published DA batch;
+5. moves orphaned work directories aside, and swaps the databases, keeping the old one for review.
+
+Stop the settler and every settled RPC on this database first: the swap is not visible to a running process.
+
+  l2_reorg_recover.py --config settler.json --follower-state DIR [--apply]
+
+Without --apply it reports the plan and changes nothing. Exit: 0 done or planned, 75 not finalized yet, 3 refused.
+"""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = Path(__file__).resolve().parent
+SETTLER = Path(os.environ.get('BLOCH_SETTLER_V3', str(HERE.parent / 'devnet/settler_v3.py')))
+if not SETTLER.exists():
+    SETTLER = HERE / 'settler_v3.py'
+spec = importlib.util.spec_from_file_location('settler_v3', SETTLER)
+S = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(S)
+
+
+class Refuse(Exception):
+    pass
+
+
+class NotYet(Exception):
+    pass
+
+
+def batch_transactions(payload):
+    """The raw transactions of a canonical DA batch (u32 BE count, then u32 BE length + bytes each)."""
+    if S.da_batch_count(payload) is None:
+        raise Refuse('malformed DA batch in an orphaned block')
+    out, at = [], 4
+    for _ in range(int.from_bytes(payload[:4], 'big')):
+        size = int.from_bytes(payload[at:at + 4], 'big')
+        out.append(payload[at + 4:at + 4 + size])
+        at += 4 + size
+    return out
+
+
+def orphaned_dirs(work, accepted):
+    """Work directories of L2 blocks above the accepted number (NNNNNNNN-anchor)."""
+    found = []
+    for path in sorted(Path(work).iterdir()):
+        head = path.name.split('-')[0]
+        if path.is_dir() and len(head) == 8 and head.isdigit() and int(head) > accepted:
+            found.append(path)
+    return found
+
+
+def respool(directories, pool):
+    """Write each orphaned user transaction as a spool entry, whole or not at all. Returns the new file names."""
+    written = []
+    for directory in directories:
+        payload = directory / 'da-payload.hex'
+        if not payload.exists():
+            continue
+        for raw in batch_transactions(bytes.fromhex(payload.read_text().strip())):
+            name = S.keccak256(raw).hex() + '.tx'
+            target = Path(pool) / name
+            if not target.exists():
+                S.atomic_write(target, raw.hex() + '\n')
+                target.chmod(0o600)
+                written.append(name)
+    return written
+
+
+def plan(config, follower_state, apply, run=subprocess.run, status=None):
+    settler = S.Settler(config)
+    if not settler.check_identity():
+        raise NotYet('no RPC quorum on the network identity')
+    view = settler.native_view()
+    if view is None:
+        raise NotYet('no RPC quorum on the settlement view')
+    accepted = view.get('accepted')
+    if not accepted:
+        raise Refuse('no accepted settlement: rebuild is the initial database, do it by hand')
+    fields = S.statement_fields(accepted['statement'])
+    number, l2_hash = fields['l2_number'], fields['l2_hash']
+    db = Path(config['l2_db'])
+    head = settler.produce('head', '--target', str(db))
+    report = {'accepted_number': number, 'accepted_hash': l2_hash, 'database_head': head['number'], 'apply': apply}
+    if head['number'] <= number:
+        raise Refuse(f'database head {head["number"]} is not ahead of accepted {number}: nothing to recover')
+    state = status if status is not None else json.loads(Path(config['follower_status']).read_text()) if config.get('follower_status') else None
+    if state is not None:
+        finals = {x['l2_number']: x['l2_hash'] for x in state.get('finalized_settlements', [])}
+        if finals.get(number) != l2_hash:
+            raise NotYet(f'settlement {number} is not finalized by the follower yet')
+    rebuilt = db.with_name(db.name + f'.rebuilt-{int(time.time())}')
+    args = ['reconstruct', '--target', str(rebuilt), '--l1-follower', str(follower_state)]
+    if config.get('timestamp_rule'):
+        args += ['--timestamp-rule', config['timestamp_rule']]
+    try:
+        document = settler.produce(*args)
+    except S.ProducerError as error:
+        shutil.rmtree(rebuilt, ignore_errors=True)
+        raise Refuse(f'rebuild from L1 refused: {error}') from None
+    if document.get('head') != l2_hash:
+        # A later settlement may already be final; never truncate L1 truth, and never accept another head.
+        shutil.rmtree(rebuilt, ignore_errors=True)
+        raise NotYet(f'rebuilt head {document.get("head")} is not the accepted {l2_hash}')
+    work = Path(config['workdir'])
+    orphans = orphaned_dirs(work, number)
+    report['rebuilt_settled'] = document.get('settled')
+    report['orphaned_blocks'] = [p.name for p in orphans]
+    if not apply:
+        shutil.rmtree(rebuilt, ignore_errors=True)
+        return report
+    stamp = int(time.time())
+    report['respooled'] = len(respool(orphans, config['txpool_dir'])) if config.get('txpool_dir') else 0
+    aside = work.parent / f'{work.name}-orphaned-{stamp}'
+    aside.mkdir()
+    for path in orphans:
+        path.rename(aside / path.name)
+    kept = db.with_name(f'{db.name}.orphaned-{stamp}')
+    db.rename(kept)
+    rebuilt.rename(db)
+    report['old_database'] = str(kept)
+    report['orphaned_work'] = str(aside)
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--follower-state', required=True)
+    parser.add_argument('--follower-status', help='follower status file; required unless named in the config')
+    parser.add_argument('--apply', action='store_true')
+    options = parser.parse_args()
+    config = json.loads(Path(options.config).read_text())
+    if options.follower_status:
+        config['follower_status'] = options.follower_status
+    if not config.get('follower_status'):
+        parser.error('--follower-status is required')
+    try:
+        print(json.dumps(plan(config, options.follower_state, options.apply), indent=1))
+    except NotYet as why:
+        print(json.dumps({'not_yet': str(why)}))
+        sys.exit(75)
+    except (Refuse, S.Halt) as why:
+        print(json.dumps({'refused': str(why)}))
+        sys.exit(3)
+
+
+if __name__ == '__main__':
+    main()
