@@ -77,7 +77,7 @@ V2_BUILD = {
 V2_SHA256 = {
     'bloch-l2-native-follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
     'bloch-l2-produce-dev': 'fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9',
-    'bloch-l2-settled-rpc': '1e76b99ad2a57dd6cfae1f4086529714d1bf3372cb578a348f4cfe9a37a91d38',
+    'bloch-l2-settled-rpc': 'e24ea5f177de31b45b2995758c0e24c097e21e00db1001d7ffde0ff8eb5d7f0e',
     'sequencer_mainnet.py': '15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2',
 }
 # getchaininfo.hard_forks name -> the params.rs constant the v2 follower/producer were compiled with,
@@ -126,6 +126,8 @@ _COMMON: Dict[str, Any] = {
     'da_backlog_warn': 3, 'da_backlog_crit': 10,
     'file_age_warn': 120, 'file_age_crit': 600,
     'status_age_warn': 300, 'status_age_crit': 900,
+    # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
+    'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
@@ -133,10 +135,7 @@ _COMMON: Dict[str, Any] = {
     # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
     'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
     'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
-    # The settled RPC refuses a status file above STATUS_FILE_LIMIT and `finalized` then stops advancing.
-    'status_size_warn': 8 * 1024 * 1024, 'status_size_crit': 14 * 1024 * 1024,
 }
-STATUS_FILE_LIMIT = 16 * 1024 * 1024  # verified_levels in bloch-l2-settled-rpc
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
                 'chain_id': 700770,
@@ -598,15 +597,32 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
-def check_status_size(name: str, path: str, p: Dict[str, Any], r: Report) -> None:
-    """The follower lists every finalized settlement in its status file, and the file never shrinks."""
-    try:
-        size = os.stat(path).st_size
-    except OSError:
-        return  # check_followers reports the unreadable file
-    over = ' ABOVE the settled RPC limit: finalized no longer advances there' if size > STATUS_FILE_LIMIT else ''
-    r.graded(f'follower_status_size[{name}]', size, p['status_size_warn'], p['status_size_crit'],
-             f'{path} is {size / 1048576:.1f} MiB of the {STATUS_FILE_LIMIT // 1048576} MiB limit{over}')
+STATUS_BYTES_PER_SETTLEMENT = 475  # measured, schema v2
+
+
+def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: 'Report') -> None:
+    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build stops
+    advancing finality above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
+    size = Path(path).stat().st_size
+    log = s.get('settlement_log')
+    if isinstance(log, dict):
+        count, detail = s.get('finalized_settlements_count'), 'schema v3'
+        try:
+            on_disk = Path(path).with_name(str(log.get('file'))).stat().st_size
+        except OSError as e:
+            r.add(f'follower_settlement_log[{name}]', CRIT, f'{e}')
+        else:
+            if on_disk < int(log.get('bytes', 0)):
+                r.add(f'follower_settlement_log[{name}]', CRIT,
+                      f'{on_disk} bytes on disk, the status names {log.get("bytes")}')
+            else:
+                r.add(f'follower_settlement_log[{name}]', OK, f'{log.get("entries")} settlements, {on_disk} bytes')
+    else:
+        count = len(s.get('finalized_settlements') or [])
+        left = max(0, 16 * 1_048_576 - size) // STATUS_BYTES_PER_SETTLEMENT
+        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build stops finality'
+    r.graded(f'follower_status_size[{name}]', size, p['status_bytes_warn'], p['status_bytes_crit'],
+             f'{path} is {size} bytes with {count} settlements ({detail})')
 
 
 def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
@@ -624,7 +640,6 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
                   f'bloch_finality finalized_height {f["finalized_height"]} != tag {v["num"]["finalized"]}')
     for spec in statuses:
         name, path = named(spec, 'follower')
-        check_status_size(name, path, p, r)
         try:
             s = json.loads(Path(path).read_text())
         except (OSError, ValueError) as e:
@@ -644,6 +659,7 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
             continue
         r.graded(f'follower_status[{name}]', age, p['status_age_warn'], p['status_age_crit'],
                  f'{path} written {age:.0f} s ago')
+        status_size(name, path, s, p, r)
         follower_lag(f'{name}:status', s.get('verified_blocks'), s.get('native_finalized_epoch'), l1_up, p, r,
                      'status.json')
 
