@@ -357,6 +357,15 @@ def check_gates(l1_up: List[Dict[str, Any]], p: Dict[str, Any], compiled: Dict[s
           value=d, warn=p['gate_warn_epochs'], crit=p['gate_crit_epochs'])
 
 
+def statement_l2_number(accepted: Any) -> Optional[int]:
+    """The L2 number of an accepted statement. source.height is an L1 count and differs from it once L1 moves on."""
+    try:
+        raw = bytes.fromhex(accepted['statement'])
+        return int.from_bytes(raw[22 + 264:22 + 272], 'big') if len(raw) >= 22 + 272 else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str, now: float, r: Report) -> List[dict]:
     with_l2 = [n for n in l1_up if isinstance(n.get('l2'), dict)]
     if not l1_up:
@@ -392,7 +401,8 @@ def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str,
     source = head.get('source') or {}
     accepted = head.get('accepted')
     r.facts['l2_next_number'] = source.get('height')
-    r.facts['l2_settled_number'] = (int(source['height']) - 1) if accepted and source.get('height') else None
+    settled = statement_l2_number(accepted)
+    r.facts['l2_settled_number'] = settled
     r.facts['l2_settlement_source_slot'] = source.get('slot')
     if accepted is None:
         if phase == 'prelaunch':
@@ -406,7 +416,7 @@ def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str,
         try:
             age = max(0.0, now - slot_time(int(source['slot'])))
             r.graded('settlement_age', age, p['settlement_age_warn'], p['settlement_age_crit'],
-                     f'last settlement (L2 block {int(source["height"]) - 1}) accepted about {minutes(age)} ago '
+                     f'last settlement (L2 block {settled}) accepted about {minutes(age)} ago '
                      f'(source slot {source["slot"]})')
         except (KeyError, TypeError, ValueError):
             r.add('settlement_age', WARN, 'getl2settlement.source has no slot')

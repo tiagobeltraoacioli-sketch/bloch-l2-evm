@@ -53,7 +53,7 @@ def healthy():
         'withdrawals': {'escrow_conserved': True, 'released_sat': str(176 * 10 ** 8),
                         'attestor_set': m.MAINNET_PINS['attestor_set'], 'roots': [],
                         'release_window': {'window': 7, 'cap_sat': str(10 ** 9), 'remaining_sat': str(10 ** 9)}},
-        'accepted': {'commitment': 'cc' * 32},
+        'accepted': {'commitment': 'cc' * 32, 'statement': '00' * 286 + (100).to_bytes(8, 'big').hex()},
     }
     backend = {
         'eth_chainId': '0xab162',
