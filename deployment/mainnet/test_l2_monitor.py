@@ -421,6 +421,14 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(r.facts['attestation_rounds'][0]['signers'], [0, 1, 2])
         self.assertEqual(level(r, 'attestors'), 'WARN')
 
+    def test_an_oversized_partial_is_not_a_vote(self):
+        root = 'ab' * 32
+        def sized(n):
+            good = partial(1, root).decode().splitlines()
+            return '\n'.join([good[0], good[1], 'ab' * n]).encode() + b'\n'
+        self.assertTrue(m.partial_ok(sized(4593), 1, 700770, root))
+        self.assertFalse(m.partial_ok(sized(4594), 1, 700770, root))
+
     def test_rounds_without_partials_are_not_faults(self):
         w, _ = self.attest_world([500, 400])
         with tempfile.TemporaryDirectory() as d:

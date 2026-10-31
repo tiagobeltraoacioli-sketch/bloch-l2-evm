@@ -85,6 +85,19 @@ Every root that covers an unclaimed large withdrawal is signed as soon as it is 
 about 2,880 blocks before the root can serve a large claim. So partials are already waiting when
 the claimant needs them.
 
+## Oversized signatures, and the `bloch-pos` pin
+
+The pinned `bloch-pos` (`093909a2…`, `keykit/operator-pins-v2.sha256`) has no `sign_fitting`, so `l2-claim attest` can write a
+signature above the claim's 4593-byte bound. The agent is the gate, and the pin does not need to move:
+
+- `sign` writes `attest` output to a scratch directory, and only a partial that `attestor_lib.parse_partial` accepts reaches
+  the outbox. Above the bound it signs again with fresh randomness, at most 64 times, then halts.
+- The feed serves only the outbox, and push targets publish only from it, so an oversized partial is never published.
+- The fix reaches a host through the kit: `attestor_agent.py` and `attestor_lib.py`, copied by `install-attestor.sh` and covered
+  by `CONTENTS.sha256` in each operator package. Packages built before this commit do not have it, so build them from this commit.
+- **Do not run `l2-claim attest` by hand and publish the result.** `aggregate_attestation.py` and the monitor both ignore an
+  oversized partial, but a hand-made one costs that signer the round.
+
 ## Where partials go (the operator's read-only feed)
 
 Each operator serves its own outbox: `bloch-l2-attestor-feed` runs `sigfeed.py serve` on one TCP port.
