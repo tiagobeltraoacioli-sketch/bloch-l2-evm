@@ -646,6 +646,7 @@ class SettlerV3Test(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 25)
         self.assertIn(b'client disconnected', process.stderr.read())
         process.stderr.close()
+        process.stdout = process.stdin = process.stderr = None
         with self.assertRaises(ProcessLookupError):
             for _ in range(100):  # killed, possibly not yet reaped by init
                 os.kill(grandchild, 0)

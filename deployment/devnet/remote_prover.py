@@ -119,7 +119,7 @@ def fail(code, message):
 def client_gone(fd=1):
     """True once the reader of the job's stdout (the SSH channel) has closed it."""
     poller = select.poll()
-    poller.register(fd, 0)  # POLLERR and POLLHUP are always reported
+    poller.register(fd, select.POLLOUT)  # with POLLOUT, macOS also reports the hangup of a pipe
     return any(events & (select.POLLERR | select.POLLHUP | select.POLLNVAL) for _, events in poller.poll(0))
 
 
