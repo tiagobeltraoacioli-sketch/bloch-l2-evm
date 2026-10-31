@@ -118,6 +118,10 @@ def prepare(args):
         shutil.copyfile(source / name, target / name)
         (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name == 'settlement_v3_mainnet'
                               else 0o755)
+    # The operator's repair after a reorg of an accepted settlement. Kit file next to this installer, not a pin:
+    # it finds settler_v3.py beside itself, so it always matches the installed worker.
+    shutil.copyfile(Path(__file__).resolve().parent / 'l2_reorg_recover.py', target / 'l2_reorg_recover.py')
+    (target / 'l2_reorg_recover.py').chmod(0o644)
     for path in (ETC, PUBLIC):
         path.mkdir(mode=0o755)
     (PUBLIC / 'l2-config.bin').write_bytes(settler.mainnet_l2_config())
