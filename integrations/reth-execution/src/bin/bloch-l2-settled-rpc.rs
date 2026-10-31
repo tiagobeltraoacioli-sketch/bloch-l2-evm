@@ -693,9 +693,13 @@ fn floored_quantity(value: &serde_json::Value, floor: u128) -> serde_json::Value
 /// gateway reads fees from either backend and sends the transaction to the sequencer. Wallets differ:
 /// viem and ethers read `eth_maxPriorityFeePerGas`, Foundry reads the rewards of `eth_feeHistory`,
 /// legacy senders read `eth_gasPrice`.
-fn floor_fee_suggestions(module: &mut jsonrpsee::RpcModule<()>, min_tip: u128, factory: BlochProviderFactory) -> Result<()> {
+fn floor_fee_suggestions(
+    module: &mut jsonrpsee::RpcModule<()>,
+    min_tip: u128,
+    factory: BlochProviderFactory,
+    spec: ChainSpec,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
-    let spec = factory.chain_spec();
     for method in ["eth_maxPriorityFeePerGas", "eth_gasPrice", "eth_feeHistory"] {
         ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
         let (original, factory, spec) = (original.clone(), factory.clone(), spec.clone());
@@ -1135,7 +1139,7 @@ async fn main() -> Result<()> {
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
-    floor_fee_suggestions(&mut module, options.min_tip, factory.clone())?;
+    floor_fee_suggestions(&mut module, options.min_tip, factory.clone(), rules())?;
     limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT)?;
     let server = start_http_rpc(module, options.port).await?;
     println!(
