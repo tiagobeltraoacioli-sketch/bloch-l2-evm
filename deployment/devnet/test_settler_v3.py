@@ -616,6 +616,43 @@ class SettlerV3Test(unittest.TestCase):
                 rp.parse_job(io.BytesIO(data))
         self.assertEqual(s.REMOTE_MAGIC, rp.MAGIC)
 
+    def test_remote_prover_stops_the_whole_group_when_the_client_disconnects(self):
+        import os
+        import subprocess
+        import time
+        marker = self.root / 'grandchild.pid'
+        prover = self.root / 'fake-settlement-v3'
+        prover.write_text(f'#!/bin/sh\nsleep 300 &\necho $! > {marker}\nwait\n')
+        prover.chmod(0o755)
+        (self.root / 'pwork').mkdir()
+        config = {'prover': str(prover), 'prover_sha256': s.digest(prover), 'guest': str(self.root / 'settlement_v3'),
+                  'guest_sha256': s.digest(self.root / 'settlement_v3'), 'workdir': str(self.root / 'pwork'),
+                  'home': str(self.root), 'prover_threads': 1, 'gnark_image': 'x', 'timeout_seconds': 120}
+        path = self.root / 'prover-disconnect.json'
+        path.write_text(json.dumps(config))
+        job = rp.MAGIC + struct.pack('>I', 4) + b'req\n' + struct.pack('>Q', 3) + b'art'
+        process = subprocess.Popen([sys.executable, str(HERE / 'remote_prover.py'), '--config', str(path)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process.stdin.write(job)
+        process.stdin.close()
+        for _ in range(200):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.05)
+        grandchild = int(marker.read_text())
+        process.stdout.close()  # the SSH channel is gone
+        started = time.monotonic()
+        self.assertEqual(process.wait(30), 70)
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertIn(b'client disconnected', process.stderr.read())
+        process.stderr.close()
+        with self.assertRaises(ProcessLookupError):
+            for _ in range(100):  # killed, possibly not yet reaped by init
+                os.kill(grandchild, 0)
+                time.sleep(0.05)
+            raise AssertionError('the prover group survived the disconnect')
+        self.assertEqual(list((self.root / 'pwork').glob('job-*')), [])
+
     def test_remote_prover_runs_the_pinned_prover_and_returns_only_the_proof(self):
         import subprocess
         prover = self.root / 'fake-settlement-v3'

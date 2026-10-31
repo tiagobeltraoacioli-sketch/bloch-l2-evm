@@ -35,11 +35,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 CONFIG = Path(os.environ.get('BLOCH_REMOTE_PROVER_CONFIG', '/etc/bloch-l2-devnet4-prover/config.json'))
 MAGIC = b'BLOCH:L2:PROVE:1\n'
@@ -113,6 +116,47 @@ def fail(code, message):
     sys.exit(code)
 
 
+def client_gone(fd=1):
+    """True once the reader of the job's stdout (the SSH channel) has closed it."""
+    poller = select.poll()
+    poller.register(fd, 0)  # POLLERR and POLLHUP are always reported
+    return any(events & (select.POLLERR | select.POLLHUP | select.POLLNVAL) for _, events in poller.poll(0))
+
+
+def stop_group(process):
+    """Stop the prover and everything it started, so the job lock and the memory are really released."""
+    for number, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 10)):
+        try:
+            os.killpg(process.pid, number)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(grace)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def run_while_client_connected(argv, env, log, timeout, gone=client_gone, poll_seconds=1):
+    """Run the prover in its own process group. A proof nobody can receive holds the lock and tens of GB
+    for its whole duration and makes every retry of the restarted settler exit 75, so a dead client or
+    the timeout stops the whole group at once."""
+    process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return process.wait(poll_seconds)
+        except subprocess.TimeoutExpired:
+            pass
+        if gone():
+            stop_group(process)
+            fail(70, 'client disconnected: proof abandoned')
+        if time.monotonic() >= deadline:
+            stop_group(process)
+            fail(70, 'prover timed out')
+
+
 def main():
     if os.environ.get('SSH_ORIGINAL_COMMAND', 'prove') != 'prove':
         fail(64, 'only the "prove" command is served')
@@ -155,14 +199,10 @@ def main():
         argv = [c['prover'], *(['--mainnet'] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
                 c['guest'], str(proof)]
         with (work / 'last-prove.log').open('w') as log:
-            try:
-                result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=log,
-                                        stderr=subprocess.STDOUT, timeout=c.get('timeout_seconds', 3500))
-            except subprocess.TimeoutExpired:
-                fail(70, 'prover timed out')
-        if result.returncode or not proof.is_file() or not 0 < proof.stat().st_size <= MAX_PROOF_BYTES:
+            returncode = run_while_client_connected(argv, env, log, c.get('timeout_seconds', 3500))
+        if returncode or not proof.is_file() or not 0 < proof.stat().st_size <= MAX_PROOF_BYTES:
             tail = (work / 'last-prove.log').read_text(errors='replace')[-2000:]
-            fail(70, f'prover exited {result.returncode}:\n{tail}')
+            fail(70, f'prover exited {returncode}:\n{tail}')
         sys.stdout.buffer.write(proof.read_bytes())
         sys.stdout.buffer.flush()
     finally:
