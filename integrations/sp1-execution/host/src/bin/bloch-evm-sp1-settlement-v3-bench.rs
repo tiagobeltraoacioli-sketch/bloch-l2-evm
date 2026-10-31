@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Execution-only cycle benchmark for the settlement V3 guest (no proof).
 //!
-//! usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals> N SETTLEMENT_V3_ELF
+//! usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet]
 //!
 //! Builds a deterministic block (one deposit plus N transfers; one deposit,
 //! a deployment and N contract calls; or one deposit and N outbox
-//! withdrawals) under the settlement V3 rules (`ChainSpec::testnet_v3`), re-executes it on the host to derive
+//! withdrawals) under the selected rules (default `ChainSpec::testnet_v3`; the ELF must be the
+//! guest of those rules), re-executes it on the host to derive
 //! the expected V3 statement, runs the guest in the SP1 executor, checks the
 //! committed statement byte-for-byte and prints one JSON line: SP1 instruction
 //! count (cycles), syscalls, SP1 gas, execution wall time and this process's
@@ -44,16 +45,27 @@ fn peak_rss_bytes() -> u64 {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals> N SETTLEMENT_V3_ELF";
-    if args.len() != 3 {
+    let usage = "usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet]";
+    if args.len() != 3 && args.len() != 4 {
         return Err(usage.into());
     }
     let n: u64 = args[1].parse().map_err(|_| usage)?;
-    let spec = ChainSpec::testnet_v3();
+    let spec = match args.get(3).map_or("testnet-v3", String::as_str) {
+        "testnet-v3" => ChainSpec::testnet_v3(),
+        "mainnet-v1" => ChainSpec::mainnet_v1(),
+        "mainnet" => ChainSpec::mainnet(),
+        _ => return Err(usage.into()),
+    };
+    let domain = if spec.chain_id == bloch_l2_evm::chainspec::MAINNET_CHAIN_ID {
+        bloch_l2_evm::chainspec::MAINNET_DOMAIN
+    } else {
+        B256::repeat_byte(0xd3)
+    };
     let fixture = match args[0].as_str() {
         "transfers" => fixture::fixture_transfers(&spec, n)?,
         "calls" => fixture::fixture_calls(&spec, n)?,
         "withdrawals" => fixture::fixture_withdrawals(&spec, n)?,
+        "empty" => fixture::fixture_empty_in(&spec, domain)?,
         _ => return Err(usage.into()),
     };
     let context = SettlementContextV2 {
@@ -67,13 +79,13 @@ async fn main() -> Result<()> {
         l1_height: 1,
         source_commitment: B256::repeat_byte(0x46),
         inbox_root: B256::repeat_byte(0x47),
-        inbox_count: 1,
+        inbox_count: fixture.body.deposits.len() as u64,
         consumed_start: 0,
-        consumed_end: 1,
+        consumed_end: fixture.body.deposits.len() as u64,
     };
     let expected = execute_settlement_statement_v3(
         &spec,
-        B256::repeat_byte(0xd3),
+        domain,
         &fixture.witness,
         &fixture.context,
         &fixture.body,

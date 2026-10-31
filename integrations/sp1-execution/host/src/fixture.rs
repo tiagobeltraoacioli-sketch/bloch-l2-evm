@@ -269,7 +269,13 @@ pub(crate) fn execute_fixture_with(
     body: NodeBodyV2,
     anchor_root: B256,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
-    execute_fixture_in(spec, B256::repeat_byte(0xd3), body, anchor_root)
+    // A mainnet rule set runs under the domain its guest compiles.
+    let domain = if spec.chain_id == bloch_l2_evm::chainspec::MAINNET_CHAIN_ID {
+        bloch_l2_evm::chainspec::MAINNET_DOMAIN
+    } else {
+        B256::repeat_byte(0xd3)
+    };
+    execute_fixture_in(spec, domain, body, anchor_root)
 }
 
 pub(crate) fn execute_fixture_in(
@@ -281,9 +287,13 @@ pub(crate) fn execute_fixture_in(
     let mut pre_state = genesis_v2(spec, 0)?;
     let previous_state_root = pre_state.commit_root();
     let parent = node_head(spec, domain, &pre_state)?;
+    // Fixtures anchor to native slot 1 (`l1_slot` of the synthetic contexts).
     let context = BlockContext {
         number: 1,
-        timestamp: 1,
+        timestamp: match spec.block_derivation {
+            Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
+            None => 1,
+        },
         base_fee_per_gas: spec.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
         prevrandao: B256::repeat_byte(7),
         anchor_root,
