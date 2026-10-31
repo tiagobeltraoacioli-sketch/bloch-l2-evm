@@ -53,7 +53,7 @@ READ_ONLY_METHODS = frozenset({
     # L2 (Ethereum JSON-RPC subset + Bloch extensions)
     'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality',
     # L1 (bloch-pos)
-    'getchaininfo', 'getblockcount', 'getl2settlement',
+    'getchaininfo', 'getblockcount', 'getl2settlement', 'getutxos',
 })
 
 # ---- Pinned mainnet identity (Genesis-4; deployment/mainnet/sequencer_mainnet.py) ----
@@ -130,7 +130,13 @@ _COMMON: Dict[str, Any] = {
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
+    # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
+    'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
+    'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
+    # The settled RPC refuses a status file above STATUS_FILE_LIMIT and `finalized` then stops advancing.
+    'status_size_warn': 8 * 1024 * 1024, 'status_size_crit': 14 * 1024 * 1024,
 }
+STATUS_FILE_LIMIT = 16 * 1024 * 1024  # verified_levels in bloch-l2-settled-rpc
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
                 'chain_id': 700770,
@@ -592,6 +598,17 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
+def check_status_size(name: str, path: str, p: Dict[str, Any], r: Report) -> None:
+    """The follower lists every finalized settlement in its status file, and the file never shrinks."""
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return  # check_followers reports the unreadable file
+    over = ' ABOVE the settled RPC limit: finalized no longer advances there' if size > STATUS_FILE_LIMIT else ''
+    r.graded(f'follower_status_size[{name}]', size, p['status_size_warn'], p['status_size_crit'],
+             f'{path} is {size / 1048576:.1f} MiB of the {STATUS_FILE_LIMIT // 1048576} MiB limit{over}')
+
+
 def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
                     p: Dict[str, Any], now: float, r: Report) -> None:
     for v in views:
@@ -607,6 +624,7 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
                   f'bloch_finality finalized_height {f["finalized_height"]} != tag {v["num"]["finalized"]}')
     for spec in statuses:
         name, path = named(spec, 'follower')
+        check_status_size(name, path, p, r)
         try:
             s = json.loads(Path(path).read_text())
         except (OSError, ValueError) as e:
@@ -702,6 +720,45 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
     if missing_count:
         msg += '; silent attestors (rounds missed): ' + ', '.join(f'#{i} ({c})' for i, c in sorted(missing_count.items()))
     r.add('attestors', worst, msg, threshold=k, n=n_att)
+
+
+# ---------------------------------------------------------------------------- DA funding, disk
+def check_da_balance(client: Client, scripts: List[str], l1_up: List[Dict[str, Any]], p: Dict[str, Any],
+                     r: Report) -> None:
+    """Spendable balance of the DA fee key, read directly: the worker's da-funding-low only fires on a DA batch."""
+    for spec in scripts:
+        name, script = named(spec, 'da')
+        balance = None
+        for node in l1_up:
+            try:
+                answer = client.call(node['url'], 'getutxos', [strip0x(script), 64])
+                balance = sum(int(u['value_sat']) for u in answer['utxos'])
+                break
+            except (RpcError, KeyError, TypeError, ValueError):
+                continue
+        if balance is None:
+            r.add(f'da_balance[{name}]', UNKNOWN, 'no L1 node answered getutxos for the DA funding script')
+            continue
+        level = CRIT if balance < p['da_balance_crit_sat'] else WARN if balance < p['da_balance_warn_sat'] else OK
+        r.add(f'da_balance[{name}]', level, f'DA fee key holds {balance / 1e8:.8f} BLCH (first 64 outputs); '
+                                            f'warn below {p["da_balance_warn_sat"] / 1e8:.8f}, '
+                                            f'crit below {p["da_balance_crit_sat"] / 1e8:.8f}', value=balance)
+
+
+def check_disks(specs: List[str], p: Dict[str, Any], r: Report) -> None:
+    for spec in specs:
+        name, path = named(spec, 'disk')
+        try:
+            st = os.statvfs(path)
+        except OSError as e:
+            r.add(f'disk[{name}]', CRIT, f'{path}: {e}')
+            continue
+        free = st.f_bavail * st.f_frsize
+        total = st.f_blocks * st.f_frsize or 1
+        pct, gib = 100.0 * free / total, free / 2 ** 30
+        level = CRIT if pct < p['disk_free_pct_crit'] or gib < p['disk_free_gib_crit'] else \
+            WARN if pct < p['disk_free_pct_warn'] or gib < p['disk_free_gib_warn'] else OK
+        r.add(f'disk[{name}]', level, f'{path}: {gib:.1f} GiB free, {pct:.1f}%', value=round(gib, 3))
 
 
 # ---------------------------------------------------------------------------- units, logs, files
@@ -945,6 +1002,8 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_escrow_and_backlog(with_l2, p, r)
     check_followers(views, args.follower_status or [], l1_up, p, now, r)
+    check_da_balance(client, args.da_script or [], l1_up, p, r)
+    check_disks(args.disk or [], p, r)
     check_gates(l1_up, p, compiled_gates(args), now, r)
     check_attestors(args.attest_drop or [], with_l2, p, fetch or http_fetcher(args.timeout), r)
     check_units(args.unit or [], p, now, run_cmd, r)
@@ -966,6 +1025,8 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--unit', action='append', help='[NAME=]UNIT: systemd state + journal failure events')
     a.add_argument('--event-log', action='append', help='[NAME=]PATH of a JSON-lines log (settler, shadow, ...)')
     a.add_argument('--file', action='append', help='NAME=PATH[:MAX_AGE_S] heartbeat file to age-check')
+    a.add_argument('--da-script', action='append', help='[NAME=]HEX funding script hash of the DA fee key (getutxos)')
+    a.add_argument('--disk', action='append', help='[NAME=]PATH of a filesystem to check for free space')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')
     a.add_argument('--build-json', help='build.json of the L2 build (default: the v2 pins compiled in)')
     a.add_argument('--set', action='append', help='override a threshold, KEY=VALUE')

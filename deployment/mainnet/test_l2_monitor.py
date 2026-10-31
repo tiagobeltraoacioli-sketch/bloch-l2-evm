@@ -109,6 +109,10 @@ class Fake:
             return node['info']
         if method == 'getl2settlement':
             return node['l2']
+        if method == 'getutxos':
+            if 'utxos' not in node:
+                raise m.RpcError('no such method')
+            return {'utxos': [{'value_sat': str(v)} for v in node['utxos']]}
         raise AssertionError(f'unexpected {method}')
 
 
@@ -570,6 +574,37 @@ class MonitorTests(unittest.TestCase):
         doc = json.loads(out.getvalue())
         self.assertEqual(code, m.OK, json.dumps(doc['checks'], indent=1))
         self.assertEqual(doc['status'], 'OK')
+
+    def test_da_balance_levels_and_no_answer(self):
+        for sats, want in (([150_000_000], 'OK'), ([60_000_000, 1], 'WARN'), ([9_999_999], 'CRIT'), ([], 'CRIT')):
+            w = healthy()
+            for node in w['l1'].values():
+                node['utxos'] = sats
+            report, _ = run(w, '--da-script', 'da=' + 'ab' * 32)
+            self.assertEqual(level(report, 'da_balance[da]'), want, sats)
+        report, _ = run(healthy(), '--da-script', 'ab' * 32)
+        self.assertEqual(level(report, 'da_balance[da]'), 'UNKNOWN')
+
+    def test_disk_levels(self):
+        gib = 2 ** 30
+        cases = ((1000, 500, 'OK'), (1000, 100, 'WARN'), (1000, 40, 'CRIT'), (100, 18, 'WARN'), (40, 4, 'CRIT'))
+        for total, free, want in cases:
+            st = mock.Mock(f_bavail=free, f_blocks=total, f_frsize=gib)
+            with mock.patch.object(m.os, 'statvfs', return_value=st):
+                report, _ = run(healthy(), '--disk', 'state=/x')
+            self.assertEqual(level(report, 'disk[state]'), want, (total, free))
+        report, _ = run(healthy(), '--disk', 'state=/does/not/exist')
+        self.assertEqual(level(report, 'disk[state]'), 'CRIT')
+
+    def test_status_file_size_levels(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'status.json'
+            for size, want in ((1000, 'OK'), (9 << 20, 'WARN'), (15 << 20, 'CRIT'), (17 << 20, 'CRIT')):
+                path.write_text('{}' + ' ' * (size - 2))
+                report, _ = run(healthy(), '--follower-status', f'A={path}')
+                self.assertEqual(level(report, 'follower_status_size[A]'), want, size)
+            message = [c for c in report.checks if c['check'] == 'follower_status_size[A]'][0]['message']
+            self.assertIn('ABOVE', message)
 
 
 if __name__ == '__main__':
