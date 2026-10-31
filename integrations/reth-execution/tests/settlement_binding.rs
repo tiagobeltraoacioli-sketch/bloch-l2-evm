@@ -3,11 +3,7 @@
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_primitives::{keccak256, Address, Signature, TxKind, B256};
 use bloch_l2_evm::{
-    native_settlement::{
-        store::{SettlementReplayRecordV1, SettlementStoreMarkV1, SettlementStoreReplayErrorV1, SettlementStoreV1},
-        AcceptedSettlementV1, SettlementExpectationV1, SettlementPolicyV1, SettlementProofVerifierV1,
-        SettlementTransactionV1, SETTLEMENT_PROOF_V1_BYTES,
-    },
+    native_settlement::{SettlementPolicyV1, SettlementTransactionV1, SETTLEMENT_PROOF_V1_BYTES},
     proof_statement::{configuration_commitment, SettlementStatementV2},
     ChainSpec, DepositMint, DepositProvenance,
 };
@@ -25,7 +21,7 @@ use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
     BlockIdReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
 };
-use std::{fs, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 fn h(byte: u8) -> B256 {
     B256::repeat_byte(byte)
@@ -117,15 +113,11 @@ fn floor(source: &BlochProviderFactory) -> ReplayFloor {
         hash: source.sealed_header(2).unwrap().unwrap().hash(),
     }
 }
-struct FixedProof;
-impl SettlementProofVerifierV1 for FixedProof {
-    fn verify(&self, policy: B256, _: &[u8], proof: &[u8]) -> bool {
-        policy == h(8) && proof == [9; SETTLEMENT_PROOF_V1_BYTES]
-    }
-}
-fn history(source: &BlochProviderFactory, path: &Path, wrong_first_body: bool) -> SettlementStoreMarkV1 {
+/// One settlement per canonical block, chained by commitment. The transactions
+/// are synthetic: this boundary checks correspondence, not the proof.
+fn history(source: &BlochProviderFactory, wrong_first_body: bool) -> Vec<SettlementTransactionV1> {
     let p = policy();
-    let mut store = SettlementStoreV1::create(path, p).unwrap();
+    let mut transactions: Vec<SettlementTransactionV1> = vec![];
     for number in 1..=2 {
         let block = source.block_by_number(number).unwrap().unwrap();
         let header = &block.header.0;
@@ -137,7 +129,7 @@ fn history(source: &BlochProviderFactory, path: &Path, wrong_first_body: bool) -
             program_elf_keccak: p.program_elf_keccak,
             program_vkey_koalabear: p.program_vkey_koalabear,
             program_vkey_bn254: p.program_vkey_bn254,
-            previous_settlement: store.registry().head().map_or(B256::ZERO, |head| head.commitment),
+            previous_settlement: transactions.last().map_or(B256::ZERO, |tx| tx.commitment()),
             chain_id: p.chain_id,
             l2_number: number,
             l2_parent_hash: header.parent_hash,
@@ -158,23 +150,9 @@ fn history(source: &BlochProviderFactory, path: &Path, wrong_first_body: bool) -
                 keccak256(alloy_rlp::encode(block.body.as_core()))
             },
         };
-        let tx = SettlementTransactionV1::new(p.proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES]).unwrap();
-        store
-            .verify_and_commit(
-                store.mark(),
-                &tx.encode(),
-                &SettlementExpectationV1 {
-                    statement,
-                    source_predecessor: store
-                        .registry()
-                        .head()
-                        .map_or(B256::ZERO, |head| head.source_commitment),
-                },
-                &FixedProof,
-            )
-            .unwrap();
+        transactions.push(SettlementTransactionV1::new(p.proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES]).unwrap());
     }
-    store.mark()
+    transactions
 }
 
 #[test]
@@ -182,22 +160,19 @@ fn binds_real_persisted_deposit_and_signed_transaction_blocks_after_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let source = open(directory.path());
     seed(&source);
-    let path = directory.path().join("settlements");
-    let mark = history(&source, &path, false);
+    let transactions = history(&source, false);
     let pinned = floor(&source);
     drop(source);
     let source = open(directory.path());
     let provider = CanonicalCoordinator::attach(source.clone()).unwrap().provider();
     assert_eq!(provider.finalized_block_num_hash().unwrap(), None);
     assert_eq!(provider.safe_block_num_hash().unwrap(), None);
-    let (store, report) =
-        with_canonical_settlement_audit(&source, policy(), pinned, ReplayLimits::default(), |audit| {
-            SettlementStoreV1::open_verified_with_audit(&path, policy(), mark, 2, &FixedProof, |record| {
-                audit.audit_record(&record)
-            })
-        })
-        .unwrap();
-    assert_eq!(store.mark(), mark);
+    let (audited, report) = with_canonical_settlement_audit(&source, policy(), pinned, ReplayLimits::default(), |audit| {
+        transactions.iter().try_for_each(|tx| audit.audit_transaction(tx))?;
+        Ok::<_, alloy_evm::block::BlockExecutionError>(transactions.len())
+    })
+    .unwrap();
+    assert_eq!(audited, 2);
     assert_eq!(report.audited_records, 2);
     assert_eq!(report.last_settlement.unwrap().hash, pinned.hash);
     assert_eq!(report.canonical_head.hash, pinned.hash);
@@ -208,37 +183,22 @@ fn binds_real_persisted_deposit_and_signed_transaction_blocks_after_reopen() {
 }
 
 #[test]
-fn rejects_old_body_mismatch_and_ignored_errors_without_exposing_store() {
+fn rejects_old_body_mismatch_and_ignored_errors() {
     let directory = tempfile::tempdir().unwrap();
     let source = open(directory.path());
     seed(&source);
-    let path = directory.path().join("settlements");
-    let mark = history(&source, &path, true);
-    let before: Vec<_> = (0..=2)
-        .map(|i| fs::read(path.join(format!("{i:020}.sst"))).unwrap())
-        .collect();
+    let transactions = history(&source, true);
     let result = with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
-        SettlementStoreV1::open_verified_with_audit(&path, policy(), mark, 2, &FixedProof, |record| {
-            audit.audit_record(&record)
-        })
+        transactions.iter().try_for_each(|tx| audit.audit_transaction(tx))
     });
-    assert!(matches!(
-        result,
-        Err(CanonicalSettlementAuditErrorV1::Consumer(
-            SettlementStoreReplayErrorV1::Audit { generation: 1, .. }
-        ))
-    ));
+    assert!(matches!(result, Err(CanonicalSettlementAuditErrorV1::Consumer(_))));
     let result = with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
-        SettlementStoreV1::open_verified_with_audit(&path, policy(), mark, 2, &FixedProof, |record| {
-            assert!(audit.audit_record(&record).is_err());
-            Ok::<(), ()>(()) // Deliberately broken caller; the outer boundary must refuse.
-        })
+        assert!(audit.audit_transaction(&transactions[0]).is_err());
+        // A poisoned audit refuses even a matching transaction.
+        assert!(audit.audit_transaction(&transactions[1]).is_err());
+        Ok::<(), ()>(()) // Deliberately broken caller; the outer boundary must refuse.
     });
     assert!(matches!(result, Err(CanonicalSettlementAuditErrorV1::Canonical(_))));
-    drop(SettlementStoreV1::open(&path, policy(), mark).unwrap());
-    for (i, expected) in before.iter().enumerate() {
-        assert_eq!(fs::read(path.join(format!("{i:020}.sst"))).unwrap(), *expected);
-    }
 }
 
 #[test]
@@ -283,92 +243,63 @@ fn refuses_wrong_policy_floor_and_budgets_before_calling_recovery() {
 }
 
 #[test]
-fn exact_statement_fields_and_record_order_must_match_the_canonical_block() {
+fn exact_statement_fields_and_order_must_match_the_canonical_block() {
     let directory = tempfile::tempdir().unwrap();
     let source = open(directory.path());
     seed(&source);
-    let path = directory.path().join("settlements");
-    let mark = history(&source, &path, false);
-    for case in 0..17 {
-        let result =
-            with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
-                SettlementStoreV1::open_verified_with_audit(&path, policy(), mark, 2, &FixedProof, |record| {
-                    let mut statement = *SettlementTransactionV1::decode(record.transaction).unwrap().statement();
-                    let mut changed_mark = record.mark;
-                    let mut proof_policy = h(8);
-                    match case {
-                        0 => statement.domain = h(99),
-                        1 => statement.configuration = h(99),
-                        2 => statement.chain_id += 1,
-                        3 => statement.l2_header_hash = h(99),
-                        4 => statement.l2_parent_hash = h(99),
-                        5 => statement.l2_previous_state_root = h(99),
-                        6 => statement.l2_state_root = h(99),
-                        7 => statement.l1_block = h(99),
-                        8 => statement.body_commitment = h(99),
-                        9 => statement.consumed_end = 0,
-                        10 => changed_mark.generation = 2,
-                        11 => statement.network = h(99),
-                        12 => statement.genesis = h(99),
-                        13 => statement.program_elf_keccak = h(99),
-                        14 => statement.program_vkey_koalabear = h(99),
-                        15 => statement.program_vkey_bn254 = h(99),
-                        16 => proof_policy = h(99),
-                        _ => unreachable!(),
-                    }
-                    let tx = SettlementTransactionV1::new(proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES])
-                        .unwrap()
-                        .encode();
-                    // Alter the supplied view, not the persisted history; public audit
-                    // views are data and must never be treated as proof capabilities.
-                    let accepted = AcceptedSettlementV1 {
-                        commitment: SettlementTransactionV1::decode(&tx).unwrap().commitment(),
-                        l2_header_hash: statement.l2_header_hash,
-                        l2_state_root: statement.l2_state_root,
-                        l1_block: statement.l1_block,
-                        consumed_end: statement.consumed_end,
-                        ..*record.accepted
-                    };
-                    audit.audit_record(&SettlementReplayRecordV1 {
-                        mark: changed_mark,
-                        accepted: &accepted,
-                        transaction: &tx,
-                        admission: record.admission,
-                        evidence: record.evidence,
-                        authority_audit: record.authority_audit,
-                    })
-                })
-            });
+    let transactions = history(&source, false);
+    for case in 0..16 {
+        let mut statement = *transactions[0].statement();
+        let mut proof_policy = h(8);
+        match case {
+            0 => statement.domain = h(99),
+            1 => statement.configuration = h(99),
+            2 => statement.chain_id += 1,
+            3 => statement.l2_header_hash = h(99),
+            4 => statement.l2_parent_hash = h(99),
+            5 => statement.l2_previous_state_root = h(99),
+            6 => statement.l2_state_root = h(99),
+            7 => statement.l1_block = h(99),
+            8 => statement.body_commitment = h(99),
+            9 => statement.consumed_end = 0,
+            10 => statement.network = h(99),
+            11 => statement.genesis = h(99),
+            12 => statement.program_elf_keccak = h(99),
+            13 => statement.program_vkey_koalabear = h(99),
+            14 => statement.program_vkey_bn254 = h(99),
+            15 => proof_policy = h(99),
+            _ => unreachable!(),
+        }
+        let tx = SettlementTransactionV1::new(proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES]).unwrap();
+        let result = with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
+            audit.audit_transaction(&tx)
+        });
         assert!(
-            matches!(
-                result,
-                Err(CanonicalSettlementAuditErrorV1::Consumer(
-                    SettlementStoreReplayErrorV1::Audit { generation: 1, .. }
-                ))
-            ),
+            matches!(result, Err(CanonicalSettlementAuditErrorV1::Consumer(_))),
             "case {case}"
         );
     }
+    // The settlement of block 2 cannot stand in for the settlement of block 1.
+    let result = with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
+        audit.audit_transaction(&transactions[1])
+    });
+    assert!(matches!(result, Err(CanonicalSettlementAuditErrorV1::Consumer(_))));
 }
 
 #[test]
-fn acknowledged_tip_change_discards_recovered_handle() {
+fn acknowledged_tip_change_discards_the_audited_result() {
     let directory = tempfile::tempdir().unwrap();
     let source = open(directory.path());
     seed(&source);
-    let path = directory.path().join("settlements");
-    let mark = history(&source, &path, false);
+    let transactions = history(&source, false);
     let mut competing = CanonicalCoordinator::attach(source.clone()).unwrap();
     let result = with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
-        let store = SettlementStoreV1::open_verified_with_audit(&path, policy(), mark, 2, &FixedProof, |record| {
-            audit.audit_record(&record)
-        })?;
+        transactions.iter().try_for_each(|tx| audit.audit_transaction(tx))?;
         // Deliberately violate the stopped-writer contract to test the final fence.
         competing.extend(competing.head().hash(), attrs(3), vec![]).unwrap();
-        Ok::<_, SettlementStoreReplayErrorV1<alloy_evm::block::BlockExecutionError>>(store)
+        Ok::<_, alloy_evm::block::BlockExecutionError>(())
     });
     assert!(matches!(result, Err(CanonicalSettlementAuditErrorV1::Canonical(_))));
-    drop(SettlementStoreV1::open(&path, policy(), mark).unwrap());
 }
 
 #[test]

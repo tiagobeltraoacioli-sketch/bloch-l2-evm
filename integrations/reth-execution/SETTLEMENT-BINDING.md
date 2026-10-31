@@ -18,12 +18,12 @@ transaction/deposit commitments, the L2 floor and the policy's initial parent.
 The limit is at most 10,000 non-genesis blocks, plus the caller's cumulative
 encoded-block byte budget. Only headers, hashes, body commitments and deposit
 counts remain cached during settlement replay. These limits do not bound native
-cryptography time or replace the settlement/checkpoint stores' own limits.
+cryptography time.
 
-`CanonicalSettlementAuditV1::audit_record` requires generation order starting at
+`CanonicalSettlementAuditV1::audit_transaction` requires generation order starting at
 one and consecutive L2 blocks starting at the policy's `first_l2_number`. It
 checks every native network/program/proof-policy identity against the selected
-settlement policy, then compares the retained transaction and accepted head with the selected block's
+settlement policy, then compares the transaction with the selected block's
 domain, chain ID, configuration, number, complete header hash, parent hash,
 parent state root, post-state root, native anchor, complete body commitment and
 consumed deposit count. Header hashing also commits timestamp, fee/gas context,
@@ -36,63 +36,31 @@ after replay; this catches ordinary concurrent advancement, not arbitrary
 host compromise or violations of the stopped-writer contract. The callback
 must not publish intermediate handles or heads.
 
-## Composition with proof and PQ authority recovery
+## Consumers
 
-The separate AGPL native-PQ adapter exposes
-`open_proof_verified_authority_stores_with_audit`. Its additional callback runs
-only after each record has passed execution-proof, complete-inclusion and
-historical checkpoint-authority verification. The callback cannot relax those
-checks.
+`settlement-recovery::native::audit_finalized_async_settlements` runs this audit
+over the finalized settlements of a complete native replay, one
+`audit_transaction` per settlement. The accounting binds the complete policy
+commitment and names the inspected canonical tip and last matched settlement. It
+is audit data, not a finalized-block capability. `audit_transaction` alone proves
+neither execution nor authority.
 
-The separate AGPL [settlement recovery adapter](../settlement-recovery/README.md)
-now provides this closed composition as `recover_canonical_settlements`, with
-joint storage/PQ integration tests and a final check of full replay coverage.
-Hosts can use that entrypoint instead of implementing the callback composition
-themselves. Its runtime proof verifier and production qualification remain
-independent requirements.
-
-The equivalent callback composition is:
-
-```rust
-with_canonical_settlement_audit(
-    &stopped_l2_provider, settlement_policy, independent_l2_floor, limits,
-    |canonical| {
-        open_proof_verified_authority_stores_with_audit(
-            checkpoint_path, checkpoint_policy, independent_checkpoint_floor,
-            settlement_path, settlement_policy, independent_settlement_floor,
-            current_epoch, maximum_proofs, &pinned_proof_verifier,
-            |record| canonical.audit_record(record).map_err(|error| {
-                SettlementAuthorityStoreErrorV1::AdditionalAudit(error.to_string())
-            }),
-        )
-    },
-)
-```
-
-The returned accounting binds the complete policy commitment and names the inspected canonical tip and last matched
-settlement. It is audit data, not a finalized-block capability. The public
-record view can be constructed as data; `audit_record` alone proves neither
-execution nor authority. Always keep it inside mandatory proof/authority
-recovery. Genuine native settlement consensus and proof transport qualification
-remain required before any RPC finality publication.
+The earlier composition with the WS-checkpoint settlement store and its
+`audit_record` method were retired on 2026-10-30.
 
 ## Validation
 
 `tests/settlement_binding.rs` uses actual MDBX, RocksDB and static-file storage,
 kernel-executed deposits and a real signed EVM transaction. It checks orderly
-reopening, an older mismatched settlement beneath a valid latest one, exact
-field binding, missing complete bodies, wrong policies/floors, budgets, ignored
-errors and concurrent tip advancement. Successful audits leave safe/finalized
-markers absent. Native provenance is synthetic and the execution-proof verifier
-is an explicit test double. The PQ integration separately exercises real
-disposable hybrid signatures, callback ordering and callback refusal.
+reopening, an older mismatched settlement, exact field binding, missing complete
+bodies, wrong policies/floors, budgets, ignored errors and concurrent tip
+advancement. Successful audits leave safe/finalized markers absent. Native
+provenance and the settlement transactions are synthetic.
 
 ```sh
 python3 integrations/reth-execution/prepare-reth.py --check -- \
   cargo +1.98.1 test --offline --locked \
   --manifest-path integrations/reth-execution/Cargo.toml --test settlement_binding
-cargo +1.94.1 test --offline --locked \
-  --manifest-path integrations/native-escrow-pq/Cargo.toml --test settlement_authority
 ```
 
 Use the pinned Reth base/patch and native revision documented in the respective

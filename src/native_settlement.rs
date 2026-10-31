@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use alloy_primitives::B256;
 use sha3::{Digest, Sha3_256};
 
-#[cfg(feature = "std")]
-pub mod store;
+// The WS-era durable settlement store was retired on 2026-10-30.
+// See docs/L2-FINALITY.md; the deterministic registry below is unchanged.
 
 /// Experimental wire discriminator. It is not an assigned native transaction tag.
 pub const EXPERIMENTAL_SETTLEMENT_TX_V1_TAG: &[u8] = b"BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-TX:1";
