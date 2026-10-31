@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE.parent))
 import aggregate_attestation  # noqa: E402
 import attestor_agent  # noqa: E402
 import attestor_lib as lib  # noqa: E402
+import sigfeed  # noqa: E402
 
 BLOCH_POS = os.environ.get('BLOCH_POS', str(Path.home() / 'worktrees/l2-attestor-keystore-20261019/target/release/bloch-pos'))
 MANIFEST = os.environ.get('MAINNET_MANIFEST', str(Path.home() / 'worktrees/l2-attestor-keystore-20261019/genesis/mainnet.manifest'))
@@ -502,6 +503,102 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(a['signers'], [1, 3, 4])
         self.assertEqual(b['signers'], [1, 3, 4])
         drop.server.shutdown()
+
+    def feeds(self, signers):
+        """One real read-only feed per operator, serving only that agent's outbox (loopback)."""
+        servers = {}
+        for i in signers:
+            _, events = self.once(self.agent(i))
+            self.assertTrue([e for e in events if e['event'] == 'signed'], events)
+            servers[i] = sigfeed.FeedServer(self.case / f'agent{i}' / 'outbox').start()
+            self.addCleanup(servers[i].stop)
+        return servers, {i: f'http://127.0.0.1:{s.port}' for i, s in servers.items()}
+
+    def hostile_feed(self, answer):
+        """A source that answers each partial path with `answer(index, root)`: bytes, or None for a 404."""
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                parts = self.path.strip('/').split('/')
+                index = int(parts[-1].split('-')[1].split('.')[0])
+                body = answer(index, parts[-2])
+                self.send_response(200 if body is not None else 404)
+                self.send_header('Content-Length', str(len(body or b'')))
+                self.end_headers()
+                self.wfile.write(body or b'')
+
+            def log_message(self, *a):
+                pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f'http://127.0.0.1:{server.server_port}'
+
+    def forged(self, index, root):
+        """Right shape, right index, right digest, wrong signature: only the native verifier can tell."""
+        digest = lib.attestation_digest(self.pins.network, self.pins.chain_id, root)
+        return f'{index}\n{digest}\n{"ab" * 4000}\n'.encode()
+
+    def test_feed_aggregate_with_two_operators_down(self):
+        servers, urls = self.feeds(range(5))
+        proof = self.claim_proof(3)
+        servers[1].stop()
+        servers[4].stop()
+        a = aggregate_attestation.aggregate(proof, list(urls.values()), self.case / 'agg', BLOCH_POS, MANIFEST,
+                                            str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertIn('attestation ok', a['native_verify'])
+
+    def test_feed_withheld_below_threshold_refuses(self):
+        servers, urls = self.feeds((0, 1))
+        with self.assertRaises(SystemExit) as e:
+            aggregate_attestation.aggregate(self.claim_proof(3), list(urls.values()), self.case / 'agg', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertIn('only 2 of the 3', str(e.exception))
+
+    def test_feed_forged_partials_cannot_displace_real_ones(self):
+        _, urls = self.feeds((0, 2, 3))
+        evil = self.hostile_feed(self.forged)
+        a = aggregate_attestation.aggregate(self.claim_proof(3), [evil, *urls.values()], self.case / 'agg', BLOCH_POS,
+                                            MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertIn('attestation ok', a['native_verify'])
+
+    def test_feed_only_forged_partials_are_refused(self):
+        evil = self.hostile_feed(self.forged)
+        out = self.case / 'agg'
+        with self.assertRaises(SystemExit) as e:
+            aggregate_attestation.aggregate(self.claim_proof(3), [evil], out, BLOCH_POS, MANIFEST, str(self.set_file),
+                                            pins=self.pins)
+        self.assertIn('native verification refused', str(e.exception))
+        self.assertEqual(list(out.glob('*.partial')), [])
+
+    def test_feed_garbage_replay_and_oversize_are_ignored(self):
+        servers, urls = self.feeds((0, 2, 3))
+        other_root = 'cd' * 32
+        answers = [lambda i, r: b'\x00\xff garbage',
+                   lambda i, r: b'x' * (sigfeed.MAX_FILE + 1),
+                   lambda i, r: self.forged(i, other_root),            # a real shape replayed from another root
+                   lambda i, r: self.forged((i + 1) % 5, r),           # another signer's index
+                   lambda i, r: f'{i}\n{"00" * 32}\nabcd\n'.encode()]
+        a = aggregate_attestation.aggregate(self.claim_proof(3), [self.hostile_feed(x) for x in answers] + list(urls.values()),
+                                            self.case / 'agg', BLOCH_POS, MANIFEST, str(self.set_file), pins=self.pins)
+        self.assertEqual(a['signers'], [0, 2, 3])
+        self.assertTrue(a['problems'])
+
+    def test_feed_serves_only_partials_and_never_the_agent_json_or_state(self):
+        servers, urls = self.feeds((0,))
+        root = self.root(3)
+        rel = lib.partial_relpath(lib.CHAIN_ID, root, 0)
+        self.assertTrue(sigfeed.fetch(f'{urls[0]}/{rel}').startswith(b'0\n'))
+        self.assertTrue((self.case / 'agent0' / 'outbox' / (rel + '.json')).exists()
+                        or list((self.case / 'agent0' / 'outbox').rglob('*.json')))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/{rel}.json'))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/state.json'))
+        self.assertIsNone(sigfeed.fetch(f'{urls[0]}/700770/{root}/'))
+
+    def test_sigfeed_is_the_pinned_file(self):
+        pinned = (HERE.parent / 'sigfeed.sha256').read_text().split()[0]
+        self.assertEqual(hashlib.sha256((HERE.parent / 'sigfeed.py').read_bytes()).hexdigest(), pinned)
 
     def test_publish_failure_is_retried(self):
         publish = [{'kind': 'command', 'argv': ['false']}]

@@ -279,7 +279,7 @@ PY
     [ ! -e "$P" ] && [ ! -e "$P.tar" ] || die "$P exists; refusing to overwrite (delete $P and $P.tar to repackage)"
     mkdir -p "$P/kit/systemd" "$P/kit/public"
     cp "$B" "$OUT/attestor-$i.pk" "$OUT/attestors.set" "$P/"
-    cp "$KIT/install-attestor.sh" "$KIT/attestor_agent.py" "$KIT/attestor_lib.py" "$KIT/aggregate_attestation.py" "$KIT/README.md" "$P/kit/"
+    cp "$KIT/install-attestor.sh" "$KIT/attestor_agent.py" "$KIT/attestor_lib.py" "$KIT/aggregate_attestation.py" "$KIT/sigfeed.py" "$KIT/sigfeed.sha256" "$KIT/README.md" "$P/kit/"
     cp "$KIT"/systemd/*.service "$P/kit/systemd/"
     cp "$KIT"/public/* "$P/kit/public/"
     cp "$PINS" "$P/ARTIFACTS.sha256"

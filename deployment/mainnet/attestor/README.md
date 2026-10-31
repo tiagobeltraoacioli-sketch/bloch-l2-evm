@@ -18,8 +18,10 @@ signing by itself. Operators act only on alerts.
 | `attestor_agent.py` | The agent: `run`, `once [--dry-run]`, `check [--no-key]`. Python standard library only. |
 | `attestor_lib.py` | Pins, withdrawal tree, set hash, attestation digest. All mirror the native code. |
 | `aggregate_attestation.py` | Claimant tool. Collects any 3 partials, verifies them natively and prints the `prepare` arguments. |
+| `sigfeed.py` | The read-only feed server and the bounded fetch client. The same file ships in the bridge signer (`sigfeed.sha256` pins it). |
 | `install-attestor.sh` | `install`, `rollback [--purge-key]` and `status` on an operator host. |
 | `systemd/bloch-l2-attestor.service` | The hardened agent unit: no listener, `IPAddressDeny=any` plus an allow-list, `LoadCredential`. |
+| `systemd/bloch-l2-attestor-feed.service` | The read-only feed (`--feed-port`): the agent's outbox only, no credential. |
 | `systemd/bloch-l2-attestor-follower.service` | The agent's own native follower (FFG replay from Genesis-4). |
 | `keykit/` | Key custody for the key holder: seal, verify, package, backup-check, shred, release (`make-operator-bundles.sh`, `KEY-HANDOFF-CHECKLIST.md`); operator side: `check-operator-bundle.sh`, `OPERATOR-ONBOARDING.md`, `OPERATOR-INSTALL.template.md`, pins `operator-pins-v2.sha256`. |
 | `public/` | The pinned `attestors.set` and the five public keys. |
@@ -69,7 +71,7 @@ Consensus code is unchanged. The other binaries come from the RC pinned build (`
    - It checks the partial: signer index, and the digest over the pinned network, chain and root.
    - It writes the partial to `/var/lib/bloch-l2-attestor/outbox/700770/<root>/attestor-<I>.partial`
      (plus a `.json` file).
-   - It pushes the partial to every configured drop. Failed pushes are retried every cycle.
+   - The operator's feed serves the outbox. It also pushes to any optional push target, retrying failures every cycle.
    - It raises a `signed` alert.
 
 At startup and once a day, `rebuild-check` rebuilds the L2 and compares every finalized settlement.
@@ -79,19 +81,30 @@ Every root that covers an unclaimed large withdrawal is signed as soon as it is 
 about 2,880 blocks before the root can serve a large claim. So partials are already waiting when
 the claimant needs them.
 
-## Where partials go (the attestation drop)
+## Where partials go (the operator's read-only feed)
 
-Every drop uses the same layout: `<base>/700770/<root>/attestor-<I>.partial`. Configure one or
-both of these:
+Each operator serves its own outbox: `bloch-l2-attestor-feed` runs `sigfeed.py serve` on one TCP port.
 
-- `--publish-url https://drop.example/attest` with `--publish-token-file`. This is an HTTP PUT with
-  a bearer token, for example a WebDAV or object-store endpoint that also serves GET. The token is
-  a systemd credential.
-- `--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'`, or any other
-  argv. The placeholders are `{file} {json} {relpath} {root} {chain} {index} {outbox}`.
+    GET <base>/700770/<root>/attestor-<I>.partial
 
-Partials are public data: one signature over a public root. The drop needs integrity, not secrecy,
-and the aggregator verifies everything it fetches.
+- There is no shared drop, no token and no upload path. The aggregator and the monitor poll the five
+  feeds. Attestors never read each other, so one operator down costs exactly that operator's partial.
+- The feed is a separate unit from the agent. It holds no credential, sees only the outbox (a read-only
+  bind mount), accepts GET and HEAD, serves only the path shape above and caps connections per address.
+- Partials are public: one signature over a public root. The content authenticates itself, so a feed
+  can withhold but cannot forge. The aggregator treats each source as hostile (byte and time limits,
+  no redirects) and lets the native verifier choose among candidates, so a forged partial from one
+  source cannot displace a real one from another.
+- Plain HTTP is enough, because TLS adds no integrity here. An operator who wants HTTPS can put an
+  auto-renewing proxy in front; `sigfeed.py serve --tls-cert --tls-key` also works, but an expired
+  certificate takes the operator's feed down.
+- Monitor: pass `--attest-drop URL` once per feed.
+
+### Hosts with no inbound port
+
+The push options remain for these hosts: `--publish-command '["rsync","-a","{file}","me@my-host:/srv/{relpath}"]'`,
+or `--publish-url` with `--publish-token-file` for a PUT endpoint the operator controls. Either target
+must then serve the same paths over GET. This target belongs to that operator alone; it is not a shared drop.
 
 ## Operator install (each of the five hosts)
 
@@ -100,11 +113,12 @@ The host must not be a mainnet validator host or the settler. It needs 2 cores, 
 
 ```
 sudo ./install-attestor.sh install --artifacts DIR --index I --bundle attestor-I.sealed \
-     --l1-rpc-url http://80.240.16.185:8080 --publish-url https://drop.example/attest --publish-token-file token
+     --l1-rpc-url http://80.240.16.185:8080 --feed-port 8787
 sudo systemctl enable --now bloch-l2-attestor-follower
 sudo systemd-run --pipe --wait -p User=bloch-l2-attestor \
      -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase \
      /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
+sudo systemctl enable --now bloch-l2-attestor-feed
 sudo systemctl enable --now bloch-l2-attestor
 ```
 

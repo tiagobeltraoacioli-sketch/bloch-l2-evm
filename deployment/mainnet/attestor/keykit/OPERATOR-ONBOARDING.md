@@ -25,7 +25,7 @@ operator's attestor, or a machine you share with anyone else.
 | Disk | 80 GB SSD | 160 GB NVMe SSD |
 | OS | Ubuntu 24.04 LTS, x86_64 | same, fully patched, unattended security upgrades |
 | Python | `/usr/bin/python3` (3.12 on 24.04), standard library only | – |
-| Network | outbound IPv4 to the L1 RPCs and to the attestation drop | a static public IPv4 |
+| Network | outbound IPv4 to the L1 RPCs, one inbound port for the read-only feed | a static public IPv4 |
 
 Why these numbers:
 
@@ -40,8 +40,10 @@ Why these numbers:
 
 ## 2. Ports and firewall
 
-The attestor needs **no inbound port**. Allow inbound SSH (TCP 22) only, and only from your own admin
-addresses. Deny everything else inbound.
+The attestor needs **one inbound port**: TCP 8787, open to everyone, for the read-only feed
+(`bloch-l2-attestor-feed`). It serves only your public signatures, accepts GET and HEAD only, holds no
+credential and runs apart from the agent, which still has no listener. Also allow inbound SSH (TCP 22),
+only from your own admin addresses. Deny everything else inbound.
 
 Outbound:
 
@@ -49,7 +51,6 @@ Outbound:
 | --- | --- | --- |
 | `80.240.16.185`, `199.247.22.8`, `45.77.67.251` | TCP 8080 (HTTP) | the agent (2-of-3 RPC quorum) |
 | the `--l1-rpc-url` host (default `80.240.16.185`) | TCP 8080 | the follower |
-| the attestation drop (given to you by the coordinator, or your own) | TCP 443 | the agent, to publish partials |
 | Ubuntu mirrors, NTP | 80/443, UDP 123 | the OS |
 
 The systemd units already deny all other addresses (`IPAddressDeny=any` with an allow-list that the
@@ -115,7 +116,7 @@ Act on these:
 | `halt` (the agent stops, exit 3) | Read the `reason`. Fix the pin or binary it names. Do not edit pins to make it pass. Ask the coordinator. |
 | `held` | A large or over-cap withdrawal. Check it. If it is legitimate, add the printed `INDEX LEAF` line to `/etc/bloch-l2-attestor/approvals.txt`. |
 | `refused-root-not-on-own-chain`, `refused-rebuild-differs` | Do **not** override. Compare with the other operators and tell the coordinator. |
-| `publish-failed` | The drop is unreachable. The agent retries; the partial stays in `/var/lib/bloch-l2-attestor/outbox`. |
+| `publish-failed` | Only with an optional push target (see `kit/README.md`): it is unreachable. The agent retries; the partial stays in `/var/lib/bloch-l2-attestor/outbox`, which the feed serves. |
 | `native_finalized_epoch` stuck for more than 1 hour | Check the follower journal: `journalctl -u bloch-l2-attestor-follower -n 50`. |
 
 `alert_command` in `config.json` runs inside the agent's sandbox, which can only reach the allow-listed
@@ -156,10 +157,10 @@ When `check-ok` passes and the agent is running, reply with this filled in. It c
 ```
 attestor index: I
 operator name and on-call contact (Signal/phone):
-host public IPv4 (egress address used for the drop and RPCs):
+host public IPv4 (egress address used for the RPCs):
 host provider and region:
-publication endpoint: either "coordinator drop" or your own read-only HTTPS base URL that serves
-  <base>/700770/<root>/attestor-I.partial over GET
+publication endpoint: the base URL of your feed, normally http://<public IPv4>:8787. The check is
+  curl -fsS http://<public IPv4>:8787/healthz (from another host: it must print ok)
 bundle hash I checked (sha256 of operator-I.tar):
 check-ok line (signer_index, set_hash):
 installed binaries (sha256sum /opt/bloch/l2-attestor/*):
@@ -168,5 +169,5 @@ offline backup re-sealed under my own passphrase (INSTALL.md step 8): yes/no
 where my two offline backups are kept (places only, no details):
 ```
 
-The coordinator publishes the list of publication endpoints so that claimants can collect partials.
-The endpoint must not require a login to read; partials are public signatures over public roots.
+The list of the five endpoints is public, so that claimants and monitors can collect partials. The
+endpoint must not require a login to read; partials are public signatures over public roots.

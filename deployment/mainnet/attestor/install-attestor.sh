@@ -7,6 +7,7 @@
 #        --l1-rpc-url http://HOST:8080 [--rpc http://H:8080 --rpc ... (3; default: the 3 public RPCs)] \
 #        [--publish-url https://drop.example/attest --publish-token-file FILE] \
 #        [--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'] \
+#        [--feed-port N [--feed-bind ADDR]] \
 #        [--alert-command '["/usr/local/bin/notify-attestor","{event}"]'] [--dry-run]
 #        [--prefix DIR [--rehearsal-set attestors.set]]
 #   sudo ./install-attestor.sh rollback [--purge-key]
@@ -22,6 +23,10 @@
 # passphrase in /etc/bloch-l2-attestor/keystore.passphrase (root, 0400), handed to the agent via
 # systemd LoadCredential. The host never holds a plaintext key file. Keep the transport bundle
 # offline as the backup; remove the copy you brought to this host after install.
+#
+# --feed-port N: the default way to publish. Prepares bloch-l2-attestor-feed.service (not enabled, not
+# started), a read-only endpoint serving only the agent's outbox partials. It holds no credential, and
+# the agent keeps its no-listener unit. The push options above stay for operators with no inbound port.
 #
 # --prefix DIR (rehearsal/staging): install every file under DIR instead of /opt, /etc and
 # /var/lib, as the invoking user, without useradd, chown or systemctl (units are written to
@@ -44,17 +49,20 @@ host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad 
 ip_of() { getent ahostsv4 "$1" | awk 'NR==1{print $1}'; }
 
 cmd_install() {
-  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET=
+  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET= FEED_PORT= FEED_BIND=0.0.0.0
   while [ $# -gt 0 ]; do
     case $1 in
       --artifacts) ART=$2; shift 2;; --index) INDEX=$2; shift 2;; --bundle) BUNDLE=$2; shift 2;;
       --l1-rpc-url) L1=$2; shift 2;; --rpc) RPCS+=("$2"); shift 2;;
       --publish-url) PUB_URL=$2; shift 2;; --publish-token-file) PUB_TOKEN=$2; shift 2;;
       --publish-command) PUB_CMD=$2; shift 2;; --alert-command) ALERT=$2; shift 2;;
+      --feed-port) FEED_PORT=$2; shift 2;; --feed-bind) FEED_BIND=$2; shift 2;;
       --dry-run) DRY=1; shift;; --prefix) PREFIX=$2; shift 2;; --rehearsal-set) RSET=$2; shift 2;;
       *) die "unknown option $1";;
     esac
   done
+  [ -z "$FEED_PORT" ] || [[ $FEED_PORT =~ ^[0-9]{2,5}$ ]] || die "--feed-port must be a port number"
+  [[ $FEED_BIND =~ ^[0-9A-Fa-f:.]+$ ]] || die "--feed-bind must be an IP address"
   [ -z "$RSET" ] || [ -n "$PREFIX" ] || die "--rehearsal-set needs --prefix (never on a real install)"
   local SETF="$HERE/public/attestors.set"
   if [ -n "$PREFIX" ]; then
@@ -77,7 +85,7 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   [ ${#RPCS[@]} -eq 3 ] || die "give exactly three --rpc URLs (quorum 2-of-3)"
   [[ $L1 =~ ^http://[A-Za-z0-9.-]+:[0-9]+/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$PREFIX" ] || die "run as root"
-  [ -z "$PUB_URL$PUB_CMD" ] && echo "WARNING: no --publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
+  [ -n "$PUB_URL$PUB_CMD$FEED_PORT" ] || echo "WARNING: no --feed-port/--publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
   [ -z "$PUB_TOKEN" ] || [ -n "$PUB_URL" ] || die "--publish-token-file goes with --publish-url"
   for f in "$UNITS/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor-follower.service" "$OPT/bloch-pos" "$ETC/attestor.sealed"; do
     [ ! -e "$f" ] || die "$f exists; refusing to overwrite (rollback first)"
@@ -109,10 +117,10 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   fi
   # $ETC stays traversable (the follower reads public/); the secrets are restricted per file.
   run install -d -m 0755 "$OPT" "$ETC" "$ETC/public"
-  run install -d -m 0700 "${own_agent[@]}" "$STATE"
+  run install -d -m 0700 "${own_agent[@]}" "$STATE" "$STATE/outbox"
   run install -d -m 0755 "${own_follower[@]}" "$FSTATE"
   run install -m 0755 "$ART/bloch-pos" "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
-  run install -m 0644 "$HERE/attestor_agent.py" "$HERE/attestor_lib.py" "$HERE/aggregate_attestation.py" "$OPT/"
+  run install -m 0644 "$HERE/attestor_agent.py" "$HERE/attestor_lib.py" "$HERE/aggregate_attestation.py" "$HERE/sigfeed.py" "$OPT/"
   run install -m 0644 "$ART/mainnet.manifest" "$ETC/public/"
   run install -m 0644 "$SETF" "$ETC/public/attestors.set"
   if [ $DRY = 1 ]; then echo "+ gunzip carryover.tsv.gz > $ETC/public/carryover.tsv"
@@ -180,6 +188,10 @@ PY
     printf '[Service]\nIPAddressAllow=%s\n' "$allow_agent" > "$UNITS/bloch-l2-attestor.service.d/network.conf"
     [ -z "$PUB_TOKEN" ] || printf 'LoadCredential=publish-token:%s/publish-token\n' "$ETC" >> "$UNITS/bloch-l2-attestor.service.d/network.conf"
     printf '[Service]\nIPAddressAllow=localhost %s\n' "$ip" > "$UNITS/bloch-l2-attestor-follower.service.d/l1-rpc.conf"
+    if [ -n "$FEED_PORT" ]; then
+      install -m 0644 "$HERE/systemd/bloch-l2-attestor-feed.service" "$UNITS/"
+      printf 'SIGFEED_BIND=%s\nSIGFEED_PORT=%s\n' "$FEED_BIND" "$FEED_PORT" > "$ETC/feed.env"; chmod 0644 "$ETC/feed.env"
+    fi
     [ -n "$PREFIX" ] || systemctl daemon-reload
   fi
   if [ -n "$PREFIX" ]; then
@@ -196,7 +208,8 @@ Installed attestor $INDEX, NOT started. Next (each step is read-only until the l
   journalctl -fu bloch-l2-attestor-follower                    # wait for l2_genesis.finalized=true in $FSTATE/status.json
   sudo systemd-run --pipe --wait -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \\
        /usr/bin/python3 -I $OPT/attestor_agent.py check --config $ETC/config.json
-  sudo systemctl enable --now bloch-l2-attestor
+ ${FEED_PORT:+ sudo systemctl enable --now bloch-l2-attestor-feed                # read-only endpoint on TCP $FEED_PORT
+} sudo systemctl enable --now bloch-l2-attestor
   journalctl -fu bloch-l2-attestor -o cat                      # 'started', then 'waiting'/'awaiting-own-finality'/'signed'
 Then remove the transport bundle copy from this host ($BUNDLE); its offline backup stays with you.
 MSG
@@ -206,7 +219,7 @@ cmd_rollback() {
   local PURGE=0
   while [ $# -gt 0 ]; do case $1 in --purge-key) PURGE=1; shift;; --dry-run) DRY=1; shift;; *) die "unknown option $1";; esac; done
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || die "run as root"
-  for unit in bloch-l2-attestor bloch-l2-attestor-follower; do
+  for unit in bloch-l2-attestor-feed bloch-l2-attestor bloch-l2-attestor-follower; do
     run systemctl disable --now "$unit.service" || true
     run rm -rf "$UNITS/$unit.service" "$UNITS/$unit.service.d"
   done
@@ -222,7 +235,7 @@ cmd_rollback() {
 }
 
 cmd_status() {
-  systemctl --no-pager status bloch-l2-attestor bloch-l2-attestor-follower 2>/dev/null | sed -n '1,12p' || true
+  systemctl --no-pager status bloch-l2-attestor bloch-l2-attestor-follower bloch-l2-attestor-feed 2>/dev/null | sed -n '1,12p' || true
   [ -e "$ETC/PAUSE" ] && echo "PAUSED ($ETC/PAUSE exists)"
   [ -e "$STATE/state.json" ] && python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))
 print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
