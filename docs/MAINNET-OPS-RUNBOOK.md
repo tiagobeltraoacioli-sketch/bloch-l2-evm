@@ -19,30 +19,56 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 ## 2. Monitor
 
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
-dependencies, no keys). It calls only `eth_chainId`, `eth_blockNumber`,
+dependencies, no keys) for the v2 L2 build `l2-78d4921c-v2` (follower
+`c18752fd…`, produce-dev `7c1cc62b…`, settled-rpc `4fc9fa1e…`). Its JSON-RPC
+calls are limited to `eth_chainId`, `eth_blockNumber`,
 `eth_getBlockByNumber`, `eth_getStorageAt`, `bloch_finality`,
 `getchaininfo`, `getblockcount` and `getl2settlement`; any other method is
-refused before a request is made. Exit status: 0 OK, 1 WARN, 2 CRIT,
-3 UNKNOWN (Nagios/Prometheus-textfile friendly).
+refused before a request is made. Its only other commands are
+`systemctl show` and `journalctl` (read-only). Exit status: 0 OK, 1 WARN,
+2 CRIT, 3 UNKNOWN (Nagios/Prometheus-textfile friendly).
 
 ```
-python3 deployment/mainnet/l2_monitor.py --profile mainnet \
-  --l2-rpc http://127.0.0.1:18945 \
-  --l1-rpc http://127.0.0.1:PORT_A --l1-rpc http://127.0.0.1:PORT_B --l1-rpc http://127.0.0.1:PORT_C \
-  --file prover=/path/to/prover-heartbeat:900 --json
+python3 deployment/mainnet/l2_monitor.py --profile mainnet --phase live \
+  --l2-rpc A=http://127.0.0.1:18955 --l2-rpc B=http://BACKEND_B:18955 \
+  --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 \
+  --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json \
+  --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service \
+  --attest-drop https://drop.example/attest --alert-config /etc/bloch-l2-monitor/alert.json --json
 ```
 
-`--file NAME=PATH[:SECONDS]` age-checks any heartbeat or status file (for
-example the follower `status.json`, or a prover/settler heartbeat), WARN
-above SECONDS and CRIT above 5×SECONDS. `--set KEY=VALUE` overrides a
-threshold. Tests: `python3 -m unittest discover -s deployment/mainnet -p
-'test_l2_monitor.py' -v`. Run it every minute from cron or a timer under an
-unprivileged user; it needs only loopback HTTP access.
+Options:
 
-Run on devnet4 (2026-10-18 22:48 UTC, `--profile devnet4`, three L1 RPCs,
-through an SSH port forward): status OK; latest 686, safe 685, finalized 684;
-L1 epoch 8165 / finalized 8163; follower 0 blocks behind; escrow 123.98 BLCH +
-released 176.02 BLCH = minted 300 BLCH.
+- `--phase prelaunch` (until the first settlement is accepted): an L2 at its
+  pinned genesis with `accepted = null` is expected, not an alert. Switch to
+  `--phase live` at go-live; with a settlement present, `prelaunch` warns.
+- `--l2-rpc NAME=URL` once per settled-RPC backend (A on 136, B on
+  45.77): each is checked, and they must agree on every common block.
+- `--follower-status NAME=PATH`: a follower `status.json` (age, pins,
+  verified lag, epoch lag). The file must be readable by the monitor user.
+- `--unit NAME=UNIT`: unit state (a failed unit with exit 3 is a halt) and
+  the failure events of its JSON journal in the last hour (settler: `halt`,
+  `prover-failed`, a non-zero `remote-proof`, `acceptance-timeout`,
+  `rpc-no-quorum`, `da-funding-low`, …; shadow: `halt`, `native-no-quorum`;
+  attestor: `refused-*`, `held`, `publish-failed`). `--event-log
+  NAME=PATH` does the same for a log file.
+- `--attest-drop DIR_OR_URL`: the attestation drop, for signatures per round.
+- `--binary PATH`: the installed binary must equal its v2 pin.
+- `--build-json PATH`: compare the L1 gates with this build's compiled
+  epochs (default: the v2 epochs compiled into the monitor).
+- `--file NAME=PATH[:SECONDS]`: heartbeat age, WARN above SECONDS and CRIT
+  above 5×SECONDS. `--set KEY=VALUE` overrides a threshold.
+- `--alert-config FILE` (`monitor/alert.json.example`): `webhook_url`
+  (JSON POST with `text`, `status`, `checks`), `telegram.bot_token_file` +
+  `telegram.chat_id`, `min_level`, `realert_seconds`. It alerts on a new or
+  worse check, repeats every `realert_seconds` while unhealthy, and sends one
+  recovery. Values containing `TBD` count as unset (the run then reports
+  `alert_delivery` WARN). `--alert-dry-run` decides without sending.
+
+Tests: `python3 -m unittest discover -s deployment/mainnet -p
+'test_l2_monitor.py' -v`. Run it every minute under an unprivileged user
+(`monitor/bloch-l2-mainnet-monitor.{service,timer}`); it needs only HTTP
+access to the RPCs and, for alerts, to the webhook / api.telegram.org.
 
 ## 3. Checks and alert thresholds (mainnet profile)
 
@@ -67,7 +93,18 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `inbox_backlog` | L1 deposits not consumed by the L2 | 50 | 500 | each L2 block consumes all pending deposits; a backlog means the sequencer is not reading L1 |
 | `da_backlog` | DA records awaiting settlement | 3 | 10 | one per block with user transactions; growth = settlements failing after DA |
 | `release_window` | remaining release in the current window | 0 left | – | exchanges' L2 → L1 claims will wait for the next window |
-| `follower_lag` | L1 finalized height − follower verified blocks | 64 | 320 | 64 = two epochs; 320 ≈ 10 epochs (≈ 2.7 h) |
+| `follower_verified_lag[*]` | L1 finalized height − follower verified blocks | 64 | 320 | 64 = two epochs; 320 ≈ 10 epochs (≈ 2.7 h) |
+| `follower_epoch_lag[*]` | L1 finalized epoch − follower's own FFG-finalized epoch | 5 | 8 | a constant 3 is structural: the votes finalizing the newest checkpoints are in blocks after the node's finalized root |
+| `follower_status[*]` | `status.json` age and pins | 300 s | 900 s | the attestor agent treats > 900 s as a stalled follower |
+| `l2_backends`, `l2_backends_agree` | backends up; same hash for every common block; finalized spread | one down / spread 2 | all down / any hash differs / spread 8 | two followers replaying the same L1 must agree exactly |
+| `l2_genesis[*]` | block 0 = `632e45ae…f468` | – | differs | wrong database or profile |
+| `settlement_age` | now − time of `getl2settlement.source.slot` (frozen right after each acceptance) | 25 min | 45 min | same cadence as `l2_head_age`; `live` phase only |
+| `l1_l2_identity` | network, genesis, chain id and attestor set of `getl2settlement` | – | differs | pins |
+| `l1_gates` | epochs to the next pending L1 gate (`getchaininfo.hard_forks`) | 96 (≈ 1 day) | 6 | upgrades must land before the gate |
+| `l1_gates_vs_l2_build` | L1 gate epochs = epochs compiled into the L2 build | – | differs | a follower/producer built for other epochs halts at the gate |
+| `attestors` | per finalized withdrawal root with at least one partial, older than 120 L1 blocks: signatures | < 5 | < 3 | agents sign only roots covering a ≥ 100 BLCH withdrawal; once one signs, all live agents sign within a few cycles. The message names silent signers |
+| `unit[*]`, `events[*]` | unit state; failure events in the last hour | warn events; ≥ 5 restarts | `halt`, refusals, a stopped unit; any warn event ≥ 5 times | |
+| `binary[*]` | installed sha256 = v2 pin | – | differs | |
 | `file:*` | heartbeat file age | given | 5 × given | prover/settler/follower liveness |
 
 The `devnet4` profile keeps the same structure with devnet values (2 s
