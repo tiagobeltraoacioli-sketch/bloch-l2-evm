@@ -340,3 +340,24 @@ Replaying to the node's head would be equally sound (finality is still what
 the replayed FFG state says), but the verifier holds one branch: a reorg of the
 unfinalized tip would halt it. Doing it needs a retained state at the
 finalized block and a rollback/re-replay of the new branch. Not done here.
+
+## Next RPC build: settled history and minimum tip
+
+**Follower status schema v3.** `status.json` keeps its scalar fields and adds `finalized_settlements_count`,
+`finalized_settlements_recent` (newest 64) and `settlement_log` (`file`, `entries`, `bytes`, `digest`). Every settlement
+is one line of the append-only `<status stem>.settlements.jsonl` beside it. The follower syncs the log before the status
+names it, and rewrites it from the replay at each start.
+
+- The settled RPC reads only the part it has not read. It compares new entries and the newest 64 with the local chain.
+- The RPC still accepts schema v2, up to 256 MiB, so RPC and follower upgrade in either order. An RPC on a v2 status
+  above the old 16 MiB limit recovers by upgrading the RPC alone. A pre-v3 RPC refuses a v3 status: upgrade the RPC first.
+- A log that disagrees with the status stops finality from advancing on that RPC, and the rest keeps serving. Restart
+  the RPC only after checking the follower.
+- The attestor agent and `l2_reorg_recover.py` read both schemas. The attestor checks the log digest in its daily
+  rebuild check.
+
+**Minimum tip.** `bloch-l2-settled-rpc --min-tip-wei` (default 100000000, 0.1 gwei) refuses an effective priority fee
+below it at the spool, evicts older spool entries below it at the sweep, and floors `eth_maxPriorityFeePerGas`,
+`eth_gasPrice` and the `eth_feeHistory` rewards. `bloch-l2-produce-dev extend --min-tip-wei` holds such entries in the
+spool; the mainnet settler installer sets `min_tip_wei`. This is operator policy, not a consensus rule: blocks with a
+lower tip stay valid, and replay never consults it. Priority fees stay in the keyless vault until a later program change.

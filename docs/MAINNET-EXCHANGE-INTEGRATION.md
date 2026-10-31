@@ -159,7 +159,9 @@ A user withdrawal on the L2 is an ordinary L2 transfer.
   elasticity 2, base-fee change at most ±0.4 % per block (denominator 250),
   30 000 000 gas per block. A 21 000-gas transfer costs about
   `21 000 × base fee` (0.000021 BLCH at 1 gwei; less while blocks are empty).
-  Use `eth_feeHistory` / `eth_gasPrice`; a priority fee of 0 is accepted.
+  Use `eth_feeHistory` / `eth_gasPrice`. From the next RPC build the sequencer's spool refuses an
+  effective priority fee below 0.1 gwei (`transaction underpriced`), and the fee methods never suggest
+  less. Builds up to v2.1 accept a priority fee of 0.
   Base fees go to the base-fee vault `0x4200…0019` and priority fees to
   `0x4200…0011` (the block's `COINBASE`); nothing is burned.
 - A sent transaction is spooled by the sequencer and included in the next

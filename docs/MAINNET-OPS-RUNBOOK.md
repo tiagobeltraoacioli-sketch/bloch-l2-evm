@@ -11,7 +11,7 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 | L1 nodes (`bloch-pos` 0.1.0-mainnet, 3 RPCs) | settlement, DA, deposits, claims, escrow | same head ± a few blocks, L1 finalized epoch = epoch − 2, `getl2settlement.profile.activated = true` |
 | Sequencer / settlement worker | builds one L2 block per cycle, publishes DA, submits the settlement | a new L2 block every ≈ 12–15 min; `latest − safe = 1` |
 | Prover (SP1 Groth16) | proves each block | one proof per cycle; the cycle time is the block interval |
-| Native follower | replays L1 from the pinned genesis, derives `finalized` | `verified_blocks` = L1 finalized height (within a poll) |
+| Native follower | replays L1 from the pinned genesis, derives `finalized` | `verified_blocks` = L1 finalized height (within a poll); `follower_status_size` OK (a schema v2 status above 16 MiB stops finality on a settled RPC up to v2.1: the monitor warns at 8 MiB and is critical at 12 MiB) |
 | Settled RPC (`bloch-l2-settled-rpc`) | serves `latest`/`safe`/`finalized`, spools transactions | answers; tags ordered; `bloch_finality` current |
 | Public RPC gateway, explorer | public access | out of scope here; probe them with the same monitor |
 | Escrow | L1 consensus escrow backing L2 supply | `escrow_conserved = true` on every L1 node; escrow + released ≥ L2 minted − burned |
