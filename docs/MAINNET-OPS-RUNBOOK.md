@@ -58,6 +58,13 @@ Options:
   epochs (default: the v2 epochs compiled into the monitor).
 - `--file NAME=PATH[:SECONDS]`: heartbeat age, WARN above SECONDS and CRIT
   above 5×SECONDS. `--set KEY=VALUE` overrides a threshold.
+- `--guardian-health NAME=PATH[:SECONDS]`: the `health_file` of a bridge guardian
+  (`guardiao.py`, bloch-l2-bridge). CRIT on `healthy` other than true (for example a
+  failed pause), on a missing or malformed file, and when no round has verified the
+  bridge yet. The age of the file and of the last verified round are WARN above SECONDS
+  (default 300) and CRIT above 3×SECONDS. Run it on the guardian's host: the file is
+  mode 0640, so add `bloch-guardiao` to `SupplementaryGroups=` of the monitor unit and
+  keep `/var/lib/bloch-guardiao` group-readable.
 - `--alert-config FILE` (`monitor/alert.json.example`): `webhook_url`
   (JSON POST with `text`, `status`, `checks`), `telegram.bot_token_file` +
   `telegram.chat_id`, `min_level`, `realert_seconds`. It alerts on a new or

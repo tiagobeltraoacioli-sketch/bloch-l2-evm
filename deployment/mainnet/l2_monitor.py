@@ -11,7 +11,7 @@ What it reads (it never writes to a chain, holds no key and opens no keystore):
   * one or more L1 node RPCs (`--l1-rpc`, repeat): getchaininfo (incl. `hard_forks`) and getl2settlement;
   * optionally: follower `status.json` files, the attestation drop (directory or HTTP GET base), the
     state and journal of systemd units (`systemctl show`, `journalctl`, read-only), JSON-lines log files,
-    heartbeat-file ages and installed binaries' SHA-256.
+    heartbeat-file ages, bridge guardian health files and installed binaries' SHA-256.
 
 JSON-RPC calls are limited to READ_ONLY_METHODS; any other method is refused before a request is made.
 The only outbound writes are the alert notifications the owner configures (`--alert-config`).
@@ -125,6 +125,7 @@ _COMMON: Dict[str, Any] = {
     'inbox_backlog_warn': 50, 'inbox_backlog_crit': 500,
     'da_backlog_warn': 3, 'da_backlog_crit': 10,
     'file_age_warn': 120, 'file_age_crit': 600,
+    'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
@@ -812,6 +813,36 @@ def check_files(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> N
         r.graded(f'file:{name}', max(0.0, now - mtime), warn, crit, f'{path} written {now - mtime:.0f} s ago')
 
 
+def check_guardian_health(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """The bridge guardian's `health_file` (guardiao.py): alive, not reporting a problem, and still able to verify."""
+    for spec in specs:
+        name, _, rest = spec.partition('=')
+        path, _, limit = rest.partition(':')
+        warn = float(limit) if limit else p['guardian_age_warn']
+        crit = warn * 3
+        try:
+            doc = json.loads(Path(path).read_text())
+            if not isinstance(doc, dict):
+                raise ValueError('not an object')
+            written = float(doc['t'])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            r.add(f'guardian[{name}]', CRIT, f'{path}: {type(e).__name__}: {e}')
+            continue
+        r.graded(f'guardian_age[{name}]', max(0.0, now - written), warn, crit, f'{path} written {now - written:.0f} s ago')
+        problems = doc.get('problems')
+        ids = ', '.join(sorted(str(k) for k in problems)) if isinstance(problems, dict) else ''
+        if doc.get('healthy') is True:
+            r.add(f'guardian[{name}]', OK, 'healthy')
+        else:
+            r.add(f'guardian[{name}]', CRIT, f'unhealthy: {ids or "no problem listed"}')
+        verified = doc.get('verified_t')
+        if not isinstance(verified, (int, float)) or isinstance(verified, bool):
+            r.add(f'guardian_verified[{name}]', CRIT, 'no round has verified the bridge yet')
+        else:
+            r.graded(f'guardian_verified[{name}]', max(0.0, now - verified), warn, crit,
+                     f'last verified round {now - verified:.0f} s ago')
+
+
 def check_binaries(paths: List[str], r: Report) -> None:
     for path in paths:
         name = Path(path).name
@@ -950,6 +981,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_units(args.unit or [], p, now, run_cmd, r)
     check_event_logs(args.event_log or [], p, now, r)
     check_files(args.file or [], p, now, r)
+    check_guardian_health(args.guardian_health or [], p, now, r)
     check_binaries(args.binary or [], r)
     return r
 
@@ -966,6 +998,8 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--unit', action='append', help='[NAME=]UNIT: systemd state + journal failure events')
     a.add_argument('--event-log', action='append', help='[NAME=]PATH of a JSON-lines log (settler, shadow, ...)')
     a.add_argument('--file', action='append', help='NAME=PATH[:MAX_AGE_S] heartbeat file to age-check')
+    a.add_argument('--guardian-health', action='append',
+                   help='NAME=PATH[:MAX_AGE_S] health_file of a bridge guardian (WARN above MAX_AGE_S, CRIT above 3x)')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')
     a.add_argument('--build-json', help='build.json of the L2 build (default: the v2 pins compiled in)')
     a.add_argument('--set', action='append', help='override a threshold, KEY=VALUE')
