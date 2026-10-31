@@ -115,7 +115,7 @@ host use an SSH tunnel or a private network. Do not publish the port: the public
 | `tools/signatario-*` mint pre-checks | `l2_rpc` | `http://127.0.0.1:18965` | Mints are checked against the settled chain. See the relayer limit. |
 | `tools/signatario-*` release | `follower` | the signer's own follower | The signer rebuilds the L2 itself and serves it on a private settled RPC. It never reads `l2_rpc` for finality, so this path needs no replica. |
 | `deployment/mainnet/attestor` | none | | The agent has no L2 RPC: it uses its own follower and rebuild, plus an L1 RPC quorum. Do not point it at a replica. |
-| `deployment/mainnet/l2_monitor.py` | its L2 RPC URL | `http://127.0.0.1:18965` | Gives a second view next to the settler's RPC. |
+| `deployment/mainnet/l2_monitor.py` | `--l2-rpc` | `http://127.0.0.1:18965` | Gives a second view next to the settler's RPC. |
 
 Use a different `--l1-rpc-url` per operator, so that a stalled L1 RPC stops only one of them.
 
