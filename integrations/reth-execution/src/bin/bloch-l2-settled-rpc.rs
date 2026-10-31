@@ -12,9 +12,12 @@
 //! - `safe`: the settlement the operator's own native node holds at its
 //!   canonical head (accepted on L1, not yet finalized), when it matches the
 //!   local canonical header; never below `finalized`.
-//! No checkpoint signature is involved. Neither level regresses; any
-//! inconsistency freezes it and is logged. `bloch_finality` reports both with
-//! their L1 anchors.
+//! No checkpoint signature is involved. Neither level regresses. A status file
+//! that is lost, unreadable or inconsistent with the local chain closes both
+//! levels: their tags answer an error and `bloch_settlement` answers null until a
+//! valid status returns. A status for a block not local yet only delays them.
+//! `bloch_finality` reports both with their L1 anchors, and `status` with the
+//! state and age of the follower's status file.
 //!
 //! `pending` is answered as Ethereum clients expect from a rollup node that
 //! publishes no pending block: state at `pending` is the latest state;
@@ -829,6 +832,103 @@ fn create_view(data: &Path, view: &Path) -> Result<()> {
 
 type Header = reth_primitives_traits::SealedHeader<bloch_reth_execution::BlochNodeHeader>;
 
+/// The status lists a settled L2 block this database has not reached: this RPC lags, nothing is wrong.
+#[derive(Debug)]
+struct NotLocalYet(u64);
+
+impl std::fmt::Display for NotLocalYet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "settled L2 block {} is not in the local canonical chain yet", self.0)
+    }
+}
+
+impl std::error::Error for NotLocalYet {}
+
+/// Whether a failed status read closes the published levels. The follower replaces the file atomically,
+/// so anything but a local lag is a real fault. A missing file is `Ok(None)` and closes them too.
+fn closes_levels(error: &eyre::Report) -> bool {
+    error.downcast_ref::<NotLocalYet>().is_none()
+}
+
+/// Methods that accept a block tag, with the position of the tag. `None` means a filter object.
+const TAGGED_METHODS: [(&str, Option<usize>); 19] = [
+    ("eth_getBlockByNumber", Some(0)),
+    ("eth_getHeaderByNumber", Some(0)),
+    ("eth_getBlockReceipts", Some(0)),
+    ("eth_getBlockTransactionCountByNumber", Some(0)),
+    ("eth_getUncleCountByBlockNumber", Some(0)),
+    ("eth_getTransactionByBlockNumberAndIndex", Some(0)),
+    ("eth_getRawTransactionByBlockNumberAndIndex", Some(0)),
+    ("eth_feeHistory", Some(1)),
+    ("eth_getBalance", Some(1)),
+    ("eth_getCode", Some(1)),
+    ("eth_getTransactionCount", Some(1)),
+    ("eth_call", Some(1)),
+    ("eth_estimateGas", Some(1)),
+    ("eth_createAccessList", Some(1)),
+    ("eth_getStorageAt", Some(2)),
+    ("eth_getProof", Some(2)),
+    ("eth_getAccount", Some(1)),
+    ("eth_getLogs", None),
+    ("eth_newFilter", None),
+];
+
+fn names_a_closed_level(values: &[serde_json::Value], position: Option<usize>) -> bool {
+    let is_level = |v: Option<&serde_json::Value>| {
+        let tag = v.and_then(|v| v.as_str());
+        tag == Some("finalized") || tag == Some("safe")
+    };
+    match position {
+        Some(at) => {
+            let value = values.get(at);
+            // EIP-1898 form: {"blockNumber": tag}.
+            is_level(value) || is_level(value.and_then(|v| v.get("blockNumber")))
+        }
+        None => values.first().is_some_and(|f| is_level(f.get("fromBlock")) || is_level(f.get("toBlock"))),
+    }
+}
+
+/// While `closed` is set, refuse every query at `safe` or `finalized` instead of answering from a level
+/// this process can no longer back with a follower status. Other tags and methods are untouched.
+/// Call it last, so that it wraps every other handler.
+fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    for (name, position) in TAGGED_METHODS {
+        if module.remove_method(name).is_none() {
+            continue;
+        }
+        let (original, closed) = (original.clone(), closed.clone());
+        module.register_async_method(name, move |params, _, _| {
+            let (original, closed) = (original.clone(), closed.clone());
+            async move {
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                if closed.load(Ordering::Acquire) && names_a_closed_level(&values, position) {
+                    return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                        -32001,
+                        "finality unavailable: this node has lost a valid follower status; safe and finalized are closed",
+                        None::<()>,
+                    ));
+                }
+                original.call::<_, serde_json::Value>(name, values).await.map_err(|error| match error {
+                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                    other => rpc_error(other.to_string()),
+                })
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// The `status` member of `bloch_finality`: state of the follower's file and, when known, its age.
+fn status_signal(state: &str, written_at_unix: Option<u64>) -> serde_json::Value {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    serde_json::json!({
+        "state": state,
+        "written_at_unix": written_at_unix,
+        "age_s": written_at_unix.map(|written| now.saturating_sub(written)),
+    })
+}
+
 /// What the follower's status proves against the local canonical chain.
 struct Levels {
     finalized: Option<Header>,
@@ -885,7 +985,7 @@ fn verified_levels(
         let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
         let local = provider
             .sealed_header(number)?
-            .ok_or_else(|| eyre::eyre!("settled L2 block {number} is not in the local canonical chain yet"))?;
+            .ok_or(NotLocalYet(number))?;
         ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
         best = Some(local);
     }
@@ -1033,7 +1133,8 @@ fn follow_withdrawals(
     };
     // Each settlement is read once, so one that cannot be parsed stops the index for good: a later
     // settlement cannot be applied without it.
-    match withdrawal_proofs::final_entries(new_settlements, indexed) {
+    let after = pending.last().map_or(indexed, |entry: &withdrawal_proofs::FinalEntry| entry.number.max(indexed));
+    match withdrawal_proofs::final_entries(new_settlements, after) {
         Ok(entries) => pending.extend(entries),
         Err(error) => {
             println!("withdrawal proofs FROZEN: unreadable finalized settlement: {error}");
@@ -1141,6 +1242,8 @@ async fn main() -> Result<()> {
     }
     floor_fee_suggestions(&mut module, options.min_tip, factory.clone(), rules())?;
     limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT)?;
+    let levels_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    refuse_closed_levels(&mut module, levels_closed.clone())?;
     let server = start_http_rpc(module, options.port).await?;
     println!(
         "SETTLED L2 RPC (chain id {}) at {}; finality only from verified native FFG settlement; {}",
@@ -1186,8 +1289,26 @@ async fn main() -> Result<()> {
                     // Block 0 is a real level (the final L2 genesis): compare
                     // against "nothing published yet", not against number 0.
                     let above = |h: &Header, current: &Option<Header>| current.as_ref().is_none_or(|c| h.0.number > c.0.number);
+                    // Nothing already proven becomes false, but this process can no longer back it or show
+                    // that it is current, so readers of these levels get an error rather than an old answer.
+                    let close = |state: &str, why: &str| {
+                        if !levels_closed.swap(true, Ordering::AcqRel) {
+                            println!("finality status {state}: {why}; safe and finalized closed");
+                        }
+                        settlements.write().expect("settlement lock").clear();
+                        *finality.write().expect("finality lock") = serde_json::json!({
+                            "latest": level_json(&factory.sealed_header(head_number).ok().flatten()),
+                            "safe": null,
+                            "finalized": null,
+                            "finalized_height": null,
+                            "status": status_signal(state, None),
+                        });
+                    };
                     match verified_levels(&options.status, &options.network, kernel.chain_id, &provider, &settlement_cursor) {
                         Ok(Some(levels)) => {
+                            if levels_closed.swap(false, Ordering::AcqRel) {
+                                println!("finality status valid again; safe and finalized reopened");
+                            }
                             match levels.finalized {
                                 Some(header) if above(&header, &finalized) => {
                                     state.set_finalized(header.clone());
@@ -1247,10 +1368,22 @@ async fn main() -> Result<()> {
                                     "verified_tip": s["verified_tip"], "verified_blocks": s["verified_blocks"],
                                     "safe_settlement": s["safe_settlement"],
                                 },
+                                "status": status_signal("ok", s["written_at_unix"].as_u64()),
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
-                        Ok(None) => {}
+                        Ok(None) if finalized.is_none() && safe.is_none() => {}
+                        // The settlement index is cleared on closing, so reopening reads the history again.
+                        Ok(None) => {
+                            close("missing", "file missing");
+                            settlement_cursor = settlement_log::Cursor::default();
+                            unindexed.clear();
+                        }
+                        Err(error) if closes_levels(&error) => {
+                            close("invalid", &error.to_string());
+                            settlement_cursor = settlement_log::Cursor::default();
+                            unindexed.clear();
+                        }
                         Err(error) => println!("finality not advanced: {error}"),
                     }
                 }
@@ -1280,6 +1413,62 @@ mod tests {
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{Address, Signature, TxKind};
     use k256::ecdsa::SigningKey;
+
+    #[test]
+    fn only_queries_at_safe_or_finalized_are_refused_while_closed() {
+        use serde_json::json;
+        let check = |v: serde_json::Value, at| names_a_closed_level(v.as_array().unwrap(), at);
+        assert!(check(json!(["finalized", false]), Some(0)));
+        assert!(check(json!(["safe", false]), Some(0)));
+        assert!(check(json!(["0xabc", "finalized"]), Some(1)));
+        assert!(check(json!(["0xabc", "0x0", "safe"]), Some(2)));
+        assert!(check(json!(["0xabc", {"blockNumber": "finalized"}]), Some(1)));
+        assert!(check(json!([{"fromBlock": "0x1", "toBlock": "finalized"}]), None));
+        assert!(!check(json!(["latest", false]), Some(0)));
+        assert!(!check(json!(["0x10", false]), Some(0)));
+        assert!(!check(json!(["0xabc"]), Some(1)));
+        assert!(!check(json!([{"fromBlock": "0x1", "toBlock": "latest"}]), None));
+    }
+
+    #[tokio::test]
+    async fn closed_levels_answer_an_error_and_reopen() {
+        use serde_json::{json, Value};
+        let mut module = jsonrpsee::RpcModule::new(());
+        module
+            .register_method("eth_getBlockByNumber", |params, _, _| {
+                let values: Vec<Value> = params.parse()?;
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(json!({"tag": values[0]}))
+            })
+            .unwrap();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        refuse_closed_levels(&mut module, closed.clone()).unwrap();
+        let ask = |tag: &'static str| {
+            let module = module.clone();
+            async move { module.call::<_, Value>("eth_getBlockByNumber", [json!(tag), json!(false)]).await }
+        };
+        assert_eq!(ask("finalized").await.unwrap(), json!({"tag": "finalized"}));
+        closed.store(true, Ordering::Release);
+        assert!(ask("finalized").await.is_err());
+        assert!(ask("safe").await.is_err());
+        assert_eq!(ask("latest").await.unwrap(), json!({"tag": "latest"}));
+        closed.store(false, Ordering::Release);
+        assert_eq!(ask("finalized").await.unwrap(), json!({"tag": "finalized"}));
+    }
+
+    #[test]
+    fn a_status_ahead_of_this_database_does_not_close_the_levels() {
+        assert!(!closes_levels(&eyre::Report::new(NotLocalYet(7))));
+        assert!(closes_levels(&eyre::eyre!("settled L2 block 7 differs from the local canonical header")));
+    }
+
+    #[test]
+    fn the_status_signal_reports_state_and_age() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let signal = status_signal("ok", Some(now - 100));
+        assert_eq!(signal["state"], "ok");
+        assert!(signal["age_s"].as_u64().unwrap() >= 100);
+        assert!(status_signal("missing", None)["age_s"].is_null());
+    }
 
     fn spool(dir: &Path, spec: &ChainSpec, key: u8, nonce: u64) {
         let key = SigningKey::from_bytes((&[key; 32]).into()).unwrap();
