@@ -98,28 +98,8 @@ repeats policy, successor and cryptographic proof verification.
 This composer does not strengthen the authority behind `ValidatedV2Prefix` and
 does not make a proof valid. It assigns no Genesis-4 wire tag or state component,
 and cannot replace checkpoint/source authentication or validator execution.
-On Unix, `ValidatedSettlementSelectionV1::verify_and_commit` frames the exact
-proof bytes and sends the matching transaction/expectation directly through
-`SettlementStoreV1`'s CAS and durable publication path. The returned mark must
-be retained independently for rollback detection. This persists the local
-settlement head, consumed cursor and exact transaction; it does not persist the
-source registry, authenticated body artifacts or checkpoint authority, and it
-provides no atomic transaction spanning the separate source journal.
-
-The stricter `verify_inclusion_and_commit` path accepts no free proof bytes. It
-consumes an `AuthenticatedSettlementInclusionV1` previously refined from a
-complete authenticated Genesis-4 body, requires its statement to equal this
-selection and passes those exact included bytes to the same store/kernel. Its
-`PersistedSettlementAdmissionV1` result keeps the accepted head, new external
-mark and durable admission receipt together. The same create-once record stores
-the exact transaction, containing block/slot, checkpoint, transaction index and
-admission commitment and validates their cross-links on recovery. The complete
-body, header/ancestry path and authenticated checkpoint-authority artifact must
-still be retained independently; stored coordinates are not a finality
-capability. The core `TransactionInclusionEvidenceV1` format can canonically
-retain and reauthenticate that body and ancestry path. The
-`verify_evidence_and_commit` path stores it atomically with the accepted record;
-it deliberately does not authenticate checkpoint authority.
+The durable commit paths through the WS-era settlement store were retired on
+2026-10-30, so a selection now feeds only the in-memory registry kernel.
 
 The existing SP1 host permits Core artifacts up to 32 MiB, while the audited
 native block limit is 512 KiB; current Core artifacts are approximately 2.8 MiB.

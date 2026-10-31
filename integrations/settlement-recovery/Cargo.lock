@@ -1899,19 +1899,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bloch-native-escrow-pq"
-version = "0.1.0-experimental"
-dependencies = [
- "alloy-primitives",
- "bloch-crypto",
- "bloch-l2-evm",
- "bloch-pos-committee",
- "serde",
- "serde_json",
- "sha3 0.11.0",
-]
-
-[[package]]
 name = "bloch-pos-committee"
 version = "0.1.0"
 dependencies = [
@@ -2000,7 +1987,6 @@ dependencies = [
  "bloch-execution-artifact",
  "bloch-l2-evm",
  "bloch-l2-proof",
- "bloch-native-escrow-pq",
  "bloch-pos-committee",
  "bloch-pos-node",
  "bloch-reth-execution",

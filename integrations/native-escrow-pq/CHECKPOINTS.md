@@ -44,16 +44,6 @@ slot comes from this header. The signed epoch is retained separately; neither
 epoch nor slot is silently converted into block height. Header linkage does not
 execute the block or validate its proposer/FFG signatures.
 
-`settlement_authority::bind_settlement_checkpoint_authority` consumes this
-private verified capability together with a complete canonical inclusion
-envelope and an independently selected settlement expectation. It returns a
-non-cloneable package only when the PQ-signed anchor, ancestry endpoint, body,
-exact transaction index and settlement statement all agree. The accompanying
-129-byte `CheckpointAuthorityReceiptV1` binds the immutable policy identity,
-signed checkpoint digest, checkpoint/freshness epochs, block, slot and review
-warning. Decoding the receipt is audit transport only and cannot recreate PQ
-verification.
-
 If a previously verified checkpoint is supplied, its chain identity must match.
 An older incoming epoch is refused. A different digest at the same epoch raises
 a conflict; an identical checkpoint is accepted idempotently. A newer checkpoint
@@ -86,75 +76,19 @@ trust decision. This module does not wire the operator
 CLI's trusted inbox files to consensus: the experimental inbox still needs a
 native committed representation and activation.
 
-The authority-bound commit path embeds that receipt beside the complete
-inclusion envelope in one `BLSTRC04` settlement record. Coordinated recovery
-reopens both stores under independently retained marks, rereads the exact
-historical checkpoint, reverifies its PQ authority at the receipt's recorded
-freshness epoch, rejects future-dated checks, and requires policy, digest, epoch,
-block and slot to match. The audit-only result cannot become a current anchor;
-`current` still performs that separate check. The checkpoint history remains a
-separate rollback domain, so both marks are mandatory. This is still
-weak-subjectivity authentication, not production FFG finality.
-
-`open_authority_bound_stores` is the structural compatibility boundary: it requires
-both non-optional external floors, opens both stores under their exclusive locks,
-checks the latest historical V4/PQ receipt, and exposes neither handle if any
-step fails. The V4 receipt already binds the two identities, so this API does not
-invent a third unsigned manifest or collapse the independently protected floors.
-
-For complete evidence recovery, `open_proof_verified_authority_stores` now
-reverifies every execution proof and every authority receipt in record order,
-including records before either external floor. Every nonempty settlement must
-retain its complete V4 inclusion and authority data; mixed V2/V3 histories need
-explicit reconstruction from independently authenticated artifacts, never
-automatic receipt backfilling. The callback to
-`SettlementStoreV1::open_verified_with_audit` keeps both stores locked until the
-whole replay succeeds. `History { generation, error }` reports an authority
-failure without returning a partial handle or changing retained bytes. An
-otherwise valid latest record cannot hide an earlier invalid receipt.
-
-The caller's `maximum_proofs` bounds settlement proof/audit invocations and
-does not replace the checkpoint store's separate history limit. Signer policy,
-current epoch and both floors remain independent trust inputs. Reverification
-of a historical acceptance epoch does not grant a fresh checkpoint capability,
-establish native settlement consensus or authorize the `finalized` RPC tag.
-
-`open_proof_verified_authority_stores_with_audit` additionally accepts a
-read-only per-record check after mandatory proof, inclusion and PQ authority
-verification. For example, a host can bind every verified record to a stopped
-[Reth canonical snapshot](../reth-execution/SETTLEMENT-BINDING.md). Invalid
-authority never reaches this callback. `AdditionalAudit` refusals retain their
-record generation and release both stores without returning a handle. This
-hook is additive; it cannot replace the mandatory verifiers. The original
-strict opener preserves its behavior by supplying a no-op additional audit.
-
-The separate AGPL [combined recovery adapter](../settlement-recovery/README.md)
-links that strict opener with the Reth audit behind one entrypoint. It compares
-the selected native genesis identities, exposes no caller-controlled audit
-callback and returns locked stores only after full coverage and a stable local
-canonical tip. Combined tests exercise real PQ signatures and real Reth storage;
-the proof verifier remains an explicit test double in those fixtures.
+The `settlement_authority` module and its coordinated recovery with the WS-era
+settlement store were retired on 2026-10-30. The checkpoint store remains.
 
 ## Validation
 
-The checkpoint and settlement-authority tests use disposable locally generated
+The checkpoint tests use disposable locally generated
 hybrid keys. They cover
 real Phase-A and Phase-B signatures, successful header/body authentication,
 corruption/removal of signature components, weakened or duplicate-key policies,
 missing external quorum, duplicate signer indices, freshness boundaries,
 adoption/review/expiry clocks, network/genesis/state/header/version mismatch,
 rollback, same-epoch conflict, identical retry and resource bounds. The eight
-existing escrow authorization tests also pass. The authority suite additionally
-covers V4 atomic publication, recovery after a newer checkpoint advances,
-historical expiry, future audit claims, predecessor relinking and receipt
-tampering. Coordinated-open tests also reject either incorrect floor and prove
-that failed admission releases both locks. Keys are not printed or saved.
-Full-history replay additionally covers a valid two-record history and eleven
-invalid first-record variants under a legitimate latest receipt: V2/V3 missing
-authority, changed policy/digest/block/slot/review flag, an absent signed
-checkpoint, future or stale-at-acceptance clocks, and a truncated receipt. The
-execution-proof verifier in these recovery regressions is a fixed test double;
-the checkpoint signatures are real ML-DSA-65 and Falcon-1024 signatures.
+existing escrow authorization tests also pass. Keys are not printed or saved.
 
 ```sh
 cargo +1.94.1 test --offline --locked --manifest-path integrations/native-escrow-pq/Cargo.toml
