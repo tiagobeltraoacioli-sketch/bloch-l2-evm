@@ -436,7 +436,7 @@ def campaign():
         (RUN / 'settler.json').write_text(json.dumps(seq, indent=2) + '\n')
         griefer_cfg = settler_config(info, 'griefer', LOCKED, 'followerB', 'gda', RPC[:3])
         (RES / 'net.json').write_text(json.dumps({**info, 'user_address': addresses['user'], 'griefer_address': addresses['griefer']}, indent=1))
-        wait_for('activation', lambda: (rpc('getl2settlement').get('native_height') or 0) >= 3, timeout=900, every=3)
+        wait_for('activation', lambda: ((rpc('getl2settlement') or {}).get('native_height') or 0) >= 3, timeout=900, every=3)
         chain, l2 = rpc('getchaininfo'), rpc('getl2settlement')
         verdict['flag_day'] = {'chain_height': chain['height'], 'epoch': chain['epoch'], 'native_height': l2['native_height'],
                                'offset': chain['height'] - l2['native_height']}
