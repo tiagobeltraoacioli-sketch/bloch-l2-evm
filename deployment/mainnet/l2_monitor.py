@@ -53,7 +53,7 @@ READ_ONLY_METHODS = frozenset({
     # L2 (Ethereum JSON-RPC subset + Bloch extensions)
     'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality',
     # L1 (bloch-pos)
-    'getchaininfo', 'getblockcount', 'getl2settlement',
+    'getchaininfo', 'getblockcount', 'getl2settlement', 'getutxos',
 })
 
 # ---- Pinned mainnet identity (Genesis-4; deployment/mainnet/sequencer_mainnet.py) ----
@@ -102,6 +102,7 @@ V2_COMPILED_GATES: Dict[str, Any] = {
     'HF3_SLH_SUITE_EPOCH': 7360, 'HF3_PQ_MIGRATION_EPOCH': 7360,
 }
 
+FINALITY_CLOSED_CODE = -32001  # bloch-l2-settled-rpc: safe and finalized refused without a valid follower status
 SUPPLY_LEDGER = '0x4200000000000000000000000000000000000100'
 SLOT_MINTED, SLOT_BURNED, SLOT_WITHDRAWN = '0x0', '0x2', '0x3'  # src/state.rs SUPPLY_LEDGER_*_SLOT
 ATOM_SCALE = 10 ** 10  # wei per L1 sat (8 -> 18 decimals)
@@ -127,10 +128,15 @@ _COMMON: Dict[str, Any] = {
     'file_age_warn': 120, 'file_age_crit': 600,
     'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
+    # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
+    'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
+    # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
+    'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
+    'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
 }
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
@@ -151,7 +157,9 @@ PROFILES: Dict[str, Dict[str, Any]] = {
 
 
 class RpcError(Exception):
-    pass
+    def __init__(self, message: str, code: Optional[int] = None):
+        super().__init__(message)
+        self.code = code
 
 
 Transport = Callable[[str, str, list], Any]
@@ -171,7 +179,8 @@ def http_transport(timeout: float) -> Transport:
         if not isinstance(reply, dict):
             raise RpcError(f'{method} at {url}: malformed reply')
         if reply.get('error') is not None:
-            raise RpcError(f'{method} at {url}: {reply["error"]}')
+            error = reply['error']
+            raise RpcError(f'{method} at {url}: {error}', error.get('code') if isinstance(error, dict) else None)
         return reply.get('result')
     return call
 
@@ -353,6 +362,15 @@ def check_gates(l1_up: List[Dict[str, Any]], p: Dict[str, Any], compiled: Dict[s
           value=d, warn=p['gate_warn_epochs'], crit=p['gate_crit_epochs'])
 
 
+def statement_l2_number(accepted: Any) -> Optional[int]:
+    """The L2 number of an accepted statement. source.height is an L1 count and differs from it once L1 moves on."""
+    try:
+        raw = bytes.fromhex(accepted['statement'])
+        return int.from_bytes(raw[22 + 264:22 + 272], 'big') if len(raw) >= 22 + 272 else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str, now: float, r: Report) -> List[dict]:
     with_l2 = [n for n in l1_up if isinstance(n.get('l2'), dict)]
     if not l1_up:
@@ -388,7 +406,8 @@ def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str,
     source = head.get('source') or {}
     accepted = head.get('accepted')
     r.facts['l2_next_number'] = source.get('height')
-    r.facts['l2_settled_number'] = (int(source['height']) - 1) if accepted and source.get('height') else None
+    settled = statement_l2_number(accepted)
+    r.facts['l2_settled_number'] = settled
     r.facts['l2_settlement_source_slot'] = source.get('slot')
     if accepted is None:
         if phase == 'prelaunch':
@@ -402,7 +421,7 @@ def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str,
         try:
             age = max(0.0, now - slot_time(int(source['slot'])))
             r.graded('settlement_age', age, p['settlement_age_warn'], p['settlement_age_crit'],
-                     f'last settlement (L2 block {int(source["height"]) - 1}) accepted about {minutes(age)} ago '
+                     f'last settlement (L2 block {settled}) accepted about {minutes(age)} ago '
                      f'(source slot {source["slot"]})')
         except (KeyError, TypeError, ValueError):
             r.add('settlement_age', WARN, 'getl2settlement.source has no slot')
@@ -465,23 +484,46 @@ def check_escrow_and_backlog(nodes: List[Dict[str, Any]], p: Dict[str, Any], r: 
 
 
 # --------------------------------------------------------------------------------------------- L2
+def check_finality_status(tag: str, finality: Any, p: Dict[str, Any], r: Report) -> None:
+    """bloch_finality.status: the RPC's own view of the follower status. Absent before anything is finalized."""
+    status = finality.get('status') if isinstance(finality, dict) else None
+    if not isinstance(status, dict):
+        return
+    state, age = status.get('state'), status.get('age_s')
+    if state != 'ok':
+        r.add(f'l2_finality_status{tag}', CRIT, f'follower status is {state}: safe and finalized are closed')
+    elif not isinstance(age, (int, float)):
+        r.add(f'l2_finality_status{tag}', WARN, 'follower status state ok, no age reported')
+    else:
+        r.graded(f'l2_finality_status{tag}', age, p['status_age_warn'], p['status_age_crit'],
+                 f'follower status written {age} s ago: a growing age means the follower stopped while the RPC '
+                 'keeps serving its last finality')
+
+
 def read_backend(client: Client, name: str, url: str, p: Dict[str, Any], r: Report) -> Optional[Dict[str, Any]]:
     tag = f'[{name}]'
     try:
         chain_id = qty(client.call(url, 'eth_chainId'))
         blocks = {'latest': client.call(url, 'eth_getBlockByNumber', ['latest', False])}
-        closed = []
-        for t in ('safe', 'finalized'):
-            try:
-                blocks[t] = client.call(url, 'eth_getBlockByNumber', [t, False])
-            except RpcError as e:
-                if '-32001' not in str(e):  # the settled RPC's "follower status lost or invalid": levels unavailable, RPC up
-                    raise
-                blocks[t] = None
-                closed.append(t)
     except (RpcError, ValueError) as e:
         r.add(f'l2_rpc{tag}', CRIT, f'L2 RPC unreachable or malformed: {e}')
         return None
+    closed = []
+    for t in ('safe', 'finalized'):
+        try:
+            blocks[t] = client.call(url, 'eth_getBlockByNumber', [t, False])
+        except RpcError as e:
+            if e.code != FINALITY_CLOSED_CODE:
+                r.add(f'l2_rpc{tag}', CRIT, f'L2 RPC unreachable or malformed: {e}')
+                return None
+            blocks[t] = None
+            closed.append(t)
+        except ValueError as e:
+            r.add(f'l2_rpc{tag}', CRIT, f'L2 RPC unreachable or malformed: {e}')
+            return None
+    if closed:
+        r.add(f'l2_finality_closed{tag}', CRIT, f'{url} answers, but {" and ".join(closed)} are closed: it lost a valid '
+                                                'follower status. Check the follower and its status file.')
     if chain_id != p['chain_id']:
         r.add(f'l2_rpc{tag}', CRIT, f'{url}: chain id {chain_id} != expected {p["chain_id"]}', value=chain_id)
         return None
@@ -511,14 +553,7 @@ def read_backend(client: Client, name: str, url: str, p: Dict[str, Any], r: Repo
     except RpcError as e:
         r.add(f'l2_finality_view{tag}', WARN, f'bloch_finality unavailable: {e}')
         finality = None
-    status = finality.get('status') if isinstance(finality, dict) else None
-    state = status.get('state') if isinstance(status, dict) else None
-    if closed or state in ('missing', 'invalid'):
-        r.add(f'l2_finality_closed{tag}', CRIT, f'{",".join(closed) or "levels"} unavailable: follower status {state or "lost or invalid"}; '
-                                                'latest still served')
-    elif isinstance(status, dict) and isinstance(status.get('age_s'), (int, float)):
-        r.graded(f'l2_status_age{tag}', float(status['age_s']), p['status_age_warn'], p['status_age_crit'],
-                 f'follower status behind this RPC is {status["age_s"]} s old')
+    check_finality_status(tag, finality, p, r)
     return {'name': name, 'url': url, 'num': num, 'ts': ts, 'hash': hashes, 'finality': finality,
             'base_fee': qty(latest.get('baseFeePerGas', '0x0'))}
 
@@ -610,6 +645,34 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
+STATUS_BYTES_PER_SETTLEMENT = 475  # measured, schema v2
+
+
+def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: 'Report') -> None:
+    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build stops
+    advancing finality above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
+    size = Path(path).stat().st_size
+    log = s.get('settlement_log')
+    if isinstance(log, dict):
+        count, detail = s.get('finalized_settlements_count'), 'schema v3'
+        try:
+            on_disk = Path(path).with_name(str(log.get('file'))).stat().st_size
+        except OSError as e:
+            r.add(f'follower_settlement_log[{name}]', CRIT, f'{e}')
+        else:
+            if on_disk < int(log.get('bytes', 0)):
+                r.add(f'follower_settlement_log[{name}]', CRIT,
+                      f'{on_disk} bytes on disk, the status names {log.get("bytes")}')
+            else:
+                r.add(f'follower_settlement_log[{name}]', OK, f'{log.get("entries")} settlements, {on_disk} bytes')
+    else:
+        count = len(s.get('finalized_settlements') or [])
+        left = max(0, 16 * 1_048_576 - size) // STATUS_BYTES_PER_SETTLEMENT
+        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build stops finality'
+    r.graded(f'follower_status_size[{name}]', size, p['status_bytes_warn'], p['status_bytes_crit'],
+             f'{path} is {size} bytes with {count} settlements ({detail})')
+
+
 def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
                     p: Dict[str, Any], now: float, r: Report) -> None:
     for v in views:
@@ -644,6 +707,7 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
             continue
         r.graded(f'follower_status[{name}]', age, p['status_age_warn'], p['status_age_crit'],
                  f'{path} written {age:.0f} s ago')
+        status_size(name, path, s, p, r)
         follower_lag(f'{name}:status', s.get('verified_blocks'), s.get('native_finalized_epoch'), l1_up, p, r,
                      'status.json')
 
@@ -720,6 +784,45 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
     if missing_count:
         msg += '; silent attestors (rounds missed): ' + ', '.join(f'#{i} ({c})' for i, c in sorted(missing_count.items()))
     r.add('attestors', worst, msg, threshold=k, n=n_att)
+
+
+# ---------------------------------------------------------------------------- DA funding, disk
+def check_da_balance(client: Client, scripts: List[str], l1_up: List[Dict[str, Any]], p: Dict[str, Any],
+                     r: Report) -> None:
+    """Spendable balance of the DA fee key, read directly: the worker's da-funding-low only fires on a DA batch."""
+    for spec in scripts:
+        name, script = named(spec, 'da')
+        balance = None
+        for node in l1_up:
+            try:
+                answer = client.call(node['url'], 'getutxos', [strip0x(script), 64])
+                balance = sum(int(u['value_sat']) for u in answer['utxos'])
+                break
+            except (RpcError, KeyError, TypeError, ValueError):
+                continue
+        if balance is None:
+            r.add(f'da_balance[{name}]', UNKNOWN, 'no L1 node answered getutxos for the DA funding script')
+            continue
+        level = CRIT if balance < p['da_balance_crit_sat'] else WARN if balance < p['da_balance_warn_sat'] else OK
+        r.add(f'da_balance[{name}]', level, f'DA fee key holds {balance / 1e8:.8f} BLCH (first 64 outputs); '
+                                            f'warn below {p["da_balance_warn_sat"] / 1e8:.8f}, '
+                                            f'crit below {p["da_balance_crit_sat"] / 1e8:.8f}', value=balance)
+
+
+def check_disks(specs: List[str], p: Dict[str, Any], r: Report) -> None:
+    for spec in specs:
+        name, path = named(spec, 'disk')
+        try:
+            st = os.statvfs(path)
+        except OSError as e:
+            r.add(f'disk[{name}]', CRIT, f'{path}: {e}')
+            continue
+        free = st.f_bavail * st.f_frsize
+        total = st.f_blocks * st.f_frsize or 1
+        pct, gib = 100.0 * free / total, free / 2 ** 30
+        level = CRIT if pct < p['disk_free_pct_crit'] or gib < p['disk_free_gib_crit'] else \
+            WARN if pct < p['disk_free_pct_warn'] or gib < p['disk_free_gib_warn'] else OK
+        r.add(f'disk[{name}]', level, f'{path}: {gib:.1f} GiB free, {pct:.1f}%', value=round(gib, 3))
 
 
 # ---------------------------------------------------------------------------- units, logs, files
@@ -993,6 +1096,8 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_escrow_and_backlog(with_l2, p, r)
     check_followers(views, args.follower_status or [], l1_up, p, now, r)
+    check_da_balance(client, args.da_script or [], l1_up, p, r)
+    check_disks(args.disk or [], p, r)
     check_gates(l1_up, p, compiled_gates(args), now, r)
     check_attestors(args.attest_drop or [], with_l2, p, fetch or http_fetcher(args.timeout), r)
     check_units(args.unit or [], p, now, run_cmd, r)
@@ -1015,6 +1120,8 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--unit', action='append', help='[NAME=]UNIT: systemd state + journal failure events')
     a.add_argument('--event-log', action='append', help='[NAME=]PATH of a JSON-lines log (settler, shadow, ...)')
     a.add_argument('--file', action='append', help='NAME=PATH[:MAX_AGE_S] heartbeat file to age-check')
+    a.add_argument('--da-script', action='append', help='[NAME=]HEX funding script hash of the DA fee key (getutxos)')
+    a.add_argument('--disk', action='append', help='[NAME=]PATH of a filesystem to check for free space')
     a.add_argument('--guardian-health', action='append',
                    help='NAME=PATH[:MAX_AGE_S] health_file of a bridge guardian (WARN above MAX_AGE_S, CRIT above 3x)')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')

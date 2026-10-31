@@ -1,0 +1,59 @@
+# Bloch L2 mainnet read-only replica: settled RPC on 127.0.0.1:@PORT@ (the binary binds loopback only).
+# No --txpool, so eth_sendRawTransaction is refused. Serves the database rebuilt from L1 by the refresh
+# unit; finalized comes only from the follower's verified status. Rendered by install-replica.sh.
+[Unit]
+Description=Bloch L2 replica settled RPC (read-only, chain id 700770)
+After=bloch-l2-replica-follower.service
+ConditionPathExists=@STATE@/generations/current/db
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+UMask=0027
+ExecStartPre=/bin/sh -c 'cd @OPT@/current && exec /usr/bin/sha256sum -c --strict --quiet SHA256SUMS'
+ExecStartPre=/bin/rm -rf @STATE@/rpc/rpc-view
+ExecStart=@OPT@/current/bloch-l2-settled-rpc --data-dir @STATE@/generations/current --view-dir @STATE@/rpc/rpc-view --finality-status @STATE@/follower/status.json --network f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --port @PORT@ --poll-ms 2000 --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679
+Restart=on-failure
+RestartSec=10
+# The database is opened read-only, but MDBX and RocksDB readers still touch lock files.
+ReadWritePaths=@STATE@/rpc @STATE@/generations
+ReadOnlyPaths=@STATE@/follower
+InaccessiblePaths=@STATE@/refresh
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitCORE=0
+MemorySwapMax=0
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryHigh=3G
+MemoryMax=4G
+CPUQuota=200%
+TasksMax=512
+LimitNOFILE=65536
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

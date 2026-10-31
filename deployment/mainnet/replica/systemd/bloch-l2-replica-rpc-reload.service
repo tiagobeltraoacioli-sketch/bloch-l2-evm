@@ -1,0 +1,13 @@
+# The only privileged step of the replica: the refresh runs unprivileged and cannot restart units itself.
+[Unit]
+Description=Restart the Bloch L2 replica RPC on a new database generation
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart bloch-l2-replica-rpc.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateNetwork=true
+IPAddressDeny=any

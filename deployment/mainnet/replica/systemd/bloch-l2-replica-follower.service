@@ -1,0 +1,58 @@
+# Bloch L2 mainnet read-only replica: native follower. Replays Bloch L1 from the pinned Genesis-4
+# manifest and verifies FFG itself; the L1 RPC is untrusted for finality. Rendered by install-replica.sh.
+[Unit]
+Description=Bloch L2 replica native follower (FFG replay from Genesis-4)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+UMask=0027
+EnvironmentFile=@ETC@/replica.env
+ExecStartPre=/bin/sh -c 'cd @OPT@/current && exec /usr/bin/sha256sum -c --strict --quiet SHA256SUMS'
+ExecStart=@OPT@/current/bloch-l2-native-follower --manifest @ETC@/public/mainnet.manifest --carryover @ETC@/public/carryover.tsv --network-pin f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --rpc-url ${BLOCH_L1_RPC_URL} --state @STATE@/follower/native --status @STATE@/follower/status.json --poll-seconds 10 --max-fetch 2000
+Restart=on-failure
+RestartSec=30
+# Exit 3 = verification halt (a block or activation that does not verify): do not loop.
+RestartPreventExitStatus=3
+ReadWritePaths=@STATE@/follower
+InaccessiblePaths=@STATE@/generations @STATE@/rpc @STATE@/refresh
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitCORE=0
+MemorySwapMax=0
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost @L1_IP@
+# Measured 2026-10-29: full replay of 181k blocks peaks at about 0.6 GB RSS.
+MemoryHigh=3G
+MemoryMax=6G
+CPUQuota=200%
+TasksMax=256
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

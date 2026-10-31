@@ -53,7 +53,7 @@ def healthy():
         'withdrawals': {'escrow_conserved': True, 'released_sat': str(176 * 10 ** 8),
                         'attestor_set': m.MAINNET_PINS['attestor_set'], 'roots': [],
                         'release_window': {'window': 7, 'cap_sat': str(10 ** 9), 'remaining_sat': str(10 ** 9)}},
-        'accepted': {'commitment': 'cc' * 32},
+        'accepted': {'commitment': 'cc' * 32, 'statement': '00' * 286 + (100).to_bytes(8, 'big').hex()},
     }
     backend = {
         'eth_chainId': '0xab162',
@@ -98,7 +98,7 @@ class Fake:
                 return w['eth_chainId']
             if method == 'eth_getBlockByNumber':
                 if w.get('closed') and params[0] in ('safe', 'finalized'):
-                    raise m.RpcError(f"eth_getBlockByNumber at {url}: {{'code': -32001, 'message': 'finality unavailable'}}")
+                    raise m.RpcError('finality unavailable', m.FINALITY_CLOSED_CODE)
                 return w[params[0]]
             if method == 'bloch_finality':
                 return w['bloch_finality']
@@ -111,6 +111,10 @@ class Fake:
             return node['info']
         if method == 'getl2settlement':
             return node['l2']
+        if method == 'getutxos':
+            if 'utxos' not in node:
+                raise m.RpcError('no such method')
+            return {'utxos': [{'value_sat': str(v)} for v in node['utxos']]}
         raise AssertionError(f'unexpected {method}')
 
 
@@ -299,6 +303,32 @@ class MonitorTests(unittest.TestCase):
         w['l2'][L2B]['bloch_finality']['l1']['verified_blocks'] = 185930 - 400
         self.assertEqual(level(run(w)[0], 'follower_verified_lag[B]'), 'CRIT')
 
+    def test_follower_status_size_alerts_before_the_rpc_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            def run(document, pad=0, log_text=None):
+                path = Path(d) / 'status.json'
+                document = {'written_at_unix': NOW, 'chain_id': 700770, 'network': m.MAINNET_PINS['network'],
+                            'verified_blocks': 1, 'native_finalized_epoch': EPOCH, **document}
+                path.write_text(json.dumps(document) + ' ' * pad)
+                if log_text is not None:
+                    (Path(d) / 'status.settlements.jsonl').write_text(log_text)
+                r = m.Report()
+                m.status_size('f', str(path), document, m.PROFILES['mainnet'], r)
+                return r
+            v2 = {'schema': 'v2', 'finalized_settlements': [{'l2_number': 1}]}
+            self.assertEqual(level(run(v2), 'follower_status_size[f]'), 'OK')
+            self.assertEqual(level(run(v2, pad=8 * 1_048_576), 'follower_status_size[f]'), 'WARN')
+            self.assertEqual(level(run(v2, pad=12 * 1_048_576), 'follower_status_size[f]'), 'CRIT')
+            self.assertIn('settlements before', [c for c in run(v2).checks if c['check'].startswith('follower_status_size')][0]['message'])
+            v3 = {'schema': 'v3', 'finalized_settlements_count': 1,
+                  'settlement_log': {'file': 'status.settlements.jsonl', 'entries': 1, 'bytes': 10}}
+            r = run(v3, log_text='x' * 10)
+            self.assertEqual(level(r, 'follower_status_size[f]'), 'OK')
+            self.assertEqual(level(r, 'follower_settlement_log[f]'), 'OK')
+            self.assertEqual(level(run(v3, log_text='x' * 9), 'follower_settlement_log[f]'), 'CRIT')
+            (Path(d) / 'status.settlements.jsonl').unlink()
+            self.assertEqual(level(run(v3), 'follower_settlement_log[f]'), 'CRIT')
+
     def test_follower_status_file(self):
         with tempfile.TemporaryDirectory() as d:
             good, stale, wrong = Path(d, 'a.json'), Path(d, 'b.json'), Path(d, 'c.json')
@@ -486,13 +516,13 @@ class MonitorTests(unittest.TestCase):
         r, _ = run(world)
         self.assertEqual(level(r, 'l2_rpc[A]'), 'OK')
         self.assertEqual(level(r, 'l2_finality_closed[A]'), 'CRIT')
-        self.assertEqual(level(r, 'l2_status_age[B]'), 'CRIT')
+        self.assertEqual(level(r, 'l2_finality_status[B]'), 'CRIT')
         world = healthy()
         world['l2'][L2A]['bloch_finality']['status'] = {'state': 'ok', 'age_s': 30}
         world['l2'][L2B]['bloch_finality']['status'] = {'state': 'ok', 'age_s': 400}
         r, _ = run(world)
-        self.assertEqual(level(r, 'l2_status_age[A]'), 'OK')
-        self.assertEqual(level(r, 'l2_status_age[B]'), 'WARN')
+        self.assertEqual(level(r, 'l2_finality_status[A]'), 'OK')
+        self.assertEqual(level(r, 'l2_finality_status[B]'), 'WARN')
 
     def test_guardian_health(self):
         good = {'t': NOW - 30, 'bridge': 'busdc', 'healthy': True, 'verified_t': NOW - 30, 'problems': {}}
@@ -621,6 +651,49 @@ class MonitorTests(unittest.TestCase):
         doc = json.loads(out.getvalue())
         self.assertEqual(code, m.OK, json.dumps(doc['checks'], indent=1))
         self.assertEqual(doc['status'], 'OK')
+
+    def test_da_balance_levels_and_no_answer(self):
+        for sats, want in (([150_000_000], 'OK'), ([60_000_000, 1], 'WARN'), ([9_999_999], 'CRIT'), ([], 'CRIT')):
+            w = healthy()
+            for node in w['l1'].values():
+                node['utxos'] = sats
+            report, _ = run(w, '--da-script', 'da=' + 'ab' * 32)
+            self.assertEqual(level(report, 'da_balance[da]'), want, sats)
+        report, _ = run(healthy(), '--da-script', 'ab' * 32)
+        self.assertEqual(level(report, 'da_balance[da]'), 'UNKNOWN')
+
+    def test_disk_levels(self):
+        gib = 2 ** 30
+        cases = ((1000, 500, 'OK'), (1000, 100, 'WARN'), (1000, 40, 'CRIT'), (100, 18, 'WARN'), (40, 4, 'CRIT'))
+        for total, free, want in cases:
+            st = mock.Mock(f_bavail=free, f_blocks=total, f_frsize=gib)
+            with mock.patch.object(m.os, 'statvfs', return_value=st):
+                report, _ = run(healthy(), '--disk', 'state=/x')
+            self.assertEqual(level(report, 'disk[state]'), want, (total, free))
+        report, _ = run(healthy(), '--disk', 'state=/does/not/exist')
+        self.assertEqual(level(report, 'disk[state]'), 'CRIT')
+
+    def test_closed_finality_is_named_and_the_backend_stays_up(self):
+        w = healthy()
+        w['l2'][L2A]['closed'] = True
+        w['l2'][L2A]['bloch_finality']['status'] = {'state': 'missing', 'written_at_unix': None, 'age_s': None}
+        report, _ = run(w)
+        self.assertEqual(level(report, 'l2_rpc[A]'), 'OK')
+        self.assertEqual(level(report, 'l2_finality_closed[A]'), 'CRIT')
+        self.assertEqual(level(report, 'l2_finality_status[A]'), 'CRIT')
+
+    def test_a_down_backend_is_still_unreachable(self):
+        w = healthy()
+        w['l2'][L2A] = None
+        report, _ = run(w)
+        self.assertEqual(level(report, 'l2_rpc[A]'), 'CRIT')
+        self.assertFalse([c for c in report.checks if c['check'] == 'l2_finality_closed[A]'])
+
+    def test_finality_status_age(self):
+        for age, want in ((20, 'OK'), (400, 'WARN'), (1000, 'CRIT')):
+            w = healthy()
+            w['l2'][L2A]['bloch_finality']['status'] = {'state': 'ok', 'written_at_unix': NOW - age, 'age_s': age}
+            self.assertEqual(level(run(w)[0], 'l2_finality_status[A]'), want, age)
 
 
 if __name__ == '__main__':
