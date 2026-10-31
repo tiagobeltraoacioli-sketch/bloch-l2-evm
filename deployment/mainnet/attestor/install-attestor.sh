@@ -250,10 +250,10 @@ print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
 }
 
 # ------------------------------------------------------------------------------------------ upgrade
-# The HF1-3 build (v2, L2 70eac31 / build 1aad0a2 against L1 78d4921c). Override only for a later
+# The HF1-3 build (v2.1, L2 9d08b546 against L1 78d4921c). Override only for a later
 # corrected build whose hashes the coordinator published.
 V2_FOLLOWER_SHA256=c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a
-V2_PRODUCE_SHA256=7c1cc62bf5fb5aa142dced01156e3a51ddb6239096034400558ef46586025a3c
+V2_PRODUCE_SHA256=55dda83b8d97ec5ac3661c012a841d60741d56075c33b627d2aaa78e311728ae
 L1_GENESIS_UNIX=1786656679 L1_EPOCH_SECONDS=960 HF1_EPOCH=7180
 ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF1 starts
 KIT_FILES=(attestor_agent.py attestor_lib.py aggregate_attestation.py)

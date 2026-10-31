@@ -17,7 +17,7 @@ Run as root from a directory holding:
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
-      --circuits DIR [--memory-gib 40] [--threads 12] [--dry-run]
+      --circuits DIR [--memory-gib 100] [--threads 24] [--dry-run]
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
 
 install refuses unless: the guest has the pinned SHA-256; the host's `--mainnet identity`
@@ -61,8 +61,10 @@ PINNED = {
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
 }
-# Measured on 45.77.142.123 (Cascade Lake, 32 vCPU, 2026-10-18): prover peak RSS 20.4 GB (empty block)
-# to 30.8 GB (5 txs) at 8 threads. Below 32 GiB a proof can OOM.
+# Measured on 136.244.93.186 (Cascade Lake, 32 vCPU, 2026-10-30) at 8 threads: prover peak RSS 20.4 GiB
+# (empty block), 25.5 GiB (5 txs), 45.2 GiB (50 transfers), 96.5 GiB (200 transfers). The default 100 GiB
+# (MemoryHigh 96) is sized for the settler's max_block_txs 128 as transfers, about 72 GiB by extrapolation.
+# Gas-heavy blocks are unmeasured. Below 32 GiB even a small block can OOM.
 MIN_MEMORY_GIB = 32
 # The Gnark Groth16 container runs under dockerd, outside the slice, and peaks at ~18.5 GB.
 HEADROOM_GIB = 20
@@ -82,7 +84,7 @@ def digest(path):
 
 def check_sizes(memory_gib, threads):
     if memory_gib < MIN_MEMORY_GIB:
-        die(f'--memory-gib must be >= {MIN_MEMORY_GIB} (a mainnet proof peaks at ~31 GB)')
+        die(f'--memory-gib must be >= {MIN_MEMORY_GIB} (even a small mainnet proof peaks above 25 GiB)')
     if not 1 <= threads <= 63:
         die('--threads must be within 1..63')
 
@@ -252,8 +254,8 @@ def main(argv=None):
     i.add_argument('--settler-pubkey', required=True)
     i.add_argument('--settler-host', required=True)
     i.add_argument('--circuits', required=True)
-    i.add_argument('--memory-gib', type=int, default=40)
-    i.add_argument('--threads', type=int, default=12)
+    i.add_argument('--memory-gib', type=int, default=100)
+    i.add_argument('--threads', type=int, default=24)
     i.add_argument('--dry-run', action='store_true')
     r = sub.add_parser('rollback')
     r.add_argument('--dry-run', action='store_true')

@@ -61,6 +61,9 @@ FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev',
          'bloch-pos', 'mainnet.manifest')
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
+# The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
+# 25.5 GiB at 1.57M instructions, 45.2 GiB at 8.86M, so 32 GiB is about 4M. Larger blocks need the prover.
+LOCAL_PROVE_MAX_INSTRUCTIONS = 3_000_000
 
 
 def run(argv, **kw):
@@ -161,7 +164,8 @@ def configure(args):
         'acceptance_timeout_seconds': 1800, 'poll_seconds': 15, 'resubmit_seconds': 300,
         'idle_seconds': 30, 'max_consecutive_failures': 8,
         'user_transactions': '--user-transactions' in args, 'txpool_dir': str(STATE / 'txpool'),
-        'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 256,
+        'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128,
+        'local_prove_max_instructions': LOCAL_PROVE_MAX_INSTRUCTIONS,
         'da': {'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
                'genesis': str(rel / 'mainnet.manifest'), 'funding_pubkey': str(PUBLIC / 'da.pubkey.hex'),
                'keystore_dir': str(DA_DIR), 'passphrase_file': str(STATE / 'da.passphrase'),
@@ -236,7 +240,7 @@ ReadWritePaths={STATE} {DA_DIR}
 LimitCORE=0
 Nice=5
 CPUQuota=1200%
-# Local SP1 Groth16 of the mainnet program: ~20 GB peak at 6 threads (2026-10-14 fixture).
+# Local fallback SP1 Groth16, only up to LOCAL_PROVE_MAX_INSTRUCTIONS (see above). Gnark runs outside this unit.
 MemoryMax=32G
 MemorySwapMax=0
 

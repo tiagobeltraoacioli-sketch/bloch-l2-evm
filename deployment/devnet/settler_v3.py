@@ -41,6 +41,10 @@ Differences, all deliberate:
   submitted. `order` lists where to prove, tried in turn until one succeeds:
   ["local", "remote"] (default) keeps the remote host as a fallback,
   ["remote", "local"] prefers it, ["remote"] never proves here.
+  `local_prove_max_instructions` (optional): a local proof is refused when
+  the block's `execute` count is above it or unknown, so a block that cannot
+  be proved within this unit's memory cap is never tried here (proof memory
+  grows with instructions; an OOM would only delay the retry).
 
 * native RPC quorum (devnet4, 2026-10-16): the worker no longer needs every
   validator RPC in `rpc_ports`. Safety-relevant reads (the `getl2settlement`
@@ -115,11 +119,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import time
+import types
 import urllib.parse
 import urllib.request
 
@@ -154,7 +160,7 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
-            'max_block_bytes': 114_688, 'max_block_txs': 256,  # bytes: one native DA batch
+            'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
             'poll_seconds': 6, 'resubmit_seconds': 120}
 NETWORK_KINDS = ('devnet', 'mainnet', 'mainnet-rehearsal')
 # Kinds that run the mainnet L2 program path (chain 700770, --rules mainnet, prover --mainnet).
@@ -749,6 +755,9 @@ class Settler:
             if not isinstance(order, list) or not order or len(set(order)) != len(order) \
                     or not set(order) <= {'local', 'remote'}:
                 raise Halt('remote_prover.order must list "local" and/or "remote" once each')
+        limit = self.c.get('local_prove_max_instructions')
+        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
+            raise Halt('local_prove_max_instructions must be a positive integer')
         self.work = Path(self.c['workdir'])
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
@@ -908,6 +917,8 @@ class Settler:
                     proof.unlink(missing_ok=True)
                 if where == 'remote':
                     result = self.prove_remote(directory, proof)
+                elif name == 'prove' and not self.local_proof_fits(directory):
+                    result = types.SimpleNamespace(returncode=75)
                 else:
                     with (directory / f'{name}.log').open('w') as out:
                         result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
@@ -925,6 +936,20 @@ class Settler:
         (directory / 'proved.json').write_text(json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
+
+    def local_proof_fits(self, directory):
+        """Whether the local prover may try this block: `local_prove_max_instructions`
+        against the count the guest reported in this block's execute stage."""
+        limit = self.c.get('local_prove_max_instructions')
+        if limit is None:
+            return True
+        log_file = directory / 'execute.log'
+        found = re.findall(r'(\d+) instructions', log_file.read_text()) if log_file.exists() else []
+        instructions = int(found[-1]) if found else None
+        if instructions is not None and instructions <= limit:
+            return True
+        log('local-proof-refused', directory=str(directory), instructions=instructions, limit=limit)
+        return False
 
     def prove_remote(self, directory, proof):
         """Groth16 on the remote prover; the caller still verifies it locally."""

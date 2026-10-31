@@ -63,7 +63,7 @@ Notes for integrators and frontends:
 - ethers v6 reuses an identical `eth_getTransactionCount` answer for 250 ms (`cacheTimeout`), on every chain. Sending two transactions back to back from one wallet needs an explicit nonce or `cacheTimeout: -1`.
 - `safe`/`finalized` stay at the genesis until the first settlement is finalized on L1. Wallets that confirm on `finalized` will wait until then.
 
-### Settled RPC fix (branch codex/rpc-gateway-20261030)
+### Settled RPC fix (in v2.1)
 
 `bloch-l2-settled-rpc` reads receipts and mined transactions by hash from the
 database, but serves `latest` state from an in-memory head that it refreshes every
@@ -75,13 +75,11 @@ read the state from before its own transaction (forge script followed by
 2. counts the pending nonce and spool admission from the database tip, not from the in-memory head;
 3. raises the HTTP connection cap from jsonrpsee's 100 to 1,024 (`RPC_MAX_HTTP_CONNECTIONS`).
 
-This changes the binary (it is no longer `4fc9fa1e`). It must be merged with the
-spool-dos fix (codex/spool-dos-20261030, which also edits `rpc_transport.rs`) and
-then released through `build-release.sh`.
+Merged with the spool-dos fix and released as settled RPC v2.1, `1e76b99a…`.
 
 ## Load (45.77, shared host, ab keep-alive, private copy)
 
-Numbers are in requests per second. The tested build was settled RPC `c444c093` (the gateway branch) with the gateway limits lifted.
+Numbers are in requests per second. The tested build was the pre-merge settled RPC `c444c093` (the gateway branch) with the gateway limits lifted. It lacks the 4-permit simulation limit of v2.1, so its `eth_call` figures do not apply to v2.1.
 
 | call (c=64) | backend direct | gateway HTTP | gateway TLS |
 |---|---|---|---|

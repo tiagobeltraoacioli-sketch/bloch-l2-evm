@@ -297,5 +297,5 @@ to 0x0003 still funds deposits and claims from a 0x0001 key.
   `verify_bound` lacks a `pqcrypto_traits::sign::DetachedSignature` import. A fix is in progress in
   that worktree. The branches here were tested with a local, uncommitted import.
 - A `settlement-recovery.mainnet.Cargo.lock` resolved against each later HF release (`NATIVE_LOCK`;
-  the 78d4921c one exists on the build host, §0).
+  the 78d4921c one is committed as `follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock`, and `build-release.sh` requires it).
 - SP1 builds of the LC programs with the new verifier (not run here).

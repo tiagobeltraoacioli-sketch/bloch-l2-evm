@@ -160,7 +160,7 @@ The L1 hard forks start at epoch 7180 (HF1, 2026-11-01 16:11 UTC). Each attestor
 v2 follower and producer **before epoch 7178 (15:39 UTC)**:
 
 - `bloch-l2-native-follower` `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a`
-- `bloch-l2-produce-dev` `7c1cc62bf5fb5aa142dced01156e3a51ddb6239096034400558ef46586025a3c`
+- `bloch-l2-produce-dev` `55dda83b8d97ec5ac3661c012a841d60741d56075c33b627d2aaa78e311728ae`
 
 These hashes are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
 `--produce-sha256` only for a later corrected build whose hashes the coordinator published.
@@ -195,7 +195,7 @@ script does the manual procedure and stops at the first failure:
 10. It removes `PAUSE` and starts the agent (`--no-unpause` stops before this step).
 
 At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower c18752fd, produce
-7c1cc62b`. Post that line in the operators' channel; the next operator then starts.
+55dda83b`. Post that line in the operators' channel; the next operator then starts.
 
 If a step fails, `PAUSE` stays in place, the agent stays stopped and the follower keeps running.
 Fix the cause, then continue from the follower start with

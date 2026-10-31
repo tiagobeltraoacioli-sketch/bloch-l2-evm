@@ -183,9 +183,9 @@ docker pull ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475
 # install-prover-mainnet.py into one directory; write SHA256SUMS of the first three
 sha256sum bloch-evm-sp1-settlement-v3 settlement_v3_mainnet remote_prover.py > SHA256SUMS
 python3 install-prover-mainnet.py install --settler-pubkey settler-prover.pub \
-  --settler-host SETTLER_IP --circuits /path/to/.sp1/circuits --memory-gib 40 --threads 12 --dry-run
+  --settler-host SETTLER_IP --circuits /path/to/.sp1/circuits --memory-gib 100 --threads 24 --dry-run
 python3 install-prover-mainnet.py install --settler-pubkey settler-prover.pub \
-  --settler-host SETTLER_IP --circuits /path/to/.sp1/circuits --memory-gib 40 --threads 12
+  --settler-host SETTLER_IP --circuits /path/to/.sp1/circuits --memory-gib 100 --threads 24
 # settler host: install-settler-mainnet.py configure --remote-prover bloch-l2-prover-mainnet@PROVER_IP ...
 # then one end-to-end check (proves and verifies, submits nothing):
 selfcheck-remote-prover.sh bloch-l2-prover-mainnet@PROVER_IP KEY KNOWN_HOSTS A/native-request.txt \
