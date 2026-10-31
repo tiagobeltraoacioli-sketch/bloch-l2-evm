@@ -85,6 +85,8 @@ first; transactions are selected in a deterministic order within --max-gas
 pending and invalid transactions are dropped with a reason. With a spool
 directory, files of included and dropped transactions are removed after the
 block is durably committed. Without --txs the block has no user transactions.
+--min-tip-wei N leaves pending the transactions whose effective priority fee at
+this block's base fee is below N (default 0, no minimum); reported as below_min_tip.
 da writes the canonical L1 data-availability batch (hex) of block N's user
 transactions and prints its da_commitment; a block without user transactions
 has nothing to publish. reconstruct creates NEW_DIR at L2 genesis and replays
@@ -305,7 +307,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 rest,
                 &[
                     "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
-                    "--max-gas", "--max-bytes", "--max-txs",
+                    "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei",
                 ],
             )?;
             let deposits = match rest.chunks(2).find(|p| p[0] == "--deposits") {
@@ -356,6 +358,13 @@ fn run(args: &[String]) -> Result<String, String> {
                 return Ok(out.to_string());
             };
             let limits = limits(rest, SelectionLimits::protocol(&rules()))?;
+            // Policy of this producer, not a block rule: replay never reads the pool.
+            let min_tip = match option(rest, "--min-tip-wei") {
+                Ok(text) => text.parse::<u128>().map_err(|_| "--min-tip-wei must be decimal")?,
+                Err(_) => 0,
+            };
+            let next_base_fee = u128::from(rules().next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
+            let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
             let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
             let (tip, selection) = coordinator
                 .extend_with_pending(parent, attributes, &candidates, limits)
@@ -392,6 +401,7 @@ fn run(args: &[String]) -> Result<String, String> {
                       "dropped": selection.dropped.iter().map(|d| json!({"index": d.index,
                                   "hash": d.hash.map(hex::encode), "reason": d.reason.describe()}))
                                   .collect::<Vec<_>>(),
+                      "below_min_tip": below_min_tip,
                       "pruned": pruned});
             report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
             Ok(out.to_string())
@@ -630,7 +640,8 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
         input: input.into(),
         gas_limit,
         max_fee_per_gas,
-        max_priority_fee_per_gas: 1,
+        // The settled RPC's default minimum; set a lower --max-fee-wei only with care.
+        max_priority_fee_per_gas: 100_000_000u128.min(max_fee_per_gas),
         ..Default::default()
     };
     let signature: alloy_primitives::Signature = key
@@ -676,6 +687,34 @@ fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> 
             })
         })
         .collect()
+}
+
+/// Set aside entries whose effective tip at `next_base_fee` is below `min_tip`: they stay in the
+/// spool, not selected and not pruned, until the fee allows them or the settled RPC evicts them.
+/// Undecodable bytes pass through, for selection to drop them with a reason.
+fn hold_below_min_tip(
+    spec: &bloch_l2_evm::ChainSpec,
+    pool: Vec<(Option<PathBuf>, alloy_primitives::Bytes)>,
+    next_base_fee: u128,
+    min_tip: u128,
+) -> (Vec<(Option<PathBuf>, alloy_primitives::Bytes)>, usize) {
+    if min_tip == 0 {
+        return (pool, 0);
+    }
+    let before = pool.len();
+    let kept: Vec<_> = pool
+        .into_iter()
+        .filter(|(_, raw)| match bloch_l2_evm::decode_signed_transaction(spec, raw) {
+            Err(_) => true,
+            Ok(tx) => {
+                let env = tx.environment();
+                let priority = env.gas_priority_fee.unwrap_or(env.gas_price);
+                priority.min(env.gas_price.saturating_sub(next_base_fee)) >= min_tip
+            }
+        })
+        .collect();
+    let held = before - kept.len();
+    (kept, held)
 }
 
 /// Pending pool entries: (spool file, if any; canonical signed bytes).

@@ -20,6 +20,20 @@ class RecoverFiles(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    def test_finalized_hash_reads_either_status_schema(self):
+        v2 = {'finalized_settlements': [{'l2_number': 1, 'l2_hash': 'a'}]}
+        self.assertEqual(r.finalized_hash(v2, None, 1), 'a')
+        self.assertIsNone(r.finalized_hash(v2, None, 2))
+        lines = ''.join(json.dumps({'l2_number': n, 'l2_hash': f'h{n}'}) + '\n' for n in range(1, 101))
+        (self.root / 's.settlements.jsonl').write_text(lines)
+        v3 = {'finalized_settlements_recent': [{'l2_number': 100, 'l2_hash': 'h100'}],
+              'settlement_log': {'file': 's.settlements.jsonl', 'entries': 100, 'bytes': len(lines), 'digest': ''}}
+        status = self.root / 's.json'
+        self.assertEqual(r.finalized_hash(v3, status, 100), 'h100')
+        self.assertEqual(r.finalized_hash(v3, status, 7), 'h7')
+        self.assertIsNone(r.finalized_hash(v3, status, 101))
+        self.assertIsNone(r.finalized_hash(v3, status, 0))
+
     def test_batch_transactions_returns_each_raw_transaction(self):
         self.assertEqual(r.batch_transactions(batch(b'\x02abc', b'\x02de')), [b'\x02abc', b'\x02de'])
 

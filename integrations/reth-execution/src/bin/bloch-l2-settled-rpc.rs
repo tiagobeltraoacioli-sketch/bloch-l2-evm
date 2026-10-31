@@ -53,6 +53,8 @@
 //! withdrawals covered by finalized settlements (`settled_rpc/withdrawal_proofs.rs`).
 #[path = "settled_rpc/withdrawal_proofs.rs"]
 mod withdrawal_proofs;
+#[path = "settled_rpc/settlement_log.rs"]
+mod settlement_log;
 
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
@@ -80,7 +82,7 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2|mainnet [--domain HEX --genesis-time SECS]] [--txpool DIR]\n\
+const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2|mainnet [--domain HEX --genesis-time SECS]] [--txpool DIR] [--min-tip-wei N]\n\
 RPC over the settled database; with --txpool, eth_sendRawTransaction spools authenticated\n\
 transactions for the settlement worker (the sequencer). finalized comes only from verified native FFG finality of L2 settlements;\n\
 safe from the settlement the local native node accepted at its head. --rules selects the settlement\n\
@@ -97,6 +99,8 @@ struct Options {
     poll: Duration,
     l2: L2Network,
     txpool: Option<PathBuf>,
+    /// Smallest priority fee the spool admits and the fee methods suggest.
+    min_tip: u128,
 }
 
 /// Admission bounds of the spool (security review 2026-10-18, finding 2: an
@@ -119,6 +123,8 @@ struct SpoolLimits {
     /// transaction above it is deferred by every block and would hold its slot
     /// (and block its sender's later nonces) until the TTL without paying.
     max_tx_gas: u64,
+    /// Smallest effective priority fee per gas admitted, in wei.
+    min_tip: u128,
 }
 
 const SPOOL_LIMITS: SpoolLimits = SpoolLimits {
@@ -128,7 +134,12 @@ const SPOOL_LIMITS: SpoolLimits = SpoolLimits {
     ttl: Duration::from_secs(3 * 3_600),
     replace_bump_percent: 10,
     max_tx_gas: 15_000_000,
+    min_tip: DEFAULT_MIN_TIP_WEI,
 };
+/// Smallest priority fee the spool admits. 0.1 gwei is 210 sat on a transfer, against about 19 sat of
+/// marginal data-availability cost and a base fee that decays to almost nothing. Not a consensus rule:
+/// a block with a lower tip stays valid, and replay never consults this.
+const DEFAULT_MIN_TIP_WEI: u128 = 100_000_000;
 /// Concurrent EVM simulations (`eth_call`, `eth_estimateGas`, ...): each may
 /// burn the full gas cap of CPU; beyond this many, callers wait (up to
 /// [`SIMULATION_WAIT`]) instead of occupying every core of the host.
@@ -151,7 +162,7 @@ fn parse() -> Result<Options> {
         ensure!(
             [
                 "--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules", "--domain",
-                "--genesis-time", "--txpool",
+                "--genesis-time", "--txpool", "--min-tip-wei",
             ].contains(&pair[0].as_str()),
             "unknown option {}\n{USAGE}",
             pair[0]
@@ -175,6 +186,7 @@ fn parse() -> Result<Options> {
         )
         .map_err(|e| eyre::eyre!("{e}\n{USAGE}"))?,
         txpool: map.get("--txpool").map(PathBuf::from),
+        min_tip: map.get("--min-tip-wei").map_or(Ok(DEFAULT_MIN_TIP_WEI), |v| v.parse())?,
     })
 }
 
@@ -327,6 +339,8 @@ impl SpoolHead<'_> {
             Some("insufficient balance")
         } else if meta.max_fee < self.next_base_fee {
             Some("underpriced")
+        } else if meta.priority < limits.min_tip {
+            Some("below the minimum tip")
         } else if self.expired(entry, limits.ttl) {
             Some("expired")
         } else {
@@ -366,6 +380,13 @@ fn plan_admission(
     }
     if new.max_fee < head.next_base_fee {
         return Err(format!("max fee per gas {} below the next base fee {}", new.max_fee, head.next_base_fee));
+    }
+    let effective_tip = new.priority.min(new.max_fee - head.next_base_fee);
+    if effective_tip < limits.min_tip {
+        return Err(format!(
+            "transaction underpriced: effective priority fee {effective_tip} wei at the next base fee {}, at least {} wei is required",
+            head.next_base_fee, limits.min_tip
+        ));
     }
     let mut evict = Vec::new();
     let mut own = Vec::new();
@@ -660,6 +681,64 @@ fn spool_pending_nonce(
     Ok(())
 }
 
+/// A hex quantity raised to `floor`; anything else stays as it is.
+fn floored_quantity(value: &serde_json::Value, floor: u128) -> serde_json::Value {
+    match value.as_str().and_then(|text| text.strip_prefix("0x")).and_then(|hex| u128::from_str_radix(hex, 16).ok()) {
+        Some(number) if number < floor => serde_json::Value::String(format!("0x{floor:x}")),
+        _ => value.clone(),
+    }
+}
+
+/// Keep what wallets are told to pay at or above what the spool admits. Replicas apply it too: a
+/// gateway reads fees from either backend and sends the transaction to the sequencer. Wallets differ:
+/// viem and ethers read `eth_maxPriorityFeePerGas`, Foundry reads the rewards of `eth_feeHistory`,
+/// legacy senders read `eth_gasPrice`.
+fn floor_fee_suggestions(module: &mut jsonrpsee::RpcModule<()>, min_tip: u128, factory: BlochProviderFactory) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    let spec = factory.chain_spec();
+    for method in ["eth_maxPriorityFeePerGas", "eth_gasPrice", "eth_feeHistory"] {
+        ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
+        let (original, factory, spec) = (original.clone(), factory.clone(), spec.clone());
+        module.register_async_method(method, move |params, _, _| {
+            let (original, factory, spec) = (original.clone(), factory.clone(), spec.clone());
+            async move {
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let mut result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
+                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                    other => rpc_error(other.to_string()),
+                })?;
+                match method {
+                    "eth_maxPriorityFeePerGas" => result = floored_quantity(&result, min_tip),
+                    "eth_gasPrice" => {
+                        let next_base_fee = tokio::task::spawn_blocking(move || -> Result<u128, String> {
+                            let best = factory.best_block_number().map_err(|e| e.to_string())?;
+                            let header = factory.sealed_header(best).map_err(|e| e.to_string())?.ok_or("head header missing")?;
+                            Ok(u128::from(spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used)))
+                        })
+                        .await
+                        .map_err(|e| rpc_error(e.to_string()))?
+                        .map_err(rpc_error)?;
+                        result = floored_quantity(&result, next_base_fee.saturating_add(min_tip));
+                    }
+                    _ => floor_rewards(&mut result, min_tip),
+                }
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(result)
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Raise each reward of an `eth_feeHistory` answer to `floor`.
+fn floor_rewards(history: &mut serde_json::Value, floor: u128) {
+    let Some(blocks) = history.get_mut("reward").and_then(|r| r.as_array_mut()) else { return };
+    for rewards in blocks.iter_mut().filter_map(|b| b.as_array_mut()) {
+        for reward in rewards.iter_mut() {
+            *reward = floored_quantity(reward, floor);
+        }
+    }
+}
+
 /// Run the EVM-simulating methods ([`SIMULATION_METHODS`]) under one
 /// semaphore of `permits`: a caller that cannot get a permit within `wait` is
 /// told to retry. Other methods are unaffected.
@@ -751,7 +830,12 @@ struct Levels {
     finalized: Option<Header>,
     /// `None` when the status has no safe settlement or it is not local yet.
     safe: Option<Header>,
+    /// The scalar facts of the status; its settlement lists are moved out.
     status: serde_json::Value,
+    /// Settlements above the cursor passed in, already matched against the local chain.
+    new_settlements: Vec<serde_json::Value>,
+    /// Adopt this to acknowledge `new_settlements`.
+    cursor: settlement_log::Cursor,
 }
 
 /// The highest L2 header proven final by the follower's verified status, if
@@ -762,26 +846,39 @@ fn verified_levels(
     network: &str,
     chain_id: u64,
     provider: &BlochBlockchainProvider,
+    cursor: &settlement_log::Cursor,
 ) -> Result<Option<Levels>> {
+    let size = match std::fs::metadata(status_path) {
+        Ok(meta) => meta.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    ensure!(size <= settlement_log::MAX_STATUS_V2_BYTES, "finality status too large");
     let bytes = match std::fs::read(status_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    ensure!(bytes.len() <= 16 * 1_048_576, "finality status too large");
-    let status: serde_json::Value = serde_json::from_slice(&bytes)?;
-    ensure!(status["schema"] == "bloch.l2.native-follower-status.v2", "unexpected status schema");
+    let mut status: serde_json::Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        status["schema"] != settlement_log::STATUS_V3 || bytes.len() as u64 <= settlement_log::MAX_STATUS_V3_BYTES,
+        "finality status too large"
+    );
+    drop(bytes);
+    ensure!(
+        status["schema"] == settlement_log::STATUS_V2 || status["schema"] == settlement_log::STATUS_V3,
+        "unexpected status schema"
+    );
     ensure!(status["network"] == network, "status is for another native network");
     ensure!(status["production_finality"] == false, "status claims production finality");
-    let settlements = status["finalized_settlements"].as_array().ok_or_else(|| eyre::eyre!("no settlement list"))?;
+    let delta = settlement_log::read_delta(status_path, &mut status, cursor).map_err(|e| eyre::eyre!(e))?;
     let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
     let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);
-    let mut expected_number = 1u64;
-    for entry in settlements {
+    // New entries once, then the newest ones at every poll: a block hash commits to its parents, so
+    // a tip that still matches the local chain covers the older blocks already matched.
+    for entry in delta.entries.iter().chain(delta.recent.iter()) {
         let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad l2_number"))?;
         let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
-        ensure!(number == expected_number, "finalized settlements are not contiguous from block 1");
-        expected_number += 1;
         let local = provider
             .sealed_header(number)?
             .ok_or_else(|| eyre::eyre!("settled L2 block {number} is not in the local canonical chain yet"))?;
@@ -805,7 +902,7 @@ fn verified_levels(
             }
         }
     };
-    Ok(Some(Levels { finalized: best, safe, status }))
+    Ok(Some(Levels { finalized: best, safe, status, new_settlements: delta.entries, cursor: delta.cursor }))
 }
 
 /// Whether the status proves the local L2 genesis final: the follower reports
@@ -855,24 +952,18 @@ fn net_web3_rpc(chain_id: u64) -> jsonrpsee::RpcModule<()> {
 
 /// Verified finalized settlements by L2 number (only entries `verified_levels`
 /// already matched against the local canonical chain).
-type SettlementIndex = std::collections::BTreeMap<u64, serde_json::Value>;
+type SettlementIndex = std::collections::BTreeMap<u64, Box<str>>;
 
-/// The public fields of each finalized settlement in a verified status.
-fn settlement_index(status: &serde_json::Value) -> SettlementIndex {
-    status["finalized_settlements"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let number = entry["l2_number"].as_u64()?;
-            let mut out = serde_json::Map::new();
-            for key in ["l2_number", "l2_hash", "l2_state_root", "commitment", "native_slot", "native_block", "withdrawals"] {
-                out.insert(key.into(), entry.get(key).cloned().unwrap_or(serde_json::Value::Null));
-            }
-            out.insert("finalized".into(), true.into());
-            Some((number, serde_json::Value::Object(out)))
-        })
-        .collect()
+/// The public fields of one finalized settlement as compact JSON (a small string per
+/// settlement, not a parsed document: the index holds the whole history).
+fn public_settlement(entry: &serde_json::Value) -> Option<(u64, Box<str>)> {
+    let number = entry["l2_number"].as_u64()?;
+    let mut out = serde_json::Map::new();
+    for key in ["l2_number", "l2_hash", "l2_state_root", "commitment", "native_slot", "native_block", "withdrawals"] {
+        out.insert(key.into(), entry.get(key).cloned().unwrap_or(serde_json::Value::Null));
+    }
+    out.insert("finalized".into(), true.into());
+    Some((number, serde_json::Value::Object(out).to_string().into_boxed_str()))
 }
 
 /// `bloch_settlement(number)`: the native L1 settlement that finalized L2 block
@@ -892,7 +983,11 @@ fn settlement_rpc(index: Arc<std::sync::RwLock<SettlementIndex>>) -> jsonrpsee::
             }
             .ok_or_else(|| jsonrpsee::types::ErrorObjectOwned::owned(-32602, "block number must be a hex quantity or an integer", None::<()>))?;
             Ok::<_, jsonrpsee::types::ErrorObjectOwned>(
-                index.read().ok().and_then(|i| i.get(&number).cloned()).unwrap_or(serde_json::Value::Null),
+                index
+                    .read()
+                    .ok()
+                    .and_then(|i| i.get(&number).and_then(|text| serde_json::from_str(text).ok()))
+                    .unwrap_or(serde_json::Value::Null),
             )
         })
         .expect("the settlement method name is unique in a new module");
@@ -912,7 +1007,12 @@ fn finality_rpc(view: Arc<std::sync::RwLock<serde_json::Value>>) -> jsonrpsee::R
 }
 
 /// Refresh the outbox counter at the head and index newly finalized blocks.
-fn follow_withdrawals(proofs: &withdrawal_proofs::Shared, reader: &BlochBlockchainProvider, status: &serde_json::Value) {
+fn follow_withdrawals(
+    proofs: &withdrawal_proofs::Shared,
+    reader: &BlochBlockchainProvider,
+    new_settlements: &[serde_json::Value],
+    pending: &mut Vec<withdrawal_proofs::FinalEntry>,
+) {
     use reth_provider::{ReceiptProvider, StateProviderFactory};
     use std::sync::atomic::Ordering;
     let counter = reader
@@ -927,18 +1027,23 @@ fn follow_withdrawals(proofs: &withdrawal_proofs::Shared, reader: &BlochBlockcha
         Ok(index) if !index.is_frozen() => index.indexed(),
         _ => return,
     };
-    let entries = match withdrawal_proofs::final_entries(status, indexed) {
-        Ok(entries) => entries,
+    // Each settlement is read once, so one that cannot be parsed stops the index for good: a later
+    // settlement cannot be applied without it.
+    match withdrawal_proofs::final_entries(new_settlements, indexed) {
+        Ok(entries) => pending.extend(entries),
         Err(error) => {
-            println!("withdrawal proofs: unreadable finality status: {error}");
+            println!("withdrawal proofs FROZEN: unreadable finalized settlement: {error}");
+            if let Ok(mut index) = proofs.index.write() {
+                index.freeze(error);
+            }
             return;
         }
-    };
-    if let Some(last) = entries.last() {
+    }
+    if let Some(last) = pending.last() {
         proofs.finalized.store(last.number, Ordering::Relaxed);
     }
     let outbox = proofs.outbox;
-    let result = proofs.catch_up(&entries, |number| {
+    let result = proofs.catch_up(pending, |number| {
         let receipts = reader
             .receipts_by_block(number.into())
             .map_err(|e| e.to_string())?
@@ -953,6 +1058,10 @@ fn follow_withdrawals(proofs: &withdrawal_proofs::Shared, reader: &BlochBlockcha
     if let Err(error) = result {
         let frozen = proofs.index.read().map_or(true, |index| index.is_frozen());
         println!("withdrawal proofs{}: {error}", if frozen { " FROZEN" } else { " not advanced" });
+    }
+    if let Ok(index) = proofs.index.read() {
+        let done = index.indexed();
+        pending.retain(|entry| entry.number > done);
     }
 }
 
@@ -998,7 +1107,7 @@ async fn main() -> Result<()> {
                 spec: rules(),
                 dir: pool.clone(),
                 index: std::sync::Mutex::new(SpoolIndex::new()),
-                limits: SPOOL_LIMITS,
+                limits: SpoolLimits { min_tip: options.min_tip, ..SPOOL_LIMITS },
             });
             // Replace the no-pool method of the read-only API with the spooling one.
             ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
@@ -1026,6 +1135,7 @@ async fn main() -> Result<()> {
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
+    floor_fee_suggestions(&mut module, options.min_tip, factory.clone())?;
     limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT)?;
     let server = start_http_rpc(module, options.port).await?;
     println!(
@@ -1041,6 +1151,10 @@ async fn main() -> Result<()> {
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     let mut interval = tokio::time::interval(options.poll);
     let mut last_sweep = std::time::Instant::now();
+    // Settlements are read once, so those the withdrawal index has not taken yet wait here.
+    let mut settlement_cursor = settlement_log::Cursor::default();
+    let mut unindexed: Vec<serde_json::Value> = Vec::new();
+    let withdrawal_pending = Arc::new(std::sync::Mutex::new(Vec::new()));
     let result: Result<()> = async {
         loop {
             tokio::select! {
@@ -1068,7 +1182,7 @@ async fn main() -> Result<()> {
                     // Block 0 is a real level (the final L2 genesis): compare
                     // against "nothing published yet", not against number 0.
                     let above = |h: &Header, current: &Option<Header>| current.as_ref().is_none_or(|c| h.0.number > c.0.number);
-                    match verified_levels(&options.status, &options.network, kernel.chain_id, &provider) {
+                    match verified_levels(&options.status, &options.network, kernel.chain_id, &provider, &settlement_cursor) {
                         Ok(Some(levels)) => {
                             match levels.finalized {
                                 Some(header) if above(&header, &finalized) => {
@@ -1098,11 +1212,22 @@ async fn main() -> Result<()> {
                                 _ => {}
                             }
                             let s = &levels.status;
-                            *settlements.write().expect("settlement lock") = settlement_index(s);
+                            settlements
+                                .write()
+                                .expect("settlement lock")
+                                .extend(levels.new_settlements.iter().filter_map(public_settlement));
+                            settlement_cursor = levels.cursor.clone();
+                            if withdrawal_proofs.is_some() {
+                                unindexed.extend(levels.new_settlements.iter().cloned());
+                            }
                             if let Some(proofs) = withdrawal_proofs.as_ref().filter(|_| proof_task.as_ref().is_none_or(|t| t.is_finished())) {
                                 proof_task = Some(tokio::task::spawn_blocking({
-                                    let (proofs, reader, status) = (proofs.clone(), provider.clone(), s.clone());
-                                    move || follow_withdrawals(&proofs, &reader, &status)
+                                    let (proofs, reader, new, pending) =
+                                        (proofs.clone(), provider.clone(), std::mem::take(&mut unindexed), withdrawal_pending.clone());
+                                    move || {
+                                        let mut pending = pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                                        follow_withdrawals(&proofs, &reader, &new, &mut pending)
+                                    }
                                 }));
                             }
                             let latest = factory.sealed_header(head_number)?;
@@ -1237,17 +1362,64 @@ mod tests {
 
     #[test]
     fn settlement_index_exposes_only_the_public_fields_of_finalized_entries() {
-        let status = serde_json::json!({"finalized_settlements": [
-            {"l2_number": 1, "l2_hash": "aa", "l2_state_root": "bb", "commitment": "cc", "native_slot": 187300,
-             "native_block": "dd", "withdrawals": {"root": "ee", "count": 0}, "extra": 1},
-            {"l2_number": "bad"},
-        ]});
-        let index = settlement_index(&status);
-        assert_eq!(index.len(), 1);
-        assert_eq!(index[&1]["native_slot"], 187300);
-        assert_eq!(index[&1]["finalized"], true);
-        assert!(index[&1].get("extra").is_none());
-        assert!(settlement_index(&serde_json::json!({})).is_empty());
+        let entry = serde_json::json!({"l2_number": 1, "l2_hash": "aa", "l2_state_root": "bb", "commitment": "cc",
+            "native_slot": 187300, "native_block": "dd", "withdrawals": {"root": "ee", "count": 0}, "extra": 1});
+        let (number, text) = public_settlement(&entry).unwrap();
+        assert_eq!(number, 1);
+        let public: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(public["native_slot"], 187300);
+        assert_eq!(public["finalized"], true);
+        assert!(public.get("extra").is_none());
+        assert!(public_settlement(&serde_json::json!({"l2_number": "bad"})).is_none());
+    }
+
+    #[test]
+    fn fee_suggestions_never_fall_below_the_minimum_tip() {
+        let quantity = |text: &str| serde_json::Value::String(text.into());
+        assert_eq!(floored_quantity(&quantity("0x1"), 256), quantity("0x100"));
+        assert_eq!(floored_quantity(&quantity("0x200"), 256), quantity("0x200"));
+        assert_eq!(floored_quantity(&serde_json::Value::Null, 256), serde_json::Value::Null);
+        let mut history = serde_json::json!({"baseFeePerGas": ["0x1"], "reward": [["0x0", "0x200"], ["0x1"]]});
+        floor_rewards(&mut history, 256);
+        assert_eq!(history["reward"], serde_json::json!([["0x100", "0x200"], ["0x100"]]));
+        assert_eq!(history["baseFeePerGas"], serde_json::json!(["0x1"]));
+        let mut none = serde_json::json!({"baseFeePerGas": ["0x1"], "reward": null});
+        floor_rewards(&mut none, 256);
+        assert!(none["reward"].is_null());
+    }
+
+    #[test]
+    fn the_spool_refuses_and_evicts_a_tip_below_the_minimum() {
+        let limits = SpoolLimits { min_tip: 100_000_000, ..LIMITS };
+        let meta = |max_fee: u128, priority: u128| SpoolMeta {
+            sender: address(1),
+            nonce: 0,
+            max_fee,
+            priority,
+            cost: alloy_primitives::U256::ZERO,
+        };
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let mut head = SpoolHead { account: &mut account, next_base_fee: 1_000, now: std::time::SystemTime::now() };
+        let plan = |head: &mut SpoolHead<'_>, new: SpoolMeta| plan_admission(&[], &new, head, limits);
+        // Zero tip, the tip one wei short, and a fee cap that leaves too little over the base fee.
+        assert!(plan(&mut head, meta(GWEI, 0)).unwrap_err().contains("underpriced"));
+        assert!(plan(&mut head, meta(GWEI, 99_999_999)).unwrap_err().contains("underpriced"));
+        assert!(plan(&mut head, meta(100_000_999, GWEI)).unwrap_err().contains("underpriced"));
+        // Exactly the minimum, in both forms; a legacy price pays price minus base fee.
+        assert!(plan(&mut head, meta(GWEI, 100_000_000)).is_ok());
+        assert!(plan(&mut head, meta(100_001_000, 100_000_000)).is_ok());
+        assert!(plan(&mut head, meta(100_001_000, 100_001_000)).is_ok());
+        assert!(plan(&mut head, meta(100_000_999, 100_000_999)).is_err());
+        // An entry spooled before this rule goes at the next sweep.
+        let now = std::time::SystemTime::now();
+        let old = SpoolEntry {
+            name: "a.tx".into(),
+            meta: Some(meta(GWEI, 1)),
+            modified: now,
+            seen: std::time::Instant::now(),
+            age_when_seen: Duration::ZERO,
+        };
+        assert_eq!(head.stale(&old, limits), Some("below the minimum tip"));
     }
 
     #[test]
@@ -1352,6 +1524,7 @@ mod tests {
         ttl: Duration::from_secs(600),
         replace_bump_percent: 10,
         max_tx_gas: 15_000_000,
+        min_tip: 0,
     };
 
     /// Plan against head nonces/balances per key (absent: nonce 0, rich).

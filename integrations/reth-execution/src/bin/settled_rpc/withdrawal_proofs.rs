@@ -55,13 +55,15 @@ pub struct FinalEntry {
     pub native_block: Value,
 }
 
-/// The entries above L2 block `after`, or why the list cannot be read.
-pub fn final_entries(status: &Value, after: u64) -> Result<Vec<FinalEntry>, String> {
-    let list = status["finalized_settlements"].as_array().ok_or("no settlement list")?;
+/// The entries above L2 block `after` of a contiguous part of the follower's settlements (checked by
+/// `verified_levels`), or why they cannot be read.
+pub fn final_entries(list: &[Value], after: u64) -> Result<Vec<FinalEntry>, String> {
     let mut entries = Vec::new();
-    // The list is contiguous from block 1 (`verified_levels` checks it).
-    for entry in list.iter().skip(usize::try_from(after).map_err(|_| "height exceeds usize")?) {
+    for entry in list {
         let number = entry["l2_number"].as_u64().ok_or("bad l2_number")?;
+        if number <= after {
+            continue;
+        }
         let hash = entry["l2_hash"].as_str().unwrap_or_default().parse::<B256>().map_err(|e| e.to_string())?;
         let commitment = match entry.get("withdrawals").filter(|v| !v.is_null()) {
             // A V2 settlement has no outbox.
@@ -596,18 +598,18 @@ mod tests {
     #[test]
     fn status_entries_parse_from_the_follower_shape() {
         let hash = alloy_primitives::hex::encode(B256::repeat_byte(3));
-        let status = json!({"finalized_settlements": [
-            {"l2_number": 1, "l2_hash": hash, "withdrawals": null, "native_slot": 5, "native_block": "aa"},
-            {"l2_number": 2, "l2_hash": hash, "withdrawals": {"root": hash, "count": 4}, "native_slot": 6, "native_block": "bb"},
-        ]});
-        let all = final_entries(&status, 0).unwrap();
+        let list = [
+            json!({"l2_number": 1, "l2_hash": hash, "withdrawals": null, "native_slot": 5, "native_block": "aa"}),
+            json!({"l2_number": 2, "l2_hash": hash, "withdrawals": {"root": hash, "count": 4}, "native_slot": 6, "native_block": "bb"}),
+        ];
+        let all = final_entries(&list, 0).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].commitment, None);
         assert_eq!(all[1].commitment, Some((B256::repeat_byte(3), 4)));
-        assert_eq!(final_entries(&status, 1).unwrap().len(), 1);
-        assert!(final_entries(&status, 2).unwrap().is_empty());
-        assert!(final_entries(&json!({}), 0).is_err());
-        assert!(final_entries(&json!({"finalized_settlements": [{"l2_number": 1, "l2_hash": hash, "withdrawals": {"root": "zz", "count": 1}}]}), 0).is_err());
+        assert_eq!(final_entries(&list, 1).unwrap().len(), 1);
+        assert!(final_entries(&list, 2).unwrap().is_empty());
+        assert!(final_entries(&[json!({})], 0).is_err());
+        assert!(final_entries(&[json!({"l2_number": 1, "l2_hash": hash, "withdrawals": {"root": "zz", "count": 1}})], 0).is_err());
     }
 
     #[tokio::test]

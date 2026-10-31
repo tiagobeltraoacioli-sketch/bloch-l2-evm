@@ -186,6 +186,13 @@ class Agent:
             raise Skip('the L2 genesis is not finalized on the own replay yet')
         return status
 
+    def settlements(self, status, check_digest=False):
+        """Every finalized settlement of the own follower."""
+        try:
+            return lib.follower_settlements(status, self.c['follower_status'], check_digest)
+        except (OSError, ValueError, KeyError) as e:
+            raise Skip(f'follower settlements unreadable: {e}') from None
+
     def rpc(self, url, method, params=()):
         body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}).encode()
         request = urllib.request.Request(url, data=body, headers={'content-type': 'application/json'})
@@ -280,14 +287,15 @@ class Agent:
         finally:
             shutil.rmtree(work, ignore_errors=True)
         rebuilt = {b['number']: b for b in report['blocks']}
-        for s in status.get('finalized_settlements', []):
+        settlements = self.settlements(status, check_digest=True)
+        for s in settlements:
             b = rebuilt.get(s['l2_number'])
             if b is None or (b['hash'], b['state_root']) != (s['l2_hash'], s['l2_state_root']) or \
                     (s.get('withdrawals') and s['withdrawals'] != {'root': b['withdrawal_root'], 'count': b['withdrawal_count']}):
                 raise Halt(f'rebuild check: L2 block {s["l2_number"]} rebuilt from L1 differs from the finalized settlement')
         self.last_rebuild_check = time.time()
         log('rebuild-check-ok', native_blocks=report.get('native_blocks'), l2_blocks=report.get('settled'),
-            finalized_settlements=len(status.get('finalized_settlements', [])))
+            finalized_settlements=len(settlements))
         return report
 
     # ---------------------------------------------------------------- cycle
@@ -299,7 +307,7 @@ class Agent:
         view = self.view()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         state = self.load_state()
-        finals = {s['l2_number']: s for s in status.get('finalized_settlements', []) if s.get('withdrawals')}
+        finals = {s['l2_number']: s for s in self.settlements(status) if s.get('withdrawals')}
         todo = []
         for record in view['roots']:
             root, number, count = record['root'], record['l2_number'], record['count']
@@ -499,7 +507,7 @@ def main(argv=None):
             view = agent.view()
             report = agent.rebuild_check()
             log('check-ok', **identity, follower_verified_slot=status.get('verified_slot'),
-                finalized_settlements=len(status.get('finalized_settlements', [])), retained_roots=len(view['roots']),
+                finalized_settlements=len(agent.settlements(status)), retained_roots=len(view['roots']),
                 rebuilt_l2_blocks=report.get('settled'))
             return 0
         agent.check_identity(key='none' if a.dry_run else 'open')

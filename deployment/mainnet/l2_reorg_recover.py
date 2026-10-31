@@ -84,6 +84,24 @@ def respool(directories, pool):
     return written
 
 
+def finalized_hash(state, status_path, number):
+    """The L2 hash the follower finalized at `number`, or None. Status v2 lists every settlement; v3 lists the
+    newest and names a log with one line per settlement, in number order."""
+    entries = state.get('finalized_settlements') or state.get('finalized_settlements_recent') or []
+    for entry in entries:
+        if entry['l2_number'] == number:
+            return entry['l2_hash']
+    log = state.get('settlement_log')
+    if not log or not status_path or not 1 <= number <= log['entries'] or '/' in log['file']:
+        return None
+    with open(Path(status_path).with_name(log['file']), 'rb') as f:
+        for index, line in enumerate(f, 1):
+            if index == number:
+                entry = json.loads(line)
+                return entry['l2_hash'] if entry['l2_number'] == number else None
+    return None
+
+
 def plan(config, follower_state, apply, run=subprocess.run, status=None):
     settler = S.Settler(config)
     if not settler.check_identity():
@@ -103,8 +121,7 @@ def plan(config, follower_state, apply, run=subprocess.run, status=None):
         raise Refuse(f'database head {head["number"]} is not ahead of accepted {number}: nothing to recover')
     state = status if status is not None else json.loads(Path(config['follower_status']).read_text()) if config.get('follower_status') else None
     if state is not None:
-        finals = {x['l2_number']: x['l2_hash'] for x in state.get('finalized_settlements', [])}
-        if finals.get(number) != l2_hash:
+        if finalized_hash(state, config.get('follower_status'), number) != l2_hash:
             raise NotYet(f'settlement {number} is not finalized by the follower yet')
     rebuilt = db.with_name(db.name + f'.rebuilt-{int(time.time())}')
     args = ['reconstruct', '--target', str(rebuilt), '--l1-follower', str(follower_state)]

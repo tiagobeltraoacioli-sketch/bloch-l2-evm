@@ -297,6 +297,32 @@ class MonitorTests(unittest.TestCase):
         w['l2'][L2B]['bloch_finality']['l1']['verified_blocks'] = 185930 - 400
         self.assertEqual(level(run(w)[0], 'follower_verified_lag[B]'), 'CRIT')
 
+    def test_follower_status_size_alerts_before_the_rpc_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            def run(document, pad=0, log_text=None):
+                path = Path(d) / 'status.json'
+                document = {'written_at_unix': NOW, 'chain_id': 700770, 'network': m.MAINNET_PINS['network'],
+                            'verified_blocks': 1, 'native_finalized_epoch': EPOCH, **document}
+                path.write_text(json.dumps(document) + ' ' * pad)
+                if log_text is not None:
+                    (Path(d) / 'status.settlements.jsonl').write_text(log_text)
+                r = m.Report()
+                m.status_size('f', str(path), document, m.PROFILES['mainnet'], r)
+                return r
+            v2 = {'schema': 'v2', 'finalized_settlements': [{'l2_number': 1}]}
+            self.assertEqual(level(run(v2), 'follower_status_size[f]'), 'OK')
+            self.assertEqual(level(run(v2, pad=8 * 1_048_576), 'follower_status_size[f]'), 'WARN')
+            self.assertEqual(level(run(v2, pad=12 * 1_048_576), 'follower_status_size[f]'), 'CRIT')
+            self.assertIn('settlements before', [c for c in run(v2).checks if c['check'].startswith('follower_status_size')][0]['message'])
+            v3 = {'schema': 'v3', 'finalized_settlements_count': 1,
+                  'settlement_log': {'file': 'status.settlements.jsonl', 'entries': 1, 'bytes': 10}}
+            r = run(v3, log_text='x' * 10)
+            self.assertEqual(level(r, 'follower_status_size[f]'), 'OK')
+            self.assertEqual(level(r, 'follower_settlement_log[f]'), 'OK')
+            self.assertEqual(level(run(v3, log_text='x' * 9), 'follower_settlement_log[f]'), 'CRIT')
+            (Path(d) / 'status.settlements.jsonl').unlink()
+            self.assertEqual(level(run(v3), 'follower_settlement_log[f]'), 'CRIT')
+
     def test_follower_status_file(self):
         with tempfile.TemporaryDirectory() as d:
             good, stale, wrong = Path(d, 'a.json'), Path(d, 'b.json'), Path(d, 'c.json')

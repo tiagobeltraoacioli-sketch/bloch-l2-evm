@@ -126,6 +126,8 @@ _COMMON: Dict[str, Any] = {
     'da_backlog_warn': 3, 'da_backlog_crit': 10,
     'file_age_warn': 120, 'file_age_crit': 600,
     'status_age_warn': 300, 'status_age_crit': 900,
+    # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
+    'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
@@ -592,6 +594,34 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
+STATUS_BYTES_PER_SETTLEMENT = 475  # measured, schema v2
+
+
+def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: 'Report') -> None:
+    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build stops
+    advancing finality above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
+    size = Path(path).stat().st_size
+    log = s.get('settlement_log')
+    if isinstance(log, dict):
+        count, detail = s.get('finalized_settlements_count'), 'schema v3'
+        try:
+            on_disk = Path(path).with_name(str(log.get('file'))).stat().st_size
+        except OSError as e:
+            r.add(f'follower_settlement_log[{name}]', CRIT, f'{e}')
+        else:
+            if on_disk < int(log.get('bytes', 0)):
+                r.add(f'follower_settlement_log[{name}]', CRIT,
+                      f'{on_disk} bytes on disk, the status names {log.get("bytes")}')
+            else:
+                r.add(f'follower_settlement_log[{name}]', OK, f'{log.get("entries")} settlements, {on_disk} bytes')
+    else:
+        count = len(s.get('finalized_settlements') or [])
+        left = max(0, 16 * 1_048_576 - size) // STATUS_BYTES_PER_SETTLEMENT
+        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build stops finality'
+    r.graded(f'follower_status_size[{name}]', size, p['status_bytes_warn'], p['status_bytes_crit'],
+             f'{path} is {size} bytes with {count} settlements ({detail})')
+
+
 def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
                     p: Dict[str, Any], now: float, r: Report) -> None:
     for v in views:
@@ -626,6 +656,7 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
             continue
         r.graded(f'follower_status[{name}]', age, p['status_age_warn'], p['status_age_crit'],
                  f'{path} written {age:.0f} s ago')
+        status_size(name, path, s, p, r)
         follower_lag(f'{name}:status', s.get('verified_blocks'), s.get('native_finalized_epoch'), l1_up, p, r,
                      'status.json')
 

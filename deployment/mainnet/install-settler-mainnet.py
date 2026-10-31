@@ -164,7 +164,7 @@ def configure(args):
         'acceptance_timeout_seconds': 1800, 'poll_seconds': 15, 'resubmit_seconds': 300,
         'idle_seconds': 30, 'max_consecutive_failures': 8,
         'user_transactions': '--user-transactions' in args, 'txpool_dir': str(STATE / 'txpool'),
-        'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128,
+        'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128, 'min_tip_wei': 100_000_000,
         'local_prove_max_instructions': LOCAL_PROVE_MAX_INSTRUCTIONS,
         'da': {'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
                'genesis': str(rel / 'mainnet.manifest'), 'funding_pubkey': str(PUBLIC / 'da.pubkey.hex'),

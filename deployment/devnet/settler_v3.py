@@ -859,6 +859,8 @@ class Settler:
         if self.c['user_transactions'] and spool:
             args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
+            if self.c.get('min_tip_wei'):
+                args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
         return args
 
     def prepare_block(self, view):

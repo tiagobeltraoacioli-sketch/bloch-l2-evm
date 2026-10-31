@@ -124,6 +124,15 @@ class Rig:
         status['finalized_settlements'] = [self.entry(b) for b in self.blocks[:finalized]]
         if mutate:
             mutate(status)
+        if self.args.status_schema == 'v3':
+            entries = status.pop('finalized_settlements')
+            lines = [json.dumps(e, separators=(',', ':')).encode() + b'\n' for e in entries]
+            name = self.status.stem + '.settlements.jsonl'
+            self.status.with_name(name).write_bytes(b''.join(lines))
+            status.update(schema='bloch.l2.native-follower-status.v3', finalized_settlements_count=len(lines),
+                          finalized_settlements_recent=entries[-64:],
+                          settlement_log={'file': name, 'entries': len(lines), 'bytes': sum(map(len, lines)),
+                                          'digest': attestor_lib.settlement_log_digest(lines).hex()})
         temporary = self.status.with_suffix('.tmp')
         temporary.write_text(json.dumps(status))
         temporary.replace(self.status)
@@ -232,6 +241,7 @@ def main():
         parser.add_argument(name, required=True)
     parser.add_argument('--live-l1')
     parser.add_argument('--port-base', type=int, default=19761)
+    parser.add_argument('--status-schema', choices=('v2', 'v3'), default='v2')
     args = parser.parse_args()
 
     rig = Rig(args)

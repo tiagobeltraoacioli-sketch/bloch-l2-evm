@@ -101,6 +101,52 @@ def keccak256(data):
 
 
 # ---- Withdrawal tree (l2_settlement::withdrawal) ----
+SETTLEMENT_LOG_DOMAIN = b'BLOCH:L2:SETTLEMENT-LOG:1'
+
+
+def follower_settlements(status, status_path, check_digest=False):
+    """Every finalized settlement of a follower status, oldest first: from the list in a v2 status, or from
+    the log a v3 status names. Raises ValueError unless the log matches the status. The digest is a keccak
+    chain over every line, too slow in pure Python for each cycle, so only check_digest (daily) compares it."""
+    schema = status.get('schema')
+    if schema == 'bloch.l2.native-follower-status.v2':
+        return status.get('finalized_settlements', [])
+    if schema != 'bloch.l2.native-follower-status.v3':
+        raise ValueError(f'unknown follower status schema {schema!r}')
+    log = status['settlement_log']
+    name = log['file']
+    if not name or '/' in name or name in ('.', '..'):
+        raise ValueError('bad settlement log name')
+    path = Path(status_path).with_name(name)
+    if log['entries'] == 0:
+        return []
+    with open(path, 'rb') as f:
+        data = f.read(log['bytes'])
+    if len(data) != log['bytes']:
+        raise ValueError('settlement log is shorter than the status says')
+    lines = data.splitlines(keepends=True)
+    if not data.endswith(b'\n') or len(lines) != log['entries']:
+        raise ValueError('settlement log does not match the status')
+    if check_digest and settlement_log_digest(lines).hex() != log['digest']:
+        raise ValueError('settlement log digest differs from the status')
+    entries = [json.loads(line) for line in lines]
+    for number, entry in enumerate(entries, 1):
+        if entry.get('l2_number') != number:
+            raise ValueError('settlement log is not contiguous')
+    recent = status.get('finalized_settlements_recent') or []
+    if entries[-len(recent):] != recent:
+        raise ValueError('settlement log differs from the status')
+    return entries
+
+
+def settlement_log_digest(lines):
+    """The digest of a settlement log (each line with its newline), as the follower computes it."""
+    digest = keccak256(SETTLEMENT_LOG_DOMAIN)
+    for line in lines:
+        digest = keccak256(digest + line)
+    return digest
+
+
 def leaf(chain_id, nonce, l1_recipient, sats):
     return keccak256(LEAF_DOMAIN + chain_id.to_bytes(8, 'big') + nonce.to_bytes(8, 'big') + l1_recipient
                      + sats.to_bytes(8, 'big'))

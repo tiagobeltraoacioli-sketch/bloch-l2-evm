@@ -16,9 +16,17 @@
 //! (`l2_genesis.finalized`), so the RPC publishes block 0 as `finalized`
 //! before the first settlement. That root is a fetch hint: the finality the
 //! status file reports is the one this process derived by replay. A block is
-//! retained only after it verified. The status file lists every L2 settlement
-//! inside the verified finalized prefix; it is evidence for the L2 RPC finality
-//! publisher, not a consensus or production finality claim.
+//! retained only after it verified. The status file and the settlement log beside
+//! it list every L2 settlement inside the verified finalized prefix; they are
+//! evidence for the L2 RPC finality publisher, not a consensus or production
+//! finality claim.
+//!
+//! Status schema v3: `status.json` stays small. It has the newest settlements and
+//! the size and digest of `<status stem>.settlements.jsonl`, an append-only log with
+//! one compact JSON entry per settlement, written and synced before the status names
+//! it. The log is rewritten from the replay at each start, so a torn append cannot
+//! survive a restart. `d0 = keccak256("BLOCH:L2:SETTLEMENT-LOG:1")`,
+//! `d(n) = keccak256(d(n-1) || line n, newline included)`.
 //!
 //! Ethereum-rollup levels (status schema v2): `finalized` = settled in an L1
 //! block this process verified as FFG-finalized; `safe` = the settlement the
@@ -202,6 +210,78 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     File::open(path.parent().unwrap_or(Path::new("/"))).and_then(|d| d.sync_all()).map_err(|e| e.to_string())
 }
 
+/// Newest settlements repeated in the status file.
+const RECENT_SETTLEMENTS: usize = 64;
+const SETTLEMENT_LOG_DOMAIN: &[u8] = b"BLOCH:L2:SETTLEMENT-LOG:1";
+
+/// The append-only log of finalized settlements (see the module documentation).
+struct SettlementLog {
+    path: PathBuf,
+    /// `None` until the first sync of this process has rewritten the log.
+    file: Option<File>,
+    entries: u64,
+    bytes: u64,
+    digest: B256,
+    recent: std::collections::VecDeque<Value>,
+}
+
+impl SettlementLog {
+    fn beside(status: &Path) -> Self {
+        let stem = status.file_stem().map_or("status".into(), |s| s.to_string_lossy().into_owned());
+        Self {
+            path: status.with_file_name(format!("{stem}.settlements.jsonl")),
+            file: None,
+            entries: 0,
+            bytes: 0,
+            digest: alloy_primitives::keccak256(SETTLEMENT_LOG_DOMAIN),
+            recent: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Serialize `new` (the entries above `self.entries`), and make them durable before the status
+    /// names them. The first call of a process writes beside the log and renames, so a reader never
+    /// sees the log shorter than the last status said.
+    fn append(&mut self, new: Vec<Value>) -> Result<(), String> {
+        let mut text = Vec::new();
+        let mut digest = self.digest;
+        for entry in &new {
+            let line = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+            let start = text.len();
+            text.extend_from_slice(&line);
+            text.push(b'\n');
+            digest = alloy_primitives::keccak256([digest.as_slice(), &text[start..]].concat());
+        }
+        match &mut self.file {
+            Some(file) => {
+                if !text.is_empty() {
+                    file.write_all(&text).and_then(|_| file.sync_data()).map_err(|e| format!("settlement log: {e}"))?;
+                }
+            }
+            None => {
+                write_atomic(&self.path, &text).map_err(|e| format!("settlement log: {e}"))?;
+                self.file = Some(OpenOptions::new().append(true).open(&self.path).map_err(|e| format!("settlement log: {e}"))?);
+            }
+        }
+        self.bytes += text.len() as u64;
+        self.digest = digest;
+        self.entries += new.len() as u64;
+        self.recent.extend(new);
+        while self.recent.len() > RECENT_SETTLEMENTS {
+            self.recent.pop_front();
+        }
+        Ok(())
+    }
+
+    fn status_fields(&self) -> Value {
+        json!({
+            "file": self.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "entries": self.entries,
+            "bytes": self.bytes,
+            "digest": hex::encode(self.digest),
+        })
+    }
+}
+
 fn run(o: &Options) -> Result<(), String> {
     let magic = {
         let mut head = [0u8; 8];
@@ -258,6 +338,7 @@ fn run(o: &Options) -> Result<(), String> {
 
     // 2. Follow finalized native blocks.
     let mut walk = None;
+    let mut log = SettlementLog::beside(&o.status);
     loop {
         match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index, &mut walk) {
             Ok(added) => {
@@ -268,7 +349,7 @@ fn run(o: &Options) -> Result<(), String> {
                         None
                     }
                 };
-                if let Some(status) = status(&verifier, &policy, safe)? {
+                if let Some(status) = status(&verifier, &policy, safe, &mut log)? {
                     write_atomic(&o.status, serde_json::to_string_pretty(&status).unwrap().as_bytes())?;
                 }
                 if added > 0 {
@@ -385,6 +466,7 @@ fn status(
     verifier: &IncrementalNativeVerifierV1,
     policy: &bloch_l2_evm::native_settlement::SettlementPolicyV1,
     safe: Option<Value>,
+    log: &mut SettlementLog,
 ) -> Result<Option<Value>, String> {
     let verified = match verifier.snapshot() {
         Ok(v) => v,
@@ -393,7 +475,7 @@ fn status(
     };
     let report = verified.report();
     let mut settlements = Vec::new();
-    for (slot, block, bytes) in verified.finalized_settlements() {
+    for (slot, block, bytes) in verified.finalized_settlements().skip(log.entries as usize) {
         let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes).ok_or("settlement decode")?;
         let mut entry = statement_json(&tx.statement)?;
         entry["native_slot"] = json!(slot);
@@ -401,12 +483,13 @@ fn status(
         entry["commitment"] = json!(hex::encode(tx.commitment()));
         settlements.push(entry);
     }
+    log.append(settlements)?;
     // safe is never below finalized.
-    let finalized_number = settlements.last().and_then(|e| e["l2_number"].as_u64()).unwrap_or(0);
+    let finalized_number = log.recent.back().and_then(|e| e["l2_number"].as_u64()).unwrap_or(0);
     let safe = safe.filter(|e| e["l2_number"].as_u64().is_some_and(|n| n >= finalized_number));
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     Ok(Some(json!({
-        "schema": "bloch.l2.native-follower-status.v2",
+        "schema": "bloch.l2.native-follower-status.v3",
         "written_at_unix": now,
         "network": hex::encode(policy.network),
         "settlement_policy": hex::encode(report.settlement_policy),
@@ -426,8 +509,55 @@ fn status(
             "activation_slot": block.slot,
             "finalized": finalized,
         })),
-        "finalized_settlements": settlements,
+        "finalized_settlements_count": log.entries,
+        "finalized_settlements_recent": log.recent,
+        "settlement_log": log.status_fields(),
         "safe_settlement": safe,
         "production_finality": false,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(number: u64) -> Value {
+        json!({"l2_number": number, "l2_hash": format!("{number:064x}")})
+    }
+
+    #[test]
+    fn the_settlement_log_is_rewritten_at_start_then_appended_with_a_rolling_digest() {
+        let dir = std::env::temp_dir().join(format!("settlement-log-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let status = dir.join("follower-status.json");
+        let mut log = SettlementLog::beside(&status);
+        assert_eq!(log.path, dir.join("follower-status.settlements.jsonl"));
+        // Nothing yet: an empty log exists, with the domain digest.
+        log.append(vec![]).unwrap();
+        assert_eq!(fs::read(&log.path).unwrap(), b"");
+        assert_eq!(log.status_fields()["entries"], 0);
+        log.append(vec![json!({"l2_number": 1})]).unwrap();
+        log.append(vec![]).unwrap();
+        log.append(vec![json!({"l2_number": 2})]).unwrap();
+        // The vector shared with the RPC and the Python readers.
+        assert_eq!(log.status_fields()["digest"], "e9e101a8fd7ec4784d28979c4a5472bdbcfe04ff5b9313928fd1f14a8d76b30c");
+        assert_eq!(log.status_fields()["bytes"], 32);
+        assert_eq!(fs::read(&log.path).unwrap(), b"{\"l2_number\":1}\n{\"l2_number\":2}\n");
+
+        // A restart with a torn append on disk rewrites the same bytes from the replay.
+        OpenOptions::new().append(true).open(&log.path).unwrap().write_all(b"{\"torn").unwrap();
+        let mut restarted = SettlementLog::beside(&status);
+        restarted.append(vec![json!({"l2_number": 1}), json!({"l2_number": 2})]).unwrap();
+        assert_eq!(restarted.status_fields(), log.status_fields());
+        assert_eq!(fs::read(&restarted.path).unwrap(), b"{\"l2_number\":1}\n{\"l2_number\":2}\n");
+
+        // Only the newest entries stay in the status.
+        let mut long = SettlementLog::beside(&dir.join("long.json"));
+        long.append((1..=200).map(entry).collect()).unwrap();
+        assert_eq!(long.recent.len(), RECENT_SETTLEMENTS);
+        assert_eq!(long.recent.front().unwrap()["l2_number"], 137);
+        assert_eq!(long.recent.back().unwrap()["l2_number"], 200);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

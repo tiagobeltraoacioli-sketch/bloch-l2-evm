@@ -44,6 +44,68 @@ def h(tag):
     return hashlib.sha256(tag.encode()).hexdigest()
 
 
+# Every test runs on either follower status schema: ATTESTOR_TEST_STATUS=v3 python3 test_attestor.py
+STATUS_SCHEMA = os.environ.get('ATTESTOR_TEST_STATUS', 'v2')
+
+
+class SettlementLogReader(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / 'status.json'
+
+    def write(self, count):
+        entries = [{'l2_number': n, 'l2_hash': f'{n:064x}'} for n in range(1, count + 1)]
+        lines = [json.dumps(e, separators=(',', ':')).encode() + b'\n' for e in entries]
+        self.path.with_name('status.settlements.jsonl').write_bytes(b''.join(lines))
+        return {'schema': 'bloch.l2.native-follower-status.v3', 'finalized_settlements_recent': entries[-64:],
+                'settlement_log': {'file': 'status.settlements.jsonl', 'entries': count, 'bytes': sum(map(len, lines)),
+                                   'digest': lib.settlement_log_digest(lines).hex()}}
+
+    def test_digest_vector_shared_with_the_follower_and_the_rpc(self):
+        self.assertEqual(lib.settlement_log_digest([b'{"l2_number":1}\n', b'{"l2_number":2}\n']).hex(),
+                         'e9e101a8fd7ec4784d28979c4a5472bdbcfe04ff5b9313928fd1f14a8d76b30c')
+
+    def test_v2_v3_and_empty(self):
+        status = self.write(100)
+        self.assertEqual(len(lib.follower_settlements(status, self.path, check_digest=True)), 100)
+        self.assertEqual(lib.follower_settlements(self.write(0), self.path), [])
+        v2 = {'schema': 'bloch.l2.native-follower-status.v2', 'finalized_settlements': [{'l2_number': 1}]}
+        self.assertEqual(lib.follower_settlements(v2, self.path), [{'l2_number': 1}])
+        with self.assertRaises(ValueError):
+            lib.follower_settlements({'schema': 'other'}, self.path)
+
+    def test_a_log_that_does_not_match_is_refused(self):
+        log = self.path.with_name('status.settlements.jsonl')
+        status = self.write(3)
+        good = log.read_bytes()
+        log.write_bytes(good[:-4])
+        with self.assertRaises(ValueError):
+            lib.follower_settlements(status, self.path)
+        log.write_bytes(good.replace(b'"l2_number":2', b'"l2_number":9'))
+        with self.assertRaises(ValueError):
+            lib.follower_settlements(status, self.path)
+        # Same length, a tip that differs from the status.
+        log.write_bytes(good[:-3] + b'f"}' + b'\n')
+        with self.assertRaises(ValueError):
+            lib.follower_settlements(status, self.path)
+        # An older line changed in place: only the digest sees it.
+        status = self.write(70)
+        data = log.read_bytes()
+        changed = data.replace(json.dumps({'l2_number': 2, 'l2_hash': f'{2:064x}'}, separators=(',', ':')).encode(),
+                               json.dumps({'l2_number': 2, 'l2_hash': f'{3:064x}'}, separators=(',', ':')).encode())
+        log.write_bytes(changed)
+        lib.follower_settlements(status, self.path)
+        with self.assertRaises(ValueError):
+            lib.follower_settlements(status, self.path, check_digest=True)
+        # A longer log (a crash before the status was written) counts up to what the status names.
+        log.write_bytes(data + b'{"torn')
+        self.assertEqual(len(lib.follower_settlements(status, self.path)), 70)
+        status['settlement_log']['file'] = '../x'
+        with self.assertRaises(ValueError):
+            lib.follower_settlements(status, self.path)
+
+
 class FakeRpc:
     """Three getl2settlement endpoints whose answers each test sets."""
 
@@ -256,10 +318,20 @@ class AgentTest(unittest.TestCase):
                 if tamper and tamper[0] == b['number']:
                     entry.update(tamper[1])
                 settlements.append(entry)
-        self.status.write_text(json.dumps({
+        document = {
             'schema': 'bloch.l2.native-follower-status.v2', 'written_at_unix': time.time() - age,
             'network': lib.NATIVE_NETWORK, 'chain_id': lib.CHAIN_ID, 'verified_slot': 500,
-            'l2_genesis': {'hash': L2_GENESIS, 'finalized': True}, 'finalized_settlements': settlements}))
+            'l2_genesis': {'hash': L2_GENESIS, 'finalized': True}, 'finalized_settlements': settlements}
+        if STATUS_SCHEMA == 'v3':
+            document['schema'] = 'bloch.l2.native-follower-status.v3'
+            settlements = document.pop('finalized_settlements')
+            lines = [json.dumps(e, separators=(',', ':')).encode() + b'\n' for e in settlements]
+            name = self.status.stem + '.settlements.jsonl'
+            self.status.with_name(name).write_bytes(b''.join(lines))
+            document.update(finalized_settlements_count=len(lines), finalized_settlements_recent=settlements[-64:],
+                            settlement_log={'file': name, 'entries': len(lines), 'bytes': sum(map(len, lines)),
+                                            'digest': lib.settlement_log_digest(lines).hex()})
+        self.status.write_text(json.dumps(document))
 
     def view(self, claimed=None, attestor_set=None):
         c = self.commitments()
