@@ -159,6 +159,7 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # The getl2settlement fields the worker reads; everything else (native_height,
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
+SPOOL_READ_LIMIT = 16_384  # the producer's MAX_POOL_ENTRIES
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
             'poll_seconds': 6, 'resubmit_seconds': 120}
@@ -215,6 +216,15 @@ def da_fee_sat(payload_bytes, inputs=1, base_fee_millisat_per_gas=MIN_BASE_FEE_M
     gas = TX_FLAT_GAS + GAS_PER_BYTE * tx_bytes + HYBRID_VERIFY_GAS * inputs
     part = lambda price: -(-gas * price // 1000)  # noqa: E731
     return part(base_fee_millisat_per_gas) + part(tip)
+
+
+def atomic_write(path, text):
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    with tmp.open('w') as out:
+        out.write(text)
+        out.flush()
+        os.fsync(out.fileno())
+    tmp.replace(path)
 
 
 class ProducerError(RuntimeError):
@@ -758,6 +768,9 @@ class Settler:
         limit = self.c.get('local_prove_max_instructions')
         if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
             raise Halt('local_prove_max_instructions must be a positive integer')
+        budget = self.c.get('max_block_instructions')
+        if budget is not None and (not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0):
+            raise Halt('max_block_instructions must be a positive integer')
         self.work = Path(self.c['workdir'])
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
@@ -819,6 +832,8 @@ class Settler:
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
+            if self.c['user_transactions'] and self.c.get('max_block_instructions'):
+                return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
             if not self.c['user_transactions']:
@@ -828,6 +843,102 @@ class Settler:
                 raise  # the block was committed before the failure; the next cycle reuses it
             log('producer-refused-spool', number=number, reason=str(error)[:400])
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
+
+    def spool_entries(self):
+        """The spool as (path, raw hex), in name order. An unreadable or malformed entry is left to the producer's rules."""
+        entries = []
+        for path in sorted(Path(self.c['txpool_dir']).glob('*.tx'))[:SPOOL_READ_LIMIT]:
+            try:
+                raw = path.read_text().strip().removeprefix('0x')
+                bytes.fromhex(raw)
+            except (OSError, ValueError):
+                continue
+            entries.append((path, raw))
+        return entries
+
+    def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
+        """Build the block from exactly these transactions on a throwaway copy of the database and run the guest in
+        execute mode. Returns (instructions or None when the time limit was hit, producer report). No proof, no lock."""
+        scratch = deposits.parent / f'preflight-{tag}'
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir(parents=True)
+        try:
+            db = scratch / 'db'
+            shutil.copytree(self.c['l2_db'], db, symlinks=True)
+            pool = scratch / 'pool.json'
+            pool.write_text(json.dumps(raws))
+            args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+            args[args.index('--target') + 1] = str(db)
+            block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
+                                 '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
+            self.produce('export', '--target', str(db), '--number', str(number), '--out', str(scratch / 'block.artifact'))
+            request = scratch / 'native-request.txt'
+            request.write_text(self.preflight_request)
+            env = {'PATH': self.c.get('prover_path', '/usr/bin:/bin'), 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
+                   'SP1_CIRCUIT_MODE': 'release', 'BLOCH_NATIVE_L2_REQUEST': str(request),
+                   'BLOCH_NATIVE_L2_ARTIFACT': str(scratch / 'block.artifact')}
+            argv = [self.c['prover'], *self.prover_args, 'execute', 'native-artifact', self.c['guest']]
+            try:
+                with (scratch / 'execute.log').open('w') as out:
+                    result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT,
+                                      timeout=self.c.get('preflight_execute_seconds', 120))
+            except subprocess.TimeoutExpired:
+                return None, block
+            found = re.findall(r'(\d+) instructions', (scratch / 'execute.log').read_text(errors='replace'))
+            if result.returncode or not found:
+                return None, block  # the guest cannot run this block: treat it as over any budget
+            return int(found[-1]), block
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
+        """Commit only a block whose guest execution fits `max_block_instructions`.
+
+        Declared gas does not bound proving cost: a 15M-gas block ranges from a few million to several billion zkVM
+        instructions. So the block is first built on a copy of the database and measured. An over-budget block is cut
+        to its longest fitting prefix. The transaction that broke the budget stays in the spool for a later block,
+        unless it does not fit even alone: then it can never be settled and moves to the quarantine directory."""
+        budget = self.c['max_block_instructions']
+        entries = self.spool_entries()
+        if not entries:
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
+        fits = lambda instructions: instructions is not None and instructions <= budget  # noqa: E731
+        self.preflight_request = self.preflight_source
+        measure = lambda raws, tag: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, tag)  # noqa: E731
+        by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
+        instructions, full = measure([raw for _, raw in entries], 'full')
+        included = list(full.get('included', []))
+        finished = [e['hash'] for e in full.get('dropped', []) if e.get('hash')]
+        keep = len(included)
+        if not fits(instructions):
+            low, high = 0, len(included)  # fits(low) by assumption, not fits(high) as measured
+            while high - low > 1:
+                middle = (low + high) // 2
+                if fits(measure([by_hash[h][1] for h in included[:middle]], 'cut')[0]):
+                    low = middle
+                else:
+                    high = middle
+            keep = low
+            offender = included[keep] if included else None
+            log('block-over-budget', number=number, instructions=instructions, budget=budget, keep=keep, of=len(included), offender=offender)
+            if offender and not fits(measure([by_hash[offender][1]], 'alone')[0]):
+                quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
+                quarantine.mkdir(exist_ok=True, mode=0o700)
+                try:
+                    by_hash[offender][0].replace(quarantine / by_hash[offender][0].name)
+                except FileNotFoundError:
+                    pass
+                log('tx-quarantined', number=number, hash=offender)
+        chosen = included[:keep]
+        pool = deposits.parent / 'selected.json'
+        atomic_write(pool, json.dumps([by_hash[h][1] for h in chosen]))
+        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+        block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
+                             '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
+        for name in chosen + finished:  # committed: what the producer does for a spool directory
+            if name in by_hash:
+                by_hash[name][0].unlink(missing_ok=True)
+        return block
 
     def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
@@ -862,6 +973,8 @@ class Settler:
             if head['hash'] != parent:
                 raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
             anchor_slot = int(source['request'].splitlines()[3])
+            self.preflight_source = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n' + (
+                f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n" if 'inbox_count' in source else '')
             block = self.extend(parent, anchor, deposits, anchor_slot, number)
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
