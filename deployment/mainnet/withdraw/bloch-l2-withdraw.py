@@ -407,7 +407,11 @@ def fetch_once(args, expected_recipient):
         raise NotReady(f'the L1 {key} root covers {target["count"]} withdrawals; {args.index} is not matured yet')
     wanted = target.get('root')
     if wanted != fields['root']:
+        first_sats = fields['sats']
         fields = check_proof(ask_proof(args.l2_rpc, args.index, wanted), args.chain_id)
+        if fields['sats'] != first_sats:
+            # The delay was chosen from the first answer; only this one is under an L1 root.
+            raise Refused(f'the RPC gave withdrawal {args.index} two amounts: {first_sats} and {fields["sats"]} sats')
         if fields['root'] != wanted:
             raise Refused(f'asked for a proof against {wanted}, the RPC answered {fields["root"]}')
         if fields['index'] != args.index:

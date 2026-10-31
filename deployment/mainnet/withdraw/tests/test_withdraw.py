@@ -258,6 +258,22 @@ class TamperedProof(Base):
         self.l1 = l1_answer([record(3, 2), record(5, 3)], record(3, 2))
         self.assertEqual(self.fetch(self.url(lambda m, p: newest)), tool.REFUSED)
 
+    def test_an_amount_that_changes_between_answers_is_refused(self):
+        """A fake small first answer must not select the short delay for a large withdrawal."""
+        fake_leaf = tool.leaf_hash(CHAIN, 0, ME, 1_000_000)
+        fake = {'chain_id': CHAIN, 'number': 9, 'withdrawal_root': tree_root([fake_leaf]).hex(), 'withdrawal_count': 1, 'index': 0,
+                'withdrawal': {'nonce': 0, 'l1_recipient': ME.hex(), 'sats': 1_000_000, 'sender': 'aa' * 20, 'l2_block': 9, 'leaf': fake_leaf.hex()},
+                'siblings': [s.hex() for s in tree_proof([fake_leaf], 0)]}
+        real = copy.deepcopy(self.doc)
+        real_leaf = tool.leaf_hash(CHAIN, 0, ME, 20_000_000_000)
+        real.update(withdrawal_root=tree_root([real_leaf]).hex(), withdrawal_count=1, siblings=[s.hex() for s in tree_proof([real_leaf], 0)])
+        real['withdrawal'].update(sats=20_000_000_000, leaf=real_leaf.hex())
+        rec = {'l2_number': 2, 'root': real['withdrawal_root'], 'count': 1, 'height': 5, 'finalized': True}
+        self.l1 = l1_answer([rec], rec)
+        l2 = self.url(lambda m, p: real if len(p) > 1 else fake)
+        self.assertEqual(self.fetch(l2), tool.REFUSED)
+        self.assertFalse(os.path.exists(self.out))
+
     def test_garbage_answers_are_refused(self):
         for answer in (b'not json', b'[1]', b'{"result":{"a":1,"a":2}}', b'{"result":null}'):
             with self.subTest(answer):
