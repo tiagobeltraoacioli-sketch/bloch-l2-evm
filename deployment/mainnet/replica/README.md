@@ -63,7 +63,7 @@ sudo systemctl enable --now bloch-l2-replica-follower bloch-l2-replica-refresh.t
 sudo systemctl enable bloch-l2-replica-rpc
 ```
 
-The first replay takes about an hour. When the follower reports the L2 genesis final, the next refresh publishes the
+The first replay takes about 80 minutes. When the follower reports the L2 genesis final, the next refresh publishes the
 first generation and the path unit starts the RPC. Check it with:
 
 ```
@@ -74,9 +74,13 @@ first generation and the path unit starts the RPC. Check it with:
 sudo -u bloch-l2-replica python3 -I /opt/bloch/l2-replica/current/replica_check.py verify --rpc http://127.0.0.1:18965 --status /var/lib/bloch-l2-replica/follower/status.json --l1 http://HOST:8080 --l1 http://OTHER:8080
 ```
 
-The sandbox settings have not been run under systemd in a rehearsal. On the first real start, check that all three
-services stay up with `systemctl --failed` and `journalctl -u 'bloch-l2-replica-*'`. A `status=31/SYS` or `203/EXEC`
-exit points at the sandbox.
+The units have run under a real systemd once: a throwaway container with its own PID 1 (2026-10-31), not a host. On
+any first real start, check that all services stay up with `systemctl --failed` and `journalctl -u 'bloch-l2-replica-*'`.
+A `status=31/SYS` or `203/EXEC` exit points at the sandbox. **Also look for `bpf-firewall ... failed` in the journal:**
+the unit then starts with no IP allow-list, and nothing else reports it.
+
+The follower's cgroup sits at `MemoryHigh` (3 GB, mostly page cache) during the replay. Its RSS stayed near 0.6 GB and
+the fetch rate did not drop.
 
 ## Upgrade and rollback
 
