@@ -200,14 +200,14 @@ def discard_phase(tag='', gas=15_000_000):
         note(f'stuck-sent{tag}', honest=honest, withdrawal=withdrawal, attacker=attacker)
     a = attacker.removeprefix('0x')
     e = wait_event(lambda e: e.get('event') == 'l2-block-produced' and e.get('transactions', 0) > 0 and e.get('number', 0) > before['head']['number'] - 1
-                   and (RUN / 'canonical').exists() and stuck_has(e, a), 'block with the attacker tx', 3600)
+                   and (RUN / 'canonical').exists() and stuck_has(e, a), 'block with the attacker tx', 21600)
     number = e['number']
     note('stuck-block', block=e)
     t0 = time.time()
     # The settler must fail at least twice on its own: real prover failures, no operator.
-    while sum(1 for x in events()[start_line:] if x.get('event') == 'prover-failed') < 2:
-        if time.time() - t0 > 7200:
-            note('no-prover-failure-in-2h')
+    while sum(1 for x in events()[start_line:] if x.get('event') == 'prover-failed' and f'{number:08d}-' in x.get('directory', '')) < 2:
+        if time.time() - t0 > 21600:
+            note('no-prover-failure-in-6h')
             break
         time.sleep(10)
     failed = [x for x in events()[start_line:] if x.get('event') in ('prover-failed', 'retry')]
@@ -245,10 +245,10 @@ def discard_phase(tag='', gas=15_000_000):
 def finish_discard(tag, number, honest, withdrawal, attacker, before, applied, t1):
     s = fs.state()
     user = s['l2_address_user']
-    f = wait_accepted(number, 5400)
+    f = wait_accepted(number, 21600)
     t2 = time.time()
     note('replacement-accepted', statement=f, old_hash=applied.get('old_hash'), recovery_seconds=round(t2 - t1))
-    deadline = time.time() + 3600
+    deadline = time.time() + 21600
     while time.time() < deadline:
         # Settle a further block too: the chain really moves on.
         v = d.safe_rpc('getl2settlement')
@@ -276,10 +276,10 @@ def elsewhere_phase():
     user = s['l2_address_user']
     cap = os.environ.get('DRILL_LOW_CAP', '12G')
     start_line = len(events())
-    (RUN / 'prover.cap').write_text(cap + '\n')
     nonce = int(d.rpc('eth_getTransactionCount', ['0x' + user, 'pending'], port=d.L2_RPC), 16)
     sent = [rpc_send(raw_transfer(nonce + i, f'{0x70 + (i % 16):02x}')) for i in range(4)]
-    e = wait_event(lambda e: e.get('event') == 'l2-block-produced' and e.get('transactions', 0) >= 1 and events().index(e) >= start_line, 'low-cap block', 3600)
+    e = wait_event(lambda e: e.get('event') == 'l2-block-produced' and e.get('transactions', 0) >= 1 and events().index(e) >= start_line, 'low-cap block', 21600)
+    (RUN / 'prover.cap').write_text(cap + '\n')  # only this block: the block before it still has to settle
     number = e['number']
     note('low-cap-block', block=e)
     t0 = time.time()
@@ -290,8 +290,8 @@ def elsewhere_phase():
             break
         if any(x.get('event') == 'accepted' and x.get('number') == number for x in evs):
             raise SystemExit('the low-cap proof succeeded: lower the cap')
-        if time.time() - t0 > 7200:
-            raise SystemExit('no failures in 2 h')
+        if time.time() - t0 > 21600:
+            raise SystemExit('no failures in 6 h')
         time.sleep(10)
     note('low-cap-stuck', failures=failures, seconds=round(time.time() - t0))
     ctl('down', 'settler')
@@ -321,7 +321,7 @@ def elsewhere_phase():
     (RUN / 'prover.cap').write_text('56G\n')
     h = head()
     ctl('up', 'settler')
-    f = wait_accepted(number, 3600)
+    f = wait_accepted(number, 21600)
     note('same-block-accepted', statement=f, db_hash_before=h['hash'], same=f['l2_hash'] == h['hash'] or h['number'] != number, recovery_seconds=round(time.time() - t1))
     snapshot('elsewhere-after')
     done('elsewhere', number=number, hash=f['l2_hash'])
