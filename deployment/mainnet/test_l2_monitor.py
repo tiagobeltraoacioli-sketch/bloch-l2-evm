@@ -602,6 +602,19 @@ class MonitorTests(unittest.TestCase):
             r, _ = run(healthy(), '--event-log', f'settler={log}')
         self.assertEqual(level(r, 'events[settler]'), 'CRIT')
 
+    def test_finality_states_of_the_next_build(self):
+        world = healthy()
+        world['l2'][L2A]['bloch_finality']['status'] = {'state': 'lagging', 'age_s': 60, 'missing_settlement': 96}
+        world['l2'][L2B]['bloch_finality']['status'] = {'state': 'lagging', 'age_s': 7200, 'missing_settlement': 96}
+        r, _ = run(world)
+        self.assertEqual(level(r, 'l2_finality_status[A]'), 'WARN')
+        self.assertEqual(level(r, 'l2_finality_status[B]'), 'CRIT')
+        self.assertIn('settlement 96', next(c['message'] for c in r.checks if c['check'] == 'l2_finality_status[A]'))
+        world = healthy()
+        world['l2'][L2A]['bloch_finality']['status'] = {'state': 'starting', 'age_s': None}
+        r, _ = run(world)
+        self.assertEqual(level(r, 'l2_finality_status[A]'), 'WARN')
+
     def test_finality_closed_and_status_age(self):
         world = healthy()
         world['l2'][L2A]['safe'] = world['l2'][L2A]['finalized'] = None

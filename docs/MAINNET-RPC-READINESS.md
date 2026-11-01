@@ -375,3 +375,7 @@ below it at the spool, evicts older spool entries below it at the sweep, and flo
 `eth_gasPrice` and the `eth_feeHistory` rewards. `bloch-l2-produce-dev extend --min-tip-wei` holds such entries in the
 spool; the mainnet settler installer sets `min_tip_wei`. This is operator policy, not a consensus rule: blocks with a
 lower tip stay valid, and replay never consults it. Priority fees stay in the keyless vault until a later program change.
+
+**Level states (`bloch_finality.status.state`).** `starting`: no first read yet, both levels closed (-32001). `ok`. `lagging`: the status names a settlement this database lacks (`missing_settlement`); levels stay open at their old height, and `age_s` is the file's real age, computed at the call. If it happens before anything was published, levels stay closed. `missing` or `invalid`: both levels closed. While `finalized` is closed, `bloch_settlement` and `bloch_getWithdrawalProof` answer -32001 too. A `safe` settlement that contradicts the local chain closes `safe` only.
+
+A regressed or damaged log stays closed until the follower's log again holds what this RPC verified, or the RPC is restarted. A poll while closed does not read the history again: the cursor stays, and a log refused on a read from its start is not re-read until it or its status changes.
