@@ -152,7 +152,7 @@ def save(**fields):
 
 
 # ── processes ─────────────────────────────────────────────────────────────────
-def spawn(name, argv, **extra):
+def spawn(name, *argv, **extra):
     logf = (R / 'logs' / f'{name}.log').open('a')
     process = subprocess.Popen([str(a) for a in argv], env=env(**extra), stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                start_new_session=True, cwd=R)
