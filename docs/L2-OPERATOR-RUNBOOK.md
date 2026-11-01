@@ -68,7 +68,7 @@ systemctl status bloch-l2-mainnet-settler --no-pager
 sudo systemctl start bloch-l2-mainnet-settler
 ```
 
-Evidence: Alert, mainnet thresholds, settler stopped: WARN at 25 min and CRIT at 45 min both seen. Drill PASS, unaided, no double payment: SIGKILL mid-proof (worker; group), after extend, and all 7 crash points around DA and submission.
+Evidence: Alert, mainnet thresholds (25/45 min), settler stopped: WARN seen at 31 min and CRIT at 57 min, the samples taken; the exact crossings were not sampled. Drill PASS, unaided, no double payment: SIGKILL mid-proof (worker; group), after extend, and all 7 crash points around DA and submission.
 
 A settler killed alone leaves its prover running. Its replacement queues behind it, which costs up to one extra proof time. Do not kill the prover by hand unless memory requires it.
 
