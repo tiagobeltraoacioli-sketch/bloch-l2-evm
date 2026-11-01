@@ -84,6 +84,8 @@ class World(base.Fake):
             users = self.block_txs.get(len(chain) - 1)
             out.stdout = json.dumps({'number': len(chain) - 1, 'hash': chain[-1], 'deposits': 1,
                                      'transactions': s.da_batch_count(users) if users else 0, 'deferred': [], 'dropped': []})
+        elif command == 'hash':
+            out.stdout = json.dumps({'number': number, 'hash': chain[number]})
         elif command == 'export':
             Path(argv[argv.index('--out') + 1]).write_bytes(b'artifact')
             out.stdout = json.dumps({'number': number, 'hash': chain[number], 'anchor': base.BLOCK, 'bytes': 8})

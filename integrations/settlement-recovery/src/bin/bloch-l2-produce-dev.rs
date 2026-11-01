@@ -34,7 +34,7 @@ use bloch_settlement_recovery::reconstruct::{
 };
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
-    prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec, BlochNextBlockEnvCtx,
+    prepare_genesis, proof_export::export_with_report, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
 };
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
@@ -411,7 +411,8 @@ fn run(args: &[String]) -> Result<String, String> {
             let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
             let out = PathBuf::from(option(rest, "--out")?);
             let factory = open(&target, &runtime, false)?;
-            let artifact = export_canonical_witness(&factory, number).map_err(|e| e.to_string())?;
+            let report = export_with_report(&factory, number).map_err(|e| e.to_string())?;
+            let artifact = report.artifact;
             let bytes = artifact.encode().map_err(|e| e.to_string())?;
             let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
             file.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -420,8 +421,18 @@ fn run(args: &[String]) -> Result<String, String> {
                 .and_then(|d| d.sync_all())
                 .map_err(|e| e.to_string())?;
             Ok(json!({"number": number, "hash": hex::encode(artifact.header().hash()),
-                      "anchor": hex::encode(artifact.context().anchor_root), "bytes": bytes.len()})
+                      "anchor": hex::encode(artifact.context().anchor_root), "bytes": bytes.len(),
+                      "state_entries": report.state_entries})
             .to_string())
+        }
+        "hash" => {
+            only(rest, &["--target", "--number"])?;
+            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let factory = open(&target, &runtime, false)?;
+            let header = <BlochProviderFactory as HeaderProvider>::sealed_header(&factory, number)
+                .map_err(|e| e.to_string())?
+                .ok_or("no such block")?;
+            Ok(json!({"number": number, "hash": hex::encode(header.hash())}).to_string())
         }
         "da" => {
             only(rest, &["--target", "--number", "--out"])?;
@@ -929,8 +940,9 @@ fn withdrawal_proof(
 /// block since genesis; an indexer replaces this outside development).
 const MAX_PROOF_BLOCKS: u64 = 1_000_000;
 
-/// Upper bound on native blocks read by one reconstruction.
-const MAX_L1_BLOCKS: usize = 1_000_000;
+/// Upper bound on native blocks read by one reconstruction: the follower's default `--max-blocks`, the most a
+/// follower store holds. Mainnet L1 grows about 2,800 blocks a day.
+const MAX_L1_BLOCKS: usize = 5_000_000;
 
 /// Upper bound on candidates read per block (selection cost is linear in it).
 const MAX_POOL_ENTRIES: usize = 16_384;

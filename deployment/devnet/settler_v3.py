@@ -988,11 +988,7 @@ class Settler:
         """The hash of block `number` in the local database."""
         if number == 0:
             return self.c['l2_genesis']
-        probe = self.work / f'.probe-{number}.artifact'
-        probe.unlink(missing_ok=True)
-        info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe))
-        probe.unlink(missing_ok=True)
-        return info['hash']
+        return self.produce('hash', '--target', self.c['l2_db'], '--number', str(number))['hash']
 
     def request_moved(self, view):
         """Whether a settlement was accepted or the request changed since `view` (None view: unknown, not moved)."""

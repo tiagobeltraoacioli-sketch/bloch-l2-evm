@@ -133,6 +133,8 @@ class Fake:
                 Path(argv[argv.index('--out') + 1]).write_text(self.da_payload.hex() + '\n')
                 out.stdout = json.dumps({'number': self.head, 'transactions': self.produced_txs,
                                          'da_commitment': s.da_commitment(self.head, self.da_payload).hex()})
+            elif command == 'hash':
+                out.stdout = json.dumps({'number': number, 'hash': chain[number]})
             elif command == 'export':
                 Path(argv[argv.index('--out') + 1]).write_bytes(b'artifact')
                 out.stdout = json.dumps({'number': self.head, 'hash': '51' * 32, 'anchor': BLOCK, 'bytes': 8})
