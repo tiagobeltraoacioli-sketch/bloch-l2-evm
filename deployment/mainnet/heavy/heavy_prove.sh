@@ -44,6 +44,7 @@ timeout -s KILL "$limit" systemd-run --user --scope -q --unit="$scope" -p Memory
   env -i "${env[@]}" /usr/bin/time -v "$H" --mainnet prove-groth16 native-artifact "$E" "$o/proof.sp1proof" > "$o/prove.log" 2>&1
 rc=$?
 secs=$(( $(date +%s) - start ))
+oom=$(journalctl --user -u "$scope.scope" --no-pager 2>/dev/null | grep -c 'killed by the OOM killer' || true)
 kill $sampler 2>/dev/null
 systemctl --user stop "$scope.scope" 2>/dev/null
 pkill -KILL -f "$H --mainnet prove-groth16 native-artifact $E $o/" 2>/dev/null
@@ -51,9 +52,9 @@ verify=none
 if [[ $rc == 0 ]]; then
   env -i "${env[@]}" "$H" --mainnet verify-groth16 native-artifact "$E" "$o/proof.sp1proof" > "$o/verify.log" 2>&1 && verify=ok || verify=failed
 fi
-python3 -I - "$d" "$o" "$name" "$tag" "$threads" "$mem" "$limit" "$rc" "$secs" "$verify" <<'PY'
+python3 -I - "$d" "$o" "$name" "$tag" "$threads" "$mem" "$limit" "$rc" "$secs" "$verify" "$oom" <<'PY'
 import json, re, sys
-d, o, name, tag, threads, mem, limit, rc, secs, verify = sys.argv[1:11]
+d, o, name, tag, threads, mem, limit, rc, secs, verify, oom = sys.argv[1:12]
 log = open(o + '/prove.log', errors='replace').read()
 rss = re.findall(r'Maximum resident set size \(kbytes\): (\d+)', log)
 cpu = re.findall(r'Percent of CPU this job got: (\d+)', log)
@@ -63,7 +64,7 @@ samples = [l.split() for l in open(o + '/memory.samples')] or [[0, 0, 0]]
 minav = min(int(s[1]) for s in samples if len(s) > 1)
 load = max(float(s[2]) for s in samples if len(s) > 2)
 rc = int(rc)
-v = 'PROVED' if rc == 0 and verify == 'ok' else 'TIME-LIMIT' if rc == 137 and int(secs) >= int(limit) - 5 else 'OOM-OR-KILLED' if rc in (137, 1) and 'Killed' in log or rc == 137 else 'FAILED'
+v = 'PROVED' if rc == 0 and verify == 'ok' else 'OOM' if int(oom or 0) else 'TIME-LIMIT' if int(secs) >= int(limit) - 5 else 'FAILED'
 r = dict(name=name, tag=tag, verdict=v, exit=rc, seconds=int(secs), threads=int(threads), memory_max_gib=int(mem),
          rss_gib=round(int(rss[0]) / 2**20, 2) if rss else None, cpu_pct=int(cpu[0]) if cpu else None,
          instructions=int(ins[-1]) if ins else None, min_mem_available_mib=minav, max_load=load, verify=verify,
