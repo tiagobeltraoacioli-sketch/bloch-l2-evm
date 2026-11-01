@@ -350,6 +350,30 @@ class MonitorTests(unittest.TestCase):
             r, _ = run(world, '--follower-status', f'f={path}')
             self.assertEqual(level(r, 'finality_file_lag[f:A]'), 'CRIT', 'the case where age_s reads young')
 
+    def test_height_runways(self):
+        p = m.PROFILES['mainnet']
+        def checks(settled, height=186000):
+            r = m.Report()
+            m.check_height_runway(settled, [{'height': height}], p, r)
+            return {c['check']: c['level'] for c in r.checks}, r
+        self.assertEqual(checks(40)[0]['l2_proof_cost'], 'OK')
+        self.assertEqual(checks(200)[0]['l2_proof_cost'], 'WARN')
+        self.assertEqual(checks(4000)[0]['l2_proof_cost'], 'CRIT')
+        self.assertEqual(m.empty_block_instructions(9000), m.empty_block_instructions(8191), 'flat once the ring wraps')
+        for height, expected in ((256, 11.2e6), (4096, 116.2e6), (8191, 227.7e6)):
+            self.assertLess(abs(m.empty_block_instructions(height) - expected) / expected, 0.25, height)
+        self.assertIn('local fallback', [c['message'] for c in checks(200)[1].checks if c['check'] == 'l2_proof_cost'][0])
+        limit = p['l1_reconstruct_limit']
+        self.assertEqual(checks(40, limit * 4 // 5 - 1)[0]['l1_reconstruct_runway'], 'OK')
+        self.assertEqual(checks(40, limit * 4 // 5)[0]['l1_reconstruct_runway'], 'WARN')
+        self.assertEqual(checks(40, limit * 19 // 20)[0]['l1_reconstruct_runway'], 'CRIT')
+        if p['l2_export_limit'] is not None:
+            self.assertEqual(checks(1023)[0]['l2_export_runway'], 'OK')
+            self.assertEqual(checks(1024)[0]['l2_export_runway'], 'WARN')
+            self.assertEqual(checks(3000)[0]['l2_export_runway'], 'CRIT')
+        else:
+            self.assertNotIn('l2_export_runway', checks(3000)[0])
+
     def test_follower_status_file(self):
         with tempfile.TemporaryDirectory() as d:
             good, stale, wrong = Path(d, 'a.json'), Path(d, 'b.json'), Path(d, 'c.json')
