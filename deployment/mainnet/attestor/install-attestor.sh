@@ -255,7 +255,7 @@ MSG
     return 0
   fi
   cat <<MSG
-Installed attestor $INDEX, NOT started. Follow INSTALL.md from step 5. The commands, in order:
+Installed attestor $INDEX, NOT started. Follow INSTALL.md from step 6. The commands, in order:
   sudo systemctl enable --now bloch-l2-attestor-follower
   journalctl -fu bloch-l2-attestor-follower
   (the first replay takes 60-90 min; wait for l2_genesis.finalized=true in $FSTATE/status.json)

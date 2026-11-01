@@ -121,4 +121,4 @@ if [ $OPEN = 1 ]; then
   echo "Type the TRANSPORT passphrase of attestor $I (received over the second channel):"
   "$ART/bloch-pos" l2-claim key-check --sealed "$SEALED" --attestors attestors.set --signer-index "$I"
 fi
-echo "BUNDLE OK for attestor $I. Next: INSTALL.md step 4 (install-attestor.sh install)."
+echo "BUNDLE OK for attestor $I. Next: INSTALL.md step 4 (firewall), then step 5 (install)."
