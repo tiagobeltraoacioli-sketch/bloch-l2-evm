@@ -378,6 +378,26 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'l2_status_runway[A]'), 'OK')
         self.assertIn('no size limit', r.checks[0]['message'])
         self.assertEqual(check(v21, height=0).checks, [])
+    def test_follower_file_against_the_rpc_finalized_height(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, 'f.json')
+            base = {'chain_id': 700770, 'network': m.MAINNET_PINS['network'], 'verified_blocks': 185930,
+                    'native_finalized_epoch': EPOCH - 5, 'l2_genesis': {'hash': GENESIS}, 'written_at_unix': NOW - 20}
+
+            def lag_levels(newest, key='finalized_settlements'):
+                path.write_text(json.dumps({**base, key: [{'l2_number': newest}]}))
+                r, _ = run(healthy(), '--follower-status', f'f={path}')
+                return level(r, 'finality_file_lag[f:A]')
+            self.assertEqual(lag_levels(95), 'OK')
+            self.assertEqual(lag_levels(90), 'OK', 'an RPC ahead of this file is not lagging')
+            self.assertEqual(lag_levels(96), 'WARN')
+            self.assertEqual(lag_levels(98), 'CRIT')
+            self.assertEqual(lag_levels(98, 'finalized_settlements_recent'), 'CRIT', 'schema v3 lists its newest')
+            world = healthy()
+            world['l2'][L2A]['bloch_finality'] = {'finalized_height': 95, 'status': {'state': 'ok', 'age_s': 1, 'written_at_unix': NOW - 1}}
+            path.write_text(json.dumps({**base, 'finalized_settlements': [{'l2_number': 200}]}))
+            r, _ = run(world, '--follower-status', f'f={path}')
+            self.assertEqual(level(r, 'finality_file_lag[f:A]'), 'CRIT', 'the case where age_s reads young')
 
     def test_follower_status_file(self):
         with tempfile.TemporaryDirectory() as d:

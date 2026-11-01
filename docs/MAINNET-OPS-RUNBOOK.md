@@ -18,6 +18,10 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 
 ## 2. Monitor
 
+`finality_file_lag[FILE:RPC]` compares the follower file's newest settlement with the RPC's `finalized_height` (WARN at 1,
+CRIT at 3; needs `--follower-status`). A settled RPC up to v2.1 keeps `bloch_finality.status.age_s` young while its database
+lags the file, so read this check, not that age, to know whether finality on a backend is current.
+
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
 dependencies, no keys) for the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (follower
 `c18752fd…`, produce-dev `fb0d5313…`, settled-rpc `18be911a…`). Its JSON-RPC

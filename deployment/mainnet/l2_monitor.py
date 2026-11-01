@@ -128,6 +128,8 @@ _COMMON: Dict[str, Any] = {
     'file_age_warn': 120, 'file_age_crit': 600,
     'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
+    # Settlements the follower file has and an RPC's finalized_height has not. One can be a poll in flight.
+    'finality_file_lag_warn': 1, 'finality_file_lag_crit': 3,
     # A settled RPC before the next build closes safe and finalized above 16 MiB of status file.
     'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
     # Runway to that limit: replacing the RPC needs a signed build and a rollout, so the warning comes months ahead.
@@ -752,6 +754,24 @@ def rpc_status_runway(client: 'Client', v: Dict[str, Any], p: Dict[str, Any], no
     settlement_runway(f'l2_status_runway[{v["name"]}]', height, limit, rate, p, now, r)
 
 
+def finality_file_lag(name: str, s: Dict[str, Any], views: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+    """The follower file's newest settlement against each RPC's finalized_height. `bloch_finality.status.age_s` of a
+    settled RPC up to v2.1 stands still while its database lags the file, so that age cannot show this."""
+    listed = s.get('finalized_settlements') or s.get('finalized_settlements_recent') or []
+    newest = listed[-1].get('l2_number') if listed else 0
+    if not isinstance(newest, int):
+        r.add(f'finality_file_lag[{name}]', WARN, 'the follower file has no readable newest settlement')
+        return
+    for v in views:
+        f = v.get('finality')
+        height = f.get('finalized_height') if isinstance(f, dict) else None
+        if height is not None:
+            lag = max(0, newest - int(height))
+            r.graded(f'finality_file_lag[{name}:{v["name"]}]', lag, p['finality_file_lag_warn'], p['finality_file_lag_crit'],
+                     f'follower file settled through L2 block {newest}, {v["name"]} publishes finalized_height {height}',
+                     newest=newest, finalized_height=height)
+
+
 def check_followers(client: 'Client', views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
                     p: Dict[str, Any], now: float, r: Report) -> None:
     for v in views:
@@ -790,6 +810,7 @@ def check_followers(client: 'Client', views: List[Dict[str, Any]], statuses: Lis
         status_size(name, path, s, p, now, r)
         follower_lag(f'{name}:status', s.get('verified_blocks'), s.get('native_finalized_epoch'), l1_up, p, r,
                      'status.json')
+        finality_file_lag(name, s, views, p, r)
 
 
 # ------------------------------------------------------------------------------------- attestors
