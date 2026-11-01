@@ -223,11 +223,13 @@ damage, and it needs an operator.
 
 **The settled RPC must restart after a swap**, because it keeps the old database open. Until then it
 serves the orphaned head as `latest`. The worker rewrites `/var/lib/bloch-l2-mainnet-settler/l2-db-generation.json`
-at each swap. The worker's unit has `NoNewPrivileges`, so it cannot restart anything itself. Watch the
-file with a path unit that restarts the RPC service. `foreign-settlement-recovered` reports the block,
-the orphans, `wasted_proofs` and `wasted_da_signed`.
+at each swap. The worker's unit has `NoNewPrivileges`, so it cannot restart anything itself.
+`follower-rpc/bloch-l2-mainnet-rpc-restart.path` watches the file and restarts the RPC service: install.sh
+installs it, and turning `foreign_recovery` on needs `sudo systemctl enable --now bloch-l2-mainnet-rpc-restart.path`.
+`foreign-settlement-recovered` reports the block, the orphans, `wasted_proofs` and `wasted_da_signed`.
 
-Repeated events are an attack on liveness, not on funds. Alert on more than one per day.
+Repeated events are an attack on liveness, not on funds. `l2_monitor.py` counts them over 24 h from `--unit` or
+`--event-log`: `foreign_settlements` is WARN at one and CRIT above one per day.
 
 ## L2 reorg recovery
 

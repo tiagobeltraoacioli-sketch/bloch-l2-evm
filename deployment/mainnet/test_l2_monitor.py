@@ -495,6 +495,31 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'unit[missing.service]'), 'CRIT')
         self.assertEqual(level(r, 'events[ok]'), 'OK')
 
+    def test_foreign_settlements_alert_over_a_day(self):
+        stamp = lambda age: m.datetime.datetime.fromtimestamp(NOW - age, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        ev = lambda age: json.dumps({'time': stamp(age), 'event': 'foreign-settlement-recovered', 'number': 7})
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d, 'settler.log')
+            log.write_text(ev(90000) + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertNotIn('foreign_settlements[settler]', [c['check'] for c in r.checks])
+            log.write_text(ev(90000) + '\n' + ev(7200) + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
+            self.assertEqual(level(r, 'events[settler]'), 'OK')
+            log.write_text(ev(7200) + '\n' + ev(60) + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
+            self.assertIn('L2 block 7', next(c['message'] for c in r.checks if c['check'] == 'foreign_settlements[settler]'))
+
+        def runner(argv):
+            if argv[0] == 'systemctl':
+                return 0, 'LoadState=loaded\nActiveState=active\nSubState=running\nNRestarts=0\nExecMainStatus=0\nResult=success\n'
+            return 0, ev(7200) + '\n'
+        r = m.Report()
+        m.check_units(['settler=settler.service'], m.PROFILES['mainnet'], NOW, runner, r)
+        self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
+
     def test_repeated_warn_events_escalate(self):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d, 'settler.log')

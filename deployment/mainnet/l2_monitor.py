@@ -132,6 +132,7 @@ _COMMON: Dict[str, Any] = {
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
+    'foreign_window_seconds': 86400, 'foreign_recovered_crit': 2,
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
 }
 PROFILES: Dict[str, Dict[str, Any]] = {
@@ -805,6 +806,17 @@ def grade_events(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], win
                                      f'({len(events)} events, {len(progress)} progress)')
 
 
+def grade_foreign(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+    """Foreign settlements recovered by the worker in the longer window. Funds are safe; more than one a day is
+    an attack on liveness. Silent when there is none, since only a settler logs this event."""
+    found = [ev for ev in events if ev['event'] == 'foreign-settlement-recovered']
+    if found:
+        last = found[-1]
+        r.graded(f'foreign_settlements[{name}]', len(found), 1, p['foreign_recovered_crit'],
+                 f'{len(found)} foreign settlement(s) recovered in {p["foreign_window_seconds"] / 3600:.0f} h; last: '
+                 f'L2 block {last.get("number")} at {last.get("time")}')
+
+
 def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner, r: Report) -> None:
     window = p['event_window_seconds']
     for spec in specs:
@@ -829,6 +841,10 @@ def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner
                              '--since', f'@{int(now - window)}'])
         if code == 0:
             grade_events(name, parse_events(out, now - window), p, window, r)
+        day = p['foreign_window_seconds']
+        code, out = run_cmd(['journalctl', '-u', unit, '-o', 'cat', '--no-pager', '-q', '--since', f'@{int(now - day)}'])
+        if code == 0:
+            grade_foreign(name, parse_events(out, now - day), p, r)
 
 
 def check_event_logs(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
@@ -845,6 +861,7 @@ def check_event_logs(specs: List[str], p: Dict[str, Any], now: float, r: Report)
             r.add(f'events[{name}]', CRIT, f'{path}: {e}')
             continue
         grade_events(name, parse_events(text, now - window), p, window, r)
+        grade_foreign(name, parse_events(text, now - p['foreign_window_seconds']), p, r)
 
 
 def check_files(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:

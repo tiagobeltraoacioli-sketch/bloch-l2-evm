@@ -1,0 +1,14 @@
+# Started by bloch-l2-mainnet-rpc-restart.path. try-restart: a stopped RPC stays stopped.
+[Unit]
+Description=Restart the L2 settled RPC on the worker's new database
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl try-restart bloch-l2-mainnet-rpc.service
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any

@@ -1,0 +1,13 @@
+# Restart the settled RPC when the settlement worker swaps its database after a foreign settlement
+# (SETTLER-RUNBOOK.md, "Foreign settlements"). The RPC keeps the old database open until it restarts,
+# and the worker's unit has NoNewPrivileges, so it cannot restart anything itself.
+# Needed only with `foreign_recovery`. Installed by install.sh, not enabled.
+[Unit]
+Description=Watch the L2 settlement worker's database generation
+
+[Path]
+PathChanged=/var/lib/bloch-l2-mainnet-settler/l2-db-generation.json
+Unit=bloch-l2-mainnet-rpc-restart.service
+
+[Install]
+WantedBy=multi-user.target
