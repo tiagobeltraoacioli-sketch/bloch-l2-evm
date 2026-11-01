@@ -239,6 +239,12 @@ def discard_phase(tag='', gas=15_000_000):
     if rc:
         raise SystemExit('discard failed')
     ctl('up', 'rpc', 'settler')
+    finish_discard(tag, number, honest, withdrawal, attacker, before, applied, t1)
+
+
+def finish_discard(tag, number, honest, withdrawal, attacker, before, applied, t1):
+    s = fs.state()
+    user = s['l2_address_user']
     f = wait_accepted(number, 5400)
     t2 = time.time()
     note('replacement-accepted', statement=f, old_hash=applied.get('old_hash'), recovery_seconds=round(t2 - t1))
@@ -327,6 +333,15 @@ if __name__ == '__main__':
         base()
     elif what == 'discard' and not phase('discard'):
         discard_phase()
+    elif what == 'discard-finish' and not phase('discard'):
+        rows = [json.loads(l) for l in (RES / 'timeline.jsonl').read_text().splitlines()]
+        sent = [r for r in rows if r['event'] == 'stuck-sent'][-1]
+        applied = [r for r in rows if r['event'] == 'tool-discard-applied'][-1]['result']
+        base_done = json.loads((RES / 'phase-base.done').read_text())
+        if not (RUN / 'settler.sup.pid').exists():
+            ctl('up', 'settler')
+        finish_discard('', applied['number'], sent['honest'], sent['withdrawal'], sent['attacker'],
+                       {'user': base_done['user'], 'attacker': base_done['attacker']}, applied, time.time())
     elif what == 'discard2' and not phase('discard2'):
         discard_phase('2', 14_000_000)
     elif what == 'elsewhere' and not phase('elsewhere'):

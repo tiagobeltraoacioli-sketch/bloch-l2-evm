@@ -768,9 +768,9 @@ class Settler:
         limit = self.c.get('local_prove_max_instructions')
         if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
             raise Halt('local_prove_max_instructions must be a positive integer')
-        budget = self.c.get('max_block_instructions')
+        budget = self.c.get('max_block_sp1_gas')
         if budget is not None and (not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0):
-            raise Halt('max_block_instructions must be a positive integer')
+            raise Halt('max_block_sp1_gas must be a positive integer')
         self.work = Path(self.c['workdir'])
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
@@ -832,7 +832,7 @@ class Settler:
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            if self.c['user_transactions'] and self.c.get('max_block_instructions'):
+            if self.c['user_transactions'] and self.c.get('max_block_sp1_gas'):
                 return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
@@ -858,7 +858,7 @@ class Settler:
 
     def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
         """Build the block from exactly these transactions on a throwaway copy of the database and run the guest in
-        execute mode. Returns (instructions or None when the time limit was hit, producer report). No proof, no lock."""
+        execute mode. Returns (SP1 gas, or None when the time limit was hit, producer report). No proof, no lock."""
         scratch = deposits.parent / f'preflight-{tag}'
         shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True)
@@ -884,33 +884,33 @@ class Settler:
                                       timeout=self.c.get('preflight_execute_seconds', 120))
             except subprocess.TimeoutExpired:
                 return None, block
-            found = re.findall(r'(\d+) instructions', (scratch / 'execute.log').read_text(errors='replace'))
+            found = re.findall(r'Settlement V3 cost: gas=(\d+)', (scratch / 'execute.log').read_text(errors='replace'))
             if result.returncode or not found:
-                return None, block  # the guest cannot run this block: treat it as over any budget
+                return None, block  # no cost from this guest and host: treat the block as over any budget
             return int(found[-1]), block
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
     def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
-        """Commit only a block whose guest execution fits `max_block_instructions`.
+        """Commit only a block whose guest execution fits `max_block_sp1_gas`.
 
-        Declared gas does not bound proving cost: a 15M-gas block ranges from a few million to several billion zkVM
-        instructions. So the block is first built on a copy of the database and measured. An over-budget block is cut
+        Declared EVM gas does not bound proving cost: a 15M-gas block ranges from about 8M to 5.8G SP1 gas, the executor's
+        estimate of proving work, which unlike the instruction count includes precompiles. So the block is first built on a copy of the database and measured. An over-budget block is cut
         to its longest fitting prefix. The transaction that broke the budget stays in the spool for a later block,
         unless it does not fit even alone: then it can never be settled and moves to the quarantine directory."""
-        budget = self.c['max_block_instructions']
+        budget = self.c['max_block_sp1_gas']
         entries = self.spool_entries()
         if not entries:
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
-        fits = lambda instructions: instructions is not None and instructions <= budget  # noqa: E731
+        fits = lambda cost: cost is not None and cost <= budget  # noqa: E731
         self.preflight_request = self.preflight_source
         measure = lambda raws, tag: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, tag)  # noqa: E731
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
-        instructions, full = measure([raw for _, raw in entries], 'full')
+        cost, full = measure([raw for _, raw in entries], 'full')
         included = list(full.get('included', []))
         finished = [e['hash'] for e in full.get('dropped', []) if e.get('hash')]
         keep = len(included)
-        if not fits(instructions):
+        if not fits(cost):
             low, high = 0, len(included)  # fits(low) by assumption, not fits(high) as measured
             while high - low > 1:
                 middle = (low + high) // 2
@@ -920,7 +920,7 @@ class Settler:
                     high = middle
             keep = low
             offender = included[keep] if included else None
-            log('block-over-budget', number=number, instructions=instructions, budget=budget, keep=keep, of=len(included), offender=offender)
+            log('block-over-budget', number=number, sp1_gas=cost, budget=budget, keep=keep, of=len(included), offender=offender)
             if offender and not fits(measure([by_hash[offender][1]], 'alone')[0]):
                 quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
                 quarantine.mkdir(exist_ok=True, mode=0o700)

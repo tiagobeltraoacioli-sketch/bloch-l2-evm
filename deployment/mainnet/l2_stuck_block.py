@@ -8,7 +8,7 @@ has seen nothing of that block: a proof is what opens its DA publication and its
   export-job  writes the request and block artifact of the stuck block, to prove on a bigger machine;
   import-proof checks a proof from that machine against this block and hands it to the settler (same block, same hash);
   triage      measures the block transaction by transaction with the guest (execute mode, no proof) and names the
-              transactions that do not fit an instruction budget;
+              transactions that do not fit a budget, in SP1 gas (in instructions with a host that does not report it);
   discard     replaces the unsettled block: rebuilds the database at the accepted settlement from verified L1 blocks,
               returns the block's transactions to the spool, and moves the named ones to a quarantine directory.
 
@@ -18,7 +18,7 @@ RPC on this database first: `discard` swaps the database, and `import-proof` wri
   l2_stuck_block.py status       --config settler.json
   l2_stuck_block.py export-job   --config settler.json --out NEW_DIR
   l2_stuck_block.py import-proof --config settler.json --proof FILE
-  l2_stuck_block.py triage       --config settler.json --budget INSTRUCTIONS --follower-state DIR --follower-status FILE [--out FILE]
+  l2_stuck_block.py triage       --config settler.json --budget COST --follower-state DIR --follower-status FILE [--out FILE]
   l2_stuck_block.py discard      --config settler.json --follower-state DIR --follower-status FILE
                                  (--exclude HASH ... | --exclude-file FILE | --exclude-all) [--apply]
 
@@ -109,12 +109,14 @@ class Stuck:
     def facts(self):
         d = self.directory
         records = [r for r in self.view.get('data_availability', []) if r.get('number', r.get('l2_number')) == self.number]
-        found = re.findall(r'(\d+) instructions', (d / 'execute.log').read_text(errors='replace')) if (d / 'execute.log').exists() else []
+        log_text = (d / 'execute.log').read_text(errors='replace') if (d / 'execute.log').exists() else ''
+        found = re.findall(r'(\d+) instructions', log_text)
+        sp1_gas = re.findall(r'Settlement V3 cost: gas=(\d+)', log_text)
         return {
             'number': self.number, 'hash': self.head['hash'], 'directory': str(d), 'accepted_number': self.accepted_number,
             'accepted_hash': self.accepted_hash, 'transactions': self.block.get('transactions'),
             'deposits': self.block.get('deposits'), 'declared_gas': self.block.get('declared_gas'),
-            'instructions': int(found[-1]) if found else None,
+            'instructions': int(found[-1]) if found else None, 'sp1_gas': int(sp1_gas[-1]) if sp1_gas else None,
             'proved': (d / 'proved.json').exists(),
             'da_prepared': sorted(p.name for p in d.glob('da-unsigned-*.hex')),
             'da_recorded_on_l1': records,
@@ -231,11 +233,12 @@ def measure(stuck, base, kept, workspace, tag):
     stuck.settler.produce('export', '--target', str(db), '--number', str(stuck.number), '--out', str(block_dir / 'block.artifact'))
     shutil.copy2(stuck.directory / 'native-request.txt', block_dir / 'native-request.txt')
     stuck.settler.prove(block_dir, stages=('execute',))
-    found = re.findall(r'(\d+) instructions', (block_dir / 'execute.log').read_text(errors='replace'))
+    log_text = (block_dir / 'execute.log').read_text(errors='replace')
+    found = re.findall(r'Settlement V3 cost: gas=(\d+)', log_text) or re.findall(r'(\d+) instructions', log_text)
     shutil.rmtree(db, ignore_errors=True)
     shutil.rmtree(block_dir, ignore_errors=True)
     if not found:
-        raise Refuse('the guest did not report an instruction count')
+        raise Refuse('the guest did not report a cost')
     return int(found[-1]), block
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests of the block budget (`max_block_instructions`): the selection logic with a fake measurement."""
+"""Tests of the block budget (`max_block_sp1_gas`): the selection logic with a fake measurement."""
 from pathlib import Path
 import sys
 import json
@@ -23,7 +23,7 @@ class Budget(unittest.TestCase):
         self.deposits = self.dir / 'deposits.json'
         self.deposits.write_text('[]')
         self.settler = s.Settler.__new__(s.Settler)
-        self.settler.c = {'txpool_dir': str(self.pool), 'max_block_instructions': 100, 'max_block_gas': 1, 'max_block_bytes': 1, 'max_block_txs': 9,
+        self.settler.c = {'txpool_dir': str(self.pool), 'max_block_sp1_gas': 100, 'max_block_gas': 1, 'max_block_bytes': 1, 'max_block_txs': 9,
                           'l2_db': 'x', 'timestamp_rule': None, 'user_transactions': True}
         self.settler.preflight_source = 'request'
         self.cost = {}
