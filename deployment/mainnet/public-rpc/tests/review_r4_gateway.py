@@ -60,7 +60,8 @@ class Backend:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def closed(self):
-        return self.state != 'ok' and not self.view_null
+        # `lagging` keeps the levels open on the real RPC, at their old height.
+        return self.state not in ('ok', 'lagging') and not self.view_null
 
     def answer(self, call):
         method, params, reply = call['method'], call.get('params') or [], {'jsonrpc': '2.0', 'id': call.get('id')}
