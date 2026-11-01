@@ -107,7 +107,7 @@ def stuck_step(st: Optional[Dict[str, Any]], s: Dict[str, Any], p: Dict[str, Any
            f'peers {"unknown" if s.get("peers") is None else s["peers"]}'
     frozen, missing, steady = fin < rf and held('frozen'), held('missing'), held('parked')
     if frozen and missing and steady:
-        return st, CRIT, f'STUCK on its own branch: {view}. A restart does not heal this; see the runbook'
+        return st, CRIT, f'STUCK on its own branch: {view}. A restart is not a reliable cure; see the runbook'
     if frozen and missing:
         why = 'parked unknown: read the metrics to confirm' if parked is None else \
             'parked below the stuck level: cut off from the reference, or not yet stuck'
