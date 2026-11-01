@@ -1031,6 +1031,19 @@ fn verified_levels(
     // A tip this database has not reached advances nothing, so a syncing RPC does not reread the log at each poll.
     if let Some(tip) = settlement_log::tip_number(&status) {
         if provider.sealed_header(tip)?.is_none() {
+            // A lag only if nothing contradicts: the genesis, what this database holds of the newest
+            // settlements, and a log of the size the status names. A database further behind than the
+            // newest settlements has nothing here to compare until it reaches them.
+            let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
+            final_genesis(&status, chain_id, genesis.hash())?;
+            for entry in settlement_log::recent_entries(&status) {
+                let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad l2_number"))?;
+                let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
+                if let Some(local) = provider.sealed_header(number)? {
+                    ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
+                }
+            }
+            settlement_log::check_log_present(status_path, &status).map_err(|e| eyre::eyre!(e))?;
             return Err(NotLocalYet { number: tip, written_at, schema }.into());
         }
     }
@@ -1044,13 +1057,21 @@ fn verified_levels(
     let delta = match settlement_log::read_delta(status_path, &mut status, cursor) {
         Ok(delta) => delta,
         Err(why) => {
-            if let Some(identity) = identity {
+            // Content only: an I/O error may clear with nothing else changing.
+            if let (Some(identity), false) = (identity.clone(), why.contains(settlement_log::IO_ERROR)) {
                 *refused_log = Some((identity, why.clone()));
             }
             bail!("{why}");
         }
     };
     *refused_log = None;
+    // A whole history read and contradicted is not read again either, until the log changes.
+    let contradicted = |why: String, identity: &Option<String>, refused_log: &mut Option<(String, String)>| {
+        if let Some(identity) = identity {
+            *refused_log = Some((identity.clone(), why.clone()));
+        }
+        eyre::eyre!(why)
+    };
     let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
     let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);
     // New entries once, then the newest ones at every poll: a block hash commits to its parents, so
@@ -1061,7 +1082,9 @@ fn verified_levels(
         let local = provider
             .sealed_header(number)?
             .ok_or_else(|| NotLocalYet { number, written_at, schema: schema.clone() })?;
-        ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
+        if local.hash() != hash {
+            return Err(contradicted(format!("settled L2 block {number} differs from the local canonical header"), &identity, refused_log));
+        }
         best = Some(local);
     }
     let finalized_number = best.as_ref().map_or(0, |h: &Header| h.0.number);
@@ -1469,7 +1492,6 @@ async fn main() -> Result<()> {
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
-                        Ok(None) if finalized.is_none() && safe.is_none() => {}
                         // The cursor and the settlement index stay: what was verified stays verified, closed
                         // readers are refused at the door, and a poll while closed costs what it costs while open.
                         Ok(None) => closing = Some(("missing", "file missing".to_string())),

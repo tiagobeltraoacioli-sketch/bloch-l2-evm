@@ -77,6 +77,32 @@ fn contiguous(entries: &[Value], first: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// In the text of an error that may clear by itself, unlike a log that contradicts its status.
+pub const IO_ERROR: &str = "I/O error";
+
+/// The newest settlements a status lists, without reading the log.
+pub fn recent_entries(status: &Value) -> Vec<Value> {
+    let list = match status["schema"].as_str() {
+        Some(STATUS_V2) => status["finalized_settlements"].as_array(),
+        Some(STATUS_V3) => status["finalized_settlements_recent"].as_array(),
+        _ => None,
+    };
+    list.map_or(Vec::new(), |list| list[list.len().saturating_sub(RECENT_V2)..].to_vec())
+}
+
+/// That the log a v3 status names exists with at least the size it says, without reading it.
+pub fn check_log_present(status_path: &Path, status: &Value) -> Result<(), String> {
+    let Some(log) = status.get("settlement_log") else { return Ok(()) };
+    let name = log["file"].as_str().filter(|n| !n.is_empty() && !n.contains('/') && *n != "." && *n != "..").ok_or("bad settlement log name")?;
+    let size = log["bytes"].as_u64().ok_or("bad settlement log size")?;
+    let path = status_path.parent().unwrap_or(Path::new(".")).join(name);
+    let found = std::fs::metadata(&path).map_err(|e| format!("settlement log {}: {e}", path.display()))?.len();
+    if found < size {
+        return Err("settlement log is shorter than the status says".into());
+    }
+    Ok(())
+}
+
 /// What a read of the log from its start would read, to avoid repeating a refused read: the status's
 /// description of the log and the file's size and time. `None` for a status without a log.
 pub fn log_identity(status_path: &Path, status: &Value) -> Option<String> {
@@ -152,10 +178,10 @@ pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Re
     let mut entries = Vec::new();
     if size > bytes {
         let path = status_path.parent().unwrap_or(Path::new(".")).join(name);
-        let mut file = std::fs::File::open(&path).map_err(|e| format!("settlement log {}: {e}", path.display()))?;
-        file.seek(SeekFrom::Start(bytes)).map_err(|e| format!("settlement log: {e}"))?;
+        let mut file = std::fs::File::open(&path).map_err(|e| format!("settlement log {IO_ERROR} {}: {e}", path.display()))?;
+        file.seek(SeekFrom::Start(bytes)).map_err(|e| format!("settlement log {IO_ERROR}: {e}"))?;
         let mut data = Vec::new();
-        file.take(size - bytes).read_to_end(&mut data).map_err(|e| format!("settlement log: {e}"))?;
+        file.take(size - bytes).read_to_end(&mut data).map_err(|e| format!("settlement log {IO_ERROR}: {e}"))?;
         if data.len() as u64 != size - bytes {
             return Err("settlement log is shorter than the status says".into());
         }
@@ -177,7 +203,8 @@ pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Re
     }
     if read != total || running != digest {
         return Err(format!(
-            "settlement log differs from the status: {read} entries against {total}; restart this RPC only after checking the follower"
+            "settlement log differs from what this RPC verified or from the status: {read} entries against {total}. A follower \
+             build that writes other bytes needs an RPC restart; otherwise restart this RPC only after checking the follower"
         ));
     }
     if let (Some(a), Some(b)) = (entries.last(), recent.last()) {

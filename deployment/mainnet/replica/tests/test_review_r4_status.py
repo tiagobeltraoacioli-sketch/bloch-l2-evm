@@ -35,5 +35,18 @@ class SchemaV3(unittest.TestCase):
             R.check_report(report, status, None)
 
 
+    def test_a_log_with_a_gap_is_not_read_as_every_settlement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'status.json'
+            status, lines = self.status()
+            lines = [lines[0], lines[0].replace('"l2_number":1', '"l2_number":3')]
+            status['settlement_log'].update(entries=2, bytes=sum(map(len, lines)))
+            status['finalized_settlements_recent'] = [json.loads(lines[1])]
+            path.write_text(json.dumps(status))
+            path.with_name('status.settlements.jsonl').write_text(''.join(lines))
+            with self.assertRaises(R.Halt, msg='settlement 2 is missing, so the rebuild check would never compare it'):
+                R.read_status(path, 3600, time.time())
+
+
 if __name__ == '__main__':
     unittest.main()

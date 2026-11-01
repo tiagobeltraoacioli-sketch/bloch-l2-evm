@@ -241,6 +241,19 @@ def main():
         answer = rpc(pair.a, 'bloch_getWithdrawalProof', [0])
         check('the first backend has closed levels: finalized:true is not read from it', (answer.get('result') or {}).get('from') == 'B', answer)
         A.state = 'ok'
+
+        # 7. Re-review: the new states. A lagging backend holds a higher, true level; the current one is lower.
+        A.proof = {'result': {'index': 0, 'finalized': True, 'from': 'A'}}
+        A.state, A.finalized, B.finalized = 'ok', 200, 200
+        settle()
+        before = finalized_number(rpc(pair.a, 'eth_getBlockByNumber', ['finalized', False]))
+        A.state, B.finalized = 'lagging', 100
+        A.age = 5
+        settle()
+        after = finalized_number(rpc(pair.a, 'eth_getBlockByNumber', ['finalized', False]))
+        check('re-review: a client does not move backwards when the higher backend turns lagging', after is not None and after >= before,
+              {'before': before, 'after': after, 'health': health(pair.a)['local'].get('followerStatus')})
+        A.state, A.finalized, B.finalized = 'ok', 100, 100
     finally:
         pair.stop()
     failed = [n for n, ok in results if not ok]
