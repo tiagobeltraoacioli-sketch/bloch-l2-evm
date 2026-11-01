@@ -22,7 +22,9 @@
    bloch-l2-withdraw.py fetch --l2-rpc https://l2rpc.blochl1.com --l1-rpc http://YOUR_L1_NODE:8080 --index I --recipient-pubkey me.pubkey.hex --sats 2000000 --out proof.json --wait 7200
    ```
 
-4. **Prepare the claim** with the command that `fetch` prints, then `l2-claim sign` and `sendrawtransaction`, as before.
+4. **Prepare the claim** with the command that `fetch` prints, then `l2-claim sign` and `sendrawtransaction`, as before. A claim of 100 BLCH or more also needs `attestor/aggregate_attestation.py`, run with the attestor `bloch-pos` `093909a2…`: the node build has no `verify-attestation`, and every set then reads as refused.
+
+5. **Confirm from the claimed set, not from the reply.** `sendrawtransaction` answering `accepted` or `duplicate` means only that the node's mempool took the bytes. Admission does not check the nullifier, so a repeated claim is answered the same way and is then dropped by consensus: nothing moves and no second payment is possible. To confirm, run `bloch-l2-withdraw.py verify --proof proof.json --l1-rpc URL`, which exits 4 once the index is claimed and the record is on L1.
 
 Exit status: 0 ok; 1 refused (bad proof, wrong owner, wrong network); 3 not ready yet; 4 already claimed.
 

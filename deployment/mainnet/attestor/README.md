@@ -266,6 +266,12 @@ in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
        --rpc http://80.240.16.185:8080 --rpc http://199.247.22.8:8080 --rpc http://45.77.67.251:8080
    ```
 
+   **`--bloch-pos` must be the attestor build `093909a2…`, not the node build.** The node build (fa980367
+   and the release it carries) has no `l2-claim verify-attestation`: it answers `l2-claim: expected prepare,
+   inspect, sign, attestor-set, set-attestors, attest or --help`, and the aggregator then reports every set
+   as refused, which reads like bad signatures. A claimant who sees that message has the wrong binary, not
+   bad partials.
+
 3. Use the printed `--attestors … --attestation …` arguments in `bloch-pos l2-claim prepare`, then
    `sign`.
 4. Broadcast separately.
