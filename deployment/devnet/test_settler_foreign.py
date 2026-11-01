@@ -294,6 +294,24 @@ class ForeignTest(unittest.TestCase):
         self.assertEqual(len(self.da_sent(world)), 1, 'the orphaned batch is not paid again')
         self.assertEqual(len(list((self.root / 'txpool').iterdir())), 1)
 
+    def test_da_wait_ends_when_a_foreign_block_settles_that_number(self):
+        payload = base.batch(1)
+        world = World(self.root, b'')
+        world.block_txs = {1: payload}
+        world.include_da = False
+        world.values = values_for(1, world.next_block, 1, payload)
+        settler = self.settler(world, users=True)
+        real, foreign = world.rpc, block('b1')
+        def rpc(port, method, params=()):
+            answer = real(port, method, params)
+            if method == 'sendrawtransaction' and params[0].startswith('15'):
+                world.foreign(1, foreign)
+            return answer
+        settler.native.rpc = rpc
+        self.assertFalse(settler.cycle())
+        self.assertEqual(len(self.events('da-wait-ended-block-settled')), 1)
+        self.assertEqual(self.events('da-inclusion-timeout'), [])
+
     def test_a_local_block_on_a_replaced_parent_is_not_reused(self):
         world = World(self.root, b'')
         world.write(world.db, [GENESIS_HASH, block('a1')[0], block('a2')[0]])

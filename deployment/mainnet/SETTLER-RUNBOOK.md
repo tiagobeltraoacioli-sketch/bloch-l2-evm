@@ -210,7 +210,8 @@ Without `foreign_recovery`, such a block halts the worker (exit 3). With it (`co
 DIR --follower-status FILE`), the worker:
 
 1. stops working on its own block, and pays no DA for a block that went stale during the proof;
-2. waits until the native follower has finalized the accepted settlement, about 2 epochs (32 min);
+2. waits until the native follower has finalized the accepted settlement. The rehearsal measured about
+   2.5 epochs of lag, which is about 40 min at 960 s epochs. A running proof must return first;
 3. rebuilds a new database from verified L1 blocks and requires its head to be the accepted hash;
 4. returns the user transactions of its orphaned blocks to the spool;
 5. moves the orphaned work directories aside, swaps the databases and continues. It keeps the last 2

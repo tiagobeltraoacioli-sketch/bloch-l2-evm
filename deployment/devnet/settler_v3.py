@@ -1208,6 +1208,12 @@ class Settler:
             if self.da_recorded(number, commitment):
                 log('da-included', number=number, commitment=commitment.hex())
                 return True
+            # Settling a block removes its DA records: this one will never show up, so do not wait for it.
+            view = self.native_view()
+            accepted = view and view.get('accepted')
+            if accepted and statement_fields(accepted['statement'])['l2_number'] >= number:
+                log('da-wait-ended-block-settled', number=number)
+                return False
         log('da-inclusion-timeout', number=number)
         return False
 
