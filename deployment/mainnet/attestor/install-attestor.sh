@@ -163,10 +163,10 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
     echo "Type the TRANSPORT passphrase of attestor $INDEX's bundle (the one you received out of band):"
     "$ART/bloch-pos" l2-claim seal-key --sealed "$BUNDLE" --attestors "$SETF" --signer-index "$INDEX" \
       --passphrase-file "$ETC/keystore.passphrase" --out "$ETC/attestor.sealed.new" \
-      || { rm -f "$ETC/attestor.sealed.new"; shred -u "$ETC/keystore.passphrase"; die "re-seal failed. Nothing was installed. Check the passphrase and run the same command again"; }
+      || { rm -f "$ETC/attestor.sealed.new"; shred -fu "$ETC/keystore.passphrase"; die "re-seal failed. Nothing was installed. Check the passphrase and run the same command again"; }
     "$ART/bloch-pos" l2-claim key-check --sealed "$ETC/attestor.sealed.new" --attestors "$SETF" \
       --signer-index "$INDEX" --passphrase-file "$ETC/keystore.passphrase" \
-      || { rm -f "$ETC/attestor.sealed.new"; shred -u "$ETC/keystore.passphrase"; die "host key check failed. Nothing was installed"; }
+      || { rm -f "$ETC/attestor.sealed.new"; shred -fu "$ETC/keystore.passphrase"; die "host key check failed. Nothing was installed"; }
   fi
 
   # 3. Users and directories.
@@ -284,7 +284,7 @@ cmd_rollback() {
   run systemctl daemon-reload
   if [ $PURGE = 1 ]; then
     for f in "$ETC/attestor.sealed" "$ETC/keystore.passphrase" "$ETC/publish-token"; do
-      [ ! -e "$f" ] || run shred -u "$f"
+      [ ! -e "$f" ] || run shred -fu "$f"
     done
     echo "Host key removed. The offline transport bundle is now the only copy of attestor's key on your side."
   fi
