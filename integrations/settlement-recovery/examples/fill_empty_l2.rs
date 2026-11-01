@@ -8,9 +8,9 @@
 //! so the state grows.
 use bloch_reth_execution::{BlochNextBlockEnvCtx, BlochProviderFactory, CanonicalCoordinator, L2Network};
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_consensus::private::alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{hex, B256};
-use bloch_l2_evm::node_execution::SelectionLimits;
+use bloch_l2_evm::node_execution::select::SelectionLimits;
 use reth_db::mdbx::{open_db, DatabaseArguments};
 use reth_provider::{
     providers::{RocksDBBuilder, StaticFileProvider},

@@ -9,7 +9,8 @@ use bloch_l2_evm::{
     BlockContext, L2State,
 };
 use reth_chainspec::EthChainSpec;
-use alloy_primitives::{map::HashMap, Address, B256, U256};
+use alloy_primitives::{Address, B256, U256};
+use std::collections::HashMap;
 use reth_db_api::{cursor::{DbCursorRO, DbDupCursorRO}, tables, transaction::DbTx};
 use reth_primitives_traits::Account;
 use reth_provider::{
