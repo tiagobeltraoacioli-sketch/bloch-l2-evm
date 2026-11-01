@@ -100,6 +100,11 @@ impl BlochRethBlockExecutorFactory {
             inner: BlochNodeBlockExecutorFactory::new(spec, domain),
         }
     }
+    /// Each block runs the rules the schedule gives for its number.
+    pub fn with_rules(mut self, rules: crate::RuleSchedule) -> Self {
+        self.inner = self.inner.with_rules(rules);
+        self
+    }
 }
 impl BlockExecutorFactory for BlochRethBlockExecutorFactory {
     type EvmFactory = BlochEvmFactory;

@@ -70,7 +70,7 @@ pub fn validate_and_execute_block(
     consensus
         .validate_header_against_parent(block.sealed_header(), parent)
         .map_err(BlockExecutionError::other)?;
-    let config = BlochEvmConfig::new(spec.execution(), spec.domain());
+    let config = BlochEvmConfig::for_chain(spec);
     let executed = execute_next_block(
         &config,
         provider,

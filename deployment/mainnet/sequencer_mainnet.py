@@ -78,7 +78,7 @@ MAX_INBOX_PER_SETTLEMENT = 64
 DA_DOMAIN = b'BLOCH:L2:DA:1'
 DA_MAX_PAYLOAD_BYTES = 114_688
 # The getl2settlement fields that decide the next block (others move every native block).
-VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'profile', 'accepted', 'source')
+VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'profile', 'accepted', 'source', 'program')
 DEFAULTS = {'poll_seconds': 15, 'user_transactions': False, 'max_block_gas': 15_000_000,
             'max_block_bytes': DA_MAX_PAYLOAD_BYTES, 'max_block_txs': 256, 'rpc_timeout_seconds': 15,
             'max_clock_skew_seconds': 120}
@@ -322,9 +322,29 @@ class Sequencer:
         tmp.write_text(text)
         os.replace(tmp, path)
 
+    def next_program_active(self, view):
+        """Whether L1 holds the next program (`next_elf_keccak`, candidate; absent keeps one rule set)."""
+        elf = self.c.get('next_elf_keccak')
+        return bool(elf) and (view.get('program') or {}).get('elf_keccak') == elf
+
+    def follow_program(self, number, source, active):
+        """An unsettled head under the old rules cannot settle once L1 moved the program: same rule as the settler."""
+        if not active:
+            return
+        head = self.produce('head', '--target', self.c['l2_db'])
+        if head['number'] == number and head.get('rules') != 'next':
+            self.produce('rewind', '--target', self.c['l2_db'], '--number', str(number), '--hash', head['hash'])
+            log('l2-block-rewound-at-swap', number=number, hash=head['hash'])
+        directory = self.job_dir(number, source)
+        produced = directory / 'block.json'
+        if produced.exists() and json.loads(produced.read_text()).get('rules') != 'next':
+            directory.rename(directory.with_name(f'{directory.name}.superseded-{int(time.time())}'))
+
     def extend_args(self, parent, anchor, deposits, anchor_slot, shadow_txs=None):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor,
                 '--deposits', str(deposits), '--timestamp-rule', TIMESTAMP_RULE, '--anchor-slot', str(anchor_slot)]
+        if self.c.get('next_elf_keccak'):
+            args += ['--rule-set', self.rule_set]
         if shadow_txs is not None:
             # Exactly the transactions the settler's DA batch carries; protocol limits.
             args += ['--txs', str(shadow_txs)]
@@ -355,6 +375,9 @@ class Sequencer:
 
     def produce_job(self, view, number, parent, source, pending, anchor_slot):
         anchor = source['block']
+        active = self.next_program_active(view)
+        self.rule_set = 'next' if active else 'base'
+        self.follow_program(number, source, active)
         directory = self.job_dir(number, source)
         job_path = directory / 'job.json'
         if job_path.exists():

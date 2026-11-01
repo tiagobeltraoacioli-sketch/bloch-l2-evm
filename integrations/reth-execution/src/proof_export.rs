@@ -27,6 +27,7 @@ pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> R
         return Err(invalid("proof export height outside bounded non-genesis prefix"));
     }
     let spec = source.chain_spec();
+    // The genesis and every parent check are the same under each rule set.
     let kernel = spec.execution();
     let domain = spec.domain();
     let tip_number = source.best_block_number()?;
@@ -63,7 +64,8 @@ pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> R
             return Err(invalid("proof export body/header canonical selection mismatch"));
         }
         let header = &block.header.0;
-        header.validate_parent(kernel, &parent)?;
+        let rules = spec.execution_at(height);
+        header.validate_parent(rules, &parent)?;
         let body = block.body.as_core();
         let context = BlockContext {
             number: header.number,
@@ -76,13 +78,13 @@ pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> R
             if selected != expected_selected {
                 return Err(invalid("selected export header changed during reconstruction"));
             }
-            let (witness, recorded) = generate_node_batch_witness(&state, kernel, domain, &context, body)?;
+            let (witness, recorded) = generate_node_batch_witness(&state, rules, domain, &context, body)?;
             if recorded.header != *header {
                 return Err(invalid("exported witness execution differs from stored block"));
             }
-            exported = Some(ExecutionArtifact::new(kernel, domain, &parent, header, body, witness)?);
+            exported = Some(ExecutionArtifact::new(rules, domain, &parent, header, body, witness)?);
         }
-        let outcome = execute_node_block(kernel, domain, &mut state, &context, body)?;
+        let outcome = execute_node_block(rules, domain, &mut state, &context, body)?;
         if outcome.header != *header {
             return Err(invalid("canonical prefix execution differs from stored block"));
         }

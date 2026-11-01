@@ -9,7 +9,10 @@
 //! A leading `--mainnet` selects the mainnet program (`settlement_v3_mainnet`:
 //! `ChainSpec::mainnet`, chain id 700770, `MAINNET_DOMAIN`) for every mode;
 //! without it the harness checks the devnet `settlement_v3` program
-//! (`ChainSpec::testnet_v3`, domain `0xd3…d3`), unchanged.
+//! (`ChainSpec::testnet_v3`, domain `0xd3…d3`), unchanged. A leading
+//! `--mainnet-v1` selects the same mainnet path under `ChainSpec::mainnet_v1`,
+//! the rules of the program the activation pinned: the settler uses it for blocks
+//! settled before the native gate replaces that program.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -26,18 +29,17 @@ use std::{error::Error, ffi::OsStr, fs, io, process::Command, time::Instant};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// The program the harness qualifies, selected once from the command line.
-static MAINNET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static MAINNET: std::sync::OnceLock<Option<ChainSpec>> = std::sync::OnceLock::new();
 
 fn mainnet() -> bool {
-    *MAINNET.get().unwrap_or(&false)
+    matches!(MAINNET.get(), Some(Some(_)))
 }
 
 /// The execution rules the selected guest compiles.
 fn spec() -> ChainSpec {
-    if mainnet() {
-        ChainSpec::mainnet()
-    } else {
-        ChainSpec::testnet_v3()
+    match MAINNET.get() {
+        Some(Some(rules)) => rules.clone(),
+        _ => ChainSpec::testnet_v3(),
     }
 }
 
@@ -232,15 +234,19 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
-    let selected = args.first().map(String::as_str) == Some("--mainnet");
-    if selected {
+    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
+    let selected = match args.first().map(String::as_str) {
+        Some("--mainnet") => Some(ChainSpec::mainnet()),
+        Some("--mainnet-v1") => Some(ChainSpec::mainnet_v1()),
+        _ => None,
+    };
+    if selected.is_some() {
         args.remove(0);
     }
     MAINNET.set(selected).expect("program selected once");
     if args.first().map(String::as_str) == Some("identity") {
         return print_identity(args.get(1).filter(|_| args.len() == 2).ok_or(
-            "usage: bloch-evm-sp1-settlement-v3 [--mainnet] identity TRUSTED_SETTLEMENT_V3_ELF",
+            "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1] identity TRUSTED_SETTLEMENT_V3_ELF",
         )?)
         .await;
     }

@@ -1000,7 +1000,7 @@ async fn main() -> Result<()> {
     .with_read_only_sync(true);
     let provider: BlochBlockchainProvider = BlockchainProvider::new(factory.clone())?;
     let kernel = rules();
-    let config = BlochEvmConfig::new(&kernel, spec.domain());
+    let config = BlochEvmConfig::for_chain(&spec);
     let api = build_eth_api_with(
         RpcNodeCoreAdapter::new(
             provider.clone(),
@@ -1068,6 +1068,10 @@ async fn main() -> Result<()> {
                     let number = factory.best_block_number()?;
                     if number != head_number {
                         let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
+                        // Which rules each served block ran, from the blocks themselves.
+                        if let Some(from) = spec.rules().discover(&factory)? {
+                            println!("rules: next from block {from}");
+                        }
                         state.set_canonical_head(header.clone());
                         served_head.store(number, Ordering::Release);
                         head_number = number;

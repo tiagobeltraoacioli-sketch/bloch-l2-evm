@@ -363,6 +363,7 @@ impl<DB: StateDB, I: Inspector<BlochContext<DB>>> BlockExecutor for BlochBlockEx
 #[derive(Clone, Debug)]
 pub struct BlochBlockExecutorFactory {
     spec: ChainSpec,
+    rules: Option<crate::RuleSchedule>,
     evm_factory: BlochEvmFactory,
 }
 impl BlochBlockExecutorFactory {
@@ -371,8 +372,14 @@ impl BlochBlockExecutorFactory {
         let evm_factory = BlochEvmFactory::new(spec);
         Self {
             spec: spec.clone(),
+            rules: None,
             evm_factory,
         }
+    }
+    /// Each block runs the rules the schedule gives for its number.
+    pub fn with_rules(mut self, rules: crate::RuleSchedule) -> Self {
+        self.rules = Some(rules);
+        self
     }
 }
 impl BlockExecutorFactory for BlochBlockExecutorFactory {
@@ -390,9 +397,13 @@ impl BlockExecutorFactory for BlochBlockExecutorFactory {
         evm: BlochEvm<DB, I>,
         context: BlochBlockExecutionCtx,
     ) -> BlochBlockExecutor<DB, I> {
+        let spec = match &self.rules {
+            Some(rules) => rules.at(context.context.number).clone(),
+            None => self.spec.clone(),
+        };
         BlochBlockExecutor {
             evm,
-            spec: self.spec.clone(),
+            spec,
             context,
             active: None,
             node_domain: None,
@@ -423,6 +434,11 @@ impl BlochNodeBlockExecutorFactory {
             inner: BlochBlockExecutorFactory::new(spec),
             domain,
         }
+    }
+    /// Each block runs the rules the schedule gives for its number.
+    pub fn with_rules(mut self, rules: crate::RuleSchedule) -> Self {
+        self.inner = self.inner.with_rules(rules);
+        self
     }
 }
 impl BlockExecutorFactory for BlochNodeBlockExecutorFactory {

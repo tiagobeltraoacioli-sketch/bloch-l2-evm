@@ -367,6 +367,7 @@ fn statement_json(statement: &[u8]) -> Result<Value, String> {
     Ok(json!({
         "l2_number": base.l2_number, "l2_hash": hex::encode(base.l2_header_hash),
         "l2_state_root": hex::encode(base.l2_state_root), "withdrawals": withdrawals,
+        "configuration": hex::encode(base.configuration),
     }))
 }
 
@@ -396,6 +397,9 @@ fn status(
     for (slot, block, bytes) in verified.finalized_settlements() {
         let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes).ok_or("settlement decode")?;
         let mut entry = statement_json(&tx.statement)?;
+        // A head reset at the native gate: what it dropped is not settled any more.
+        let number = entry["l2_number"].as_u64().unwrap_or_default();
+        settlements.retain(|earlier: &Value| earlier["l2_number"].as_u64().is_some_and(|n| n < number));
         entry["native_slot"] = json!(slot);
         entry["native_block"] = json!(hex::encode(block));
         entry["commitment"] = json!(hex::encode(tx.commitment()));
@@ -410,6 +414,12 @@ fn status(
         "written_at_unix": now,
         "network": hex::encode(policy.network),
         "settlement_policy": hex::encode(report.settlement_policy),
+        // The program the replayed state holds now; `settlement_policy` stays the activation's.
+        "active_program": verifier.l2_policy().map(|policy| json!({
+            "configuration": hex::encode(policy.identities[3]),
+            "elf_keccak": hex::encode(policy.identities[4]),
+            "vkey_bn254": hex::encode(policy.identities[6]),
+        })),
         "verified_blocks": report.replayed_blocks,
         "verified_tip": hex::encode(report.replayed_tip),
         "verified_slot": report.replayed_slot,
