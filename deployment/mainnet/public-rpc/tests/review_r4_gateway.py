@@ -81,7 +81,11 @@ class Backend:
             reply['result'] = None if self.view_null else {'finalized_height': self.finalized,
                                                            'status': {'state': self.state, 'age_s': self.age if self.state == 'ok' else None}}
         elif method == 'bloch_settlement':
-            reply['result'] = None if (self.closed() or self.view_null) else {'finalized': True, 'from': self.name}
+            # Closed: -32001, as the settled RPC of the next build answers. The closed v2.1 RPC answered null.
+            if self.closed():
+                reply['error'] = {'code': -32001, 'message': 'closed'}
+            else:
+                reply['result'] = None if self.view_null else {'finalized': True, 'from': self.name}
         elif method == 'bloch_getWithdrawalProof':
             reply.update(self.proof)
         else:

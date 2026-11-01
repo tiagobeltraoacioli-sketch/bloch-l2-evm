@@ -269,9 +269,14 @@ def scenario_small(a, work):
         wait_for(lambda: call(rpc.port, 'bloch_settlement', [last]).get('result') is not None)
 
         # 4. A settlement accepted at the L1 head that this database does not hold (a third party settled).
+        # A new process: lowering the status under a running RPC is the regression of check 3, which stays closed.
+        rpc.stop()
         foreign = dict(entries[-1], l2_hash='ee' * 32)
         chain.write(last - 1, safe=foreign)
-        wait_for(lambda: closed_code(rpc.finalized()) == -32001, 5)
+        rpc = Rpc(a.rpc, db, chain.status, a.port, dir_)
+        wait_for(lambda: closed_code(call(rpc.port, 'eth_getBlockByNumber', ['safe', False])) == -32001, 10)
+        check('a foreign settlement at the L1 head closes safe', closed_code(call(rpc.port, 'eth_getBlockByNumber', ['safe', False])) == -32001,
+              rpc.finality().get('status'))
         answer = rpc.finalized()
         check('a foreign, not yet finalized settlement at the L1 head does not close the verified finalized prefix',
               closed_code(answer) != -32001, {'finalized': answer.get('error') or (answer.get('result') or {}).get('number'),
@@ -335,11 +340,20 @@ def scenario_big(a, work):
         open_rate = (rpc.cpu() - cpu) / (time.time() - t)
         chain_safe = dict(entries[-1], l2_hash='ee' * 32)
         chain.write(count, safe=chain_safe)
-        wait_for(lambda: closed_code(rpc.finalized()) == -32001, 60)
         time.sleep(5)
         cpu, t = rpc.cpu(), time.time()
         time.sleep(30)
         closed_rate = (rpc.cpu() - cpu) / (time.time() - t)
+        safe_only = closed_code(call(rpc.port, 'eth_getBlockByNumber', ['safe', False])) == -32001 and closed_code(rpc.finalized()) != -32001
+        check('a mismatching safe settlement closes safe only, at this history', safe_only, rpc.finality().get('status'))
+        # Fully closed: a lost status file.
+        os.rename(chain.status, chain.status.with_suffix('.away'))
+        wait_for(lambda: closed_code(rpc.finalized()) == -32001, 60)
+        cpu, t = rpc.cpu(), time.time()
+        time.sleep(20)
+        lost_rate = (rpc.cpu() - cpu) / (time.time() - t)
+        check('fully closed: a poll does not read the log', lost_rate < max(5 * open_rate, 0.05), {'cpu_cores_lost_status': round(lost_rate, 3)})
+        os.rename(chain.status.with_suffix('.away'), chain.status)
         check('while closed, a poll does not cost much more than while open ("the cost of one poll does not grow with the history")',
               closed_rate < max(5 * open_rate, 0.05),
               {'entries': count, 'cpu_cores_open': round(open_rate, 3), 'cpu_cores_closed': round(closed_rate, 3)})

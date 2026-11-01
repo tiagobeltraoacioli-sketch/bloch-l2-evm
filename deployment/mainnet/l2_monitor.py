@@ -494,7 +494,14 @@ def check_finality_status(tag: str, finality: Any, p: Dict[str, Any], r: Report)
     if not isinstance(status, dict):
         return
     state, age = status.get('state'), status.get('age_s')
-    if state != 'ok':
+    if state == 'starting':
+        r.add(f'l2_finality_status{tag}', WARN, 'the RPC has not finished its first read of the follower status: levels are closed')
+    elif state == 'lagging':
+        real = age if isinstance(age, (int, float)) else 0
+        r.add(f'l2_finality_status{tag}', CRIT if real >= p['status_age_crit'] else WARN,
+              f'this database has not reached settlement {status.get("missing_settlement")} of a status written {real} s ago: '
+              'finalized stands at its old level. Check the producer or the replica refresh.')
+    elif state != 'ok':
         r.add(f'l2_finality_status{tag}', CRIT, f'follower status is {state}: safe and finalized are closed')
     elif not isinstance(age, (int, float)):
         r.add(f'l2_finality_status{tag}', WARN, 'follower status state ok, no age reported')
@@ -525,7 +532,10 @@ def read_backend(client: Client, name: str, url: str, p: Dict[str, Any], r: Repo
         except ValueError as e:
             r.add(f'l2_rpc{tag}', CRIT, f'L2 RPC unreachable or malformed: {e}')
             return None
-    if closed:
+    if closed == ['safe']:
+        r.add(f'l2_finality_closed{tag}', WARN, f'{url}: safe is closed, finalized stands: the settlement at the L1 head is not '
+                                                'in this database, usually a foreign settlement. See foreign_settlements.')
+    elif closed:
         r.add(f'l2_finality_closed{tag}', CRIT, f'{url} answers, but {" and ".join(closed)} are closed: it lost a valid '
                                                 'follower status. Check the follower and its status file.')
     if chain_id != p['chain_id']:
@@ -951,11 +961,12 @@ def grade_foreign(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r:
     """Foreign settlements recovered by the worker in the longer window. Funds are safe; more than one a day is
     an attack on liveness. Silent when there is none, since only a settler logs this event."""
     found = [ev for ev in events if ev['event'] == 'foreign-settlement-recovered']
-    if found:
-        last = found[-1]
-        r.graded(f'foreign_settlements[{name}]', len(found), 1, p['foreign_recovered_crit'],
-                 f'{len(found)} foreign settlement(s) recovered in {p["foreign_window_seconds"] / 3600:.0f} h; last: '
-                 f'L2 block {last.get("number")} at {last.get("time")}')
+    waiting = [ev for ev in events if ev['event'] == 'foreign-settlement-waiting-finality']
+    if found or waiting:
+        last = (found or waiting)[-1]
+        r.graded(f'foreign_settlements[{name}]', max(len(found), len(waiting)), 1, p['foreign_recovered_crit'],
+                 f'{len(found)} foreign settlement(s) recovered, {len(waiting)} waited on, in '
+                 f'{p["foreign_window_seconds"] / 3600:.0f} h; last: L2 block {last.get("number")} at {last.get("time")}')
 
 
 def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner, r: Report) -> None:

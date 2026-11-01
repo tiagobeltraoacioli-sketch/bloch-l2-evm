@@ -9,11 +9,13 @@
 //   read     to the fresher of the local settled RPC and the peer host's
 //            (nginx upstream with the other one as backup)
 //   seqread  the sequencer first (it counts the spool), then the other
-//   finality a call at `safe` or `finalized`, bloch_finality or bloch_settlement:
-//            to a backend whose follower status is valid and younger than
-//            cfg.maxStatusAgeS, and once more to the other backend when the
-//            first has closed those levels. A stale status alone never refuses
-//            a read: old finality is still true, and /health reports the age.
+//   finality a call at `safe` or `finalized`, bloch_finality, bloch_settlement or
+//            bloch_getWithdrawalProof: to a backend whose follower status is valid
+//            and younger than cfg.maxStatusAgeS and, among those, the one with the
+//            higher finalized level; once more to the other backend when the first
+//            has closed those levels, answers null, or lacks the proof. A stale
+//            status alone never refuses a read: old finality is still true, and
+//            /health reports the age. A backend with no status view is not current.
 //   tx       eth_sendRawTransaction, the sequencer only, never retried
 //
 // Backend freshness comes from a js_periodic probe (chain id, head, finalized,
@@ -96,9 +98,10 @@ const TAG_POSITION = {
   eth_createAccessList: 1, eth_getStorageAt: 2, eth_getProof: 2,
 };
 // Answered from the follower status, so the same choice of backend applies.
-const FINALITY_METHODS = { bloch_finality: true, bloch_settlement: true };
-// The settled RPC's answer while its safe and finalized levels are closed.
-const LEVELS_CLOSED = -32001;
+const FINALITY_METHODS = { bloch_finality: true, bloch_settlement: true, bloch_getWithdrawalProof: true };
+// Answers the other backend may do better on: levels closed (-32001), and for a withdrawal proof: not finalized
+// here yet, unknown index, unknown root, index catching up, frozen.
+const RETRY_CODES = { '-32001': true, '-32041': true, '-32042': true, '-32043': true, '-32045': true, '-32046': true };
 
 const HEX_QTY = /^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const HASH32 = /^0x[0-9a-fA-F]{64}$/;
@@ -174,23 +177,28 @@ function namesFinalityLevel(method, params) {
   return isLevel(v) || (!!v && typeof v === 'object' && isLevel(v.blockNumber));
 }
 
-// A backend answering, with a valid follower status younger than the threshold. A backend that
-// reports no status (before v2.1) counts as current: there is nothing to act on.
+// A backend answering, with a valid follower status younger than the threshold. No status view (a backend
+// starting, or without a follower) is not current, and neither is one whose database lags its follower.
 function finalityCurrent(s) {
-  return fresh(s) && s.ok && (s.statusState === null || (s.statusState === 'ok' && s.statusAge !== null && s.statusAge <= cfg.maxStatusAgeS));
+  return fresh(s) && s.ok && s.statusState === 'ok' && s.statusAge !== null && s.statusAge <= cfg.maxStatusAgeS;
 }
 
-// A backend whose levels are open, even on an old status.
+// A backend whose levels are open, even on an old status or behind its follower.
 function finalityOpen(s) {
-  return fresh(s) && s.ok && (s.statusState === null || s.statusState === 'ok');
+  return fresh(s) && s.ok && (s.statusState === 'ok' || s.statusState === 'lagging');
 }
 
-// 'local' or 'peer': the first backend for a finality read. Current beats open beats the read target.
+// 'local' or 'peer': the first backend for a finality read. Current beats open beats the read target;
+// between equals the higher finalized level, so that routing by head does not move a client backwards.
 function finalityTarget() {
   const l = readState('local');
   const p = cfg.peerProbeUrl ? readState('peer') : null;
   const pick = (good) => {
-    if (good(l) && good(p)) return readTarget();
+    if (good(l) && good(p)) {
+      const lf = l.finalized === null ? -1 : l.finalized;
+      const pf = p.finalized === null ? -1 : p.finalized;
+      return lf === pf ? readTarget() : lf > pf ? 'local' : 'peer';
+    }
     if (good(l)) return 'local';
     return good(p) ? 'peer' : null;
   };
@@ -199,10 +207,12 @@ function finalityTarget() {
 
 function closedAnswer(reply) {
   if (!reply || typeof reply !== 'object') return false;
-  if (reply.error && reply.error.code === LEVELS_CLOSED) return true;
+  if (reply.error) return RETRY_CODES[String(reply.error.code)] === true;
+  // Null is "nothing here": a backend starting, or one behind the other. The peer may hold it.
+  if (reply.result === null) return true;
   // bloch_finality names a state; only an answer with the member can say the levels are closed.
-  const status = reply.result && typeof reply.result === 'object' ? reply.result.status : null;
-  return !!status && typeof status === 'object' && status.state !== undefined && status.state !== 'ok';
+  const status = typeof reply.result === 'object' ? reply.result.status : null;
+  return !!status && typeof status === 'object' && status.state !== undefined && status.state !== 'ok' && status.state !== 'lagging';
 }
 
 function sequencerDown() {

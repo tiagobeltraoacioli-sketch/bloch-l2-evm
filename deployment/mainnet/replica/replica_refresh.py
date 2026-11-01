@@ -109,7 +109,8 @@ def check_report(report, status, previous):
     if report.get('genesis') != L2_GENESIS:
         raise Halt(f'the rebuilt L2 genesis {report.get("genesis")} differs from the pin')
     blocks = {b['number']: b for b in report.get('blocks', [])}
-    for s in status.get('finalized_settlements', []):
+    # read_status puts the whole log of a schema v3 status in this list; a status without it still has its newest.
+    for s in status.get('finalized_settlements') or status.get('finalized_settlements_recent', []):
         b = blocks.get(s['l2_number'])
         if b is None or (b['hash'], b['state_root']) != (s['l2_hash'], s['l2_state_root']) or \
                 (s.get('withdrawals') and s['withdrawals'] != {'root': b['withdrawal_root'], 'count': b['withdrawal_count']}):

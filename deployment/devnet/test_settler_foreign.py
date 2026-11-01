@@ -36,6 +36,7 @@ def values_for(number, entry, user_txs=0, payload=None):
 
 class World(base.Fake):
     status_schema = 'v2'
+    finalized_only = None
 
     """The local database is `chain.json` in the real l2_db directory; `l1` is what a rebuild derives."""
 
@@ -100,9 +101,11 @@ class World(base.Fake):
                 out.returncode, out.stderr = 2, 'L2 block 1: rebuilt hash x / state root y differ from settled'
                 return out
             target.mkdir()
-            self.write(target, [GENESIS_HASH, *[e[0] for e in self.l1]])
-            blocks = [{'number': i + 1, 'hash': e[0], 'state_root': e[1]} for i, e in enumerate(self.l1)]
-            out.stdout = json.dumps({'head': self.l1[-1][0] if self.l1 else None, 'blocks': blocks, 'native_blocks': 40})
+            # Rebuilds read finalized L1 blocks only, when the test has said which those are.
+            l1 = self.l1 if self.finalized_only is None else self.l1[:self.finalized_only]
+            self.write(target, [GENESIS_HASH, *[e[0] for e in l1]])
+            blocks = [{'number': i + 1, 'hash': e[0], 'state_root': e[1]} for i, e in enumerate(l1)]
+            out.stdout = json.dumps({'head': l1[-1][0] if l1 else None, 'blocks': blocks, 'native_blocks': 40})
         else:
             raise AssertionError(argv)
         return out

@@ -58,7 +58,8 @@ The answer has the `bloch-l2-produce-dev withdrawal-proof` fields (`chain_id`, `
 | -32043 | the root is not that of a finalized settlement known here | retry within `--wait` |
 | -32044 | the withdrawal is newer than the requested root | refuse |
 | -32045 | the index is still reading finalized blocks | retry |
-| -32046 | frozen: a finalized settlement disagrees with this RPC's receipts | refuse; the operator must investigate |
+| -32001 | this RPC has closed its finality levels (lost follower status, or starting) | retry |
+| -32046 | frozen: a finalized settlement disagrees with this RPC's receipts | retry: behind a gateway another backend may hold it; on your own RPC the operator must investigate |
 | -32602 | malformed parameters | refuse |
 
 **Operation.** The index holds only finalized data. It reads a block's receipts only after a finalized settlement raised the withdrawal count, and it publishes the new leaves only if they fold to that settlement's root and count. A mismatch logs `withdrawal proofs FROZEN` and stops the method until a restart; the rest of the RPC keeps serving. Requests are answered from memory, without a database read. Memory is about 170 bytes per withdrawal, and the index is rebuilt at start from the finalized blocks that added withdrawals. The method exists only under rules with an outbox (`v3`, `mainnet`).

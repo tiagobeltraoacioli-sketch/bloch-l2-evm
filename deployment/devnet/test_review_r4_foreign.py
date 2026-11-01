@@ -28,6 +28,7 @@ class Starvation(F.ForeignTest):
             settler.cycle()
             finalized.append(entry)
             world.finalize(*finalized[:-1])
+            world.finalized_only = len(finalized) - 1
             settler.cycle()
         return finalized
 
@@ -39,7 +40,7 @@ class Starvation(F.ForeignTest):
         world.during_prove = None
         finalized = self.rolling_foreign(world, settler, 12)
         rebuilds = [c for c in world.calls if 'reconstruct' in c]
-        self.assertTrue(rebuilds or self.events('foreign-settlement-recovered'),
+        self.assertTrue(rebuilds and self.events('foreign-settlement-recovered'),
                         f'after {len(finalized)} foreign settlements, {len(finalized) - 1} of them finalized, the worker never '
                         f'rebuilt: local chain {[h[:4] for h in self.local()]}, events '
                         f'{len(self.events("foreign-settlement-waiting-finality"))} waiting, 0 recovered')
