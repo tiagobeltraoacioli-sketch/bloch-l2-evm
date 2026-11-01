@@ -86,7 +86,7 @@ def probe(n=200):
         t = time.time(); call('eth_blockNumber'); ts.append(time.time() - t); time.sleep(0.02)
     ts.sort(); return ts[len(ts) // 2] * 1000, ts[-1] * 1000
 def monitor(status_path, doc):
-    r = M.Report(); M.status_size('t', str(status_path), doc, M.PROFILES['mainnet'], r)
+    r = M.Report(); M.status_size('t', str(status_path), doc, M.PROFILES['mainnet'], time.time(), r)
     return {c['check'].split('[')[0]: c['level'] for c in r.checks}, [c['message'] for c in r.checks if 'size' in c['check']][0]
 (WORK / 'run').mkdir(exist_ok=True)
 for f in (WORK / 'run').glob('*'):

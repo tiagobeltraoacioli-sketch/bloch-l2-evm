@@ -275,7 +275,8 @@ class TamperedProof(Base):
         self.assertFalse(os.path.exists(self.out))
 
     def test_garbage_answers_are_refused(self):
-        for answer in (b'not json', b'[1]', b'{"result":{"a":1,"a":2}}', b'{"result":null}'):
+        self.assertEqual(self.fetch(self.url(lambda m, p: b'not json' if m.startswith('bloch') else self.l1)), tool.NOT_READY)
+        for answer in (b'[1]', b'{"result":{"a":1,"a":2}}', b'{"result":null}'):
             with self.subTest(answer):
                 self.assertEqual(self.fetch(self.url(lambda m, p: answer if m.startswith('bloch') else self.l1)), tool.REFUSED)
 
@@ -330,10 +331,10 @@ class Anchor(Base):
 
 class RpcErrors(Base):
     def test_retryable_errors_are_not_ready_and_others_refused(self):
-        for code in (-32041, -32042, -32043, -32045):
+        for code in (-32001, -32041, -32042, -32043, -32045, -32046):
             with self.subTest(code):
                 self.assertEqual(self.fetch(self.url(lambda m, p: Fail(code))), tool.NOT_READY)
-        for code in (-32044, -32046, -32601, -32602):
+        for code in (-32044, -32601, -32602):
             with self.subTest(code):
                 self.assertEqual(self.fetch(self.url(lambda m, p: Fail(code))), tool.REFUSED)
 

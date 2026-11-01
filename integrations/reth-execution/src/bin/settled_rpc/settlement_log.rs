@@ -47,6 +47,13 @@ pub struct Cursor {
     digest: Option<B256>,
 }
 
+impl Cursor {
+    /// Whether the next v3 read starts at the beginning of the log.
+    pub fn reads_from_start(&self) -> bool {
+        self.digest.is_none()
+    }
+}
+
 /// What one read adds. Nothing is committed until the caller adopts `cursor`.
 #[derive(Debug)]
 pub struct Delta {
@@ -68,6 +75,26 @@ fn contiguous(entries: &[Value], first: u64) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What a read of the log from its start would read, to avoid repeating a refused read: the status's
+/// description of the log and the file's size and time. `None` for a status without a log.
+pub fn log_identity(status_path: &Path, status: &Value) -> Option<String> {
+    let log = status.get("settlement_log")?;
+    let name = log["file"].as_str().filter(|n| !n.is_empty() && !n.contains('/'))?;
+    let meta = std::fs::metadata(status_path.parent().unwrap_or(Path::new(".")).join(name)).ok();
+    let (size, time) = meta.map_or((0, None), |m| (m.len(), m.modified().ok()));
+    Some(format!("{log} {size} {time:?}"))
+}
+
+/// The newest settlement a status names, without reading the log.
+pub fn tip_number(status: &Value) -> Option<u64> {
+    let list = match status["schema"].as_str() {
+        Some(STATUS_V2) => &status["finalized_settlements"],
+        Some(STATUS_V3) => &status["finalized_settlements_recent"],
+        _ => return None,
+    };
+    list.as_array()?.last()?["l2_number"].as_u64()
 }
 
 /// Read what `status` adds to `cursor`. The list fields are moved out of `status`, which keeps only
@@ -168,6 +195,15 @@ mod tests {
 
     fn entry(number: u64) -> Value {
         json!({"l2_number": number, "l2_hash": format!("{number:064x}"), "native_slot": number + 7})
+    }
+
+    #[test]
+    fn the_tip_comes_from_the_status_alone() {
+        let v3 = json!({"schema": STATUS_V3, "finalized_settlements_recent": [entry(69), entry(70)]});
+        assert_eq!(tip_number(&v3), Some(70));
+        assert_eq!(tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": [entry(1), entry(2)]})), Some(2));
+        assert_eq!(tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": []})), None);
+        assert_eq!(tip_number(&json!({"schema": "other", "finalized_settlements": [entry(1)]})), None);
     }
 
     /// Write a v3 status and log with `count` entries, as the follower does.

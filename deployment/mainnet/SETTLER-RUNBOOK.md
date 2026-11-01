@@ -228,8 +228,12 @@ at each swap. The worker's unit has `NoNewPrivileges`, so it cannot restart anyt
 installs it, and turning `foreign_recovery` on needs `sudo systemctl enable --now bloch-l2-mainnet-rpc-restart.path`.
 `foreign-settlement-recovered` reports the block, the orphans, `wasted_proofs` and `wasted_da_signed`.
 
-Repeated events are an attack on liveness, not on funds. `l2_monitor.py` counts them over 24 h from `--unit` or
-`--event-log`: `foreign_settlements` is WARN at one and CRIT above one per day.
+A tip that keeps moving does not hold recovery back: when the database has left the finalized prefix, the worker rebuilds
+to the newest finalized settlement and keeps waiting for the tip. A database already on the prefix just waits.
+
+Repeated events are an attack on liveness, not on funds. `l2_monitor.py` counts recovered and waited-on settlements over
+24 h from `--unit` or `--event-log`: `foreign_settlements` is WARN at one and CRIT above one per day. Meanwhile `safe` is
+closed on this RPC and `finalized` stands.
 
 ## L2 reorg recovery
 

@@ -18,6 +18,10 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 
 ## 2. Monitor
 
+`finality_file_lag[FILE:RPC]` compares the follower file's newest settlement with the RPC's `finalized_height` (WARN at 1,
+CRIT at 3; needs `--follower-status`). A settled RPC up to v2.1 keeps `bloch_finality.status.age_s` young while its database
+lags the file, so read this check, not that age, to know whether finality on a backend is current.
+
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
 dependencies, no keys) for the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (follower
 `c18752fd…`, produce-dev `fb0d5313…`, settled-rpc `18be911a…`). Its JSON-RPC
@@ -103,6 +107,7 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `follower_verified_lag[*]` | L1 finalized height − follower verified blocks | 64 | 320 | 64 = two epochs; 320 ≈ 10 epochs (≈ 2.7 h) |
 | `follower_epoch_lag[*]` | L1 finalized epoch − follower's own FFG-finalized epoch | 5 | 8 | a constant 3 is structural: the votes finalizing the newest checkpoints are in blocks after the node's finalized root |
 | `follower_status[*]` | `status.json` age and pins | 300 s | 900 s | the attestor agent treats > 900 s as a stalled follower |
+| `follower_status_runway[*]`, `l2_status_runway[*]` | settlements left in a schema v2 status on this RPC, with the date at the cadence of the last 64 settlements. The second needs only the RPC | 120 days left, or 15,000 settlements on a v2.1 RPC | 45 days left, or 22,500 settlements | a v2.1 RPC closes `safe` and `finalized` at 30,194 settlements; a schema v3 follower has no such limit. Fix: `MAINNET-RPC-READINESS.md`, "Rolling from schema v2 to v3" |
 | `l2_backends`, `l2_backends_agree` | backends up; same hash for every common block; finalized spread | one down / spread 2 | all down / any hash differs / spread 8 | two followers replaying the same L1 must agree exactly |
 | `l2_genesis[*]` | block 0 = `632e45ae…f468` | – | differs | wrong database or profile |
 | `settlement_age` | now − time of `getl2settlement.source.slot` (frozen right after each acceptance) | 25 min | 45 min | same cadence as `l2_head_age`; `live` phase only |

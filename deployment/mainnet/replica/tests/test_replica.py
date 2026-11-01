@@ -276,6 +276,47 @@ def status(tip='t1', settlements=(), **over):
     return doc
 
 
+class FollowerStatusV3(unittest.TestCase):
+    """Both replica tools read schema v3; a log that differs from its status stops them."""
+
+    def write(self, d, count):
+        entries = [{'l2_number': n, 'l2_hash': f'h{n}', 'l2_state_root': f's{n}'} for n in range(1, count + 1)]
+        text = b''.join(json.dumps(e, sort_keys=True).encode() + b'\n' for e in entries)
+        path = Path(d) / 'status.json'
+        (Path(d) / 'status.settlements.jsonl').write_bytes(text)
+        doc = status(schema=refresh.SCHEMA_V3, finalized_settlements_count=count, finalized_settlements_recent=entries[-64:],
+                     settlement_log={'file': 'status.settlements.jsonl', 'entries': count, 'bytes': len(text), 'digest': ''})
+        doc.pop('finalized_settlements')
+        path.write_text(json.dumps(doc))
+        return path, doc, entries
+
+    def test_both_tools_read_the_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, doc, entries = self.write(d, 100)
+            self.assertEqual(refresh.read_status(path, 3600, time.time())['finalized_settlements'], entries)
+            self.assertEqual(check.settlements_of(doc, path), entries)
+
+    def test_a_torn_log_halts_the_refresh_and_fails_the_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, doc, _ = self.write(d, 10)
+            log = path.with_name('status.settlements.jsonl')
+            log.write_bytes(log.read_bytes()[:-3])
+            with self.assertRaises(refresh.Halt):
+                refresh.read_status(path, 3600, time.time())
+            with self.assertRaises(ValueError):
+                check.settlements_of(doc, path)
+
+    def test_a_log_with_another_tip_stops_both(self):
+        with tempfile.TemporaryDirectory() as d:
+            path, doc, _ = self.write(d, 10)
+            doc['finalized_settlements_recent'][-1]['l2_hash'] = 'other'
+            path.write_text(json.dumps(doc))
+            with self.assertRaises(refresh.Halt):
+                refresh.read_status(path, 3600, time.time())
+            with self.assertRaises(ValueError):
+                check.settlements_of(doc, path)
+
+
 def block(n, h='h'):
     return {'number': n, 'hash': f'{h}{n}', 'state_root': f's{n}', 'withdrawal_root': 'w', 'withdrawal_count': 0}
 

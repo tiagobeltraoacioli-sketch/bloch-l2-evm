@@ -24,6 +24,7 @@ Exit status: 0 ok; 1 refused, tampered or usage error; 3 not ready yet, retry la
 """
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -48,7 +49,8 @@ POLL_SECONDS = 30
 
 # bloch_getWithdrawalProof errors that a later try can clear.
 RETRYABLE = {-32041: 'not finalized yet', -32045: 'RPC index catching up', -32042: 'RPC does not know this index yet',
-             -32043: 'RPC does not know this finalized root yet', -32005: 'rate limited', -32053: 'no backend available'}
+             -32043: 'RPC does not know this finalized root yet', -32005: 'rate limited', -32053: 'no backend available',
+             -32001: 'the RPC has closed its finality levels', -32046: 'this RPC froze its withdrawal index; another backend may hold it'}
 
 OK, REFUSED, NOT_READY, CLAIMED = 0, 1, 3, 4
 
@@ -220,6 +222,8 @@ def rpc(url, method, params):
     try:
         with urllib.request.urlopen(request, timeout=RPC_TIMEOUT) as response:
             text = response.read(MAX_RESPONSE + 1)
+    except http.client.HTTPException as error:  # the answer was cut short
+        raise NotReady(f'{url}: {error!r}') from None
     except urllib.error.HTTPError as error:
         text = error.read(MAX_RESPONSE + 1)
         if not text:
@@ -230,8 +234,8 @@ def rpc(url, method, params):
         raise Refused(f'{url}: answer too large')
     try:
         answer = json.loads(text, object_pairs_hook=no_duplicates)
-    except ValueError:
-        raise Refused(f'{url}: the answer is not JSON') from None
+    except ValueError:  # an edge's error page, a restart: nothing was claimed, so nothing is refused
+        raise NotReady(f'{url}: the answer is not JSON') from None
     if not isinstance(answer, dict):
         raise Refused(f'{url}: the answer is not a JSON-RPC object')
     if answer.get('error') is not None:

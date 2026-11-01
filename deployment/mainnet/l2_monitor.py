@@ -51,7 +51,7 @@ SEVERITY = {OK: 0, WARN: 1, UNKNOWN: 2, CRIT: 3}
 
 READ_ONLY_METHODS = frozenset({
     # L2 (Ethereum JSON-RPC subset + Bloch extensions)
-    'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality',
+    'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality', 'bloch_settlement',
     # L1 (bloch-pos)
     'getchaininfo', 'getblockcount', 'getl2settlement', 'getutxos',
 })
@@ -128,8 +128,13 @@ _COMMON: Dict[str, Any] = {
     'file_age_warn': 120, 'file_age_crit': 600,
     'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
-    # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
+    # Settlements the follower file has and an RPC's finalized_height has not. One can be a poll in flight.
+    'finality_file_lag_warn': 1, 'finality_file_lag_crit': 3,
+    # A settled RPC before the next build closes safe and finalized above 16 MiB of status file.
     'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
+    # Runway to that limit: replacing the RPC needs a signed build and a rollout, so the warning comes months ahead.
+    'status_runway_days_warn': 120, 'status_runway_days_crit': 45,
+    'status_settlements_warn': 15_000, 'status_settlements_crit': 22_500,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
@@ -491,7 +496,14 @@ def check_finality_status(tag: str, finality: Any, p: Dict[str, Any], r: Report)
     if not isinstance(status, dict):
         return
     state, age = status.get('state'), status.get('age_s')
-    if state != 'ok':
+    if state == 'starting':
+        r.add(f'l2_finality_status{tag}', WARN, 'the RPC has not finished its first read of the follower status: levels are closed')
+    elif state == 'lagging':
+        real = age if isinstance(age, (int, float)) else 0
+        r.add(f'l2_finality_status{tag}', CRIT if real >= p['status_age_crit'] else WARN,
+              f'this database has not reached settlement {status.get("missing_settlement")} of a status written {real} s ago: '
+              'finalized stands at its old level. Check the producer or the replica refresh.')
+    elif state != 'ok':
         r.add(f'l2_finality_status{tag}', CRIT, f'follower status is {state}: safe and finalized are closed')
     elif not isinstance(age, (int, float)):
         r.add(f'l2_finality_status{tag}', WARN, 'follower status state ok, no age reported')
@@ -522,7 +534,10 @@ def read_backend(client: Client, name: str, url: str, p: Dict[str, Any], r: Repo
         except ValueError as e:
             r.add(f'l2_rpc{tag}', CRIT, f'L2 RPC unreachable or malformed: {e}')
             return None
-    if closed:
+    if closed == ['safe']:
+        r.add(f'l2_finality_closed{tag}', WARN, f'{url}: safe is closed, finalized stands: the settlement at the L1 head is not '
+                                                'in this database, usually a foreign settlement. See foreign_settlements.')
+    elif closed:
         r.add(f'l2_finality_closed{tag}', CRIT, f'{url} answers, but {" and ".join(closed)} are closed: it lost a valid '
                                                 'follower status. Check the follower and its status file.')
     if chain_id != p['chain_id']:
@@ -646,12 +661,49 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
-STATUS_BYTES_PER_SETTLEMENT = 555  # measured on a real follower status, schema v2
+# Schema v2 repeats every settlement in the status file. Measured on real binaries (agent 76): 556 bytes each, the
+# settled RPC of v2.1 closes safe and finalized at 30,194 settlements, and the next RPC at about 483,000.
+STATUS_BYTES_PER_SETTLEMENT = 556
+STATUS_V2_LIMIT_V21 = 16 * 1_048_576
+STATUS_V2_LIMIT_NEXT = 256 * 1_048_576
+SLOT_SECONDS = 30
+SETTLEMENT_RATE_WINDOW = 64
 
 
-def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: 'Report') -> None:
-    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build stops
-    advancing finality above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
+def settlement_rate(entries: List[Dict[str, Any]]) -> Optional[float]:
+    """Settlements per day over the given entries (oldest first), from their L1 slots. None without two slots apart."""
+    slots = [e.get('native_slot') for e in entries[-SETTLEMENT_RATE_WINDOW:] if isinstance(e, dict)]
+    slots = [s for s in slots if isinstance(s, int)]
+    if len(slots) < 2 or slots[-1] <= slots[0]:
+        return None
+    return (len(slots) - 1) * 86400 / ((slots[-1] - slots[0]) * SLOT_SECONDS)
+
+
+def settlement_runway(check: str, count: int, limit_bytes: int, rate: Optional[float], p: Dict[str, Any], now: float,
+                      r: 'Report') -> None:
+    """How long a schema v2 status can grow before a settled RPC closes safe and finalized, and the date at this rate."""
+    limit = limit_bytes // STATUS_BYTES_PER_SETTLEMENT
+    left = max(0, limit - count)
+    if rate:
+        days = left / rate
+        when = time.strftime('%Y-%m-%d', time.gmtime(now + days * 86400))
+        detail = f'{rate:.1f} settlements a day, {days:.0f} days left, about {when}'
+    else:
+        days, detail = None, 'no settlement rate yet'
+    level = OK
+    if count >= p['status_settlements_warn'] * limit // (STATUS_V2_LIMIT_V21 // STATUS_BYTES_PER_SETTLEMENT) \
+            or (days is not None and days < p['status_runway_days_warn']):
+        level = WARN
+    if count >= p['status_settlements_crit'] * limit // (STATUS_V2_LIMIT_V21 // STATUS_BYTES_PER_SETTLEMENT) \
+            or (days is not None and days < p['status_runway_days_crit']):
+        level = CRIT
+    action = '' if level == OK else '; install the next settled RPC, then follower --status-schema v3'
+    r.add(check, level, f'{count} of about {limit} settlements a schema v2 status can hold on this RPC ({detail}){action}')
+
+
+def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], now: float, r: 'Report') -> None:
+    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build closes safe and
+    finalized above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
     size = Path(path).stat().st_size
     log = s.get('settlement_log')
     if isinstance(log, dict):
@@ -667,19 +719,66 @@ def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: '
             else:
                 r.add(f'follower_settlement_log[{name}]', OK, f'{log.get("entries")} settlements, {on_disk} bytes')
     else:
-        count = len(s.get('finalized_settlements') or [])
-        left = max(0, 16 * 1_048_576 - size) // STATUS_BYTES_PER_SETTLEMENT
-        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build stops finality'
+        entries = s.get('finalized_settlements') or []
+        count = len(entries)
+        left = max(0, STATUS_V2_LIMIT_V21 - size) // STATUS_BYTES_PER_SETTLEMENT
+        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build closes finality'
+        settlement_runway(f'follower_status_runway[{name}]', count, STATUS_V2_LIMIT_V21, settlement_rate(entries), p, now, r)
     r.graded(f'follower_status_size[{name}]', size, p['status_bytes_warn'], p['status_bytes_crit'],
              f'{path} is {size} bytes with {count} settlements ({detail})')
 
 
-def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
+def rpc_status_runway(client: 'Client', v: Dict[str, Any], p: Dict[str, Any], now: float, r: 'Report') -> None:
+    """The same runway from the RPC alone, for a monitor without the follower's file. The settled list is contiguous from
+    block 1, so the finalized height is the count. A settled RPC that names the schema is at least the next build."""
+    f = v.get('finality')
+    height = f.get('finalized_height') if isinstance(f, dict) else None
+    status = f.get('status') if isinstance(f, dict) else None
+    if not isinstance(height, int) or height < 1 or not isinstance(status, dict):
+        return
+    schema = status.get('schema') or ''
+    if schema.endswith('.v3'):
+        r.add(f'l2_status_runway[{v["name"]}]', OK, f'{height} settlements, schema v3 has no size limit')
+        return
+    entries = []
+    for number in (max(1, height - SETTLEMENT_RATE_WINDOW + 1), height):
+        try:
+            entries.append(client.call(v['url'], 'bloch_settlement', [number]))
+        except RpcError:
+            entries.append(None)
+    rate = None
+    if all(isinstance(e, dict) and isinstance(e.get('native_slot'), int) for e in entries) and height > entries[0]['l2_number']:
+        elapsed = (entries[1]['native_slot'] - entries[0]['native_slot']) * SLOT_SECONDS
+        rate = (height - entries[0]['l2_number']) * 86400 / elapsed if elapsed > 0 else None
+    limit = STATUS_V2_LIMIT_NEXT if schema else STATUS_V2_LIMIT_V21
+    settlement_runway(f'l2_status_runway[{v["name"]}]', height, limit, rate, p, now, r)
+
+
+def finality_file_lag(name: str, s: Dict[str, Any], views: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+    """The follower file's newest settlement against each RPC's finalized_height. `bloch_finality.status.age_s` of a
+    settled RPC up to v2.1 stands still while its database lags the file, so that age cannot show this."""
+    listed = s.get('finalized_settlements') or s.get('finalized_settlements_recent') or []
+    newest = listed[-1].get('l2_number') if listed else 0
+    if not isinstance(newest, int):
+        r.add(f'finality_file_lag[{name}]', WARN, 'the follower file has no readable newest settlement')
+        return
+    for v in views:
+        f = v.get('finality')
+        height = f.get('finalized_height') if isinstance(f, dict) else None
+        if height is not None:
+            lag = max(0, newest - int(height))
+            r.graded(f'finality_file_lag[{name}:{v["name"]}]', lag, p['finality_file_lag_warn'], p['finality_file_lag_crit'],
+                     f'follower file settled through L2 block {newest}, {v["name"]} publishes finalized_height {height}',
+                     newest=newest, finalized_height=height)
+
+
+def check_followers(client: 'Client', views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
                     p: Dict[str, Any], now: float, r: Report) -> None:
     for v in views:
         f = v.get('finality')
         if not isinstance(f, dict):
             continue
+        rpc_status_runway(client, v, p, now, r)
         l1 = f.get('l1') or {}
         follower_lag(v['name'], l1.get('verified_blocks'), (l1.get('finalized') or {}).get('epoch'), l1_up, p, r,
                      'bloch_finality')
@@ -708,9 +807,10 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
             continue
         r.graded(f'follower_status[{name}]', age, p['status_age_warn'], p['status_age_crit'],
                  f'{path} written {age:.0f} s ago')
-        status_size(name, path, s, p, r)
+        status_size(name, path, s, p, now, r)
         follower_lag(f'{name}:status', s.get('verified_blocks'), s.get('native_finalized_epoch'), l1_up, p, r,
                      'status.json')
+        finality_file_lag(name, s, views, p, r)
 
 
 # ------------------------------------------------------------------------------------- attestors
@@ -882,11 +982,12 @@ def grade_foreign(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r:
     """Foreign settlements recovered by the worker in the longer window. Funds are safe; more than one a day is
     an attack on liveness. Silent when there is none, since only a settler logs this event."""
     found = [ev for ev in events if ev['event'] == 'foreign-settlement-recovered']
-    if found:
-        last = found[-1]
-        r.graded(f'foreign_settlements[{name}]', len(found), 1, p['foreign_recovered_crit'],
-                 f'{len(found)} foreign settlement(s) recovered in {p["foreign_window_seconds"] / 3600:.0f} h; last: '
-                 f'L2 block {last.get("number")} at {last.get("time")}')
+    waiting = [ev for ev in events if ev['event'] == 'foreign-settlement-waiting-finality']
+    if found or waiting:
+        last = (found or waiting)[-1]
+        r.graded(f'foreign_settlements[{name}]', max(len(found), len(waiting)), 1, p['foreign_recovered_crit'],
+                 f'{len(found)} foreign settlement(s) recovered, {len(waiting)} waited on, in '
+                 f'{p["foreign_window_seconds"] / 3600:.0f} h; last: L2 block {last.get("number")} at {last.get("time")}')
 
 
 def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner, r: Report) -> None:
@@ -1112,7 +1213,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     l1_up = check_l1(client, args.l1_rpc or [], p, r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_escrow_and_backlog(with_l2, p, r)
-    check_followers(views, args.follower_status or [], l1_up, p, now, r)
+    check_followers(client, views, args.follower_status or [], l1_up, p, now, r)
     check_da_balance(client, args.da_script or [], l1_up, p, r)
     check_disks(args.disk or [], p, r)
     check_gates(l1_up, p, compiled_gates(args), now, r)

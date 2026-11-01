@@ -424,7 +424,7 @@ def main():
     log = (rig.work / 'rpc.log').read_text()
     check('the freeze is logged', 'withdrawal proofs FROZEN' in log, log[-500:])
     code, text = fetch(0, 'frozen.json')
-    check('client: frozen RPC is refused', code == 1, text)
+    check('client: a frozen RPC is not ready, another backend may hold it', code == 3, text)
     rig.stop_rpc()
     rig.write_status(5)
 

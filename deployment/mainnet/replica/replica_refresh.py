@@ -28,6 +28,7 @@ NETWORK_ARGS = ['--rules', 'mainnet', '--domain', '1c3f8772d0bdfc22f33efce250a4f
                 '--genesis-time', '1786656679']
 TIMESTAMP_RULE = '1:1786656679:30000'
 SCHEMA = 'bloch.l2.native-follower-status.v2'
+SCHEMA_V3 = 'bloch.l2.native-follower-status.v3'
 KEEP_GENERATIONS = 2
 
 
@@ -45,13 +46,37 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+
+def settlements_of(status, path):
+    """Every finalized settlement of a follower status, oldest first: the list in schema v2, or the log beside the file
+    in schema v3, which must hold exactly what the status names. Every entry is compared with the rebuilt chain later."""
+    if status.get('schema') != SCHEMA_V3:
+        return status.get('finalized_settlements', [])
+    log = status.get('settlement_log') or {}
+    name, entries, size = log.get('file'), log.get('entries'), log.get('bytes')
+    if not isinstance(name, str) or not name or '/' in name or name in ('.', '..'):
+        raise ValueError('the follower status names a bad settlement log')
+    data = b''
+    if entries:
+        with open(Path(path).with_name(name), 'rb') as f:
+            data = f.read(size)
+    lines = data.splitlines()
+    if len(data) != size or len(lines) != entries:
+        raise ValueError('the follower settlement log does not match its status')
+    settlements = [json.loads(line) for line in lines]
+    recent = status.get('finalized_settlements_recent') or []
+    if entries and (not recent or settlements[-len(recent):] != recent):
+        raise ValueError('the follower settlement log differs from its status')
+    return settlements
+
+
 def read_status(path, max_age, now):
     """The follower's status, or None while it is still replaying. A status for anything else is a halt."""
     try:
         status = json.loads(path.read_text())
     except FileNotFoundError:
         return None
-    if status.get('schema') != SCHEMA or status.get('network') != NETWORK or status.get('chain_id') != CHAIN_ID \
+    if status.get('schema') not in (SCHEMA, SCHEMA_V3) or status.get('network') != NETWORK or status.get('chain_id') != CHAIN_ID \
             or status.get('production_finality') is not False:
         raise Halt('the follower status is for another network or schema')
     genesis = status.get('l2_genesis') or {}
@@ -59,6 +84,10 @@ def read_status(path, max_age, now):
         raise Halt(f'the follower reports L2 genesis {genesis.get("hash")}, not the pin')
     if genesis.get('finalized') is not True or now - status.get('written_at_unix', 0) > max_age:
         return None
+    try:
+        status['finalized_settlements'] = settlements_of(status, path)
+    except (OSError, ValueError) as e:
+        raise Halt(f'follower settlement log: {e}') from None
     return status
 
 
@@ -80,7 +109,8 @@ def check_report(report, status, previous):
     if report.get('genesis') != L2_GENESIS:
         raise Halt(f'the rebuilt L2 genesis {report.get("genesis")} differs from the pin')
     blocks = {b['number']: b for b in report.get('blocks', [])}
-    for s in status.get('finalized_settlements', []):
+    # read_status puts the whole log of a schema v3 status in this list; a status without it still has its newest.
+    for s in status.get('finalized_settlements') or status.get('finalized_settlements_recent', []):
         b = blocks.get(s['l2_number'])
         if b is None or (b['hash'], b['state_root']) != (s['l2_hash'], s['l2_state_root']) or \
                 (s.get('withdrawals') and s['withdrawals'] != {'root': b['withdrawal_root'], 'count': b['withdrawal_count']}):

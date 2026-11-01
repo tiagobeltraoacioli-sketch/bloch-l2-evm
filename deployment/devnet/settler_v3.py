@@ -1392,11 +1392,18 @@ class Settler:
         fields = statement_fields(accepted['statement'])
         number, l2_hash = fields['l2_number'], fields['l2_hash']
         finals = follower_finals(recovery['follower_status'])
+        expected_root = fields['l2_state_root']
         if finals.get(number) != l2_hash:
             if self.waiting_for != l2_hash:
                 self.waiting_for = l2_hash
-                log('foreign-settlement-waiting-finality', number=number, l2_hash=l2_hash, reason=reason[:300])
-            return False
+                log('foreign-settlement-waiting-finality', number=number, l2_hash=l2_hash, finalized_prefix=max(finals, default=0),
+                    reason=reason[:300])
+            # A tip that keeps moving must not hold back the finalized prefix: rebuild to it when the
+            # database has left it. A database on the prefix has nothing to gain, so it waits.
+            prefix = max(finals, default=0)
+            if not prefix or self.holds_block(prefix, finals[prefix]):
+                return False
+            number, l2_hash, expected_root = prefix, finals[prefix], None
         db = Path(self.c['l2_db'])
         rebuilding = db.with_name(db.name + '.rebuilding')
         shutil.rmtree(rebuilding, ignore_errors=True)
@@ -1413,7 +1420,7 @@ class Settler:
         document = json.loads(result.stdout)
         blocks = {b['number']: b for b in document.get('blocks', [])}
         rebuilt = blocks.get(number)
-        if document.get('head') != l2_hash or rebuilt is None or rebuilt['state_root'] != fields['l2_state_root']:
+        if document.get('head') != l2_hash or rebuilt is None or expected_root not in (None, rebuilt['state_root']):
             # Another settlement landed since the view was read; the next cycle starts over from a fresh view.
             shutil.rmtree(rebuilding, ignore_errors=True)
             log('foreign-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
@@ -1441,6 +1448,14 @@ class Settler:
             orphaned_blocks=orphans, respooled=respooled, wasted_proofs=proofs, wasted_da_signed=da_paid,
             rebuild_seconds=round(self.clock() - start, 1), native_blocks=document.get('native_blocks'))
         return True
+
+    def holds_block(self, number, l2_hash):
+        """Whether the local database has this hash at this number."""
+        try:
+            head = self.produce('head', '--target', self.c['l2_db'])['number']
+            return head >= number and self.local_hash(number) == l2_hash
+        except ProducerError:
+            return False
 
     def recovery_journal(self):
         return Path(self.c['l2_db']).with_name(Path(self.c['l2_db']).name + '.recovery.json')
