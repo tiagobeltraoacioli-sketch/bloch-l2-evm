@@ -23,6 +23,7 @@ Related documents:
 - `deployment/mainnet/public-rpc/README.md`: the public RPC gateway.
 - `docs/L2-HARD-FORK-OPERATOR-STEPS.md`: the L2 across HF1/HF2/HF3.
 - `docs/MAINNET-OPS-RUNBOOK.md`: the monitor and its thresholds.
+- `docs/L2-OPERATOR-RUNBOOK.md`: what to do per failure.
 - `docs/MAINNET-EXCHANGE-INTEGRATION.md`: exchange-facing behaviour.
 
 ## 0. Where things stand (read-only checks, 2026-10-30 22:06 UTC)
@@ -57,7 +58,7 @@ the value.
 | **D5** | **Attestor operators**: five people, five hosts, one index each, plus each operator's feed URL | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
 | **D6** | **Bloch Inc addresses** | **None is needed for the L2 core.** L2 fees go to the predeploy `0x4200…0011`, settlements pay no L1 fee, and the DA key is generated on the host. Still `TBD-owner`: (a) the L1 wallet that funds the DA key (5 BLCH, only when user transactions are enabled); (b) the L1 wallet and L2 recipient for the test deposit and test withdrawal; (c) the Bloch Inc Safe and bridge guardian addresses, which the DEX and bridge need later. Those are not part of this plan. | P12 |
 | **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `dded10b9b49a862d1b31f0667b945016b5da54e6c497eba123c42b32e0cd11f9`) with the owner's minisign key before any install. `TBD-owner` key. | P2 |
-| **D8** | Retire the 10-18 scratch follower/RPC on 45.77 (they halt at HF1 anyway) | Stop them before or at G0. The owner runs `kill 1452988 1304666`. | none (hygiene) |
+| **D8** | Retire the 10-18 scratch follower/RPC on 45.77 (they halt at HF1 anyway) | Stop them before or at G0. PIDs change after a restart, so first confirm with `ps -o pid,cmd -p 1452988,1304666` that they are the scratch follower and RPC, then the owner runs `kill 1452988 1304666`. | none (hygiene) |
 | **D9** | Public gateway | `l2rpc.blochl1.com` through the nginx + njs gateway on A and B (`deployment/mainnet/public-rpc/`). The Worker of `codex/l2-mainnet-public-20261019` is retired: do not deploy it. CORS is open to any origin (decided 2026-10-30). Still open: DNS timing, and origin failover: one proxied A record with a manual switch to B (default), or paid Cloudflare Load Balancing. `TBD-owner`. | P11 |
 | **D10** | When to enable user transactions | Only after the P12 deposit test, the DA rehearsal R2, the gas-heavy measurement and the stuck-block rehearsal (§3.4). Until then deposits mint on the L2 but nobody can transact or withdraw. | P12 |
 | **D11** | Alert channel for the monitor | `TBD-owner`. | P9 |
@@ -143,7 +144,7 @@ Both builds are byte-identical. Source: `45.77.142.123:~/l2dexbridge-20261030/l2
 | `bloch-l2-settled-rpc` | `18be911a47f0ab8975e1f079c860adef08dfc43c4b5062eca7b040e2e6eee83f` | **changed**, was `4fc9fa1e…` | RPC A, RPC B (P4) |
 | `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | unchanged | shadow (P7) |
 | `build.json` | `b12ed2b6d643896f98c2792663de0cdf6779f6a5b613a2168b51c79decc03cb4` | changed | check `l2_commit` `a39b04e4`, `l1_activation_epochs` 7180/7180/7186/7270×4/7360×3/8620 and `l2_tracked_changes: 0` |
-| `out/SHA256SUMS` | `c07531b7e92d05e356648815a43a8529ec15e6e2b30caaa856c0789ddc34da4b` | changed | install.sh `sha256sum -c` |
+| `out/SHA256SUMS` | `c07531b7e92d05e356648815a43a8529ec15e6e2b30caaa856c0789ddc34da4b` | changed | Build output only. It is not in the release directory. `install.sh` checks the release `SHA256SUMS` below. |
 | release `SHA256SUMS` (signing target, D7) | `dded10b9b49a862d1b31f0667b945016b5da54e6c497eba123c42b32e0cd11f9` | changed | owner signature |
 | `NATIVE_LOCK` (settlement-recovery, 78d4921c) | `26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8` | unchanged | rebuilds. Committed as `deployment/mainnet/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock`, and `build-release.sh` refuses any other lock for this native commit. |
 
@@ -183,8 +184,9 @@ The L2 source the guest compiles from has no diff against v2.
 | K2 | **Closed in v2.1.** The attestor agent did not pin the follower binary (report 06). | `config.json` now carries `follower_sha256`, the agent checks it, and `install-attestor.sh upgrade` covers older configs. | Stage the kit from this branch. | P10 |
 | K3 | 10-19 runbook `curl` lines lack `Content-Type` | The L1 RPC refuses them. | Use the commands in this document. | all |
 | K4 | `install.sh` prints "~155k blocks, 30–40 min" | Cosmetic. The real figure is in §2. | none | P3 |
-| K5 | Replica B's canonical DB advances only by a manual `reconstruct` (no timer) | B drops out of the gateway rotation when it is more than 16 blocks behind A. It never serves wrong data. | Run the P4 refresh after each finalized settlement until a timer exists. | P4, P11 |
+| K5 | Replica B, installed as in P3, advances only by a manual `reconstruct` (the kit in `deployment/mainnet/replica/` has a refresh timer, but other unit names and port 18965; choosing it for B is an owner decision) | B drops out of the gateway rotation when it is more than 16 blocks behind A. It never serves wrong data. | Run the P4 refresh after each finalized settlement until a timer exists. | P4, P11 |
 | K6 | **Closed in v2.1.** The 8 `tests/ffg_recovery.rs` failures were stale fixtures, not a follower bug: the native genesis commitment changed, and the settlement wire tag moved from 0x0E to 0x12. | Fixtures regenerated against 78d4921c with a real proof. All 8 pass, and settlement-recovery passes 67 of 67. No library or follower code changed. The legacy WS-checkpoint store fails closed on current chains, the release follower does not use it, and it is retired (owner decision). | none | P6 |
+| K10 | `install-settler-mainnet.py` `16aba9b6…` calls `runuser` with `PATH=/usr/bin:/bin`, and `configure` and `dry-run` fail on Ubuntu 24.04. | P6 stops with a traceback, and `config.json` is already written. | The symlink in P6 step 2 needs no pin change. The real fix moves the installer pin; the signing target does not move. | P6 |
 | K7 | `docs/L2-HARD-FORK-OPERATOR-STEPS.md` §4.2 step 2 still says to pin the compat-branch DA signer | Wrong for 78d4921c (report 05). | Follow D12. | P12 |
 | K8 | The per-transaction gas limit in the settled RPC is a constant, 15,000,000, equal to the settler's `max_block_gas` | If `max_block_gas` is lowered without changing the constant, the spool squat reopens below it. | Do not lower `max_block_gas` without a new settled-RPC build. | P12 |
 | K9 | A settler `extend` over a maximal spool needs about 1.5 GB RSS for about 5 s | Only relevant with user transactions on; the unit cap of 32 G covers it. | Keep it in mind when sizing a separate settler host. | P12 |
@@ -231,7 +233,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 4. No L1 release after fa980367 changed a crate the L2 links (see `L2-HARD-FORK-OPERATOR-STEPS.md`
    §0). If one did, rebuild the L2 against it first: NO-GO with v2.1.
 5. `getl2settlement`: `accepted` = `null`, source height 1, slot 187200, `profile.activated` true.
-   Record `inbox` (expected 0). If deposits arrived in the meantime, L2 block 1 will differ from
+   Record `inbox` (expected `count` 0, `consumed` 0, `escrow_sat` "0"). If deposits arrived in the meantime, L2 block 1 will differ from
    `0ff59c11…ab25` and the P6 dry-run reference changes accordingly.
 6. D1, D2, D3, D4 and D7 are decided, and the v2.1 release is signed.
 
@@ -260,7 +262,7 @@ Rollback: none needed.
 
 ## P2. Stage and verify the v2.1 release (no install)
 
-1. Owner signs the release `SHA256SUMS` (D7) and keeps the `.minisig` with the release dir.
+1. Owner signs the release `SHA256SUMS` (D7) and keeps the `.minisig` with the release dir. After the copy in step 2, verify it on A with `minisign -Vm /home/ubuntu/l2-golive-v2/artifacts/SHA256SUMS -P <owner public key>`, and confirm that `sha256sum SHA256SUMS` prints `dded10b9…`. `minisign` is not installed by default.
 2. Stage on A, from the Mac. Each command is one block.
 
 ```
@@ -282,6 +284,10 @@ scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-close-r
 ```
 scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-close-r3-20261031/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-v2/release-settler-v2/
 ```
+
+`scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-v2/kit` first. The kit copy takes about 4 minutes over a long link.
+
+Stage B the same way (D3): run the `mkdir`, the two `scp -3` and the kit `scp -r` with B as the destination. Everything B needs comes from `artifacts/` and `kit/`.
 
 3. On A, check the release and assemble the settler release dir. `bloch-l2-produce-dev`, the kit
    installer and the settler come from this release. The guest, the SP1 host and the 78d4921c
@@ -316,6 +322,7 @@ bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --verify /home/ubuntu/l2-go
   `18be911a…`, sequencer `15daa26f…`, `settler_v3.py` `3ddb260a…`, `install-settler-mainnet.py` `16aba9b6…`, guest `203114bf…`, `bloch-pos`
   `700631b0…`, manifest `7eef82a7…`, `carryover.tsv.gz` `4d1e2738…`.
 - `artifacts/build.json` shows `l2_commit` `a39b04e4`, `l2_tracked_changes: 0` and the HF epochs.
+- `kit/l2_monitor.py` `b6def43b…`, `kit/l2_reorg_recover.py` `d688e59f…`, `kit/attestor/sigfeed.py` `6b6c15a7…`, `kit/prover/install-prover-mainnet.py` `f0b84726…`.
 
 **NO-GO:** any mismatch. Re-copy from the build host. Never use `~/l2-mainnet-install-20261019/out-release`
 or `release-settler/bloch-l2-produce-dev` (`3736860e…`, pre-HF), and never `4fc9fa1e…` (the settled RPC
@@ -354,8 +361,20 @@ sudo runuser -u bloch-l2-mainnet-settler -- /opt/bloch/l2-mainnet-tools/bloch-l2
 sudo bash /home/ubuntu/l2-golive-v2/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-v2/artifacts --l1-rpc-url http://80.240.16.185:8080 --canonical /var/lib/bloch-l2-mainnet-settler/canonical --canonical-user bloch-l2-mainnet-settler --txpool /var/lib/bloch-l2-mainnet-settler/txpool --dry-run
 ```
 
-4. Keep RPC A without the txpool until D10 (drop-in `no-txpool.conf`; the content is in
-   `FOLLOWER-RPC.md` §3.6, unchanged).
+4. Keep RPC A without the txpool until D10. Create the drop-in:
+
+```
+sudo install -d /etc/systemd/system/bloch-l2-mainnet-rpc.service.d
+```
+
+```
+printf '[Service]\nExecStart=\nExecStart=/opt/bloch/l2-mainnet/bloch-l2-settled-rpc --data-dir /var/lib/bloch-l2-mainnet-settler/canonical --view-dir /var/lib/bloch-l2-mainnet-rpc/rpc-view --finality-status /var/lib/bloch-l2-mainnet-follower/status.json --network f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --port 18955 --poll-ms 2000 --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679\n' | sudo tee /etc/systemd/system/bloch-l2-mainnet-rpc.service.d/no-txpool.conf
+```
+
+```
+sudo systemctl daemon-reload
+```
+
 5. Start the follower only:
 
 ```
@@ -364,11 +383,21 @@ sudo systemctl enable --now bloch-l2-mainnet-follower
 
 ### B (D3 host)
 
-Same steps with the replica user `bloch-l2-mainnet-replica`, canonical
-`/var/lib/bloch-l2-mainnet-replica/canonical`, `--l1-rpc-url http://199.247.22.8:8080` and the
-permanent `no-txpool.conf` (`FOLLOWER-RPC.md` §4.2–4.4, with the v2.1 artifacts). **Do not** seed B from
-the 10-18 scratch state (the old §4.5). Let it replay from zero, so that A and B verify the forks
-independently.
+B has no settler, so the `prepare` step does not apply. Create the replica user and its directories first:
+
+```
+sudo useradd --system --user-group --no-create-home --home-dir /var/lib/bloch-l2-mainnet-replica --shell /usr/sbin/nologin bloch-l2-mainnet-replica
+```
+
+```
+sudo install -d -m 0700 -o bloch-l2-mainnet-replica -g bloch-l2-mainnet-replica /var/lib/bloch-l2-mainnet-replica /var/lib/bloch-l2-mainnet-replica/txpool
+```
+
+Then repeat A's steps 2 to 5 with the user `bloch-l2-mainnet-replica`, canonical
+`/var/lib/bloch-l2-mainnet-replica/canonical`, txpool `/var/lib/bloch-l2-mainnet-replica/txpool`,
+`--l1-rpc-url http://199.247.22.8:8080`, and the same drop-in with that `--data-dir`. On B the drop-in is
+permanent. **Do not** seed B from the 10-18 scratch state. Let it replay from zero, so that A and B verify
+the forks independently.
 
 ### Go / no-go (both hosts, after about 65–80 min)
 
@@ -391,7 +420,10 @@ sudo journalctl -u bloch-l2-mainnet-follower --no-pager | grep -cE 'halted|State
 **NO-GO (stop the whole go-live):** any halt. It means the verifier disagrees with the L1 on a
 post-fork block. Keep the state for analysis and do not skip a block.
 
-Rollback: `FOLLOWER-RPC.md` §6. The settler `prepare` state stays (see P6 rollback).
+Rollback, as root on each host: `systemctl disable --now bloch-l2-mainnet-rpc bloch-l2-mainnet-follower`, then remove
+`/etc/systemd/system/bloch-l2-mainnet-rpc.service.d`, `/etc/systemd/system/bloch-l2-mainnet-follower.service.d` and the two
+unit files, and run `systemctl daemon-reload`. To reinstall, move `/opt/bloch/l2-mainnet` aside first, because `install.sh`
+refuses a populated directory. The data stays. The settler `prepare` state stays (see P6 rollback).
 
 ## P4. Settled RPC A and B
 
@@ -415,28 +447,66 @@ GO when:
 
 - `eth_chainId` is `0xab162`;
 - `finalized` and `safe` are block 0, `0x632e45ae…f468`;
-- `bloch_finality` shows `l2_genesis.finalized: true` with activation `618c9b80…` at slot 187200;
+- `bloch_finality` shows `l2_genesis.finalized: true` with activation `618c9b80…` at slot 187200, and `status.state: ok` with a small `age_s`;
 - `systemctl show -p ExecStart bloch-l2-mainnet-rpc` has no `--txpool`.
 
 NO-GO: `safe`/`finalized` `null` after the follower is ready, or a wrong chain id.
 
-Replica refresh on B (K5; after every finalized settlement from P8 on). The full command block is in
-`FOLLOWER-RPC.md` §4.7. Use the v2.1 `produce-dev` at `/opt/bloch/l2-mainnet-tools/`.
+Replica refresh on B (K5; after every finalized settlement from P8 on), one command per block:
+
+```
+sudo runuser -u bloch-l2-mainnet-replica -- /opt/bloch/l2-mainnet-tools/bloch-l2-produce-dev reconstruct --target /var/lib/bloch-l2-mainnet-replica/canonical.next --l1-follower /var/lib/bloch-l2-mainnet-follower/native --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679 --timestamp-rule 1:1786656679:30000
+```
+
+```
+sudo systemctl stop bloch-l2-mainnet-rpc
+```
+
+```
+sudo mv /var/lib/bloch-l2-mainnet-replica/canonical /var/lib/bloch-l2-mainnet-replica/canonical.prev-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+```
+sudo mv /var/lib/bloch-l2-mainnet-replica/canonical.next /var/lib/bloch-l2-mainnet-replica/canonical
+```
+
+```
+sudo systemctl start bloch-l2-mainnet-rpc
+```
 
 Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends on it until P10.
 
 ## P5. Prover (D2; on A unless decided otherwise)
 
-Prover release dir: the settler-v2 staging `release-prover/` (host `3a24c36d…`, guest,
-`remote_prover.py` `3c11d9be…`, `SHA256SUMS`). Verify:
+**Do not install from the settler-v2 staging `release-prover/`.** It holds the old `remote_prover.py` `99bbc1bc…`
+and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. Assemble a new directory. The host and the
+guest come from the staging. The installer comes from the kit. `remote_prover.py` is under `deployment/devnet`, which
+the P2 kit copy does not include, so copy it from the Mac first:
 
 ```
-cd /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover && sha256sum -c SHA256SUMS
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-close-r3-20261031/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-v2/
 ```
 
-Install after the settler `configure` (P6 step 2) has created the settler SSH key. Run the dry-run, then
-the real install. Both commands are in `PASSOS.md` §5, with `--memory-gib 100 --threads 24` and
-`--circuits /home/ubuntu/l2-mainnet-install-20261019/circuits`.
+```
+mkdir -p /home/ubuntu/l2-golive-v2/release-prover-v2
+```
+
+```
+cp /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/bloch-evm-sp1-settlement-v3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/settlement_v3_mainnet /home/ubuntu/l2-golive-v2/kit/prover/install-prover-mainnet.py /home/ubuntu/l2-golive-v2/remote_prover.py /home/ubuntu/l2-golive-v2/release-prover-v2/
+```
+
+```
+cd /home/ubuntu/l2-golive-v2/release-prover-v2 && sha256sum bloch-evm-sp1-settlement-v3 settlement_v3_mainnet remote_prover.py > SHA256SUMS && sha256sum *
+```
+
+GO only if the host is `3a24c36d…`, the guest `203114bf…`, `remote_prover.py` `3c11d9be…` and the installer `f0b84726…`.
+
+Install after the settler `configure` (P6 step 2) has created the settler SSH key. Dry-run first, then the same
+command without `--dry-run`:
+
+```
+sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.py install --settler-pubkey /var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519.pub --settler-host 127.0.0.1 --circuits /home/ubuntu/l2-mainnet-install-20261019/circuits --memory-gib 100 --threads 24 --dry-run
+```
 
 GO when:
 
@@ -449,7 +519,7 @@ NO-GO: an identity mismatch, or MemAvailable < 120 GiB.
 Rollback (refuses while a proof runs):
 
 ```
-sudo python3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/install-prover-mainnet.py rollback
+sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.py rollback
 ```
 
 ## P6. Settler: prepare, configure, dry-run, then dry-run with the proof
@@ -460,16 +530,56 @@ sudo python3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/install
 sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainnet.py prepare --release /home/ubuntu/l2-golive-v2/release-settler-v2
 ```
 
-   Record `da_funding_script_hash`. Back up the DA keystore and the passphrase **separately**
-   (`PASSOS.md` §2, unchanged). Copy the SP1 circuits for the local fallback (`PASSOS.md` §3).
+   Record `da_funding_script_hash`. Back up the DA keystore and the passphrase **separately**. Each `gpg` asks for a
+   passphrase on the terminal; use a different one for each. Copy both files off the host, to different media, then delete them there.
 
-2. **configure** with the local prover and the read-only checks:
+```
+sudo tar czf - -C /var/lib bloch-l2-mainnet-da | gpg --symmetric --pinentry-mode loopback -o /home/ubuntu/da-keystore.tgz.gpg
+```
+
+```
+sudo cat /var/lib/bloch-l2-mainnet-settler/da.passphrase | gpg --symmetric --pinentry-mode loopback -o /home/ubuntu/da-passphrase.gpg
+```
+
+   Copy the SP1 circuits for the local fallback:
+
+```
+sudo cp -a /home/ubuntu/l2-mainnet-install-20261019/circuits /var/lib/bloch-l2-mainnet-settler/.sp1-circuits-tmp
+```
+
+```
+sudo mkdir -p /var/lib/bloch-l2-mainnet-settler/.sp1
+```
+
+```
+sudo mv /var/lib/bloch-l2-mainnet-settler/.sp1-circuits-tmp /var/lib/bloch-l2-mainnet-settler/.sp1/circuits
+```
+
+```
+sudo chown -R bloch-l2-mainnet-settler:bloch-l2-mainnet-settler /var/lib/bloch-l2-mainnet-settler/.sp1
+```
+
+2. **configure** with the local prover and the read-only checks.
+
+   Prerequisite on Ubuntu 24.04: the pinned installer (`16aba9b6…`) runs `runuser` with `PATH=/usr/bin:/bin`, and
+   `runuser` is only in `/usr/sbin`. Without this link `configure` and `dry-run` stop with
+   `FileNotFoundError: 'runuser'`. A later installer build should call the absolute path.
+
+```
+sudo ln -s /usr/sbin/runuser /usr/bin/runuser
+```
+
+   `configure` writes `config.json` before its checks. If a check fails, the next `configure` refuses with
+   `run prepare first, configure once`. Fix the cause, then remove the file and run it again:
+   `sudo rm /etc/bloch-l2-mainnet-settler/config.json`. A failed `prepare` is different: `rollback` does not undo it, so
+   inspect what it created before you remove anything. Never remove a DA keystore that may already hold funds.
+
 
 ```
 sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainnet.py configure --prover-threads 6 --remote-prover bloch-l2-prover-mainnet@127.0.0.1 --prover-host-key /etc/ssh/ssh_host_ed25519_key.pub
 ```
 
-   GO:
+   GO (the state root is in `dry-run-*/work/*/block.json`, not in the printed report):
    - `rpc-check` `ok: true` (3/3 same view, quorum 2);
    - dry-run `ok: true`, identity checked (mainnet, async, activated, attestor set);
    - with an empty inbox: L2 block 1 = `0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab25`,
@@ -483,14 +593,27 @@ sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainne
 ```
 
 ```
-sudo sh -c 'cat /var/lib/bloch-l2-mainnet-settler/dry-run-*/dry-run-report.json' | grep -E '"ok"|"tag"|"bytes"|"proof_policy"|"where"'
+sudo sh -c 'cat "$(ls -d /var/lib/bloch-l2-mainnet-settler/dry-run-* | tail -1)/dry-run-report.json"' | grep -E '"ok"|"tag"|"bytes"|"proof_policy"'
 ```
+
+   Each dry run leaves its own directory, so read only the newest. The report has no `where` field, and a dry run that
+   fell back to a local proof still ends `ok: true`. Read the stage from `proved.json`:
+
+```
+sudo sh -c 'cat "$(ls -d /var/lib/bloch-l2-mainnet-settler/dry-run-* | tail -1)"/work/*/proved.json' | grep -E '"name"|"where"'
+```
+
+   If it fell back, the reason is in `work/*/prove-remote.log` in the same directory.
 
    GO:
    - `ok: true`, tag `0x13`, 1155 bytes, `proof_policy 154869964f…747d`;
    - the `prove` stage `"where": "remote"`;
-   - with an unchanged source, the statement SHA-256 is `42779c77…7426` (report 05; the transaction
-     bytes differ, because Groth16 is randomized).
+   - with an unchanged source, the statement SHA-256 is `42779c77…7426`, which is bytes 33 to 798 of `work/*/transaction.bin`
+     (the transaction bytes differ between runs, because Groth16 is randomized):
+
+```
+sudo sh -c 'python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],\"rb\").read()[33:799]).hexdigest())" "$(ls -d /var/lib/bloch-l2-mainnet-settler/dry-run-* | tail -1)"/work/*/transaction.bin'
+```
 
 NO-GO:
 
@@ -513,7 +636,7 @@ GO:
 
 - the `init` hash is `632e45ae…` / `2ad7e807…`;
 - `check` ok against the 3 RPCs;
-- the unit is active, with no `halt` in `journalctl -u bloch-l2-mainnet-shadow`.
+- the unit is active, with no `"event": "halt"` in `journalctl -u bloch-l2-mainnet-shadow`. A plain `grep halt` always matches, because the unit description contains "halts".
 
 NO-GO: a pin refusal (wrong release or kit) or a check failure.
 
@@ -537,7 +660,7 @@ journalctl -u bloch-l2-mainnet-settler.service -f -o cat
 ```
 
 Expected, in order: `identity-checked` (mainnet true), `l2-block-produced` 1, `proof-generated`,
-`transaction-built`, `submitted`, `accepted`.
+`remote-proof` with exit code 0, `transaction-built`, `submitted`, `accepted`. The worker then starts block 2 at once.
 
 Independent check, on each of the three RPCs:
 
@@ -548,7 +671,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 GO (the L2 is live):
 
 - `accepted.statement` L2 number 1 on all three nodes;
-- `source.height` 2;
+- `source.height` greater than 1 (it follows the L1 chain, it is not the L2 number);
 - the shadow is silent (no `halt`);
 - after FFG finality of the including block (`getchaininfo.finalized_height` ≥ that block, about
   2–3 epochs), RPC A and RPC B show `safe` → block 1, then `finalized` → block 1. On B this happens
@@ -567,15 +690,18 @@ resumes from the accepted head.
 
 ## P9. Monitor
 
-Run once by hand as a gate, then install the 60 s timer (units in `deployment/mainnet/monitor/`, commands in
-`docs/MAINNET-OPS-RUNBOOK.md`; D11 sets the alert targets):
+Run once by hand as a gate, then install the 60 s timer (units in `deployment/mainnet/monitor/`; D11 sets the alert targets).
+The units expect the user `bloch-l2-monitor`, `/opt/bloch/l2-monitor/l2_monitor.py` and `/etc/bloch-l2-monitor/{monitor.env,alert.json}`.
+No document lists the commands that create them. In `monitor.env`, drop `--l2-rpc B=`: the settled RPC binds loopback only, so A cannot reach B on 18955.
+The command below needs root for `status.json` only if that file is not world-readable:
 
 ```
 python3 /home/ubuntu/l2-golive-v2/kit/l2_monitor.py --profile mainnet --phase live --l2-rpc A=http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service --binary /opt/bloch/l2-mainnet/bloch-l2-settled-rpc --build-json /home/ubuntu/l2-golive-v2/artifacts/build.json --json
 ```
 
-GO: exit 0, or 1 with only expected WARNs (`l2_finalized` before the first finality, `alert_delivery`
-before D11). A CRIT on `--binary` means an installed binary is not the v2.1 pin. Thresholds:
+GO, after the first L2 finalization: exit 0, or 1 with only the expected WARN `alert_delivery` before D11. Between P8 and that
+finalization, `--phase live` exits 2 with `l2_finalized_age` CRIT, because the finalized block is still the old genesis. That CRIT alone is expected.
+Before P8, use `--phase prelaunch`; there `unit[settler]` is CRIT until the unit exists. A CRIT on `--binary` means an installed binary is not the v2.1 pin. Thresholds:
 `MAINNET-OPS-RUNBOOK.md` §3.
 
 Rollback: `sudo systemctl disable --now bloch-l2-mainnet-monitor.timer`. It is read-only.
@@ -628,12 +754,14 @@ Worker and its plain-HTTP `:2095` origin guard. It removes the unencrypted hop a
 header, and keeps all policy on our hosts. **Do not deploy both.** The explorer Function `/l2rpc` keeps
 working against `https://l2rpc.blochl1.com/`.
 
-Prerequisites: P4 on both hosts, and the gateway package from this branch. The certificate and peer
-steps are in the rpc-gateway report (Cloudflare Origin CA, Authenticated Origin Pulls CA, `peer-cert`
-on each host, exchange of the public peer certificates).
+Prerequisites: P4 on both hosts, and the gateway package from this branch. On each host, as root:
+
+- `apt-get install nginx libnginx-mod-http-js`; nginx must be running, since `apply` reloads it.
+- Place `/etc/ssl/bloch-l2rpc/origin.pem` and `origin.key` (Cloudflare Origin CA) and `/etc/ssl/bloch-l2rpc/cloudflare-aop-ca.pem` (Authenticated Origin Pulls CA).
+- Run `setup-gateway.sh peer-cert`, then copy each host's `/etc/nginx/bloch-l2rpc/peer/self.crt` to the other host as `/etc/nginx/bloch-l2rpc/peer/peer.crt`.
 
 `setup-gateway.sh` renders with CORS open to any origin and `--backend-conns 400`, which is correct
-for settled RPC v2.1. The `plan` command only renders; `apply` installs.
+for settled RPC v2.1. The `plan` command only renders, and it exits 0 even when it prints `MISSING:` lines, so read its output. `apply` installs.
 
 On A:
 
@@ -699,7 +827,9 @@ sudo PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setu
 
 1. **Deposit** (works with user transactions off). Send a small deposit, for example 1 BLCH
    (minimum 0.01 BLCH), from the D6(b) L1 wallet with `bloch-pos l2-deposit` (fa980367 fleet binary)
-   to the D6(b) L2 address.
+   to the D6(b) L2 address: `l2-deposit prepare --genesis MANIFEST --funding-pubkey FILE --input TXID:VOUT:SATS --amount SATS --recipient L2_ADDRESS --base-fee N --tip 0 --out UNSIGNED`,
+   then `l2-deposit sign --genesis MANIFEST --tx UNSIGNED --dir WALLET_DIR --out SIGNED`, then `sendrawtransaction` with the contents of SIGNED.
+   `--base-fee` is `next_base_fee_millisat_per_gas` from `getchaininfo`.
 
    GO:
    - `getl2settlement.inbox` shows it pending;
