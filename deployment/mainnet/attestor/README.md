@@ -27,6 +27,7 @@ signing by itself. Operators act only on alerts.
 | `public/` | The pinned `attestors.set` and the five public keys. |
 | `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`) and `python3 -m unittest -v test_upgrade` (no native binary; follower pin and `upgrade`/`upgrade-rollback`). |
 | `tests/rehearse_upgrade.sh` | Rehearsal of `upgrade`/`upgrade-rollback` on old-kit `--prefix` installs against live L1 (`rehearsal_services.sh` stands in for systemctl, `rehearsal_check.py` runs `check` with a throwaway set). |
+| `tests/test_package_guards.py` | `python3 -m unittest -v test_package_guards` on Linux: refusals for stale pins, unpublished binaries, and the retry after a failed key step. No native binary. |
 | `tests/rehearse_owner_flow.sh` | End-to-end owner rehearsal with throwaway keys (`tty_driver.py` types the passphrases). |
 | `tests/rehearse_custody_flow.sh` | Custody rehearsal with throwaway keys: `owner` part (macOS or Linux) and `operator` part (Linux, v2 artifacts). |
 
