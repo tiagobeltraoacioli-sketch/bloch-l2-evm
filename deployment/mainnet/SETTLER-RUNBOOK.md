@@ -44,8 +44,8 @@ Do **not** run this on the three 128 GB mainnet validator hosts. They ran out of
   `remote_prover.py` and `"mainnet": true` in its config. The worker still runs execute and verify
   locally.
 
-**Only one settler may run.** A second one is halted the first time the other's statement is
-accepted ("another settler?").
+**Run one settler.** Nothing on L1 gives it exclusivity, so see "Foreign settlements" below for what
+happens when anyone else settles a block.
 
 ## 0. Release directory (on the operator host)
 
@@ -198,7 +198,36 @@ from the accepted head; it reuses a block left by a crash if its anchor is uncha
 | `acceptance-timeout` + `l1-not-advancing` | The L1 is stalled (the devnet4 block-231 case). Nothing to fix in the settler: the next cycle reuses the same proof and bytes. |
 | `rpc-no-quorum` / `rpc-endpoint-diverged` | The RPCs disagree. The worker waits and never uses a minority answer. |
 | `da-funding-low` | Top up the DA fee key. |
-| `halt` (exit 3, no auto-restart) | Operator review. Causes: a foreign statement accepted for the same block (another settler), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
+| `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements". No action unless they repeat. |
+| `halt` (exit 3, no auto-restart) | Operator review. Causes: a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
+
+## Foreign settlements
+
+Settling needs no authorization. A deposit-only block built by the rules is identical whoever builds
+it, so only a block with other user transactions, and its own paid DA batch, differs from ours.
+
+Without `foreign_recovery`, such a block halts the worker (exit 3). With it (`configure --follower-state
+DIR --follower-status FILE`), the worker:
+
+1. stops working on its own block, and pays no DA for a block that went stale during the proof;
+2. waits until the native follower has finalized the accepted settlement. The rehearsal measured about
+   2.5 epochs of lag, which is about 40 min at 960 s epochs. A running proof must return first;
+3. rebuilds a new database from verified L1 blocks and requires its head to be the accepted hash;
+4. returns the user transactions of its orphaned blocks to the spool;
+5. moves the orphaned work directories aside, swaps the databases and continues. It keeps the last 2
+   old databases and work directories (`foreign_recovery.keep`).
+
+The follower's state directory and status file must be outside `/home` and readable by the settler
+user. A rebuild that L1 cannot reproduce still halts: that is an off-rule block (finding F1) or local
+damage, and it needs an operator.
+
+**The settled RPC must restart after a swap**, because it keeps the old database open. Until then it
+serves the orphaned head as `latest`. The worker rewrites `/var/lib/bloch-l2-mainnet-settler/l2-db-generation.json`
+at each swap. The worker's unit has `NoNewPrivileges`, so it cannot restart anything itself. Watch the
+file with a path unit that restarts the RPC service. `foreign-settlement-recovered` reports the block,
+the orphans, `wasted_proofs` and `wasted_da_signed`.
+
+Repeated events are an attack on liveness, not on funds. Alert on more than one per day.
 
 ## L2 reorg recovery
 
