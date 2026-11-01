@@ -41,7 +41,7 @@ Related documents:
   | Host | vCPU | RAM | Free disk | Notes |
   | --- | --- | --- | --- | --- |
   | 136.244.93.186 | 32 (Cascade Lake) | 125 GiB, 123 GiB available | 2.7 TB | Idle. No `bloch-l2*` units. The pinned gnark image `e1a1cd62…` is present. The 10-19 staging dir `~/l2-mainnet-install-20261019` is present, including the SP1 circuits (7.9 GB). |
-  | 45.77.142.123 | 32 | 125 GiB | 2.2 TB | Shared build host. It still runs the 10-18 scratch follower and RPC (127.0.0.1:19145, pre-HF build, PIDs 1304666 and 1452988). The unsigned v2.1 release is in `~/l2dexbridge-20261030/l2-v21/release/bloch-l2-2026-10-30-v21-native-78d4921c`. `manifest` and `carryover` come from `~/hf-release-kit-20261020/l2-agents/07-rpc/artifacts`. |
+  | 45.77.142.123 | 32 | 125 GiB | 2.2 TB | Shared build host. It still runs the 10-18 scratch follower and RPC (127.0.0.1:19145, pre-HF build, PIDs 1304666 and 1452988). The unsigned v2.1 release is in `~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c`. `manifest` and `carryover` come from `~/hf-release-kit-20261020/l2-agents/07-rpc/artifacts`. |
 
 ## 1. Owner decisions (all open)
 
@@ -56,7 +56,7 @@ the value.
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8 (different sources on purpose). | P3 |
 | **D5** | **Attestor operators**: five people, five hosts, one index each, plus each operator's feed URL | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
 | **D6** | **Bloch Inc addresses** | **None is needed for the L2 core.** L2 fees go to the predeploy `0x4200…0011`, settlements pay no L1 fee, and the DA key is generated on the host. Still `TBD-owner`: (a) the L1 wallet that funds the DA key (5 BLCH, only when user transactions are enabled); (b) the L1 wallet and L2 recipient for the test deposit and test withdrawal; (c) the Bloch Inc Safe and bridge guardian addresses, which the DEX and bridge need later. Those are not part of this plan. | P12 |
-| **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `c2a55ba8e179585ea84f22d6e45f1e2f2c55215243585bf1b3eabc8425fa325c`) with the owner's minisign key before any install. `TBD-owner` key. | P2 |
+| **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `dded10b9b49a862d1b31f0667b945016b5da54e6c497eba123c42b32e0cd11f9`) with the owner's minisign key before any install. `TBD-owner` key. | P2 |
 | **D8** | Retire the 10-18 scratch follower/RPC on 45.77 (they halt at HF1 anyway) | Stop them before or at G0. The owner runs `kill 1452988 1304666`. | none (hygiene) |
 | **D9** | Public gateway | `l2rpc.blochl1.com` through the nginx + njs gateway on A and B (`deployment/mainnet/public-rpc/`). The Worker of `codex/l2-mainnet-public-20261019` is retired: do not deploy it. CORS is open to any origin (decided 2026-10-30). Still open: DNS timing, and origin failover: one proxied A record with a manual switch to B (default), or paid Cloudflare Load Balancing. `TBD-owner`. | P11 |
 | **D10** | When to enable user transactions | Only after the P12 deposit test, the DA rehearsal R2, the gas-heavy measurement and the stuck-block rehearsal (§3.4). Until then deposits mint on the L2 but nobody can transact or withdraw. | P12 |
@@ -130,26 +130,26 @@ The 30 `bloch-expansion@` units on 136 are disabled and must stay so.
 
 ## 3. Pins: the v2.1 build and what stays
 
-### 3.1 v2.1 artifacts (L2 commit `18b9e1d1`, native 78d4921c, valid for the fa980367 fleet)
+### 3.1 v2.1 artifacts (L2 commit `a39b04e4`, native 78d4921c, valid for the fa980367 fleet)
 
 Built twice from fresh trees and fresh targets at the reference WORK path
 `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2` (a bind mount in a private mount namespace).
-Both builds are byte-identical. Source: `45.77.142.123:~/l2dexbridge-20261030/l2-v21/release/bloch-l2-2026-10-30-v21-native-78d4921c/`.
+Both builds are byte-identical. Source: `45.77.142.123:~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/`.
 
 | Artifact | SHA-256 | v2 | Used by (phase) |
 | --- | --- | --- | --- |
 | `bloch-l2-native-follower` | `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a` | unchanged, byte-identical | follower A, follower B (P3), attestor hosts (P10) |
 | `bloch-l2-produce-dev` | `fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9` | **changed**, was `7c1cc62b…` (see below) | canonical DB init A/B (P3), settler release (P6), shadow (P7), replica rebuild B (P4), attestors (P10) |
-| `bloch-l2-settled-rpc` | `1e76b99ad2a57dd6cfae1f4086529714d1bf3372cb578a348f4cfe9a37a91d38` | **changed**, was `4fc9fa1e…` | RPC A, RPC B (P4) |
+| `bloch-l2-settled-rpc` | `18be911a47f0ab8975e1f079c860adef08dfc43c4b5062eca7b040e2e6eee83f` | **changed**, was `4fc9fa1e…` | RPC A, RPC B (P4) |
 | `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | unchanged | shadow (P7) |
-| `build.json` | `7baba441dba3adf9b24d4c90344d3a1fdea1b7b52c85126e64d58c64ec25c1a0` | changed | check `l2_commit` `18b9e1d1`, `l1_activation_epochs` 7180/7180/7186/7270×4/7360×3/8620 and `l2_tracked_changes: 0` |
-| `out/SHA256SUMS` | `0f3fae169e493df000c5fda7f476202bf6366ec4c4459efeec55eec2339ce0cd` | changed | install.sh `sha256sum -c` |
-| release `SHA256SUMS` (signing target, D7) | `c2a55ba8e179585ea84f22d6e45f1e2f2c55215243585bf1b3eabc8425fa325c` | changed | owner signature |
+| `build.json` | `b12ed2b6d643896f98c2792663de0cdf6779f6a5b613a2168b51c79decc03cb4` | changed | check `l2_commit` `a39b04e4`, `l1_activation_epochs` 7180/7180/7186/7270×4/7360×3/8620 and `l2_tracked_changes: 0` |
+| `out/SHA256SUMS` | `c07531b7e92d05e356648815a43a8529ec15e6e2b30caaa856c0789ddc34da4b` | changed | install.sh `sha256sum -c` |
+| release `SHA256SUMS` (signing target, D7) | `dded10b9b49a862d1b31f0667b945016b5da54e6c497eba123c42b32e0cd11f9` | changed | owner signature |
 | `NATIVE_LOCK` (settlement-recovery, 78d4921c) | `26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8` | unchanged | rebuilds. Committed as `deployment/mainnet/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock`, and `build-release.sh` refuses any other lock for this native commit. |
 
 Why the producer hash changed: `reconstruct` now numbers follower blocks on the L2 registry's count. Before this fix, the first settled deposit made every rebuild fail with `Deposits`. A block built by `extend` is unchanged: v2 and v2.1 produce the same hash and state root for the same inputs (one comparison, an empty block on a synthetic anchor). The guest and the consensus code are not touched.
 
-To reproduce: check out L2 `18b9e1d1645782b8c3cb2c095161f7649dd32d72`, native 78d4921c and reth 8eb21017 plus
+To reproduce: check out L2 `a39b04e435b11bd2316dffe94d78df0163153c56`, native 78d4921c and reth 8eb21017 plus
 `reth-snapshot.patch`, then run `build-release.sh` at the WORK path above. A different WORK path gives
 different hashes, because cargo hashes the absolute paths of the native path dependencies.
 
@@ -162,8 +162,8 @@ The L2 source the guest compiles from has no diff against v2.
 | Guest `settlement_v3_mainnet` | `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473` | settler, prover |
 | Proof policy V3 | `154869964f…747d` | settler dry-run report |
 | SP1 host `bloch-evm-sp1-settlement-v3` | `3a24c36d…973a` (the settler-v2 staging on 136). The file hash depends on the build path and is not the pin; the identity is. Earlier builds `617d191f…86b3` and `505500af…aa07` print the same `--mainnet identity` (ELF keccak `6e4c8440…`, vkeys `389cfbde…` / `007139f7…`). | settler, prover |
-| `remote_prover.py` | `99bbc1bcec7db7cf3f56c361a6af6253e461d13ebab2ffc5a190df0fc2feb9bd` (same in the v2 tree and in the 10-19 staging) | prover |
-| `settler_v3.py` | `8589d5e2bd8ddde7f2dff03f784e6a4e3095890a784c9222a0bdf058b90b3ef5` (**this branch**; adds the local-proof limit. v2 `875f4cca…` and the settler-v2 staging on 136 must not be used) | settler |
+| `remote_prover.py` | `3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5` (**this branch**; stops the prover on client disconnect. The v2 tree and the 10-19 staging hold the old `99bbc1bc…`, which must not be used) | prover |
+| `settler_v3.py` | `3ddb260a1caaadb3f874d436282715900c640cb410a458ee94609ea1bf3fdfe4` (**this branch**; adds the local-proof limit and atomic state files. v2 `875f4cca…` and the settler-v2 staging on 136 must not be used) | settler |
 | Settler `bloch-pos` (DA key only) | `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e` (78d4921c; rebuilt with `--no-cache`, byte-identical). Enforced by `install-settler-mainnet.py`. | settler (D12) |
 | `mainnet.manifest` | `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd` | all |
 | `carryover.tsv.gz` / `carryover.tsv` | `4d1e2738baec39ec25e2e33968f72a47abb261f271de62fb48a33be55bfc83be` / `84ddbbac2afdd5c78618096a7d4f66cf5b04a3e5757a03fe90550e50096183f6` | followers, attestors |
@@ -268,7 +268,7 @@ ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkd
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/l2-v21/release/bloch-l2-2026-10-30-v21-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-v2/artifacts/
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-v2/artifacts/
 ```
 
 ```
@@ -276,11 +276,11 @@ scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-v21-20261030/deployment/mainnet ubuntu@136.244.93.186:l2-golive-v2/kit
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-close-r3-20261031/deployment/mainnet ubuntu@136.244.93.186:l2-golive-v2/kit
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-v21-20261030/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-v2/release-settler-v2/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-close-r3-20261031/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-v2/release-settler-v2/
 ```
 
 3. On A, check the release and assemble the settler release dir. `bloch-l2-produce-dev`, the kit
@@ -313,9 +313,9 @@ bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --verify /home/ubuntu/l2-go
 - `SHA256SUMS` is OK.
 - `install-shadow.sh --verify` prints `verify OK`.
 - The printed hashes match §3.1/§3.2: produce-dev `fb0d5313…`, follower `c18752fd…`, settled-rpc
-  `1e76b99a…`, sequencer `15daa26f…`, `settler_v3.py` `8589d5e2…`, `install-settler-mainnet.py` `16aba9b6…`, guest `203114bf…`, `bloch-pos`
+  `18be911a…`, sequencer `15daa26f…`, `settler_v3.py` `3ddb260a…`, `install-settler-mainnet.py` `16aba9b6…`, guest `203114bf…`, `bloch-pos`
   `700631b0…`, manifest `7eef82a7…`, `carryover.tsv.gz` `4d1e2738…`.
-- `artifacts/build.json` shows `l2_commit` `18b9e1d1`, `l2_tracked_changes: 0` and the HF epochs.
+- `artifacts/build.json` shows `l2_commit` `a39b04e4`, `l2_tracked_changes: 0` and the HF epochs.
 
 **NO-GO:** any mismatch. Re-copy from the build host. Never use `~/l2-mainnet-install-20261019/out-release`
 or `release-settler/bloch-l2-produce-dev` (`3736860e…`, pre-HF), and never `4fc9fa1e…` (the settled RPC
@@ -428,7 +428,7 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 ## P5. Prover (D2; on A unless decided otherwise)
 
 Prover release dir: the settler-v2 staging `release-prover/` (host `3a24c36d…`, guest,
-`remote_prover.py` `99bbc1bc…`, `SHA256SUMS`). Verify:
+`remote_prover.py` `3c11d9be…`, `SHA256SUMS`). Verify:
 
 ```
 cd /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover && sha256sum -c SHA256SUMS

@@ -20,7 +20,7 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
 dependencies, no keys) for the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (follower
-`c18752fd…`, produce-dev `fb0d5313…`, settled-rpc `1e76b99a…`). Its JSON-RPC
+`c18752fd…`, produce-dev `fb0d5313…`, settled-rpc `18be911a…`). Its JSON-RPC
 calls are limited to `eth_chainId`, `eth_blockNumber`,
 `eth_getBlockByNumber`, `eth_getStorageAt`, `bloch_finality`,
 `getchaininfo`, `getblockcount` and `getl2settlement`; any other method is
@@ -58,6 +58,13 @@ Options:
   epochs (default: the v2 epochs compiled into the monitor).
 - `--file NAME=PATH[:SECONDS]`: heartbeat age, WARN above SECONDS and CRIT
   above 5×SECONDS. `--set KEY=VALUE` overrides a threshold.
+- `--guardian-health NAME=PATH[:SECONDS]`: the `health_file` of a bridge guardian
+  (`guardiao.py`, bloch-l2-bridge). CRIT on `healthy` other than true (for example a
+  failed pause), on a missing or malformed file, and when no round has verified the
+  bridge yet. The age of the file and of the last verified round are WARN above SECONDS
+  (default 300) and CRIT above 3×SECONDS. Run it on the guardian's host: the file is
+  mode 0640, so add `bloch-guardiao` to `SupplementaryGroups=` of the monitor unit and
+  keep `/var/lib/bloch-guardiao` group-readable.
 - `--alert-config FILE` (`monitor/alert.json.example`): `webhook_url`
   (JSON POST with `text`, `status`, `checks`), `telegram.bot_token_file` +
   `telegram.chat_id`, `min_level`, `realert_seconds`. It alerts on a new or
@@ -104,6 +111,11 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `l1_gates_vs_l2_build` | L1 gate epochs = epochs compiled into the L2 build | – | differs | a follower/producer built for other epochs halts at the gate |
 | `attestors` | per finalized withdrawal root with at least one partial, older than 120 L1 blocks: signatures | < 5 | < 3 | agents sign only roots covering a ≥ 100 BLCH withdrawal; once one signs, all live agents sign within a few cycles. The message names silent signers |
 | `unit[*]`, `events[*]` | unit state; failure events in the last hour | warn events; ≥ 5 restarts | `halt`, refusals, a stopped unit; any warn event ≥ 5 times | |
+| `l2_finality_closed[*]` | backend answers `-32001` for `safe`/`finalized`: it lost a valid follower status | – | any | the backend is up; `l2_rpc` stays OK |
+| `l2_finality_status[*]` | `bloch_finality.status`: state and `age_s` | 300 s | 900 s / state not `ok` | the RPC keeps serving its last finality while the follower is stopped |
+| `follower_status_size[*]` | size of the status file | 8 MiB | 12 MiB | the settled RPC refuses it above 16 MiB and `finalized` stops following |
+| `da_balance[*]` | spendable balance of the DA key (`--da-script`, `getutxos`) | 1 BLCH | 0.1 BLCH | the worker's `da-funding-low` only fires when a batch is prepared |
+| `disk[*]` | free space (`--disk`) | 15% or 20 GiB | 5% or 5 GiB | |
 | `binary[*]` | installed sha256 = v2 pin | – | differs | |
 | `file:*` | heartbeat file age | given | 5 × given | prover/settler/follower liveness |
 
@@ -111,6 +123,8 @@ The `devnet4` profile keeps the same structure with devnet values (2 s
 slots: finalized age 40/90 min, height spread 15/160, follower lag 160/960).
 
 ## 4. Playbooks
+
+Per-failure procedures, with their evidence: [L2-OPERATOR-RUNBOOK.md](L2-OPERATOR-RUNBOOK.md).
 
 ### 4.1 `l2_head_age` WARN/CRIT, `l2_unsafe_depth` normal
 

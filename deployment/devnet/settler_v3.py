@@ -233,6 +233,28 @@ def log(event, **fields):
     print(json.dumps({'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'event': event, **fields}), flush=True)
 
 
+def atomic_write(path, data):
+    """Replace `path` whole or not at all: a crash or a full disk never leaves a truncated state file,
+    which the next cycle would read as a conflicting request or as corrupt JSON."""
+    path = Path(path)
+    temporary = path.with_name(f'.{path.name}.tmp')
+    payload = data.encode() if isinstance(data, str) else data
+    try:
+        with temporary.open('wb') as out:
+            out.write(payload)
+            out.flush()
+            os.fsync(out.fileno())
+        temporary.replace(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -855,7 +877,7 @@ class Settler:
         deposits_text = json.dumps(pending, sort_keys=True)
         if deposits.exists() and deposits.read_text() != deposits_text:
             raise Halt(f'{deposits} already holds different deposits')
-        deposits.write_text(deposits_text)
+        atomic_write(deposits, deposits_text)
         head = self.produce('head', '--target', self.c['l2_db'])
         produced = directory / 'block.json'
         if head['number'] == number - 1:
@@ -865,7 +887,7 @@ class Settler:
             block = self.extend(parent, anchor, deposits, anchor_slot, number)
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
-            produced.write_text(json.dumps(block, sort_keys=True) + '\n')
+            atomic_write(produced, json.dumps(block, sort_keys=True) + '\n')
             log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
                                                                'withdrawal_count') if k in block},
                 deferred=len(block.get('deferred', [])), dropped=block.get('dropped', []))
@@ -889,7 +911,7 @@ class Settler:
             text += f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n"
         if request.exists() and request.read_text() != text:
             raise Halt(f'{request} already holds a different request')
-        request.write_text(text)
+        atomic_write(request, text)
         return number, directory
 
     def prove(self, directory, stages=('execute', 'prove', 'verify')):
@@ -933,7 +955,7 @@ class Settler:
         if 'verify' not in stages:
             log('prover-stages-done', directory=str(directory), steps=steps)
             return None
-        (directory / 'proved.json').write_text(json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
+        atomic_write(directory / 'proved.json', json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
 
@@ -1086,8 +1108,8 @@ class Settler:
         payload = bytes.fromhex((directory / 'da-payload.hex').read_text().strip())
         if da_frame_fields(tx) != (self.chain_id, number, payload):
             raise Halt('signed DA transaction does not carry this block batch')
-        (directory / f'da-meta-{attempt}.json').write_text(json.dumps({'base_fee': base_fee, 'inputs': inputs,
-                                                                       'form': form}) + '\n')
+        atomic_write(directory / f'da-meta-{attempt}.json', json.dumps({'base_fee': base_fee, 'inputs': inputs,
+                                                                        'form': form}) + '\n')
         return self.submit_da(number, directory, tx, commitment, attempt, estimate)
 
     def da_signature_form(self):
@@ -1149,7 +1171,7 @@ class Settler:
         if self.mainnet_path and (tx[1:33].hex() != MAINNET['proof_policy']
                              or int.from_bytes(values[T + 256:T + 264], 'big') != MAINNET['chain_id']):
             raise Halt('settlement does not carry the mainnet proof policy and chain id')
-        (directory / 'transaction.bin').write_bytes(tx)
+        atomic_write(directory / 'transaction.bin', tx)
         root, count = withdrawal_fields(values)
         log('transaction-built', directory=str(directory), user_transactions=users, bytes=len(tx),
             withdrawal_root=root.hex(), withdrawal_count=count)
@@ -1188,7 +1210,7 @@ class Settler:
         record['attempts'] = record.get('attempts', 0) + 1
         record.setdefault('first_unix', int(time.time()))
         record['last_status'] = response.get('status')
-        (directory / 'submitted.json').write_text(json.dumps(record, indent=2) + '\n')
+        atomic_write(directory / 'submitted.json', json.dumps(record, indent=2) + '\n')
         log('submitted' if response.get('status') != 'duplicate' else 'submitted-duplicate', number=number,
             response=response.get('status'), tx_hash=response.get('tx_hash'), port=port, attempt=record['attempts'])
         return True
@@ -1236,7 +1258,7 @@ class Settler:
         return False
 
     def record_accepted(self, number, directory, accepted):
-        (directory / 'accepted.json').write_text(json.dumps(accepted, indent=2) + '\n')
+        atomic_write(directory / 'accepted.json', json.dumps(accepted, indent=2) + '\n')
         log('accepted', number=number, commitment=accepted['commitment'],
             l2_hash=statement_fields(accepted['statement'])['l2_hash'])
         return True

@@ -267,7 +267,7 @@ print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
 }
 
 # ------------------------------------------------------------------------------------------ upgrade
-# The HF1-3 build (v2.1, L2 18b9e1d1 against L1 78d4921c). Override only for a later
+# The HF1-3 build (v2.1, L2 a39b04e4 against L1 78d4921c). Override only for a later
 # corrected build whose hashes the coordinator published.
 V2_FOLLOWER_SHA256=c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a
 V2_PRODUCE_SHA256=fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9

@@ -1,0 +1,10 @@
+# Restart the settled RPC when the refresh published a new database generation.
+[Unit]
+Description=Watch the Bloch L2 replica database generation
+
+[Path]
+PathChanged=@STATE@/refresh/generation
+Unit=bloch-l2-replica-rpc-reload.service
+
+[Install]
+WantedBy=multi-user.target
