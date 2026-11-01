@@ -57,7 +57,10 @@ run install -d -m 0700 -o "$CANON_USER" -g "$CANON_USER" $STATE
 
 # 3. Units (not enabled, not started).
 if [ $DRY = 1 ]; then echo "+ write follower.env, units, drop-in"; else
+  # A reinstall keeps a host's chosen status schema; v2 is the unit's default.
+  SCHEMA=$(sed -n 's/^BLOCH_L2_STATUS_SCHEMA=//p' /etc/bloch-l2-mainnet/follower.env 2>/dev/null | tail -1)
   printf 'BLOCH_L1_RPC_URL=%s\n' "$L1" > /etc/bloch-l2-mainnet/follower.env
+  if [ -n "$SCHEMA" ]; then printf 'BLOCH_L2_STATUS_SCHEMA=%s\n' "$SCHEMA" >> /etc/bloch-l2-mainnet/follower.env; fi
   install -m 0644 "$HERE/bloch-l2-mainnet-follower.service" /etc/systemd/system/
   install -d /etc/systemd/system/bloch-l2-mainnet-follower.service.d
   printf '[Service]\nIPAddressAllow=localhost %s\n' "$(getent ahostsv4 "$L1_HOST" | awk 'NR==1{print $1}')" \

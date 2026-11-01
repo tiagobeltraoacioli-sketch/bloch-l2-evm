@@ -977,6 +977,12 @@ fn verified_levels(
     );
     ensure!(status["network"] == network, "status is for another native network");
     ensure!(status["production_finality"] == false, "status claims production finality");
+    // A tip this database has not reached advances nothing, so a syncing RPC does not reread the log at each poll.
+    if let Some(tip) = settlement_log::tip_number(&status) {
+        if provider.sealed_header(tip)?.is_none() {
+            return Err(NotLocalYet(tip).into());
+        }
+    }
     let delta = settlement_log::read_delta(status_path, &mut status, cursor).map_err(|e| eyre::eyre!(e))?;
     let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
     let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);

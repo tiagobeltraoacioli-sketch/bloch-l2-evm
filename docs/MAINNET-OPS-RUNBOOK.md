@@ -103,6 +103,7 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `follower_verified_lag[*]` | L1 finalized height − follower verified blocks | 64 | 320 | 64 = two epochs; 320 ≈ 10 epochs (≈ 2.7 h) |
 | `follower_epoch_lag[*]` | L1 finalized epoch − follower's own FFG-finalized epoch | 5 | 8 | a constant 3 is structural: the votes finalizing the newest checkpoints are in blocks after the node's finalized root |
 | `follower_status[*]` | `status.json` age and pins | 300 s | 900 s | the attestor agent treats > 900 s as a stalled follower |
+| `follower_status_runway[*]`, `l2_status_runway[*]` | settlements left in a schema v2 status on this RPC, with the date at the cadence of the last 64 settlements. The second needs only the RPC | 120 days left, or 15,000 settlements on a v2.1 RPC | 45 days left, or 22,500 settlements | a v2.1 RPC closes `safe` and `finalized` at 30,194 settlements; a schema v3 follower has no such limit. Fix: `MAINNET-RPC-READINESS.md`, "Rolling from schema v2 to v3" |
 | `l2_backends`, `l2_backends_agree` | backends up; same hash for every common block; finalized spread | one down / spread 2 | all down / any hash differs / spread 8 | two followers replaying the same L1 must agree exactly |
 | `l2_genesis[*]` | block 0 = `632e45ae…f468` | – | differs | wrong database or profile |
 | `settlement_age` | now − time of `getl2settlement.source.slot` (frozen right after each acceptance) | 25 min | 45 min | same cadence as `l2_head_age`; `live` phase only |
