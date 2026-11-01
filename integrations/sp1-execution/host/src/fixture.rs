@@ -290,19 +290,23 @@ pub(crate) fn execute_fixture_in(
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
     let mut pre_state = genesis_v2(spec, 0)?;
     if let Some(first) = FIRST_BLOCK_RULES.get() {
+        // BLOCH_BENCH_PARENT_BLOCKS empty blocks first (default one): a benchmark at an L2 height.
+        let blocks: u64 = std::env::var("BLOCH_BENCH_PARENT_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
         pre_state.commit_root();
-        let parent = node_head(first, domain, &pre_state)?;
-        let context = BlockContext {
-            number: 1,
-            timestamp: match first.block_derivation {
-                Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
-                None => 1,
-            },
-            base_fee_per_gas: first.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
-            prevrandao: B256::repeat_byte(7),
-            anchor_root,
-        };
-        execute_node_block(first, domain, &mut pre_state, &context, &NodeBodyV2::default())?;
+        for number in 1..=blocks {
+            let parent = node_head(first, domain, &pre_state)?;
+            let context = BlockContext {
+                number,
+                timestamp: match first.block_derivation {
+                    Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
+                    None => number,
+                },
+                base_fee_per_gas: first.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
+                prevrandao: B256::repeat_byte(7),
+                anchor_root,
+            };
+            execute_node_block(first, domain, &mut pre_state, &context, &NodeBodyV2::default())?;
+        }
     }
     let previous_state_root = pre_state.commit_root();
     let parent = node_head(spec, domain, &pre_state)?;
