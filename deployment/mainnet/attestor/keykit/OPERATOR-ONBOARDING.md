@@ -36,7 +36,8 @@ Why these numbers:
 - **Disk.** The follower's copy of L1 was 3.3 GB at about 181,000 L1 blocks. It grows by about 50 MB
   a day (2,880 blocks a day), so about 20 GB a year.
 - **Restart time.** After any restart the follower re-verifies all retained L1 history. This took
-  50–60 minutes on a 2-core host. Plan maintenance around it.
+  about 60 minutes at 181,000 blocks (report 02: 62 minutes, then up to 16 for the next finalized epoch),
+  and it grows with the chain. Plan maintenance around it. While it runs the agent logs `waiting`.
 
 ## 2. Ports and firewall
 
@@ -68,8 +69,15 @@ sudo ufw default allow outgoing
 sudo ufw allow from YOUR_ADMIN_IP to any port 22 proto tcp
 ```
 ```
+sudo ufw allow 8787/tcp
+```
+```
 sudo ufw enable
 ```
+
+`YOUR_ADMIN_IP` is the public address you connect from. If it changes, you lose SSH until you use your
+provider's console, so check that console works first. Then, from another machine, confirm that SSH still
+connects. Many providers also have a firewall panel of their own: open 8787 there too.
 
 ## 3. Key handling rules
 
@@ -96,7 +104,10 @@ own monitoring:
 journalctl -u bloch-l2-attestor -o cat --since -24h | grep -E '"(halt|held|refused-[a-z-]+|publish-failed|alert-failed)"'
 ```
 ```
-systemctl is-active bloch-l2-attestor bloch-l2-attestor-follower
+systemctl is-active bloch-l2-attestor bloch-l2-attestor-follower bloch-l2-attestor-feed
+```
+```
+curl -fsS http://127.0.0.1:8787/healthz
 ```
 ```
 python3 -c 'import json; s=json.load(open("/var/lib/bloch-l2-attestor-follower/status.json")); import time; print(s["native_finalized_epoch"], s["verified_blocks"], int(time.time() - s["written_at_unix"]), "s old")'
@@ -104,10 +115,11 @@ python3 -c 'import json; s=json.load(open("/var/lib/bloch-l2-attestor-follower/s
 
 What healthy looks like:
 
-- Both units are `active`.
+- All three units are `active`, and the feed prints `ok`.
 - `native_finalized_epoch` increases by one about every 16 minutes (one L1 epoch is 960 s).
-- The agent logs `waiting`, `awaiting-own-finality`, `root-skipped` or `signed`. A `rebuild-check-ok`
-  line appears at start and once a day.
+- The agent is mostly silent. It logs `waiting`, `awaiting-own-finality`, `root-skipped` or `signed`
+  when they apply. A `rebuild-check-ok` line appears at start and once a day: no such line for more than
+  a day means the agent is not working.
 
 Act on these:
 
@@ -116,6 +128,7 @@ Act on these:
 | `halt` (the agent stops, exit 3) | Read the `reason`. Fix the pin or binary it names. Do not edit pins to make it pass. Ask the coordinator. |
 | `held` | A large or over-cap withdrawal. Check it. If it is legitimate, add the printed `INDEX LEAF` line to `/etc/bloch-l2-attestor/approvals.txt`. |
 | `refused-root-not-on-own-chain`, `refused-rebuild-differs` | Do **not** override. Compare with the other operators and tell the coordinator. |
+| `systemctl is-active` says `failed` after a `halt` | The unit does not restart by itself, on purpose. After the coordinator has answered: `sudo systemctl restart bloch-l2-attestor`. |
 | `publish-failed` | Only with an optional push target (see `kit/README.md`): it is unreachable. The agent retries; the partial stays in `/var/lib/bloch-l2-attestor/outbox`, which the feed serves. |
 | `native_finalized_epoch` stuck for more than 1 hour | Check the follower journal: `journalctl -u bloch-l2-attestor-follower -n 50`. |
 
@@ -129,7 +142,7 @@ L1 epoch E starts at Unix time `1786656679 + E × 960`.
 
 | Gate | Epoch | Start (UTC) | What you do |
 | --- | --- | --- | --- |
-| Deadline for v2 binaries | 7178 | Sun 2026-11-01 15:39 | Your host must run the v2 follower `c18752fd…` and producer `fb0d5313…` (pinned in `ARTIFACTS.sha256`). A new install from this bundle already has them. |
+| Binaries | 7178 | Sun 2026-11-01 15:39 | Your host must run the follower `c18752fd…` and producer `fb0d5313…` (pinned in `ARTIFACTS.sha256`). A new install from this bundle has them. If you install after a date below, skip that row: the first replay crosses it for you. |
 | HF1 | 7180 / 7186 | Sun 2026-11-01 16:11 / 17:47 | Watch `native_finalized_epoch` pass 7186 and keep increasing. No action if it does. |
 | HF2 | 7270 | Mon 2026-11-02 16:11 | Same check: the epoch passes 7270. |
 | HF3 | 7360 | Tue 2026-11-03 16:11 | Same check: the epoch passes 7360. |
@@ -137,8 +150,8 @@ L1 epoch E starts at Unix time `1786656679 + E × 960`.
 
 At each gate:
 
-1. Do not restart or upgrade anything in the two hours before the gate. A restart costs 50–60 minutes
-   of re-verification.
+1. Do not restart or upgrade anything in the two hours before the gate. A restart costs at least an
+   hour of re-verification.
 2. About one hour after the gate, run the `status.json` command above twice, 16+ minutes apart. The
    epoch must be past the gate and increasing.
 3. If the follower stops advancing, or the agent logs `halt`, run

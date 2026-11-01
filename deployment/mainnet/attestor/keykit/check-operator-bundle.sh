@@ -11,10 +11,11 @@
 #    public/attestors.set is the same file, and attestor-I.pk is key I of it.
 # 3. Every artifact in DIR (default ./artifacts) matches ARTIFACTS.sha256: bloch-pos, the v2
 #    bloch-l2-native-follower and bloch-l2-produce-dev, mainnet.manifest and carryover.tsv.gz.
-#    The installer itself does not pin the follower binary, so this is where it is checked.
+#    Without --rehearsal, the pins must also equal the hashes built into kit/install-attestor.sh.
 # 4. bloch-pos (from DIR) reads the sealed key's public header: index I, set 1c06adbb….
 # 5. --open: bloch-pos opens the sealed key with the transport passphrase you type and proves it signs
 #    for public key I. Nothing is written. (install-attestor.sh does the same check again.)
+# 6. The host: Linux x86_64, glibc 2.38+, memory, disk, clock. A failure here costs you an hour later.
 # --rehearsal accepts a throwaway set (never use it with a real bundle).
 set -euo pipefail
 PINNED_SET_HASH=1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b
@@ -63,11 +64,26 @@ if bytes.fromhex(open(pkf).read().strip()) != keys[i]: sys.exit(f'{pkf} is not k
 print(f'ok: set {h[:16]}… {k}-of-{len(keys)}; attestor-{i}.pk is key {i}')
 PY
 
+# The kit's own pins: the file the agent's feed comes from, and the build this kit expects.
+[ "$(sha256 kit/sigfeed.py)" = "$(cut -d' ' -f1 kit/sigfeed.sha256)" ] || die "kit/sigfeed.py does not match kit/sigfeed.sha256"
+ok "kit/sigfeed.py $(sha256 kit/sigfeed.py)"
+if grep -q '^7c1cc62b' ARTIFACTS.sha256; then
+  die "this bundle pins the old producer 7c1cc62b…, which halts on the first settled deposit. Ask the coordinator for a new bundle"
+fi
+if [ $REHEARSAL = 0 ]; then
+  for pair in bloch-pos:V2_BLOCH_POS_SHA256 bloch-l2-native-follower:V2_FOLLOWER_SHA256 bloch-l2-produce-dev:V2_PRODUCE_SHA256; do
+    want=$(sed -n "s/^${pair#*:}=//p" kit/install-attestor.sh)
+    [ "$want" = "$(awk -v n="${pair%:*}" '$2==n{print $1}' ARTIFACTS.sha256)" ] || die "ARTIFACTS.sha256 and kit/install-attestor.sh disagree on ${pair%:*}: ask the coordinator for a new bundle"
+  done
+  ok "ARTIFACTS.sha256 equals the build this kit expects"
+fi
+
 # 3. artifacts against the pins
 [ -d "$ART" ] || die "artifacts directory $ART not found (give --artifacts DIR)"
 while read -r h f; do
   [ -f "$ART/$f" ] || die "$ART/$f missing"
   [ "$(sha256 "$ART/$f")" = "$h" ] || die "$ART/$f does not match its pin $h"
+  case $f in bloch-*) [ -x "$ART/$f" ] || chmod +x "$ART/$f" || die "cannot make $ART/$f executable";; esac
   ok "$f $h"
 done < ARTIFACTS.sha256
 [ -f "$ART/carryover.tsv.gz.sha256" ] || die "$ART/carryover.tsv.gz.sha256 missing (the installer needs it)"
@@ -84,8 +100,19 @@ else
 fi
 
 # 4./5. the sealed key
-[ "$(uname -s)" = Linux ] || die "the artifacts are Linux x86_64 binaries; run this on the attestor host"
-info=$("$ART/bloch-pos" l2-claim key-info --sealed "$SEALED") || die "$SEALED is not a sealed attestor key"
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || die "the artifacts are Linux x86_64 binaries; run this on the attestor host"
+glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+[ "$(printf '%s\n2.38\n' "${glibc:-0}" | sort -V | head -1)" = 2.38 ] || die "glibc ${glibc:-unknown} is too old: the binaries need 2.38 or newer. Use Ubuntu 24.04 LTS"
+ok "glibc $glibc"
+mem_gb=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo)
+[ "$mem_gb" -ge 7 ] || echo "WARNING: ${mem_gb} GB of memory, ONBOARDING.md asks for at least 8"
+disk_gb=$(df -BG --output=avail /var/lib 2>/dev/null | tail -1 | tr -dc 0-9)
+[ "${disk_gb:-0}" -ge 40 ] || echo "WARNING: ${disk_gb:-unknown} GB free on /var/lib, ONBOARDING.md asks for an 80 GB disk"
+if command -v timedatectl >/dev/null; then
+  [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] || echo "WARNING: the clock is not NTP-synchronized (timedatectl). Fix it before you start the agent"
+fi
+[ -x /usr/bin/python3 ] || die "/usr/bin/python3 is missing"
+info=$("$ART/bloch-pos" l2-claim key-info --sealed "$SEALED") || die "$SEALED is not a sealed attestor key, or $ART/bloch-pos does not run here"
 grep -qx "signer_index $I" <<<"$info" || die "$SEALED is not attestor $I"
 grep -qx "set_hash $SETHASH" <<<"$info" || die "$SEALED is sealed for another set"
 ok "$SEALED header: attestor $I of set ${SETHASH:0:16}…"
