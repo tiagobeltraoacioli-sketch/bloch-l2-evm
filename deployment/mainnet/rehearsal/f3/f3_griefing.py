@@ -215,7 +215,8 @@ class RpcKeeper(threading.Thread):
             text = path.read_text() if path.exists() else None
             if text != self.seen:
                 self.seen = text
-                if text is not None:
+                # The griefer shares this parent directory; its swaps are not the sequencer's.
+                if text is not None and json.loads(text)['database'] == str(RUN / 'seq-db'):
                     self.proc.terminate()
                     self.proc.wait(30)
                     self.proc = start_rpc(self.net_info)
