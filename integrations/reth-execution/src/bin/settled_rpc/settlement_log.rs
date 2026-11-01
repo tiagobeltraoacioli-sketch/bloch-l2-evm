@@ -70,6 +70,16 @@ fn contiguous(entries: &[Value], first: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// The newest settlement a status names, without reading the log.
+pub fn tip_number(status: &Value) -> Option<u64> {
+    let list = match status["schema"].as_str() {
+        Some(STATUS_V2) => &status["finalized_settlements"],
+        Some(STATUS_V3) => &status["finalized_settlements_recent"],
+        _ => return None,
+    };
+    list.as_array()?.last()?["l2_number"].as_u64()
+}
+
 /// Read what `status` adds to `cursor`. The list fields are moved out of `status`, which keeps only
 /// the scalar facts. `status_path` locates the log, which lies beside the status file.
 pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Result<Delta, String> {
@@ -168,6 +178,15 @@ mod tests {
 
     fn entry(number: u64) -> Value {
         json!({"l2_number": number, "l2_hash": format!("{number:064x}"), "native_slot": number + 7})
+    }
+
+    #[test]
+    fn the_tip_comes_from_the_status_alone() {
+        let v3 = json!({"schema": STATUS_V3, "finalized_settlements_recent": [entry(69), entry(70)]});
+        assert_eq!(tip_number(&v3), Some(70));
+        assert_eq!(tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": [entry(1), entry(2)]})), Some(2));
+        assert_eq!(tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": []})), None);
+        assert_eq!(tip_number(&json!({"schema": "other", "finalized_settlements": [entry(1)]})), None);
     }
 
     /// Write a v3 status and log with `count` entries, as the follower does.

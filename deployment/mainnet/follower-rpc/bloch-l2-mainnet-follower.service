@@ -11,8 +11,10 @@ Type=simple
 User=bloch-l2-follower-main
 Group=bloch-l2-follower-main
 UMask=0022
+# v2 until every reader of this host's status reads v3 (docs/MAINNET-RPC-READINESS.md). follower.env overrides this.
+Environment=BLOCH_L2_STATUS_SCHEMA=v2
 EnvironmentFile=/etc/bloch-l2-mainnet/follower.env
-ExecStart=/opt/bloch/l2-mainnet/bloch-l2-native-follower --manifest /etc/bloch-l2-mainnet/public/mainnet.manifest --carryover /etc/bloch-l2-mainnet/public/carryover.tsv --network-pin f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --rpc-url ${BLOCH_L1_RPC_URL} --state /var/lib/bloch-l2-mainnet-follower/native --status /var/lib/bloch-l2-mainnet-follower/status.json --poll-seconds 10
+ExecStart=/opt/bloch/l2-mainnet/bloch-l2-native-follower --manifest /etc/bloch-l2-mainnet/public/mainnet.manifest --carryover /etc/bloch-l2-mainnet/public/carryover.tsv --network-pin f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --rpc-url ${BLOCH_L1_RPC_URL} --state /var/lib/bloch-l2-mainnet-follower/native --status /var/lib/bloch-l2-mainnet-follower/status.json --poll-seconds 10 --status-schema ${BLOCH_L2_STATUS_SCHEMA}
 Restart=on-failure
 RestartSec=30
 # Exit 3 = verification halt (a block or activation that does not verify): do not loop.

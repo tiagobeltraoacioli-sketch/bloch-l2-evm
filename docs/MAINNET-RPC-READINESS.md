@@ -343,18 +343,32 @@ finalized block and a rollback/re-replay of the new branch. Not done here.
 
 ## Next RPC build: settled history and minimum tip
 
-**Follower status schema v3.** `status.json` keeps its scalar fields and adds `finalized_settlements_count`,
+**Follower status schema v3.** `bloch-l2-native-follower --status-schema v3` (the default is `v2`). `status.json` keeps its scalar fields and adds `finalized_settlements_count`,
 `finalized_settlements_recent` (newest 64) and `settlement_log` (`file`, `entries`, `bytes`, `digest`). Every settlement
 is one line of the append-only `<status stem>.settlements.jsonl` beside it. The follower syncs the log before the status
 names it, and rewrites it from the replay at each start.
 
 - The settled RPC reads only the part it has not read. It compares new entries and the newest 64 with the local chain.
-- The RPC still accepts schema v2, up to 256 MiB, so RPC and follower upgrade in either order. An RPC on a v2 status
-  above the old 16 MiB limit recovers by upgrading the RPC alone. A pre-v3 RPC refuses a v3 status: upgrade the RPC first.
+- The RPC still accepts schema v2, up to 256 MiB. An RPC on a v2 status above the old 16 MiB limit recovers by upgrading
+  the RPC alone. An RPC of v2.1 closes `safe` and `finalized` on a v3 status, so the order below matters.
+- `bloch_finality.status.schema` names the schema; a settled RPC of v2.1 does not have the field.
 - A log that disagrees with the status stops finality from advancing on that RPC, and the rest keeps serving. Restart
   the RPC only after checking the follower.
 - The attestor agent and `l2_reorg_recover.py` read both schemas. The attestor checks the log digest in its daily
   rebuild check.
+
+**Rolling from schema v2 to v3.** Each step is safe alone, and each host moves on its own:
+
+| Step | What | State if you stop here |
+|---|---|---|
+| 1 | Next settled RPC on every host that serves this status, including the signers' private RPC pin | v2 up to 256 MiB, finality open |
+| 2 | Readers of the follower's file on that host: attestor kit, replica kit, bridge signers (`load_status`) | They read both schemas |
+| 3 | New follower binary, schema still v2 (the default) | Nothing changes for readers |
+| 4 | `BLOCH_L2_STATUS_SCHEMA=v3` in `follower.env`, restart that follower. One host at a time; check `bloch_finality.status.schema` | `status.json` falls to about 37 KB |
+
+Going back is a restart with `v2`: the follower rewrites the whole list and the RPC stays open. Doing step 4 before step 1
+closes `safe` and `finalized` on that host, and doing it before step 2 stops that host's signer, attestor or replica. None
+of them serves anything wrong. `tools/signatario-gnb` in the bridge repository does not read v3.
 
 **Minimum tip.** `bloch-l2-settled-rpc --min-tip-wei` (default 100000000, 0.1 gwei) refuses an effective priority fee
 below it at the spool, evicts older spool entries below it at the sweep, and floors `eth_maxPriorityFeePerGas`,

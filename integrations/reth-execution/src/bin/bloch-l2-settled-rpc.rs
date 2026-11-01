@@ -920,12 +920,14 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<std::
 }
 
 /// The `status` member of `bloch_finality`: state of the follower's file and, when known, its age.
-fn status_signal(state: &str, written_at_unix: Option<u64>) -> serde_json::Value {
+fn status_signal(state: &str, written_at_unix: Option<u64>, schema: Option<&str>) -> serde_json::Value {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     serde_json::json!({
         "state": state,
         "written_at_unix": written_at_unix,
         "age_s": written_at_unix.map(|written| now.saturating_sub(written)),
+        // Absent from a settled RPC of v2.1, which is how the monitor tells which limit applies.
+        "schema": schema,
     })
 }
 
@@ -975,6 +977,12 @@ fn verified_levels(
     );
     ensure!(status["network"] == network, "status is for another native network");
     ensure!(status["production_finality"] == false, "status claims production finality");
+    // A tip this database has not reached advances nothing, so a syncing RPC does not reread the log at each poll.
+    if let Some(tip) = settlement_log::tip_number(&status) {
+        if provider.sealed_header(tip)?.is_none() {
+            return Err(NotLocalYet(tip).into());
+        }
+    }
     let delta = settlement_log::read_delta(status_path, &mut status, cursor).map_err(|e| eyre::eyre!(e))?;
     let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
     let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);
@@ -1306,7 +1314,7 @@ async fn main() -> Result<()> {
                             "safe": null,
                             "finalized": null,
                             "finalized_height": null,
-                            "status": status_signal(state, None),
+                            "status": status_signal(state, None, None),
                         });
                     };
                     match verified_levels(&options.status, &options.network, kernel.chain_id, &provider, &settlement_cursor) {
@@ -1373,7 +1381,7 @@ async fn main() -> Result<()> {
                                     "verified_tip": s["verified_tip"], "verified_blocks": s["verified_blocks"],
                                     "safe_settlement": s["safe_settlement"],
                                 },
-                                "status": status_signal("ok", s["written_at_unix"].as_u64()),
+                                "status": status_signal("ok", s["written_at_unix"].as_u64(), s["schema"].as_str()),
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
@@ -1469,10 +1477,10 @@ mod tests {
     #[test]
     fn the_status_signal_reports_state_and_age() {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let signal = status_signal("ok", Some(now - 100));
+        let signal = status_signal("ok", Some(now - 100), Some("v3"));
         assert_eq!(signal["state"], "ok");
         assert!(signal["age_s"].as_u64().unwrap() >= 100);
-        assert!(status_signal("missing", None)["age_s"].is_null());
+        assert!(status_signal("missing", None, None)["age_s"].is_null());
     }
 
     fn spool(dir: &Path, spec: &ChainSpec, key: u8, nonce: u64) {
