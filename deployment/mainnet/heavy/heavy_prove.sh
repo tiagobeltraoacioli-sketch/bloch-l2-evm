@@ -16,7 +16,7 @@ deadline=$(( $(date +%s) + ${HEAVY_WAIT_SECONDS:-21600} ))
 need=$((mem + 8))
 while :; do
   flock 9
-  others=$(pgrep -fc 'bloch-evm-sp1-settlement-v3.*prove-groth16' || true)
+  others=$(pgrep -fc '^[^ ]*bloch-evm-sp1-settlement-v3 .*prove-groth16' || true)  # a queued flock wrapper is not a prover
   gnark=$(docker ps --format '{{.Image}}' 2>/dev/null | grep -c sp1-gnark || true)
   avail=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)
   [[ $others == 0 && $gnark == 0 && $avail -ge $need ]] && break

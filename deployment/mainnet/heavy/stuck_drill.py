@@ -26,6 +26,7 @@ ENV = {**os.environ, 'BLOCH_SETTLER_V3': str(R / 'src/settler/settler_v3.py'), '
        'DRILL_RPC_BIN': str(R / 'out/bloch-l2-settled-rpc-v21')}
 sys.path.insert(0, str(R / 'src/rehearsal/drills'))
 sys.path.insert(0, str(R / 'src/rehearsal'))
+sys.path.insert(0, str(R / 'src/settler'))
 import drillctl as d  # noqa: E402
 fs = d.fs
 
@@ -144,10 +145,13 @@ def base():
         (RUN / 'prover.cap').write_text('56G\n')
         for name in ('user', 'attacker'):
             ctl('l2key', name)
-    ctl('up', 'follower', 'rpc', 'settler')
-    for name in ('user', 'attacker'):
-        ctl('deposit', name, 2_000_000_000)
-        time.sleep(8)
+    if not (RUN / 'settler.sup.pid').exists():
+        ctl('up', 'follower', 'rpc', 'settler')
+    if not (RES / 'deposits.sent').exists():
+        for name in ('user', 'attacker'):
+            ctl('deposit', name, 2_000_000_000)
+            time.sleep(8)
+        (RES / 'deposits.sent').write_text('1\n')
     s = fs.state()
     wait_accepted(2, 5400)
     deadline = time.time() + 5400
@@ -172,26 +176,33 @@ def raw_withdraw(nonce, script, sats):
     return staged.read_text().strip()
 
 
-def discard_phase():
+def discard_phase(tag='', gas=15_000_000):
     s = fs.state()
     user = s['l2_address_user']
-    before = {'user': account(user), 'attacker': account(s['l2_address_attacker']), 'head': head()}
-    start_line = len(events())
-    nonce = int(d.rpc('eth_getTransactionCount', ['0x' + user, 'pending'], port=d.L2_RPC), 16)
-    honest = [rpc_send(raw_transfer(nonce + i, f'{0x60 + i:02x}')) for i in range(3)]
-    withdrawal = rpc_send(raw_withdraw(nonce + 3, s['wallet_script'], 100_000_000))
-    gen = RUN / 'attacker-tx'
-    shutil.rmtree(gen, ignore_errors=True)
-    subprocess.run([*GEN, 'pc-modexp-512b', '--key', str(RUN / 'attacker.l2.key'), '--out', str(gen), '--block-gas', '15000000', '--txs', '1',
-                    '--nonce', str(int(d.rpc('eth_getTransactionCount', ['0x' + s['l2_address_attacker'], 'pending'], port=d.L2_RPC), 16))], check=True)
-    attacker = rpc_send(next(gen.iterdir()).read_text())
-    ctl('deposit', 'user', 300_000_000)
-    note('stuck-sent', honest=honest, withdrawal=withdrawal, attacker=attacker)
+    prior = [json.loads(l) for l in (RES / 'timeline.jsonl').read_text().splitlines() if f'"stuck-sent{tag}"' in l]
+    start_line = 0
+    if prior:  # resumed after the transactions were sent
+        honest, withdrawal, attacker = prior[-1]['honest'], prior[-1]['withdrawal'], prior[-1]['attacker']
+        base_done = json.loads((RES / 'phase-base.done').read_text())
+        before = {'user': base_done['user'], 'attacker': base_done['attacker'], 'head': {'number': 0}}
+    else:
+        before = {'user': account(user), 'attacker': account(s['l2_address_attacker']), 'head': head()}
+        start_line = len(events())
+        nonce = int(d.rpc('eth_getTransactionCount', ['0x' + user, 'pending'], port=d.L2_RPC), 16)
+        honest = [rpc_send(raw_transfer(nonce + i, f'{0x60 + i:02x}')) for i in range(3)]
+        withdrawal = rpc_send(raw_withdraw(nonce + 3, s['wallet_script'], 100_000_000))
+        gen = RUN / 'attacker-tx'
+        shutil.rmtree(gen, ignore_errors=True)
+        subprocess.run([*GEN, 'pc-modexp-512b', '--key', str(RUN / 'attacker.l2.key'), '--out', str(gen), '--block-gas', str(gas), '--txs', '1',
+                        '--nonce', str(int(d.rpc('eth_getTransactionCount', ['0x' + s['l2_address_attacker'], 'pending'], port=d.L2_RPC), 16))], check=True)
+        attacker = rpc_send(next(gen.iterdir()).read_text())
+        ctl('deposit', 'user', 300_000_000)
+        note(f'stuck-sent{tag}', honest=honest, withdrawal=withdrawal, attacker=attacker)
     a = attacker.removeprefix('0x')
     e = wait_event(lambda e: e.get('event') == 'l2-block-produced' and e.get('transactions', 0) > 0 and e.get('number', 0) > before['head']['number'] - 1
                    and (RUN / 'canonical').exists() and stuck_has(e, a), 'block with the attacker tx', 3600)
     number = e['number']
-    note('stuck-block', **e)
+    note('stuck-block', block=e)
     t0 = time.time()
     # The settler must fail at least twice on its own: real prover failures, no operator.
     while sum(1 for x in events()[start_line:] if x.get('event') == 'prover-failed') < 2:
@@ -201,7 +212,7 @@ def discard_phase():
         time.sleep(10)
     failed = [x for x in events()[start_line:] if x.get('event') in ('prover-failed', 'retry')]
     note('settler-stuck', failures=failed, seconds=round(time.time() - t0))
-    snapshot('stuck-before')
+    snapshot(f'stuck-before{tag}')
     latest = d.safe_rpc('eth_getBlockByNumber', ['latest', False], port=d.L2_RPC)
     safe = d.safe_rpc('eth_getBlockByNumber', ['safe', False], port=d.L2_RPC)
     receipt = d.safe_rpc('eth_getTransactionReceipt', [attacker], port=d.L2_RPC)
@@ -216,7 +227,7 @@ def discard_phase():
     note('tool-status', rc=rc, status=status)
     t1 = time.time()
     follow = ('--follower-state', RUN / 'follower', '--follower-status', RUN / 'follower-status.json')
-    triage_file = RES / 'triage.json'
+    triage_file = RES / f'triage{tag}.json'
     rc, tri = tool('triage', '--budget', os.environ.get('DRILL_BUDGET', '30000000'), *follow, '--out', triage_file, retry_75=True)
     note('tool-triage', rc=rc, kept=tri.get('kept'), exclude=tri.get('exclude'), after=tri.get('instructions_after'), steps=tri.get('steps'), seconds=round(time.time() - t1), other=None if 'kept' in tri else tri)
     if rc:
@@ -243,8 +254,8 @@ def discard_phase():
     rcp = {h: d.safe_rpc('eth_getTransactionReceipt', [h], port=d.L2_RPC) for h in honest + [withdrawal, attacker]}
     summary = {h: ({'status': r.get('status'), 'block': r.get('blockNumber'), 'hash': r.get('blockHash')} if isinstance(r, dict) else r) for h, r in rcp.items()}
     note('after-discard', before=before, after=after, receipts=summary, quarantine=sorted(p.name for p in (RUN / 'txpool-quarantine').iterdir()))
-    snapshot('discard-after')
-    done('discard', number=number, replacement=f['l2_hash'], old=applied.get('old_hash'))
+    snapshot(f'discard-after{tag}')
+    done(f'discard{tag}', number=number, replacement=f['l2_hash'], old=applied.get('old_hash'))
 
 
 def stuck_has(event, attacker):
@@ -264,7 +275,7 @@ def elsewhere_phase():
     sent = [rpc_send(raw_transfer(nonce + i, f'{0x70 + (i % 16):02x}')) for i in range(4)]
     e = wait_event(lambda e: e.get('event') == 'l2-block-produced' and e.get('transactions', 0) >= 1 and events().index(e) >= start_line, 'low-cap block', 3600)
     number = e['number']
-    note('low-cap-block', **e)
+    note('low-cap-block', block=e)
     t0 = time.time()
     while True:
         evs = events()[start_line:]
@@ -316,6 +327,8 @@ if __name__ == '__main__':
         base()
     elif what == 'discard' and not phase('discard'):
         discard_phase()
+    elif what == 'discard2' and not phase('discard2'):
+        discard_phase('2', 14_000_000)
     elif what == 'elsewhere' and not phase('elsewhere'):
         elsewhere_phase()
     elif what == 'stop':

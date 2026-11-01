@@ -42,6 +42,7 @@ if not SETTLER.exists():
 spec = importlib.util.spec_from_file_location('settler_v3', SETTLER)
 S = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(S)
+S.log = lambda event, **fields: print(json.dumps({'event': event, **fields}), file=sys.stderr, flush=True)  # stdout carries only the report
 
 
 class Refuse(Exception):
