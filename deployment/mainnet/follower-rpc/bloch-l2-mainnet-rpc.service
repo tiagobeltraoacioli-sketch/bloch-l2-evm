@@ -36,6 +36,8 @@ IPAddressDeny=any
 IPAddressAllow=localhost
 LimitCORE=0
 MemoryMax=4G
+# Above RPC_MAX_HTTP_CONNECTIONS, so the 1024-connection limit answers 429 before descriptors run out.
+LimitNOFILE=65536
 Nice=5
 
 [Install]
