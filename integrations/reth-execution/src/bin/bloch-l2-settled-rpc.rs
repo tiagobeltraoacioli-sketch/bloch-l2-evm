@@ -920,12 +920,14 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<std::
 }
 
 /// The `status` member of `bloch_finality`: state of the follower's file and, when known, its age.
-fn status_signal(state: &str, written_at_unix: Option<u64>) -> serde_json::Value {
+fn status_signal(state: &str, written_at_unix: Option<u64>, schema: Option<&str>) -> serde_json::Value {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     serde_json::json!({
         "state": state,
         "written_at_unix": written_at_unix,
         "age_s": written_at_unix.map(|written| now.saturating_sub(written)),
+        // Absent from a settled RPC of v2.1, which is how the monitor tells which limit applies.
+        "schema": schema,
     })
 }
 
@@ -1306,7 +1308,7 @@ async fn main() -> Result<()> {
                             "safe": null,
                             "finalized": null,
                             "finalized_height": null,
-                            "status": status_signal(state, None),
+                            "status": status_signal(state, None, None),
                         });
                     };
                     match verified_levels(&options.status, &options.network, kernel.chain_id, &provider, &settlement_cursor) {
@@ -1373,7 +1375,7 @@ async fn main() -> Result<()> {
                                     "verified_tip": s["verified_tip"], "verified_blocks": s["verified_blocks"],
                                     "safe_settlement": s["safe_settlement"],
                                 },
-                                "status": status_signal("ok", s["written_at_unix"].as_u64()),
+                                "status": status_signal("ok", s["written_at_unix"].as_u64(), s["schema"].as_str()),
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
@@ -1469,10 +1471,10 @@ mod tests {
     #[test]
     fn the_status_signal_reports_state_and_age() {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let signal = status_signal("ok", Some(now - 100));
+        let signal = status_signal("ok", Some(now - 100), Some("v3"));
         assert_eq!(signal["state"], "ok");
         assert!(signal["age_s"].as_u64().unwrap() >= 100);
-        assert!(status_signal("missing", None)["age_s"].is_null());
+        assert!(status_signal("missing", None, None)["age_s"].is_null());
     }
 
     fn spool(dir: &Path, spec: &ChainSpec, key: u8, nonce: u64) {

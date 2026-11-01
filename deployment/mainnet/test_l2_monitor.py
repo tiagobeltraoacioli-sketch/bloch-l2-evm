@@ -309,7 +309,7 @@ class MonitorTests(unittest.TestCase):
                 if log_text is not None:
                     (Path(d) / 'status.settlements.jsonl').write_text(log_text)
                 r = m.Report()
-                m.status_size('f', str(path), document, m.PROFILES['mainnet'], r)
+                m.status_size('f', str(path), document, m.PROFILES['mainnet'], NOW, r)
                 return r
             v2 = {'schema': 'v2', 'finalized_settlements': [{'l2_number': 1}]}
             self.assertEqual(level(run(v2), 'follower_status_size[f]'), 'OK')
@@ -324,6 +324,56 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(level(run(v3, log_text='x' * 9), 'follower_settlement_log[f]'), 'CRIT')
             (Path(d) / 'status.settlements.jsonl').unlink()
             self.assertEqual(level(run(v3), 'follower_settlement_log[f]'), 'CRIT')
+
+    def test_status_runway_warns_months_ahead_at_the_observed_cadence(self):
+        def runway(count, minutes):
+            slots = int(minutes * 2)
+            entries = [{'l2_number': n, 'native_slot': 100000 + n * slots} for n in range(max(1, count - 63), count + 1)]
+            r = m.Report()
+            m.settlement_runway('c', count, m.STATUS_V2_LIMIT_V21, m.settlement_rate(entries), m.PROFILES['mainnet'], NOW, r)
+            return r
+        limit = m.STATUS_V2_LIMIT_V21 // m.STATUS_BYTES_PER_SETTLEMENT
+        # One settlement every 15 minutes: 251 days from zero.
+        self.assertEqual(level(runway(100, 15), 'c'), 'OK')
+        self.assertEqual(level(runway(limit - 11000, 15), 'c'), 'WARN')  # 114 days left
+        self.assertEqual(level(runway(limit - 4000, 15), 'c'), 'CRIT')  # 41 days left
+        # One a minute: 21 days from zero, so CRIT from the first window.
+        self.assertEqual(level(runway(100, 1), 'c'), 'CRIT')
+        self.assertIn('days left', runway(100, 15).checks[0]['message'])
+        self.assertIn('--status-schema v3', runway(100, 1).checks[0]['message'])
+        # The count alone grades when no rate is known.
+        r = m.Report()
+        m.settlement_runway('c', 15_000, m.STATUS_V2_LIMIT_V21, None, m.PROFILES['mainnet'], NOW, r)
+        self.assertEqual(level(r, 'c'), 'WARN')
+        r = m.Report()
+        m.settlement_runway('c', 22_500, m.STATUS_V2_LIMIT_V21, None, m.PROFILES['mainnet'], NOW, r)
+        self.assertEqual(level(r, 'c'), 'CRIT')
+        r = m.Report()
+        m.settlement_runway('c', 22_500, m.STATUS_V2_LIMIT_NEXT, None, m.PROFILES['mainnet'], NOW, r)
+        self.assertEqual(level(r, 'c'), 'OK')
+
+    def test_status_runway_from_the_rpc_alone(self):
+        class Client:
+            def __init__(self, table, fail=False): self.table, self.fail = table, fail
+            def call(self, url, method, params):
+                if self.fail: raise m.RpcError('down')
+                return self.table.get(params[0])
+        table = {n: {'l2_number': n, 'native_slot': 100000 + n * 24} for n in range(1, 30001)}  # one per 12 minutes
+        def check(status, height=23000, fail=False):
+            r = m.Report()
+            view = {'name': 'A', 'url': 'u', 'finality': {'finalized_height': height, 'status': status}}
+            m.rpc_status_runway(Client(table, fail), view, m.PROFILES['mainnet'], NOW, r)
+            return r
+        v21 = {'state': 'ok', 'age_s': 3}
+        self.assertEqual(level(check(v21), 'l2_status_runway[A]'), 'CRIT')
+        self.assertEqual(level(check(v21, height=100), 'l2_status_runway[A]'), 'OK')
+        # Without bloch_settlement the count still grades, and a v2.1 RPC is not given the next build's limit.
+        self.assertEqual(level(check(v21, fail=True), 'l2_status_runway[A]'), 'CRIT')
+        self.assertEqual(level(check({**v21, 'schema': 'bloch.l2.native-follower-status.v2'}), 'l2_status_runway[A]'), 'OK')
+        r = check({**v21, 'schema': 'bloch.l2.native-follower-status.v3'})
+        self.assertEqual(level(r, 'l2_status_runway[A]'), 'OK')
+        self.assertIn('no size limit', r.checks[0]['message'])
+        self.assertEqual(check(v21, height=0).checks, [])
 
     def test_follower_status_file(self):
         with tempfile.TemporaryDirectory() as d:

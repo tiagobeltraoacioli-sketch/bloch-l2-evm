@@ -21,6 +21,11 @@
 //! evidence for the L2 RPC finality publisher, not a consensus or production
 //! finality claim.
 //!
+//! `--status-schema` chooses the file format, `v2` by default, so that replacing this binary changes
+//! nothing for the readers of the status: a settled RPC of the closed v2.1 release, and any other
+//! reader that knows only v2, closes or refuses on v3. Choose `v3` on a host once every reader of
+//! that host's status reads it. Changing it needs only a restart, in either direction.
+//!
 //! Status schema v3: `status.json` stays small. It has the newest settlements and
 //! the size and digest of `<status stem>.settlements.jsonl`, an append-only log with
 //! one compact JSON entry per settlement, written and synced before the status names
@@ -59,6 +64,7 @@ const USAGE: &str = "\
 usage: bloch-l2-native-follower --manifest PATH --network-pin HEX (--rpc-port N | --rpc-url http://HOST:PORT)
                                 --state DIR --status FILE [--carryover TSV]
                                 [--poll-seconds N] [--max-blocks N] [--max-fetch N]
+                                [--status-schema v2|v3]
 Re-verifies retained history from the pinned genesis on start, then follows finalized
 native blocks from a native node RPC (read-only methods: getchaininfo, getblockraw,
 getl2settlement) and writes verified finality status. A BPOSMAN3 manifest is a
@@ -66,6 +72,15 @@ development network with the L2 at genesis; the Genesis-4 mainnet manifest
 (BPOSMAN1, --network-pin f47d3e49...1966) needs --carryover (the decompressed
 carryover.tsv) and the L2 is checked at its epoch-5850 activation.
 ";
+
+/// The file format of `--status`. See the module documentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusSchema {
+    /// The whole list in the file: a settled RPC of v2.1 stops at 16 MiB of it, about 30,190 settlements.
+    V2,
+    /// The newest entries in the file, and the rest in the settlement log.
+    V3,
+}
 
 struct Options {
     manifest: PathBuf,
@@ -77,6 +92,7 @@ struct Options {
     poll: Duration,
     max_blocks: usize,
     max_fetch: usize,
+    status_schema: StatusSchema,
 }
 
 fn main() -> ExitCode {
@@ -110,7 +126,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let name = pair[0].strip_prefix("--").ok_or("options must start with --")?;
         if ![
             "manifest", "carryover", "network-pin", "rpc-port", "rpc-url", "state", "status", "poll-seconds", "max-blocks",
-            "max-fetch",
+            "max-fetch", "status-schema",
         ]
         .contains(&name)
         {
@@ -143,6 +159,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
         poll: Duration::from_secs(num("poll-seconds", 10)?.clamp(1, 600)),
         max_blocks: num("max-blocks", 5_000_000)? as usize,
         max_fetch: num("max-fetch", 20_000)? as usize,
+        status_schema: match map.get("status-schema").map(String::as_str) {
+            None | Some("v2") => StatusSchema::V2,
+            Some("v3") => StatusSchema::V3,
+            Some(_) => return Err("--status-schema must be v2 or v3".into()),
+        },
     })
 }
 
@@ -349,7 +370,7 @@ fn run(o: &Options) -> Result<(), String> {
                         None
                     }
                 };
-                if let Some(status) = status(&verifier, &policy, safe, &mut log)? {
+                if let Some(status) = status(&verifier, &policy, safe, o.status_schema, &mut log)? {
                     write_atomic(&o.status, serde_json::to_string_pretty(&status).unwrap().as_bytes())?;
                 }
                 if added > 0 {
@@ -466,6 +487,7 @@ fn status(
     verifier: &IncrementalNativeVerifierV1,
     policy: &bloch_l2_evm::native_settlement::SettlementPolicyV1,
     safe: Option<Value>,
+    schema: StatusSchema,
     log: &mut SettlementLog,
 ) -> Result<Option<Value>, String> {
     let verified = match verifier.snapshot() {
@@ -475,7 +497,9 @@ fn status(
     };
     let report = verified.report();
     let mut settlements = Vec::new();
-    for (slot, block, bytes) in verified.finalized_settlements().skip(log.entries as usize) {
+    // v3 builds only what the log does not hold yet; v2 repeats the whole list in every file.
+    let known = if schema == StatusSchema::V3 { log.entries as usize } else { 0 };
+    for (slot, block, bytes) in verified.finalized_settlements().skip(known) {
         let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes).ok_or("settlement decode")?;
         let mut entry = statement_json(&tx.statement)?;
         entry["native_slot"] = json!(slot);
@@ -483,13 +507,15 @@ fn status(
         entry["commitment"] = json!(hex::encode(tx.commitment()));
         settlements.push(entry);
     }
-    log.append(settlements)?;
+    if schema == StatusSchema::V3 {
+        log.append(settlements.clone())?;
+    }
     // safe is never below finalized.
-    let finalized_number = log.recent.back().and_then(|e| e["l2_number"].as_u64()).unwrap_or(0);
+    let newest = if schema == StatusSchema::V3 { log.recent.back() } else { settlements.last() };
+    let finalized_number = newest.and_then(|e| e["l2_number"].as_u64()).unwrap_or(0);
     let safe = safe.filter(|e| e["l2_number"].as_u64().is_some_and(|n| n >= finalized_number));
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    Ok(Some(json!({
-        "schema": "bloch.l2.native-follower-status.v3",
+    let mut document = json!({
         "written_at_unix": now,
         "network": hex::encode(policy.network),
         "settlement_policy": hex::encode(report.settlement_policy),
@@ -509,12 +535,25 @@ fn status(
             "activation_slot": block.slot,
             "finalized": finalized,
         })),
-        "finalized_settlements_count": log.entries,
-        "finalized_settlements_recent": log.recent,
-        "settlement_log": log.status_fields(),
         "safe_settlement": safe,
         "production_finality": false,
-    })))
+    });
+    let fields = match schema {
+        StatusSchema::V2 => json!({
+            "schema": "bloch.l2.native-follower-status.v2",
+            "finalized_settlements": settlements,
+        }),
+        StatusSchema::V3 => json!({
+            "schema": "bloch.l2.native-follower-status.v3",
+            "finalized_settlements_count": log.entries,
+            "finalized_settlements_recent": log.recent,
+            "settlement_log": log.status_fields(),
+        }),
+    };
+    if let (Some(all), Value::Object(fields)) = (document.as_object_mut(), fields) {
+        all.extend(fields);
+    }
+    Ok(Some(document))
 }
 
 #[cfg(test)]
@@ -523,6 +562,24 @@ mod tests {
 
     fn entry(number: u64) -> Value {
         json!({"l2_number": number, "l2_hash": format!("{number:064x}")})
+    }
+
+    #[test]
+    fn the_status_schema_defaults_to_v2_and_refuses_anything_else() {
+        let args = |extra: &[&str]| -> Vec<String> {
+            let pin = "ab".repeat(32);
+            let mut all: Vec<String> = ["--manifest", "m", "--network-pin", &pin, "--rpc-port", "1", "--state", "d", "--status", "s"]
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
+            all.extend(extra.iter().map(|a| a.to_string()));
+            all
+        };
+        assert_eq!(parse(&args(&[])).map(|o| o.status_schema), Ok(StatusSchema::V2));
+        assert_eq!(parse(&args(&["--status-schema", "v2"])).map(|o| o.status_schema), Ok(StatusSchema::V2));
+        assert_eq!(parse(&args(&["--status-schema", "v3"])).map(|o| o.status_schema), Ok(StatusSchema::V3));
+        assert!(parse(&args(&["--status-schema", "v4"])).is_err());
+        assert!(parse(&args(&["--status-schema", ""])).is_err());
     }
 
     #[test]

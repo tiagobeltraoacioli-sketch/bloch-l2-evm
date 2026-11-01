@@ -51,7 +51,7 @@ SEVERITY = {OK: 0, WARN: 1, UNKNOWN: 2, CRIT: 3}
 
 READ_ONLY_METHODS = frozenset({
     # L2 (Ethereum JSON-RPC subset + Bloch extensions)
-    'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality',
+    'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality', 'bloch_settlement',
     # L1 (bloch-pos)
     'getchaininfo', 'getblockcount', 'getl2settlement',
 })
@@ -127,8 +127,11 @@ _COMMON: Dict[str, Any] = {
     'file_age_warn': 120, 'file_age_crit': 600,
     'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
-    # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
+    # A settled RPC before the next build closes safe and finalized above 16 MiB of status file.
     'status_bytes_warn': 8 * 1_048_576, 'status_bytes_crit': 12 * 1_048_576,
+    # Runway to that limit: replacing the RPC needs a signed build and a rollout, so the warning comes months ahead.
+    'status_runway_days_warn': 120, 'status_runway_days_crit': 45,
+    'status_settlements_warn': 15_000, 'status_settlements_crit': 22_500,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
@@ -613,12 +616,49 @@ def follower_lag(name: str, verified_blocks: Any, own_epoch: Any, l1_up: List[Di
                  f'{p["follower_epoch_lag_expected"]} is structural)', expected=p['follower_epoch_lag_expected'])
 
 
-STATUS_BYTES_PER_SETTLEMENT = 555  # measured on a real follower status, schema v2
+# Schema v2 repeats every settlement in the status file. Measured on real binaries (agent 76): 556 bytes each, the
+# settled RPC of v2.1 closes safe and finalized at 30,194 settlements, and the next RPC at about 483,000.
+STATUS_BYTES_PER_SETTLEMENT = 556
+STATUS_V2_LIMIT_V21 = 16 * 1_048_576
+STATUS_V2_LIMIT_NEXT = 256 * 1_048_576
+SLOT_SECONDS = 30
+SETTLEMENT_RATE_WINDOW = 64
 
 
-def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: 'Report') -> None:
-    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build stops
-    advancing finality above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
+def settlement_rate(entries: List[Dict[str, Any]]) -> Optional[float]:
+    """Settlements per day over the given entries (oldest first), from their L1 slots. None without two slots apart."""
+    slots = [e.get('native_slot') for e in entries[-SETTLEMENT_RATE_WINDOW:] if isinstance(e, dict)]
+    slots = [s for s in slots if isinstance(s, int)]
+    if len(slots) < 2 or slots[-1] <= slots[0]:
+        return None
+    return (len(slots) - 1) * 86400 / ((slots[-1] - slots[0]) * SLOT_SECONDS)
+
+
+def settlement_runway(check: str, count: int, limit_bytes: int, rate: Optional[float], p: Dict[str, Any], now: float,
+                      r: 'Report') -> None:
+    """How long a schema v2 status can grow before a settled RPC closes safe and finalized, and the date at this rate."""
+    limit = limit_bytes // STATUS_BYTES_PER_SETTLEMENT
+    left = max(0, limit - count)
+    if rate:
+        days = left / rate
+        when = time.strftime('%Y-%m-%d', time.gmtime(now + days * 86400))
+        detail = f'{rate:.1f} settlements a day, {days:.0f} days left, about {when}'
+    else:
+        days, detail = None, 'no settlement rate yet'
+    level = OK
+    if count >= p['status_settlements_warn'] * limit // (STATUS_V2_LIMIT_V21 // STATUS_BYTES_PER_SETTLEMENT) \
+            or (days is not None and days < p['status_runway_days_warn']):
+        level = WARN
+    if count >= p['status_settlements_crit'] * limit // (STATUS_V2_LIMIT_V21 // STATUS_BYTES_PER_SETTLEMENT) \
+            or (days is not None and days < p['status_runway_days_crit']):
+        level = CRIT
+    action = '' if level == OK else '; install the next settled RPC, then follower --status-schema v3'
+    r.add(check, level, f'{count} of about {limit} settlements a schema v2 status can hold on this RPC ({detail}){action}')
+
+
+def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], now: float, r: 'Report') -> None:
+    """Schema v2 repeats every settlement in the status file, and a settled RPC before the next build closes safe and
+    finalized above 16 MiB of it. Schema v3 stays small; its log must hold what the status names."""
     size = Path(path).stat().st_size
     log = s.get('settlement_log')
     if isinstance(log, dict):
@@ -634,19 +674,48 @@ def status_size(name: str, path: str, s: Dict[str, Any], p: Dict[str, Any], r: '
             else:
                 r.add(f'follower_settlement_log[{name}]', OK, f'{log.get("entries")} settlements, {on_disk} bytes')
     else:
-        count = len(s.get('finalized_settlements') or [])
-        left = max(0, 16 * 1_048_576 - size) // STATUS_BYTES_PER_SETTLEMENT
-        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build stops finality'
+        entries = s.get('finalized_settlements') or []
+        count = len(entries)
+        left = max(0, STATUS_V2_LIMIT_V21 - size) // STATUS_BYTES_PER_SETTLEMENT
+        detail = f'schema v2, about {left} settlements before a settled RPC older than the next build closes finality'
+        settlement_runway(f'follower_status_runway[{name}]', count, STATUS_V2_LIMIT_V21, settlement_rate(entries), p, now, r)
     r.graded(f'follower_status_size[{name}]', size, p['status_bytes_warn'], p['status_bytes_crit'],
              f'{path} is {size} bytes with {count} settlements ({detail})')
 
 
-def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
+def rpc_status_runway(client: 'Client', v: Dict[str, Any], p: Dict[str, Any], now: float, r: 'Report') -> None:
+    """The same runway from the RPC alone, for a monitor without the follower's file. The settled list is contiguous from
+    block 1, so the finalized height is the count. A settled RPC that names the schema is at least the next build."""
+    f = v.get('finality')
+    height = f.get('finalized_height') if isinstance(f, dict) else None
+    status = f.get('status') if isinstance(f, dict) else None
+    if not isinstance(height, int) or height < 1 or not isinstance(status, dict):
+        return
+    schema = status.get('schema') or ''
+    if schema.endswith('.v3'):
+        r.add(f'l2_status_runway[{v["name"]}]', OK, f'{height} settlements, schema v3 has no size limit')
+        return
+    entries = []
+    for number in (max(1, height - SETTLEMENT_RATE_WINDOW + 1), height):
+        try:
+            entries.append(client.call(v['url'], 'bloch_settlement', [number]))
+        except RpcError:
+            entries.append(None)
+    rate = None
+    if all(isinstance(e, dict) and isinstance(e.get('native_slot'), int) for e in entries) and height > entries[0]['l2_number']:
+        elapsed = (entries[1]['native_slot'] - entries[0]['native_slot']) * SLOT_SECONDS
+        rate = (height - entries[0]['l2_number']) * 86400 / elapsed if elapsed > 0 else None
+    limit = STATUS_V2_LIMIT_NEXT if schema else STATUS_V2_LIMIT_V21
+    settlement_runway(f'l2_status_runway[{v["name"]}]', height, limit, rate, p, now, r)
+
+
+def check_followers(client: 'Client', views: List[Dict[str, Any]], statuses: List[str], l1_up: List[Dict[str, Any]],
                     p: Dict[str, Any], now: float, r: Report) -> None:
     for v in views:
         f = v.get('finality')
         if not isinstance(f, dict):
             continue
+        rpc_status_runway(client, v, p, now, r)
         l1 = f.get('l1') or {}
         follower_lag(v['name'], l1.get('verified_blocks'), (l1.get('finalized') or {}).get('epoch'), l1_up, p, r,
                      'bloch_finality')
@@ -675,7 +744,7 @@ def check_followers(views: List[Dict[str, Any]], statuses: List[str], l1_up: Lis
             continue
         r.graded(f'follower_status[{name}]', age, p['status_age_warn'], p['status_age_crit'],
                  f'{path} written {age:.0f} s ago')
-        status_size(name, path, s, p, r)
+        status_size(name, path, s, p, now, r)
         follower_lag(f'{name}:status', s.get('verified_blocks'), s.get('native_finalized_epoch'), l1_up, p, r,
                      'status.json')
 
@@ -1040,7 +1109,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     l1_up = check_l1(client, args.l1_rpc or [], p, r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_escrow_and_backlog(with_l2, p, r)
-    check_followers(views, args.follower_status or [], l1_up, p, now, r)
+    check_followers(client, views, args.follower_status or [], l1_up, p, now, r)
     check_gates(l1_up, p, compiled_gates(args), now, r)
     check_attestors(args.attest_drop or [], with_l2, p, fetch or http_fetcher(args.timeout), r)
     check_units(args.unit or [], p, now, run_cmd, r)
