@@ -1,0 +1,48 @@
+# Bloch L2 mainnet read-only replica: rebuild the database from the follower's verified L1 blocks
+# (produce reconstruct) and swap it in when the settled chain grew. No network. Rendered by install-replica.sh.
+[Unit]
+Description=Bloch L2 replica database refresh (reconstruct from L1 data)
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@USER@
+UMask=0027
+ExecStart=/usr/bin/python3 -I @OPT@/current/replica_refresh.py --produce @OPT@/current/bloch-l2-produce-dev --state @STATE@
+TimeoutStartSec=3600
+ReadWritePaths=@STATE@/generations @STATE@/refresh
+ReadOnlyPaths=@STATE@/follower
+InaccessiblePaths=@STATE@/rpc
+PrivateNetwork=true
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitCORE=0
+MemorySwapMax=0
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+MemoryHigh=2G
+MemoryMax=3G
+CPUQuota=100%
+TasksMax=128
+Nice=10
