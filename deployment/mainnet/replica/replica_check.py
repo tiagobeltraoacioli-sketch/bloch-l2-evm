@@ -22,6 +22,7 @@ ACTIVATION_BLOCK = '618c9b80cebda5b5bda0b0c7d79e19dae8dc24e773aa94a2c135eb805ff0
 L2_GENESIS = '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468'
 L2_STATE_ROOT = '2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d'
 SCHEMA = 'bloch.l2.native-follower-status.v2'
+SCHEMA_V3 = 'bloch.l2.native-follower-status.v3'
 
 
 def rpc(url, method, params=(), timeout=20):
@@ -66,6 +67,30 @@ def check_l1(report, url):
     return info['finalized']['epoch'], info['finalized']['root'], view
 
 
+
+def settlements_of(status, path):
+    """Every finalized settlement of a follower status, oldest first: the list in schema v2, or the log beside the file
+    in schema v3, which must hold exactly what the status names. Every entry is compared with the rebuilt chain later."""
+    if status.get('schema') != SCHEMA_V3:
+        return status.get('finalized_settlements', [])
+    log = status.get('settlement_log') or {}
+    name, entries, size = log.get('file'), log.get('entries'), log.get('bytes')
+    if not isinstance(name, str) or not name or '/' in name or name in ('.', '..'):
+        raise ValueError('the follower status names a bad settlement log')
+    data = b''
+    if entries:
+        with open(Path(path).with_name(name), 'rb') as f:
+            data = f.read(size)
+    lines = data.splitlines()
+    if len(data) != size or len(lines) != entries:
+        raise ValueError('the follower settlement log does not match its status')
+    settlements = [json.loads(line) for line in lines]
+    recent = status.get('finalized_settlements_recent') or []
+    if entries and (not recent or settlements[-len(recent):] != recent):
+        raise ValueError('the follower settlement log differs from its status')
+    return settlements
+
+
 def preflight(a):
     report = Report()
     for url in a.l1:
@@ -77,7 +102,7 @@ def verify(a):
     report = Report()
     status = json.loads(Path(a.status).read_text())
     genesis = status.get('l2_genesis') or {}
-    report.check('status-identity', status.get('schema') == SCHEMA and status.get('network') == NETWORK
+    report.check('status-identity', status.get('schema') in (SCHEMA, SCHEMA_V3) and status.get('network') == NETWORK
                  and status.get('chain_id') == CHAIN_ID and status.get('production_finality') is False)
     report.check('status-l2-genesis', genesis.get('hash') == L2_GENESIS and genesis.get('state_root') == L2_STATE_ROOT
                  and genesis.get('activation_block') == ACTIVATION_BLOCK and genesis.get('finalized') is True, l2_genesis=genesis)
@@ -88,7 +113,11 @@ def verify(a):
                  hash=block0['hash'], state_root=block0['stateRoot'])
     finalized = rpc(a.rpc, 'eth_getBlockByNumber', ['finalized', False])
     latest = rpc(a.rpc, 'eth_getBlockByNumber', ['latest', False])
-    settlements = status.get('finalized_settlements', [])
+    try:
+        settlements = settlements_of(status, a.status)
+    except (OSError, ValueError) as e:
+        report.check('status-settlement-log', False, error=str(e))
+        return report.finish(mode='verify')
     want = settlements[-1]['l2_hash'] if settlements else L2_GENESIS
     report.check('rpc-finalized-matches-status', finalized is not None and strip0x(finalized['hash']) == strip0x(want),
                  finalized=finalized and finalized['hash'], want=want)
