@@ -35,6 +35,8 @@ def values_for(number, entry, user_txs=0, payload=None):
 
 
 class World(base.Fake):
+    status_schema = 'v2'
+
     """The local database is `chain.json` in the real l2_db directory; `l1` is what a rebuild derives."""
 
     def __init__(self, root, values):
@@ -52,8 +54,14 @@ class World(base.Fake):
         (path / 'chain.json').write_text(json.dumps(chain))
 
     def finalize(self, *entries):
-        self.status.write_text(json.dumps({'finalized_settlements': [
-            {'l2_number': i + 1, 'l2_hash': e[0]} for i, e in enumerate(entries)]}))
+        listed = [{'l2_number': i + 1, 'l2_hash': e[0]} for i, e in enumerate(entries)]
+        if self.status_schema == 'v3':
+            lines = [json.dumps(x).encode() + b'\n' for x in listed]
+            self.status.with_name('status.settlements.jsonl').write_bytes(b''.join(lines))
+            self.status.write_text(json.dumps({'finalized_settlements_recent': listed[-64:], 'settlement_log': {
+                'file': 'status.settlements.jsonl', 'entries': len(lines), 'bytes': sum(map(len, lines)), 'digest': ''}}))
+            return
+        self.status.write_text(json.dumps({'finalized_settlements': listed}))
 
     def foreign(self, number, entry):
         self.accepted = {'statement': values_for(number, entry).hex(), 'commitment': PARENT_COMMITMENT}
@@ -190,6 +198,31 @@ class ForeignTest(unittest.TestCase):
         self.assertTrue(settler.cycle())
         self.assertEqual(s.statement_fields(world.accepted['statement'])['l2_number'], 2)
         self.assertEqual(self.local(), [GENESIS_HASH, block('b1')[0], block('a2')[0]])
+
+    def test_status_schema_v3_waits_and_recovers_the_same_way(self):
+        world = World(self.root, b'')
+        world.status_schema = 'v3'
+        world.finalize()
+        self.lost_race(world)
+        settler = self.settler(world)
+        self.assertFalse(settler.cycle())
+        self.assertFalse([c for c in world.calls if 'reconstruct' in c], 'no rebuild before finality')
+        world.finalize(block('b1'))
+        self.assertTrue(settler.cycle())
+        self.assertEqual(self.local(), [GENESIS_HASH, block('b1')[0]])
+
+    def test_follower_finals_reads_the_part_of_the_log_the_status_covers(self):
+        world = World(self.root, b'')
+        world.status_schema = 'v3'
+        world.finalize(block('b1'), block('b2'))
+        self.assertEqual(s.follower_finals(world.status), {1: block('b1')[0], 2: block('b2')[0]})
+        log = world.status.with_name('status.settlements.jsonl')
+        good = log.read_bytes()
+        log.write_bytes(good + b'{"torn')
+        self.assertEqual(len(s.follower_finals(world.status)), 2)
+        log.write_bytes(good[:-4])
+        with self.assertRaisesRegex(s.Halt, 'does not match'):
+            s.follower_finals(world.status)
 
     def test_off_rule_block_halts_and_keeps_the_database(self):
         world = World(self.root, b'')

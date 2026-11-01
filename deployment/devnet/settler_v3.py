@@ -232,6 +232,27 @@ class ProducerError(RuntimeError):
     """bloch-l2-produce-dev refused a command: retryable (bounded), never a permanent halt."""
 
 
+def follower_finals(status_path):
+    """{L2 number: L2 hash} of every finalized settlement in a follower status file: the list in schema v2, or
+    the log a schema v3 status names (the part the status covers; a crash can leave more after it)."""
+    status = json.loads(Path(status_path).read_text())
+    log_doc = status.get('settlement_log')
+    if log_doc is None:
+        return {x['l2_number']: x['l2_hash'] for x in status.get('finalized_settlements', [])}
+    name = log_doc['file']
+    if not name or '/' in name or name in ('.', '..'):
+        raise Halt('the follower status names a bad settlement log')
+    if not log_doc['entries']:
+        return {}
+    with open(Path(status_path).with_name(name), 'rb') as f:
+        data = f.read(log_doc['bytes'])
+    lines = data.splitlines()
+    if len(data) != log_doc['bytes'] or len(lines) != log_doc['entries']:
+        raise Halt('the follower settlement log does not match its status')
+    entries = [json.loads(line) for line in lines]
+    return {x['l2_number']: x['l2_hash'] for x in entries}
+
+
 class Halt(Exception):
     """Divergence that requires an operator; the unit must not auto-repair it."""
 
@@ -1370,8 +1391,7 @@ class Settler:
             return False
         fields = statement_fields(accepted['statement'])
         number, l2_hash = fields['l2_number'], fields['l2_hash']
-        status = json.loads(Path(recovery['follower_status']).read_text())
-        finals = {x['l2_number']: x['l2_hash'] for x in status.get('finalized_settlements', [])}
+        finals = follower_finals(recovery['follower_status'])
         if finals.get(number) != l2_hash:
             if self.waiting_for != l2_hash:
                 self.waiting_for = l2_hash
