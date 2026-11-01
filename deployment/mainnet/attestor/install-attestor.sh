@@ -74,7 +74,7 @@ usage() { sed -n '3,/^set -euo/p' "$0" | sed '$d'; }
 DRY=0
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad URL $1"; echo "${BASH_REMATCH[1]}"; }
-ip_of() { getent ahostsv4 "$1" | awk 'NR==1{print $1}'; }
+ip_of() { { getent ahostsv4 "$1" || true; } | awk 'NR==1{print $1}'; }
 
 cmd_install() {
   local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET= FEED_PORT= FEED_BIND=0.0.0.0 ANYMANIFEST=0

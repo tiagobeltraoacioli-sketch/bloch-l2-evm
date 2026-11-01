@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
 done
 die() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
+command -v python3 >/dev/null || die "python3 is missing: sudo apt install python3"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 
 # 1. bundle integrity
