@@ -54,6 +54,8 @@ READ_ONLY_METHODS = frozenset({
     'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality',
     # L1 (bloch-pos)
     'getchaininfo', 'getblockcount', 'getl2settlement', 'getutxos',
+    # Only with --l1-stuck-node.
+    'getblockbyid',
 })
 
 # ---- Pinned mainnet identity (Genesis-4; deployment/mainnet/sequencer_mainnet.py) ----
@@ -146,6 +148,8 @@ _COMMON: Dict[str, Any] = {
     # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
     'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
     'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
+    # --l1-stuck-node: docs/L1-STUCK-NODE-RUNBOOK.md. Epochs are finalized epochs gained by the reference.
+    'stuck_sustain_epochs': 3, 'stuck_parked_min': 32, 'stuck_min_samples': 3, 'stuck_max_gap_epochs': 2,
 }
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
@@ -298,6 +302,7 @@ def check_l1(client: Client, urls: List[str], p: Dict[str, Any], r: Report) -> L
             node['finalized_root'] = fin.get('root') if isinstance(fin, dict) else None
             node['slot'] = int(info['slot']) if 'slot' in info else None
             node['hard_forks'] = info.get('hard_forks')
+            node['block_id'] = info.get('block_id')
         except (RpcError, KeyError, TypeError, ValueError) as e:
             node['error'] = str(e)
             nodes.append(node)
@@ -328,6 +333,131 @@ def check_l1(client: Client, urls: List[str], p: Dict[str, Any], r: Report) -> L
     r.graded('l1_finality_lag', lag, p['l1_finality_epochs_warn'], p['l1_finality_epochs_crit'],
              f'L1 epoch {best["epoch"]}, finalized epoch {best["finalized_epoch"]} ({lag} epochs; 2 is normal)')
     return up
+
+
+# ------------------------------------------------------------------------------- L1 node on its own branch
+# The next two functions are identical to those in l1_stuck_check.py; test_l2_monitor.py fails if they differ.
+def stuck_metric(text: Optional[str], name: str) -> Optional[int]:
+    for line in (text or '').splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == name:
+            try:
+                return int(float(parts[1]))
+            except ValueError:
+                return None
+    return None
+
+
+def stuck_step(st: Optional[Dict[str, Any]], s: Dict[str, Any], p: Dict[str, Any]) -> Tuple[Dict[str, Any], int, str]:
+    """One sample of one node. Returns (new state, level, message). Pure: no I/O and no clock.
+
+    s: ref_finalized (None: no reference answered), down, finalized, parked (None: unknown),
+    has_ref_head (True, False, None: lookup failed), peers.
+    """
+    st = dict(st or {})
+    rf = s.get('ref_finalized')
+    if rf is None:
+        return st, UNKNOWN, 'no reference answers: not evaluated'
+    need, samples = p['stuck_sustain_epochs'], p['stuck_min_samples']
+    last = st.get('last_ref')
+    if last is not None and rf < last:
+        rf = last  # another reference answered, and it is behind the best one seen
+    st['last_ref'] = rf
+
+    def stop(name: str) -> None:
+        st.pop(name, None)
+
+    def tick(name: str) -> None:
+        clock = st.get(name) or {'base': rf, 'n': 0}
+        st[name] = {'base': clock['base'], 'n': clock['n'] + 1}
+
+    def held(name: str) -> bool:
+        clock = st.get(name)
+        return bool(clock) and clock['n'] >= samples and rf - clock['base'] >= need
+
+    if last is not None and rf - last > p['stuck_max_gap_epochs']:  # the monitor was away: nothing steady was seen
+        stop('parked')
+        stop('missing')
+    if s.get('down'):
+        stop('parked')  # a restart empties the parked set
+        stop('missing')
+        tick('down')
+        if held('down'):
+            return st, UNKNOWN, f'node has not answered while the reference finalized {need}+ epochs'
+        return st, OK, 'node does not answer (a restart?): not evaluated yet'
+    stop('down')
+
+    fin, parked, has_head = s['finalized'], s.get('parked'), s.get('has_ref_head')
+    if st.get('frozen_at') != fin or fin >= rf:
+        st['frozen_at'] = fin
+        stop('frozen')
+    tick('frozen')
+    if parked is not None and parked >= p['stuck_parked_min']:
+        tick('parked')
+    else:
+        stop('parked')
+    if has_head is False:
+        tick('missing')
+    elif has_head is True:
+        stop('missing')
+
+    view = f'finalized e{fin}, reference e{rf}, parked {"unknown" if parked is None else parked}, ' \
+           f'reference head {dict([(True, "known"), (False, "NOT known"), (None, "lookup failed")])[has_head]}, ' \
+           f'peers {"unknown" if s.get("peers") is None else s["peers"]}'
+    frozen, missing, steady = fin < rf and held('frozen'), held('missing'), held('parked')
+    if frozen and missing and steady:
+        return st, CRIT, f'STUCK on its own branch: {view}. A restart does not heal this; see the runbook'
+    if frozen and missing:
+        why = 'parked unknown: read the metrics to confirm' if parked is None else \
+            'parked below the stuck level: cut off from the reference, or not yet stuck'
+        return st, WARN, f'not following the reference ({why}): {view}'
+    if missing and rf - fin < need:  # further behind is an ordinary long sync
+        return st, WARN, f'finalizing, but the reference head stays unknown (a branch of its own?): {view}'
+    return st, OK, view
+
+
+def check_l1_stuck(client: Client, specs: List[str], state_path: Optional[str], l1_up: List[Dict[str, Any]],
+                   p: Dict[str, Any], fetch: Fetcher, r: Report) -> None:
+    """--l1-stuck-node NAME=RPC_URL[,METRICS_URL]: nothing is called without this option."""
+    if not specs:
+        return
+    if not state_path:
+        r.add('l1_stuck', UNKNOWN, '--l1-stuck-node needs --l1-stuck-state: nothing steady can be seen without it')
+        return
+    try:
+        state = json.loads(Path(state_path).read_text())
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    for i, spec in enumerate(specs):
+        name, rest = named(spec, f'node{i}')
+        url, _, metrics = rest.partition(',')
+        refs = [n for n in l1_up if n['url'] != url and n.get('block_id')]
+        ref = max(refs, key=lambda n: n['finalized_epoch']) if refs else None
+        s: Dict[str, Any] = {'ref_finalized': ref['finalized_epoch'] if ref else None}
+        try:
+            own = client.call(url, 'getchaininfo')
+            s['finalized'] = int(own['finalized']['epoch'])
+        except (RpcError, KeyError, TypeError, ValueError):
+            s['down'] = True
+        if not s.get('down'):
+            raw = fetch(metrics) if metrics else None
+            text = raw.decode(errors='replace') if raw else None
+            s.update(parked=stuck_metric(text, 'bloch_pos_blocks_parked'),
+                     peers=stuck_metric(text, 'bloch_pos_peer_count'), has_ref_head=None)
+            if ref:
+                try:
+                    s['has_ref_head'] = bool(client.call(url, 'getblockbyid', [ref['block_id']]))
+                except RpcError as e:
+                    s['has_ref_head'] = False if 'no block' in str(e) else None
+        state[name], level, message = stuck_step(state.get(name), s, p)
+        r.add(f'l1_stuck[{name}]', level, message)
+    try:
+        tmp = f'{state_path}.tmp'
+        Path(tmp).write_text(json.dumps(state))
+        os.replace(tmp, state_path)
+    except OSError as e:
+        r.add('l1_stuck_state', WARN, f'cannot keep the state file, so nothing steady can be seen: {e}')
 
 
 def check_gates(l1_up: List[Dict[str, Any]], p: Dict[str, Any], compiled: Dict[str, Any], now: float,
@@ -1152,6 +1282,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     backends = [named(s, f'rpc{i}') for i, s in enumerate(args.l2_rpc or [])]
     views = check_l2(client, backends, p, args.phase, now, r)
     l1_up = check_l1(client, args.l1_rpc or [], p, r)
+    check_l1_stuck(client, args.l1_stuck_node or [], args.l1_stuck_state, l1_up, p, fetch or http_fetcher(args.timeout), r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_height_runway(r.facts.get('l2_settled_number'), l1_up, p, r)
     check_escrow_and_backlog(with_l2, p, r)
@@ -1175,6 +1306,9 @@ def parse(argv: List[str]) -> argparse.Namespace:
                    help='prelaunch: an L2 at its pinned genesis with no settlement is expected, not an alert')
     a.add_argument('--l2-rpc', action='append', help='[NAME=]URL of a settled-RPC backend; repeat for each')
     a.add_argument('--l1-rpc', action='append', help='L1 bloch-pos RPC URL; repeat for each node')
+    a.add_argument('--l1-stuck-node', action='append',
+                   help='NAME=RPC_URL[,METRICS_URL] of an L1 node to check for being stuck on its own branch, against --l1-rpc')
+    a.add_argument('--l1-stuck-state', help='state file for --l1-stuck-node, kept between runs')
     a.add_argument('--follower-status', action='append', help='[NAME=]PATH of a native follower status.json')
     a.add_argument('--attest-drop', action='append', help='attestation drop: directory or http(s) base URL')
     a.add_argument('--unit', action='append', help='[NAME=]UNIT: systemd state + journal failure events')
