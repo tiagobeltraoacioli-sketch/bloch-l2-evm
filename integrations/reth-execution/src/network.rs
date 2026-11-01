@@ -107,7 +107,8 @@ impl L2Network {
     /// The provider configuration bound to this network's genesis.
     pub fn chain_spec(&self) -> Result<BlochChainSpec, BlockExecutionError> {
         let rules = match &self.next_rules {
-            Some(next) => RuleSchedule::new(self.rules.clone(), next.clone())?,
+            Some(next) => RuleSchedule::new(self.rules.clone(), next.clone())
+                .map_err(|_| BlockExecutionError::InvalidChainSpec(bloch_l2_evm::ChainSpecError::PartialNextRules))?,
             None => RuleSchedule::single(self.rules.clone()),
         };
         BlochChainSpec::scheduled(rules, self.domain, self.genesis_timestamp)

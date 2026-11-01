@@ -160,6 +160,41 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(json.loads((d / 'deposits.json').read_text()), PENDING)
         self.assertTrue((d / 'native-request.txt').read_text().endswith('77' * 32 + '\n1\n0\n1\n'))
 
+    def test_an_unsettled_block_is_rewound_when_l1_moves_the_program(self):
+        class Swap(FakeProducer):
+            rules = {}
+
+            def head(self, o):
+                return {**super().head(o), 'rules': self.rules.get(len(self.chain) - 1, 'base')}
+
+            def extend(self, o):
+                out = super().extend(o)
+                self.rules[out['number']] = o['--rule-set']
+                return {**out, 'rules': o['--rule-set']}
+
+            def rewind(self, o):
+                assert int(o['--number']) == len(self.chain) - 1 and o['--hash'] == self.chain[-1]['hash']
+                self.chain.pop()
+                return {'number': len(self.chain) - 1}
+
+        producer = Swap()
+        seq, _, rpc = self.make([view()] * 3, producer, next_elf_keccak='ab' * 32)
+        old = seq.step()
+        self.assertEqual(producer.rules[1], 'base')
+        moved = {**view(), 'program': {'elf_keccak': 'ab' * 32}}
+        rpc.views = [moved] * 3
+        producer.calls.clear()
+        job = seq.step()
+        self.assertIn('rewind', producer.calls)
+        self.assertEqual(producer.rules[1], 'next')
+        self.assertEqual(job['number'], 1)
+        kept = [p for p in Path(old['directory']).parent.iterdir() if '.superseded-' in p.name]
+        self.assertEqual(len(kept), 1)
+        # The next step reuses the block under the next rules.
+        producer.calls.clear()
+        self.assertEqual(seq.step()['hash'], job['hash'])
+        self.assertNotIn('rewind', producer.calls)
+
     def test_minority_views_are_never_used(self):
         bad = view(network='00' * 32)
         seq, producer, _ = self.make([view(), bad, RuntimeError('down')])

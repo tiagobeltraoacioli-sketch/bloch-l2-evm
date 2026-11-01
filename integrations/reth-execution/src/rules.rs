@@ -20,7 +20,7 @@
 use alloy_evm::block::BlockExecutionError;
 use alloy_primitives::Bytes;
 use bloch_l2_evm::{chainspec::fee_vault_sweep_code, ChainSpec};
-use reth_provider::{BlockNumReader, StateProvider, StateProviderFactory};
+use reth_provider::{BlockNumReader, StateProvider};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -121,10 +121,7 @@ impl RuleSchedule {
     /// Learn the switch from a database: the lowest block whose state holds the
     /// sweep code. Clears it when the database no longer holds any such block.
     /// Returns the first next-rule block, if any. Needs an archival database.
-    pub fn discover<P>(&self, provider: &P) -> Result<Option<u64>, BlockExecutionError>
-    where
-        P: StateProviderFactory + BlockNumReader,
-    {
+    pub fn discover(&self, provider: &crate::BlochProviderFactory) -> Result<Option<u64>, BlockExecutionError> {
         if self.next.is_none() {
             return Ok(None);
         }

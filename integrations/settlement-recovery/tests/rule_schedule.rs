@@ -103,6 +103,7 @@ fn h(v: &Value, k: &str) -> B256 {
     v[k].as_str().unwrap_or_else(|| panic!("{k} in {v}")).parse().unwrap()
 }
 
+#[derive(Debug)]
 struct Produced {
     number: u64,
     parent: B256,
@@ -213,7 +214,7 @@ impl Chain {
         assert_eq!(block["rules"], if next { "next" } else { "base" });
         let spec = if next { ChainSpec::mainnet() } else { ChainSpec::mainnet_v1() };
         let payload = (!txs.is_empty()).then(|| {
-            let out = self.root.path().join(format!("da-{number}-{}.hex", h(&block, "hash")));
+            let out = self.root.path().join(format!("da-{number}-{}.hex", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             produce(&["da", "--target", &self.db, "--number", &number.to_string(), "--out", out.to_str().unwrap()]).unwrap();
             hex::decode(std::fs::read_to_string(&out).unwrap().trim()).unwrap()
         });
@@ -367,12 +368,11 @@ fn a_rewound_chain_equals_a_chain_that_never_built_the_block() {
         chain.extend(2, Some("base"), vec![], (1, 1), &[transfer(0)]).unwrap();
     }
     // Several rounds, so a leftover index or trie node from the removed block would show.
-    for round in 0..3u64 {
+    for _ in 0..3 {
         let (parent, root) = (rewound.parent, rewound.parent_root);
         let doomed = rewound.extend(3, Some("base"), vec![], (1, 1), &[transfer(1), transfer(2)]).unwrap();
         produce(&["rewind", "--target", &rewound.db, "--number", "3", "--hash", &hex::encode(doomed.hash)]).unwrap();
         (rewound.parent, rewound.parent_root) = (parent, root);
-        let _ = round;
     }
     let a = rewound.extend(3, Some("base"), vec![], (1, 1), &[transfer(1)]).unwrap();
     let b = straight.extend(3, Some("base"), vec![], (1, 1), &[transfer(1)]).unwrap();

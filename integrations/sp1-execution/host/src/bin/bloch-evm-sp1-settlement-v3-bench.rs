@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Execution-only cycle benchmark for the settlement V3 guest (no proof).
 //!
-//! usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet]
+//! usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet] [after-mainnet-v1|after-mainnet]
 //!
 //! Builds a deterministic block (one deposit plus N transfers; one deposit,
 //! a deployment and N contract calls; or one deposit and N outbox
@@ -12,7 +12,10 @@
 //! count (cycles), syscalls, SP1 gas, execution wall time and this process's
 //! peak RSS. Run one configuration per process so peak RSS is per block.
 //! Program identities in the context are synthetic: execution does not depend
-//! on them, and no verifying key is derived (that would dominate RSS).
+//! on them, and no verifying key is derived (that would dominate RSS). A last
+//! argument makes the measured block a block 2, after an empty block 1 under those
+//! rules: `mainnet` after `after-mainnet-v1` is the block that installs the fee-vault
+//! sweep at the switch, after `after-mainnet` a block on the installed code.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -45,8 +48,8 @@ fn peak_rss_bytes() -> u64 {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet]";
-    if args.len() != 3 && args.len() != 4 {
+    let usage = "usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet] [after-mainnet-v1|after-mainnet]";
+    if !(3..=5).contains(&args.len()) {
         return Err(usage.into());
     }
     let n: u64 = args[1].parse().map_err(|_| usage)?;
@@ -56,6 +59,12 @@ async fn main() -> Result<()> {
         "mainnet" => ChainSpec::mainnet(),
         _ => return Err(usage.into()),
     };
+    match args.get(4).map(String::as_str) {
+        None => {}
+        Some("after-mainnet-v1") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet_v1()).map_err(|_| usage)?,
+        Some("after-mainnet") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet()).map_err(|_| usage)?,
+        _ => return Err(usage.into()),
+    }
     let domain = if spec.chain_id == bloch_l2_evm::chainspec::MAINNET_CHAIN_ID {
         bloch_l2_evm::chainspec::MAINNET_DOMAIN
     } else {
@@ -109,8 +118,9 @@ async fn main() -> Result<()> {
     }
     expected.check_expected(public.as_slice())?;
     println!(
-        "{{\"kind\":\"{}\",\"n\":{},\"user_txs\":{},\"withdrawal_count\":{},\"block_gas_used\":{},\"body_bytes\":{},\"witness_bytes\":{},\"cycles\":{},\"syscalls\":{},\"sp1_gas\":{},\"execute_seconds\":{:.2},\"peak_rss_bytes\":{}}}",
+        "{{\"kind\":\"{}\",\"after\":\"{}\",\"n\":{},\"user_txs\":{},\"withdrawal_count\":{},\"block_gas_used\":{},\"body_bytes\":{},\"witness_bytes\":{},\"cycles\":{},\"syscalls\":{},\"sp1_gas\":{},\"execute_seconds\":{:.2},\"peak_rss_bytes\":{}}}",
         args[0],
+        args.get(4).map_or("genesis", String::as_str),
         n,
         expected.user_tx_count,
         expected.withdrawal_count,

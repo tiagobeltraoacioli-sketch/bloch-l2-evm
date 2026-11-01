@@ -1069,8 +1069,11 @@ async fn main() -> Result<()> {
                     if number != head_number {
                         let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
                         // Which rules each served block ran, from the blocks themselves.
-                        if let Some(from) = spec.rules().discover(&factory)? {
-                            println!("rules: next from block {from}");
+                        let known = spec.rules().next_from();
+                        match spec.rules().discover(&factory) {
+                            Ok(from) if from != known => println!("rules: next from block {}", from.map_or("none".to_string(), |n| n.to_string())),
+                            Ok(_) => {}
+                            Err(error) => println!("rules: could not read the switch: {error}"),
                         }
                         state.set_canonical_head(header.clone());
                         served_head.store(number, Ordering::Release);

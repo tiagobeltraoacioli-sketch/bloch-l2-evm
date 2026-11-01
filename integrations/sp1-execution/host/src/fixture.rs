@@ -278,6 +278,10 @@ pub(crate) fn execute_fixture_with(
     execute_fixture_in(spec, domain, body, anchor_root)
 }
 
+/// Rules of an empty block 1 to run before the measured block, so the fixture is
+/// block 2: a benchmark then sees a parent under those rules instead of the genesis.
+pub static FIRST_BLOCK_RULES: std::sync::OnceLock<ChainSpec> = std::sync::OnceLock::new();
+
 pub(crate) fn execute_fixture_in(
     spec: &ChainSpec,
     domain: B256,
@@ -285,11 +289,26 @@ pub(crate) fn execute_fixture_in(
     anchor_root: B256,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
     let mut pre_state = genesis_v2(spec, 0)?;
+    if let Some(first) = FIRST_BLOCK_RULES.get() {
+        pre_state.commit_root();
+        let parent = node_head(first, domain, &pre_state)?;
+        let context = BlockContext {
+            number: 1,
+            timestamp: match first.block_derivation {
+                Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
+                None => 1,
+            },
+            base_fee_per_gas: first.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
+            prevrandao: B256::repeat_byte(7),
+            anchor_root,
+        };
+        execute_node_block(first, domain, &mut pre_state, &context, &NodeBodyV2::default())?;
+    }
     let previous_state_root = pre_state.commit_root();
     let parent = node_head(spec, domain, &pre_state)?;
     // Fixtures anchor to native slot 1 (`l1_slot` of the synthetic contexts).
     let context = BlockContext {
-        number: 1,
+        number: parent.number + 1,
         timestamp: match spec.block_derivation {
             Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
             None => 1,
