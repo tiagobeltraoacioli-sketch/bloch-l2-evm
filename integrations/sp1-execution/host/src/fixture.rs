@@ -315,7 +315,7 @@ pub(crate) fn execute_fixture_in(
         number: parent.number + 1,
         timestamp: match spec.block_derivation {
             Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
-            None => 1,
+            None => parent.timestamp + 1,
         },
         base_fee_per_gas: spec.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
         prevrandao: B256::repeat_byte(7),
