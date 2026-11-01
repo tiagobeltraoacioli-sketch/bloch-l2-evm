@@ -103,6 +103,19 @@ pub fn check_log_present(status_path: &Path, status: &Value) -> Result<(), Strin
     Ok(())
 }
 
+/// Whether a v3 status names, at or above the verified count, a log that does not continue what was read: the
+/// same count with another digest, or bytes below the verified size with more entries.
+pub fn log_rewritten(status: &Value, cursor: &Cursor) -> bool {
+    let Some(read) = cursor.digest else { return false };
+    let log = &status["settlement_log"];
+    let (Some(total), Some(size)) = (log["entries"].as_u64(), log["bytes"].as_u64()) else { return false };
+    if total < cursor.count {
+        return false;
+    }
+    let same_digest = log["digest"].as_str().and_then(|d| d.parse::<B256>().ok()) == Some(read);
+    (total == cursor.count && !same_digest) || size < cursor.bytes
+}
+
 /// What a read of the log from its start would read, to avoid repeating a refused read: the status's
 /// description of the log and the file's size and time. `None` for a status without a log.
 pub fn log_identity(status_path: &Path, status: &Value) -> Option<String> {

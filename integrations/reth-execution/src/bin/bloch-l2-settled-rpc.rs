@@ -1054,7 +1054,18 @@ fn verified_levels(
             bail!("{why}");
         }
     }
-    let delta = match settlement_log::read_delta(status_path, &mut status, cursor) {
+    // Same settlements in other bytes (a follower build that writes other JSON): read the whole log once and
+    // compare it with this chain below. Fewer settlements than verified stays a regression.
+    let first_try = if settlement_log::log_rewritten(&status, cursor) { None } else { Some(cursor) };
+    let start = settlement_log::Cursor::default();
+    let cursor_used = first_try.unwrap_or(&start);
+    let identity = if first_try.is_none() { settlement_log::log_identity(status_path, &status) } else { identity };
+    if let (Some(identity), Some((seen, why))) = (&identity, &*refused_log) {
+        if identity == seen {
+            bail!("{why}");
+        }
+    }
+    let delta = match settlement_log::read_delta(status_path, &mut status, cursor_used) {
         Ok(delta) => delta,
         Err(why) => {
             // Content only: an I/O error may clear with nothing else changing.
@@ -1110,7 +1121,10 @@ fn verified_levels(
             }
         }
     };
-    Ok(Some(Levels { finalized: best, safe, safe_refused, status, new_settlements: delta.entries, cursor: delta.cursor }))
+    let mut new_settlements = delta.entries;
+    // After a whole-log read, what this process already adopted is not new.
+    new_settlements.retain(|entry| entry["l2_number"].as_u64().is_some_and(|n| n > cursor.count));
+    Ok(Some(Levels { finalized: best, safe, safe_refused, status, new_settlements, cursor: delta.cursor }))
 }
 
 /// Whether the status proves the local L2 genesis final: the follower reports
@@ -1503,7 +1517,9 @@ async fn main() -> Result<()> {
                                     lag_seen = Some(lag.number);
                                 }
                                 let mut view = finality.write().expect("finality lock");
-                                view["status"] = status_signal("lagging", lag.written_at, lag.schema.as_deref());
+                                // `behind`: nothing published yet in this process, so the levels are closed. `lagging`: they stand.
+                                let state = if levels_closed.finalized.load(Ordering::Acquire) { "behind" } else { "lagging" };
+                                view["status"] = status_signal(state, lag.written_at, lag.schema.as_deref());
                                 view["status"]["missing_settlement"] = lag.number.into();
                             } else {
                                 println!("finality not advanced: {error}");
