@@ -38,8 +38,10 @@ class Starvation(F.ForeignTest):
         settler = self.settler(world)
         self.assertFalse(settler.cycle())
         world.during_prove = None
+        world.l1 = []  # the rolling settlements below start again at block 1, so the L1 list must match their numbers
         finalized = self.rolling_foreign(world, settler, 12)
         rebuilds = [c for c in world.calls if 'reconstruct' in c]
+        self.assertEqual(self.local()[-1], finalized[-2][0], 'the database ends on the newest finalized settlement')
         self.assertTrue(rebuilds and self.events('foreign-settlement-recovered'),
                         f'after {len(finalized)} foreign settlements, {len(finalized) - 1} of them finalized, the worker never '
                         f'rebuilt: local chain {[h[:4] for h in self.local()]}, events '

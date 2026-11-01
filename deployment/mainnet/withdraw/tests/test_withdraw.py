@@ -275,7 +275,8 @@ class TamperedProof(Base):
         self.assertFalse(os.path.exists(self.out))
 
     def test_garbage_answers_are_refused(self):
-        for answer in (b'not json', b'[1]', b'{"result":{"a":1,"a":2}}', b'{"result":null}'):
+        self.assertEqual(self.fetch(self.url(lambda m, p: b'not json' if m.startswith('bloch') else self.l1)), tool.NOT_READY)
+        for answer in (b'[1]', b'{"result":{"a":1,"a":2}}', b'{"result":null}'):
             with self.subTest(answer):
                 self.assertEqual(self.fetch(self.url(lambda m, p: answer if m.startswith('bloch') else self.l1)), tool.REFUSED)
 
