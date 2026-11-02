@@ -2,10 +2,13 @@
 //! Reconstruct a selected persisted block's sparse witness from canonical genesis.
 //! Local selection is trusted; this is not native deposit/finality authentication.
 use crate::BlochProviderFactory;
-use bloch_execution_artifact::{ExecutionArtifact, Result};
+use alloy_primitives::B256;
+use bloch_execution_artifact::{ExecutionArtifact, Result, SparseExecutionArtifact};
 use bloch_l2_evm::{
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
-    BlockContext,
+    node_primitives::{NodeBodyV2, NodeHeaderV2},
+    sparse_witness::{generate_sparse_node_witness, BlockHashes},
+    BlockContext, ChainSpec, L2State,
 };
 use reth_chainspec::EthChainSpec;
 use reth_provider::{BlockNumReader, BlockReader, ChainSpecProvider, HeaderProvider};
@@ -23,6 +26,36 @@ fn invalid(message: &'static str) -> Box<dyn std::error::Error> {
 /// Complexity includes all transactions/state in at most 4096 selected blocks;
 /// this is not a hostile-input CPU or accumulated-state memory sandbox.
 pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> Result<ExecutionArtifact> {
+    export_with(source, number, |state, rules, domain, context, parent, header, body| {
+        let (witness, recorded) = generate_node_batch_witness(state, rules, domain, context, body)?;
+        if recorded.header != *header {
+            return Err(invalid("exported witness execution differs from stored block"));
+        }
+        ExecutionArtifact::new(rules, domain, parent, header, body, witness)
+    })
+}
+
+/// CANDIDATE: [`export_canonical_witness`] for the sparse-witness guest (lazy
+/// `BLOCKHASH`). The same replay and checks; only the witness differs. The
+/// generator also runs the complete-witness path and refuses any difference.
+pub fn export_canonical_sparse_witness(source: &BlochProviderFactory, number: u64) -> Result<SparseExecutionArtifact> {
+    export_with(source, number, |state, rules, domain, context, parent, header, body| {
+        let (witness, recorded) =
+            generate_sparse_node_witness(state, rules, domain, context, body, BlockHashes::Lazy)?;
+        if recorded.header != *header {
+            return Err(invalid("exported witness execution differs from stored block"));
+        }
+        SparseExecutionArtifact::new(rules, domain, parent, header, body, witness)
+    })
+}
+
+#[allow(clippy::type_complexity)]
+fn export_with<T>(
+    source: &BlochProviderFactory,
+    number: u64,
+    make: impl FnOnce(&L2State, &ChainSpec, B256, &BlockContext, &NodeHeaderV2, &NodeHeaderV2, &NodeBodyV2) -> Result<T>,
+) -> Result<T> {
+    let mut make = Some(make);
     if number == 0 || number > MAX_REPLAY_BLOCKS {
         return Err(invalid("proof export height outside bounded non-genesis prefix"));
     }
@@ -78,11 +111,8 @@ pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> R
             if selected != expected_selected {
                 return Err(invalid("selected export header changed during reconstruction"));
             }
-            let (witness, recorded) = generate_node_batch_witness(&state, rules, domain, &context, body)?;
-            if recorded.header != *header {
-                return Err(invalid("exported witness execution differs from stored block"));
-            }
-            exported = Some(ExecutionArtifact::new(rules, domain, &parent, header, body, witness)?);
+            let make = make.take().ok_or_else(|| invalid("proof export selected twice"))?;
+            exported = Some(make(&state, rules, domain, &context, &parent, header, body)?);
         }
         let outcome = execute_node_block(rules, domain, &mut state, &context, body)?;
         if outcome.header != *header {

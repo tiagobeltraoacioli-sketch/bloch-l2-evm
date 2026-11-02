@@ -13,6 +13,9 @@
 //! `--mainnet-v1` selects the same mainnet path under `ChainSpec::mainnet_v1`,
 //! the rules of the program the activation pinned: the settler uses it for blocks
 //! settled before the native gate replaces that program.
+//!
+//! CANDIDATE: `--sparse` after either mainnet flag selects the sparse-witness guest
+//! and its artifact (`produce export --witness sparse`). The statement is the same.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -30,6 +33,14 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// The program the harness qualifies, selected once from the command line.
 static MAINNET: std::sync::OnceLock<Option<ChainSpec>> = std::sync::OnceLock::new();
+
+/// CANDIDATE: `--sparse` after the rules flag selects the sparse-witness guest
+/// (`settlement_v3_mainnet_sparse`) and its artifact. Mainnet path only.
+static SPARSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn sparse() -> bool {
+    SPARSE.get().copied().unwrap_or(false)
+}
 
 fn mainnet() -> bool {
     matches!(MAINNET.get(), Some(Some(_)))
@@ -53,7 +64,9 @@ fn domain() -> B256 {
 }
 
 fn program_name() -> &'static str {
-    if mainnet() {
+    if sparse() {
+        "settlement_v3_mainnet_sparse"
+    } else if mainnet() {
         "settlement_v3_mainnet"
     } else {
         "settlement_v3"
@@ -66,11 +79,18 @@ struct Qualification {
     execution: fixture::Fixture,
     context: SettlementContextV2,
     expected: SettlementStatementV3,
+    /// CANDIDATE: the sparse witness, written to the guest instead of
+    /// `execution.witness` (`--sparse`).
+    sparse: Option<bloch_l2_evm::sparse_witness::SparseBatchWitness>,
 }
 
-fn stdin(fixture: &fixture::Fixture, context: SettlementContextV2) -> SP1Stdin {
+fn stdin(qualification: &Qualification) -> SP1Stdin {
+    let (fixture, context) = (&qualification.execution, qualification.context);
     let mut stdin = SP1Stdin::new();
-    stdin.write(&fixture.witness);
+    match &qualification.sparse {
+        Some(witness) => stdin.write(witness),
+        None => stdin.write(&fixture.witness),
+    }
     stdin.write(&fixture.context);
     stdin.write_vec(alloy_rlp::encode(&fixture.body));
     stdin.write(&context);
@@ -94,6 +114,32 @@ fn expect_in(spec: &ChainSpec, domain: B256, execution: fixture::Fixture, contex
         execution,
         context,
         expected,
+        sparse: None,
+    })
+}
+
+/// [`expect_in`] for the sparse-witness guest: the statement comes from the
+/// stateless sparse verifier with lazy `BLOCKHASH`, the guest's own procedure.
+fn expect_sparse(
+    execution: fixture::Fixture,
+    witness: bloch_l2_evm::sparse_witness::SparseBatchWitness,
+    context: SettlementContextV2,
+) -> Result<Qualification> {
+    use bloch_l2_evm::sparse_witness::{execute_settlement_statement_v3_sparse, BlockHashes};
+    let expected = execute_settlement_statement_v3_sparse(
+        &spec(),
+        domain(),
+        &witness,
+        &execution.context,
+        &execution.body,
+        context,
+        BlockHashes::Lazy,
+    )?;
+    Ok(Qualification {
+        execution,
+        context,
+        expected,
+        sparse: Some(witness),
     })
 }
 
@@ -158,11 +204,43 @@ fn native_artifact_qualification(
         return Err(io::Error::other("invalid native request position").into());
     }
     let previous_settlement = hash(7, true)?;
-    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact_in(artifact, &spec(), domain())?;
-    if (artifact.header().number == 1) != (previous_settlement == B256::ZERO) {
+    let (artifact, sparse_witness) = if sparse() {
+        let loaded = bloch_evm_sp1_host::artifact::load_selected_sparse_artifact_in(artifact, &spec(), domain())?;
+        let witness = loaded.witness();
+        // The complete witness is not used on this path: `stdin` and `expect_in`
+        // take the sparse one. An empty placeholder keeps one fixture type.
+        let placeholder = bloch_l2_evm::proving::BatchWitness {
+            prev_state_root: witness.prev_state_root,
+            new_state_root: witness.new_state_root,
+            proof: Default::default(),
+            pre_accounts: Vec::new(),
+            absent_accounts: Vec::new(),
+        };
+        let execution = fixture::Fixture {
+            witness: placeholder,
+            context: loaded.context().clone(),
+            body: loaded.body().clone(),
+            expected: loaded.expected(),
+            parent: loaded.parent().clone(),
+            header: loaded.header().clone(),
+        };
+        (execution, Some(witness.clone()))
+    } else {
+        let loaded = bloch_evm_sp1_host::artifact::load_selected_artifact_in(artifact, &spec(), domain())?;
+        let execution = fixture::Fixture {
+            witness: loaded.witness().clone(),
+            context: loaded.context().clone(),
+            body: loaded.body().clone(),
+            expected: loaded.expected(),
+            parent: loaded.parent().clone(),
+            header: loaded.header().clone(),
+        };
+        (execution, None)
+    };
+    if (artifact.header.number == 1) != (previous_settlement == B256::ZERO) {
         return Err(io::Error::other("only L2 block 1 may have no previous settlement").into());
     }
-    if artifact.context().anchor_root != hash(2, false)? {
+    if artifact.context.anchor_root != hash(2, false)? {
         return Err(io::Error::other("artifact anchor is not the native-selected source block").into());
     }
     let (inbox_count, consumed_start, consumed_end) = if fields.len() == 11 {
@@ -176,19 +254,12 @@ fn native_artifact_qualification(
     };
     // V3: user transactions are allowed. Deposits must still be exactly the
     // consumed inbox range.
-    if consumed_end.checked_sub(consumed_start) != Some(artifact.body().deposits.len() as u64)
+    if consumed_end.checked_sub(consumed_start) != Some(artifact.body.deposits.len() as u64)
         || consumed_end > inbox_count
     {
         return Err(io::Error::other("artifact deposits do not match the consumed inbox range").into());
     }
-    let execution = fixture::Fixture {
-        witness: artifact.witness().clone(),
-        context: artifact.context().clone(),
-        body: artifact.body().clone(),
-        expected: artifact.expected(),
-        parent: artifact.parent().clone(),
-        header: artifact.header().clone(),
-    };
+    let execution = artifact;
     let context = SettlementContextV2 {
         network: hash(0, false)?,
         genesis: hash(1, false)?,
@@ -204,7 +275,10 @@ fn native_artifact_qualification(
         consumed_start,
         consumed_end,
     };
-    expect(execution, context)
+    match sparse_witness {
+        Some(witness) => expect_sparse(execution, witness, context),
+        None => expect(execution, context),
+    }
 }
 
 fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification> {
@@ -234,7 +308,7 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
+    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1 [--sparse]] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
     let selected = match args.first().map(String::as_str) {
         Some("--mainnet") => Some(ChainSpec::mainnet()),
         Some("--mainnet-v1") => Some(ChainSpec::mainnet_v1()),
@@ -243,7 +317,15 @@ async fn main() -> Result<()> {
     if selected.is_some() {
         args.remove(0);
     }
+    let sparse_selected = args.first().map(String::as_str) == Some("--sparse");
+    if sparse_selected {
+        if selected.is_none() {
+            return Err("--sparse applies to the mainnet program path only".into());
+        }
+        args.remove(0);
+    }
     MAINNET.set(selected).expect("program selected once");
+    SPARSE.set(sparse_selected).expect("witness selected once");
     if args.first().map(String::as_str) == Some("identity") {
         return print_identity(args.get(1).filter(|_| args.len() == 2).ok_or(
             "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1] identity TRUSTED_SETTLEMENT_V3_ELF",
@@ -270,7 +352,7 @@ async fn main() -> Result<()> {
     let elf = Elf::from(fs::read(elf_path)?);
     let trusted = TrustedProgram::from_trusted_elf(elf.clone()).await?;
     let qualification = qualification(fixture_name, trusted.identity())?;
-    let (fixture, context, expected) = (&qualification.execution, qualification.context, qualification.expected);
+    let expected = qualification.expected;
     println!("OFFLINE QUALIFICATION ONLY: no native source authority, consensus activation, finality or payouts");
     println!(
         "Expected settlement V3 statement: user_tx_count={} deposits_hash={:?} transactions_root={:?} withdrawal_root={:?} withdrawal_count={}",
@@ -284,7 +366,7 @@ async fn main() -> Result<()> {
     if mode == "execute" {
         let executor = LightProver::new().await;
         let started = Instant::now();
-        let (public, report) = executor.execute(elf, stdin(fixture, context)).await?;
+        let (public, report) = executor.execute(elf, stdin(&qualification)).await?;
         if report.exit_code != 0 {
             return Err(io::Error::other("settlement V3 guest execution failed").into());
         }
@@ -313,7 +395,7 @@ async fn main() -> Result<()> {
     let prover = ProverClient::builder().cpu().build().await;
     let key = prover.setup(elf).await?;
     let started = Instant::now();
-    let proof = prover.prove(&key, stdin(fixture, context)).groth16().await?;
+    let proof = prover.prove(&key, stdin(&qualification)).groth16().await?;
     let qualified = trusted.verify_groth16_settlement_v3(proof.clone(), &expected)?;
     if qualified.canonical_proof_bytes()?.len() != 356 {
         return Err(io::Error::other("unexpected canonical Groth16 proof length").into());

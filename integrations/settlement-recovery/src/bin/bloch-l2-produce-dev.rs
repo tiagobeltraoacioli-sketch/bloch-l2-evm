@@ -35,7 +35,7 @@ use bloch_settlement_recovery::reconstruct::{
 };
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
-    canonical::rewind_canonical_head, prepare_genesis, proof_export::export_canonical_witness, BlochChainSpec,
+    canonical::rewind_canonical_head, prepare_genesis, proof_export::{export_canonical_sparse_witness, export_canonical_witness}, BlochChainSpec,
     BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
 };
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
@@ -63,7 +63,7 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
                               [--timestamp-rule FROM:GENESIS:SLOT_MS --anchor-slot N]
                               [--rule-set base|next]
   bloch-l2-produce-dev rewind --target DIR --number N --hash HEX [--respool DIR]
-  bloch-l2-produce-dev export --target DIR --number N --out FILE
+  bloch-l2-produce-dev export --target DIR --number N --out FILE [--witness complete|sparse]
   bloch-l2-produce-dev head   --target DIR
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
   bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
@@ -475,20 +475,32 @@ fn run(args: &[String]) -> Result<String, String> {
                       "rewound_hash": hex::encode(expected), "respooled": respooled}).to_string())
         }
         "export" => {
-            only(rest, &["--target", "--number", "--out"])?;
+            only(rest, &["--target", "--number", "--out", "--witness"])?;
+            let sparse = match option(rest, "--witness") {
+                Err(_) => false,
+                Ok("complete") => false,
+                Ok("sparse") => true,
+                Ok(other) => return Err(format!("--witness must be complete or sparse, not {other}")),
+            };
             let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
             let out = PathBuf::from(option(rest, "--out")?);
             let factory = open(&target, &runtime, false)?;
-            let artifact = export_canonical_witness(&factory, number).map_err(|e| e.to_string())?;
-            let bytes = artifact.encode().map_err(|e| e.to_string())?;
+            // CANDIDATE: `--witness sparse` writes the artifact of the sparse-witness guest.
+            let (bytes, hash, anchor) = if sparse {
+                let artifact = export_canonical_sparse_witness(&factory, number).map_err(|e| e.to_string())?;
+                (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root)
+            } else {
+                let artifact = export_canonical_witness(&factory, number).map_err(|e| e.to_string())?;
+                (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root)
+            };
             let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
             file.write_all(&bytes).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             File::open(out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))
                 .and_then(|d| d.sync_all())
                 .map_err(|e| e.to_string())?;
-            Ok(json!({"number": number, "hash": hex::encode(artifact.header().hash()),
-                      "anchor": hex::encode(artifact.context().anchor_root), "bytes": bytes.len()})
+            Ok(json!({"number": number, "hash": hex::encode(hash),
+                      "anchor": hex::encode(anchor), "bytes": bytes.len(), "sparse": sparse})
             .to_string())
         }
         "da" => {
