@@ -836,9 +836,9 @@ resumes from the accepted head; run gate R-1 again first.
 
 ## P9. Monitor
 
-Run once by hand as a gate, then install the 60 s timer (units in `kit/monitor/`; D11 sets the alert targets). The env file drops `--l2-rpc B=`: the settled RPC binds loopback only, so A cannot reach B on 18955. Each command is one block:
-
 L1 monitor (agent 187, `kit/l1_monitor.py`, pinned in `GO-LIVE-PINS.sha256`): install it next to the L2 monitor and feed its report in with `--report l1=/var/lib/bloch-l2-monitor/l1-monitor.report.json:180`, as `docs/L1-MONITOR.md` describes (copy from `/home/ubuntu/l2-golive-next/kit/`, not from a worktree). It reads the settler's `rpc_urls` and goes CRIT when a quorum of them sits on a branch apart from the one finalizing furthest.
+
+Run once by hand as a gate, then install the 60 s timer (units in `kit/monitor/`; D11 sets the alert targets). The env file drops `--l2-rpc B=`: the settled RPC binds loopback only, so A cannot reach B on 18955. Each command is one block:
 
 ```
 sudo useradd --system --user-group --no-create-home --home-dir /var/lib/bloch-l2-monitor --shell /usr/sbin/nologin bloch-l2-monitor
