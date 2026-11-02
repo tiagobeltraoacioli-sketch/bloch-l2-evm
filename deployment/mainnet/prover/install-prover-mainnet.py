@@ -13,7 +13,7 @@ needs no inbound port besides sshd; outbound only Docker's pinned Gnark image
 Run as root from a directory holding:
   bloch-evm-sp1-settlement-v3   host built by build-program.sh (features source-settlement,node-artifact)
   settlement_v3_mainnet         guest ELF, SHA-256 203114bf...c473 (build-reproducible.sh)
-  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet"), SHA-256 3c11d9be...c8e5
+  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet"), SHA-256 183bd655...abe5
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
@@ -62,7 +62,7 @@ GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473
 # Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
 # Agent 93's measured low-memory setting, used unless --prover-env is given.
 DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
-REMOTE_PROVER_SHA256 = 'ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a'
+REMOTE_PROVER_SHA256 = '183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab'
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {

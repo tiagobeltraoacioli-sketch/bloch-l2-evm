@@ -6,6 +6,8 @@ The v2.1 plan is kept as `docs/L2-MAINNET-GO-LIVE-V21.md`. Do not mix the two: t
 
 **The build.** L2 build commit (`l2_commit`) `17383feb88602926c26559802b95dee273484cd5`, native 78d4921c, settlement-recovery lock `a3c38a46…`. Built reproducibly on three hosts (209 twice, 136, and independently 45.77 by agent 124). **Unsigned.** Release `bloch-l2-2026-11-02-next-native-78d4921c`, assembled independently on 209 and 136 with the same result; its `SHA256SUMS` is the signing target `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (D7). Source of every hash: `agents/PINS-NEXT.md`; if it disagrees with this file, it wins, and this file must be fixed.
 
+**Kit tip moved after this plan was written:** see the newest change notice in `agents/PINS-NEXT.md` for the tip and the kit-file pins (F8 port, prover pins, release target in `GO-LIVE-PINS.sha256`). Binaries and the signing target `116bfaba…` did not move.
+
 **Kit source.** `~/worktrees/go-live-next-r7-20261102`, branch `codex/go-live-next-r7-20261102`: kit tip `9645efc` (583d8ec plus agent 118's gateway commits 3de3a3e and 51cbda1) plus documentation only. Check before staging that no kit file differs from 9645efc:
 
 ```
@@ -137,7 +139,7 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 | `deployment/mainnet/install-settler-mainnet.py` | `0fefcbf47092f3383538a9db6e17cd44a5526c2bf50d89794fcbd749198b9215` |
 | `deployment/mainnet/l2_reorg_recover.py` | `7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57` (the settler installer pins it) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d022527d9d2d18b344ac0ec8be9f471ba73848a828993db78d4fe877b598baf8` |
-| `deployment/devnet/remote_prover.py` | `ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
+| `deployment/devnet/remote_prover.py` | `183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
 | `deployment/devnet/settler_v3.py` | `8861b0bc3578b29dcc6306138cb4fdc46dce42935ac721bfbc80cd5eff5bcf97` |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
@@ -168,7 +170,7 @@ As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd
 | R1 | First real crossing of HF1–HF3 by this follower | Any halt in P3 is an absolute NO-GO | P3 |
 | R2 | DA signature after HF2 | Untested; inferred from code | Rehearse one 0x15 on a private net before D10 |
 | R3 | Gas-heavy 15M blocks unmeasured; stuck-block recovery not rehearsed | A proof that OOMs makes the settler retry the same committed block forever | Before D10 |
-| R4 | Statement and block-1 references of P6 were measured on v2.1 (`fb0d5313…`) | Expected equal (no execution rule changed, agent 124) but not re-measured on `e3f1a290…` | A difference is NO-GO until explained |
+| R4 | Statement and block-1 references of P6 were measured on v2.1 (`fb0d5313…`) | **Re-measured equal on `e3f1a290…`** (agent 65, recorded view, execute only); the live P6 read stays the owner's | A difference is NO-GO until explained |
 
 ## 4. G0: HF3 finalized cleanly (entry gate for everything below)
 
@@ -476,7 +478,7 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 
 ## P5. Prover (D2; on A unless decided otherwise)
 
-**Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `ba309912…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
+**Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `183bd655…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
 
 ```
 scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-next/
@@ -508,7 +510,7 @@ GO when:
 - the dry-run prints `memory_ok: true`, the identity equals the pins (ELF keccak `6e4c8440…`, policy
   `154869964f…747d`) the slice is 100 G / 32 threads, `prover_env` is `ELEMENT_THRESHOLD: 268435456` and `timeout_seconds` 5400;
 - `authorized_keys` ends in `bloch-l2-mainnet-settler` with `from="127.0.0.1"`;
-- the `sha256` block shows `remote_prover.py` `ba309912…`.
+- the `sha256` block shows `remote_prover.py` `183bd655…`.
 
 NO-GO: an identity mismatch, `remote_prover.py is … not the pinned …`, or MemAvailable < 120 GiB.
 
@@ -578,7 +580,7 @@ sudo python3 -c "import json;c=json.load(open('/etc/bloch-l2-mainnet-settler/con
    - `rpc-check` `ok: true` (3/3 same view, quorum 2);
    - dry-run `ok: true`, identity checked (mainnet, async, activated, attestor set);
    - with an empty inbox: L2 block 1 = `0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab25`,
-     state root `8a1c475a…136c`, SP1 execute matched. These references were measured with v2.1's producer (R4).
+     state root `8a1c475a…136c`, SP1 execute matched. These references were measured with v2.1's producer and re-measured on 2026-11-02 with this build's producer `e3f1a290…` and the kit `settler_v3.py`, mainnet kind, against stubs replaying the recorded view: same block 1, same state root, same native request, same `block.artifact`, the same expected statement line, 529,004 instructions (agent 65; execute only, no proof, no live mainnet read).
 
 3. Then P5 (prover install), then **dry-run with the Groth16 proof** (about 5–15 min for this empty block, about
    20 GiB prover RSS plus 18.5 GiB gnark):
