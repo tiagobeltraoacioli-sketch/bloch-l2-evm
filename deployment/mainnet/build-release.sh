@@ -30,10 +30,13 @@
 # (43be49f5..., native 78b7343a) is kept for the historical rehearsal/build.sh only and cannot build
 # this release.
 #
-# FORK CANDIDATE (codex/fork-candidate-l2-r7-20261102): the default native is the candidate of the L2 program
-# swap, bloch-sis-pow codex/fork-candidate-native-r7-20261102 27f195d7 (guest activation 0fbd07a6 + node RC
-# c6f20bd2 + hf-gates discover fix + PROGRAM_NEXT = sparse ELF 78c533fa; L2_NEXT_PROGRAM_EPOCH and L2_PROGRAM_ROLLBACK_EPOCH inert), with its one pinned lock
-# follower-rpc/settlement-recovery.native-27f195d7.Cargo.lock (sha256 ab7b3a09...): the 78d4921c lock plus
+# FORK CANDIDATE v2 (codex/fork-candidate-l2-r8-20261102): the default native is the candidate of the L2 program
+# swap, bloch-sis-pow codex/fork-candidate-native-r8-20261102 f12b4113: v1 27f195d7 (guest activation 0fbd07a6 + node RC
+# c6f20bd2 + hf-gates discover fix + PROGRAM_NEXT = sparse ELF 78c533fa) + the reserved DA slot 1ca3d382 + PROGRAM_FALLBACK =
+# complete ELF 3ad3a4f0 (d6a704b8) + L1 forced inclusion 3533cd56. L2_NEXT_PROGRAM_EPOCH, L2_PROGRAM_ROLLBACK_EPOCH,
+# L2_DA_RESERVED_SLOT_EPOCH and L2_FORCED_INCLUSION_EPOCH are all inert. Its one pinned lock is still
+# follower-rpc/settlement-recovery.native-27f195d7.Cargo.lock (sha256 ab7b3a09...): the v2 merges change no native
+# Cargo.toml or Cargo.lock, so the same lock resolves it. It is the 78d4921c lock plus
 # pqcrypto-mlkem and the mesh transport's dependencies, nothing else moved. NATIVE_COMMIT=78d4921c... with
 # the 78d4921c lock still builds the release this branch came from. A native commit that arms the gate is
 # another commit, and needs its own lock line here. build.json records every L1 activation epoch the binaries were compiled with
@@ -42,7 +45,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-CANDIDATE_NATIVE_COMMIT=27f195d73856bf93cb09434c2bc7b9b402798367
+CANDIDATE_NATIVE_COMMIT=f12b4113bfcba79ab21181cf5128602fc9550bb4
 CANDIDATE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 NATIVE_COMMIT=${NATIVE_COMMIT:-$CANDIDATE_NATIVE_COMMIT}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
@@ -77,7 +80,9 @@ if [ "$NATIVE_COMMIT" = "$CANDIDATE_NATIVE_COMMIT" ]; then
     || die "$NATIVE_LOCK is not the pinned lock $CANDIDATE_LOCK_SHA256 of native $CANDIDATE_NATIVE_COMMIT"
   grep -q 'pub const L2_NEXT_PROGRAM_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
     && grep -q 'pub const L2_PROGRAM_ROLLBACK_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
-    || die "the candidate native tree must keep the program gates inert"
+    && grep -q 'pub const L2_DA_RESERVED_SLOT_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
+    && grep -q 'pub const L2_FORCED_INCLUSION_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
+    || die "the candidate native tree must keep the program, DA-slot and forced-inclusion gates inert"
 fi
 [ "$(git -C "$N" rev-parse HEAD)" = "$NATIVE_COMMIT" ] || die "native checkout is not $NATIVE_COMMIT"
 [ "$(git -C "$RETH" rev-parse HEAD)" = "$RETH_COMMIT" ] || die "reth snapshot is not $RETH_COMMIT"

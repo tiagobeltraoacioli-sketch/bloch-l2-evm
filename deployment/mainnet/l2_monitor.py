@@ -99,6 +99,11 @@ GATE_CONSTANTS = {
     # The L2 program swap and its rollback (inert until a release arms them; l1_gates.py reads both).
     'l2_next_program': 'L2_NEXT_PROGRAM_EPOCH',
     'l2_program_rollback': 'L2_PROGRAM_ROLLBACK_EPOCH',
+    # Fork candidate v2: the reserved DA slot and L1 forced inclusion (both inert). Forced inclusion changes the
+    # transition the follower runs; the DA slot only refuses blocks, but an L1 that arms it against an inert build
+    # still means the build is not the release that matches the fork notice.
+    'l2_da_reserved_slot': 'L2_DA_RESERVED_SLOT_EPOCH',
+    'l2_forced_inclusion': 'L2_FORCED_INCLUSION_EPOCH',
 }
 V2_COMPILED_GATES: Dict[str, Any] = {
     'HF1_CLAIM_FINALITY_EPOCH': 7180, 'HF1_FROZEN_FINALITY_SET_EPOCH': 7180, 'HF1_OWN_TARGET_VOTES_EPOCH': 7186,
@@ -107,6 +112,7 @@ V2_COMPILED_GATES: Dict[str, Any] = {
     'HF3_SLH_SUITE_EPOCH': 7360, 'HF3_PQ_MIGRATION_EPOCH': 7360,
     # Absent before the program-swap build, which is the same as inert: an L2 build without them halts at an armed swap.
     'L2_NEXT_PROGRAM_EPOCH': 'inert', 'L2_PROGRAM_ROLLBACK_EPOCH': 'inert',
+    'L2_DA_RESERVED_SLOT_EPOCH': 'inert', 'L2_FORCED_INCLUSION_EPOCH': 'inert',
 }
 
 FINALITY_CLOSED_CODE = -32001  # bloch-l2-settled-rpc: safe and finalized refused without a valid follower status

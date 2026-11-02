@@ -560,6 +560,21 @@ class MonitorTests(unittest.TestCase):
             bj.write_text(json.dumps({'l1_activation_epochs': {'L2_NEXT_PROGRAM_EPOCH': 10060}}))
             self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
 
+    def test_an_armed_da_slot_or_forced_inclusion_the_l2_build_holds_inert_is_critical(self):
+        for gate, const in (('l2_da_reserved_slot', 'L2_DA_RESERVED_SLOT_EPOCH'),
+                            ('l2_forced_inclusion', 'L2_FORCED_INCLUSION_EPOCH')):
+            w = healthy()
+            for node in w['l1'].values():
+                node['info']['hard_forks'][gate] = {'activation_epoch': 10060, 'active': False}
+            with tempfile.TemporaryDirectory() as d:
+                bj = Path(d, 'build.json')
+                bj.write_text(json.dumps({'l1_activation_epochs': {const: 'inert'}}))
+                r, _ = run(w, '--build-json', str(bj))
+                self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
+                self.assertIn(gate, next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build'))
+                bj.write_text(json.dumps({'l1_activation_epochs': {const: 10060}}))
+                self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
+
     def test_l1_without_hard_forks_warns(self):
         w = healthy()
         for node in w['l1'].values():
