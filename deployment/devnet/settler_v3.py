@@ -126,6 +126,7 @@ the worker (exit 3) for operator review. Dependency-free Python 3.9+. The
 worker never reads signing keys itself; with user transactions it invokes the
 pinned DA signer (whose keystore holds only DA fee funds).
 """
+import itertools
 import hashlib
 import json
 import os
@@ -170,6 +171,9 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # The getl2settlement fields the worker reads; everything else (native_height,
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sequencer_policy  # noqa: E402  (installed beside this file)
+
 SPOOL_READ_LIMIT = 16_384  # the producer's MAX_POOL_ENTRIES
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
@@ -849,9 +853,12 @@ class Settler:
                 raise Halt('foreign_recovery needs follower_state and follower_status')
             if not isinstance(recovery.get('keep', 2), int) or recovery.get('keep', 2) < 1:
                 raise Halt('foreign_recovery.keep must be a positive integer')
-        budgets = [self.c.get(key) for key in ('max_block_instructions', 'max_block_sp1_gas')]
-        if budgets != [None, None] and not all(isinstance(b, int) and not isinstance(b, bool) and b > 0 for b in budgets):
-            raise Halt('max_block_instructions and max_block_sp1_gas go together, as positive integers')
+        for key in ('max_block_sp1_gas', 'max_block_instructions', 'local_prove_max_sp1_gas'):
+            value = self.c.get(key)
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+                raise Halt(f'{key} must be a positive integer')
+        if self.c.get('max_block_instructions') and not self.c.get('max_block_sp1_gas'):
+            raise Halt('max_block_instructions needs max_block_sp1_gas: the budget is in SP1 gas')
         self.work = Path(self.c['workdir'])
         self.rebuild_discarded_at = None
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
@@ -915,7 +922,7 @@ class Settler:
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            if self.c['user_transactions'] and self.c.get('max_block_instructions'):
+            if self.c.get('max_block_sp1_gas'):
                 return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
@@ -939,9 +946,18 @@ class Settler:
             entries.append((path, raw))
         return entries
 
+    def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):
+        """What the producer's selection would do with these transactions. Native execution, nothing is committed."""
+        pool = directory / 'dry.json'
+        pool.write_text(json.dumps(raws))
+        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+        args[0] = 'select'
+        return self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
+                            '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
+
     def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
-        """Build the block from exactly these transactions on a throwaway copy of the database and run the guest in
-        execute mode. Returns (cost, where 1.0 is the budget, or None when the time limit was hit, producer report). No proof, no lock."""
+        """Build the block from exactly these transactions, deposits included, on a throwaway copy of the database and run
+        the guest in execute mode. Returns (Cost, or None when the time limit was hit, producer report). No proof, no lock."""
         scratch = deposits.parent / f'preflight-{tag}'
         shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True)
@@ -972,59 +988,62 @@ class Settler:
             instructions = re.findall(r'(\d+) instructions', text)
             if result.returncode or not gas or not instructions:
                 return None, block  # no cost from this guest and host: treat the block as over any budget
-            # Memory follows instructions, time follows SP1 gas: 1.0 is the budget.
-            return max(int(instructions[-1]) / self.c['max_block_instructions'], int(gas[-1]) / self.c['max_block_sp1_gas']), block
+            return sequencer_policy.Cost(int(gas[-1]), int(instructions[-1])), block
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
     def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
-        """Commit only a block whose guest execution fits `max_block_instructions` and `max_block_sp1_gas`.
+        """Commit only a block the policy of `sequencer_policy.py` chose: measured in SP1 gas with its deposits.
 
-        Declared EVM gas does not bound proving cost: a 15M-gas block ranges from about 7M to 6.9G zkVM instructions.
-        Measured on the 100 GiB prover: peak memory follows the instruction count, proving time follows SP1 gas, which
-        also counts precompiles. So the block is first built on a copy of the database and measured. An over-budget block
-        is cut to its longest fitting prefix. The transaction that broke the budget stays in the spool for a later block,
-        unless it does not fit even alone: then it can never be settled and moves to the quarantine directory."""
-        entries = self.spool_entries()
-        if not entries:
-            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
-        fits = lambda cost: cost is not None and cost <= 1  # noqa: E731
-        self.preflight_request = self.preflight_source
-        measure = lambda raws, tag: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, tag)  # noqa: E731
+        A block whose deposits alone are over the budget still commits, because L1 names exactly those deposits for the next
+        settlement; it carries nothing else, and the operator's exit is a bigger prover. See that module."""
+        entries = self.spool_entries() if self.c['user_transactions'] else []
+        pending = json.loads(deposits.read_text())
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
-        cost, full = measure([raw for _, raw in entries], 'full')
-        included = list(full.get('included', []))
-        finished = [e['hash'] for e in full.get('dropped', []) if e.get('hash')]
-        keep = len(included)
-        if not fits(cost):
-            low, high = 0, len(included)  # fits(low) by assumption, not fits(high) as measured
-            while high - low > 1:
-                middle = (low + high) // 2
-                if fits(measure([by_hash[h][1] for h in included[:middle]], 'cut')[0]):
-                    low = middle
-                else:
-                    high = middle
-            keep = low
-            offender = included[keep] if included else None
-            log('block-over-budget', number=number, cost=cost, keep=keep, of=len(included), offender=offender)
-            if offender and not fits(measure([by_hash[offender][1]], 'alone')[0]):
-                quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
+        if not entries and not pending:
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
+        self.preflight_request = self.preflight_source
+        tags = itertools.count()
+        planner = self.planner()
+        plan = planner.plan(
+            [raw for _, raw in entries],
+            lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
+            lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
+            number, has_deposits=bool(pending))
+        if plan.deposits_over_budget:
+            atomic_write(deposits.parent / 'deposits-over-budget.json', json.dumps(
+                {'number': number, 'sp1_gas': plan.base.sp1_gas if plan.base else None,
+                 'instructions': plan.base.instructions if plan.base else None, 'budget': planner.budget,
+                 'deposits': len(pending)}, sort_keys=True) + '\n')
+        quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
+        for name, reason in plan.quarantine:
+            if name in by_hash:
                 quarantine.mkdir(exist_ok=True, mode=0o700)
                 try:
-                    by_hash[offender][0].replace(quarantine / by_hash[offender][0].name)
+                    by_hash[name][0].replace(quarantine / by_hash[name][0].name)
                 except FileNotFoundError:
                     pass
-                log('tx-quarantined', number=number, hash=offender)
-        chosen = included[:keep]
+                log('tx-quarantined', number=number, hash=name, reason=reason)
+        if plan.held:
+            log('txs-held', number=number, held=[{'hash': h, 'reason': r} for h, r in plan.held[:32]], count=len(plan.held))
         pool = deposits.parent / 'selected.json'
-        atomic_write(pool, json.dumps([by_hash[h][1] for h in chosen]))
+        atomic_write(pool, json.dumps(plan.chosen))
         args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
         block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
                              '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
-        for name in chosen + finished:  # committed: what the producer does for a spool directory
+        chosen_hashes = [keccak256(bytes.fromhex(raw)).hex() for raw in plan.chosen]
+        for name in chosen_hashes + plan.finished:  # committed: what the producer does for a spool directory
             if name in by_hash:
                 by_hash[name][0].unlink(missing_ok=True)
+        planner.committed(plan, number)
+        log('block-plan', number=number, runs=plan.runs, exhausted=plan.exhausted, transactions=len(plan.chosen),
+            sp1_gas=plan.cost.sp1_gas if plan.cost else None, base_sp1_gas=plan.base.sp1_gas if plan.base else None,
+            required_tip=planner.required_tip())
         return block
+
+    def planner(self):
+        sequencer_policy.set_hash(keccak256)
+        return sequencer_policy.Planner(self.c, self.work / 'sequencer-policy.json', self.clock, log)
 
     def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
@@ -1166,12 +1185,19 @@ class Settler:
         return proof
 
     def local_proof_fits(self, directory):
-        """Whether the local prover may try this block: `local_prove_max_instructions`
-        against the count the guest reported in this block's execute stage."""
+        """Whether the local prover may try this block: `local_prove_max_sp1_gas` and `local_prove_max_instructions`
+        against what the guest reported in this block's execute stage. A deposit-only block over the budget comes here too:
+        it goes to the remote prover, or waits for `l2_stuck_block.py import-proof`, without running the host out of memory."""
+        log_file = directory / 'execute.log'
+        limit = self.c.get('local_prove_max_sp1_gas')
+        if limit is not None:
+            gas = re.findall(r'Settlement V3 cost: gas=(\d+)', log_file.read_text(errors='replace')) if log_file.exists() else []
+            if not gas or int(gas[-1]) > limit:
+                log('local-proof-refused', directory=str(directory), sp1_gas=int(gas[-1]) if gas else None, limit=limit)
+                return False
         limit = self.c.get('local_prove_max_instructions')
         if limit is None:
             return True
-        log_file = directory / 'execute.log'
         found = re.findall(r'(\d+) instructions', log_file.read_text()) if log_file.exists() else []
         instructions = int(found[-1]) if found else None
         if instructions is not None and instructions <= limit:

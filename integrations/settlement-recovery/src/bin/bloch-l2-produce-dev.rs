@@ -60,6 +60,7 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
   bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
                               [--timestamp-rule FROM:GENESIS:SLOT_MS --anchor-slot N]
+  bloch-l2-produce-dev select ... as extend, with --txs: reports the selection and commits nothing
   bloch-l2-produce-dev export --target DIR --number N --out FILE
   bloch-l2-produce-dev head   --target DIR
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
@@ -302,7 +303,7 @@ fn run(args: &[String]) -> Result<String, String> {
             writer.commit().map_err(|e| e.to_string())?;
             Ok(json!({"number": 0, "hash": hex::encode(hash)}).to_string())
         }
-        "extend" => {
+        "extend" | "select" => {
             only(
                 rest,
                 &[
@@ -349,6 +350,9 @@ fn run(args: &[String]) -> Result<String, String> {
                 }
             };
             let Some(pool) = pool else {
+                if command == "select" {
+                    return Err("select needs --txs".into());
+                }
                 let tip = coordinator.extend(parent, attributes, vec![]).map_err(|e| e.to_string())?;
                 let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                           "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
@@ -366,6 +370,11 @@ fn run(args: &[String]) -> Result<String, String> {
             let next_base_fee = u128::from(rules().next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
             let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
             let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
+            if command == "select" {
+                // What `extend` would select, per transaction: nothing is committed or pruned.
+                let selection = coordinator.select_pending(&attributes, &candidates, limits).map_err(|e| e.to_string())?;
+                return Ok(selection_report(&selection, below_min_tip).to_string());
+            }
             let (tip, selection) = coordinator
                 .extend_with_pending(parent, attributes, &candidates, limits)
                 .map_err(|e| e.to_string())?;
@@ -395,20 +404,10 @@ fn run(args: &[String]) -> Result<String, String> {
                       "declared_gas": selection.declared_gas, "bytes": selection.bytes,
                       "limits": {"max_gas": limits.max_gas, "max_bytes": limits.max_bytes,
                                  "max_txs": limits.max_transactions},
-                      "included": selection.hashes.iter().map(hex::encode).collect::<Vec<_>>(),
-                      "deferred": selection.deferred.iter().map(|d| json!({"hash": hex::encode(d.hash),
-                                  "reason": d.reason.as_str()})).collect::<Vec<_>>(),
-                      "dropped": selection.dropped.iter().map(|d| json!({"index": d.index,
-                                  "hash": d.hash.map(hex::encode), "reason": d.reason.describe()}))
-                                  .collect::<Vec<_>>(),
-                      "below_min_tip": below_min_tip,
-                      "tx_stats": selection.stats.iter().map(|t| json!({"hash": hex::encode(t.hash),
-                                  "sender": hex::encode(t.sender), "gas_used": t.gas_used,
-                                  "effective_tip": t.effective_tip.to_string(),
-                                  "fresh_slots": t.fresh_slots.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>(),
-                                  "cleared_slots": t.cleared_slots.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>()}))
-                                  .collect::<Vec<_>>(),
                       "pruned": pruned});
+            if let (Some(fields), serde_json::Value::Object(report)) = (out.as_object_mut(), selection_report(&selection, below_min_tip)) {
+                fields.extend(report);
+            }
             report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
             Ok(out.to_string())
         }
@@ -670,6 +669,20 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
 
 /// Native inbox records as L2 deposit mints. The native settlement rejects any
 /// body that does not mint exactly these records, so no field is defaulted.
+fn selection_report(selection: &bloch_l2_evm::node_execution::select::BlockSelection, below_min_tip: usize) -> serde_json::Value {
+    let slots = |items: &[(Address, u64)]| items.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>();
+    json!({"included": selection.hashes.iter().map(hex::encode).collect::<Vec<_>>(),
+           "deferred": selection.deferred.iter().map(|d| json!({"hash": hex::encode(d.hash),
+                       "reason": d.reason.as_str()})).collect::<Vec<_>>(),
+           "dropped": selection.dropped.iter().map(|d| json!({"index": d.index,
+                       "hash": d.hash.map(hex::encode), "reason": d.reason.describe()})).collect::<Vec<_>>(),
+           "below_min_tip": below_min_tip,
+           "tx_stats": selection.stats.iter().map(|t| json!({"hash": hex::encode(t.hash),
+                       "sender": hex::encode(t.sender), "gas_used": t.gas_used,
+                       "effective_tip": t.effective_tip.to_string(),
+                       "fresh_slots": slots(&t.fresh_slots), "cleared_slots": slots(&t.cleared_slots)})).collect::<Vec<_>>()})
+}
+
 fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> {
     let bytes = fs::read(path).map_err(|e| format!("deposits: {e}"))?;
     let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|e| format!("deposits: {e}"))?;
