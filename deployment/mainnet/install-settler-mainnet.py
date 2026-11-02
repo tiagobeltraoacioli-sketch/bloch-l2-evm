@@ -19,6 +19,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       script hash to send the DA fee budget to.
   sudo python3 install-settler-mainnet.py configure [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
+        [--max-block-sp1-gas N]
       Runs, as the settler user, `--check-rpc` and the read-only `--dry-run` (SP1
       execute of the next L2 block against the live request) on a pending config, and
       only then writes config.json (user transactions OFF unless asked). A failed check
@@ -200,6 +201,9 @@ def configure(args):
             'min_block_interval_seconds': int(option(args, '--min-block-interval', '0'))}
            if '--skip-idle-blocks' in args else {}),
         'local_prove_max_instructions': LOCAL_PROVE_MAX_INSTRUCTIONS,
+        # The sequencer's proving budget in SP1 gas (sequencer_policy.py, report 90: 150M was the measured design).
+        # Absent unless given: user transactions stay off until the owner sets it.
+        **({'max_block_sp1_gas': int(option(args, '--max-block-sp1-gas'))} if option(args, '--max-block-sp1-gas') else {}),
         'da': {'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
                'genesis': str(rel / 'mainnet.manifest'), 'funding_pubkey': str(PUBLIC / 'da.pubkey.hex'),
                'keystore_dir': str(DA_DIR), 'passphrase_file': str(STATE / 'da.passphrase'),

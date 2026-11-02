@@ -80,6 +80,12 @@ class Installer(unittest.TestCase):
         self.assertTrue(config['next_program']['guest'].endswith('/settlement_v3_mainnet_sparse'))
         self.assertTrue(config['next_program']['l2_config'].endswith('/l2-config.next.bin'))
 
+    def test_the_proving_budget_is_set_only_when_given(self):
+        import json
+        with mock.patch.object(m.subprocess, 'run', return_value=Done()):
+            m.configure(['--max-block-sp1-gas', '150000000'])
+        self.assertEqual(json.loads((self.etc / 'config.json').read_text())['max_block_sp1_gas'], 150_000_000)
+
     def test_the_sparse_guest_pin_is_the_settlers(self):
         spec = importlib.util.spec_from_file_location('settler_v3', HERE.parent / 'devnet' / 'settler_v3.py')
         settler = importlib.util.module_from_spec(spec)
