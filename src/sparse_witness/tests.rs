@@ -418,7 +418,7 @@ fn a_forged_slot_value_is_refused_at_every_level_of_the_chain_of_trust() {
         Err(SparseNodeError::Verify(SparseVerifyError::AccountNotProven(_)))
     ));
     let mut forged = witness.clone();
-    forged.pre_accounts[index].code.push(0x00);
+    forged.pre_accounts[index].code_hash = alloy_primitives::keccak256([0x00]);
     assert!(matches!(
         chain.verify(&forged, &context, &body, BlockHashes::Lazy),
         Err(SparseNodeError::Verify(SparseVerifyError::AccountNotProven(_)))
