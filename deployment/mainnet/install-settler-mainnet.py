@@ -10,7 +10,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
       l2_reorg_recover.py (SHA-256 7c918bb7...) and, for the program swap (CANDIDATE, native
-      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 78c533fa...).
+      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 bc35e838...).
       The host of this kit serves both programs: the activated one with --mainnet-v1, the
       next one with --mainnet --sparse (see "Program swap" in SETTLER-RUNBOOK.md).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
@@ -71,7 +71,7 @@ PINS = {
     'l2_reorg_recover.py': '7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (TBD-owner) and with the audit's fixes.
-    'settlement_v3_mainnet_sparse': '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
+    'settlement_v3_mainnet_sparse': 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048',
 }
 # This kit's host takes --mainnet for the NEXT rules; the activated program is --mainnet-v1.
 ACTIVATED_PROVER_ARGS = ['--mainnet-v1']

@@ -260,18 +260,19 @@ MAINNET_NEXT = {
 }
 
 # CANDIDATE, not scheduled: the same next rules proved by the sparse-witness guest
-# (`settlement_v3_mainnet_sparse` 78c533fa, the pinned container build of bloch-l2-evm
-# codex/sparse-audit-r7-20261102 b772f2d, code-by-hash witness, artifact format SPARSE:2).
-# The native fork candidate (bloch-sis-pow codex/fork-candidate-native-r7-20261102) names this ELF
-# in `PROGRAM_NEXT`. Same configuration; ELF and keys differ.
+# (`settlement_v3_mainnet_sparse` bc35e838, the pinned container build of bloch-l2-evm
+# codex/forced-guest-r8-20261102 595d914: code-by-hash witness and L1 forced inclusion, artifact
+# format SPARSE:3). The native candidate (bloch-sis-pow codex/forced-guest-native-r8-20261102) names
+# this ELF in `PROGRAM_NEXT`. Its configuration is the next rules with forced inclusion (tag 4,
+# b4663ab8); the complete-witness fallback keeps 975ec258 and does not implement forced inclusion.
 # A `next_program` with `"witness": "sparse"` must match this pin, exports the sparse artifact
 # (`produce export --witness sparse`) and runs the prover with `--mainnet --sparse`.
 MAINNET_NEXT_SPARSE = {
-    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
-    'elf_keccak': '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
-    'vkey_koalabear': '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
-    'vkey_bn254': '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910',
-    'guest_sha256': '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
+    'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
+    'elf_keccak': '1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18',
+    'vkey_koalabear': '6a140f117b84dd524b3681b9447422e5281451295144b5747197d0df5db6afc9',
+    'vkey_bn254': '00d4281e23ee13754a59b40dcc47422e55028a2534512d5d38cbe86fddb6afc9',
+    'guest_sha256': 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048',
 }
 
 # CANDIDATE, not scheduled: native `PROGRAM_FALLBACK`, which `L2_PROGRAM_ROLLBACK_EPOCH` (inert) installs
