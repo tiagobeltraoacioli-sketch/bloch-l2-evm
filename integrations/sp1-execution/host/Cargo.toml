@@ -21,6 +21,16 @@ path = "src/bin/bloch-evm-sp1-sparse-bench.rs"
 required-features = ["sparse-witness"]
 
 [[bin]]
+name = "bloch-evm-sp1-sparse-diff"
+path = "src/bin/bloch-evm-sp1-sparse-diff.rs"
+required-features = ["sparse-witness", "node-artifact"]
+
+[[bin]]
+name = "bloch-evm-sp1-sparse-code-cost"
+path = "src/bin/bloch-evm-sp1-sparse-code-cost.rs"
+required-features = ["sparse-witness"]
+
+[[bin]]
 name = "bloch-evm-sp1-artifact"
 path = "src/bin/bloch-evm-sp1-artifact.rs"
 required-features = ["node-artifact"]
