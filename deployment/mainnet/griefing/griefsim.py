@@ -33,7 +33,7 @@ TIP_FLOOR = 100_000_000  # next RPC default, 0.1 gwei
 WRITE_PRICE = 2 * 10**14  # 200 microBLCH per new slot, see the report
 LIMITS = dict(min_tip_wei=TIP_FLOOR, preflight_max_runs=16, preflight_max_seconds=600, max_tx_gas=5_000_000, strike_cooldown_blocks=32)
 RATES = dict(fresh_slots_per_block=128, fresh_slots_per_sender=256, fresh_sender_window_blocks=96,
-             congestion_denominator=8, congestion_target_share=0.5, fresh_slot_price_wei=WRITE_PRICE)
+             congestion_denominator=8, congestion_target_share=0.5, congestion_max_tip_wei=100 * 10**9, fresh_slot_price_wei=WRITE_PRICE)
 DESIGNS = {
     # guest, planner config. None: the settler with no budget, as v2.1 runs.
     'D0-complete-open': ('complete', None),
@@ -494,7 +494,7 @@ def deposits_code(sim, contracts=64):
     out(event='verdict', attack='deposits-code', design=sim.design, contracts=contracts, fee_blch=spent(sim), reply=reply)
 
 
-def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, honest_every=1):
+def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, saturate=0, max_fee=100.0):
     """Keep the proving budget full with reads of a grown real token, and send one honest transfer each block."""
     token = sim.n['busdc']
     key = sim.funded_attacker(1_000_000_000_000)
@@ -504,7 +504,7 @@ def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, honest_every
     filler = Filler(sim, key, griefer, lambda n: sel('fillApprove(address,uint256)') + cat(w(token), w(n)), 30_000)
     while slots < fill_slots:
         added = filler.block()
-        if not added:
+        if not added and filler.done:
             out(event='growth-stopped', slots=slots, reasons=filler.refusals)
             break
         slots += added
@@ -512,23 +512,32 @@ def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, honest_every
     grown_fee = spent(sim)
     out(event='grown', slots=slots, fee_blch=grown_fee, number=sim.number, required_tip=sim.tip())
     # Size one attacking read batch to the budget.
-    room = BUDGET * 9 // 10
+    # Saturating leaves no room for anyone else: the attacker outbids by one wei and fills what is left.
+    room = BUDGET * 98 // 100 if saturate else BUDGET * 9 // 10
     batch = read_batch or 1_000
     for _ in range(5):
         raw = sim.tx(key, griefer, sel('readAllowances(address,address,uint256,uint256)') + cat(w(token), w(griefer), w(1), w(batch)), 5_000_000, tip=sim.tip())
         cost = sim.cost([raw])
         sim.resync([g.address(key)])
+        used = sim.select([raw])['tx_stats'][0]['gas_used']
+        sim.resync([g.address(key)])
+        if used > 4_800_000:  # at the gas cap
+            batch = batch * 4_700_000 // used
+            continue
         if cost and abs(cost.sp1_gas - room) < room // 10:
             break
-        batch = int(batch * room / (cost.sp1_gas if cost else room * 2))
+        batch = min(int(batch * room / (cost.sp1_gas if cost else room * 2)), batch * 4_700_000 // used)
     # One transaction stops at the gas cap: send as many as the budget holds, each reading other slots.
-    copies = max(1, round(room / cost.sp1_gas)) if cost else 1
+    copies = max(1, (room - 3_000_000) // (cost.sp1_gas - 3_000_000)) if cost else 1
     out(event='batch', batch=batch, copies=copies, sp1=cost.sp1_gas if cost else None)
     waits, honest_paid = [], 0
     pending = None
     pending_since = None
     for i in range(blocks):
-        tip = sim.tip()
+        if spent(sim) - grown_fee > max_fee:
+            out(event='attacker-out-of-budget', i=i)
+            break
+        tip = sim.tip() + (1 if saturate else 0)
         raws = [sim.tx(key, griefer, sel('readAllowances(address,address,uint256,uint256)') + cat(w(token), w(griefer), w(1 + k * batch), w(batch)), 5_000_000, tip=tip) for k in range(copies)]
         if pending is None:
             sim.resync([g.address(sim.honest)])
@@ -542,7 +551,7 @@ def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, honest_every
             honest_paid += next(int(t['gas_used']) * (reply['base_fee'] + int(t['effective_tip'])) for t in stats if t['hash'] == g.keccak(bytes.fromhex(pending)).hex())
             pending = None
         out(event='congestion-block', i=i, tip=tip, attacker_block_fee_blch=spent(sim) - before, attacker_in=sum(r in chosen for r in raws), sp1=plan.cost.sp1_gas if plan else None, base_fee=reply['base_fee'], waits=len(waits))
-    out(event='verdict', attack='congestion', design=sim.design, blocks=blocks, slots=slots, grown_fee_blch=grown_fee, fee_blch=spent(sim) - grown_fee, tip_end=sim.tip(), honest_mean_wait=sum(waits) / max(len(waits), 1), honest_max_wait=max(waits or [0]), honest_mean_fee_blch=honest_paid / max(len(waits), 1) / COIN, honest_included=len(waits))
+    out(event='verdict', attack='congestion', design=sim.design, blocks=blocks, slots=slots, grown_fee_blch=grown_fee, fee_blch=spent(sim) - grown_fee, tip_end=sim.tip(), honest_mean_wait=sum(waits) / max(len(waits), 1), honest_max_wait=max(waits or [0]), honest_mean_fee_blch=honest_paid / max(len(waits), 1) / COIN, honest_included=len(waits), honest_pending_blocks=(blocks - pending_since) if pending else 0)
 
 
 def spam(sim, count=8, scenario='keccak-32', gas=4_500_000):
