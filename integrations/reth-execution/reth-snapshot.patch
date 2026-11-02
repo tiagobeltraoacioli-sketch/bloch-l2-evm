@@ -1,3 +1,171 @@
+diff --git a/crates/rpc/rpc-eth-api/src/helpers/call.rs b/crates/rpc/rpc-eth-api/src/helpers/call.rs
+index e4cccad806b87c54197d9a24c768dd0abd1f4ab9..3b138d9853a38342120d010de74a1dd6e5e93526 100644
+--- a/crates/rpc/rpc-eth-api/src/helpers/call.rs
++++ b/crates/rpc/rpc-eth-api/src/helpers/call.rs
+@@ -45,12 +45,71 @@ use revm::{
+     Database, DatabaseCommit,
+ };
+ use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
+-use std::collections::BTreeMap;
++use std::{
++    collections::BTreeMap,
++    sync::atomic::{AtomicU64, Ordering},
++    time::{Duration, Instant},
++};
+ use tracing::{trace, warn};
+ 
+ /// Result type for `eth_simulateV1` RPC method.
+ pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
+ 
++/// Bloch host patch: process-wide wall-clock budget, in milliseconds, of one request that runs
++/// the EVM more than once (`eth_estimateGas`, `eth_createAccessList`); 0 means no budget. One EVM
++/// run cannot be interrupted: it is bounded by the gas cap ([`Call::call_gas_limit`]), which
++/// [`gas_within_cap`] applies to every gas-limit path. The budget is checked before each further
++/// run, so a request stops at most one capped run after it.
++static SIMULATION_TIME_LIMIT_MS: AtomicU64 = AtomicU64::new(0);
++
++/// Set the budget of [`SIMULATION_TIME_LIMIT_MS`] (`None`: no budget). Bloch host patch.
++pub fn set_simulation_time_limit(limit: Option<Duration>) {
++    let millis = limit.map_or(0, |limit| u64::try_from(limit.as_millis()).unwrap_or(u64::MAX).max(1));
++    SIMULATION_TIME_LIMIT_MS.store(millis, Ordering::Relaxed);
++}
++
++/// The budget set by [`set_simulation_time_limit`]. Bloch host patch.
++pub fn simulation_time_limit() -> Option<Duration> {
++    match SIMULATION_TIME_LIMIT_MS.load(Ordering::Relaxed) {
++        0 => None,
++        millis => Some(Duration::from_millis(millis)),
++    }
++}
++
++/// The deadline of one simulation request, from the moment it starts executing. Bloch host patch.
++#[derive(Clone, Copy, Debug)]
++pub struct SimulationDeadline {
++    started: Instant,
++    limit: Option<Duration>,
++}
++
++impl SimulationDeadline {
++    /// Start the clock with the current [`simulation_time_limit`].
++    pub fn start() -> Self {
++        Self { started: Instant::now(), limit: simulation_time_limit() }
++    }
++
++    /// [`EthApiError::ExecutionTimedOut`] once the budget is spent.
++    pub fn check(&self) -> Result<(), EthApiError> {
++        match self.limit {
++            Some(limit) if self.started.elapsed() >= limit => Err(EthApiError::ExecutionTimedOut(limit)),
++            _ => Ok(()),
++        }
++    }
++}
++
++/// `gas` capped to the RPC gas cap `cap` (0: no cap). Bloch host patch: upstream applies the cap
++/// to an explicit `eth_call` gas only, not to the caller-allowance fallback (which takes the block
++/// gas limit, itself open to a block override), nor to `eth_estimateGas` or
++/// `eth_createAccessList`.
++pub const fn gas_within_cap(gas: u64, cap: u64) -> u64 {
++    if cap != 0 && gas > cap {
++        cap
++    } else {
++        gas
++    }
++}
++
+ /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
+ /// the `eth_` namespace.
+ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
+@@ -458,6 +517,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+         Self: Trace,
+     {
+         self.spawn_blocking_io_fut(async move |this| {
++            let deadline = SimulationDeadline::start();
+             let state = this.state_at_block_id(at).await?;
+             let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
+ 
+@@ -499,6 +559,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+                 // limit
+                 tx_env.set_gas_limit(cap.min(evm_env.block_env.gas_limit()));
+             }
++            // Bloch host patch: an explicit gas limit, and the fallbacks above, stay within the
++            // RPC gas cap (block and EIP-7825 limits are disabled here).
++            tx_env.set_gas_limit(gas_within_cap(tx_env.gas_limit(), this.call_gas_limit()));
+ 
+             let mut inspector = AccessListInspector::new(initial);
+ 
+@@ -515,6 +578,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+             }
+ 
+             // transact again to get the exact gas used
++            deadline.check().map_err(Self::Error::from_eth_err)?;
+             let result = this.transact(&mut db, evm_env, tx_env)?;
+             let gas_used = result.result.tx_gas_used();
+             let error = Self::Error::ensure_success(result.result).err().map(|e| e.to_string());
+@@ -912,8 +976,12 @@ pub trait Call:
+                 // If gas price is specified, cap transaction gas limit with caller allowance
+                 trace!(target: "rpc::eth::call", ?tx_env, "Applying gas limit cap with caller allowance");
+                 let cap = self.caller_gas_allowance(db, &evm_env, &tx_env)?;
+-                // ensure we cap gas_limit to the block's
+-                tx_env.set_gas_limit(cap.min(evm_env.block_env.gas_limit()));
++                // ensure we cap gas_limit to the block's, and to the RPC gas cap (Bloch host
++                // patch: the block's may be a block override)
++                tx_env.set_gas_limit(gas_within_cap(
++                    cap.min(evm_env.block_env.gas_limit()),
++                    self.call_gas_limit(),
++                ));
+             }
+         }
+ 
+diff --git a/crates/rpc/rpc-eth-api/src/helpers/estimate.rs b/crates/rpc/rpc-eth-api/src/helpers/estimate.rs
+index 0990ab2c52a4ded154f40051208f1810e03afc38..273ba83db0f6c2a87403e48267cd9f97e8331407 100644
+--- a/crates/rpc/rpc-eth-api/src/helpers/estimate.rs
++++ b/crates/rpc/rpc-eth-api/src/helpers/estimate.rs
+@@ -1,6 +1,9 @@
+ //! Estimate gas needed implementation
+ 
+-use super::{Call, LoadPendingBlock};
++use super::{
++    call::{gas_within_cap, SimulationDeadline},
++    Call, LoadPendingBlock,
++};
+ use crate::{AsEthApiError, FromEthApiError, IntoEthApiError};
+ use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides};
+ use alloy_network::TransactionBuilder;
+@@ -57,6 +60,9 @@ pub trait EstimateCall: Call {
+     where
+         S: EvmStateProvider,
+     {
++        // Bloch host patch: the whole binary search shares one wall-clock budget.
++        let deadline = SimulationDeadline::start();
++
+         // Disabled because eth_estimateGas is sometimes used with eoa senders
+         // See <https://github.com/paradigmxyz/reth/issues/1959>
+         evm_env.cfg_env.disable_eip3607 = true;
+@@ -101,6 +107,8 @@ pub trait EstimateCall: Call {
+         } else {
+             evm_env.cfg_env.tx_gas_limit_cap().min(block_gas_limit)
+         };
++        // Bloch host patch: never above the RPC gas cap (the block's may be a block override).
++        let max_gas_limit = gas_within_cap(max_gas_limit, self.call_gas_limit());
+ 
+         // Determine the highest possible gas limit, considering both the request's specified limit
+         // and the block's limit.
+@@ -237,6 +245,7 @@ pub trait EstimateCall: Call {
+ 
+             // Re-execute the transaction with the new gas limit and update the result and
+             // environment.
++            deadline.check().map_err(Self::Error::from_eth_err)?;
+             res = evm.transact(optimistic_tx_env).map_err(Self::Error::from_evm_err)?;
+ 
+             // Update the gas used based on the new result.
+@@ -269,6 +278,7 @@ pub trait EstimateCall: Call {
+                 break
+             };
+ 
++            deadline.check().map_err(Self::Error::from_eth_err)?;
+             let mut mid_tx_env = tx_env.clone();
+             mid_tx_env.set_gas_limit(mid_gas_limit);
+ 
 diff --git a/crates/storage/provider/src/providers/consistent.rs b/crates/storage/provider/src/providers/consistent.rs
 index 89c9795d0041c39030f8ea686e7be84916a60c3b..07c684688735aaae53f6374c791dd87ced56550e 100644
 --- a/crates/storage/provider/src/providers/consistent.rs
