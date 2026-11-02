@@ -39,7 +39,7 @@ Related documents:
 - `docs/MAINNET-RPC-READINESS.md`: RPC limits and the status-schema rollout order.
 - `docs/MAINNET-OPS-RUNBOOK.md`: the monitor and its thresholds.
 - `docs/L2-OPERATOR-RUNBOOK.md`: what to do per failure.
-- `docs/L1-STUCK-NODE-RUNBOOK.md`: stuck L1 nodes. **At 9645efc its wipe step is wrong for mainnet** (§6.1); the fix is on `codex/recovery-r6-20261102` (28c2b5f, 7554681), not merged here.
+- `docs/L1-STUCK-NODE-RUNBOOK.md`: stuck L1 nodes. At 9645efc its wipe step was wrong for mainnet (§6.1); the fix from `codex/recovery-r6-20261102` (28c2b5f, 7554681) is merged since kit tip 2087b40: refill from a healthy node.
 - `docs/MAINNET-EXCHANGE-INTEGRATION.md`: exchange-facing behaviour.
 
 ## 0. Where things stand
@@ -128,19 +128,19 @@ Build output on 209: `~/l2dexbridge-20261030/next-rpc-r4/rel4/work-a/out/` (iden
 
 To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.patch`, `build-release.sh` at the WORK path `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2`.
 
-### 3.2 Kit files at 9645efc
+### 3.2 Kit files at 6a96dc8
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `442beec339f88574af4245ec1733bc84ba10256c561aa5ca3f63fdc847d0de52` |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `f668ecec63600f74ad0cfb37fef077455bf1aaafeadd4195592a0e3fd04f4697` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `8c87718fbab960571afa0348941ffb02e1a64e38e16d8df52c1b1b91704a1bb4` |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `65715d136c401eec751cbf1677a6691ffca281b5d47667b7c8f4885aa607c91d` |
 | `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
 | `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
 | `deployment/mainnet/install-settler-mainnet.py` | `0fefcbf47092f3383538a9db6e17cd44a5526c2bf50d89794fcbd749198b9215` |
 | `deployment/mainnet/l2_reorg_recover.py` | `7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57` (the settler installer pins it) |
-| `deployment/mainnet/prover/install-prover-mainnet.py` | `d022527d9d2d18b344ac0ec8be9f471ba73848a828993db78d4fe877b598baf8` |
+| `deployment/mainnet/prover/install-prover-mainnet.py` | `f342deab986b419dccd89070bb1ac0088729c90258cc57a646b83e9a31787e39` |
 | `deployment/devnet/remote_prover.py` | `183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
-| `deployment/devnet/settler_v3.py` | `8861b0bc3578b29dcc6306138cb4fdc46dce42935ac721bfbc80cd5eff5bcf97` |
+| `deployment/devnet/settler_v3.py` | `334230e5970108daff2e2e778b55605bc520a9699f86bc0574b31791bb534ede` |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `24aa5cb8d76e5fc8ff926bd49a21497635959c032783fbfdeee38dd2917aac48` (`LimitNOFILE=65536`) |
