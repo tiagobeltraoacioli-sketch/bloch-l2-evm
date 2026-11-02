@@ -112,6 +112,16 @@ pub struct SparseBatchWitness {
     /// entry and serves it only for that hash; see the module documentation.
     #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_codes"))]
     pub codes: Vec<Bytes>,
+    /// CANDIDATE (forced inclusion): the forced records L1 names for this
+    /// block's settlement, in queue order, each with its envelope. Empty under
+    /// rules without forced inclusion. Nothing here is trusted: the guest binds
+    /// the records into the statement's `deposits_hash` slot, which L1
+    /// compares with its own queue, and checks each envelope against its hash.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::serde_bounded::streaming_vector")
+    )]
+    pub forced: Vec<crate::forced_inclusion::ForcedTransaction>,
 }
 
 /// A touched pre-state account. It carries no slot values: every value is a leaf of
@@ -559,6 +569,7 @@ fn prepare_parent_lazy<DB: DatabaseRef>(
 }
 
 /// `run_node_block` with a choice of how the ring is read.
+#[allow(clippy::too_many_arguments)]
 fn run_sparse_block<DB: DatabaseRef>(
     spec: &ChainSpec,
     domain: B256,
@@ -567,7 +578,8 @@ fn run_sparse_block<DB: DatabaseRef>(
     context: &BlockContext,
     body: &NodeBodyV2,
     block_hashes: BlockHashes,
-) -> Result<(CacheDB<DB>, PendingOutcome), NodeExecutionError> {
+    forced: &[crate::forced_inclusion::ForcedTransaction],
+) -> Result<(CacheDB<DB>, PendingOutcome, usize), NodeExecutionError> {
     let input = body.authenticated_input(spec).map_err(NodeExecutionError::Body)?;
     let mut parent_timestamp = 0;
     let mut session = BlockSession::begin_with_header(spec, db, context, &body.deposits, |db| {
@@ -577,7 +589,13 @@ fn run_sparse_block<DB: DatabaseRef>(
             BlockHashes::Lazy => prepare_parent_lazy(spec, domain, db, previous_root, context),
         }
     })?;
-    for tx in &input.txs {
+    // Forced inclusion: the forced envelopes run first, after the deposits; the
+    // body must start with exactly the ones that were not skipped. Their reads,
+    // the skipped ones' included, go through this database, so the generator
+    // records them and the guest needs them in its witness.
+    let included = crate::forced_inclusion::run_forced_prefix(spec, &mut session, forced, &body.transactions)
+        .map_err(|e| NodeExecutionError::Execution(e.into()))?;
+    for tx in &input.txs[included..] {
         session.try_transaction(tx, |_| true)?;
     }
     let (db, run, (record, receipts)) = session.finish_with_header(|db, run| {
@@ -594,6 +612,7 @@ fn run_sparse_block<DB: DatabaseRef>(
             withdrawals: run.withdrawals,
             parent_timestamp,
         },
+        included,
     ))
 }
 
@@ -641,6 +660,20 @@ pub fn verify_node_batch_sparse(
     body: &NodeBodyV2,
     block_hashes: BlockHashes,
 ) -> Result<NodeExecutionOutcome, SparseNodeError> {
+    let (outcome, _) = verify_node_batch_sparse_forced(spec, domain, witness, context, body, block_hashes)?;
+    Ok(outcome)
+}
+
+/// [`verify_node_batch_sparse`], also returning how many body transactions are
+/// the forced prefix (always 0 without forced inclusion).
+pub fn verify_node_batch_sparse_forced(
+    spec: &ChainSpec,
+    domain: B256,
+    witness: &SparseBatchWitness,
+    context: &BlockContext,
+    body: &NodeBodyV2,
+    block_hashes: BlockHashes,
+) -> Result<(NodeExecutionOutcome, usize), SparseNodeError> {
     let hydrated = hydrate_sparse(spec, witness, context.number).map_err(SparseNodeError::Verify)?;
     let HydratedSparse {
         state,
@@ -648,11 +681,20 @@ pub fn verify_node_batch_sparse(
         pre_leaves,
         pre_storage_roots,
     } = hydrated;
-    let (db, pending) = run_sparse_block(spec, domain, state, witness.prev_state_root, context, body, block_hashes)
-        .map_err(SparseNodeError::Execution)?;
+    let (db, pending, included) = run_sparse_block(
+        spec,
+        domain,
+        state,
+        witness.prev_state_root,
+        context,
+        body,
+        block_hashes,
+        &witness.forced,
+    )
+    .map_err(SparseNodeError::Execution)?;
     let root = derive_post_root(witness, &account_view, &pre_leaves, &pre_storage_roots, &db)
         .map_err(SparseNodeError::Verify)?;
-    Ok(pending.finalize(spec, domain, root))
+    Ok((pending.finalize(spec, domain, root), included))
 }
 
 /// Failure of the sparse settlement statement.
@@ -686,8 +728,8 @@ pub fn execute_settlement_statement_v3_sparse(
     settlement: SettlementContextV2,
     block_hashes: BlockHashes,
 ) -> Result<SettlementStatementV3, SparseStatementError> {
-    let outcome =
-        verify_node_batch_sparse(spec, domain, witness, context, body, block_hashes).map_err(SparseStatementError::Node)?;
+    let (outcome, included_forced) = verify_node_batch_sparse_forced(spec, domain, witness, context, body, block_hashes)
+        .map_err(SparseStatementError::Node)?;
     if let Some(rule) = spec.block_derivation {
         if rule.timestamp(outcome.parent_timestamp, settlement.l1_slot) != Some(context.timestamp)
             || context.prevrandao != rule.prevrandao
@@ -705,6 +747,19 @@ pub fn execute_settlement_statement_v3_sparse(
         .as_ref()
         .map(|summary| summary.commitment)
         .ok_or(SparseStatementError::Statement(SettlementStatementV2Error::Withdrawals))?;
+    if spec.forced_inclusion {
+        let consumed: Vec<_> = witness.forced.iter().map(|f| f.record).collect();
+        return SettlementStatementV3::from_executed_forced(
+            configuration,
+            &outcome.header,
+            body,
+            settlement,
+            withdrawals,
+            &consumed,
+            included_forced,
+        )
+        .map_err(SparseStatementError::Statement);
+    }
     SettlementStatementV3::from_executed(configuration, &outcome.header, body, settlement, withdrawals)
         .map_err(SparseStatementError::Statement)
 }
@@ -782,6 +837,21 @@ pub fn generate_sparse_node_witness(
     body: &NodeBodyV2,
     block_hashes: BlockHashes,
 ) -> Result<(SparseBatchWitness, NodeExecutionOutcome), SparseNodeError> {
+    generate_sparse_node_witness_forced(pre, spec, domain, context, body, block_hashes, &[])
+}
+
+/// [`generate_sparse_node_witness`] for a block that consumes these forced
+/// records (forced inclusion). The witness carries the list, and covers every
+/// account the forced rule reads, the senders of skipped envelopes included.
+pub fn generate_sparse_node_witness_forced(
+    pre: &L2State,
+    spec: &ChainSpec,
+    domain: B256,
+    context: &BlockContext,
+    body: &NodeBodyV2,
+    block_hashes: BlockHashes,
+    forced: &[crate::forced_inclusion::ForcedTransaction],
+) -> Result<(SparseBatchWitness, NodeExecutionOutcome), SparseNodeError> {
     let (_, canonical) = generate_node_batch_witness(pre, spec, domain, context, body).map_err(SparseNodeError::Canonical)?;
     let trie = pre.warm_commitment().ok_or(SparseNodeError::ColdCommitment)?;
     let previous_root = pre.state_root();
@@ -793,8 +863,9 @@ pub fn generate_sparse_node_witness(
         slots: RefCell::new(BTreeMap::new()),
         codes: RefCell::new(BTreeSet::new()),
     };
-    let (db, _) = run_sparse_block(spec, domain, CacheDB::new(recording), previous_root, context, body, block_hashes)
-        .map_err(SparseNodeError::Execution)?;
+    let (db, _, _) =
+        run_sparse_block(spec, domain, CacheDB::new(recording), previous_root, context, body, block_hashes, forced)
+            .map_err(SparseNodeError::Execution)?;
 
     let mut addresses: BTreeSet<Address> = db.cache.accounts.keys().copied().collect();
     addresses.extend(db.db.accounts.borrow().iter().copied());
@@ -882,6 +953,7 @@ pub fn generate_sparse_node_witness(
         pre_accounts,
         absent_accounts,
         codes,
+        forced: forced.to_vec(),
     };
     let verified = verify_node_batch_sparse(spec, domain, &witness, context, body, block_hashes)?;
     if verified.header != canonical.header

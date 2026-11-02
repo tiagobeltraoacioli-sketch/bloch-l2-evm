@@ -27,17 +27,21 @@
 //!   [`inbox_hash`] and `user_tx_count` and the data-availability batch cover
 //!   the sequencer's transactions only (forced envelopes are already on L1).
 //!
-//! What a guest still needs (not done here): take the forced list as private
-//! input, run [`check_forced_prefix`] on its witness database, and write the
-//! two statement fields with [`statement_fields`]. The sparse witness must
-//! cover every forced sender, including skipped ones, because revm reads the
-//! sender account to decide the skip.
+//! The sparse guest runs the node-path rule ([`run_forced_prefix`]) inside its
+//! block session right after the deposits; the forced list travels in the
+//! sparse witness (`SparseBatchWitness::forced`), so the senders of skipped
+//! envelopes are recorded and proved like every other read. A database read
+//! the witness does not cover fails the block, never turns into a skip.
+//! Compiled only with the `forced-inclusion` feature, which the sparse-witness
+//! feature enables; no other program changes.
 
 use alloc::vec::Vec;
 use alloy_primitives::{keccak256, Bytes, B256};
 use revm::DatabaseRef;
 
 use crate::transactions::{decode_signed_transaction, SignedBlockBuilder, SignedInputError};
+#[allow(unused_imports)]
+use alloc::string::String;
 use crate::{BlockContext, BlockExecutionError, ChainSpec, DepositMint};
 
 /// Forced records one settlement consumes at most (native `forced::MAX_PER_SETTLEMENT`).
@@ -186,8 +190,100 @@ fn check_inputs(forced: &[ForcedTransaction]) -> Result<(), ForcedInputError> {
     Ok(())
 }
 
-/// Producer side: push the forced envelopes into a fresh builder, before any
-/// sequencer transaction. The builder must not have accepted anything yet.
+/// One forced envelope against the session state, right after the deposits
+/// and the forced envelopes before it: `Ok(None)` when it was executed and
+/// committed (included), `Ok(Some(reason))` when it is skipped. The rule is
+/// the same on every path (producer, rebuild, guest): it does not authenticate
+/// for this chain, its own gas limit is above the declared one, or revm
+/// refuses it before execution. An error (a database read the witness does
+/// not cover, or a failure after execution) fails the block.
+pub(crate) fn forced_step<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    session: &mut crate::executor::BlockSession<DB>,
+    forced: &ForcedTransaction,
+) -> Result<Option<ForcedSkip>, BlockExecutionError> {
+    let tx = match decode_signed_transaction(spec, &forced.envelope) {
+        Ok(tx) => tx,
+        Err(reason) => return Ok(Some(ForcedSkip::Authentication(reason))),
+    };
+    let gas = tx.environment().gas_limit;
+    if gas > forced.record.gas_limit {
+        return Ok(Some(ForcedSkip::GasAboveDeclared {
+            envelope: gas,
+            declared: forced.record.gas_limit,
+        }));
+    }
+    if let Some(reason) = session.forced_admissible(tx.environment())? {
+        return Ok(Some(ForcedSkip::Execution(reason)));
+    }
+    session.try_transaction(tx.environment(), |_| true)?;
+    Ok(None)
+}
+
+/// Run the whole forced list in a session that has applied the header and the
+/// deposits and nothing else. Returns the selection (included envelopes in
+/// order, and the skips).
+pub(crate) fn run_forced<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    session: &mut crate::executor::BlockSession<DB>,
+    forced: &[ForcedTransaction],
+) -> Result<ForcedSelection, ForcedRuleError> {
+    check_inputs(forced).map_err(ForcedRuleError::Input)?;
+    let mut selection = ForcedSelection::default();
+    for (index, f) in forced.iter().enumerate() {
+        match forced_step(spec, session, f).map_err(ForcedRuleError::Execution)? {
+            None => selection.included.push(f.envelope.clone()),
+            Some(reason) => selection.skipped.push((index, reason)),
+        }
+    }
+    Ok(selection)
+}
+
+/// Verifier side of the node path: run the forced list and require `body` to
+/// start with exactly the included envelopes. Returns how many body
+/// transactions were executed (the forced prefix).
+pub(crate) fn run_forced_prefix<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    session: &mut crate::executor::BlockSession<DB>,
+    forced: &[ForcedTransaction],
+    body: &[Bytes],
+) -> Result<usize, ForcedRuleError> {
+    if !spec.forced_inclusion {
+        return if forced.is_empty() { Ok(0) } else { Err(ForcedRuleError::NotEnabled) };
+    }
+    let selection = run_forced(spec, session, forced)?;
+    for (position, envelope) in selection.included.iter().enumerate() {
+        if body.get(position) != Some(envelope) {
+            return Err(ForcedRuleError::Input(ForcedInputError::Prefix { position }));
+        }
+    }
+    Ok(selection.included.len())
+}
+
+/// Failure of the forced rule on the node path.
+#[derive(Debug)]
+pub enum ForcedRuleError {
+    /// The forced list is not a valid list, or the body does not start with the selection.
+    Input(ForcedInputError),
+    /// A database read or post-execution failure: the block fails.
+    Execution(BlockExecutionError),
+    /// A forced list was given under rules without forced inclusion.
+    NotEnabled,
+}
+
+impl From<ForcedRuleError> for BlockExecutionError {
+    fn from(error: ForcedRuleError) -> Self {
+        match error {
+            ForcedRuleError::Execution(error) => error,
+            other => BlockExecutionError::HeaderState {
+                detail: alloc::format!("forced inclusion: {other:?}"),
+            },
+        }
+    }
+}
+
+/// Producer side on the V1 builder: push the forced envelopes into a fresh
+/// builder, before any sequencer transaction. Same rule as the node path.
 pub fn push_forced<DB: DatabaseRef>(
     spec: &ChainSpec,
     builder: &mut SignedBlockBuilder<DB>,
@@ -199,41 +295,20 @@ pub fn push_forced<DB: DatabaseRef>(
     }
     let mut selection = ForcedSelection::default();
     for (index, f) in forced.iter().enumerate() {
-        // Decode first to compare the gas limit with the declared one.
-        let gas = match decode_signed_transaction(spec, &f.envelope) {
-            Ok(tx) => tx.environment().gas_limit,
-            Err(reason) => {
-                selection.skipped.push((index, ForcedSkip::Authentication(reason)));
-                continue;
-            }
-        };
-        if gas > f.record.gas_limit {
-            selection.skipped.push((
-                index,
-                ForcedSkip::GasAboveDeclared {
-                    envelope: gas,
-                    declared: f.record.gas_limit,
-                },
-            ));
-            continue;
-        }
-        match builder.try_push(&f.envelope) {
-            Ok(_) => selection.included.push(f.envelope.clone()),
-            Err(SignedInputError::Authentication { reason, .. }) => {
-                selection.skipped.push((index, ForcedSkip::Authentication(reason)));
-            }
-            Err(SignedInputError::Execution(error)) => {
-                selection.skipped.push((index, ForcedSkip::Execution(alloc::format!("{error}"))));
-            }
+        match builder
+            .push_forced_one(spec, f)
+            .map_err(|e| ForcedInputError::Builder(alloc::format!("{e:?}")))?
+        {
+            None => selection.included.push(f.envelope.clone()),
+            Some(reason) => selection.skipped.push((index, reason)),
         }
     }
     Ok(selection)
 }
 
-/// Verifier side: rerun the selection on the block's pre-state (after the same
-/// header rules and deposits) and require `body` to start with exactly the
-/// included envelopes. Returns the selection; the sequencer's transactions are
-/// `body[selection.included.len()..]`.
+/// Verifier side on the V1 builder: rerun the selection on the block's
+/// pre-state (after the same header rules and deposits) and require `body` to
+/// start with exactly the included envelopes.
 pub fn check_forced_prefix<DB: DatabaseRef>(
     spec: &ChainSpec,
     database: DB,

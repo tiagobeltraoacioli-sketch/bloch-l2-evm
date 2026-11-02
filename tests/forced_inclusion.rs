@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Forced inclusion (candidate): the deterministic selection of forced
 //! envelopes at the start of a block, and the verifier's prefix check.
+#![cfg(feature = "forced-inclusion")]
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};

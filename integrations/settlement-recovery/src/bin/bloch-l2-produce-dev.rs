@@ -20,6 +20,7 @@
 #![cfg(unix)]
 
 use alloy_primitives::{hex, Address, B256, U256};
+use bloch_l2_evm::forced_inclusion::{ForcedRecord, ForcedSelection, ForcedTransaction};
 use bloch_l2_evm::{
     data_availability::{da_commitment, encode_da_payload},
     node_execution::select::SelectionLimits,
@@ -36,7 +37,7 @@ use bloch_settlement_recovery::reconstruct::{
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
     canonical::rewind_canonical_head, prepare_genesis,
-    proof_export::{export_sparse_with_report, export_with_report}, BlochChainSpec, BlochNextBlockEnvCtx,
+    proof_export::{export_sparse_forced_with_report, export_with_report}, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
 };
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
@@ -346,9 +347,14 @@ fn run(args: &[String]) -> Result<String, String> {
                 rest,
                 &[
                     "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
-                    "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set",
+                    "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
                 ],
             )?;
+            // CANDIDATE (forced inclusion): the records L1 names for this block's settlement.
+            let forced = match rest.chunks(2).find(|p| p[0] == "--forced") {
+                Some(pair) => read_forced(Path::new(&pair[1]))?,
+                None => vec![],
+            };
             let deposits = match rest.chunks(2).find(|p| p[0] == "--deposits") {
                 Some(pair) => read_deposits(Path::new(&pair[1]))?,
                 None => vec![],
@@ -401,6 +407,22 @@ fn run(args: &[String]) -> Result<String, String> {
                 if command == "select" {
                     return Err("select needs --txs".into());
                 }
+                if !forced.is_empty() {
+                    // Deposits and forced envelopes only.
+                    let (selection, _) = coordinator
+                        .select_pending_after_forced(&attributes, &forced, &[], SelectionLimits::protocol(&rules()))
+                        .map_err(|e| e.to_string())?;
+                    let tip = coordinator.extend_raw(parent, attributes, &selection.included).map_err(|e| e.to_string())?;
+                    write_forced_sidecar(&target, tip.0.number, &forced, selection.included.len())?;
+                    let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
+                              "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
+                              "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
+                              "transactions": selection.included.len(), "user_transactions": 0,
+                              "forced": forced_report(&forced, &selection),
+                              "rules": if schedule.is_next(number) { "next" } else { "base" }});
+                    report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
+                    return Ok(out.to_string());
+                }
                 let tip = coordinator.extend(parent, attributes, vec![]).map_err(|e| e.to_string())?;
                 let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                           "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
@@ -418,6 +440,35 @@ fn run(args: &[String]) -> Result<String, String> {
             let next_base_fee = u128::from(rules().next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
             let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
             let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
+            if !forced.is_empty() {
+                let (forced_selection, selection) = coordinator
+                    .select_pending_after_forced(&attributes, &forced, &candidates, limits)
+                    .map_err(|e| e.to_string())?;
+                if command == "select" {
+                    let mut out = selection_report(&selection, below_min_tip);
+                    out["forced"] = forced_report(&forced, &forced_selection);
+                    return Ok(out.to_string());
+                }
+                let body: Vec<_> = forced_selection.included.iter().chain(selection.transactions.iter()).cloned().collect();
+                let tip = coordinator.extend_raw(parent, attributes, &body).map_err(|e| e.to_string())?;
+                write_forced_sidecar(&target, tip.0.number, &forced, forced_selection.included.len())?;
+                let pruned = prune_spool(&pool, &candidates, &selection)?;
+                let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
+                          "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
+                          "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
+                          "rules": if schedule.is_next(number) { "next" } else { "base" },
+                          "transactions": body.len(), "user_transactions": selection.transactions.len(),
+                          "forced": forced_report(&forced, &forced_selection),
+                          "declared_gas": selection.declared_gas, "bytes": selection.bytes,
+                          "limits": {"max_gas": limits.max_gas, "max_bytes": limits.max_bytes,
+                                     "max_txs": limits.max_transactions},
+                          "pruned": pruned});
+                if let (Some(fields), serde_json::Value::Object(report)) = (out.as_object_mut(), selection_report(&selection, below_min_tip)) {
+                    fields.extend(report);
+                }
+                report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
+                return Ok(out.to_string());
+            }
             if command == "select" {
                 // What `extend` would select, per transaction: nothing is committed or pruned.
                 let selection = coordinator.select_pending(&attributes, &candidates, limits).map_err(|e| e.to_string())?;
@@ -485,6 +536,11 @@ fn run(args: &[String]) -> Result<String, String> {
                 }
             }
             let parent = rewind_canonical_head(&factory, expected).map_err(|e| e.to_string())?;
+            match fs::remove_file(forced_sidecar(&target, number)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("forced sidecar: {e}")),
+            }
             factory.chain_spec().rules().discover(&factory).map_err(|e| e.to_string())?;
             Ok(json!({"number": parent.0.number, "hash": hex::encode(parent.hash()),
                       "state_root": hex::encode(parent.0.state_root), "rewound": number,
@@ -502,8 +558,13 @@ fn run(args: &[String]) -> Result<String, String> {
             let out = PathBuf::from(option(rest, "--out")?);
             let factory = open(&target, &runtime, false)?;
             // CANDIDATE: `--witness sparse` writes the artifact of the sparse-witness guest.
+            let forced = read_forced_sidecar(&target, number)?.map(|(forced, _)| forced).unwrap_or_default();
+            if !sparse && !forced.is_empty() {
+                return Err(format!("block {number} consumed forced records: only the sparse witness carries them"));
+            }
             let (bytes, hash, anchor, state_entries) = if sparse {
-                let (artifact, state_entries) = export_sparse_with_report(&factory, number).map_err(|e| e.to_string())?;
+                let (artifact, state_entries) =
+                    export_sparse_forced_with_report(&factory, number, &forced).map_err(|e| e.to_string())?;
                 (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, state_entries)
             } else {
                 let report = export_with_report(&factory, number).map_err(|e| e.to_string())?;
@@ -539,7 +600,14 @@ fn run(args: &[String]) -> Result<String, String> {
                 .block_by_number(number)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no block {number}"))?;
-            let transactions = &block.body.as_core().transactions;
+            // Forced envelopes are already on L1: the batch carries the sequencer's part only.
+            let included = read_forced_sidecar(&target, number)?.map_or(0, |(_, included)| included);
+            let transactions = block
+                .body
+                .as_core()
+                .transactions
+                .get(included..)
+                .ok_or_else(|| format!("block {number} is shorter than its forced prefix"))?;
             if transactions.is_empty() {
                 return Err(format!("block {number} has no user transactions: nothing to publish"));
             }
@@ -608,9 +676,22 @@ fn run(args: &[String]) -> Result<String, String> {
                     anchor_root: block.anchor,
                     deposits: block.deposits.clone(),
                 };
+                // Forced inclusion: the consumed records run first, by the same rule as the producer and the guest.
+                let mut body = Vec::new();
+                if !block.forced.is_empty() {
+                    let (selection, _) = coordinator
+                        .select_pending_after_forced(&attributes, &block.forced, &[], SelectionLimits::protocol(&rules()))
+                        .map_err(|e| format!("L2 block {}: forced: {e}", block.number))?;
+                    body.extend(selection.included);
+                }
+                let forced_included = body.len();
+                body.extend(block.transactions.iter().cloned());
                 let tip = coordinator
-                    .extend_raw(head.hash(), attributes, &block.transactions)
+                    .extend_raw(head.hash(), attributes, &body)
                     .map_err(|e| format!("L2 block {}: {e}", block.number))?;
+                if !block.forced.is_empty() {
+                    write_forced_sidecar(&target, tip.0.number, &block.forced, forced_included)?;
+                }
                 let withdrawals = outbox_commitment(
                     coordinator.provider().history_by_block_hash(tip.hash()).map_err(|e| e.to_string())?.as_ref(),
                 )?;
@@ -625,7 +706,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 let mismatch = tip.hash() != block.header_hash
                     || tip.0.state_root != block.state_root
                     || block.transactions_root.is_some_and(|root| root != tip.0.transactions_root)
-                    || block.deposits_hash.is_some_and(|hash| hash != tip.0.deposits_hash);
+                    || (block.forced.is_empty() && block.deposits_hash.is_some_and(|hash| hash != tip.0.deposits_hash));
                 if mismatch {
                     return Err(format!(
                         "L2 block {}: rebuilt hash {} / state root {} differ from settled {} / {}",
@@ -640,6 +721,7 @@ fn run(args: &[String]) -> Result<String, String> {
                                    "hash": hex::encode(tip.hash()), "state_root": hex::encode(tip.0.state_root),
                                    "rules": if schedule.is_next(block.number) { "next" } else { "base" },
                                    "deposits": block.deposits.len(), "transactions": block.transactions.len(),
+                                   "forced": block.forced.len(), "forced_included": forced_included,
                                    "da_commitment": hex::encode(block.da_commitment),
                                    "withdrawal_root": hex::encode(withdrawals.root),
                                    "withdrawal_count": withdrawals.count}));
@@ -804,6 +886,107 @@ fn selection_report(selection: &bloch_l2_evm::node_execution::select::BlockSelec
                        "sender": hex::encode(t.sender), "gas_used": t.gas_used,
                        "effective_tip": t.effective_tip.to_string(),
                        "fresh_slots": slots(&t.fresh_slots), "cleared_slots": slots(&t.cleared_slots)})).collect::<Vec<_>>()})
+}
+
+/// CANDIDATE (forced inclusion): the due records as `getl2settlement.forced.due` lists them, each with its
+/// envelope: `[{"height", "l1_txid", "envelope_hash", "gas_limit", "envelope"}]`, hex with or without 0x.
+/// The forced rule checks each envelope against its hash and the list against the per-settlement bounds.
+fn read_forced(path: &Path) -> Result<Vec<ForcedTransaction>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("forced: {e}"))?;
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|e| format!("forced: {e}"))?;
+    forced_from_json(&list)
+}
+
+fn forced_from_json(list: &[serde_json::Value]) -> Result<Vec<ForcedTransaction>, String> {
+    let num = |v: &serde_json::Value, k: &str| v[k].as_u64().ok_or_else(|| format!("forced field {k} must be an integer"));
+    let bytes_of = |v: &serde_json::Value, k: &str| -> Result<Vec<u8>, String> {
+        hex::decode(v[k].as_str().unwrap_or_default().trim_start_matches("0x")).map_err(|_| format!("forced field {k} must be hex"))
+    };
+    let fixed = |v: &serde_json::Value, k: &str| -> Result<[u8; 32], String> {
+        bytes_of(v, k)?.try_into().map_err(|_| format!("forced field {k} must be 32 bytes"))
+    };
+    list.iter()
+        .map(|v| {
+            Ok(ForcedTransaction {
+                record: ForcedRecord {
+                    l1_height: num(v, "height")?,
+                    l1_txid: fixed(v, "l1_txid")?,
+                    envelope_hash: B256::from(fixed(v, "envelope_hash")?),
+                    gas_limit: num(v, "gas_limit")?,
+                },
+                envelope: bytes_of(v, "envelope")?.into(),
+            })
+        })
+        .collect()
+}
+
+fn forced_json(forced: &[ForcedTransaction]) -> serde_json::Value {
+    json!(forced
+        .iter()
+        .map(|f| json!({"height": f.record.l1_height, "l1_txid": hex::encode(f.record.l1_txid),
+                        "envelope_hash": hex::encode(f.record.envelope_hash), "gas_limit": f.record.gas_limit,
+                        "envelope": hex::encode(&f.envelope)}))
+        .collect::<Vec<_>>())
+}
+
+fn forced_report(forced: &[ForcedTransaction], selection: &ForcedSelection) -> serde_json::Value {
+    json!({"due": forced.len(), "included": selection.included.len(),
+           "hashes": selection.included.iter().map(|raw| hex::encode(alloy_primitives::keccak256(raw))).collect::<Vec<_>>(),
+           "skipped": selection.skipped.iter().map(|(index, reason)| json!([index, format!("{reason:?}")])).collect::<Vec<_>>(),
+           "due_hash": hex::encode(bloch_l2_evm::forced_inclusion::forced_hash(
+               &forced.iter().map(|f| f.record).collect::<Vec<_>>()))})
+}
+
+/// The forced records block `number` consumed and how many of its first transactions they are. Kept beside the
+/// database (candidate tooling): `export` puts the records in the sparse witness and `da` leaves the prefix out.
+fn forced_sidecar(target: &Path, number: u64) -> PathBuf {
+    target.join("forced").join(format!("{number:08}.json"))
+}
+
+fn write_forced_sidecar(target: &Path, number: u64, forced: &[ForcedTransaction], included: usize) -> Result<(), String> {
+    let path = forced_sidecar(target, number);
+    fs::create_dir_all(path.parent().expect("sidecar has a parent")).map_err(|e| format!("forced sidecar: {e}"))?;
+    let temporary = path.with_extension("json.tmp");
+    let text = json!({"number": number, "included": included, "forced": forced_json(forced)}).to_string();
+    let mut file = File::create(&temporary).map_err(|e| format!("forced sidecar: {e}"))?;
+    file.write_all(text.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("forced sidecar: {e}"))?;
+    fs::rename(&temporary, &path).map_err(|e| format!("forced sidecar: {e}"))
+}
+
+fn read_forced_sidecar(target: &Path, number: u64) -> Result<Option<(Vec<ForcedTransaction>, usize)>, String> {
+    let bytes = match fs::read(forced_sidecar(target, number)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("forced sidecar: {e}")),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("forced sidecar: {e}"))?;
+    let list = value["forced"].as_array().ok_or("forced sidecar: no list")?;
+    let included = value["included"].as_u64().ok_or("forced sidecar: no count")? as usize;
+    Ok(Some((forced_from_json(list)?, included)))
+}
+
+/// Remove the spool files of included and dropped candidates.
+fn prune_spool(
+    pool: &[(Option<PathBuf>, alloy_primitives::Bytes)],
+    candidates: &[alloy_primitives::Bytes],
+    selection: &bloch_l2_evm::node_execution::select::BlockSelection,
+) -> Result<usize, String> {
+    let mut pruned = 0usize;
+    let finished = selection
+        .dropped
+        .iter()
+        .map(|d| d.index)
+        .chain(selection.hashes.iter().filter_map(|h| candidates.iter().position(|raw| alloy_primitives::keccak256(raw) == *h)));
+    for index in finished {
+        if let Some(file) = &pool[index].0 {
+            match fs::remove_file(file) {
+                Ok(()) => pruned += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("prune {}: {e}", file.display())),
+            }
+        }
+    }
+    Ok(pruned)
 }
 
 fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> {

@@ -214,10 +214,52 @@ pub fn select_node_transactions<DB: DatabaseRef>(
     candidates: &[Bytes],
     limits: SelectionLimits,
 ) -> Result<BlockSelection, BlockExecutionError> {
-    let limits = limits.clamp(spec);
     let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
         super::prepare_parent(spec, domain, db, previous_root, context)
     })?;
+    select_in_session(spec, &mut session, context, candidates, limits)
+}
+
+/// CANDIDATE (forced inclusion): [`select_node_transactions`] after the forced
+/// envelopes, which run first, right after the deposits, by the rule of
+/// [`crate::forced_inclusion`] and outside `limits` (L1 bounds them). The
+/// block body is the included forced envelopes, then the returned selection.
+#[cfg(feature = "forced-inclusion")]
+#[allow(clippy::too_many_arguments)]
+pub fn select_node_transactions_after_forced<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: DB,
+    previous_root: B256,
+    context: &BlockContext,
+    deposits: &[DepositMint],
+    forced: &[crate::forced_inclusion::ForcedTransaction],
+    candidates: &[Bytes],
+    limits: SelectionLimits,
+) -> Result<(crate::forced_inclusion::ForcedSelection, BlockSelection), BlockExecutionError> {
+    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
+        super::prepare_parent(spec, domain, db, previous_root, context)
+    })?;
+    let forced = if spec.forced_inclusion || !forced.is_empty() {
+        if !spec.forced_inclusion {
+            return Err(crate::forced_inclusion::ForcedRuleError::NotEnabled.into());
+        }
+        crate::forced_inclusion::run_forced(spec, &mut session, forced)?
+    } else {
+        Default::default()
+    };
+    let selection = select_in_session(spec, &mut session, context, candidates, limits)?;
+    Ok((forced, selection))
+}
+
+fn select_in_session<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    session: &mut BlockSession<DB>,
+    context: &BlockContext,
+    candidates: &[Bytes],
+    limits: SelectionLimits,
+) -> Result<BlockSelection, BlockExecutionError> {
+    let limits = limits.clamp(spec);
     let mut selection = BlockSelection::default();
 
     // Authenticate and group by sender in nonce order (stable for equal nonces).
