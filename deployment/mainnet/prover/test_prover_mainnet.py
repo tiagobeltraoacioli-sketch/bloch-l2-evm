@@ -4,6 +4,7 @@ the install/rollback plan of install-prover-mainnet.py (no root, no Docker).
 
     python3 -m unittest deployment/mainnet/prover/test_prover_mainnet.py
 """
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 DEVNET = HERE.parent.parent / 'devnet'
@@ -145,6 +147,23 @@ class InstallPlan(unittest.TestCase):
         self.assertEqual(config['prover_threads'], 12)
         self.assertEqual(config['gnark_image'], install.GNARK_IMAGE)
         self.assertTrue(config['guest'].endswith('/settlement_v3_mainnet'))
+
+    def test_install_refuses_another_remote_prover_even_with_a_matching_sums_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            here = Path(tmp)
+            for name in install.FILES:
+                (here / name).write_bytes(b'an older file: ' + name.encode())
+            sums = {name: sha256(here / name) for name in install.FILES}
+            sums[install.FILES[1]] = install.GUEST_SHA256
+            (here / 'SHA256SUMS').write_text(''.join(f'{v}  {n}\n' for n, v in sums.items()))
+            real = install.digest
+            pretend = lambda path: sums[Path(path).name] if Path(path).name == install.FILES[1] else real(path)
+            with mock.patch.object(install, 'digest', pretend):
+                with self.assertRaisesRegex(SystemExit, 'remote_prover.py is'):
+                    install.install(argparse.Namespace(memory_gib=100, threads=24), here)
+
+    def test_remote_prover_pin_is_the_file_in_this_tree(self):
+        self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)
 
     def test_memory_floor(self):
         for memory, threads in ((24, 8), (48, 0), (48, 64)):

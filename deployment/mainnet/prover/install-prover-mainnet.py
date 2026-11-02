@@ -13,14 +13,15 @@ needs no inbound port besides sshd; outbound only Docker's pinned Gnark image
 Run as root from a directory holding:
   bloch-evm-sp1-settlement-v3   host built by build-program.sh (features source-settlement,node-artifact)
   settlement_v3_mainnet         guest ELF, SHA-256 203114bf...c473 (build-reproducible.sh)
-  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet")
+  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet"), SHA-256 3c11d9be...c8e5
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
       --circuits DIR [--memory-gib 100] [--threads 24] [--dry-run]
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
 
-install refuses unless: the guest has the pinned SHA-256; the host's `--mainnet identity`
+install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
+beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
 prints exactly the program the native mainnet activation pins (ELF Keccak, KoalaBear and
 BN254 vkeys, proof policy, domain, configuration); the Gnark image is present; nothing is
 installed yet; MemAvailable covers the cap + 20 GiB (Gnark container, outside the slice). It creates the system user
@@ -49,6 +50,8 @@ STATE = Path('/var/lib/bloch-l2-mainnet-prover')
 FILES = ('bloch-evm-sp1-settlement-v3', 'settlement_v3_mainnet', 'remote_prover.py')
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473'
+# Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
+REMOTE_PROVER_SHA256 = '3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5'
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {
@@ -148,6 +151,8 @@ def install(args, here):
             die(f'{name} differs from SHA256SUMS')
     if sums[FILES[1]] != GUEST_SHA256:
         die('settlement_v3_mainnet is not the pinned guest')
+    if sums[FILES[2]] != REMOTE_PROVER_SHA256:
+        die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
     identity = check_identity(run([here / FILES[0], '--mainnet', 'identity', here / FILES[1]]))
     circuits = Path(args.circuits)
     if not (circuits / 'groth16').is_dir():
