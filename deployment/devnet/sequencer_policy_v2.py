@@ -64,8 +64,10 @@ DEFAULTS = {
     'congestion_down_denominator': 16,
     'congestion_idle_grace_seconds': 4500,
     'congestion_idle_half_life_seconds': 1200,
-    # Exempt senders (3.6): outside the write price and write rates only.
+    # Exempt senders (3.6): outside the write price and write rates, and under the block gas limit instead of
+    # `max_tx_gas` (operator deployments). Never outside the SP1-gas budget, the tip or the measurement.
     'write_limit_exempt_senders': [],
+    'exempt_max_tx_gas': 15_000_000,
     # Prover profiles (3.1, X17).
     'fast_profile_max_sp1_gas': 10_500_000,
     'gate_passes': 6,
@@ -222,7 +224,7 @@ class Policy:
                 reason = ('sender-banned', False)
             elif wait and wait['until'] > now and not (wait['kind'] == 'band' and not has_mandatory):
                 reason = (f"{wait['kind']}-wait", False)
-            elif gas > self.c['max_tx_gas']:
+            elif gas > (self.c['exempt_max_tx_gas'] if sender in exempt else self.c['max_tx_gas']):
                 reason = ('tx-gas-cap', True)
             elif tip < tip_floor:
                 reason = ('below-required-tip', False)

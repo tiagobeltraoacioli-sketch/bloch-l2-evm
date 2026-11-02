@@ -112,7 +112,7 @@ class World(unittest.TestCase):
             for r in failing:
                 self.tx[r]['fail_first'] -= 1
             costs = [self.tx[r]['cost'] for r in included]
-            if failing or any(c is None for c in costs):
+            if failing or base == 'none' or any(c is None for c in costs):
                 self.now += 60
                 self.timeouts += 1
                 return None, self.report(raws)
@@ -235,6 +235,23 @@ class N3ReplacementRestartsNothing(World):
         self.assertEqual(self.held()[f'evil-5'], 'sender-banned')
 
 
+class N3bReplacementKeepsTheUnmeasuredWait(World):
+    """A transaction without cost on a healthy host (the control measures) waits by sender and nonce: replacing it
+    with a 10% higher fee neither restarts the wait nor resets the count."""
+
+    def test_replacement_during_the_wait_is_not_measured_and_counts_on(self):
+        self.add('slow-0', 'mallory', 0, 50_000, 1, fail_first=100)
+        self.block(advance=60)
+        self.spool = [r for r in self.spool if self.tx[r]['name'] != 'slow-0']  # the RPC replaced it
+        self.add('slow-1', 'mallory', 0, 50_000, 1, fail_first=100, tip=int(GWEI * 1.1))
+        self.block(advance=0)
+        self.assertEqual(self.held()['slow-1'], 'unmeasured-wait')
+        self.assertNotIn('slow-1', self.runs_with)
+        self.now += 600
+        self.block(advance=1800)
+        self.assertEqual(self.policy.state['failures']['mallory:0']['count'], 2)
+
+
 class N4OneUnmeasurableTransactionIsCheap(World):
     def test_a_heavy_transaction_costs_at_most_two_runs_and_no_timeout(self):
         self.add('evil', 'mallory', 0, 4_900_000, OVER, tip=10 * GWEI)
@@ -272,6 +289,16 @@ class N6MandatoryBlockWithoutCost(World):
         self.assertEqual(plan.profile, 'mandatory-heavy')
         self.assertEqual(self.quarantined, [])
         self.assertEqual(self.spooled(), ['honest'])
+
+    def test_mandatory_block_without_cost_on_a_healthy_host_is_recorded_and_takes_no_user_transaction(self):
+        self.add('honest', 'alice', 0, 21_000, 1)
+        self.mandatory_cost = 'none'  # the deposit block's run fails without the cycle-limit verdict; the control measures
+        self.assertEqual(self.block(deposits=True), [])
+        plan = self.plans[-1]
+        self.assertTrue(plan.mandatory_over_budget)
+        self.assertFalse(plan.host_unavailable)
+        self.assertEqual(plan.profile, 'mandatory-heavy')
+        self.assertEqual(self.quarantined, [])
 
     def test_failing_host_takes_no_unmeasured_user_transactions(self):
         self.add('honest', 'alice', 0, 21_000, 1)
@@ -520,6 +547,13 @@ class Limits(World):
         self.add('too-heavy', 'signer3', 0, 50_000, 150)
         self.block()
         self.assertIn('too-heavy', self.quarantined)
+
+    def test_exempt_deployment_above_the_per_transaction_cap_is_measured_not_refused(self):
+        self.policy.c['write_limit_exempt_senders'] = ['deployer']
+        self.add('router', 'deployer', 0, 7_000_000, 40)
+        self.add('other', 'bob', 0, 7_000_000, 40)
+        self.assertEqual(self.block(), ['router'])
+        self.assertEqual(self.quarantined, ['other'])
 
     def test_prover_profile_by_preflight_sp1_gas(self):
         policy = sp.Policy()
