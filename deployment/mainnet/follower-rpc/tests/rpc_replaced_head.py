@@ -28,9 +28,14 @@ def extend(slot, anchor):
     return produce('extend', '--target', db, '--parent', h, '--anchor', anchor * 32, '--deposits', work / 'dep.json', '--timestamp-rule', f'1:{GT}:30000', '--anchor-slot', slot)
 def settled(b, seconds=20):
     end = time.time() + seconds
+    latest = by_number = {}
     while time.time() < end:
-        latest = call('eth_getBlockByNumber', 'latest', False).get('result') or {}
-        by_number = call('eth_getBlockByNumber', hex(b['number']), False).get('result') or {}
+        try:
+            latest = call('eth_getBlockByNumber', 'latest', False).get('result') or {}
+            by_number = call('eth_getBlockByNumber', hex(b['number']), False).get('result') or {}
+        except OSError:
+            time.sleep(0.25)
+            continue
         if latest.get('hash') == by_number.get('hash') == '0x' + b['hash']:
             return True, round(seconds - (end - time.time()), 1)
         time.sleep(0.25)
