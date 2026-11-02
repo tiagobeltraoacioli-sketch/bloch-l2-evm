@@ -55,6 +55,13 @@
 //! worker selects from; the producer still decides inclusion and drops invalid
 //! entries with a reason. Without `--txpool`, transactions are refused.
 //!
+//! EVM simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`, ...)
+//! run at most 4 at a time (a caller waits up to 10 s for a permit), with at
+//! most 15,000,000 gas on every gas path (explicit gas, caller allowance, block
+//! override), and a caller is answered `execution aborted (timeout = 5s)` once
+//! its call has run 5 s; estimates and access lists also stop their next EVM
+//! run then, and a permit is held until the EVM really stops.
+//!
 //! `bloch_getWithdrawalProof(index, root?)` serves Merkle proofs of outbox
 //! withdrawals covered by finalized settlements (`settled_rpc/withdrawal_proofs.rs`).
 #[path = "settled_rpc/withdrawal_proofs.rs"]
@@ -65,7 +72,7 @@ mod settlement_log;
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    build_eth_api_with, chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc,
+    build_eth_api_capped, chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc,
     BlochBlockchainProvider, BlochEvmConfig, BlochProviderFactory, L2Network, PendingPolicy,
 };
 use eyre::{bail, ensure, Result};
@@ -157,6 +164,21 @@ const DEFAULT_MIN_TIP_WEI: u128 = 100_000_000;
 /// [`SIMULATION_WAIT`]) instead of occupying every core of the host.
 const MAX_CONCURRENT_SIMULATIONS: usize = 4;
 const SIMULATION_WAIT: Duration = Duration::from_secs(10);
+/// Gas cap of one EVM simulation: the spool's `max_tx_gas`, since no transaction
+/// can use more (the block gas limit of 30M would double the worst case). It holds
+/// for every gas path of `eth_call`, `eth_estimateGas` and `eth_createAccessList`:
+/// an explicit gas, the caller-allowance fallback and a block override of the gas
+/// limit (snapshot patch, integrations/reth-execution/RETH-SNAPSHOT.md).
+const SIMULATION_GAS_CAP: u64 = 15_000_000;
+const _: () = assert!(SIMULATION_GAS_CAP == SPOOL_LIMITS.max_tx_gas);
+/// Wall-clock budget of one simulation request once it holds a permit. One EVM
+/// run cannot be interrupted, but at 15M gas the slowest measured run (BLAKE2F,
+/// 14.9M rounds) took 1.63 s; 5 s lets every single run finish and an honest
+/// estimate of a call near the cap make its first, optimistic and one search run.
+/// The caller is answered when it is spent; `eth_estimateGas` and
+/// `eth_createAccessList` also stop their next run (snapshot patch), and the
+/// permit stays taken until the EVM really stops.
+const SIMULATION_TIME_LIMIT: Duration = Duration::from_secs(5);
 /// The methods that run the EVM on request.
 const SIMULATION_METHODS: [&str; 5] = ["eth_call", "eth_estimateGas", "eth_createAccessList", "eth_callMany", "eth_simulateV1"];
 /// Periodic eviction of stale spool entries (also done under pressure at admission).
@@ -854,8 +876,12 @@ fn floor_rewards(history: &mut serde_json::Value, floor: u128) {
 
 /// Run the EVM-simulating methods ([`SIMULATION_METHODS`]) under one
 /// semaphore of `permits`: a caller that cannot get a permit within `wait` is
-/// told to retry. Other methods are unaffected.
-fn limit_simulations(module: &mut jsonrpsee::RpcModule<()>, permits: usize, wait: Duration) -> Result<()> {
+/// told to retry. A call that holds a permit runs as its own task, which keeps
+/// the permit until the call really ends, even when its caller has gone or has
+/// been answered `execution aborted (timeout = ...)` after `limit`: an EVM run
+/// cannot be stopped from outside, so a permit freed early would let more than
+/// `permits` runs take the CPU. Other methods are unaffected.
+fn limit_simulations(module: &mut jsonrpsee::RpcModule<()>, permits: usize, wait: Duration, limit: Duration) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     let gate = Arc::new(tokio::sync::Semaphore::new(permits));
     for name in SIMULATION_METHODS {
@@ -867,7 +893,7 @@ fn limit_simulations(module: &mut jsonrpsee::RpcModule<()>, permits: usize, wait
             let (original, gate) = (original.clone(), gate.clone());
             async move {
                 let values: Vec<serde_json::Value> = params.parse()?;
-                let _permit = match tokio::time::timeout(wait, gate.acquire_owned()).await {
+                let permit = match tokio::time::timeout(wait, gate.acquire_owned()).await {
                     Ok(Ok(permit)) => permit,
                     _ => {
                         return Err(jsonrpsee::types::ErrorObjectOwned::owned(
@@ -877,10 +903,19 @@ fn limit_simulations(module: &mut jsonrpsee::RpcModule<()>, permits: usize, wait
                         ))
                     }
                 };
-                original.call::<_, serde_json::Value>(name, values).await.map_err(|error| match error {
-                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
-                    other => rpc_error(other.to_string()),
-                })
+                let run = tokio::spawn(async move {
+                    let answer = original.call::<_, serde_json::Value>(name, values).await;
+                    drop(permit);
+                    answer
+                });
+                match tokio::time::timeout(limit, run).await {
+                    Ok(Ok(answer)) => answer.map_err(|error| match error {
+                        jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                        other => rpc_error(other.to_string()),
+                    }),
+                    Ok(Err(join)) => Err(rpc_error(format!("{name}: {join}"))),
+                    Err(_) => Err(reth_rpc_eth_types::EthApiError::ExecutionTimedOut(limit).into()),
+                }
             }
         })?;
     }
@@ -1486,7 +1521,8 @@ async fn main() -> Result<()> {
     let provider: BlochBlockchainProvider = BlockchainProvider::new(factory.clone())?;
     let kernel = rules();
     let config = BlochEvmConfig::new(&kernel, spec.domain());
-    let api = build_eth_api_with(
+    reth_rpc_eth_api::helpers::call::set_simulation_time_limit(Some(SIMULATION_TIME_LIMIT));
+    let api = build_eth_api_capped(
         RpcNodeCoreAdapter::new(
             provider.clone(),
             NoopTransactionPool::default(),
@@ -1495,6 +1531,7 @@ async fn main() -> Result<()> {
         ),
         runtime.clone(),
         PendingPolicy::LatestDerived,
+        SIMULATION_GAS_CAP,
     );
     let filter = EthFilter::new(api.clone(), reth_rpc_eth_types::EthConfig::default().filter_config(), runtime.clone());
     let mut module = api.into_rpc().remove_context();
@@ -1541,7 +1578,7 @@ async fn main() -> Result<()> {
     }
     let tip = Arc::new(RequiredTip::new(options.min_tip, options.required_tip_file.clone(), options.tip_headroom_percent));
     floor_fee_suggestions(&mut module, tip, factory.clone(), rules())?;
-    limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT)?;
+    limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT, SIMULATION_TIME_LIMIT)?;
     let levels_closed = Arc::new(ClosedLevels::new(true));
     refuse_closed_levels(&mut module, levels_closed.clone())?;
     let server = start_http_rpc(module, options.port).await?;
@@ -2330,7 +2367,7 @@ mod tests {
             })
             .unwrap();
         module.register_method("eth_chainId", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0xab162")).unwrap();
-        limit_simulations(&mut module, 1, Duration::from_millis(100)).unwrap();
+        limit_simulations(&mut module, 1, Duration::from_millis(100), Duration::from_secs(5)).unwrap();
         let (first, second, other) = tokio::join!(
             module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({}), "latest"]),
             async {
@@ -2348,5 +2385,86 @@ mod tests {
         assert_eq!(other.unwrap(), "0xab162", "methods outside the limiter are not gated");
         // Once the permit is free the next call runs.
         assert_eq!(module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})]).await.unwrap(), "0x");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_simulation_past_its_time_limit_is_answered_and_keeps_its_permit_until_it_ends() {
+        let ended = Arc::new(AtomicU64::new(0));
+        let mut module = jsonrpsee::RpcModule::new(());
+        let seen = ended.clone();
+        module
+            .register_async_method("eth_estimateGas", move |_, _, _| {
+                let seen = seen.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x5208")
+                }
+            })
+            .unwrap();
+        limit_simulations(&mut module, 1, Duration::from_millis(100), Duration::from_millis(200)).unwrap();
+        let started = std::time::Instant::now();
+        let slow = module
+            .call::<_, String>("eth_estimateGas", jsonrpsee::rpc_params![serde_json::json!({})])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(slow.contains("execution aborted (timeout = 200ms)"), "{slow}");
+        assert!(started.elapsed() < Duration::from_millis(500), "answered at the limit, not at the end of the run");
+        assert_eq!(ended.load(Ordering::SeqCst), 0, "the run goes on after its caller was answered");
+        // Its permit is still taken: the next caller waits 100 ms and is refused.
+        let busy = module
+            .call::<_, String>("eth_estimateGas", jsonrpsee::rpc_params![serde_json::json!({})])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(busy.contains("too many concurrent EVM simulations"), "{busy}");
+        // The run ends and frees the permit.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(ended.load(Ordering::SeqCst), 1);
+        let after = module
+            .call::<_, String>("eth_estimateGas", jsonrpsee::rpc_params![serde_json::json!({})])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(after.contains("execution aborted"), "the permit was free again: {after}");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(ended.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_caller_that_goes_away_does_not_free_the_permit_of_its_running_simulation() {
+        let mut module = jsonrpsee::RpcModule::new(());
+        module
+            .register_async_method("eth_call", |_, _, _| async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x")
+            })
+            .unwrap();
+        limit_simulations(&mut module, 1, Duration::from_millis(50), Duration::from_secs(5)).unwrap();
+        // The caller gives up (a closed connection drops its future) after 100 ms.
+        let gone = tokio::time::timeout(
+            Duration::from_millis(100),
+            module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})]),
+        )
+        .await;
+        assert!(gone.is_err());
+        let busy = module
+            .call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(busy.contains("too many concurrent EVM simulations"), "{busy}");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})]).await.unwrap(), "0x");
+    }
+
+    #[test]
+    fn the_simulation_gas_cap_is_the_largest_transaction_the_spool_admits() {
+        assert_eq!(SIMULATION_GAS_CAP, 15_000_000);
+        assert_eq!(SIMULATION_GAS_CAP, SPOOL_LIMITS.max_tx_gas);
+        // The gateway's proxy_read_timeout (30 s, l2rpc-gateway.conf.in) never fires on a
+        // simulation, so it never replays one on the other backend (review 154, G4).
+        assert!(SIMULATION_WAIT + SIMULATION_TIME_LIMIT < Duration::from_secs(30));
     }
 }

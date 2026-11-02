@@ -14,8 +14,13 @@
 # (1,024 connections) and must be lowered to 48 for an older binary.
 # Files the owner places first (see README.md):
 #   /etc/ssl/bloch-l2rpc/origin.pem, origin.key   Cloudflare Origin CA certificate for l2rpc.blochl1.com
-#   /etc/ssl/bloch-l2rpc/cloudflare-aop-ca.pem     Cloudflare Authenticated Origin Pulls CA
+#   /etc/ssl/bloch-l2rpc/aop-client-ca.pem         the owner's OWN per-hostname Authenticated Origin Pulls CA
+#                                                  (certificate only; README.md "Authenticated Origin Pulls").
+#                                                  render.py refuses Cloudflare's shared AOP CA.
 #   /etc/nginx/bloch-l2rpc/peer/peer.crt           the OTHER host's peer certificate (from its peer-cert)
+# The outbound peer hop is a unix socket in /run/bloch-l2rpc (0750 root:$NGINX_GROUP, recreated at
+# boot by /etc/tmpfiles.d/bloch-l2rpc.conf, written by apply): only root and the nginx workers can
+# use this host's peer certificate. Run no untrusted local user on either host (README.md).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEST=/etc/nginx/bloch-l2rpc
@@ -23,6 +28,9 @@ PEERDIR=$DEST/peer
 INCLUDE=/etc/nginx/conf.d/bloch-l2rpc.conf
 SSL=/etc/ssl/bloch-l2rpc
 PEER_PORT=18956
+HOP=/run/bloch-l2rpc
+TMPFILES=/etc/tmpfiles.d/bloch-l2rpc.conf
+NGINX_GROUP=${NGINX_GROUP:-www-data}
 
 need_root() { [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }; }
 
@@ -30,13 +38,19 @@ render_to() {
   : "${ROLE:?set ROLE}" "${NAME:?set NAME}" "${PEER:?set PEER}" "${PEER_ALLOW:?set PEER_ALLOW}"
   # shellcheck disable=SC2086
   python3 "$HERE/render.py" --role "$ROLE" --name "$NAME" --out "$1" --peer "$PEER" --peer-allow "$PEER_ALLOW" \
-    --peer-listen "0.0.0.0:$PEER_PORT" --peer-dir "$PEERDIR" --cors-any --backend-conns 400 ${EXTRA:-}
+    --peer-listen "0.0.0.0:$PEER_PORT" --peer-dir "$PEERDIR" --hop-dir "$HOP" --client-ca "$SSL/aop-client-ca.pem" \
+    --cors-any --backend-conns 400 ${EXTRA:-}
 }
 
 check() {
   local ok=1
   dpkg -s libnginx-mod-http-js >/dev/null 2>&1 || { echo "MISSING: apt-get install libnginx-mod-http-js"; ok=0; }
-  for f in "$SSL/origin.pem" "$SSL/origin.key" "$SSL/cloudflare-aop-ca.pem" "$PEERDIR/self.crt" "$PEERDIR/self.key" "$PEERDIR/peer.crt"; do
+  getent group "$NGINX_GROUP" >/dev/null || { echo "MISSING: group $NGINX_GROUP (the nginx workers' group; set NGINX_GROUP)"; ok=0; }
+  grep -qE "^\s*user\s+[a-z_][a-z0-9_-]*(\s+$NGINX_GROUP)?;" /etc/nginx/nginx.conf \
+    || echo "NOTE: check that the nginx workers run with group $NGINX_GROUP (user directive in /etc/nginx/nginx.conf)"
+  [ -e "$SSL/aop-client-ca.pem" ] || [ ! -e "$SSL/cloudflare-aop-ca.pem" ] \
+    || echo "NOTE: $SSL/cloudflare-aop-ca.pem is the shared CA and is no longer used; place your own CA as aop-client-ca.pem"
+  for f in "$SSL/origin.pem" "$SSL/origin.key" "$SSL/aop-client-ca.pem" "$PEERDIR/self.crt" "$PEERDIR/self.key" "$PEERDIR/peer.crt"; do
     [ -s "$f" ] || { echo "MISSING: $f"; ok=0; }
   done
   if [ -s "$PEERDIR/self.crt" ] && [ -s "$PEERDIR/peer.crt" ] && cmp -s "$PEERDIR/self.crt" "$PEERDIR/peer.crt"; then
@@ -82,6 +96,9 @@ case "${1:-}" in
     check
     TS=$(date -u +%Y%m%dT%H%M%SZ)
     [ -f "$DEST/l2rpc-gateway.conf" ] && cp -a "$DEST" "/root/bloch-l2rpc.bak-$TS"
+    echo "d $HOP 0750 root $NGINX_GROUP -" > "$TMPFILES"
+    systemd-tmpfiles --create "$TMPFILES"
+    [ "$(stat -c '%a %U %G' "$HOP")" = "750 root $NGINX_GROUP" ] || { echo "$HOP is not 0750 root:$NGINX_GROUP" >&2; exit 1; }
     render_to "$DEST"
     echo "include $DEST/l2rpc-gateway.conf;" > "$INCLUDE"
     if ! nginx -t; then
@@ -97,8 +114,9 @@ case "${1:-}" in
     need_root
     rm -f "$INCLUDE"
     nginx -t && systemctl reload nginx
+    rm -f "$TMPFILES"
     : "${PEER_ALLOW:?set PEER_ALLOW}"
     firewall delete
     echo "gateway removed; $DEST (and the peer key) kept" ;;
-  *) sed -n 2,18p "$0"; exit 2 ;;
+  *) sed -n 2,25p "$0"; exit 2 ;;
 esac
