@@ -54,6 +54,8 @@ READ_ONLY_METHODS = frozenset({
     'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getStorageAt', 'bloch_finality', 'bloch_settlement',
     # L1 (bloch-pos)
     'getchaininfo', 'getblockcount', 'getl2settlement', 'getutxos',
+    # Only with --l1-stuck-node.
+    'getblockbyid',
 })
 
 # ---- Pinned mainnet identity (Genesis-4; deployment/mainnet/sequencer_mainnet.py) ----
@@ -136,7 +138,11 @@ _COMMON: Dict[str, Any] = {
     'l1_reconstruct_limit': 5000000,
     # Cost of an empty block by height, measured on guest 203114bf. Above the first figure the local fallback is gone;
     # the others are what has been proved at the planned limits.
-    'proof_instructions_local': 3_000_000, 'proof_instructions_warn': 5_300_000, 'proof_instructions_crit': 88_000_000,
+    'proof_instructions_local': 3_000_000,
+    # l2_proof_cost grades the measured proof time (settler `proof-generated` seconds) against the block interval the
+    # operator configures (--set block_interval_seconds=N; 0: not set, the check then only reports). The empty-block
+    # instruction model is shown in the message as context, not graded.
+    'block_interval_seconds': 0, 'proof_time_warn_ratio': 0.7, 'proof_time_crit_ratio': 1.0,
     # Settlements the follower file has and an RPC's finalized_height has not. One can be a poll in flight.
     'finality_file_lag_warn': 1, 'finality_file_lag_crit': 3,
     # A settled RPC before the next build closes safe and finalized above 16 MiB of status file.
@@ -151,7 +157,11 @@ _COMMON: Dict[str, Any] = {
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
     # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
     'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
+    'mem_avail_pct_warn': 15.0, 'mem_avail_pct_crit': 7.0, 'swap_used_pct_warn': 50.0,
+    'report_age_warn': 900.0, 'l1_stall_warn_s': 600.0, 'l1_stall_crit_s': 1800.0,
     'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
+    # --l1-stuck-node: docs/L1-STUCK-NODE-RUNBOOK.md. Epochs are finalized epochs gained by the reference.
+    'stuck_sustain_epochs': 3, 'stuck_parked_min': 32, 'stuck_min_samples': 3, 'stuck_max_gap_epochs': 2,
 }
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
@@ -304,6 +314,7 @@ def check_l1(client: Client, urls: List[str], p: Dict[str, Any], r: Report) -> L
             node['finalized_root'] = fin.get('root') if isinstance(fin, dict) else None
             node['slot'] = int(info['slot']) if 'slot' in info else None
             node['hard_forks'] = info.get('hard_forks')
+            node['block_id'] = info.get('block_id')
         except (RpcError, KeyError, TypeError, ValueError) as e:
             node['error'] = str(e)
             nodes.append(node)
@@ -334,6 +345,131 @@ def check_l1(client: Client, urls: List[str], p: Dict[str, Any], r: Report) -> L
     r.graded('l1_finality_lag', lag, p['l1_finality_epochs_warn'], p['l1_finality_epochs_crit'],
              f'L1 epoch {best["epoch"]}, finalized epoch {best["finalized_epoch"]} ({lag} epochs; 2 is normal)')
     return up
+
+
+# ------------------------------------------------------------------------------- L1 node on its own branch
+# The next two functions are identical to those in l1_stuck_check.py; test_l2_monitor.py fails if they differ.
+def stuck_metric(text: Optional[str], name: str) -> Optional[int]:
+    for line in (text or '').splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == name:
+            try:
+                return int(float(parts[1]))
+            except ValueError:
+                return None
+    return None
+
+
+def stuck_step(st: Optional[Dict[str, Any]], s: Dict[str, Any], p: Dict[str, Any]) -> Tuple[Dict[str, Any], int, str]:
+    """One sample of one node. Returns (new state, level, message). Pure: no I/O and no clock.
+
+    s: ref_finalized (None: no reference answered), down, finalized, parked (None: unknown),
+    has_ref_head (True, False, None: lookup failed), peers.
+    """
+    st = dict(st or {})
+    rf = s.get('ref_finalized')
+    if rf is None:
+        return st, UNKNOWN, 'no reference answers: not evaluated'
+    need, samples = p['stuck_sustain_epochs'], p['stuck_min_samples']
+    last = st.get('last_ref')
+    if last is not None and rf < last:
+        rf = last  # another reference answered, and it is behind the best one seen
+    st['last_ref'] = rf
+
+    def stop(name: str) -> None:
+        st.pop(name, None)
+
+    def tick(name: str) -> None:
+        clock = st.get(name) or {'base': rf, 'n': 0}
+        st[name] = {'base': clock['base'], 'n': clock['n'] + 1}
+
+    def held(name: str) -> bool:
+        clock = st.get(name)
+        return bool(clock) and clock['n'] >= samples and rf - clock['base'] >= need
+
+    if last is not None and rf - last > p['stuck_max_gap_epochs']:  # the monitor was away: nothing steady was seen
+        stop('parked')
+        stop('missing')
+    if s.get('down'):
+        stop('parked')  # a restart empties the parked set
+        stop('missing')
+        tick('down')
+        if held('down'):
+            return st, UNKNOWN, f'node has not answered while the reference finalized {need}+ epochs'
+        return st, OK, 'node does not answer (a restart?): not evaluated yet'
+    stop('down')
+
+    fin, parked, has_head = s['finalized'], s.get('parked'), s.get('has_ref_head')
+    if st.get('frozen_at') != fin or fin >= rf:
+        st['frozen_at'] = fin
+        stop('frozen')
+    tick('frozen')
+    if parked is not None and parked >= p['stuck_parked_min']:
+        tick('parked')
+    else:
+        stop('parked')
+    if has_head is False:
+        tick('missing')
+    elif has_head is True:
+        stop('missing')
+
+    view = f'finalized e{fin}, reference e{rf}, parked {"unknown" if parked is None else parked}, ' \
+           f'reference head {dict([(True, "known"), (False, "NOT known"), (None, "lookup failed")])[has_head]}, ' \
+           f'peers {"unknown" if s.get("peers") is None else s["peers"]}'
+    frozen, missing, steady = fin < rf and held('frozen'), held('missing'), held('parked')
+    if frozen and missing and steady:
+        return st, CRIT, f'STUCK on its own branch: {view}. A restart is not a reliable cure; see the runbook'
+    if frozen and missing:
+        why = 'parked unknown: read the metrics to confirm' if parked is None else \
+            'parked below the stuck level: cut off from the reference, or not yet stuck'
+        return st, WARN, f'not following the reference ({why}): {view}'
+    if missing and rf - fin < need:  # further behind is an ordinary long sync
+        return st, WARN, f'finalizing, but the reference head stays unknown (a branch of its own?): {view}'
+    return st, OK, view
+
+
+def check_l1_stuck(client: Client, specs: List[str], state_path: Optional[str], l1_up: List[Dict[str, Any]],
+                   p: Dict[str, Any], fetch: Fetcher, r: Report) -> None:
+    """--l1-stuck-node NAME=RPC_URL[,METRICS_URL]: nothing is called without this option."""
+    if not specs:
+        return
+    if not state_path:
+        r.add('l1_stuck', UNKNOWN, '--l1-stuck-node needs --l1-stuck-state: nothing steady can be seen without it')
+        return
+    try:
+        state = json.loads(Path(state_path).read_text())
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    for i, spec in enumerate(specs):
+        name, rest = named(spec, f'node{i}')
+        url, _, metrics = rest.partition(',')
+        refs = [n for n in l1_up if n['url'] != url and n.get('block_id')]
+        ref = max(refs, key=lambda n: n['finalized_epoch']) if refs else None
+        s: Dict[str, Any] = {'ref_finalized': ref['finalized_epoch'] if ref else None}
+        try:
+            own = client.call(url, 'getchaininfo')
+            s['finalized'] = int(own['finalized']['epoch'])
+        except (RpcError, KeyError, TypeError, ValueError):
+            s['down'] = True
+        if not s.get('down'):
+            raw = fetch(metrics) if metrics else None
+            text = raw.decode(errors='replace') if raw else None
+            s.update(parked=stuck_metric(text, 'bloch_pos_blocks_parked'),
+                     peers=stuck_metric(text, 'bloch_pos_peer_count'), has_ref_head=None)
+            if ref:
+                try:
+                    s['has_ref_head'] = bool(client.call(url, 'getblockbyid', [ref['block_id']]))
+                except RpcError as e:
+                    s['has_ref_head'] = False if 'no block' in str(e) else None
+        state[name], level, message = stuck_step(state.get(name), s, p)
+        r.add(f'l1_stuck[{name}]', level, message)
+    try:
+        tmp = f'{state_path}.tmp'
+        Path(tmp).write_text(json.dumps(state))
+        os.replace(tmp, state_path)
+    except OSError as e:
+        r.add('l1_stuck_state', WARN, f'cannot keep the state file, so nothing steady can be seen: {e}')
 
 
 def check_gates(l1_up: List[Dict[str, Any]], p: Dict[str, Any], compiled: Dict[str, Any], now: float,
@@ -404,11 +540,7 @@ def check_height_runway(settled: Optional[int], l1_up: List[Dict[str, Any]], p: 
             r.graded('l2_export_runway', settled, p['l2_export_warn'], p['l2_export_crit'],
                      f'L2 block {settled}: this build refuses to export above {limit}, and settlement stops there. A fixed '
                      f'producer must be rolled out first ({limit - settled} blocks left)', limit=limit)
-        cost = empty_block_instructions(settled)
-        r.graded('l2_proof_cost', cost, p['proof_instructions_warn'], p['proof_instructions_crit'],
-                 f'L2 block {settled}: an empty block costs about {cost / 1e6:.0f}M guest instructions'
-                 + (f'; above {p["proof_instructions_local"] / 1e6:.0f}M the settler has no local fallback, only the remote prover'
-                    if cost > p['proof_instructions_local'] else ''), instructions=cost)
+        r.facts['l2_proof_model_instructions'] = empty_block_instructions(settled)
     if l1_up:
         height = max(n['height'] for n in l1_up)
         limit = p['l1_reconstruct_limit']
@@ -999,7 +1131,34 @@ def parse_events(text: str, since: float) -> List[Dict[str, Any]]:
     return events
 
 
+def check_proof_time(p: Dict[str, Any], r: Report) -> None:
+    """The slowest proof the settler logged in the event window, against the configured block interval. A proof slower
+    than the interval means settlement falls behind block production."""
+    cost = r.facts.get('l2_proof_model_instructions')
+    model = '' if cost is None else (
+        f'; model: an empty block at this height is about {cost / 1e6:.0f}M guest instructions'
+        + (f', above {p["proof_instructions_local"] / 1e6:.0f}M the settler has no local fallback, only the remote prover'
+           if cost > p['proof_instructions_local'] else ''))
+    seconds = r.facts.get('proof_seconds') or []
+    interval = p['block_interval_seconds']
+    if not seconds:
+        if cost is not None or interval:
+            r.add('l2_proof_cost', OK, f'no proof-generated event in the window{model}')
+        return
+    worst = max(seconds)
+    if not interval:
+        r.add('l2_proof_cost', OK, f'slowest proof {worst:.0f} s; no block_interval_seconds set, not graded{model}',
+              proof_seconds=worst)
+        return
+    r.graded('l2_proof_cost', worst / interval, p['proof_time_warn_ratio'], p['proof_time_crit_ratio'],
+             f'slowest proof {worst:.0f} s against a block interval of {interval} s{model}',
+             proof_seconds=worst, block_interval_seconds=interval)
+
+
 def grade_events(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], window: float, r: Report) -> None:
+    for ev in events:
+        if ev['event'] == 'proof-generated' and isinstance(ev.get('seconds'), (int, float)):
+            r.facts.setdefault('proof_seconds', []).append(float(ev['seconds']))
     counts: Dict[str, int] = {}
     level = OK
     last_bad = None
@@ -1083,6 +1242,84 @@ def check_event_logs(specs: List[str], p: Dict[str, Any], now: float, r: Report)
         grade_foreign(name, parse_events(text, now - p['foreign_window_seconds']), p, r)
 
 
+def check_l1_progress(path: Optional[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """--l1-progress-state: a stalled L1 keeps a constant finality lag, so `l1_finality_lag` stays quiet. This compares
+    the best height with the previous run's and grades how long it has not moved."""
+    if not path or 'l1_height' not in r.facts:
+        return
+    height = int(r.facts['l1_height'])
+    try:
+        st = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        st = {}
+    if st.get('height') != height:
+        st = {'height': height, 'since': now}
+    try:
+        tmp = Path(path).with_suffix('.tmp')
+        tmp.write_text(json.dumps(st))
+        os.replace(tmp, path)
+    except OSError as e:
+        r.add('l1_progress', WARN, f'cannot keep {path}: {e}')
+        return
+    still = now - float(st['since'])
+    r.graded('l1_progress', still, p['l1_stall_warn_s'], p['l1_stall_crit_s'], f'L1 height {height} for {still:.0f} s')
+
+
+def check_memory(enabled: bool, p: Dict[str, Any], r: Report, path: str = '/proc/meminfo') -> None:
+    """Host memory: the OOMs of 2026-10-12 stalled finality before any chain check moved. MemAvailable, and swap in use."""
+    if not enabled:
+        return
+    try:
+        info = {}
+        for line in Path(path).read_text().splitlines():
+            k, _, v = line.partition(':')
+            info[k.strip()] = int(v.split()[0])
+        total, avail = info['MemTotal'], info['MemAvailable']
+    except (OSError, ValueError, KeyError, IndexError) as e:
+        r.add('memory', UNKNOWN, f'{path}: {type(e).__name__}: {e}')
+        return
+    pct = 100.0 * avail / total
+    level = CRIT if pct < p['mem_avail_pct_crit'] else WARN if pct < p['mem_avail_pct_warn'] else OK
+    r.add('memory', level, f'{avail / 2**20:.1f} GiB available of {total / 2**20:.1f} GiB ({pct:.1f}%)', value=round(pct, 2))
+    swap_total = info.get('SwapTotal', 0)
+    if swap_total:
+        used = 100.0 * (swap_total - info.get('SwapFree', swap_total)) / swap_total
+        r.add('swap', WARN if used >= p['swap_used_pct_warn'] else OK, f'{used:.0f}% of swap in use', value=round(used, 1))
+
+
+def check_reports(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """NAME=PATH[:MAX_AGE_S]: the --json report of another monitor (dex-monitor.mjs, a second l2_monitor), written by its
+    unit. Its WARN/CRIT checks go out through this monitor's alert path with one deduplication, and a report older than
+    MAX_AGE_S (CRIT at 3x) means that monitor is dead or hung, which it cannot report itself."""
+    for spec in specs:
+        name, _, rest = spec.partition('=')
+        path, _, limit = rest.partition(':')
+        warn = float(limit) if limit else p['report_age_warn']
+        try:
+            mtime = os.stat(path).st_mtime
+            doc = json.loads(Path(path).read_text())
+            checks = doc['checks']
+            if not isinstance(checks, list):
+                raise ValueError('checks is not a list')
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            r.add(f'report[{name}]', CRIT, f'{path}: {type(e).__name__}: {e}')
+            continue
+        r.graded(f'report_age[{name}]', max(0.0, now - mtime), warn, warn * 3, f'{path} written {now - mtime:.0f} s ago')
+        bad = 0
+        for c in checks:
+            if not isinstance(c, dict):
+                continue
+            level = LEVEL_CODES.get(str(c.get('status') or c.get('level') or '').upper())
+            if level is None:
+                level = c.get('level') if c.get('level') in LEVEL_NAMES else UNKNOWN
+            if level != OK:
+                bad += 1
+                r.add(f'{name}/{c.get("name") or c.get("check")}', level, str(c.get('detail') or c.get('message') or '')[:300])
+        top = LEVEL_CODES.get(str(doc.get('level') or doc.get('status') or '').upper(), OK)
+        if not bad:
+            r.add(f'report[{name}]', top, f'{len(checks)} checks, none failing')
+
+
 def check_files(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
     for spec in specs:
         name, _, rest = spec.partition('=')
@@ -1115,10 +1352,13 @@ def check_guardian_health(specs: List[str], p: Dict[str, Any], now: float, r: Re
         r.graded(f'guardian_age[{name}]', max(0.0, now - written), warn, crit, f'{path} written {now - written:.0f} s ago')
         problems = doc.get('problems')
         ids = ', '.join(sorted(str(k) for k in problems)) if isinstance(problems, dict) else ''
+        findings = doc.get('findings')
+        open_ = ', '.join(sorted(str(k) for k in findings)) if isinstance(findings, dict) else ''
         if doc.get('healthy') is True:
             r.add(f'guardian[{name}]', OK, 'healthy')
         else:
-            r.add(f'guardian[{name}]', CRIT, f'unhealthy: {ids or "no problem listed"}')
+            r.add(f'guardian[{name}]', CRIT, 'unhealthy: ' + '; '.join(x for x in (ids, open_ and f'open hard findings: {open_}')
+                                                                          if x) or 'unhealthy: no problem listed')
         verified = doc.get('verified_t')
         if not isinstance(verified, (int, float)) or isinstance(verified, bool):
             r.add(f'guardian_verified[{name}]', CRIT, 'no round has verified the bridge yet')
@@ -1157,15 +1397,29 @@ def alert_text(profile: str, r: Report, min_level: int) -> str:
     return '\n'.join(lines)[:3800]
 
 
-def decide_alert(r: Report, state: Dict[str, Any], now: float, realert: float, min_level: int) -> Optional[str]:
+def decide_alert(r: Report, state: Dict[str, Any], now: float, realert: float, min_level: int,
+                 recover_runs: int = 1) -> Optional[str]:
     """Returns 'raise', 'recover' or None. Alerts on a new or worse check, a recovery, or every `realert`
-    seconds while something is still at or above min_level."""
+    seconds while something is still at or above min_level. A check that cleared stays in `bad` until it has been clean
+    for `recover_runs` runs, so a flapping check is one alert, not one per run."""
     current = {c['check']: c['code'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
     previous = {k: LEVEL_CODES[v] for k, v in (state.get('bad') or {}).items()}
+    clean = state.setdefault('clean', {})
+    for k in list(previous):
+        if k in current:
+            clean.pop(k, None)
+        else:
+            clean[k] = int(clean.get(k, 0)) + 1
+    for k in [k for k in clean if k not in previous]:
+        del clean[k]
+    held = {k: previous[k] for k in previous if k not in current and clean.get(k, 0) < recover_runs}
+    state['held'] = held
     if current:
         worse = any(SEVERITY[c] > SEVERITY[previous.get(k, OK)] for k, c in current.items())
         if worse or now - float(state.get('sent_at', 0)) >= realert:
             return 'raise'
+        return None
+    if held:
         return None
     return 'recover' if previous else None
 
@@ -1183,6 +1437,18 @@ def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout:
         else:
             urllib.request.urlopen(urllib.request.Request(hook, data=body, headers=headers), timeout=timeout).read()
             sent.append('webhook')
+    command = cfg.get('alert_command')
+    if isinstance(command, list) and command and all(configured(str(a)) for a in command):
+        argv = [str(a).replace('{event}', str(payload.get('event'))).replace('{status}', str(payload.get('status')))
+                .replace('{text}', text) for a in command]
+        if dry_run:
+            sent.append(f'command (dry run) {argv[0]}')
+        else:
+            done = subprocess.run(argv, input=json.dumps({'text': text, **payload}, default=str), capture_output=True,
+                                  text=True, timeout=timeout)
+            if done.returncode:
+                raise RuntimeError(f'alert_command exit {done.returncode}: {done.stderr.strip()[-200:]}')
+            sent.append('command')
     tg = cfg.get('telegram') or {}
     if configured(tg.get('bot_token_file')) and configured(str(tg.get('chat_id', ''))):
         if dry_run:
@@ -1197,6 +1463,26 @@ def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout:
     return sent
 
 
+def write_alert_state(path: Path, doc: Dict[str, Any]) -> None:
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(doc))
+    os.replace(tmp, path)
+
+
+def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report) -> None:
+    """`heartbeat_url`: fetched every run, whatever the status. A dead-man service (healthchecks.io style, or the
+    operator's own) alerts when the pings stop: a dead or hung monitor, a stopped timer or a host down. Nothing here
+    can report its own death."""
+    url = cfg.get('heartbeat_url')
+    if not configured(url) or args.alert_dry_run:
+        return
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, headers={'user-agent': 'bloch-l2-monitor'}),
+                               timeout=args.timeout).read()
+    except Exception as e:  # noqa: BLE001 - a missed ping is the dead-man's to alert on
+        r.add('heartbeat', WARN, f'heartbeat_url not reached: {e}')
+
+
 def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_alert) -> Optional[str]:
     if not args.alert_config:
         return None
@@ -1207,8 +1493,14 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
         state = {}
-    decision = decide_alert(r, state, now, float(cfg.get('realert_seconds', 3600)), min_level)
+    heartbeat(cfg, args, r)
+    decision = decide_alert(r, state, now, float(cfg.get('realert_seconds', 3600)), min_level,
+                            int(cfg.get('recover_runs', 3)))
     if decision is None:
+        if not args.alert_dry_run:  # the clean-run counters must survive, or a flapping check never settles
+            bad = {c['check']: c['level'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
+            bad.update({k: LEVEL_NAMES[v] for k, v in state.get('held', {}).items()})
+            write_alert_state(state_path, {'bad': bad, 'sent_at': state.get('sent_at', 0), 'clean': state.get('clean', {})})
         return None
     text = alert_text(args.profile, r, min_level) if decision == 'raise' else \
         f'BLOCH L2 {args.profile}: RECOVERED, status {LEVEL_NAMES[r.status]} ({utc(now)})'
@@ -1223,9 +1515,9 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         r.add('alert_delivery', WARN, 'alert due but no target configured (webhook_url / telegram are TBD-owner)')
     if not args.alert_dry_run:
         bad = {c['check']: c['level'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
-        tmp = state_path.with_suffix('.tmp')
-        tmp.write_text(json.dumps({'bad': bad, 'sent_at': now if sent else state.get('sent_at', 0)}))
-        os.replace(tmp, state_path)
+        bad.update({k: LEVEL_NAMES[v] for k, v in state.get('held', {}).items()})
+        write_alert_state(state_path, {'bad': bad, 'sent_at': now if sent else state.get('sent_at', 0),
+                                       'clean': state.get('clean', {}) if decision != 'recover' else {}})
     r.facts['alert'] = {'decision': decision, 'sent': sent}
     return decision
 
@@ -1287,6 +1579,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     backends = [named(s, f'rpc{i}') for i, s in enumerate(args.l2_rpc or [])]
     views = check_l2(client, backends, p, args.phase, now, r)
     l1_up = check_l1(client, args.l1_rpc or [], p, r)
+    check_l1_stuck(client, args.l1_stuck_node or [], args.l1_stuck_state, l1_up, p, fetch or http_fetcher(args.timeout), r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_height_runway(r.facts.get('l2_settled_number'), l1_up, p, r)
     check_escrow_and_backlog(with_l2, p, r, now, args.backlog_state if args.max_idle_seconds else None)
@@ -1297,7 +1590,11 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_attestors(args.attest_drop or [], with_l2, p, fetch or http_fetcher(args.timeout), r)
     check_units(args.unit or [], p, now, run_cmd, r)
     check_event_logs(args.event_log or [], p, now, r)
+    check_proof_time(p, r)
     check_files(args.file or [], p, now, r)
+    check_reports(args.report or [], p, now, r)
+    check_memory(args.memory, p, r)
+    check_l1_progress(args.l1_progress_state, p, now, r)
     check_guardian_health(args.guardian_health or [], p, now, r)
     check_binaries(args.binary or [], r)
     return r
@@ -1310,6 +1607,9 @@ def parse(argv: List[str]) -> argparse.Namespace:
                    help='prelaunch: an L2 at its pinned genesis with no settlement is expected, not an alert')
     a.add_argument('--l2-rpc', action='append', help='[NAME=]URL of a settled-RPC backend; repeat for each')
     a.add_argument('--l1-rpc', action='append', help='L1 bloch-pos RPC URL; repeat for each node')
+    a.add_argument('--l1-stuck-node', action='append',
+                   help='NAME=RPC_URL[,METRICS_URL] of an L1 node to check for being stuck on its own branch, against --l1-rpc')
+    a.add_argument('--l1-stuck-state', help='state file for --l1-stuck-node, kept between runs')
     a.add_argument('--follower-status', action='append', help='[NAME=]PATH of a native follower status.json')
     a.add_argument('--attest-drop', action='append', help='attestation drop: directory or http(s) base URL')
     a.add_argument('--unit', action='append', help='[NAME=]UNIT: systemd state + journal failure events')
@@ -1317,6 +1617,10 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--file', action='append', help='NAME=PATH[:MAX_AGE_S] heartbeat file to age-check')
     a.add_argument('--da-script', action='append', help='[NAME=]HEX funding script hash of the DA fee key (getutxos)')
     a.add_argument('--disk', action='append', help='[NAME=]PATH of a filesystem to check for free space')
+    a.add_argument('--report', action='append',
+                   help='NAME=PATH[:MAX_AGE_S] --json report of another monitor (dex-monitor.mjs) to alert on and age-check')
+    a.add_argument('--l1-progress-state', help='state file: alert when the best L1 height stops moving')
+    a.add_argument('--memory', action='store_true', help='check MemAvailable and swap of this host (/proc/meminfo)')
     a.add_argument('--guardian-health', action='append',
                    help='NAME=PATH[:MAX_AGE_S] health_file of a bridge guardian (WARN above MAX_AGE_S, CRIT above 3x)')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')

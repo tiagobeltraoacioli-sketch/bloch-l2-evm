@@ -51,6 +51,18 @@ MAGIC = b'BLOCH:L2:PROVE:1\n'
 MAX_REQUEST_BYTES = 700  # the V3 host refuses longer native requests
 MAX_ARTIFACT_BYTES = 64 << 20
 MAX_PROOF_BYTES = 1 << 20
+# Scheduling and shard-size settings of the SP1 6.8 prover. They change memory and time, never the
+# program or the verifier: the arity settings and WITHOUT_VK_VERIFICATION are absent on purpose.
+PROVER_ENV_ALLOWED = frozenset((
+    'SP1_WORKER_NUM_CORE_WORKERS', 'SP1_WORKER_CORE_BUFFER_SIZE',
+    'SP1_WORKER_NUM_SPLICING_WORKERS', 'SP1_WORKER_SPLICING_BUFFER_SIZE',
+    'SP1_WORKER_GLOBAL_MEMORY_BUFFER_SIZE',
+    'SP1_WORKER_NUM_SETUP_WORKERS', 'SP1_WORKER_SETUP_BUFFER_SIZE',
+    'SP1_WORKER_NUM_PREPARE_REDUCE_WORKERS', 'SP1_WORKER_PREPARE_REDUCE_BUFFER_SIZE',
+    'SP1_WORKER_NUM_RECURSION_EXECUTOR_WORKERS', 'SP1_WORKER_RECURSION_EXECUTOR_BUFFER_SIZE',
+    'SP1_WORKER_NUM_RECURSION_PROVER_WORKERS', 'SP1_WORKER_RECURSION_PROVER_BUFFER_SIZE',
+    'ELEMENT_THRESHOLD',
+))
 
 
 def digest(path):
@@ -102,6 +114,19 @@ def cgroup_memory_cap(proc_cgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
             break
         path = path.parent
     return min(caps) if caps else None
+
+
+def prover_env(config):
+    """The optional low-memory settings of the config. Anything outside the list refuses the job."""
+    settings = config.get('prover_env', {})
+    if not isinstance(settings, dict):
+        raise ValueError('prover_env must be an object')
+    for name, value in settings.items():
+        if name not in PROVER_ENV_ALLOWED:
+            raise ValueError(f'prover_env {name} is not allowed')
+        if not isinstance(value, str) or not value.isascii() or not value.isdigit() or int(value) < 1:
+            raise ValueError(f'prover_env {name} must be a positive decimal string')
+    return dict(settings)
 
 
 def config_path(argv, environ):
@@ -170,6 +195,10 @@ def main():
         fail(70, 'config: mainnet must be a boolean')
     if c.get('mainnet_flag', '--mainnet') not in ('--mainnet', '--mainnet-v1'):
         fail(70, 'config: mainnet_flag must be --mainnet or --mainnet-v1')
+    try:
+        tuning = prover_env(c)
+    except ValueError as error:
+        fail(70, f'config: {error}')
     for key in ('prover', 'guest'):
         if digest(c[key]) != c[key + '_sha256']:
             fail(70, f'{key} differs from its pin')
@@ -197,7 +226,7 @@ def main():
                'RAYON_NUM_THREADS': str(c['prover_threads']), 'SP1_CIRCUIT_MODE': 'release',
                'SP1_GNARK_IMAGE': c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(job / 'native-request.txt'),
-               'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact')}
+               'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact'), **tuning}
         # `"mainnet": true` proves the mainnet program (settlement_v3_mainnet); the settler
         # verifies the result locally with the same flag, so a wrong program is never submitted.
         argv = [c['prover'], *([c.get('mainnet_flag', '--mainnet')] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',

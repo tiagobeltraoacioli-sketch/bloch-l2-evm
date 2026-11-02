@@ -13,14 +13,23 @@ needs no inbound port besides sshd; outbound only Docker's pinned Gnark image
 Run as root from a directory holding:
   bloch-evm-sp1-settlement-v3   host built by build-program.sh (features source-settlement,node-artifact)
   settlement_v3_mainnet         guest ELF, SHA-256 203114bf...c473 (build-reproducible.sh)
-  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet")
+  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet"), SHA-256 3c11d9be...c8e5
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
-      --circuits DIR [--memory-gib 100] [--threads 24] [--dry-run]
+      --circuits DIR [--memory-gib 100] [--threads 32] [--prover-env NAME=VALUE ...]
+      [--timeout-seconds 5400] [--dry-run]
+
+The defaults are the measured settings below: --threads 32, ELEMENT_THRESHOLD=268435456, 5,400 s.
+
+Measured 2026-11-02 on 32 vCPU / 125 GiB hosts (agents/93-prover-tuning.md), empty block 8191:
+SP1 defaults OOM at 100 GiB; --threads 32 --prover-env ELEMENT_THRESHOLD=268435456 proves in
+2,731-2,809 s at 84-85 GiB, so it also needs --timeout-seconds 5400 and a settler remote
+timeout above it.
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
 
-install refuses unless: the guest has the pinned SHA-256; the host's `--mainnet identity`
+install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
+beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
 prints exactly the program the native mainnet activation pins (ELF Keccak, KoalaBear and
 BN254 vkeys, proof policy, domain, configuration); the Gnark image is present; nothing is
 installed yet; MemAvailable covers the cap + 20 GiB (Gnark container, outside the slice). It creates the system user
@@ -32,6 +41,7 @@ runs only when the settler connects. rollback removes exactly what install recor
 /etc/bloch-l2-mainnet-prover/installed.json (refusing while a proof is running).
 """
 import argparse
+import ast
 import fcntl
 import hashlib
 import json
@@ -49,6 +59,10 @@ STATE = Path('/var/lib/bloch-l2-mainnet-prover')
 FILES = ('bloch-evm-sp1-settlement-v3', 'settlement_v3_mainnet', 'remote_prover.py')
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473'
+# Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
+# Agent 93's measured low-memory setting, used unless --prover-env is given.
+DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
+REMOTE_PROVER_SHA256 = 'ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a'
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {
@@ -120,13 +134,37 @@ def authorized_line(key, settler_host, release, config):
             f'--config {config}" {key}\n')
 
 
-def prover_config(release, state, prover_sha256, threads, memory_gib):
+def allowed_prover_env():
+    """The list of the remote_prover.py this kit ships (next to this file in a release, in devnet/ in the repo)."""
+    here = Path(__file__).resolve().parent
+    for path in (here / FILES[2], here.parent.parent / 'devnet' / FILES[2]):
+        if path.is_file():
+            for node in ast.parse(path.read_text()).body:
+                if isinstance(node, ast.Assign) and node.targets[0].id == 'PROVER_ENV_ALLOWED':
+                    return frozenset(ast.literal_eval(node.value.args[0]))
+    die('remote_prover.py with PROVER_ENV_ALLOWED not found')
+
+
+def parse_prover_env(items):
+    """NAME=VALUE options of --prover-env, refused here with the same rule remote_prover.py applies per job."""
+    settings, allowed = {}, allowed_prover_env()
+    for item in items or ():
+        name, separator, value = item.partition('=')
+        if not separator or name not in allowed or not value.isascii() \
+                or not value.isdigit() or int(value) < 1:
+            die(f'bad --prover-env {item!r}')
+        settings[name] = value
+    return settings
+
+
+def prover_config(release, state, prover_sha256, threads, memory_gib, prover_env=None, timeout_seconds=3500):
     return {'mainnet': True,
             'prover': str(release / FILES[0]), 'prover_sha256': prover_sha256,
             'guest': str(release / FILES[1]), 'guest_sha256': GUEST_SHA256,
             'workdir': str(state / 'work'), 'home': str(state / 'work'),
             'prover_threads': threads, 'gnark_image': GNARK_IMAGE,
-            'timeout_seconds': 3500, 'max_memory_bytes': memory_gib << 30}
+            'timeout_seconds': timeout_seconds, 'max_memory_bytes': memory_gib << 30,
+            **({'prover_env': prover_env} if prover_env else {})}
 
 
 def mem_available_gib():
@@ -148,6 +186,8 @@ def install(args, here):
             die(f'{name} differs from SHA256SUMS')
     if sums[FILES[1]] != GUEST_SHA256:
         die('settlement_v3_mainnet is not the pinned guest')
+    if sums[FILES[2]] != REMOTE_PROVER_SHA256:
+        die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
     identity = check_identity(run([here / FILES[0], '--mainnet', 'identity', here / FILES[1]]))
     circuits = Path(args.circuits)
     if not (circuits / 'groth16').is_dir():
@@ -172,7 +212,8 @@ def install(args, here):
     line = authorized_line(Path(args.settler_pubkey).read_text(), args.settler_host, RELEASE, ETC / 'config.json')
     plan = {'user': USER, 'release': str(RELEASE), 'etc': str(ETC), 'state': str(STATE),
             'memory_gib': args.memory_gib, 'threads': args.threads, 'identity': identity,
-            'sha256': {n: sums[n] for n in FILES}}
+            'sha256': {n: sums[n] for n in FILES},
+            'prover_env': parse_prover_env(args.prover_env or DEFAULT_PROVER_ENV), 'timeout_seconds': args.timeout_seconds}
     if args.dry_run:
         print(json.dumps({'dry_run': True, **plan, 'mem_available_gib': available, 'memory_ok': memory_ok,
                           'authorized_keys': line.strip(),
@@ -200,7 +241,8 @@ def install(args, here):
     for name in FILES:
         shutil.copyfile(here / name, RELEASE / name)
         (RELEASE / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
-    config = prover_config(RELEASE, STATE, sums[FILES[0]], args.threads, args.memory_gib)
+    config = prover_config(RELEASE, STATE, sums[FILES[0]], args.threads, args.memory_gib,
+                           parse_prover_env(args.prover_env or DEFAULT_PROVER_ENV), args.timeout_seconds)
     (ETC / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
     (ETC / 'config.json').chmod(0o644)
     slice_file.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +297,10 @@ def main(argv=None):
     i.add_argument('--settler-host', required=True)
     i.add_argument('--circuits', required=True)
     i.add_argument('--memory-gib', type=int, default=100)
-    i.add_argument('--threads', type=int, default=24)
+    i.add_argument('--threads', type=int, default=32)
+    i.add_argument('--prover-env', action='append', metavar='NAME=VALUE',
+                   help='default ELEMENT_THRESHOLD=268435456 (agent 93); give it explicitly to replace the default')
+    i.add_argument('--timeout-seconds', type=int, default=5400)
     i.add_argument('--dry-run', action='store_true')
     r = sub.add_parser('rollback')
     r.add_argument('--dry-run', action='store_true')

@@ -4,6 +4,7 @@ the install/rollback plan of install-prover-mainnet.py (no root, no Docker).
 
     python3 -m unittest deployment/mainnet/prover/test_prover_mainnet.py
 """
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 DEVNET = HERE.parent.parent / 'devnet'
@@ -70,6 +72,21 @@ class RemoteProverMainnet(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout), (0, b'req\nart'), done.stderr)
         argv = (self.root / 'argv').read_text().split()
         self.assertEqual(argv[:4], ['--mainnet', 'prove-groth16', 'native-artifact', str(self.guest)])
+
+    def test_prover_env_reaches_the_host_and_the_list_is_closed(self):
+        self.prover.write_text(self.prover.read_text() + 'echo "$SP1_WORKER_NUM_CORE_WORKERS" > "$HOME/seen"\n')
+        self.config['prover_sha256'] = sha256(self.prover)
+        self.config['prover_env'] = {'SP1_WORKER_NUM_CORE_WORKERS': '1'}
+        self.write()
+        done = self.run_prover('--config', str(self.root / 'config.json'))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / 'work' / 'seen').read_text().strip(), '1')
+        for bad in ({'WITHOUT_VK_VERIFICATION': '1'}, {'SP1_WORKER_MAX_COMPOSE_ARITY': '2'}, {'LD_PRELOAD': '1'},
+                    {'SP1_WORKER_NUM_CORE_WORKERS': '0'}, {'SP1_WORKER_NUM_CORE_WORKERS': 1}, ['x']):
+            self.config['prover_env'] = bad
+            self.write()
+            done = self.run_prover('--config', str(self.root / 'config.json'))
+            self.assertEqual(done.returncode, 70, bad)
 
     def test_devnet_config_keeps_the_devnet_command(self):
         del self.config['mainnet']
@@ -145,6 +162,39 @@ class InstallPlan(unittest.TestCase):
         self.assertEqual(config['prover_threads'], 12)
         self.assertEqual(config['gnark_image'], install.GNARK_IMAGE)
         self.assertTrue(config['guest'].endswith('/settlement_v3_mainnet'))
+
+    def test_install_refuses_another_remote_prover_even_with_a_matching_sums_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            here = Path(tmp)
+            for name in install.FILES:
+                (here / name).write_bytes(b'an older file: ' + name.encode())
+            sums = {name: sha256(here / name) for name in install.FILES}
+            sums[install.FILES[1]] = install.GUEST_SHA256
+            (here / 'SHA256SUMS').write_text(''.join(f'{v}  {n}\n' for n, v in sums.items()))
+            real = install.digest
+            pretend = lambda path: sums[Path(path).name] if Path(path).name == install.FILES[1] else real(path)
+            with mock.patch.object(install, 'digest', pretend):
+                with self.assertRaisesRegex(SystemExit, 'remote_prover.py is'):
+                    install.install(argparse.Namespace(memory_gib=100, threads=24), here)
+
+    def test_remote_prover_pin_is_the_file_in_this_tree(self):
+        self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)
+    def test_prover_env_option(self):
+        self.assertEqual(install.parse_prover_env(['SP1_WORKER_NUM_CORE_WORKERS=1']),
+                         {'SP1_WORKER_NUM_CORE_WORKERS': '1'})
+        self.assertEqual(install.allowed_prover_env(), rp.PROVER_ENV_ALLOWED)
+        for bad in ('WITHOUT_VK_VERIFICATION=1', 'SP1_WORKER_MAX_COMPOSE_ARITY=2', 'ELEMENT_THRESHOLD', 'ELEMENT_THRESHOLD=0'):
+            with self.assertRaises(SystemExit):
+                install.parse_prover_env([bad])
+        config = install.prover_config(Path('/opt/r'), Path('/var/lib/s'), 'aa' * 32, 12, 48, {'ELEMENT_THRESHOLD': '1'}, 7000)
+        self.assertEqual((config['prover_env'], config['timeout_seconds']), ({'ELEMENT_THRESHOLD': '1'}, 7000))
+        self.assertNotIn('prover_env', install.prover_config(Path('/opt/r'), Path('/var/lib/s'), 'aa' * 32, 12, 48))
+
+    def test_defaults_are_the_measured_settings(self):
+        source = (HERE / 'install-prover-mainnet.py').read_text()
+        self.assertIn("'--threads', type=int, default=32", source)
+        self.assertIn("'--timeout-seconds', type=int, default=5400", source)
+        self.assertEqual(install.parse_prover_env(install.DEFAULT_PROVER_ENV), {'ELEMENT_THRESHOLD': '268435456'})
 
     def test_memory_floor(self):
         for memory, threads in ((24, 8), (48, 0), (48, 64)):

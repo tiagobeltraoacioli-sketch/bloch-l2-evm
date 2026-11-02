@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Tests of the reorg recovery tool's file handling; the whole path runs in the l1-reorg recovery drill."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import l2_reorg_recover as r  # noqa: E402
@@ -60,6 +63,18 @@ class RecoverFiles(unittest.TestCase):
         self.assertEqual((pool / (r.S.keccak256(b'one').hex() + '.tx')).read_text(), b'one'.hex() + '\n')
         self.assertEqual(r.respool([block], pool), [])
         self.assertEqual([p.name for p in pool.iterdir() if p.name.endswith('.tmp')], [])
+
+    def test_stdout_is_one_json_document_even_when_the_worker_logs(self):
+        config = self.root / 'settler.json'
+        config.write_text(json.dumps({'follower_status': 'x'}))
+        def noisy(*_args):
+            r.S.log('identity-checked', network='n')
+            return {'accepted_number': 5}
+        out = io.StringIO()
+        with mock.patch.object(r, 'plan', noisy), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(sys, 'argv', ['tool', '--config', str(config), '--follower-state', 'y']):
+            r.main()
+        self.assertEqual(json.loads(out.getvalue()), {'accepted_number': 5})
 
 
 if __name__ == '__main__':

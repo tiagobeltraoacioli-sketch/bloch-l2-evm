@@ -6,7 +6,10 @@
 - Kit commit: `@KIT_COMMIT@`
 
 Read `ONBOARDING.md` first: host requirements, firewall, monitoring, the fork schedule and the reply
-you send at the end. Every command below runs on the attestor host. Run one command at a time.
+you send at the end. Every command below runs on the attestor host, from a normal user that can use
+`sudo`. Run one command at a time, and stop at the first output that differs from what is described.
+Plan about two hours: most of it is waiting at step 6. If anything refuses, send the coordinator the
+output. Never send a passphrase or the sealed key.
 
 ## 1. Check the bundle you received
 
@@ -28,7 +31,7 @@ cd operator-@INDEX@
 
 ## 2. Get the Linux artifacts
 
-If the bundle has an `artifacts/` directory, use it. Otherwise copy the five files named in
+If the bundle has an `artifacts/` directory, there is nothing to do here. Otherwise copy the five files named in
 `ARTIFACTS.sha256`, plus `carryover.tsv.gz.sha256`, into `operator-@INDEX@/artifacts/` from the place
 the coordinator gives you. Their hashes are pinned in `ARTIFACTS.sha256`, so the source does not need
 to be trusted.
@@ -39,16 +42,24 @@ to be trusted.
 ./check-operator-bundle.sh --open
 ```
 
-It checks every bundle file, the pinned set, your public key, every artifact (including the v2
-follower `c18752fd…` and producer `fb0d5313…`) and the sealed key header. With `--open` it asks for
-the **transport passphrase** (received over the third channel) and proves the key opens and signs
-for index @INDEX@. It must end with `BUNDLE OK for attestor @INDEX@`.
+It checks every bundle file, the pinned set, your public key, every artifact (including the
+follower `c18752fd…` and producer `fb0d5313…`), that the host can run them, and the sealed key
+header. With `--open` it asks for the **transport passphrase** (it arrived on its own channel, not
+with the bundle) and proves the key opens and signs for index @INDEX@. It must end with
+`BUNDLE OK for attestor @INDEX@`. Fix any `WARNING` line before you go on. A wrong passphrase prints
+`authentication failed`: nothing has changed, run the command again.
 
-## 4. Install (nothing starts yet)
+## 4. Open the firewall
+
+ONBOARDING.md section 2 has the commands. Allow SSH from your own address **before** you enable the
+firewall, or you lock yourself out. Inbound TCP 8787 must be open to everyone. If your provider has
+its own firewall panel, open 8787 there too. If your host cannot take an inbound port, see "Hosts with
+no inbound port" in `kit/README.md`.
+
+## 5. Install (nothing starts yet)
 
 This prepares a read-only endpoint on TCP 8787 that serves only your signatures. No drop and no
-token are involved. If your host cannot take an inbound port, see "Hosts with no inbound port" in
-`kit/README.md`.
+token are involved.
 
 ```
 sudo kit/install-attestor.sh install --artifacts artifacts --index @INDEX@ --bundle attestor-@INDEX@.sealed --l1-rpc-url http://80.240.16.185:8080 --feed-port 8787
@@ -56,31 +67,26 @@ sudo kit/install-attestor.sh install --artifacts artifacts --index @INDEX@ --bun
 
 Type the transport passphrase once at `Sealed attestor key passphrase:`. It must print
 `ok: sealed key opens and signs for attestor @INDEX@ of 3-of-5 set 1c06adbb…` and
-`Installed attestor @INDEX@, NOT started.`
+`Installed attestor @INDEX@, NOT started.` If the passphrase was wrong, nothing was installed: run the
+same command again. Do not edit `config.json`: the agent halts if a pin differs.
 
-The installer pins `bloch-pos` and the producer in `config.json`, but not the follower. Check the
-installed follower yourself:
+The installer refuses binaries other than the published ones and pins all three in `config.json`.
 
-```
-sha256sum /opt/bloch/l2-attestor/bloch-l2-native-follower /opt/bloch/l2-attestor/bloch-l2-produce-dev /opt/bloch/l2-attestor/bloch-pos
-```
-
-The three hashes must equal the lines in `ARTIFACTS.sha256`.
-
-## 5. Start the follower and wait for its first replay
+## 6. Start the follower and wait for its first replay
 
 ```
 sudo systemctl enable --now bloch-l2-attestor-follower
 ```
 
-The first replay takes 30–60 minutes or more. Wait until `status.json` shows the L2 genesis as
-finalized:
+The first replay takes 60–90 minutes on two cores, and more as the chain grows. Until it finishes
+`status.json` does not exist, and the next command prints `No such file`. That is normal. Run it again
+every 15 minutes until it shows `'finalized': True`:
 
 ```
 sudo python3 -c 'import json; s=json.load(open("/var/lib/bloch-l2-attestor-follower/status.json")); print(s["native_finalized_epoch"], s["l2_genesis"])'
 ```
 
-## 6. Check
+## 7. Check
 
 ```
 sudo systemd-run --pipe --wait -p User=bloch-l2-attestor -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
@@ -89,8 +95,11 @@ sudo systemd-run --pipe --wait -p User=bloch-l2-attestor -p LoadCredential=passp
 Before the replay finishes this prints `check-not-ready`; wait and run it again. It must print
 `check-ok` with `signer_index @INDEX@` and `set_hash 1c06adbb…`.
 
-## 7. Start the agent
+## 8. Start the feed and the agent
 
+```
+sudo systemctl enable --now bloch-l2-attestor-feed
+```
 ```
 sudo systemctl enable --now bloch-l2-attestor
 ```
@@ -98,9 +107,19 @@ sudo systemctl enable --now bloch-l2-attestor
 journalctl -u bloch-l2-attestor -o cat -n 20
 ```
 
-Expect `started`, then `rebuild-check-ok`, then `waiting`, `awaiting-own-finality` or `root-skipped`.
+Expect `started`, then `rebuild-check-ok`, then nothing or `waiting`, `awaiting-own-finality` or
+`root-skipped`. Silence between events is normal: the agent logs only when something happens.
 
-## 8. Re-seal your offline backup under a passphrase only you know
+From **another machine**, not this host, check that the world reaches your feed:
+
+```
+curl -fsS http://YOUR_PUBLIC_IPV4:8787/healthz
+```
+
+It must print `ok`. If it times out, your firewall or your provider's firewall blocks 8787. Without the
+feed your signatures reach nobody, and the agent itself cannot tell you. Fix this before you reply.
+
+## 9. Re-seal your offline backup under a passphrase only you know
 
 The key holder chose the transport passphrase, so they can still open `attestor-@INDEX@.sealed`.
 Re-seal your backup copy under your own passphrase so that, after the handoff, nobody but you can
@@ -117,8 +136,11 @@ passphrase twice (`New sealed-key passphrase:`, `Repeat passphrase:`). Prove the
 artifacts/bloch-pos l2-claim key-check --sealed attestor-@INDEX@.operator.sealed --attestors attestors.set --signer-index @INDEX@
 ```
 
-Copy `attestor-@INDEX@.operator.sealed` to your offline media (two USB drives in different places),
-check the copies with `sha256sum`, and only then delete it from the host:
+Copy `attestor-@INDEX@.operator.sealed` to your offline media (two USB drives in different places).
+A rented server has no USB port: fetch the file to your own computer with `scp` first, write it to
+both drives, delete it from that computer, and compare `sha256sum` of both drives with the file on the
+host. Write your passphrase on paper and keep it apart from the drives. Forgetting it loses your backup,
+and nobody can recover it. Only then delete the file from the host:
 
 ```
 shred -u attestor-@INDEX@.operator.sealed
@@ -127,7 +149,7 @@ shred -u attestor-@INDEX@.operator.sealed
 Tell the coordinator you re-sealed (no passphrase, no file). The key holder can then destroy their
 own copies of bundle @INDEX@.
 
-## 9. Remove the bundle from the host
+## 10. Remove the bundle from the host
 
 The host now holds only the re-sealed key (`/etc/bloch-l2-attestor/attestor.sealed`) and its random
 host passphrase (root, 0400). Delete what you brought:
@@ -139,9 +161,9 @@ cd ..
 shred -u operator-@INDEX@/attestor-@INDEX@.sealed operator-@INDEX@.tar
 ```
 
-Your offline backup is now `attestor-@INDEX@.operator.sealed` (step 8) plus the passphrase only you
+Your offline backup is now `attestor-@INDEX@.operator.sealed` (step 9) plus the passphrase only you
 know. Keep them in different places.
 
-## 10. Reply
+## 11. Reply
 
 Send the coordinator the reply in `ONBOARDING.md` section 6 (no secret in it).
