@@ -169,6 +169,7 @@ RPC_DIVERGED_LOG_AFTER = 3  # consecutive reads outside the quorum before an end
 QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy endpoints straddle a block
 # The getl2settlement fields the worker reads; everything else (native_height,
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
+FRESH_SOURCE_SECONDS = 600  # skip_idle_blocks: a source older than this (above the pacing) takes no user transaction
 SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
@@ -839,6 +840,20 @@ class Settler:
                 raise Halt('foreign_recovery needs follower_state and follower_status')
             if not isinstance(recovery.get('keep', 2), int) or recovery.get('keep', 2) < 1:
                 raise Halt('foreign_recovery.keep must be a positive integer')
+        if not isinstance(self.c.get('skip_idle_blocks', False), bool):
+            raise Halt('skip_idle_blocks must be true or false')
+        if self.c.get('skip_idle_blocks'):
+            limit = self.c.get('max_idle_seconds')
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+                raise Halt('skip_idle_blocks requires max_idle_seconds, a positive integer')
+        pace = self.c.get('min_block_interval_seconds', 0)
+        if not isinstance(pace, int) or isinstance(pace, bool) or pace < 0:
+            raise Halt('min_block_interval_seconds must be a non-negative integer')
+        if pace and not self.c.get('skip_idle_blocks'):
+            raise Halt('min_block_interval_seconds requires skip_idle_blocks')
+        self.spool_open = True  # false: the next block is built without the spool (see hold_block)
+        self.holding_since = None  # monotonic time this worker began to hold; None while it builds
+        self.hold_logged_at = None
         self.work = Path(self.c['workdir'])
         self.rebuild_discarded_at = None
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
@@ -917,12 +932,67 @@ class Settler:
         if self.c.get('timestamp_rule'):
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
-        if self.c['user_transactions'] and spool:
+        if self.c['user_transactions'] and spool and self.spool_open:
             args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
             if self.c.get('min_tip_wei'):
                 args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
         return args
+
+    def source_age(self, view):
+        """Seconds of L1 time since the frozen source, which is the block right after the last acceptance. The L1 head
+        slot is bounded by an honest endpoint's, so a lying endpoint cannot age the source. An L1 that stops stops this
+        clock too: no block is due while nothing could settle it."""
+        rule = self.c.get('timestamp_rule')
+        slot_seconds = int(rule.split(':')[2]) / 1000 if rule else 30
+        return (self.native.bounded_value('getchaininfo', 'slot') - int(view['source']['slot'])) * slot_seconds
+
+    def inbox_backlog(self):
+        """Deposits L1 holds and no settlement has consumed. `source.pending` cannot show this: the source freezes the
+        inbox count right after an acceptance, so a deposit made later appears there only after one more settlement.
+        Bounded by an honest endpoint's answer, so a lying endpoint cannot force a block."""
+        values = sorted(int(a['inbox']['count']) - int(a['inbox']['consumed'])
+                        for a in self.native.gather('getl2settlement').values())
+        return values[max(0, len(values) - 1 - self.native.faults)]
+
+    def hold_block(self, view):
+        """With `skip_idle_blocks`: whether to build no block in this cycle. Not a block rule: L1, the guest, the follower
+        and every rebuild only see fewer blocks, each with an older anchor. See SETTLER-RUNBOOK.md, "Idle blocks".
+
+        A block is due when L1 holds an unconsumed deposit, the spool holds a transaction, or the source reached
+        `max_idle_seconds`, which proves the whole path while nothing else does. `min_block_interval_seconds` then delays
+        a due block, so that deposits cannot make the height grow faster than that: a deposit costs 0.01 BLCH, and the
+        recipient keeps it. A deposit that arrived while idle needs two blocks: L1 keeps the source frozen until the next
+        settlement, so the first block is anchored to the old source and cannot mint it."""
+        accepted = view.get('accepted')
+        expected = statement_fields(accepted['statement'])['l2_hash'] if accepted else self.c['l2_genesis']
+        if not Path(self.c['l2_db']).exists() or self.produce('head', '--target', self.c['l2_db'])['hash'] != expected:
+            return False  # a block left by a crash is finished first; a foreign settlement is handled by prepare_block
+        try:
+            age = self.source_age(view)
+            backlog = self.inbox_backlog()
+        except Exception as error:  # noqa: BLE001 - the quorum view just passed: try again next cycle
+            log('idle-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
+            return True
+        spooled = bool(self.c['user_transactions'] and any(Path(self.c['txpool_dir']).glob('*.tx')))
+        pace = self.c.get('min_block_interval_seconds', 0)
+        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if spooled
+                  else 'max-idle' if age >= self.c['max_idle_seconds'] else None)
+        if reason is None or age < pace:
+            now = self.clock()
+            if self.holding_since is None:
+                self.holding_since, self.hold_logged_at = now, None
+            if self.hold_logged_at is None or now - self.hold_logged_at >= 3600:
+                self.hold_logged_at = now
+                log('idle-hold', source_age_seconds=int(age), backlog=backlog, due=reason)
+            return True
+        # An L2 block takes its time from its anchor. A transaction in a block on an old source would run at the old time,
+        # so an expired deadline would pass. Build this block without the spool; the next one has a fresh source.
+        self.spool_open = age < pace + FRESH_SOURCE_SECONDS
+        if self.holding_since is not None or not self.spool_open:
+            log('idle-end', reason=reason, source_age_seconds=int(age), backlog=backlog, spool_open=self.spool_open)
+        self.holding_since = None
+        return False
 
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
@@ -1367,6 +1437,8 @@ class Settler:
         if view is None or view.get('source') is None:
             return False
         try:
+            if self.c.get('skip_idle_blocks') and self.hold_block(view):
+                return False
             number, directory = self.prepare_block(view)
             proof = self.prove(directory, view=view)
             # A proof takes many minutes: never pay DA for a block another settlement made stale meanwhile.

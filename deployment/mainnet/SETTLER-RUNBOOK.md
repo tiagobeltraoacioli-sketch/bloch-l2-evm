@@ -201,6 +201,31 @@ from the accepted head; it reuses a block left by a crash if its anchor is uncha
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements". No action unless they repeat. |
 | `halt` (exit 3, no auto-restart) | Operator review. Causes: a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
 
+## Idle blocks
+
+Off by default. `configure --skip-idle-blocks [--max-idle-seconds 86400] [--min-block-interval 0]` sets `skip_idle_blocks`, `max_idle_seconds` and `min_block_interval_seconds`. The height then grows with demand, which matters because each block raises the cost of every later block and the export stops at block 4097 on v2.1.
+
+No consensus rule changes. L1 accepts the next L2 block at any time, against the source it froze right after the last acceptance.
+
+A block is due when L1 holds an unconsumed deposit, the spool holds a transaction, or the source is `max_idle_seconds` old. The last one proves prover, proof and submission while no demand does, and sets how late a broken prover is found.
+
+**What changes for users and operators:**
+
+- **A deposit made while idle takes two blocks and two proofs.** The frozen source does not list it, so the first block carries nothing and only the next can mint it.
+- **L2 time stands still while idle.** `latest` shows the last block's time, and the next block carries the time of the old source, up to `max_idle_seconds` behind. Its transactions would run at that time, so a block on a source older than 600 s above the pacing is built without the spool, and the transactions go in the next one. This also costs a block.
+- **Pacing.** `min_block_interval_seconds` delays a due block, measured from the last acceptance. It is the only limit on a depositor forcing blocks. A deposit may then wait two intervals plus two proofs.
+- **Junk in the spool still forces blocks.** A transaction the producer cannot include is demand until it leaves the spool. Set pacing before user transactions are on.
+
+**Set with the option, or they raise false alerts:**
+
+| Where | Setting |
+|---|---|
+| `l2_monitor.py` | `--max-idle-seconds N --backlog-state FILE`. Adds `deposit_wait`. `--set deposit_wait_warn=...` if pacing is on |
+| Guardian | `l2_stall_alert_s` above N, on bridge deployments |
+| DEX UI | The "L2 finality looks stalled" notice appears once the finalized block is older than `FINALIZED_AGE_WARN_SECONDS`, also on a healthy idle chain |
+
+Follower, settled RPC, attestors and claims do not depend on block cadence.
+
 ## Foreign settlements
 
 Settling needs no authorization. A deposit-only block built by the rules is identical whoever builds

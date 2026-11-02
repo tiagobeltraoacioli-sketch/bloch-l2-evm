@@ -108,6 +108,134 @@ class World(base.Fake):
         return out
 
 
+class IdleWorld(World):
+    """L1 as the idle logic reads it: the frozen source, the live inbox and the head slot. Per-port overrides model liars."""
+
+    def __init__(self, root, values):
+        super().__init__(root, values)
+        self.source_slot, self.head_slot, self.count, self.consumed, self.pending = 1000, 1010, 0, 0, []
+        self.liars, self.down = {}, set()
+
+    def view(self):
+        view = super().view()
+        view['source'].update(slot=self.source_slot, pending=list(self.pending), consumed_start=self.consumed,
+                              consumed_end=self.consumed + len(self.pending))
+        return view
+
+    def rpc(self, port, method, params=()):
+        if port in self.down and method in ('getchaininfo', 'getl2settlement'):
+            raise OSError('down')
+        answer = super().rpc(port, method, params)
+        if method == 'getchaininfo':
+            return {**answer, 'slot': self.liars.get(port, {}).get('slot', self.head_slot)}
+        if method == 'getl2settlement':
+            return {**answer, 'inbox': {'count': self.liars.get(port, {}).get('count', self.count), 'consumed': self.consumed}}
+        return answer
+
+
+class IdleTest(unittest.TestCase):
+    def setUp(self):
+        self.base = ForeignTest('config')
+        self.base.setUp()
+        self.addCleanup(self.base.tmp.cleanup)
+        self.addCleanup(mock.patch.stopall)
+        self.root, self.world = self.base.root, IdleWorld(self.base.root, b'')
+        rule = {'timestamp_rule': '1:1000:30000'}
+        self.options = dict(skip_idle_blocks=True, max_idle_seconds=3000, **rule)
+
+    def settler(self, **extra):
+        return self.base.settler(self.world, **{**self.options, **extra})
+
+    def held(self, settler=None):
+        settler = settler or self.settler()
+        return settler.hold_block(settler.native_view())
+
+    def test_quiet_chain_builds_no_block(self):
+        settler = self.settler()
+        self.assertFalse(settler.cycle())
+        self.assertEqual(self.base.local(), [GENESIS_HASH])
+        self.assertFalse([c for c in self.world.calls if 'extend' in c or 'prove-groth16' in c])
+
+    def test_option_is_off_by_default(self):
+        settler = self.base.settler(self.world, timestamp_rule='1:1000:30000')
+        with mock.patch.object(settler, 'prove', return_value=None):
+            settler.cycle()
+        self.assertTrue([c for c in self.world.calls if 'extend' in c])
+
+    def test_a_deposit_after_the_freeze_is_seen_though_the_source_shows_nothing(self):
+        # The source froze before this deposit: L1 reports pending [] until one more settlement is accepted.
+        self.world.count = 1
+        self.assertEqual(self.settler().native_view()['source']['pending'], [])
+        self.assertFalse(self.held())
+
+    def test_a_deposit_in_the_frozen_source_is_due(self):
+        self.world.count, self.world.pending = 1, [{'deposit': 1}]
+        self.assertFalse(self.held())
+
+    def test_max_idle_is_due_at_the_interval_only(self):
+        self.world.head_slot = 1000 + 99
+        self.assertTrue(self.held())
+        self.world.head_slot = 1000 + 100
+        self.assertFalse(self.held())
+
+    def test_a_crash_left_block_is_finished_first(self):
+        (self.root / 'db' / 'chain.json').write_text(json.dumps([GENESIS_HASH, 'aa' * 32]))
+        self.assertFalse(self.held())
+
+    def test_pacing_delays_a_due_block_and_nothing_else(self):
+        self.world.count = 1
+        settler = self.settler(min_block_interval_seconds=600)
+        self.world.head_slot = 1000 + 19
+        self.assertTrue(self.held(settler))
+        self.world.head_slot = 1000 + 20
+        self.assertFalse(self.held(settler))
+
+    def test_one_lying_endpoint_cannot_force_a_block(self):
+        self.world.liars = {1: {'slot': 10**9, 'count': 10**6}}
+        self.assertTrue(self.held())
+
+    def test_one_silent_endpoint_does_not_hide_a_deposit(self):
+        self.world.count, self.world.down = 1, {1}
+        self.assertFalse(self.held())
+
+    def test_no_quorum_for_the_idle_reads_holds_and_does_not_raise(self):
+        settler = self.settler()
+        view = settler.native_view()
+        self.world.count, self.world.down = 1, {1, 2}
+        self.assertTrue(settler.hold_block(view))
+        self.assertTrue(self.base.events('idle-check-failed'))
+
+    def test_a_transaction_on_an_old_source_waits_for_a_fresh_one(self):
+        settler = self.settler(users=True)
+        (self.root / 'txpool' / 'a.tx').write_text('00')
+        self.world.head_slot = 1000 + 21  # 630 s
+        self.assertFalse(self.held(settler))
+        self.assertNotIn('--txs', settler.extend_arguments('p', 'a', 'd', 5))
+        self.world.head_slot = 1000 + 19  # 570 s
+        self.assertFalse(self.held(settler))
+        self.assertIn('--txs', settler.extend_arguments('p', 'a', 'd', 5))
+
+    def test_pacing_does_not_keep_transactions_out_for_ever(self):
+        # The source is always at least the pacing old when a paced block is built.
+        settler = self.settler(users=True, min_block_interval_seconds=3600)
+        (self.root / 'txpool' / 'a.tx').write_text('00')
+        self.world.head_slot = 1000 + 121  # 3630 s
+        self.assertFalse(self.held(settler))
+        self.assertIn('--txs', settler.extend_arguments('p', 'a', 'd', 5))
+
+    def test_without_user_transactions_the_spool_is_not_demand(self):
+        (self.root / 'txpool' / 'a.tx').write_text('00')
+        self.assertTrue(self.held())
+
+    def test_bad_configuration_is_refused(self):
+        for extra in ({'max_idle_seconds': None}, {'max_idle_seconds': 0}, {'skip_idle_blocks': 'yes'},
+                      {'min_block_interval_seconds': -1}):
+            with self.assertRaises(s.Halt):
+                self.settler(**extra)
+        with self.assertRaisesRegex(s.Halt, 'requires skip_idle_blocks'):
+            self.base.settler(self.world, min_block_interval_seconds=60)
+
+
 class ForeignTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

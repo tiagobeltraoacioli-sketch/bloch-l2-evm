@@ -215,6 +215,49 @@ class MonitorTests(unittest.TestCase):
             node['l2']['source']['slot'] = (NOW - 50 * 60 - m.L1_GENESIS_TIME) // 30
         self.assertEqual(level(run(w)[0], 'settlement_age'), 'CRIT')
 
+    def idle_world(self, minutes_idle):
+        w = healthy()
+        slot = (NOW - minutes_idle * 60 - m.L1_GENESIS_TIME) // 30
+        for node in w['l1'].values():
+            node['l2']['source']['slot'] = slot
+        old = NOW - minutes_idle * 60
+        for backend in w['l2'].values():
+            for tag in ('latest', 'safe', 'finalized'):
+                backend[tag] = {**backend[tag], 'timestamp': hex(old)}
+        return w
+
+    def test_idle_settler_moves_the_age_checks_by_the_interval(self):
+        w = self.idle_world(10 * 60)
+        for name in ('settlement_age', 'l2_head_age', 'l2_finalized_age'):
+            self.assertEqual(level(run(w)[0], name), 'CRIT', 'without the flag a quiet chain alarms')
+        with tempfile.TemporaryDirectory() as d:
+            idle = ('--max-idle-seconds', '86400', '--backlog-state', f'{d}/backlog')
+            for name in ('settlement_age', 'l2_head_age', 'l2_finalized_age'):
+                self.assertEqual(level(run(w, *idle)[0], name), 'OK')
+            w = self.idle_world(24 * 60 + 50)
+            self.assertEqual(level(run(w, *idle)[0], 'settlement_age'), 'CRIT', 'a missed heartbeat still alarms')
+
+    def test_idle_flag_needs_the_state_file(self):
+        with self.assertRaisesRegex(SystemExit, 'backlog-state'):
+            run(healthy(), '--max-idle-seconds', '60')
+
+    def test_deposit_wait_counts_from_first_seen_and_resets_on_consumption(self):
+        with tempfile.TemporaryDirectory() as d:
+            idle = ('--max-idle-seconds', '86400', '--backlog-state', f'{d}/backlog')
+            def at(now, count, consumed):
+                w = healthy()
+                for node in w['l1'].values():
+                    node['l2']['inbox'].update(count=count, consumed=consumed)
+                return level(m.run(m.parse(['--profile', 'mainnet', '--phase', 'live', '--l2-rpc', f'A={L2A}',
+                                            *sum((['--l1-rpc', u] for u in L1), []), *idle]),
+                                   Fake(w), now=now, run_cmd=lambda a: (1, ''), fetch=lambda u: None), 'deposit_wait')
+            self.assertEqual(at(NOW, 3, 3), 'OK')
+            self.assertEqual(at(NOW + 60, 4, 3), 'OK', 'first seen now')
+            self.assertEqual(at(NOW + 60 + 46 * 60, 4, 3), 'WARN')
+            self.assertEqual(at(NOW + 60 + 91 * 60, 5, 3), 'CRIT', 'new deposits do not restart a stuck wait')
+            self.assertEqual(at(NOW + 60 + 92 * 60, 5, 4), 'OK', 'a consumption restarts it')
+            self.assertEqual(at(NOW + 60 + 93 * 60, 4, 5), 'OK')
+
     # ---- L2 backends
     def test_stale_head_is_critical(self):
         w = healthy()

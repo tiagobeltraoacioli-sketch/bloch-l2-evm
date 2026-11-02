@@ -111,6 +111,7 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `l2_backends`, `l2_backends_agree` | backends up; same hash for every common block; finalized spread | one down / spread 2 | all down / any hash differs / spread 8 | two followers replaying the same L1 must agree exactly |
 | `l2_genesis[*]` | block 0 = `632e45ae…f468` | – | differs | wrong database or profile |
 | `settlement_age` | now − time of `getl2settlement.source.slot` (frozen right after each acceptance) | 25 min | 45 min | same cadence as `l2_head_age`; `live` phase only |
+| `deposit_wait` | only with `--max-idle-seconds` (settler `skip_idle_blocks`): time since deposits began to wait with no consumption. That flag also adds the interval to `settlement_age`, `l2_head_age` and `l2_finalized_age` | 45 min | 90 min | an idle settler that misses a deposit is otherwise silent until the interval ends |
 | `l1_l2_identity` | network, genesis, chain id and attestor set of `getl2settlement` | – | differs | pins |
 | `l1_gates` | epochs to the next pending L1 gate (`getchaininfo.hard_forks`) | 96 (≈ 1 day) | 6 | upgrades must land before the gate |
 | `l1_gates_vs_l2_build` | L1 gate epochs = epochs compiled into the L2 build | – | differs | a follower/producer built for other epochs halts at the gate |
