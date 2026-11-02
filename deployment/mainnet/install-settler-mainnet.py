@@ -9,7 +9,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
-      l2_reorg_recover.py (SHA-256 7c918bb7...).
+      l2_reorg_recover.py (SHA-256 d1a91c46...).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
       whose passphrase is generated here and never printed. Prints the funding
@@ -64,7 +64,7 @@ PINS = {
     'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
     # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
-    'l2_reorg_recover.py': '7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57',
+    'l2_reorg_recover.py': 'd1a91c46688bb4d37fc12d54f96df04727f105dffbf336dddc896524e548623a',
 }
 FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
          'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')

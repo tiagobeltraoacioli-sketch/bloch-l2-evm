@@ -128,19 +128,19 @@ Build output on 209: `~/l2dexbridge-20261030/next-rpc-r4/rel4/work-a/out/` (iden
 
 To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.patch`, `build-release.sh` at the WORK path `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2`.
 
-### 3.2 Kit files at 6a96dc8
+### 3.2 Kit files at the kit tip named in agents/PINS-NEXT.md
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `8c87718fbab960571afa0348941ffb02e1a64e38e16d8df52c1b1b91704a1bb4` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `1bc1da0cc8bda03e380a7ced923d2177ced105314ca5fd91e9047cb6209f3996` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `65715d136c401eec751cbf1677a6691ffca281b5d47667b7c8f4885aa607c91d` |
 | `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
 | `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
-| `deployment/mainnet/install-settler-mainnet.py` | `0fefcbf47092f3383538a9db6e17cd44a5526c2bf50d89794fcbd749198b9215` |
-| `deployment/mainnet/l2_reorg_recover.py` | `7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57` (the settler installer pins it) |
+| `deployment/mainnet/install-settler-mainnet.py` | `57de4dfca34b6aea45826ba159762666a399d9e7d40c85336aed5f52f76add40` |
+| `deployment/mainnet/l2_reorg_recover.py` | `d1a91c46688bb4d37fc12d54f96df04727f105dffbf336dddc896524e548623a` (the settler installer pins it) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `f342deab986b419dccd89070bb1ac0088729c90258cc57a646b83e9a31787e39` |
 | `deployment/devnet/remote_prover.py` | `183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
-| `deployment/devnet/settler_v3.py` | `334230e5970108daff2e2e778b55605bc520a9699f86bc0574b31791bb534ede` |
+| `deployment/devnet/settler_v3.py` | `2be2651c884db041d076ec80f67b1da747aa0fe63a8fc540875398ff3a832546` |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `24aa5cb8d76e5fc8ff926bd49a21497635959c032783fbfdeee38dd2917aac48` (`LimitNOFILE=65536`) |
@@ -1059,6 +1059,6 @@ If the refilled node is a follower's only L1 source, the follower may have halte
 | --- | --- | --- |
 | Follower host | Reinstall (P3) and replay from L1 | 57 min to e6596, about 75 min today |
 | Settled RPC view | Restart; it rebuilds the view | 0.8 s (small L2) |
-| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This build's `l2_reorg_recover.py` `7c918bb7…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118). | 0.16 s rebuild (3 blocks) |
+| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This build's `l2_reorg_recover.py` `d1a91c46…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118). | 0.16 s rebuild (3 blocks) |
 | DA fee key | New key, fund it, restart with the same paths; the old key's balance is lost. Hence the separate backups in P6 | 6 s funding |
 | Prover host | Reinstall P5 and prove the next block | 11–28 min plus install (not run) |
