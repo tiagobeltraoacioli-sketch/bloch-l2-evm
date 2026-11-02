@@ -341,6 +341,137 @@ def keccak256(data):
     return b''.join(state[i % 5][i // 5].to_bytes(8, 'little') for i in range(4))
 
 
+# secp256k1, only to read the sender of a spooled transaction (idle-block demand). Never signs, never decides a block.
+SECP_P = 2 ** 256 - 2 ** 32 - 977
+SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+SECP_G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+          0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _jacobian_double(p):
+    x, y, z = p
+    if not y:
+        return 0, 1, 0
+    yy = y * y % SECP_P
+    s = 4 * x * yy % SECP_P
+    m = 3 * x * x % SECP_P
+    nx = (m * m - 2 * s) % SECP_P
+    return nx, (m * (s - nx) - 8 * yy * yy) % SECP_P, 2 * y * z % SECP_P
+
+
+def _jacobian_add(p, q):
+    if not p[2]:
+        return q
+    if not q[2]:
+        return p
+    z1z1, z2z2 = p[2] * p[2] % SECP_P, q[2] * q[2] % SECP_P
+    u1, u2 = p[0] * z2z2 % SECP_P, q[0] * z1z1 % SECP_P
+    s1, s2 = p[1] * z2z2 * q[2] % SECP_P, q[1] * z1z1 * p[2] % SECP_P
+    if u1 == u2:
+        return _jacobian_double(p) if s1 == s2 else (0, 1, 0)
+    h, r = (u2 - u1) % SECP_P, (s2 - s1) % SECP_P
+    hh = h * h % SECP_P
+    hhh, v = h * hh % SECP_P, u1 * hh % SECP_P
+    nx = (r * r - hhh - 2 * v) % SECP_P
+    return nx, (r * (v - nx) - s1 * hhh) % SECP_P, h * p[2] * q[2] % SECP_P
+
+
+def secp_mul(k, point, k2=0, point2=None):
+    """k * point (+ k2 * point2), affine in and out; None is the point at infinity."""
+    pairs = [(k, (point[0], point[1], 1))] + ([(k2, (point2[0], point2[1], 1))] if point2 else [])
+    both = _jacobian_add(pairs[0][1], pairs[1][1]) if point2 else None
+    result = (0, 1, 0)
+    for bit in range(max(k, k2).bit_length() - 1, -1, -1):
+        result = _jacobian_double(result)
+        first, second = k >> bit & 1, point2 is not None and k2 >> bit & 1
+        if first or second:
+            result = _jacobian_add(result, both if first and second else pairs[0][1] if first else pairs[1][1])
+    if not result[2]:
+        return None
+    zi = pow(result[2], -1, SECP_P)
+    return result[0] * zi * zi % SECP_P, result[1] * zi * zi * zi % SECP_P
+
+
+def rlp_items(data):
+    """The top-level RLP list `data` as [(raw encoding, payload)]; ValueError unless `data` is exactly one list."""
+    def header(at):
+        first = data[at]
+        if first < 0x80:
+            return at, at + 1, False
+        if first < 0xb8 or 0xc0 <= first < 0xf8:
+            short = first - (0x80 if first < 0xc0 else 0xc0)
+            return at + 1, at + 1 + short, first >= 0xc0
+        size_len = first - (0xb7 if first < 0xc0 else 0xf7)
+        size = int.from_bytes(data[at + 1:at + 1 + size_len], 'big')
+        start = at + 1 + size_len
+        return start, start + size, first >= 0xc0
+    start, end, is_list = header(0)
+    if not is_list or end != len(data):
+        raise ValueError('not one RLP list')
+    items, at = [], start
+    while at < end:
+        body, stop, _ = header(at)
+        if stop > end:
+            raise ValueError('RLP item overruns its list')
+        items.append((data[at:stop], data[body:stop]))
+        at = stop
+    return items
+
+
+def rlp_list(encoded_items):
+    payload = b''.join(encoded_items)
+    if len(payload) < 56:
+        return bytes([0xc0 + len(payload)]) + payload
+    size = len(payload).to_bytes((len(payload).bit_length() + 7) // 8, 'big')
+    return bytes([0xf7 + len(size)]) + size + payload
+
+
+def rlp_uint(value):
+    raw = value.to_bytes((value.bit_length() + 7) // 8, 'big')
+    return raw if len(raw) == 1 and raw[0] < 0x80 else bytes([0x80 + len(raw)]) + raw
+
+
+def spooled_sender_nonce(raw):
+    """(sender, nonce) of a signed type 0 (EIP-155), 1 or 2 envelope, or None when these bytes do not read as one. Not
+    an authentication: the producer decides inclusion. This only tells a nonce gap from what the next block may take."""
+    try:
+        if raw[0] in (1, 2):
+            items = rlp_items(raw[1:])
+            if len(items) != (11 if raw[0] == 1 else 12):
+                return None
+            signed = items[:-3]
+            digest = keccak256(raw[:1] + rlp_list([item for item, _ in signed]))
+            parity = int.from_bytes(items[-3][1], 'big')
+            nonce = int.from_bytes(items[1][1], 'big')
+        elif raw[0] >= 0xc0:
+            items = rlp_items(raw)
+            if len(items) != 9:
+                return None
+            v = int.from_bytes(items[6][1], 'big')
+            if v < 35:
+                return None  # unprotected: the producer refuses it
+            parity = (v - 35) % 2
+            digest = keccak256(rlp_list([item for item, _ in items[:6]] + [rlp_uint((v - 35) // 2), b'\x80', b'\x80']))
+            nonce = int.from_bytes(items[0][1], 'big')
+        else:
+            return None
+        r, s = (int.from_bytes(items[i][1], 'big') for i in (-2, -1))
+        if parity > 1 or not (0 < r < SECP_N and 0 < s < SECP_N):
+            return None
+        y = pow((r ** 3 + 7) % SECP_P, (SECP_P + 1) // 4, SECP_P)
+        if y * y % SECP_P != (r ** 3 + 7) % SECP_P:
+            return None
+        point = (r, y if y % 2 == parity else SECP_P - y)
+        inverse = pow(r, -1, SECP_N)
+        e = int.from_bytes(digest, 'big')
+        key = secp_mul(s * inverse % SECP_N, point, (-e * inverse) % SECP_N, SECP_G)
+        if key is None:
+            return None
+        return keccak256(key[0].to_bytes(32, 'big') + key[1].to_bytes(32, 'big'))[12:], nonce
+    except (IndexError, ValueError):
+        return None
+
+
 def deposits_hash(records):
     """bloch_l2_evm::executor::deposits_hash of the deposits minted for these
     native inbox records: keccak(recipient || height BE8 || tx_index BE4 ||
@@ -1081,12 +1212,53 @@ class Settler:
                         for a in self.native.gather('getl2settlement').values())
         return values[max(0, len(values) - 1 - self.native.faults)]
 
+    def spool_demand(self, head):
+        """Whether a spooled transaction may go into the next block on `head`. A file alone is not demand: the RPC admits
+        nonces up to 16 ahead and keeps them 3 hours, and the producer defers a nonce gap without dropping it, so one such
+        entry would make every cycle due (review r7 F5). Demand is an entry whose nonce is its sender's next nonce at the
+        head. Bytes that do not read as a transaction, and a sender whose nonce the producer cannot tell, count as demand:
+        the producer drops what it cannot decode, and a block too many costs less than a transaction never served.
+        Fees are not checked: the RPC admits only a fee cap over the next base fee and a tip over the floor."""
+        if not self.c['user_transactions']:
+            return False
+        files = sorted(Path(self.c['txpool_dir']).glob('*.tx'))
+        if not files:
+            return False
+        known = getattr(self, 'spool_senders', {})
+        self.spool_senders = {}
+        nonces = getattr(self, 'spool_nonces', (None, {}))
+        nonces = nonces if nonces[0] == head else (head, {})
+        self.spool_nonces = nonces
+        for path in files:
+            try:
+                stat = path.stat()
+                key = (path.name, stat.st_size, stat.st_mtime_ns)
+                entry = known[key] if key in known else spooled_sender_nonce(bytes.fromhex(path.read_text().strip()))
+            except FileNotFoundError:
+                continue  # included, pruned or evicted meanwhile
+            except (OSError, ValueError):
+                return True
+            self.spool_senders[key] = entry
+            if entry is None:
+                return True
+            sender, nonce = entry
+            if sender not in nonces[1]:
+                try:
+                    nonces[1][sender] = int(self.produce('account', '--target', self.c['l2_db'],
+                                                         '--address', sender.hex())['nonce'])
+                except Exception as error:  # noqa: BLE001
+                    log('spool-demand-unknown', reason=f'{type(error).__name__}: {error}'[:300])
+                    return True
+            if nonce == nonces[1][sender]:
+                return True
+        return False
+
     def hold_block(self, view):
         """With `skip_idle_blocks`: whether to build no block in this cycle. Not a block rule: L1, the guest, the follower
         and every rebuild only see fewer blocks, each with an older anchor. See SETTLER-RUNBOOK.md, "Idle blocks".
 
-        A block is due when L1 holds an unconsumed deposit, the spool holds a transaction, or the source reached
-        `max_idle_seconds`, which proves the whole path while nothing else does. `min_block_interval_seconds` then delays
+        A block is due when L1 holds an unconsumed deposit, the spool holds a transaction the next block may take
+        (`spool_demand`), or the source reached `max_idle_seconds`, which proves the whole path while nothing else does. `min_block_interval_seconds` then delays
         a due block, so that deposits cannot make the height grow faster than that: a deposit costs 0.01 BLCH, and the
         recipient keeps it. A deposit that arrived while idle needs two blocks: L1 keeps the source frozen until the next
         settlement, so the first block is anchored to the old source and cannot mint it."""
@@ -1100,9 +1272,8 @@ class Settler:
         except Exception as error:  # noqa: BLE001 - the quorum view just passed: try again next cycle
             log('idle-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
             return True
-        spooled = bool(self.c['user_transactions'] and any(Path(self.c['txpool_dir']).glob('*.tx')))
         pace = self.c.get('min_block_interval_seconds', 0)
-        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if spooled
+        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if self.spool_demand(expected)
                   else 'max-idle' if age >= self.c['max_idle_seconds'] else None)
         if reason is None or age < pace:
             now = self.clock()
