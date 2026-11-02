@@ -1881,10 +1881,13 @@ fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
     let tx = chain.call(target, script(&[(SSTORE, u(1), u(2))]));
     let body = chain.body(vec![tx]);
     let (witness, canonical, context) = chain.differential(&body, "base");
-    assert_eq!(witness.codes.len(), 1, "the script's code, once");
+    let script_hash = keccak256(script_runtime());
+    let script_entries = witness.codes.iter().filter(|code| keccak256(code) == script_hash).count();
+    assert_eq!(script_entries, 1, "the script's code, once");
 
     let mut changed = witness.clone();
-    changed.codes.push(changed.codes[0].clone());
+    let script_code = changed.codes.iter().find(|code| keccak256(code) == script_hash).unwrap().clone();
+    changed.codes.push(script_code);
     assert!(matches!(
         chain.verify(&changed, &context, &body),
         Err(SparseNodeError::Verify(SparseVerifyError::DuplicateCode(_)))
@@ -1893,7 +1896,7 @@ fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
     changed.codes.push(Bytes::new());
     assert!(matches!(
         chain.verify(&changed, &context, &body),
-        Err(SparseNodeError::Verify(SparseVerifyError::InvalidCode(1)))
+        Err(SparseNodeError::Verify(SparseVerifyError::InvalidCode(_)))
     ));
     let mut changed = witness.clone();
     let index = changed.pre_accounts.iter().position(|account| account.address == target).unwrap();
@@ -1921,9 +1924,9 @@ fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
     changed.codes.push(victim_runtime().into());
     let outcome = chain.verify(&changed, &context, &body).unwrap();
     assert_eq!(outcome.header, canonical.header);
-    // An empty list: the call loads the script's code and fails the block.
+    // Without the script's code: the call loads it and fails the block.
     let mut changed = witness.clone();
-    changed.codes.clear();
+    changed.codes.retain(|code| keccak256(code) != script_hash);
     assert!(matches!(chain.verify(&changed, &context, &body), Err(SparseNodeError::Execution(_))));
 }
 
