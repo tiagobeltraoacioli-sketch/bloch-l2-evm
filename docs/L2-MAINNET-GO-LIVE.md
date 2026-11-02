@@ -143,7 +143,7 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 | `deployment/devnet/settler_v3.py` | `4152f5c34abc92d231e2a90441f0f3b760bf4b67a71256c844c109100230eb41` (agent 193, M1/M2; was `8e2c67f5…` at 4b7f4f7) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
-| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `24aa5cb8d76e5fc8ff926bd49a21497635959c032783fbfdeee38dd2917aac48` (`LimitNOFILE=65536`) |
+| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `70d565a9d88a30ae192aa2d45738fb7132a2c4939374eedfe538fff8ed490493` (`LimitNOFILE=65536`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `ab24bda0770a1e196f8ffe4340e46520c81f2dd891dd4b1413b6bbec9bee0780` |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
