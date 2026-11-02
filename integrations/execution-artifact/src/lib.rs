@@ -141,7 +141,7 @@ impl ExecutionArtifact {
     }
 }
 
-const SPARSE_FORMAT: &str = "BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:1";
+const SPARSE_FORMAT: &str = "BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:2";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
