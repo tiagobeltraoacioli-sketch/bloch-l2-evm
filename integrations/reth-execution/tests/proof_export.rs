@@ -154,6 +154,11 @@ fn contract_export(anchor: B256, artifact_variable: Option<&str>, directory_vari
             .expected(),
         artifact.expected()
     );
+    // The database's state gives the same bytes as re-executing from genesis, at every height.
+    for height in 1..=3 {
+        let direct = export_canonical_witness(&factory, height).unwrap().encode().unwrap();
+        assert_eq!(direct, bloch_reth_execution::proof_export::export_by_replay(&factory, height).unwrap().encode().unwrap(), "height {height}");
+    }
     for invalid in [0, 4, MAX_REPLAY_BLOCKS + 1] {
         assert!(export_canonical_witness(&factory, invalid).is_err());
         assert_eq!(factory.best_block_number().unwrap(), 3);

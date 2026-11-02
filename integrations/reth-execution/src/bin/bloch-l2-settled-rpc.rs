@@ -794,13 +794,66 @@ const HEAD_BOUND_METHODS: [&str; 2] = ["eth_getTransactionReceipt", "eth_getTran
 /// it imports the block). Without this, a client that sees its receipt and
 /// then reads `latest` (forge script, ethers `wait()` followed by a call) can
 /// read the state before its own transaction for up to one poll interval.
-fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>) -> Result<()> {
+/// Whether `hash` is the canonical block at its number in the database, at or below the served head. A
+/// block removed by a rewind or a database swap can still sit in the API's block cache; it must not be served.
+fn canonical_hash(factory: &BlochProviderFactory, hash: B256, head: u64) -> bool {
+    use reth_provider::BlockNumReader;
+    match factory.block_number(hash) {
+        Ok(Some(number)) if number <= head => {
+            factory.sealed_header(number).ok().flatten().is_some_and(|header| header.hash() == hash)
+        }
+        _ => false,
+    }
+}
+
+/// Methods that name a block by hash, with the position of the hash.
+const BY_HASH_METHODS: [(&str, usize); 7] = [
+    ("eth_getBlockByHash", 0),
+    ("eth_getHeaderByHash", 0),
+    ("eth_getBlockTransactionCountByHash", 0),
+    ("eth_getTransactionByBlockHashAndIndex", 0),
+    ("eth_getUncleCountByBlockHash", 0),
+    ("eth_getUncleByBlockHashAndIndex", 0),
+    ("eth_getBlockReceipts", 0),
+];
+
+/// Answer null, as for an unknown block, when a call names a block hash that is not canonical in the database.
+fn hide_removed_blocks(module: &mut jsonrpsee::RpcModule<()>, factory: BlochProviderFactory, head: Arc<AtomicU64>) -> Result<()> {
+    let original: jsonrpsee::Methods = module.clone().into();
+    for (method, position) in BY_HASH_METHODS {
+        if module.remove_method(method).is_none() {
+            continue;
+        }
+        let (original, factory, head) = (original.clone(), factory.clone(), head.clone());
+        module.register_async_method(method, move |params, _, _| {
+            let (original, factory, head) = (original.clone(), factory.clone(), head.clone());
+            async move {
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let named = values.get(position).and_then(|v| v.as_str()).filter(|v| v.len() == 66).and_then(|v| v.parse::<B256>().ok());
+                if let Some(hash) = named {
+                    let served = head.load(Ordering::Acquire);
+                    let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served)).await.unwrap_or(false);
+                    if !known {
+                        return Ok(serde_json::Value::Null);
+                    }
+                }
+                original.call::<_, serde_json::Value>(method, values).await.map_err(|error| match error {
+                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                    other => rpc_error(other.to_string()),
+                })
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>, factory: Option<BlochProviderFactory>) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     for method in HEAD_BOUND_METHODS {
         ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
-        let (original, head) = (original.clone(), head.clone());
+        let (original, head, factory) = (original.clone(), head.clone(), factory.clone());
         module.register_async_method(method, move |params, _, _| {
-            let (original, head) = (original.clone(), head.clone());
+            let (original, head, factory) = (original.clone(), head.clone(), factory.clone());
             async move {
                 let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
                 let result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
@@ -811,10 +864,18 @@ fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<Atomi
                     .get("blockNumber")
                     .and_then(|v| v.as_str())
                     .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
-                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(match number {
-                    Some(number) if number > head.load(Ordering::Acquire) => serde_json::Value::Null,
-                    _ => result,
-                })
+                let served = head.load(Ordering::Acquire);
+                if matches!(number, Some(number) if number > served) {
+                    return Ok(serde_json::Value::Null);
+                }
+                // A transaction of a block a rewind removed: the cache may still hold it.
+                if let (Some(hash), Some(factory)) = (result.get("blockHash").and_then(|v| v.as_str()).and_then(|v| v.parse::<B256>().ok()), factory) {
+                    let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served)).await.unwrap_or(false);
+                    if !known {
+                        return Ok(serde_json::Value::Null);
+                    }
+                }
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(result)
             }
         })?;
     }
@@ -1370,7 +1431,8 @@ async fn main() -> Result<()> {
     let mut proof_task: Option<tokio::task::JoinHandle<()>> = None;
     serve_pending_blocks_as_latest(&mut module)?;
     let served_head = Arc::new(AtomicU64::new(0));
-    hide_blocks_above_head(&mut module, served_head.clone())?;
+    hide_blocks_above_head(&mut module, served_head.clone(), Some(factory.clone()))?;
+    hide_removed_blocks(&mut module, factory.clone(), served_head.clone())?;
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
@@ -1387,6 +1449,7 @@ async fn main() -> Result<()> {
     );
     let state = provider.canonical_in_memory_state();
     let mut head_number = u64::MAX;
+    let mut head_hash = B256::ZERO;
     let mut finalized: Option<Header> = None;
     let mut safe: Option<Header> = None;
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
@@ -1406,7 +1469,10 @@ async fn main() -> Result<()> {
                 signal = &mut shutdown => { signal?; break; }
                 _ = interval.tick() => {
                     let number = factory.best_block_number()?;
-                    if number != head_number {
+                    // The hash too: a rewound head can be replaced at the same number between two polls.
+                    let replaced = number == head_number
+                        && factory.sealed_header(number)?.is_some_and(|header| header.hash() != head_hash);
+                    if number != head_number || replaced {
                         // The producer commits the block number before this read-only view can see the
                         // header. That is a moment of a write, not a fault: the next tick has it.
                         match factory.sealed_header(number)? {
@@ -1415,6 +1481,7 @@ async fn main() -> Result<()> {
                                 state.set_canonical_head(header.clone());
                                 served_head.store(number, Ordering::Release);
                                 head_number = number;
+                                head_hash = header.hash();
                                 println!("head block={} hash={}", number, header.hash());
                             }
                         }
@@ -1695,7 +1762,7 @@ mod tests {
                 .unwrap();
         }
         let head = Arc::new(AtomicU64::new(4));
-        hide_blocks_above_head(&mut module, head.clone()).unwrap();
+        hide_blocks_above_head(&mut module, head.clone(), None).unwrap();
         for method in HEAD_BOUND_METHODS {
             let at: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["mined"]).await.unwrap();
             assert!(at.is_null(), "{method} above the head");

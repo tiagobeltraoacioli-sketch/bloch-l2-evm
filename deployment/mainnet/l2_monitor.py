@@ -130,6 +130,13 @@ _COMMON: Dict[str, Any] = {
     'file_age_warn': 120, 'file_age_crit': 600,
     'guardian_age_warn': 300,
     'status_age_warn': 300, 'status_age_crit': 900,
+    # Height runways. Export: the producer refuses to export a block above this (None: no such limit in this build).
+    'l2_export_limit': None, 'l2_export_warn': 1024, 'l2_export_crit': 3000,
+    # Native blocks one `reconstruct` reads: attestor rebuilds, replica refresh and foreign recovery stop above it.
+    'l1_reconstruct_limit': 5000000,
+    # Cost of an empty block by height, measured on guest 203114bf. Above the first figure the local fallback is gone;
+    # the others are what has been proved at the planned limits.
+    'proof_instructions_local': 3_000_000, 'proof_instructions_warn': 5_300_000, 'proof_instructions_crit': 88_000_000,
     # Settlements the follower file has and an RPC's finalized_height has not. One can be a poll in flight.
     'finality_file_lag_warn': 1, 'finality_file_lag_crit': 3,
     # A settled RPC before the next build closes safe and finalized above 16 MiB of status file.
@@ -377,6 +384,37 @@ def statement_l2_number(accepted: Any) -> Optional[int]:
         return int.from_bytes(raw[22 + 264:22 + 272], 'big') if len(raw) >= 22 + 272 else None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+PROOF_BASE_INSTRUCTIONS = 2_000_000
+PROOF_INSTRUCTIONS_PER_BLOCK = 27_660
+PROOF_RING_BLOCKS = 8_191  # the EIP-4788 ring: every block hydrates its whole storage, 2 slots per block until it wraps
+
+
+def empty_block_instructions(height: int) -> int:
+    """Guest instructions of an empty block at L2 height `height`, fitted to execute runs at 256 to 16,384."""
+    return PROOF_BASE_INSTRUCTIONS + PROOF_INSTRUCTIONS_PER_BLOCK * min(height, PROOF_RING_BLOCKS)
+
+
+def check_height_runway(settled: Optional[int], l1_up: List[Dict[str, Any]], p: Dict[str, Any], r: 'Report') -> None:
+    """Limits that depend on height alone, well before they stop anything."""
+    if isinstance(settled, int):
+        limit = p['l2_export_limit']
+        if limit is not None:
+            r.graded('l2_export_runway', settled, p['l2_export_warn'], p['l2_export_crit'],
+                     f'L2 block {settled}: this build refuses to export above {limit}, and settlement stops there. A fixed '
+                     f'producer must be rolled out first ({limit - settled} blocks left)', limit=limit)
+        cost = empty_block_instructions(settled)
+        r.graded('l2_proof_cost', cost, p['proof_instructions_warn'], p['proof_instructions_crit'],
+                 f'L2 block {settled}: an empty block costs about {cost / 1e6:.0f}M guest instructions'
+                 + (f'; above {p["proof_instructions_local"] / 1e6:.0f}M the settler has no local fallback, only the remote prover'
+                    if cost > p['proof_instructions_local'] else ''), instructions=cost)
+    if l1_up:
+        height = max(n['height'] for n in l1_up)
+        limit = p['l1_reconstruct_limit']
+        r.graded('l1_reconstruct_runway', height, limit * 4 // 5, limit * 19 // 20,
+                 f'L1 height {height}: `reconstruct` refuses a follower store above {limit} blocks (attestor rebuild, replica '
+                 'refresh, foreign recovery)', limit=limit)
 
 
 def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str, now: float, r: Report) -> List[dict]:
@@ -1250,6 +1288,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     views = check_l2(client, backends, p, args.phase, now, r)
     l1_up = check_l1(client, args.l1_rpc or [], p, r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
+    check_height_runway(r.facts.get('l2_settled_number'), l1_up, p, r)
     check_escrow_and_backlog(with_l2, p, r, now, args.backlog_state if args.max_idle_seconds else None)
     check_followers(client, views, args.follower_status or [], l1_up, p, now, r)
     check_da_balance(client, args.da_script or [], l1_up, p, r)
