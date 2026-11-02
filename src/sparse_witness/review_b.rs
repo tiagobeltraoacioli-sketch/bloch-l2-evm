@@ -292,3 +292,141 @@ fn gate_validate_refuses_a_burning_sweep_recipient() {
     }
     assert!(accepted.is_empty(), "validate accepts burning sweep recipients: {accepted:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Storage trie: the same two-level cascade
+// ---------------------------------------------------------------------------
+
+/// Slots `a`, `b` share three key bytes under first nibble `x`, `c` shares only `x`.
+fn mine_storage_cascade(x: u8, avoid: &BTreeSet<u64>) -> (u64, u64, u64) {
+    let mut seen: BTreeMap<[u8; 3], u64> = BTreeMap::new();
+    let mut slot = 10_000_000u64;
+    let (a, b) = loop {
+        slot += 1;
+        if avoid.contains(&slot) {
+            continue;
+        }
+        let key = keccak256(U256::from(slot).to_be_bytes::<32>());
+        if key[0] >> 4 != x {
+            continue;
+        }
+        let prefix = [key[0], key[1], key[2]];
+        if let Some(other) = seen.get(&prefix) {
+            break (*other, slot);
+        }
+        seen.insert(prefix, slot);
+    };
+    let second = keccak256(U256::from(a).to_be_bytes::<32>())[0] & 0x0f;
+    loop {
+        slot += 1;
+        let key = keccak256(U256::from(slot).to_be_bytes::<32>());
+        if key[0] >> 4 == x && key[0] & 0x0f != second {
+            return (a, b, slot);
+        }
+    }
+}
+
+/// Storage version of the account cascade: one block deletes `a` and `b`; the branch
+/// under `x` collapses onto the untouched `c`. Hiding `c`'s node must be refused.
+#[test]
+fn b_two_slot_deletions_cascade_onto_an_untouched_slot() {
+    for spec in both_rules() {
+        let mut chain = Chain::new(spec);
+        let target = chain.deploy_script();
+        let filler: Vec<u64> = (1..=40).collect();
+        let used: BTreeSet<u8> = filler.iter().map(|slot| keccak256(U256::from(*slot).to_be_bytes::<32>())[0] >> 4).collect();
+        let x = (0u8..16).find(|n| !used.contains(n)).expect("40 slots leave a first nibble free");
+        let (a, b, c) = mine_storage_cascade(x, &filler.iter().copied().collect());
+        let mut fill: Vec<(u64, U256, U256)> = filler.iter().map(|slot| (SSTORE, u(*slot), u(9))).collect();
+        fill.extend([(SSTORE, u(a), u(1)), (SSTORE, u(b), u(2)), (SSTORE, u(c), u(3))]);
+        let tx = chain.call(target, script(&fill));
+        let body = chain.body(vec![tx]);
+        chain.check(&body, "fill the storage cascade");
+
+        let first = chain.call(target, script(&[(SSTORE, u(a), u(0))]));
+        let second = chain.call(target, script(&[(SSTORE, u(b), u(0))]));
+        let body = chain.body(vec![first, second]);
+        let (witness, canonical, context) = chain.differential(&body, "two slot deletions cascade onto c");
+        let index = account(&witness, target);
+        let storage = &witness.pre_accounts[index];
+        let view = IndexedTrieView::from_proof(storage.storage_root, &storage.storage_proof).unwrap();
+        assert!(view.lookup(&storage_key(&u(c))).unwrap().is_some(), "the surviving slot c is exposed");
+        let c_key = storage_key(&u(c));
+        let c_paths: Vec<Nibbles> =
+            storage.storage_proof.keys().copied().filter(|path| path.len() >= 2 && c_key.starts_with(path)).collect();
+        assert!(!c_paths.is_empty(), "c has a node of its own in the storage proof");
+        for path in c_paths {
+            let mut hidden = witness.clone();
+            hidden.pre_accounts[index].storage_proof.remove(&path);
+            match chain.verify(&hidden, &context, &body) {
+                Err(_) => {}
+                Ok(outcome) => assert_eq!(outcome.header, canonical.header, "hiding {path:?} changed the root"),
+            }
+        }
+        chain.commit(&body);
+        assert_eq!(chain.state.storage_of(&target, u(c)), u(3));
+        assert_eq!(chain.state.storage_of(&target, u(a)), u(0));
+    }
+}
+
+fn account(witness: &SparseBatchWitness, address: Address) -> usize {
+    witness.pre_accounts.iter().position(|entry| entry.address == address).expect("account in the witness")
+}
+
+// ---------------------------------------------------------------------------
+// The sweep's failure paths
+// ---------------------------------------------------------------------------
+
+/// The sweep with a recipient that always reverts (`PUSH0 PUSH0 REVERT`), reached by a
+/// direct call, by STATICCALL (value in a static frame), and by DELEGATECALL (the
+/// caller's own balance is sent). The vault keeps its balance on every failure, and
+/// the sparse statement equals the complete one.
+#[test]
+fn b_sweep_failure_paths_agree() {
+    let reverting = [0x5f, 0x5f, 0xfd];
+    // The first contract the harness sender deploys: its nonce is 0 after genesis.
+    let probe = Chain::new(ChainSpec::mainnet());
+    let recipient = probe.sender.create(0);
+    let spec = ChainSpec {
+        fee_vault_sweep: Some(recipient),
+        ..ChainSpec::mainnet()
+    };
+    spec.validate().unwrap();
+    let mut chain = Chain::new(spec);
+    let tx = chain.tx(TxKind::Create, U256::ZERO, deploy_code(&reverting).into(), 300_000);
+    let body = chain.body(vec![tx]);
+    let outcome = chain.check(&body, "deploy the reverting recipient");
+    assert!(outcome.transactions[0].success);
+    assert_eq!(chain.state.account(&recipient).unwrap().code_hash, keccak256(reverting));
+    let script_address = chain.deploy_script();
+    let (base, sequencer) = (chain.spec.base_fee_vault, chain.spec.sequencer_fee_vault);
+    // A plain 21,000-gas payment cannot run the script's code; give it room.
+    let funded = chain.tx(TxKind::Call(script_address), u(1_000), Bytes::new(), 100_000);
+    let body = chain.body(vec![funded]);
+    let outcome = chain.check(&body, "fees accrue");
+    assert!(outcome.transactions[0].success);
+    assert_eq!(chain.state.balance_of(&script_address), u(1_000));
+    let before = chain.state.balance_of(&base);
+    assert!(!before.is_zero());
+
+    let direct = chain.call(base, Bytes::new());
+    let via = chain.call(
+        script_address,
+        script(&[
+            (STATICCALL, word_of(sequencer), u(0)),
+            (DELEGATECALL, word_of(base), u(0)),
+            (CALL, word_of(base), u(0)),
+        ]),
+    );
+    let body = chain.body(vec![direct, via]);
+    let (_, canonical, _) = chain.differential(&body, "sweep failures");
+    assert!(!canonical.transactions[0].success, "a direct sweep to a reverting recipient reverts");
+    assert!(canonical.transactions[1].success, "the script survives its inner failures");
+    for log in 0..3 {
+        assert_eq!(Chain::logged_word(&canonical, 1, log), u(0), "inner sweep {log} fails");
+    }
+    chain.commit(&body);
+    assert!(chain.state.balance_of(&base) >= before, "the vault kept its balance");
+    assert_eq!(chain.state.balance_of(&recipient), u(0));
+    assert_eq!(chain.state.balance_of(&script_address), u(1_000));
+}
