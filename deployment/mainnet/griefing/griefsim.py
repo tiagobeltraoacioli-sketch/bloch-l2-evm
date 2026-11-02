@@ -180,8 +180,10 @@ class Sim:
         return plan, chosen, stats, reply, fee
 
     def _measured(self, raws, deposits):
-        cost = self.cost(raws, deposits)
-        return cost, self.select(raws, deposits)
+        """As the settler's preflight: the producer's selection first, so a nonce gap is deferred rather than an error."""
+        report = self.select(raws, deposits)
+        keyed = {g.keccak(bytes.fromhex(r)).hex(): r for r in raws}
+        return self.cost([keyed[h] for h in report['included']], deposits), report
 
     def attacker_spent(self):
         return sum(v for k, v in self.spent.items() if bytes.fromhex(k) in self.attacker)
@@ -283,18 +285,24 @@ class Filler:
         self.tx_cap = config.get('max_tx_gas', 15_000_000)
         self.sender_used = 0
         self.refusals = []
+        self.limit = 10**9
+        self.done = False  # one new slot at a time was refused
+
+    def new_sender(self):
+        sim = self.sim
+        fresh = sim.new_key()
+        sim.mark(fresh)
+        sim.block([sim.tx(self.key, g.address(fresh), b'', 21_000, value=COIN * 2, tip=sim.tip())])
+        self.key, self.sender_used = fresh, 0
 
     def block(self, wanted=None):
         """Returns slots added this block."""
         sim = self.sim
-        room = min((15_000_000 - 3 * 60_000) // self.gas_per_slot, self.per_block or 10**9)
+        room = min((15_000_000 - 3 * 60_000) // self.gas_per_slot, self.per_block or 10**9, self.limit)
         if wanted is not None:
             room = min(room, wanted)
         if self.per_sender and self.sender_used + room > self.per_sender:
-            fresh = sim.new_key()
-            sim.mark(fresh)
-            sim.block([sim.tx(self.key, g.address(fresh), b'', 21_000, value=COIN * 2, tip=sim.tip())])
-            self.key, self.sender_used = fresh, 0
+            self.new_sender()
         per_tx = max(1, min(room, (self.tx_cap - 60_000) // self.gas_per_slot))
         raws, counts, left = [], [], room
         while left > 0:
@@ -312,6 +320,12 @@ class Filler:
         self.refusals = [r for _, r in (plan.held + plan.quarantine)] if plan else []
         if not added or len(chosen) < len(raws):
             sim.resync([g.address(self.key)])
+        if not added:
+            # Near the budget a smaller transaction may still fit. A quarantined sender is cooling down: use another.
+            self.done = room <= 1
+            self.limit = max(room // 2, 1)
+            if 'over-budget-alone' in self.refusals or 'sender-cooldown' in self.refusals:
+                self.new_sender()
         return added
 
 
@@ -330,8 +344,8 @@ def freeze(sim, target='busdc', max_fee=100.0, max_blocks=2_000, check_every=500
         slots += added
         if not added:
             refused += 1
-            out(event='fill-refused', slots=slots, number=sim.number, reasons=filler.refusals, result=filler.reply['results'])
-            if refused >= 2:
+            out(event='fill-refused', slots=slots, limit=filler.limit, number=sim.number, reasons=filler.refusals, result=filler.reply['results'])
+            if filler.done or refused >= 12:
                 return finish_freeze(sim, target, slots, start, filler.refusals)
         else:
             refused = 0
@@ -386,8 +400,10 @@ def halt_deposit(sim, contracts=8, per_contract=None, max_fee=100.0, chunk=None,
                 break
             added = filler.block(per_contract - slots if per_contract else None)
             if not added:
-                out(event='fill-stopped', contract=index, slots=slots, reasons=filler.refusals, result=filler.reply['results'])
-                break
+                out(event='fill-refused', contract=index, slots=slots, limit=filler.limit, reasons=filler.refusals, result=filler.reply['results'])
+                if filler.done:
+                    break
+                continue
             slots += added
             slots_total += added
         key = filler.key
