@@ -268,6 +268,10 @@ class RpcError(RuntimeError):
     """The endpoint answered with a JSON-RPC error."""
 
 
+class FollowerBehind(Exception):
+    """A DA batch for the next block is on L1, but the follower has not stored (finalized) its block yet."""
+
+
 class ForeignSettlement(Exception):
     """L1 accepted a settlement the local database does not hold: recoverable with `foreign_recovery`."""
 
@@ -627,19 +631,21 @@ def scan_da_frames(data, chain_id, wanted):
     return found
 
 
-def recorded_da_batches(state_dir, chain_id, records, window=8):
+def recorded_da_batches(state_dir, chain_id, records, offset=0, window=8, scan=4096):
     """{(number, commitment hex): (funding key, payload)} for DA `records` (getl2settlement entries with
-    l2_number, commitment, height), read from the follower's verified L1 blocks near each record's height. Records
-    whose block is not (yet) in the follower store are left out."""
+    l2_number, commitment, height), read from the follower's verified (finalized) L1 blocks. A record's `height` is
+    the L2 state's native height, which trails the chain height by a constant `offset` (the flag-day offset, 64 on
+    the rehearsal nets): the block is searched near index height + offset - 1, then forward over `scan` blocks.
+    Records whose block is not (yet) in the follower store are left out."""
     wanted = {(int(r['l2_number']), r['commitment']) for r in records}
     if not wanted:
         return {}
     files = follower_block_files(state_dir)
     heights = sorted({int(r['height']) for r in records})
     seen, found = set(), {}
-    # The index lists blocks from height 1 in order; a store that started later is covered by the tail scan.
-    candidates = [i for h in heights for i in range(max(0, h - 1 - window), min(len(files), h + window))]
-    candidates += list(range(len(files) - 1, max(-1, len(files) - 1 - 4 * window), -1))
+    # The index lists blocks from height 1 in order.
+    candidates = [i for h in heights for i in range(max(0, h + offset - 1 - window), min(len(files), h + offset + window))]
+    candidates += [i for h in heights for i in range(max(0, h - 1 - window), min(len(files), h + scan))]
     for index in candidates:
         if index in seen or len(found) == len(wanted):
             continue
@@ -1041,6 +1047,7 @@ class Settler:
         self.c = {**DEFAULTS, **(MAINNET_DEFAULTS if self.mainnet else {}), **config}
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
         self.wall = time.time  # wall time persisted in DA attempt records (clock is monotonic)
+        self.reuse_waits = {}  # L2 number -> clock when the worker started waiting for the follower
         self.chain_id = MAINNET['chain_id'] if self.mainnet_path else CHAIN_ID
         self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet_path else []
         self.prover_args = ['--mainnet'] if self.mainnet_path else []
@@ -1322,11 +1329,30 @@ class Settler:
         own = bytes.fromhex(Path(self.c['da']['funding_pubkey']).read_text().strip())
         batches = {}
         state = self.follower_state_dir()
+        offset = self.native_height_offset() if state else None
         if state:
             try:
-                batches = recorded_da_batches(state, self.chain_id, records)
+                batches = recorded_da_batches(state, self.chain_id, records, offset or 0)
             except (OSError, ValueError) as error:
                 log('da-batch-unrecoverable', number=number, reason=f'follower store: {error}'[:300])
+        missing = [r for r in records if (number, r['commitment']) not in batches and r['commitment'] not in local]
+        if missing:
+            # The follower stores finalized blocks only; a batch paid minutes ago is read from the native nodes
+            # (a quorum must return identical block bytes; the payload is checked against the recorded commitment).
+            batches.update(self.node_da_batches(missing, offset if offset is not None else self.native_height_offset()))
+        if state and not any((number, r['commitment']) in batches or r['commitment'] in local for r in records):
+            try:
+                stored = len(follower_block_files(state))
+            except OSError:
+                stored = 0
+            need = max(int(r['height']) for r in records) + (offset or 0)
+            started = self.reuse_waits.setdefault(number, self.clock())
+            # Off by default: anyone can post a DA record for any number, so waiting on records that are not
+            # ours would let a third party delay every block by the finality lag.
+            limit = int(self.c['da'].get('reuse_wait_seconds', 0))
+            if stored < need and self.clock() - started < limit:
+                raise FollowerBehind(f'L1 records a DA batch for L2 block {number} at native height {need}; '
+                                     f'the follower has stored {stored} blocks')
         payload = None
         for record in sorted(records, key=lambda r: (int(r['height']), r['commitment'])):
             key = (number, record['commitment'])
@@ -1355,6 +1381,51 @@ class Settler:
         log('da-batch-reused', number=number, commitment=da_commitment(number, payload, self.chain_id).hex(),
             transactions=len(transactions), returned_to_spool=returned, source=source)
         return pool
+
+    def node_da_batches(self, records, offset, max_blocks=64):
+        """{(number, commitment hex): (funding key, payload)} for DA records, from native blocks read by quorum
+        (getblockbyslot near each record's chain height, then getblockraw). Each block is read once and searched for
+        every wanted batch; at most `max_blocks` distinct heights, newest first (third parties can add records)."""
+        found = {}
+        if offset is None:
+            return found
+        wanted = {(int(r['l2_number']), r['commitment']) for r in records}
+        targets = sorted({int(r['height']) + offset for r in records}, reverse=True)[:max_blocks]
+        delta = 0  # slot - height, learned from the first block read
+        for target in targets:
+            if len(found) == len(wanted):
+                break
+            slot = max(0, target + delta - 2)
+            for _ in range(64):
+                try:
+                    block, _ = self.native.agreed('getblockbyslot', [slot])
+                except Exception:  # noqa: BLE001 - an empty slot or a failed read
+                    block = None
+                slot += 1
+                if not isinstance(block, dict) or 'block_id' not in block:
+                    continue
+                height = int(block['height'])
+                delta = int(block['slot']) - height if 'slot' in block else slot - 1 - height
+                if height < target - 1:
+                    continue
+                if height > target + 1:
+                    break
+                try:
+                    raw, _ = self.native.agreed('getblockraw', [block['block_id']])
+                    raw = raw.get('hex', '') if isinstance(raw, dict) else raw
+                    found.update(scan_da_frames(bytes.fromhex(raw), self.chain_id, wanted - set(found)))
+                except Exception:  # noqa: BLE001 - unreadable block: the batch stays unrecovered
+                    continue
+        return found
+
+    def native_height_offset(self):
+        """Chain height minus the L2 state's native height (a search hint for DA records), or None."""
+        try:
+            port = self.native.usable()[0]
+            view, info = self.rpc(port, 'getl2settlement'), self.rpc(port, 'getchaininfo')
+            return max(0, int(info['height']) - int(view['native_height']))
+        except Exception:  # noqa: BLE001 - only narrows the search
+            return None
 
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
@@ -1898,6 +1969,9 @@ class Settler:
                     not self.publish_da(number, directory, values):
                 return False
             return self.submit_and_wait(number, directory, tx, view)
+        except FollowerBehind as behind:
+            log('da-reuse-waiting-follower', reason=str(behind)[:300])
+            return False
         except ForeignSettlement as foreign:
             return self.recover_foreign(str(foreign))
 

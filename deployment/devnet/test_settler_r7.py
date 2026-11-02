@@ -189,6 +189,54 @@ class PaidBatch(Base):
         self.assertEqual(spool, sorted(f'{s.keccak256(raw).hex()}.tx' for raw in s.da_batch_transactions(self.paid)),
                          'the paid transactions are back in the main spool too')
 
+    def test_can_wait_for_the_follower_to_store_the_paid_block(self):
+        # The follower stores finalized blocks only: a batch recorded at height 3 is not in a 1-block store yet.
+        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
+        state = self.follower_store([b'\x01' * 40])
+        settler = self.user_settler(fake, follower_state=str(state), da={**self.da_config(), 'reuse_wait_seconds': 3600})
+        self.assertFalse(settler.cycle(), 'waits instead of paying a second fee')
+        self.assertEqual((fake.sent, fake.pools), ([], []))
+        for i, frame in ((2, b'\x02' * 40), (3, self.own_frame(1, self.paid))):
+            (state / 'blocks' / f'{i:064x}.bin').write_bytes(frame)
+            with (state / 'index').open('a') as index:
+                index.write(f'{i:064x}\n')
+        self.assertTrue(settler.cycle())
+        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
+
+    def test_gives_up_waiting_after_reuse_wait_seconds(self):
+        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
+        state = self.follower_store([b'\x01' * 40])
+        settler = self.user_settler(fake, follower_state=str(state), da={**self.da_config(), 'reuse_wait_seconds': 1})
+        settler.reuse_waits[1] = -10_000
+        self.assertTrue(settler.cycle())
+        self.assertEqual(fake.pools, [str(self.root / 'txpool')], 'built from the spool after the wait')
+
+    def test_a_batch_not_yet_finalized_is_read_from_the_native_nodes(self):
+        # The follower has not stored the block yet; a quorum of native RPCs serves it (chain height = native + 64).
+        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
+        block = b'\x02' * 50 + self.own_frame(1, self.paid) + b'\x15' * 9
+        rpc = fake.rpc
+
+        def node(port, method, params=()):
+            if method == 'getl2settlement':
+                return {**rpc(port, method, params), 'native_height': 100}
+            if method == 'getchaininfo':
+                return {'height': 164, 'next_base_fee_millisat_per_gas': '10', 'epoch': fake.epoch}
+            if method == 'getblockbyslot':
+                return {'block_id': f'{params[0]:064x}', 'height': params[0] - 1}
+            if method == 'getblockraw':
+                return block.hex() if int(params[0], 16) - 1 == 3 + 64 else (b'\x01' * 20).hex()
+            return rpc(port, method, params)
+        fake.rpc = node
+        state = self.follower_store([b'\x01' * 40])
+        settler = self.user_settler(fake, follower_state=str(state))
+        self.assertTrue(settler.cycle())
+        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG], 'no second fee')
+        self.assertTrue(fake.pools[0].endswith('da-reuse-spool'))
+
     def test_foreign_recovery_follower_state_is_used(self):
         fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
         fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 1})
