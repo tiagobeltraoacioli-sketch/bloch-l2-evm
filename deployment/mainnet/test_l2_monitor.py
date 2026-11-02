@@ -356,13 +356,14 @@ class MonitorTests(unittest.TestCase):
             r = m.Report()
             m.check_height_runway(settled, [{'height': height}], p, r)
             return {c['check']: c['level'] for c in r.checks}, r
-        self.assertEqual(checks(40)[0]['l2_proof_cost'], 'OK')
-        self.assertEqual(checks(200)[0]['l2_proof_cost'], 'WARN')
-        self.assertEqual(checks(4000)[0]['l2_proof_cost'], 'CRIT')
+        self.assertNotIn('l2_proof_cost', checks(4000)[0], 'height alone no longer grades the proof cost')
         self.assertEqual(m.empty_block_instructions(9000), m.empty_block_instructions(8191), 'flat once the ring wraps')
         for height, expected in ((256, 11.2e6), (4096, 116.2e6), (8191, 227.7e6)):
             self.assertLess(abs(m.empty_block_instructions(height) - expected) / expected, 0.25, height)
-        self.assertIn('local fallback', [c['message'] for c in checks(200)[1].checks if c['check'] == 'l2_proof_cost'][0])
+        r = checks(200)[1]
+        m.check_proof_time(p, r)
+        self.assertEqual(level(r, 'l2_proof_cost'), 'OK')
+        self.assertIn('local fallback', next(c['message'] for c in r.checks if c['check'] == 'l2_proof_cost'))
         limit = p['l1_reconstruct_limit']
         self.assertEqual(checks(40, limit * 4 // 5 - 1)[0]['l1_reconstruct_runway'], 'OK')
         self.assertEqual(checks(40, limit * 4 // 5)[0]['l1_reconstruct_runway'], 'WARN')
@@ -513,6 +514,22 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'attestors'), 'OK')
 
     # ---- units and logs
+    def test_proof_time_against_the_block_interval(self):
+        def proof_level(seconds, *extra):
+            def runner(argv):
+                if argv[0] == 'systemctl':
+                    return 0, 'LoadState=loaded\nActiveState=active\nSubState=running\nNRestarts=0\nExecMainStatus=0\nResult=success\n'
+                t = m.datetime.datetime.fromtimestamp(NOW - 60, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                return 0, '\n'.join('x: ' + json.dumps({'time': t, 'event': 'proof-generated', 'seconds': s}) for s in seconds)
+            r, _ = run(healthy(), '--unit', 'settler=settler.service', *extra, runner=runner)
+            return level(r, 'l2_proof_cost')
+        interval = ('--set', 'block_interval_seconds=600')
+        self.assertEqual(proof_level([300, 410], *interval), 'OK')
+        self.assertEqual(proof_level([300, 420], *interval), 'WARN')
+        self.assertEqual(proof_level([610], *interval), 'CRIT')
+        self.assertEqual(proof_level([5000]), 'OK', 'without a configured interval it only reports')
+        self.assertEqual(proof_level([], *interval), 'OK', 'no proof in the window')
+
     def test_units_and_journal_events(self):
         def runner(argv):
             unit = argv[2]

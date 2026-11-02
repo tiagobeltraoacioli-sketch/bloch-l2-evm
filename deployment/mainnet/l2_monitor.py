@@ -136,7 +136,11 @@ _COMMON: Dict[str, Any] = {
     'l1_reconstruct_limit': 1000000,
     # Cost of an empty block by height, measured on guest 203114bf. Above the first figure the local fallback is gone;
     # the others are what has been proved at the planned limits.
-    'proof_instructions_local': 3_000_000, 'proof_instructions_warn': 5_300_000, 'proof_instructions_crit': 88_000_000,
+    'proof_instructions_local': 3_000_000,
+    # l2_proof_cost grades the measured proof time (settler `proof-generated` seconds) against the block interval the
+    # operator configures (--set block_interval_seconds=N; 0: not set, the check then only reports). The empty-block
+    # instruction model is shown in the message as context, not graded.
+    'block_interval_seconds': 0, 'proof_time_warn_ratio': 0.7, 'proof_time_crit_ratio': 1.0,
     # Settlements the follower file has and an RPC's finalized_height has not. One can be a poll in flight.
     'finality_file_lag_warn': 1, 'finality_file_lag_crit': 3,
     # A settled RPC before the next build stops advancing finality above 16 MiB of status file.
@@ -530,11 +534,7 @@ def check_height_runway(settled: Optional[int], l1_up: List[Dict[str, Any]], p: 
             r.graded('l2_export_runway', settled, p['l2_export_warn'], p['l2_export_crit'],
                      f'L2 block {settled}: this build refuses to export above {limit}, and settlement stops there. A fixed '
                      f'producer must be rolled out first ({limit - settled} blocks left)', limit=limit)
-        cost = empty_block_instructions(settled)
-        r.graded('l2_proof_cost', cost, p['proof_instructions_warn'], p['proof_instructions_crit'],
-                 f'L2 block {settled}: an empty block costs about {cost / 1e6:.0f}M guest instructions'
-                 + (f'; above {p["proof_instructions_local"] / 1e6:.0f}M the settler has no local fallback, only the remote prover'
-                    if cost > p['proof_instructions_local'] else ''), instructions=cost)
+        r.facts['l2_proof_model_instructions'] = empty_block_instructions(settled)
     if l1_up:
         height = max(n['height'] for n in l1_up)
         limit = p['l1_reconstruct_limit']
@@ -1043,7 +1043,34 @@ def parse_events(text: str, since: float) -> List[Dict[str, Any]]:
     return events
 
 
+def check_proof_time(p: Dict[str, Any], r: Report) -> None:
+    """The slowest proof the settler logged in the event window, against the configured block interval. A proof slower
+    than the interval means settlement falls behind block production."""
+    cost = r.facts.get('l2_proof_model_instructions')
+    model = '' if cost is None else (
+        f'; model: an empty block at this height is about {cost / 1e6:.0f}M guest instructions'
+        + (f', above {p["proof_instructions_local"] / 1e6:.0f}M the settler has no local fallback, only the remote prover'
+           if cost > p['proof_instructions_local'] else ''))
+    seconds = r.facts.get('proof_seconds') or []
+    interval = p['block_interval_seconds']
+    if not seconds:
+        if cost is not None or interval:
+            r.add('l2_proof_cost', OK, f'no proof-generated event in the window{model}')
+        return
+    worst = max(seconds)
+    if not interval:
+        r.add('l2_proof_cost', OK, f'slowest proof {worst:.0f} s; no block_interval_seconds set, not graded{model}',
+              proof_seconds=worst)
+        return
+    r.graded('l2_proof_cost', worst / interval, p['proof_time_warn_ratio'], p['proof_time_crit_ratio'],
+             f'slowest proof {worst:.0f} s against a block interval of {interval} s{model}',
+             proof_seconds=worst, block_interval_seconds=interval)
+
+
 def grade_events(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], window: float, r: Report) -> None:
+    for ev in events:
+        if ev['event'] == 'proof-generated' and isinstance(ev.get('seconds'), (int, float)):
+            r.facts.setdefault('proof_seconds', []).append(float(ev['seconds']))
     counts: Dict[str, int] = {}
     level = OK
     last_bad = None
@@ -1428,6 +1455,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_attestors(args.attest_drop or [], with_l2, p, fetch or http_fetcher(args.timeout), r)
     check_units(args.unit or [], p, now, run_cmd, r)
     check_event_logs(args.event_log or [], p, now, r)
+    check_proof_time(p, r)
     check_files(args.file or [], p, now, r)
     check_reports(args.report or [], p, now, r)
     check_memory(args.memory, p, r)

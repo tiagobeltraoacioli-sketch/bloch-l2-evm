@@ -18,7 +18,9 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 
 ## 2. Monitor
 
-Height runways: `l2_export_runway` (a build that refuses to export above L2 block 4096 stops settlement there; WARN at 1,024, CRIT at 3,000), `l1_reconstruct_runway` (WARN at 80%, CRIT at 95% of what `reconstruct` reads) and `l2_proof_cost` (the guest instructions of an empty block, which grow with height until L2 block 8,191 because the witness hydrates the EIP-4788 ring).
+Height runways: `l2_export_runway` (a build that refuses to export above L2 block 4096 stops settlement there; WARN at 1,024, CRIT at 3,000), `l1_reconstruct_runway` (WARN at 80%, CRIT at 95% of what `reconstruct` reads).
+
+`l2_proof_cost` grades the slowest `proof-generated` time the settler logged in the event window (local or remote, all stages) against the block interval you set with `--set block_interval_seconds=N`: WARN at 70%, CRIT at 100%, when settlement would fall behind production. Without that setting it only reports. Its message also shows the empty-block instruction model for the settled height (it grows until L2 block 8,191 because the witness hydrates the EIP-4788 ring). It needs `--unit settler=…` or `--event-log`.
 
 `finality_file_lag[FILE:RPC]` compares the follower file's newest settlement with the RPC's `finalized_height` (WARN at 1,
 CRIT at 3; needs `--follower-status`). A settled RPC up to v2.1 keeps `bloch_finality.status.age_s` young while its database
