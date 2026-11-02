@@ -847,7 +847,7 @@ fn hide_removed_blocks(module: &mut jsonrpsee::RpcModule<()>, factory: BlochProv
     Ok(())
 }
 
-fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>, factory: BlochProviderFactory) -> Result<()> {
+fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>, factory: Option<BlochProviderFactory>) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     for method in HEAD_BOUND_METHODS {
         ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
@@ -869,7 +869,7 @@ fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<Atomi
                     return Ok(serde_json::Value::Null);
                 }
                 // A transaction of a block a rewind removed: the cache may still hold it.
-                if let Some(hash) = result.get("blockHash").and_then(|v| v.as_str()).and_then(|v| v.parse::<B256>().ok()) {
+                if let (Some(hash), Some(factory)) = (result.get("blockHash").and_then(|v| v.as_str()).and_then(|v| v.parse::<B256>().ok()), factory) {
                     let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served)).await.unwrap_or(false);
                     if !known {
                         return Ok(serde_json::Value::Null);
@@ -1431,7 +1431,7 @@ async fn main() -> Result<()> {
     let mut proof_task: Option<tokio::task::JoinHandle<()>> = None;
     serve_pending_blocks_as_latest(&mut module)?;
     let served_head = Arc::new(AtomicU64::new(0));
-    hide_blocks_above_head(&mut module, served_head.clone(), factory.clone())?;
+    hide_blocks_above_head(&mut module, served_head.clone(), Some(factory.clone()))?;
     hide_removed_blocks(&mut module, factory.clone(), served_head.clone())?;
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
@@ -1762,7 +1762,7 @@ mod tests {
                 .unwrap();
         }
         let head = Arc::new(AtomicU64::new(4));
-        hide_blocks_above_head(&mut module, head.clone()).unwrap();
+        hide_blocks_above_head(&mut module, head.clone(), None).unwrap();
         for method in HEAD_BOUND_METHODS {
             let at: serde_json::Value = module.call(method, jsonrpsee::rpc_params!["mined"]).await.unwrap();
             assert!(at.is_null(), "{method} above the head");
