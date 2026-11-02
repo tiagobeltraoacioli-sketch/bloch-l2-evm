@@ -132,6 +132,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -834,6 +835,67 @@ def parse_proof_artifact(data):
     return values, proof
 
 
+def group_segments(pgid, directory):
+    """The SP1 shared-memory files (`sp1_*`, `sem.sp1_*` under `directory`) that processes of group `pgid` map or hold."""
+    found, prefix = set(), str(directory).rstrip('/') + '/'
+    for proc in Path('/proc').iterdir() if Path('/proc').is_dir() else ():
+        if not proc.name.isdigit():
+            continue
+        try:
+            stat = (proc / 'stat').read_text()
+            if int(stat.rsplit(')', 1)[1].split()[2]) != pgid:
+                continue
+            paths = [line.split(None, 5)[5] for line in (proc / 'maps').read_text().splitlines() if len(line.split(None, 5)) == 6]
+            paths += [os.readlink(fd) for fd in (proc / 'fd').iterdir()]
+        except (OSError, ValueError, IndexError):
+            continue
+        for path in paths:
+            path = path.replace(' (deleted)', '')
+            name = path[len(prefix):] if path.startswith(prefix) else ''
+            if name.startswith(('sp1_', 'sem.sp1_')) and '/' not in name:
+                found.add(path)
+    return found
+
+
+def segment_mapped(path):
+    """Whether any process we can see maps or holds `path`. Processes of other users cannot be read; they cannot have
+    opened this user's segment either (mode 0600), unless they run as root."""
+    target = str(path)
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if target in (proc / 'maps').read_text():
+                return True
+            if any(os.readlink(fd) == target for fd in (proc / 'fd').iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def remove_leaked_segments(paths, mapped=segment_mapped):
+    """Remove the given segments, which this run's prover processes mapped, once no process maps them. A killed SP1 native
+    runner never unlinks its segments (4.7 GB each in /dev/shm), and a full /dev/shm makes every later SP1 run on the
+    host crash. Only segments seen mapped by this run's own process group are candidates: nothing another job created."""
+    removed, paths = [], set(paths)
+    for path in list(paths):  # the semaphores of a segment this group used carry its name: sem.sp1_<id>_t_empty, _filled
+        head, name = os.path.split(path)
+        if name.startswith('sp1_'):
+            paths |= {os.path.join(head, f'sem.{name}_{end}') for end in ('empty', 'filled')}
+    for path in sorted(paths):
+        try:
+            if not os.path.exists(path) or mapped(path):
+                continue
+            os.unlink(path)
+            removed.append(os.path.basename(path))
+        except OSError:
+            continue
+    if removed:
+        log('prover-shm-removed', segments=removed)
+    return removed
+
+
 class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
         kind = config.get('network_kind', DEFAULTS['network_kind'])
@@ -1229,7 +1291,7 @@ class Settler:
                     result = types.SimpleNamespace(returncode=75)
                 else:
                     with (directory / f'{name}.log').open('w') as out:
-                        result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                        result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
                 if result.returncode == 0:
                     break
                 if name == 'prove':
@@ -1261,6 +1323,42 @@ class Settler:
             return True
         log('local-proof-refused', directory=str(directory), instructions=instructions, limit=limit)
         return False
+
+    def run_bounded(self, argv, timeout, **kwargs):
+        """Run a prover with a time limit that holds for everything it starts. subprocess.run kills only the direct child
+        on a timeout: the SP1 native runner it spawned would live on and keep its memory. So the prover gets its own
+        process group, which is killed on a timeout and after every exit. An injected runner (tests) is used as given."""
+        if self.run is not subprocess.run:
+            return self.run(argv, timeout=timeout, **kwargs)
+        shm = str(Path(self.c.get('prover_shm_dir', '/dev/shm')) if hasattr(self, 'c') else Path('/dev/shm'))
+        process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        ours = set()  # segments a process of this run's group mapped: only these may be removed afterwards
+        deadline = time.monotonic() + timeout
+        try:
+            while process.poll() is None:
+                ours |= group_segments(process.pid, shm)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                time.sleep(0.5)
+        except BaseException:
+            ours |= group_segments(process.pid, shm)
+            self.kill_group(process.pid)
+            process.wait()
+            time.sleep(0.2)
+            remove_leaked_segments(ours)
+            raise
+        ours |= group_segments(process.pid, shm)
+        self.kill_group(process.pid)  # whatever it left running
+        time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
+        remove_leaked_segments(ours)
+        return subprocess.CompletedProcess(argv, process.returncode)
+
+    @staticmethod
+    def kill_group(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     def prove_remote(self, directory, proof):
         """Groth16 on the remote prover; the caller still verifies it locally."""
