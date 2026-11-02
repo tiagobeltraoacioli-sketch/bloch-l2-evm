@@ -235,3 +235,66 @@ Evidence: Alert, real agent under the real unit in a container with its own syst
 After `upgrade` or `rollback`, restart only what the script prints. Restarting the follower costs about an hour.
 
 Evidence: run in a container with its own systemd against L1 mainnet (read-only): replay 78 min, RSS peak 625 MB, 0 restarts. The refresh published, the path unit started the RPC, `replica_check.py verify` passed 16/16, upgrade to `18be911a…`, rollback and upgrade again each passed verify, and a tampered `SHA256SUMS` stopped the RPC with `unit[rpc]` CRIT. The IP allow-list held only with BPF capabilities. Mainnet has no settlement, so only an empty L2 was published.
+
+## 13. Lost host or lost state
+
+What to keep, what is rebuilt, and how long it takes. Measured 2026-11-02 in agents/106-recovery.md; see each row's evidence.
+
+### Back up these, and only these
+
+| Item | Path | Why |
+|---|---|---|
+| DA fee keystore | `/var/lib/bloch-l2-mainnet-da/validator.key` | Holds the DA fee money. `LOCK` is not needed |
+| DA passphrase | `/var/lib/bloch-l2-mainnet-settler/da.passphrase` | Without it the keystore does not open. Store apart from the keystore |
+| Settler config and release | `/etc/bloch-l2-mainnet-settler/config.json`, the signed release directory | Reinstall |
+| SSH identity to the remote prover | `/var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519` | Or make a new one and authorize it on the prover |
+
+**Never back up, and never restore, the settler's L2 database or its `work/` directory.** Both are rebuilt from L1. An old copy is worse than none: see "Settler state restored from an old backup" below.
+
+### Recovery table
+
+| Failure | Time to recover | Data needed | Who acts |
+|---|---|---|---|
+| Settler L2 database lost or restored from an old backup | Seconds to rebuild from L1 (0.16 s for 3 blocks on a private net), plus the next proof | Follower state on the same host; the newer `work/` if it survived | Settler operator |
+| Settler `work/` lost, database intact | One proof: the next cycle re-exports the unsettled block from the database and proves it again (Code, not rehearsed) | Nothing | Unaided |
+| Settler host lost | Follower rebuild (about 75 min) + install + one proof | Backup list above | Settler operator; owner funds a new DA key if the old one is lost |
+| Follower state lost | Full re-verification from Genesis-4: 57 min to the e6596 copy with the pinned `c18752fd…` (173,967 blocks, 3.1 GB of state, 516 MB RSS); about 75 min for today's chain. `safe` and `finalized` stay closed meanwhile | An L1 RPC that serves full history | Operator of that host |
+| Settled RPC view (`rpc-view`) lost | Under 1 s on a 3-block L2: it is rebuilt from the database at start | The database | Unaided after restart |
+| Prover host lost | Install on a new host + one proof (11 to 28 min, entry 2). Nothing is paid meanwhile | Signed prover release; SSH identity | Settler operator |
+| DA fee keystore or passphrase lost | Minutes: new key, one transfer to fund it, restart | Funds for the new key. The old key's balance is lost | Owner (funds), settler operator |
+
+### Settler state restored from an old backup
+
+Restoring the database (and `work/`) from a backup older than the accepted settlement does not double-pay and does not fork the settled chain. The worker halts with `L2 head N cannot extend accepted settlement M`, N below M, and pays nothing. It cannot spend a DA input twice either: inputs come from the L1 UTXO set at signing time, and a signed batch is reused only while its inputs are unspent. L1 accepts only settlements that extend the accepted one, so an old state cannot replace a settled block. A restored settler started while the old host still runs is the two-settler case of entry 4 (`another settler?`).
+
+The repair tool does not cover this case: `l2_reorg_recover.py` refuses with `database head N is not ahead of accepted M: nothing to recover`. Rebuild by hand, with the settler and the RPC stopped. `RULE` is `timestamp_rule` from the config:
+
+```
+sudo systemctl stop bloch-l2-mainnet-settler bloch-l2-mainnet-rpc
+```
+
+```
+sudo -u bloch-l2-mainnet-settler REL/bloch-l2-produce-dev reconstruct --target /var/lib/bloch-l2-mainnet-settler/canonical.rebuilt --l1-follower /var/lib/bloch-l2-mainnet-follower/native --timestamp-rule RULE --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679
+```
+
+These are the arguments the worker itself passes (`MAINNET_PRODUCE_ARGS` in `settler_v3.py`). Check that the printed `head` is the accepted L2 hash (`getl2settlement` on the native RPC); if not, stop and escalate. Then swap, keeping the restored copy:
+
+```
+sudo mv /var/lib/bloch-l2-mainnet-settler/canonical /var/lib/bloch-l2-mainnet-settler/canonical.restored
+sudo mv /var/lib/bloch-l2-mainnet-settler/canonical.rebuilt /var/lib/bloch-l2-mainnet-settler/canonical
+sudo systemctl start bloch-l2-mainnet-rpc bloch-l2-mainnet-settler
+```
+
+Proposed for the next build: let `l2_reorg_recover.py` handle a database behind the accepted head (rebuild, no orphans) instead of refusing. It is pinned (`678482bf…`), so this branch does not change it.
+
+**User transactions of the unsettled block are dropped.** If, before the restore, a block above the accepted number had been built and its DA batch published, the restored worker rebuilds that number from the current spool, which no longer holds those transactions: they vanish from `latest`, and the DA fee already paid for them is lost. On the private net the restored worker rebuilt block 4 empty, with another hash, while L1 held the DA record of the first block 4 (3 transactions, 2196 sat). To return them, keep the pre-restore `work/` (here `OLD_WORK`) and, before starting the settler, re-spool the transactions of its blocks above the accepted number `M`:
+
+```
+sudo -u bloch-l2-mainnet-settler python3 -c "import sys; from pathlib import Path; sys.path.insert(0, 'REL'); import l2_reorg_recover as t; print(t.respool(t.orphaned_dirs(Path('OLD_WORK'), M), '/var/lib/bloch-l2-mainnet-settler/txpool'))"
+```
+
+It prints the spool files it wrote. If that `work/` is gone too, the batch exists only in the L1 DA transaction.
+
+**A backup whose head equals the accepted number does not halt.** The worker then rebuilds the next block from the spool with no warning: the transactions of a block already published are dropped the same way, and if the spool holds others, a second DA fee is paid for the same L2 number (a different commitment, so consensus accepts both). This follows from the code (`prepare_block`, `publish_da`); the drill ran the halting case. So: before starting a settler on any restored or copied state, compare `produce head` with the accepted number, and rebuild from L1 as above unless they are equal and no newer `work/` directory exists.
+
+Evidence: Drill on a private net, real Groth16, settled-rpc `18be911a…`, settler `3ddb260a…`: backup at accepted 1 (head 2), live run to accepted 3 with block 4's DA included and its settlement held, then restore. Halt at once, DA spend unchanged (2196 sat, one fee), no settlement sent. Tool exit 3 as quoted. Manual rebuild head equal to the accepted hash. Worker resumed and rebuilt block 4 empty.
