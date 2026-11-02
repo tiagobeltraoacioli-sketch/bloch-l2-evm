@@ -1292,3 +1292,45 @@ mod forced {
         .expect("the producer's body is the one the verifier accepts");
     }
 }
+
+mod forced_funded_skip {
+    use super::*;
+    use crate::forced_inclusion::{ForcedRecord, ForcedTransaction};
+
+    #[test]
+    fn a_funded_skipped_sender_left_out_of_the_witness_fails_the_block() {
+        let mut chain = Chain::new(ChainSpec::mainnet());
+        let other = SigningKey::from_bytes((&[0x77u8; 32]).into()).unwrap();
+        let other_address = Address::from_public_key(other.verifying_key());
+        let fund = chain.tx(TxKind::Call(other_address), U256::from(10u128.pow(18)), Bytes::new(), 21_000);
+        let body = chain.body(vec![fund]);
+        assert!(chain.commit(&body).transactions[0].success);
+        // A nonce gap: skipped, but its sender's account decides it.
+        let transaction = TxEip1559 {
+            chain_id: chain.spec.chain_id,
+            nonce: 9,
+            to: TxKind::Call(Address::repeat_byte(0x55)),
+            value: U256::from(1u64),
+            gas_limit: 21_000,
+            max_fee_per_gas: 200_000_000_000,
+            ..Default::default()
+        };
+        let signature: Signature = other.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
+        let envelope: Bytes = TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into();
+        let forced = vec![ForcedTransaction {
+            record: ForcedRecord { l1_height: 5, l1_txid: [5; 32], envelope_hash: keccak256(&envelope), gas_limit: 21_000 },
+            envelope,
+        }];
+        let body = chain.body(vec![]);
+        let context = chain.context();
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &forced,
+        )
+        .unwrap();
+        assert!(witness.pre_accounts.iter().any(|a| a.address == other_address), "the skipped sender is witnessed");
+        let mut missing = witness.clone();
+        missing.pre_accounts.retain(|a| a.address != other_address);
+        let result = verify_node_batch_sparse_forced(&chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy);
+        assert!(result.is_err(), "accepted: {:?}", result.map(|(o, n)| (o.header.state_root, n)));
+    }
+}

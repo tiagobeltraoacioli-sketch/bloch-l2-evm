@@ -170,6 +170,9 @@ async fn main() -> Result<()> {
     stdin.write(&settlement);
     let executor = LightProver::new().await;
     let (public, report) = executor.execute(Elf::from(fs::read(&elf)?), stdin).await?;
+    if report.exit_code != 0 {
+        return Err(format!("the honest block exited with code {}", report.exit_code).into());
+    }
     expected.check_expected(public.as_slice())?;
     // Attacks on the ELF: the guest must refuse what the native path refuses.
     let run_attack = |w: &bloch_l2_evm::sparse_witness::SparseBatchWitness| {
@@ -193,10 +196,13 @@ async fn main() -> Result<()> {
             continue;
         }
         let native = execute_settlement_statement_v3_sparse(&spec, MAINNET_DOMAIN, &changed, &ctx, &body, settlement, BlockHashes::Lazy).is_err();
-        let elf_refused = executor.execute(Elf::from(fs::read(&elf)?), run_attack(&changed)).await.is_err();
+        let elf_refused = match executor.execute(Elf::from(fs::read(&elf)?), run_attack(&changed)).await {
+            Err(_) => true,
+            Ok((_, report)) => report.exit_code != 0,
+        };
         attacks.push(format!("{{\"attack\":\"sender-omitted\",\"native_refused\":{native},\"elf_refused\":{elf_refused}}}"));
         if !native || !elf_refused {
-            return Err("a witness without a forced sender was accepted".into());
+            return Err(format!("a witness without forced sender {sender} was accepted: native refused {native}, ELF refused {elf_refused}").into());
         }
     }
     // 2. Drop the forced list: whatever executes, the statement must differ from the honest one.
@@ -204,7 +210,7 @@ async fn main() -> Result<()> {
     dropped.forced.clear();
     let differs = match executor.execute(Elf::from(fs::read(&elf)?), run_attack(&dropped)).await {
         Err(_) => true,
-        Ok((public, _)) => expected.check_expected(public.as_slice()).is_err(),
+        Ok((public, report)) => report.exit_code != 0 || expected.check_expected(public.as_slice()).is_err(),
     };
     attacks.push(format!("{{\"attack\":\"list-dropped\",\"statement_differs_or_refused\":{differs}}}"));
     if !differs {
