@@ -72,6 +72,10 @@ def spool(name, raw):
     (W / 'txpool' / f'{name}.tx').write_text(raw.hex() + '\n')
 
 
+def quarantined_hopeful():
+    return 'hopeful' in quarantined()
+
+
 def names():
     return sorted(p.stem for p in (W / 'txpool').glob('*.tx'))
 
@@ -131,27 +135,35 @@ check('a transaction within the gas cap and over the budget is quarantined by me
       'evil-small' in quarantined() and b['transactions'] == 1 and not names(), quarantine=quarantined())
 nonce[honest] = 0
 
-# Grow the contract in steps below the budget, until a deposit to it alone is over the budget.
-grown = 181
-while grown < BUDGET // 17_000 * 2:
-    spool('fill', fill(200))
-    b, _ = block()
-    if not b['transactions']:
-        print(json.dumps({'note': 'fill refused', 'grown': grown, 'spool': names(), 'quarantine': quarantined()}), flush=True)
-        for p in (W / 'txpool').glob('*.tx'):
-            p.unlink()
-        nonce[attacker] = int(s.produce('account', '--target', s.c['l2_db'], '--address', A.hex())['nonce'])
-        break
-    grown += 200
-state = json.loads((W / 'work' / 'sequencer-policy.json').read_text())
-print(json.dumps({'grown': grown, 'state_keys': list(state)}), flush=True)
+# One contract cannot pass the budget: the transaction growing it touches it too. Grow two, then deposit to both.
+def fill_to(target):
+    grown = 0
+    while True:
+        raw = tx(attacker, target, g.keccak(b'fillRaw(uint256)')[:4] + (200).to_bytes(32, 'big'), 24_000 * 200 + 60_000)
+        spool('fill', raw)
+        b, _ = block()
+        if not b['transactions']:
+            for p in (W / 'txpool').glob('*.tx'):
+                p.unlink()
+            nonce[attacker] = int(s.produce('account', '--target', s.c['l2_db'], '--address', A.hex())['nonce'])
+            for _ in range(5):  # the strike's cooldown
+                block()
+            return grown
+        grown += 200
 
-spool('hopeful', tx(attacker, H, b'', 21_000, value=1))
+
+grown = fill_to(griefer)
 second = g.keccak(g.rlp([A, nonce[attacker]]))[12:]
-number_before = number
-b, d = block([dep(griefer)])
+spool('deploy2', tx(attacker, b'', bytes.fromhex(BC['Griefer']), 2_000_000))
+block()
+check('second contract deployed after the cooldown', not names())
+grown2 = fill_to(second)
+print(json.dumps({'grown': [grown, grown2]}), flush=True)
+
+spool('hopeful', tx(honest, A, b'', 21_000, value=1))
+b, d = block([dep(griefer), dep(second)])
 written = json.loads((d / 'deposits-over-budget.json').read_text()) if (d / 'deposits-over-budget.json').exists() else None
-check('a deposit over the budget commits alone, with a record; the transaction waits', b['deposits'] == 1 and b['transactions'] == 0 and written and written['sp1_gas'] > BUDGET and names() == ['hopeful'], record=written, spool=names())
+check('deposits over the budget commit alone, with a record; the transaction waits', b['deposits'] == 2 and b['transactions'] == 0 and written and written['sp1_gas'] > BUDGET and names() == ['hopeful'] and not quarantined_hopeful(), record=written, spool=names())
 
 b, d = block()
 check('the next block is normal: the transaction that waited goes in', b['transactions'] == 1 and not names(), transactions=b['transactions'])
