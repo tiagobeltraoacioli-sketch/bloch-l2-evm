@@ -152,6 +152,12 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `disk[*]` | free space (`--disk`) | 15% or 20 GiB | 5% or 5 GiB | |
 | `binary[*]` | installed sha256 = v2 pin | – | differs | |
 | `file:*` | heartbeat file age | given | 5 × given | prover/settler/follower liveness |
+| `l1_finality_spread` | best − worst finalized epoch over the `--l1-rpc` nodes; names the nodes behind | 2 | 4 | a node with a current head and frozen finality is on a branch of its own (L1-6b); report 94's settler settled L2 blocks 6-8 on such a branch because its quorum was there. Remove the node from every L2 reader's endpoints |
+| `l2_rpc_vs_l1[*]` | hash of each backend's block at the L1-accepted L2 number = the accepted statement's `l2_hash` | `safe` above the accepted number | hash differs | the RPC serves `latest`/`safe` that L1 no longer has (L2-12, report 94): stop the settler, `l2_reorg_recover.py` |
+| `prover_path[*]` | settler `prover-failed` / `local-proof-refused` / `proof-generated` per block in the event window | a block proved on the local fallback after the remote failed (exit 75 = remote busy, R-1 of report 141) | 2 failed prove cycles of one block (every prover failed or refused) | above `local_prove_max_instructions` (3M) the fallback refuses and the block has no prover |
+| `spool_expired[*]` | `evicted tx file=… (expired)` lines in the unit's journal (settled RPC) in the event window | 1 | 5 | acknowledged transactions dropped: the sender holds a hash that never lands (L2-20) |
+| `shm[*]` | `--shm /dev/shm`: free GiB; `sp1_*` segments older than 3 h | < 12 GiB, or any stale segment | < 6 GiB | a killed SP1 runner leaks a 3.4-4.7 GiB segment (F8 of report 121); a full tmpfs makes every SP1 run SIGBUS. The monitor only reads: remove a stale segment only after checking no process maps it |
+| `http[*]` | `--http NAME=URL[\|TEXT]` GET answers 2xx (and contains TEXT) | – | other status, unreachable or TEXT missing | signer `/healthz` (report 105's gap), L1 indexer `/health` (L1-2), gateway and explorer |
 
 The `devnet4` profile keeps the same structure with devnet values (2 s
 slots: finalized age 40/90 min, height spread 15/160, follower lag 160/960).
