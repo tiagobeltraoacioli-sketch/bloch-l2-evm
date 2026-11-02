@@ -163,13 +163,15 @@ NATIVE_PLACEHOLDER_DOC = ('    /// The configuration carries a PLACEHOLDER fee-s
 
 def owner_doc(recipient):
     return ('/// The immutable recipient of the fee-vault sweep, fixed by the owner:\n'
-            f'/// {eip55(recipient)}. This value enters the configuration commitment, so the\n'
-            '/// configuration, ELF and verifying keys of the next rules are built with it.\n')
+            f'/// `{eip55(recipient)}`.\n'
+            '/// This value enters the configuration commitment, so the configuration, ELF\n'
+            '/// and verifying keys of the next rules are built with it.\n')
 
 
 def native_owner_doc(recipient):
-    return (f'    /// The configuration carries the owner\'s fee-sweep recipient {eip55(recipient)}\n'
-            '    /// (bloch-l2-evm `MAINNET_FEE_SWEEP_RECIPIENT`); these values are candidates until\n')
+    return ('    /// The configuration carries the owner\'s fee-sweep recipient\n'
+            f'    /// `{eip55(recipient)}` (bloch-l2-evm\n'
+            '    /// `MAINNET_FEE_SWEEP_RECIPIENT`); these values are candidates until\n')
 
 
 def git_files(tree):

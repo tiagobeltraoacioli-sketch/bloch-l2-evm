@@ -90,6 +90,7 @@ class Commitment(unittest.TestCase):
         self.assertEqual(m.parse_address('0x000000000000000000000000000000000000dEaD', allow_burn=True), '000000000000000000000000000000000000dead')
 
 
+@unittest.skipUnless(m.current_recipient(L2) == PLACEHOLDER, 'this tree already carries a chosen recipient')
 class Steps(unittest.TestCase):
     """apply, pins, native-commit and audit on copies of this tree's real files and a native fixture."""
 
