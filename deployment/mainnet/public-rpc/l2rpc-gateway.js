@@ -374,7 +374,7 @@ async function forwardParts(r, parts) {
     x.p.calls.forEach((c) => {
       if (c.call.id === undefined) return;
       const hit = x.byId[JSON.stringify(c.call.id)];
-      out.push({ index: c.index, reply: hit || unavailable(c.call.id, x.p.route) });
+      out.push({ index: c.index, reply: hit || unavailable(c.call.id, x.p.route), unanswered: !hit });
     });
   });
   return out;
@@ -471,8 +471,10 @@ async function handle(r) {
     if (sims > 0) slots.incr(slotKey, -sims, 0);
   }
   const merged = replies.concat(forwarded).sort((a, b) => a.index - b.index).map((x) => x.reply);
-  if (!batch) return merged.length ? send(r, 200, merged[0]) : r.return(204);
-  return send(r, 200, merged);
+  // No backend answered any part: 503, as the single-route path answers (a batch mixing read and seqread calls).
+  const status = replies.length === 0 && forwarded.length > 0 && forwarded.every((x) => x.unanswered) ? 503 : 200;
+  if (!batch) return merged.length ? send(r, status, merged[0]) : r.return(204);
+  return send(r, status, merged);
 }
 
 function failure(r) {
