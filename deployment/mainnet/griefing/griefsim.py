@@ -508,7 +508,6 @@ def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, saturate=0, 
             out(event='growth-stopped', slots=slots, reasons=filler.refusals)
             break
         slots += added
-    key = filler.key
     grown_fee = spent(sim)
     out(event='grown', slots=slots, fee_blch=grown_fee, number=sim.number, required_tip=sim.tip())
     # Size one attacking read batch to the budget.
