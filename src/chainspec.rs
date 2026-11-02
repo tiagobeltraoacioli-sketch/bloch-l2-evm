@@ -615,9 +615,18 @@ mod tests {
         next.validate().expect("the next mainnet spec is valid");
         assert!(next.block_derivation.is_some() && next.fee_vault_sweep.is_some());
         assert_eq!(
-            ChainSpec { block_derivation: None, fee_vault_sweep: None, ..next.clone() },
+            ChainSpec {
+                block_derivation: None,
+                fee_vault_sweep: None,
+                // CANDIDATE: with the feature the next rules also carry forced inclusion.
+                #[cfg(feature = "forced-inclusion")]
+                forced_inclusion: false,
+                ..next.clone()
+            },
             ChainSpec::mainnet_v1()
         );
+        #[cfg(feature = "forced-inclusion")]
+        assert!(next.forced_inclusion && !ChainSpec::mainnet_v1().forced_inclusion);
     }
 
     #[test]
