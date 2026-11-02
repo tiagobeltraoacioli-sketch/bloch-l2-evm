@@ -160,6 +160,10 @@ async fn main() -> Result<ExitCode> {
         let path = entry?.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
         let Some(height) = name.split('-').next().and_then(|height| height.parse::<u64>().ok()) else { continue };
+        // A block the settler replaced keeps its directory under this suffix.
+        if name.contains("superseded") {
+            continue;
+        }
         if path.join("block.artifact").is_file() {
             by_height.entry(height).or_default().push(path);
         }

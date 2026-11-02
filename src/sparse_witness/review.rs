@@ -1755,3 +1755,75 @@ fn fuzz_rich_blocks_next_rules() {
         fuzz_chain(alloc::format!("n{round}").as_bytes(), ChainSpec::mainnet(), 250);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Findings: these fail on the candidate. Run with --ignored.
+// ---------------------------------------------------------------------------
+
+/// FINDING L1 (liveness, not soundness). A deposit cannot be refused, and it runs no
+/// code. Yet the witness must carry the whole code of the recipient, and hydration
+/// analyses and hashes it. So the guest's cost of a deposit depends on what the target
+/// deployed, and a deposit-only block can still be made unprovable: storage griefing is
+/// closed, code griefing is not. See `bloch-evm-sp1-sparse-code-cost` for the cost.
+#[test]
+#[ignore = "finding L1: fails on the candidate, a forced deposit carries the recipient's code"]
+fn a_deposit_does_not_carry_the_code_of_its_recipient() {
+    let mut chain = Chain::new(ChainSpec::mainnet_v1());
+    // PUSH2 24576 PUSH1 0 RETURN: 24,576 zero bytes of runtime.
+    let tx = chain.tx(TxKind::Create, U256::ZERO, vec![0x61, 0x60, 0x00, 0x60, 0x00, 0xf3].into(), 6_000_000);
+    let target = chain.sender.create(chain.nonce - 1);
+    let body = chain.body(vec![tx]);
+    assert!(chain.commit(&body).transactions[0].success);
+    let body = NodeBodyV2 {
+        deposits: vec![chain.deposit_to(target, 1_000_000)],
+        transactions: vec![],
+    };
+    let (witness, _, _) = chain.differential(&body, "deposit to a large contract");
+    let account = witness.pre_accounts.iter().find(|account| account.address == target).unwrap();
+    assert!(
+        account.code.len() < 100,
+        "the recipient's code is {} bytes in the witness of a block that never runs it",
+        account.code.len()
+    );
+}
+
+/// Not a finding: the witness is malleable, and the statement does not depend on it.
+/// Order, padding and extra exposure only change the program's input.
+#[test]
+fn witness_malleability_does_not_reach_the_statement() {
+    let mut chain = Chain::new(ChainSpec::mainnet_v1());
+    let target = chain.deploy_script();
+    let bystander = chain.deploy_script();
+    let tx = chain.call(target, script(&[(SSTORE, u(1), u(2)), (SSTORE, u(2), u(3))]));
+    let body = chain.body(vec![tx]);
+    chain.commit(&body);
+    let tx = chain.call(target, script(&[(SLOAD, u(1), u(0)), (SSTORE, u(9), u(1))]));
+    let body = chain.body(vec![tx]);
+    let (witness, _, context) = chain.differential(&body, "base");
+    let settlement = Chain::settlement(&body);
+    let expected =
+        execute_settlement_statement_v3_sparse(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement, BlockHashes::Lazy).unwrap();
+
+    let trie = chain.state.warm_commitment().unwrap();
+    let mut changed = witness.clone();
+    changed.pre_accounts.reverse();
+    changed.absent_accounts.reverse();
+    // An account the block does not touch, hydrated and with all of its storage open.
+    let info = chain.state.account(&bystander).unwrap();
+    changed.proof.extend(trie.proof([account_key(&bystander)]).unwrap());
+    changed.pre_accounts.push(SparseWitnessAccount {
+        address: bystander,
+        balance: info.balance,
+        nonce: info.nonce,
+        code: script_runtime(),
+        storage_root: trie.storage_root_cached(&bystander).unwrap(),
+        storage_proof: trie.storage_proof(&bystander, [storage_key(&u(1))]).unwrap(),
+    });
+    // An address the block does not touch, proved absent.
+    let unrelated = Address::repeat_byte(0xab);
+    changed.proof.extend(trie.proof([account_key(&unrelated)]).unwrap());
+    changed.absent_accounts.push(unrelated);
+    let got =
+        execute_settlement_statement_v3_sparse(&chain.spec, MAINNET_DOMAIN, &changed, &context, &body, settlement, BlockHashes::Lazy).unwrap();
+    assert_eq!(got.encode(), expected.encode());
+}
