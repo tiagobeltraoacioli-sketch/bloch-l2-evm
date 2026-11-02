@@ -54,7 +54,7 @@ rehearsal). Stop those too.
 Read the block. This changes nothing.
 
 ```
-python3 l2_stuck_block.py status --config /etc/bloch-l2-mainnet-settler/settler.json
+sudo -u bloch-l2-mainnet-settler python3 l2_stuck_block.py status --config /etc/bloch-l2-mainnet-settler/config.json
 ```
 
 Decide from these fields:
@@ -79,7 +79,7 @@ Use exit B when the block would need more than about half a day of proving. Extr
 15M-gas block needs about 35 hours. That run was not measured.
 
 ```
-python3 l2_stuck_block.py export-job --config /etc/bloch-l2-mainnet-settler/settler.json --out /var/tmp/job-N
+sudo -u bloch-l2-mainnet-settler python3 l2_stuck_block.py export-job --config /etc/bloch-l2-mainnet-settler/config.json --out /var/tmp/job-N
 ```
 
 Copy the directory to the big machine, with the same host binary and the pinned guest `203114bf…c473`. There:
@@ -92,7 +92,7 @@ Copy `external.proof` back and import it. The tool verifies it against this bloc
 anything else.
 
 ```
-python3 l2_stuck_block.py import-proof --config /etc/bloch-l2-mainnet-settler/settler.json --proof /var/tmp/job-N/external.proof
+sudo -u bloch-l2-mainnet-settler python3 l2_stuck_block.py import-proof --config /etc/bloch-l2-mainnet-settler/config.json --proof /var/tmp/job-N/external.proof
 ```
 
 Start the units. The settler finds `proved.json` and continues with DA and settlement.
@@ -115,7 +115,7 @@ Use this when a transaction in the block cannot be proved at an acceptable cost.
 seconds per transaction, plus up to 1-2 minutes for a transaction of several billion instructions. It waits with exit 75 until the follower has finalized the accepted settlement. Run it again later.
 
 ```
-python3 l2_stuck_block.py triage --config /etc/bloch-l2-mainnet-settler/settler.json --budget 100000000 --budget-gas 240000000 --follower-state /var/lib/bloch-l2-mainnet-follower/state --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --out /var/tmp/triage-N.json
+sudo -u bloch-l2-mainnet-settler python3 l2_stuck_block.py triage --config /etc/bloch-l2-mainnet-settler/config.json --budget 100000000 --budget-gas 240000000 --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --out /var/tmp/triage-N.json
 ```
 
 Read `exclude`, `kept` and `instructions_after` in the output. A 15M-gas transaction of a kind that cannot be proved shows up as a
@@ -127,11 +127,11 @@ Without `--apply`, the tool rebuilds the database in a new directory, checks tha
 prints the plan, and removes the new directory.
 
 ```
-python3 l2_stuck_block.py discard --config /etc/bloch-l2-mainnet-settler/settler.json --follower-state /var/lib/bloch-l2-mainnet-follower/state --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --exclude-file /var/tmp/triage-N.json
+sudo -u bloch-l2-mainnet-settler python3 l2_stuck_block.py discard --config /etc/bloch-l2-mainnet-settler/config.json --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --exclude-file /var/tmp/triage-N.json
 ```
 
 ```
-python3 l2_stuck_block.py discard --config /etc/bloch-l2-mainnet-settler/settler.json --follower-state /var/lib/bloch-l2-mainnet-follower/state --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --exclude-file /var/tmp/triage-N.json --apply
+sudo -u bloch-l2-mainnet-settler python3 l2_stuck_block.py discard --config /etc/bloch-l2-mainnet-settler/config.json --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --exclude-file /var/tmp/triage-N.json --apply
 ```
 
 What `--apply` does:
