@@ -274,6 +274,16 @@ PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths={STATE} {DA_DIR}
+# Kernel, cgroup and privilege surfaces the worker never uses (it runs Docker through the socket, not here).
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 LimitCORE=0
 Nice=5
 CPUQuota=1200%

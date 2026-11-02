@@ -91,6 +91,22 @@ class Installer(unittest.TestCase):
                     paths |= {p.lstrip('-') for p in line.split('=', 1)[1].split()}
             self.assertLessEqual(hidden, paths, unit.name)
 
+    def test_start_writes_a_hardened_unit_once(self):
+        unit = self.etc / 'x.service'
+        (self.etc / 'config.json').write_text('{}')
+        with mock.patch.object(m, 'UNIT', unit), mock.patch.object(m, 'run') as run:
+            m.start(['--confirm-mainnet'])
+            text = unit.read_text()
+            for line in ('NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=true', 'UMask=0077',
+                         'MemoryMax=32G', 'MemorySwapMax=0', 'Restart=on-failure', 'RestartPreventExitStatus=3',
+                         'CapabilityBoundingSet=', 'ProtectKernelTunables=true', 'RestrictSUIDSGID=true'):
+                self.assertIn(line + '\n', text)
+            with self.assertRaisesRegex(AssertionError, 'start once'):
+                m.start(['--confirm-mainnet'])
+            self.assertEqual(unit.read_text(), text)
+        self.assertEqual([c.args[0][:2] for c in run.call_args_list][-2:], [['systemctl', 'daemon-reload'],
+                                                                            ['systemctl', 'enable']])
+
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)
         self.assertEqual(hashlib.sha256((HERE / 'l2_reorg_recover.py').read_bytes()).hexdigest(),
