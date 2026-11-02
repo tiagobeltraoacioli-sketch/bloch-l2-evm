@@ -124,6 +124,17 @@ Differences, all deliberate:
   activated program; a host that serves both takes `--mainnet-v1` for it and
   `--mainnet` for the next one. Without `next_program` the worker behaves as before.
 
+* L1 forced inclusion (candidate; native `L2_FORCED_INCLUSION_EPOCH` inert): once the native queue is enabled,
+  `getl2settlement.forced.due` names the forced records (with their envelopes) the next settlement must consume.
+  The worker writes them to `forced.json` beside `deposits.json` (a crash-left file must match), passes
+  `--forced` to the producer, which runs them first after the deposits and outside every sequencer limit
+  (including the SP1-gas budget, like deposits), and checks before submission that the statement's
+  `deposits_hash` slot is `inbox_hash(deposits_hash, due)` and `user_tx_count` the sequencer's part only; the DA
+  batch covers only that part, so a forced-only block publishes none. A due or queued record makes a block due
+  under `skip_idle_blocks`. A record whose envelope the node cannot read is waited for, never guessed.
+  `censor_senders` (rehearsal only, refused on mainnet) moves the spool entries of listed L2 senders aside, to
+  rehearse a censoring sequencer.
+
 * `--dry-run [--prove]`: builds the next settlement against the live network
   in a scratch copy of the L2 database and validates it (identity, request,
   producer, SP1 execute; with --prove also Groth16 + every pre-submit check)
@@ -290,6 +301,11 @@ def da_fee_sat(payload_bytes, inputs=1, base_fee_millisat_per_gas=MIN_BASE_FEE_M
 class WaitForProgram(RuntimeError):
     """L1 reports the old program while the L2 head already runs the next rules: an L1 reorganization
     across the gate. The next epoch boundary on any branch installs it again, so this only waits."""
+
+
+class WaitForForcedEnvelope(WaitForProgram):
+    """A due forced record whose envelope the node could not read from its L1 block (`"envelope": null`): retried,
+    because no settlement on this source can be built without it."""
 
 
 class ProducerError(RuntimeError):
@@ -563,6 +579,8 @@ def forced_due(view):
         raise Halt('native forced.due is malformed or above the per-settlement cap')
     out = []
     for r in due:
+        if isinstance(r, dict) and r.get('envelope') is None:
+            raise WaitForForcedEnvelope(f'the node reports no envelope for forced record {r.get("l1_txid")}')
         try:
             record = {'height': int(r['height']), 'l1_txid': strip0x(r['l1_txid']).lower(),
                       'envelope_hash': strip0x(r['envelope_hash']).lower(), 'gas_limit': int(r['gas_limit']),

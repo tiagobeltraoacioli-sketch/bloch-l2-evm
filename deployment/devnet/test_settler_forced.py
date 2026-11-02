@@ -88,13 +88,16 @@ class ForcedPrimitivesTest(unittest.TestCase):
         cases = {
             'does not hash': forced_view([bad], due_hash=s.forced_hash([bad]).hex()),
             'due_hash': forced_view([record(ENVELOPE)], due_hash='00' * 32),
-            'carries no envelope': forced_view([{k: v for k, v in record(ENVELOPE).items() if k != 'envelope'}]),
+            'malformed': {'due': [{k: v for k, v in record(ENVELOPE).items() if k != 'l1_txid'}]},
             'per-settlement cap': forced_view([record(ENVELOPE, txid=f'{i:02x}') for i in range(17)]),
             'more gas': forced_view([record(ENVELOPE, gas=200_000), record(SKIPPED, txid='a2', gas=200_000)]),
         }
         for name, view in cases.items():
             with self.subTest(name), self.assertRaisesRegex(s.Halt, name):
                 s.forced_due({'forced': view})
+        unreadable = forced_view([{**record(ENVELOPE), 'envelope': None}])
+        with self.assertRaisesRegex(s.WaitForProgram, 'no envelope'):
+            s.forced_due({'forced': unreadable})
 
     def test_the_quorum_compares_only_the_due_records(self):
         view = {'network': 'n', 'forced': forced_view(DUE), 'native_height': 9}
