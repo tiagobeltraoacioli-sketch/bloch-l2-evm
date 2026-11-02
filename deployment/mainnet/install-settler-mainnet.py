@@ -16,6 +16,10 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       script hash to send the DA fee budget to.
   sudo python3 install-settler-mainnet.py configure [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
+        [--follower-state DIR --follower-status FILE | --no-foreign-recovery]
+      Foreign settlement recovery is ON by default (owner decision D17, 2026-11-02): it reads the
+      local native follower at FOLLOWER_STATE / FOLLOWER_STATUS, which must exist and be readable
+      by the settler user. --no-foreign-recovery leaves it off (any foreign settlement then halts).
       Runs, as the settler user, `--check-rpc` and the read-only `--dry-run` (SP1
       execute of the next L2 block against the live request) on a pending config, and
       only then writes config.json (user transactions OFF unless asked). A failed check
@@ -68,6 +72,9 @@ PINS = {
 }
 FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
          'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
+# Foreign settlement recovery (D17: on at launch) reads follower A on this host (go-live plan P3).
+FOLLOWER_STATE = '/var/lib/bloch-l2-mainnet-follower/native'
+FOLLOWER_STATUS = '/var/lib/bloch-l2-mainnet-follower/status.json'
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
@@ -189,8 +196,18 @@ def configure(args):
     }
     state, status = option(args, '--follower-state'), option(args, '--follower-status')
     assert bool(state) == bool(status), 'foreign settlement recovery takes both --follower-state and --follower-status'
-    if state:
-        # Outside /home (ProtectHome=true) and readable by the settler user. See SETTLER-RUNBOOK.md.
+    if '--no-foreign-recovery' in args:
+        assert not state, '--no-foreign-recovery takes no follower paths'
+    else:
+        # D17: on by default. Outside /home (ProtectHome=true) and readable by the settler user, checked here
+        # rather than at the first foreign settlement. See SETTLER-RUNBOOK.md, "Foreign settlements".
+        state, status = state or FOLLOWER_STATE, status or FOLLOWER_STATUS
+        assert state.startswith('/') and status.startswith('/') and not state.startswith('/home') \
+            and not status.startswith('/home'), 'the follower paths must be absolute and outside /home'
+        readable = as_settler(['/usr/bin/test', '-d', state, '-a', '-r', state, '-a', '-x', state, '-a',
+                               '-r', status])
+        assert readable.returncode == 0, (f'the settler user cannot read the follower state {state} and status '
+                                          f'{status}: start follower A first (P3), or pass --no-foreign-recovery')
         config['foreign_recovery'] = {'follower_state': state, 'follower_status': status}
     target = option(args, '--remote-prover')
     if target:
@@ -254,6 +271,13 @@ Environment=TMPDIR={STATE}/tmp
 ExecStart=/usr/bin/python3 -u {rel}/settler_v3.py
 Restart=on-failure
 RestartSec=60
+# Stop: SIGTERM to the worker only; it kills its prover group, removes the SP1 segments the group mapped and
+# kills a Gnark container the group left (review r10 M1), then systemd SIGKILLs anything left. The cleanup
+# needs at most about 80 s (30 s group wait, three 15 s docker calls).
+KillMode=mixed
+TimeoutStopSec=120
+# Backstop: POSIX shared memory and semaphores of the settler user (SP1 segments) go when the unit stops.
+RemoveIPC=yes
 # exit 3 = halt for operator review (divergence, off-rule foreign settlement, refused proof): never auto-restart.
 RestartPreventExitStatus=3
 UMask=0077

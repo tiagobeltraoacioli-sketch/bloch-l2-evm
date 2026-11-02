@@ -100,7 +100,20 @@ Differences, all deliberate:
   (`l1-not-advancing`) and never counts as a worker failure; a terminal
   refusal (policy/source/successor/proof) is re-checked against the quorum
   view and halts unless the request moved; a different statement accepted
-  for the same L2 block halts (another settler).
+  for the same L2 block halts (another settler). Review r10 M2: every
+  broadcast (settlement and DA) goes to every configured endpoint, not only
+  the first that answers, and `accepted` or `duplicate` from any of them
+  counts as held; when an acceptance window ends with the bytes held and the
+  L1 head advancing, `settlement-not-included` is logged, and after
+  `max_unincluded_windows` such windows in a row (default 4, 0 = alert only)
+  the worker halts for the operator.
+
+* stop signals (review r10 M1): SIGTERM, SIGINT and SIGHUP take the same
+  cleanup path as a prover timeout: the prover's process group is killed,
+  the SP1 segments it mapped are removed from /dev/shm, and a Gnark container
+  it left (found by its bind mounts from the run's private TMPDIR) is killed.
+  A second signal does not interrupt that cleanup. The process then ends by
+  the signal it received.
 
 * foreign settlements (security review 2026-10-30, F3; optional `foreign_recovery`): settling needs no
   authorization, so a third party can settle a rule-conforming block the local database does not hold.
@@ -126,6 +139,7 @@ the worker (exit 3) for operator review. Dependency-free Python 3.9+. The
 worker never reads signing keys itself; with user transactions it invokes the
 pinned DA signer (whose keystore holds only DA fee funds).
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -136,6 +150,8 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import types
 import urllib.parse
@@ -823,20 +839,38 @@ class Endpoints:
         return [first[k] for k in seen if seen[k] >= self.quorum]
 
     def submit(self, tx_hex):
-        """sendrawtransaction on the first usable endpoint that accepts it: (port, response).
-        Raises SubmitRefused with every endpoint's reason when none does."""
-        errors = []
-        for port in self.usable():
+        """sendrawtransaction on EVERY configured endpoint, in order: (ports that hold the bytes, first answer).
+
+        Writes are not quorum reads: one endpoint that answers `accepted` but never gets the transaction into a
+        block (a node on a minority fork, partitioned, or stuck with parked blocks) must not be the only one that
+        ever sees it (review r10 M2). Sending the same bytes to all endpoints is harmless: consensus validates them,
+        and a node that already holds or recently included them answers `duplicate`, which counts as held, like
+        `accepted`. Endpoints in backoff are tried too: a write is rare and must reach every node it can.
+        Raises SubmitRefused with every endpoint's reason when none holds them."""
+        held, first, errors = [], None, []
+        for port in self.ports:
             try:
-                return port, self.call(port, 'sendrawtransaction', [tx_hex])
-            except Exception as error:
+                response = self.call(port, 'sendrawtransaction', [tx_hex])
+            except Exception as error:  # logged by call() as rpc-endpoint-failed
                 errors.append((port, f'{type(error).__name__}: {error}'[:300]))
-        raise SubmitRefused(errors)
+                continue
+            if not isinstance(response, dict) or response.get('status') not in SUBMIT_HELD:
+                errors.append((port, f'UnexpectedAnswer: {canonical(response)}'[:300]))
+                continue
+            held.append(port)
+            first = response if first is None else first
+        if not held:
+            raise SubmitRefused(errors)
+        if errors:
+            log('submit-partial', held_by=held, errors=[f'{p}: {e}'[:300] for p, e in errors])
+        return held, first
 
 
 # Native sendrawtransaction refusals (bloch-pos-node rpc.rs / engine.rs, release 78b7343a).
 TX_REFUSED, TX_REFUSED_RETRYABLE, MEMPOOL_FULL, TX_REFUSED_SOURCE_CAP = -32008, -32009, -32003, -32010
 ONE_PROOF_PENDING = 'one L2 proof is already pending'
+# sendrawtransaction answers that mean the node holds the bytes (native rpc.rs Admitted::New / Duplicate).
+SUBMIT_HELD = ('accepted', 'duplicate')
 
 
 class SubmitRefused(RuntimeError):
@@ -965,6 +999,116 @@ def remove_leaked_segments(paths, mapped=segment_mapped):
     return removed
 
 
+# ---- stop signals (review r10 M1): the F8 cleanup also runs on systemctl stop/restart, Ctrl-C and hangup ----
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+_STOP = {'signum': None, 'raised': False, 'deferred': 0}
+
+
+class Stopped(SystemExit):
+    """A stop signal turned into an exception. Python's default SIGTERM action ends the process without unwinding,
+    so neither the prover group nor its SP1 segments nor its Gnark container would be cleaned up. As an exception it
+    takes the same path as a timeout; main() then ends the process by the same signal, so systemd sees the stop it
+    asked for. A SystemExit, so `except Exception` never swallows it."""
+
+    def __init__(self, signum):
+        super().__init__(128 + signum)
+        self.signum = signum
+
+
+def _on_stop_signal(signum, _frame):
+    if _STOP['signum'] is not None:
+        return  # already stopping: a second signal must not abort the cleanup the first one started
+    _STOP['signum'] = signum
+    if _STOP['deferred']:
+        return  # inside a cleanup: raised when it ends (deferred_stop)
+    _STOP['raised'] = True
+    raise Stopped(signum)
+
+
+def install_stop_handlers():
+    """Route SIGTERM, SIGINT and SIGHUP to Stopped. Returns the handlers it replaced ({} off the main thread, where
+    Python cannot install handlers, and where they are already installed)."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    previous = {}
+    for number in STOP_SIGNALS:
+        current = signal.getsignal(number)
+        if current is not _on_stop_signal:
+            previous[number] = current
+            signal.signal(number, _on_stop_signal)
+    return previous
+
+
+@contextlib.contextmanager
+def stop_signals():
+    """Stop signals raise Stopped inside the block (a prover run), then the previous handlers come back."""
+    previous = install_stop_handlers()
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            if handler is not None:
+                signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def deferred_stop():
+    """Run a cleanup to its end: a stop signal that arrives inside it is raised once the cleanup is done."""
+    _STOP['deferred'] += 1
+    try:
+        yield
+    finally:
+        _STOP['deferred'] -= 1
+        if not _STOP['deferred'] and _STOP['signum'] is not None and not _STOP['raised']:
+            _STOP['raised'] = True
+            raise Stopped(_STOP['signum'])
+
+
+def exit_by_signal(stop):
+    """End the process by the signal that stopped it (after the cleanup), as the default action would have."""
+    log('stopped', signal=signal.Signals(stop.signum).name)
+    signal.signal(stop.signum, signal.SIG_DFL)
+    os.kill(os.getpid(), stop.signum)
+    sys.exit(stop.code)  # not reached for TERM, INT and HUP
+
+
+def stop_gnark_containers(tmpdir, path='/usr/bin:/bin', run=subprocess.run, report=None):
+    """Kill the Gnark containers that a killed prover left running (review r10 L5). SP1 runs Groth16 wrapping as
+    `docker run --rm` without a name: killing the prover's process group kills the docker CLI only, while the
+    container, a child of containerd, runs on outside every memory cap (~18.5 GB) until its proof ends. Only
+    containers with a bind mount from `tmpdir` are touched: SP1 mounts its witness and output temporary files from
+    TMPDIR, which is private to this prover run. Returns the container ids killed."""
+    report = report or log
+    docker = shutil.which('docker', path=path) if tmpdir else None
+    if not docker:
+        return []
+    prefix = str(tmpdir).rstrip('/') + '/'
+    try:
+        ids = run([docker, 'ps', '-q', '--no-trunc'], capture_output=True, text=True, timeout=15).stdout.split()
+        found = run([docker, 'inspect', '--format', '{{.Id}}\t{{json .Mounts}}', *ids], capture_output=True,
+                    text=True, timeout=15).stdout if ids else ''
+    except (OSError, subprocess.SubprocessError) as error:
+        report('prover-container-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
+        return []
+    ours = []
+    for line in found.splitlines():
+        container, _, mounts = line.partition('\t')
+        try:
+            sources = [str(m.get('Source', '')) for m in json.loads(mounts) or []]
+        except (ValueError, AttributeError):
+            continue
+        if any(source.startswith(prefix) for source in sources):
+            ours.append(container)
+    for container in ours:
+        try:
+            run([docker, 'kill', container], capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if ours:
+        report('prover-container-killed', containers=[c[:12] for c in ours], tmpdir=str(tmpdir))
+    return ours
+
+
 class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
         kind = config.get('network_kind', DEFAULTS['network_kind'])
@@ -1053,6 +1197,10 @@ class Settler:
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
+        self.unincluded = {}  # consecutive acceptance windows the same bytes were held but not included
+        limit = self.c.get('max_unincluded_windows', 4)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise Halt('max_unincluded_windows must be a non-negative integer')
         self.identity_checked = False
         self.dry_run = False
 
@@ -1366,31 +1514,59 @@ class Settler:
     def run_bounded(self, argv, timeout, **kwargs):
         """Run a prover with a time limit that holds for everything it starts. subprocess.run kills only the direct child
         on a timeout: the SP1 native runner it spawned would live on and keep its memory. So the prover gets its own
-        process group, which is killed on a timeout and after every exit. An injected runner (tests) is used as given."""
+        process group, which is killed on a timeout and after every exit. An injected runner (tests) is used as given.
+
+        A stop signal (systemctl stop/restart, Ctrl-C, hangup) takes the timeout path (review r10 M1): the group is
+        killed, the SP1 segments it mapped are removed, and a Gnark container it left is killed. A second signal
+        during that cleanup does not interrupt it. Each run gets its own TMPDIR under the configured one, so its
+        container is found by its bind mounts, and its temporary files go with it."""
         if self.run is not subprocess.run:
             return self.run(argv, timeout=timeout, **kwargs)
         shm = str(Path(self.c.get('prover_shm_dir', '/dev/shm')) if hasattr(self, 'c') else Path('/dev/shm'))
-        process = subprocess.Popen(argv, start_new_session=True, **kwargs)
-        ours = set()  # segments a process of this run's group mapped: only these may be removed afterwards
-        deadline = time.monotonic() + timeout
-        try:
-            while process.poll() is None:
-                ours |= group_segments(process.pid, shm)
-                if time.monotonic() >= deadline:
-                    raise subprocess.TimeoutExpired(argv, timeout)
-                time.sleep(0.5)
-        except BaseException:
+        docker_path = (self.c.get('prover_path') if hasattr(self, 'c') else None) or '/usr/bin:/bin'
+        env = kwargs.get('env')
+        with stop_signals():
+            process, ours, private = None, set(), None  # ours: segments this run's group mapped; only these go
+            try:
+                with deferred_stop():
+                    if env and env.get('TMPDIR'):
+                        try:
+                            private = tempfile.mkdtemp(prefix='prover-', dir=env['TMPDIR'])
+                            kwargs['env'] = {**env, 'TMPDIR': private}
+                        except OSError:  # no usable TMPDIR: run as before, without the container check
+                            private = None
+                    process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+                deadline = time.monotonic() + timeout
+                while process.poll() is None:
+                    ours |= group_segments(process.pid, shm)
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    time.sleep(0.5)
+            except BaseException:
+                with deferred_stop():
+                    self.clean_up_prover(process, ours, shm, private, docker_path, abnormal=True)
+                raise
+            with deferred_stop():
+                self.clean_up_prover(process, ours, shm, private, docker_path, abnormal=process.returncode != 0)
+            return subprocess.CompletedProcess(argv, process.returncode)
+
+    def clean_up_prover(self, process, ours, shm, private, docker_path, abnormal):
+        """Kill the prover group, remove the SP1 segments it mapped, kill its Gnark container after an abnormal end,
+        and remove its private TMPDIR. Runs inside deferred_stop(); every step tolerates a group already gone."""
+        if process is not None:
             ours |= group_segments(process.pid, shm)
-            self.kill_group(process.pid)
-            process.wait()
-            time.sleep(0.2)
+            self.kill_group(process.pid)  # whatever it left running
+            if process.returncode is None:
+                try:
+                    process.wait(30)
+                except subprocess.TimeoutExpired:
+                    pass
+            time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
             remove_leaked_segments(ours)
-            raise
-        ours |= group_segments(process.pid, shm)
-        self.kill_group(process.pid)  # whatever it left running
-        time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
-        remove_leaked_segments(ours)
-        return subprocess.CompletedProcess(argv, process.returncode)
+        if private:
+            if abnormal:
+                stop_gnark_containers(private, docker_path)
+            shutil.rmtree(private, ignore_errors=True)
 
     @staticmethod
     def kill_group(pgid):
@@ -1603,9 +1779,9 @@ class Settler:
         """Send the DA bytes and wait for the record. With `signed_base_fee`, return 'fee-moved' as soon as the
         next base fee differs from it: those bytes can then no longer be included, and waiting is pointless."""
         da = self.c['da']
-        port, response = self.native.submit(tx.hex())
+        ports, response = self.native.submit(tx.hex())
         log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'),
-            port=port, attempt=attempt, fee_estimate_sat=estimate, signed_base_fee=signed_base_fee)
+            ports=ports, attempt=attempt, fee_estimate_sat=estimate, signed_base_fee=signed_base_fee)
         deadline = self.clock() + da.get('inclusion_timeout_seconds', 300)
         while self.clock() < deadline:
             self.sleep(self.c['poll_seconds'])
@@ -1678,10 +1854,11 @@ class Settler:
                                 f'(another settler?) while settling {number}')
 
     def broadcast(self, number, directory, tx, record):
-        """Submit (or rebroadcast) the same bytes. True when some endpoint holds them,
-        False when every refusal was transient; a terminal refusal returns 'terminal'."""
+        """Submit (or rebroadcast) the same bytes to every endpoint. The list of endpoints that hold them
+        (true) when at least one does, False when every refusal was transient; a terminal refusal returns
+        'terminal'."""
         try:
-            port, response = self.native.submit(tx.hex())
+            ports, response = self.native.submit(tx.hex())
         except SubmitRefused as refused:
             kind = refused.kind()
             log('submit-refused', number=number, kind=kind, errors=[f'{p}: {e}'[:300] for p, e in refused.errors])
@@ -1691,8 +1868,8 @@ class Settler:
         record['last_status'] = response.get('status')
         atomic_write(directory / 'submitted.json', json.dumps(record, indent=2) + '\n')
         log('submitted' if response.get('status') != 'duplicate' else 'submitted-duplicate', number=number,
-            response=response.get('status'), tx_hash=response.get('tx_hash'), port=port, attempt=record['attempts'])
-        return True
+            response=response.get('status'), tx_hash=response.get('tx_hash'), ports=ports, attempt=record['attempts'])
+        return ports
 
     def submit_and_wait(self, number, directory, tx, view):
         values = tx[33:33 + VALUES_BYTES]
@@ -1730,11 +1907,29 @@ class Settler:
             if self.clock() - last_sent >= self.c['resubmit_seconds'] or not sent:
                 sent, last_sent = self.broadcast(number, directory, tx, record), self.clock()
         now = self.l1_height()
+        held = sent if isinstance(sent, list) else []
         log('acceptance-timeout', number=number, l1_height_at_submit=height, l1_height_now=now,
-            submitted=bool(sent))
+            submitted=bool(sent), held_by=held)
         if height is not None and now is not None and now <= height:
             log('l1-not-advancing', number=number, l1_height=now)  # the L1 is stalled; nothing to fix here
+        elif held and height is not None and now is not None:
+            self.not_included(number, record['tx_sha256'], held)
         return False
+
+    def not_included(self, number, tx_sha256, held):
+        """An acceptance window ended while endpoints held these bytes and L1 advanced: no endpoint relayed them to
+        a proposer that would include them, or proposers refuse them. Counted per settlement bytes; after
+        `max_unincluded_windows` consecutive windows (default 4, 0 = alert only) the worker halts for the operator
+        instead of looping silently (review r10 M2). A restart changes nothing here: the bytes come from proved.json."""
+        if self.unincluded.get('tx') != tx_sha256:
+            self.unincluded = {'tx': tx_sha256, 'windows': 0}
+        self.unincluded['windows'] += 1
+        windows, limit = self.unincluded['windows'], self.c.get('max_unincluded_windows', 4)
+        log('settlement-not-included', number=number, held_by=held, windows=windows, halt_after=limit)
+        if limit and windows >= limit:
+            raise Halt(f'the settlement of L2 block {number} was held by endpoints {held} for {windows} acceptance '
+                       'windows while L1 advanced, and was never included: check that the endpoints relay to the '
+                       'validators (fork, partition, stuck node) and the proposers\' refusals')
 
     def record_accepted(self, number, directory, accepted):
         atomic_write(directory / 'accepted.json', json.dumps(accepted, indent=2) + '\n')
@@ -2039,6 +2234,14 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
 
 
 def main():
+    install_stop_handlers()
+    try:
+        run_main()
+    except Stopped as stop:
+        exit_by_signal(stop)
+
+
+def run_main():
     config = json.loads(CONFIG.read_text())
     if sys.argv[1:] == ['--check-rpc']:
         sys.exit(check_rpc(config))

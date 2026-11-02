@@ -2,6 +2,7 @@
 """The settler installer's runuser path, its configure retry and its reorg tool pin. No root, no RPC."""
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -64,10 +65,57 @@ class Installer(unittest.TestCase):
             m.configure([])
 
     def test_failed_dry_run_also_leaves_no_config(self):
-        with mock.patch.object(m.subprocess, 'run', side_effect=[Done(), Done(1)]):
+        # follower readability (D17), --check-rpc, then the dry run fails
+        with mock.patch.object(m.subprocess, 'run', side_effect=[Done(), Done(), Done(1)]):
             with self.assertRaisesRegex(AssertionError, 'dry run failed'):
                 m.configure([])
         self.assertFalse((self.etc / 'config.json').exists())
+
+    # ---- D17 (owner, 2026-11-02): foreign settlement recovery on at the deposit-only launch ----
+    def configured(self, args):
+        with mock.patch.object(m.subprocess, 'run', return_value=Done()) as run:
+            m.configure(args)
+        return json.loads((self.etc / 'config.json').read_text()), run
+
+    def test_d17_foreign_recovery_is_on_by_default_with_follower_a(self):
+        config, run = self.configured([])
+        self.assertEqual(config['foreign_recovery'], {'follower_state': '/var/lib/bloch-l2-mainnet-follower/native',
+                                                      'follower_status': '/var/lib/bloch-l2-mainnet-follower/status.json'})
+        check = run.call_args_list[0].args[0]
+        self.assertEqual(check[:4], ['/usr/sbin/runuser', '-u', m.USER, '--'])
+        self.assertEqual(check[4], '/usr/bin/test')
+        self.assertIn('/var/lib/bloch-l2-mainnet-follower/status.json', check, 'checked as the settler user')
+
+    def test_d17_explicit_follower_paths_and_opt_out(self):
+        config, _ = self.configured(['--follower-state', '/srv/f/native', '--follower-status', '/srv/f/status.json'])
+        self.assertEqual(config['foreign_recovery']['follower_state'], '/srv/f/native')
+        (self.etc / 'config.json').unlink()
+        config, run = self.configured(['--no-foreign-recovery'])
+        self.assertNotIn('foreign_recovery', config)
+        self.assertNotIn('/usr/bin/test', [a for c in run.call_args_list for a in c.args[0]])
+        (self.etc / 'config.json').unlink()
+        with self.assertRaisesRegex(AssertionError, 'both'):
+            self.configured(['--follower-state', '/srv/f/native'])
+        with self.assertRaisesRegex(AssertionError, 'outside /home'):
+            self.configured(['--follower-state', '/home/x/native', '--follower-status', '/home/x/status.json'])
+
+    def test_d17_unreadable_follower_refuses_before_any_config(self):
+        with mock.patch.object(m.subprocess, 'run', side_effect=[Done(1)]) as run:
+            with self.assertRaisesRegex(AssertionError, 'cannot read the follower'):
+                m.configure([])
+        self.assertEqual(run.call_count, 1, 'no RPC check or dry run before the follower check passed')
+        self.assertFalse((self.etc / 'config.json').exists())
+        self.assertFalse((self.etc / 'config.json.pending').exists())
+
+    # ---- review r10 M1: the unit lets the worker clean up its prover on stop ----
+    def test_m1_unit_stops_the_worker_first_and_removes_its_ipc(self):
+        (self.etc / 'config.json').write_text('{}')
+        unit = self.etc / 'unit.service'
+        with mock.patch.object(m, 'UNIT', unit), mock.patch.object(m, 'run', return_value=''):
+            m.start(['--confirm-mainnet'])
+        text = unit.read_text()
+        for line in ('KillMode=mixed', 'TimeoutStopSec=120', 'RemoveIPC=yes', 'RestartPreventExitStatus=3'):
+            self.assertIn(f'\n{line}\n', text)
 
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)

@@ -58,8 +58,9 @@ class FeeMarket(t.Fake):
             self.da_sends += 1
             if self.include_da and self.signed_fee.get(tx) == self.fee():
                 _, number, payload = s.da_frame_fields(tx)
-                self.da_records.append({'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(),
-                                        'height': 9})
+                record = {'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(), 'height': 9}
+                if record not in self.da_records:  # native keeps one record per (number, commitment): Duplicate
+                    self.da_records.append(record)
             return {'status': 'accepted', 'tx_hash': '01' * 32}
         return super().rpc(port, method, params)
 
@@ -87,7 +88,7 @@ class FeeMoves(Base):
         self.assertTrue(settler.cycle(), 'settled in the same cycle, no inclusion timeout')
         calls = prepares(fake)
         self.assertEqual([c[c.index('--base-fee') + 1] for c in calls], ['10', '11'])
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in t.broadcasts(fake.sent)], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
         self.assertEqual(len(fake.da_records), 1, 'one record: one fee')
         self.assertLess(next(clock), 200, 'well inside one inclusion timeout')
 
@@ -133,7 +134,7 @@ class FeeMoves(Base):
         settler = self.user_settler(fake, da={**self.da_config(), 'inclusion_timeout_seconds': 60})
         self.assertFalse(settler.cycle())
         self.assertEqual(len(prepares(fake)), 1)
-        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual(len(t.broadcasts(fake.sent)), 1)
 
 
 class Restored(t.Fake):
@@ -190,7 +191,7 @@ class NoPaidBatchReuse(Base):
         self.assertTrue(settler.cycle())
         self.assertEqual(fake.pools, [str(self.root / 'txpool')])
         self.assertEqual(list((self.root / 'txpool').iterdir()), [], 'nothing written into the main spool')
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in t.broadcasts(fake.sent)], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
         for name in ('paid_batch_spool', 'node_da_batches'):
             self.assertFalse(hasattr(s.Settler, name), name)
         for name in ('scan_da_frames', 'recorded_da_batches', 'da_frame_key'):
