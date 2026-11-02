@@ -70,7 +70,7 @@ shasum -a 256 SHA256SUMS
 The frozen kit must pin the same value (line `artifacts/SHA256SUMS`):
 
 ```
-grep 'artifacts/SHA256SUMS$' ~/worktrees/release-signing-r10-20261102/deployment/mainnet/GO-LIVE-PINS.sha256
+grep 'artifacts/SHA256SUMS$' ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/GO-LIVE-PINS.sha256
 ```
 
 No `SHA256SUMS.minisig` may exist yet (`rsign` overwrites one silently). This must say "No such file":
@@ -93,7 +93,7 @@ The trusted comment is derived from `release.json` and the SHA-256 of `SHA256SUM
 exactly the line in section 3:
 
 ```
-python3 -I ~/worktrees/release-signing-r10-20261102/deployment/mainnet/verify_release_signature.py --print-trusted-comment ~/bloch-l2-signing/from-209
+python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --print-trusted-comment ~/bloch-l2-signing/from-209
 ```
 
 ## 3. Sign (offline)
@@ -137,7 +137,7 @@ rsign verify -p ~/bloch-l2-signing/bloch-release-20260922.pub -x SHA256SUMS.mini
 The kit verifier, with the pinned key, the canonical trusted comment and every file. Must end with `signature OK`:
 
 ```
-python3 -I ~/worktrees/release-signing-r10-20261102/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-209 --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-209 --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
 ```
 
 The same signature must verify on the copy from the other host:
@@ -147,7 +147,7 @@ cp SHA256SUMS.minisig ~/bloch-l2-signing/from-136/
 ```
 
 ```
-python3 -I ~/worktrees/release-signing-r10-20261102/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-136 --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-136 --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
 ```
 
 ```

@@ -53,13 +53,13 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 
 | File | Source | SHA-256 |
 | --- | --- | --- |
-| `settler_v3.py` | this branch, `deployment/devnet/` | (recorded in the `/opt` path) |
-| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | not a pin: its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
-| `bloch-l2-produce-dev` | the next build 17383fe against native 78d4921c: `e3f1a290…` (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | not a pin |
+| `settler_v3.py` | this branch, `deployment/devnet/` | `9c592bd4…3007` (enforced since agent 155; also recorded in the `/opt` path) |
+| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | `3a24c36d…973a` (enforced since agent 155), and its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
+| `bloch-l2-produce-dev` | the next build 17383fe against native 78d4921c: `e3f1a290…` (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
-| `l2_reorg_recover.py` | `deployment/mainnet/l2_reorg_recover.py` | `2a0cfabd…b5b1` (enforced) |
+| `l2_reorg_recover.py` | `deployment/mainnet/l2_reorg_recover.py` | `2a648b31…9a53` (enforced) |
 
 ## 1. Prepare (local only)
 
@@ -310,7 +310,7 @@ sudo systemctl stop bloch-l2-mainnet-settler bloch-l2-mainnet-rpc
 sudo -u bloch-l2-mainnet-settler python3 REL/l2_reorg_recover.py --config /etc/bloch-l2-mainnet-settler/config.json --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json
 ```
 
-`--follower-status` is required: the tool does not read it from the config. `prepare` refuses any file but the pinned tool `2a0cfabd…`. Its stdout is exactly one JSON document; worker log lines go to stderr. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
+`--follower-status` is required: the tool does not read it from the config. `prepare` refuses any file but the pinned tool `2a648b31…`. Its stdout is exactly one JSON document; worker log lines go to stderr. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
 
 Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool (and, with `--respool-from OLD_WORK`, those of the pre-restore `work/` above the accepted number; never batches read from L1), and keeps the old database for review.
 

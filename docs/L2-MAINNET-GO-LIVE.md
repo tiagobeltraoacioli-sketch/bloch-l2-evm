@@ -161,7 +161,7 @@ The follow-up commit (one commit, kit and docs only, on top of the frozen kit ti
 1. `deployment/mainnet/GO-LIVE-PINS.sha256`: the `artifacts/` lines that moved (`bloch-l2-settled-rpc`, `build.json`, `SHA256SUMS`, and `bloch-l2-native-follower`/`bloch-l2-produce-dev`/`release-settler-v2/bloch-l2-produce-dev` if they moved).
 2. `deployment/mainnet/replica/PINS.sha256`: `bloch-l2-settled-rpc` (and follower/produce-dev if moved).
 3. `deployment/mainnet/l2_monitor.py`: `V2_SHA256['bloch-l2-settled-rpc']` and `V2_BUILD['l2_commit']` (and the module docstring's hash list); `test_l2_monitor.py` `test_identity_pins_untouched`.
-4. `deployment/mainnet/install-shadow.sh`: `L2_COMMIT` (and `PRODUCE_SHA256` if moved).
+4. `deployment/mainnet/install-shadow.sh`: `L2_COMMIT` (and `PRODUCE_SHA256` if moved); `deployment/mainnet/install-settler-mainnet.py` `PINS['bloch-l2-produce-dev']` if produce-dev moved (then the settler installer's own pin in `GO-LIVE-PINS.sha256`).
 5. If the follower or produce-dev moved: `attestor/install-attestor.sh`, `attestor/keykit/operator-pins-v2.sha256`, `attestor/keykit/check-operator-bundle.sh` and the attestor texts (a new operator bundle cut).
 6. Docs: this section and §3.1, every `116bfaba…`/`e5754d05…`/`17383feb…`/release-name occurrence in this plan (D7, §3.1, P2, P4), `docs/RELEASE-SIGNING.md` (fetch path, `--expect-sha256`, trusted comment), `docs/MAINNET-OPS-RUNBOOK.md` and `docs/L2-OPERATOR-RUNBOOK.md` hash mentions.
 7. Recompute and write: `sha256` of `l2_monitor.py` into `GO-LIVE-PINS.sha256`; then `GO-LIVE-PINS.sha256`, `replica/PINS.sha256` and `install-shadow.sh` into the §3.2 table; then a change notice in `agents/PINS-NEXT.md` naming the new kit tip and the new signing target.
@@ -173,24 +173,31 @@ No other kit file names the release. `verify_release_signature.py` reads the rel
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `a7005ec9819217c85242028930d30e219adb185444612f282f608c31e6de0407` |
-| `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/follower-rpc/install.sh` | `45eb83cd52e5356907141a0c8bf8f0dcd9171df156b6b9de6da44bc82a7680de` (refuses an unsigned release) |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `a6ccf602d7bd0487fdb2888e6eda43e5e089e3daeb381c4751ddf953309b5269` |
-| `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
-| `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
-| `deployment/mainnet/install-settler-mainnet.py` | `8067c4c72ccdf709851020aab0c88953c826e93bacf6f63718e243faf7c5fa66` |
-| `deployment/mainnet/l2_reorg_recover.py` | `2a0cfabd0ab9f30d4ef78838c96daa1ff086c87c42ff7e7b501d4e7951c6b5b1` (the settler installer pins it) |
-| `deployment/mainnet/prover/install-prover-mainnet.py` | `c6103ee91d4a20e952d7f5af9fd70a37226b7a58e1384e3b5516db6fb71bee32` |
-| `deployment/devnet/remote_prover.py` | `601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107` (the prover installer pins it; agent 193 M1; was `183bd655…` at 4b7f4f7; **not** `3c11d9be…`, agent 124 D1) |
-| `deployment/devnet/settler_v3.py` | `4152f5c34abc92d231e2a90441f0f3b760bf4b67a71256c844c109100230eb41` (agent 193, M1/M2; was `8e2c67f5…` at 4b7f4f7) |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `dfc3e8b8be1e6d95ed33d50ad69585ca358e33caad8c769dedd948d3fd31c994` |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b4c08e7f0fda112cdab824c6aa5adc76dc8e79189ae779322e0b71be468f4913` |
+| `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
+| `deployment/mainnet/install-settler-mainnet.py` | `a5fab5ae2a7eb8fbc050ddc6be7d85fa0db94fc696203e14b31b506a27b45bbc` (agents 155 M-1/L-3, 193 D17/M1) |
+| `deployment/devnet/remote_prover.py` | `601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
+| `deployment/mainnet/prover/install-prover-mainnet.py` | `a1033ce4e4eca3ad6cbdc7303c66099722963541686571ddcebd3e3d55442cee` (agent 155 M-2: pins the SP1 host too) |
+| `deployment/mainnet/install-shadow.sh` | `5eb5437b7f518a118483a5a3eca1870e6044e457ddf6c78d464e05d9a79242df` (agent 155 H-1/L-1) |
+| `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `0ceed773548f0899d9f6b0b82c7c62dcfaedf01b2c40022dca78795e949d9d77` (agent 155 H-1 `InaccessiblePaths`) |
+| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `70d565a9d88a30ae192aa2d45738fb7132a2c4939374eedfe538fff8ed490493` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`) |
+| `deployment/mainnet/follower-rpc/install.sh` | `45eb83cd52e5356907141a0c8bf8f0dcd9171df156b6b9de6da44bc82a7680de` (agent 159: refuses an unsigned release) |
+| `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
+| `deployment/mainnet/l2_monitor.py` | `2cc61e393100529cff874f7c864dbf738798ff2fdd2116e0e6aa312219c5ccff` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l1_monitor.py` | `1632d18a63ef2b14505f5f805e06f438d977aaff507b28b432346638b3f1f744` (agent 187) |
+| `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
-| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `70d565a9d88a30ae192aa2d45738fb7132a2c4939374eedfe538fff8ed490493` (`LimitNOFILE=65536`) |
-| `deployment/mainnet/attestor/install-attestor.sh` | `ab24bda0770a1e196f8ffe4340e46520c81f2dd891dd4b1413b6bbec9bee0780` |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `b773201f82fa46150be4a704aacd731651e56a08e0616e6de3ea163a9d32f11d` (agent 154 8d1c873) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `27ad850586eaebc96fab0a8ab1888a45f396674292f2f1a3bc821a514b1753e1` (agent 154 8d1c873) |
+| `deployment/mainnet/public-rpc/render.py` | `c03bbf9945807bac82bfad66c6827b92d7a01cd5cea96dd15be2b015ac757b93` (agent 154 8d1c873) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `3722708241f4eb25aacd960b2b29ccefff1d94907f9c282644558d7c71586a52` (agent 156 texts only; was `ab24bda0…`) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
-| `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
+| `deployment/mainnet/attestor/attestor_agent.py` | `208d7a0d54e8fa870c979c8761125546d9a0ef47db2f58fe9cf58c738d88943a` |
+| `deployment/mainnet/attestor/attestor_lib.py` | `b996845f0e77b82aea66a7d73d1ad46525ba868fdafefe06380e2a7ac91fcc78` |
 | `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
+| `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
 
 Since kit tip 2087b40, `GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the release `SHA256SUMS` `116bfaba…` (before, it held the build's `out/SHA256SUMS` `1bad88ba…`). P2 still checks that line separately, after the signature check.
 
@@ -198,7 +205,7 @@ Since kit tip 2087b40, `GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the
 
 As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473`; proof policy `154869964f…747d`; SP1 host `bloch-evm-sp1-settlement-v3` `3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a`; settler `bloch-pos` `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e`; `mainnet.manifest` `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd`; `carryover.tsv.gz` `4d1e2738baec39ec25e2e33968f72a47abb261f271de62fb48a33be55bfc83be`; gnark image `sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d`; SP1 circuits v6.1.0; L2 genesis `632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468`; network pin `f47d3e49…1966`; domain `1c3f8772…0733`; attestor set `1c06adbb…cc4b` (3-of-5); attestor `bloch-pos` `093909a2…` (rehearsal; production hash `TBD-OWNER`).
 
-**Do not use:** any v2.1 binary (`18be911a…`, `c18752fd…`, `fb0d5313…`) with this kit; the superseded next candidates `d49bcb88…` (72ed5bd), `87aa896f…`, `6052d4bb…`; `remote_prover.py` `99bbc1bc…` or `3c11d9be…`; the staging `release-prover/` and its installer `ed9a001d…`; `settler_v3.py` `3ddb260a…`, `8589d5e2…`, `4059d3a6…`, `0ad4900f…`, `8e2c67f5…` (before M1/M2); `remote_prover.py` `183bd655…` (before M1); produce-dev `7c1cc62b…`; anything built from 724bf4c; the 10-19 runbooks and staging binaries.
+**Do not use:** any v2.1 binary (`18be911a…`, `c18752fd…`, `fb0d5313…`) with this kit; the superseded next candidates `d49bcb88…` (72ed5bd), `87aa896f…`, `6052d4bb…`; `remote_prover.py` `99bbc1bc…` or `3c11d9be…`; the staging `release-prover/` and its installer `ed9a001d…`; `settler_v3.py` `3ddb260a…`, `8589d5e2…`, `4059d3a6…`, `0ad4900f…`, `8861b0bc…`, `334230e5…`, `2be2651c…` (145 F1 reuse), `8e2c67f5…` (before M1/M2), `4152f5c3…` (agent 193 alone, before 152 L1/L6); `l2_reorg_recover.py` `2a0cfabd…` (before 152 L2-L4); `GO-LIVE-PINS.sha256` `442beec3…` (9645efc), `1bc1da0c…` (f1c8033), `d8e6dd91…` (4b7f4f7), `a7005ec9…` (193 alone); `remote_prover.py` `183bd655…` (before M1); produce-dev `7c1cc62b…`; anything built from 724bf4c; the 10-19 runbooks and staging binaries.
 
 ### 3.4 Known gaps and residual risks of this build
 
@@ -380,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `GOLIVEPINS_PLACEHOLDER`, `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `dfc3e8b8be1e6d95ed33d50ad69585ca358e33caad8c769dedd948d3fd31c994` (§3.2) (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
@@ -831,6 +838,8 @@ resumes from the accepted head; run gate R-1 again first.
 
 Run once by hand as a gate, then install the 60 s timer (units in `kit/monitor/`; D11 sets the alert targets). The env file drops `--l2-rpc B=`: the settled RPC binds loopback only, so A cannot reach B on 18955. Each command is one block:
 
+L1 monitor (agent 187, `kit/l1_monitor.py`, pinned in `GO-LIVE-PINS.sha256`): install it next to the L2 monitor and feed its report in with `--report l1=/var/lib/bloch-l2-monitor/l1-monitor.report.json:180`, as `docs/L1-MONITOR.md` describes (copy from `/home/ubuntu/l2-golive-next/kit/`, not from a worktree). It reads the settler's `rpc_urls` and goes CRIT when a quorum of them sits on a branch apart from the one finalizing furthest.
+
 ```
 sudo useradd --system --user-group --no-create-home --home-dir /var/lib/bloch-l2-monitor --shell /usr/sbin/nologin bloch-l2-monitor
 ```
@@ -898,7 +907,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    (`keykit/KEY-HANDOFF-CHECKLIST.md`). The keys never travel unsealed. The
    originals are now destroyed before the handoff, gated on verified bundles and two read-back media.
 2. Each operator host (§2 spec) gets an `ARTEFATOS` dir with:
-   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `ab24bda0…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
+   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `37227082…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
@@ -1194,6 +1203,6 @@ If the refilled node is a follower's only L1 source, the follower may have halte
 | --- | --- | --- |
 | Follower host | Reinstall (P3) and replay from L1 | 57 min to e6596, about 75 min today |
 | Settled RPC view | Restart; it rebuilds the view | 0.8 s (small L2) |
-| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This build's `l2_reorg_recover.py` `2a0cfabd…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118); it re-spools only from `--respool-from OLD_WORK`, never from batches read on L1 (agents/145 F1). | 0.16 s rebuild (3 blocks) |
+| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This kit's `l2_reorg_recover.py` `2a648b31…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118); it re-spools only from `--respool-from OLD_WORK`, never from batches read on L1 (agents/145 F1). | 0.16 s rebuild (3 blocks) |
 | DA fee key | New key, fund it, restart with the same paths; the old key's balance is lost. Hence the separate backups in P6 | 6 s funding |
 | Prover host | Reinstall P5 and prove the next block | 11–28 min plus install (not run) |

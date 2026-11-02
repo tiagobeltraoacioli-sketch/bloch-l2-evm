@@ -108,7 +108,7 @@ It will not restart. Read the reason, then match it:
 
 Any reorg of an accepted, unfinalized settlement causes this, shallow or deep. Effect while halted: no settlement. The RPC keeps serving the orphaned blocks as `latest` and `safe` (drill: `safe` stayed on a block L1 had dropped), and a DA fee for an orphaned block may already be spent. **Tell integrators that `latest` and `safe` are unreliable until this is done.** `finalized` was not affected in the drill.
 
-`install-settler-mainnet.py prepare` installs the tool next to the worker as `REL/l2_reorg_recover.py`, pinned `2a0cfabd…` at kit 4b7f4f7 (the value in `GO-LIVE-PINS.sha256` of the frozen kit wins; `678482bf…` was the v2.1 kit's); `REL` is `/opt/bloch/l2-mainnet-settler/<digest>`. Its stdout is one JSON document; worker log lines go to stderr.
+`install-settler-mainnet.py prepare` installs the tool next to the worker as `REL/l2_reorg_recover.py`, pinned `2a648b31…` at the round-10 integrated kit (`2a0cfabd…` at 4b7f4f7; the value in `GO-LIVE-PINS.sha256` of the frozen kit wins; `678482bf…` was the v2.1 kit's); `REL` is `/opt/bloch/l2-mainnet-settler/<digest>`. Its stdout is one JSON document; worker log lines go to stderr.
 
 Then, during the incident:
 

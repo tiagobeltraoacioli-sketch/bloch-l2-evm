@@ -9,7 +9,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
-      l2_reorg_recover.py (SHA-256 2a0cfabd...); every file is pinned in PINS below and is
+      l2_reorg_recover.py (SHA-256 2a648b31...); every file is pinned in PINS below and is
       hashed after it is copied into /opt (the copies run, not the source).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
@@ -69,10 +69,10 @@ PINS = {
     'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
     # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
-    'l2_reorg_recover.py': '2a0cfabd0ab9f30d4ef78838c96daa1ff086c87c42ff7e7b501d4e7951c6b5b1',
+    'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': '4152f5c34abc92d231e2a90441f0f3b760bf4b67a71256c844c109100230eb41',
+    'settler_v3.py': '9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
 }
