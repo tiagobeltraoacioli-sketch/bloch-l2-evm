@@ -9,7 +9,8 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
-      l2_reorg_recover.py (SHA-256 2a0cfabd...).
+      l2_reorg_recover.py (SHA-256 2a0cfabd...); every file is pinned in PINS below and is
+      hashed after it is copied into /opt (the copies run, not the source).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
       whose passphrase is generated here and never printed. Prints the funding
@@ -65,6 +66,11 @@ PINS = {
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
     # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
     'l2_reorg_recover.py': '2a0cfabd0ab9f30d4ef78838c96daa1ff086c87c42ff7e7b501d4e7951c6b5b1',
+    # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
+    # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
+    'settler_v3.py': '8e2c67f54efff1f3fe69de1361b8cdbdcc622ee187b29dffd64c3c3f58edf1d8',
+    'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
+    'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
 }
 FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
          'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
@@ -95,6 +101,7 @@ def release():
 
 
 def settler_module(directory):
+    sys.dont_write_bytecode = True  # no __pycache__ written as root into the release directory
     sys.path.insert(0, str(directory))
     import settler_v3  # noqa: E402
     return settler_v3
@@ -110,27 +117,31 @@ def prepare(args):
     source = Path(option(args, '--release', ''))
     assert source.is_dir(), 'prepare --release DIR'
     assert not any(p.exists() for p in (STATE, DA_DIR, ETC, OPT, UNIT)), 'already prepared (see rollback)'
+    assert set(PINS) == set(FILES), 'every installed file has a pin'
     for name in FILES:
         assert (source / name).is_file(), f'{source / name} is missing'
-    for name, pin in PINS.items():
-        assert digest(source / name) == pin, f'{name} differs from its pin {pin}'
-    settler = settler_module(source)
-    assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
-    build = run([source / 'bloch-pos', '--version']) + run([source / 'bloch-pos', 'buildinfo'])
-    assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+    # Copy first, then hash the root-owned copies: the source (often under /home/ubuntu) may change after any
+    # check of it, and only the bytes that were hashed may run. Nothing here executes or imports from source.
+    target = OPT / PINS['settler_v3.py'][:16]
+    try:
+        target.mkdir(parents=True, mode=0o755)
+        for name in FILES:
+            shutil.copyfile(source / name, target / name)
+            (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name == 'settlement_v3_mainnet'
+                                  else 0o755)
+        for name, pin in PINS.items():
+            assert digest(target / name) == pin, f'{name} differs from its pin {pin}'
+        settler = settler_module(target)
+        assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
+        build = run([target / 'bloch-pos', '--version']) + run([target / 'bloch-pos', 'buildinfo'])
+        assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+    except BaseException:
+        # Nothing but these copies exists yet (no user, no state, no key): remove them so prepare can simply re-run.
+        shutil.rmtree(OPT, ignore_errors=True)
+        raise
     run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', STATE,
          '--shell', '/usr/sbin/nologin', '--groups', 'docker', USER])
     owner = pwd.getpwnam(USER)
-    target = OPT / digest(source / 'settler_v3.py')[:16]
-    target.mkdir(parents=True, mode=0o755)
-    for name in FILES:
-        shutil.copyfile(source / name, target / name)
-        (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name == 'settlement_v3_mainnet'
-                              else 0o755)
-    # The operator's repair after a reorg of an accepted settlement. Kit file next to this installer, not a pin:
-    # it finds settler_v3.py beside itself, so it always matches the installed worker.
-    shutil.copyfile(Path(__file__).resolve().parent / 'l2_reorg_recover.py', target / 'l2_reorg_recover.py')
-    (target / 'l2_reorg_recover.py').chmod(0o644)
     for path in (ETC, PUBLIC):
         path.mkdir(mode=0o755)
     (PUBLIC / 'l2-config.bin').write_bytes(settler.mainnet_l2_config())
@@ -142,9 +153,9 @@ def prepare(args):
     # The DA fee key: a sealed hybrid keystore that holds only DA fee money. Its passphrase is
     # generated here, readable by the settler alone, and never printed.
     passphrase = STATE / 'da.passphrase'
-    with passphrase.open('x') as out:
+    # Created 0400 in one step (O_EXCL: never over an existing file), not created then narrowed.
+    with os.fdopen(os.open(passphrase, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400), 'w') as out:
         out.write(secrets.token_hex(48) + '\n')
-    passphrase.chmod(0o400)
     env = {'PATH': '/usr/bin:/bin', 'BLOCH_KEYSTORE_PASSPHRASE_FILE': str(passphrase)}
     run([target / 'bloch-pos', 'keygen', '--dir', DA_DIR, '--index', '0'], env=env)
     pubkey = run([target / 'bloch-pos', 'keygen-public', '--dir', DA_DIR], env=env).split('\t')[1].strip()
