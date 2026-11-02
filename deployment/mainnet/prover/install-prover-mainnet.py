@@ -17,7 +17,13 @@ Run as root from a directory holding:
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
-      --circuits DIR [--memory-gib 100] [--threads 24] [--dry-run]
+      --circuits DIR [--memory-gib 100] [--threads 24] [--prover-env NAME=VALUE ...]
+      [--timeout-seconds 3500] [--dry-run]
+
+Measured 2026-11-02 on 32 vCPU / 125 GiB hosts (agents/93-prover-tuning.md), empty block 8191:
+SP1 defaults OOM at 100 GiB; --threads 32 --prover-env ELEMENT_THRESHOLD=268435456 proves in
+2,731-2,809 s at 84-85 GiB, so it also needs --timeout-seconds 5400 and a settler remote
+timeout above it.
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
 
 install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
