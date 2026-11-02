@@ -6,7 +6,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use bloch_l2_evm::forced_inclusion::{
     check_forced_prefix, push_forced, statement_fields, ForcedInputError, ForcedRecord, ForcedSkip,
-    ForcedTransaction, MAX_PER_SETTLEMENT,
+    ForcedTransaction, MAX_GAS, MAX_PER_SETTLEMENT,
 };
 use bloch_l2_evm::{
     execute_signed_block, BlockContext, ChainSpec, DepositMint, DepositProvenance, L2State, SignedBlockBuilder,
@@ -202,11 +202,22 @@ fn forced_input_must_match_its_records_and_the_cap() {
         check_forced_prefix(&spec, state.db(), root, context.clone(), vec![], &many, &[]),
         Err(ForcedInputError::TooMany)
     );
-    // Sixteen sequential envelopes of one sender all execute, in order.
+    // Declared gas: sixteen transfers (336k) cross the 300k cap; fourteen fit.
     let sixteen = &many[..MAX_PER_SETTLEMENT];
-    let body: Vec<Bytes> = sixteen.iter().map(|f| f.envelope.clone()).collect();
-    let selection = check_forced_prefix(&spec, state.db(), root, context, vec![], sixteen, &body).unwrap();
-    assert_eq!(selection.included.len(), MAX_PER_SETTLEMENT);
+    assert_eq!(
+        check_forced_prefix(&spec, state.db(), root, context.clone(), vec![], sixteen, &[]),
+        Err(ForcedInputError::Gas)
+    );
+    let over = forced(1, transfer(&spec, 3, 0), MAX_GAS + 1);
+    assert_eq!(
+        check_forced_prefix(&spec, state.db(), root, context.clone(), vec![], &[over], &[]),
+        Err(ForcedInputError::Gas)
+    );
+    // Fourteen sequential envelopes of one sender all execute, in order.
+    let fourteen = &many[..14];
+    let body: Vec<Bytes> = fourteen.iter().map(|f| f.envelope.clone()).collect();
+    let selection = check_forced_prefix(&spec, state.db(), root, context, vec![], fourteen, &body).unwrap();
+    assert_eq!(selection.included.len(), 14);
 }
 
 #[test]

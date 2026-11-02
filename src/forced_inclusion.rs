@@ -45,7 +45,11 @@ pub const MAX_PER_SETTLEMENT: usize = 16;
 /// Declared gas limit bounds (native `forced::MIN_GAS` / `forced::MAX_GAS`).
 pub const MIN_GAS: u64 = 21_000;
 /// See [`MIN_GAS`].
-pub const MAX_GAS: u64 = 500_000;
+pub const MAX_GAS: u64 = 300_000;
+/// Declared gas one settlement consumes at most (native
+/// `forced::MAX_GAS_PER_SETTLEMENT`): forced envelopes bypass the sequencer's
+/// proving budget, so this bounds their proving work.
+pub const MAX_GAS_PER_SETTLEMENT: u64 = 300_000;
 /// One forced envelope at most this long (native `forced::MAX_ENVELOPE_BYTES`).
 pub const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 /// Domain of [`inbox_hash`].
@@ -131,6 +135,9 @@ pub enum ForcedSkip {
 pub enum ForcedInputError {
     /// More than [`MAX_PER_SETTLEMENT`] records.
     TooMany,
+    /// More than [`MAX_GAS_PER_SETTLEMENT`] declared gas, or a record's
+    /// declared gas outside [`MIN_GAS`]..=[`MAX_GAS`].
+    Gas,
     /// An envelope does not hash to its record, or is empty or oversized.
     Envelope {
         /// Position in the forced list.
@@ -157,6 +164,16 @@ pub struct ForcedSelection {
 fn check_inputs(forced: &[ForcedTransaction]) -> Result<(), ForcedInputError> {
     if forced.len() > MAX_PER_SETTLEMENT {
         return Err(ForcedInputError::TooMany);
+    }
+    let mut gas = 0u64;
+    for f in forced {
+        if !(MIN_GAS..=MAX_GAS).contains(&f.record.gas_limit) {
+            return Err(ForcedInputError::Gas);
+        }
+        gas = gas.saturating_add(f.record.gas_limit);
+    }
+    if gas > MAX_GAS_PER_SETTLEMENT {
+        return Err(ForcedInputError::Gas);
     }
     for (index, f) in forced.iter().enumerate() {
         if f.envelope.is_empty()
