@@ -1079,36 +1079,40 @@ class Settler:
             transactions=len(transactions), returned_to_spool=returned, source=source)
         return pool
 
-    def node_da_batches(self, records, offset):
+    def node_da_batches(self, records, offset, max_blocks=64):
         """{(number, commitment hex): (funding key, payload)} for DA records, from native blocks read by quorum
-        (getblockbyslot from the record's chain height up, then getblockraw)."""
+        (getblockbyslot near each record's chain height, then getblockraw). Each block is read once and searched for
+        every wanted batch; at most `max_blocks` distinct heights, newest first (third parties can add records)."""
         found = {}
         if offset is None:
             return found
         wanted = {(int(r['l2_number']), r['commitment']) for r in records}
-        for record in records:
-            target = int(record['height']) + offset
-            for slot in range(max(0, target - 2), target + 128):
+        targets = sorted({int(r['height']) + offset for r in records}, reverse=True)[:max_blocks]
+        delta = 0  # slot - height, learned from the first block read
+        for target in targets:
+            if len(found) == len(wanted):
+                break
+            slot = max(0, target + delta - 2)
+            for _ in range(64):
                 try:
                     block, _ = self.native.agreed('getblockbyslot', [slot])
-                    if not isinstance(block, dict) or 'block_id' not in block:
-                        continue
-                    if int(block['height']) > target + 2:
-                        break
-                    if int(block['height']) < target - 2:
-                        continue
-                    raw, _ = self.native.agreed('getblockraw', [block['block_id']])
-                except Exception:  # noqa: BLE001 - an empty slot or a failed read: next slot
+                except Exception:  # noqa: BLE001 - an empty slot or a failed read
+                    block = None
+                slot += 1
+                if not isinstance(block, dict) or 'block_id' not in block:
                     continue
-                if isinstance(raw, dict):
-                    raw = raw.get('hex', '')
-                try:
-                    found.update(scan_da_frames(bytes.fromhex(raw), self.chain_id, wanted - set(found)))
-                except (TypeError, ValueError):
+                height = int(block['height'])
+                delta = int(block['slot']) - height if 'slot' in block else slot - 1 - height
+                if height < target - 1:
                     continue
-                if all(key in found for key in wanted if key[0] == int(record['l2_number'])
-                       and key[1] == record['commitment']):
+                if height > target + 1:
                     break
+                try:
+                    raw, _ = self.native.agreed('getblockraw', [block['block_id']])
+                    raw = raw.get('hex', '') if isinstance(raw, dict) else raw
+                    found.update(scan_da_frames(bytes.fromhex(raw), self.chain_id, wanted - set(found)))
+                except Exception:  # noqa: BLE001 - unreadable block: the batch stays unrecovered
+                    continue
         return found
 
     def native_height_offset(self):
