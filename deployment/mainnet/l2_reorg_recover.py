@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """Recover the settler's L2 database after an L1 reorg removed an accepted, unfinalized settlement.
 
-settler_v3 halts (exit 3) when the database is ahead of what L1 can still accept: "L2 head N cannot extend accepted
-settlement M", or an unsettled block with another anchor. This tool is the operator's repair. It never signs,
-broadcasts or edits a database in place:
+settler_v3 halts (exit 3) when the database does not extend what L1 accepted: "L2 head N cannot extend accepted
+settlement M" (a database ahead of L1 after a reorg, or behind it after an old backup was restored), or an unsettled
+block with another anchor. This tool is the operator's repair. It never signs, broadcasts or edits a database in
+place:
 
 1. reads the accepted settlement from a quorum of native RPCs;
 2. refuses (exit 75, run again later) until the follower has finalized that settlement;
 3. rebuilds a NEW database from verified L1 blocks with `produce reconstruct` and requires its head to be exactly the
    accepted L2 hash;
-4. returns the user transactions of orphaned blocks to the spool, from each block's published DA batch;
+4. returns the user transactions of unsettled blocks to the spool: from each orphaned work directory's DA batch, from
+   the work directories named with --respool-from (the pre-restore `work/` of a restored backup), and from every DA
+   batch above the accepted number that the settler's own DA key published on L1 (read from the follower's verified
+   blocks and checked against the recorded commitment). A database behind the accepted head has no work directory
+   for those blocks: their paid batches on L1 are the only copy the restore left;
 5. moves orphaned work directories aside, and swaps the databases, keeping the old one for review.
 
 Stop the settler and every settled RPC on this database first: the swap is not visible to a running process.
 
-  l2_reorg_recover.py --config settler.json --follower-state DIR [--apply]
+  l2_reorg_recover.py --config settler.json --follower-state DIR [--respool-from WORK_DIR ...] [--apply]
 
 Without --apply it reports the plan and changes nothing. Exit: 0 done or planned, 75 not finalized yet, 3 refused.
 """
@@ -84,6 +89,32 @@ def respool(directories, pool):
     return written
 
 
+def respool_payloads(payloads, pool):
+    """Write the transactions of DA batches (bytes) as spool entries, whole or not at all. Returns the new names."""
+    written = []
+    for payload in payloads:
+        for raw in batch_transactions(payload):
+            name = S.keccak256(raw).hex() + '.tx'
+            target = Path(pool) / name
+            if not target.exists():
+                S.atomic_write(target, raw.hex() + '\n')
+                target.chmod(0o600)
+                written.append(name)
+    return written
+
+
+def own_l1_batches(config, settler, view, number, follower_state):
+    """{(l2 number, commitment): payload} of the DA batches above `number` that the settler's own DA key published,
+    read from the follower's verified L1 blocks. Batches of other keys are never respooled."""
+    records = [r for r in view.get('data_availability', []) if int(r['l2_number']) > number]
+    da = config.get('da') or {}
+    if not records or not da.get('funding_pubkey'):
+        return {}
+    own = bytes.fromhex(Path(da['funding_pubkey']).read_text().strip())
+    found = S.recorded_da_batches(follower_state, settler.chain_id, records)
+    return {key: payload for key, (key_bytes, payload) in found.items() if key_bytes == own}
+
+
 def finalized_hash(state, status_path, number):
     """The L2 hash the follower finalized at `number`, or None. Status v2 lists every settlement; v3 lists the
     newest and names a log with one line per settlement, in number order."""
@@ -102,8 +133,8 @@ def finalized_hash(state, status_path, number):
     return None
 
 
-def plan(config, follower_state, apply, run=subprocess.run, status=None):
-    settler = S.Settler(config)
+def plan(config, follower_state, apply, run=subprocess.run, status=None, respool_from=(), settler=None):
+    settler = settler or S.Settler(config)
     if not settler.check_identity():
         raise NotYet('no RPC quorum on the network identity')
     view = settler.native_view()
@@ -117,8 +148,11 @@ def plan(config, follower_state, apply, run=subprocess.run, status=None):
     db = Path(config['l2_db'])
     head = settler.produce('head', '--target', str(db))
     report = {'accepted_number': number, 'accepted_hash': l2_hash, 'database_head': head['number'], 'apply': apply}
-    if head['number'] <= number:
-        raise Refuse(f'database head {head["number"]} is not ahead of accepted {number}: nothing to recover')
+    if head['number'] == number and settler.local_hash(number) == l2_hash:
+        raise Refuse(f'database head {number} is the accepted head: nothing to recover')
+    # Behind: an old backup restored, or a database rebuilt before the latest settlement. Its unsettled blocks
+    # have no work directory any more; their user transactions come back from the paid batches on L1.
+    report['database'] = "behind" if head['number'] < number else "ahead" if head['number'] > number else "forked"
     state = status if status is not None else json.loads(Path(config['follower_status']).read_text()) if config.get('follower_status') else None
     if state is not None:
         if finalized_hash(state, config.get('follower_status'), number) != l2_hash:
@@ -138,13 +172,22 @@ def plan(config, follower_state, apply, run=subprocess.run, status=None):
         raise NotYet(f'rebuilt head {document.get("head")} is not the accepted {l2_hash}')
     work = Path(config['workdir'])
     orphans = orphaned_dirs(work, number)
+    extra = [p for d in respool_from for p in orphaned_dirs(d, number)]
+    l1 = own_l1_batches(config, settler, view, number, follower_state) if config.get('user_transactions') else {}
     report['rebuilt_settled'] = document.get('settled')
     report['orphaned_blocks'] = [p.name for p in orphans]
+    report['respool_from'] = [str(p) for p in extra]
+    report['l1_batches'] = sorted(f'{n}:{c[:16]}' for n, c in l1)
     if not apply:
         shutil.rmtree(rebuilt, ignore_errors=True)
         return report
     stamp = int(time.time())
-    report['respooled'] = len(respool(orphans, config['txpool_dir'])) if config.get('txpool_dir') else 0
+    if config.get('txpool_dir'):
+        written = respool(orphans + extra, config['txpool_dir'])
+        written += respool_payloads([l1[k] for k in sorted(l1)], config['txpool_dir'])
+        report['respooled'] = len(written)
+    else:
+        report['respooled'] = 0
     aside = work.parent / f'{work.name}-orphaned-{stamp}'
     aside.mkdir()
     for path in orphans:
@@ -162,6 +205,9 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--follower-state', required=True)
     parser.add_argument('--follower-status', help='follower status file; required unless named in the config')
+    parser.add_argument('--respool-from', action='append', default=[], metavar='WORK_DIR',
+                        help='also respool the DA batches of blocks above the accepted number in this work directory '
+                             '(the pre-restore work/ of a restored backup); repeatable')
     parser.add_argument('--apply', action='store_true')
     options = parser.parse_args()
     config = json.loads(Path(options.config).read_text())
@@ -170,7 +216,7 @@ def main():
     if not config.get('follower_status'):
         parser.error('--follower-status is required')
     try:
-        print(json.dumps(plan(config, options.follower_state, options.apply), indent=1))
+        print(json.dumps(plan(config, options.follower_state, options.apply, respool_from=options.respool_from), indent=1))
     except NotYet as why:
         print(json.dumps({'not_yet': str(why)}))
         sys.exit(75)
