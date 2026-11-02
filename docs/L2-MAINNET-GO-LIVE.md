@@ -179,8 +179,8 @@ The L2 source the guest compiles from has no diff against v2.
 | Guest `settlement_v3_mainnet` | `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473` | settler, prover |
 | Proof policy V3 | `154869964f…747d` | settler dry-run report |
 | SP1 host `bloch-evm-sp1-settlement-v3` | `3a24c36d…973a` (the settler-v2 staging on 136). The file hash depends on the build path and is not the pin; the identity is. Earlier builds `617d191f…86b3` and `505500af…aa07` print the same `--mainnet identity` (ELF keccak `6e4c8440…`, vkeys `389cfbde…` / `007139f7…`). | settler, prover |
-| `remote_prover.py` | `3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5` (**this branch**; stops the prover on client disconnect. The v2 tree and the 10-19 staging hold the old `99bbc1bc…`, which must not be used) | prover |
-| `settler_v3.py` | `3ddb260a1caaadb3f874d436282715900c640cb410a458ee94609ea1bf3fdfe4` (**this branch**; adds the local-proof limit and atomic state files. v2 `875f4cca…` and the settler-v2 staging on 136 must not be used) | settler |
+| `remote_prover.py` | `3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5` (**the kit**; stops the prover on client disconnect. The v2 tree and the 10-19 staging hold the old `99bbc1bc…`, which must not be used) | prover |
+| `settler_v3.py` | `3ddb260a1caaadb3f874d436282715900c640cb410a458ee94609ea1bf3fdfe4` (**the kit**; adds the local-proof limit and atomic state files. v2 `875f4cca…` and the settler-v2 staging on 136 must not be used) | settler |
 | Settler `bloch-pos` (DA key only) | `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e` (78d4921c; rebuilt with `--no-cache`, byte-identical). Enforced by `install-settler-mainnet.py`. | settler (D12) |
 | `mainnet.manifest` | `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd` | all |
 | `carryover.tsv.gz` / `carryover.tsv` | `4d1e2738baec39ec25e2e33968f72a47abb261f271de62fb48a33be55bfc83be` / `84ddbbac2afdd5c78618096a7d4f66cf5b04a3e5757a03fe90550e50096183f6` | followers, attestors |
