@@ -35,15 +35,16 @@
 # A wrong transport passphrase, or a host that cannot be resolved, leaves nothing behind: just run install again.
 #
 # DIR holds: bloch-pos (built from codex/l2-attestor-keystore-20261019: l2-claim seal-key/key-check/
-# attest --sealed), bloch-l2-native-follower and bloch-l2-produce-dev (the RC pinned build,
+# attest --sealed), bloch-l2-native-follower and bloch-l2-produce-dev (the pinned L2 release build,
 # build-release.sh), mainnet.manifest, carryover.tsv.gz + carryover.tsv.gz.sha256 (bloch-sis-pow
 # 78b7343a), and SHA256SUMS over the three binaries.
 #
 # The key: the operator's transport bundle (attestor-I.sealed from make-operator-bundles.sh) is
 # opened ONCE with the transport passphrase (typed here) and re-sealed under a fresh random host
 # passphrase in /etc/bloch-l2-attestor/keystore.passphrase (root, 0400), handed to the agent via
-# systemd LoadCredential. The host never holds a plaintext key file. Keep the transport bundle
-# offline as the backup; remove the copy you brought to this host after install.
+# systemd LoadCredential. The host never holds a plaintext key file. After check-ok the operator
+# re-seals an offline backup under their own passphrase (INSTALL.md step 9) and deletes every copy of
+# the transport bundle (step 10): the key holder can open the transport bundle, so it is not a backup.
 #
 # upgrade also installs sigfeed.py and prepares the feed unit (not enabled; feed.env 0.0.0.0:8787 unless it
 # exists or --feed-port/--feed-bind are given; --no-feed skips the unit), and it restarts a running feed.
@@ -257,14 +258,15 @@ MSG
   cat <<MSG
 Installed attestor $INDEX, NOT started. Follow INSTALL.md from step 6. The commands, in order:
   sudo systemctl enable --now bloch-l2-attestor-follower
-  journalctl -fu bloch-l2-attestor-follower
-  (the first replay takes 60-90 min; wait for l2_genesis.finalized=true in $FSTATE/status.json)
+  sudo journalctl -fu bloch-l2-attestor-follower
+  (the first replay takes 60-90 min or more; wait for l2_genesis.finalized=true in $FSTATE/status.json)
   sudo systemd-run --pipe --wait -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \\
        /usr/bin/python3 -I $OPT/attestor_agent.py check --config $ETC/config.json
  ${FEED_PORT:+ sudo systemctl enable --now bloch-l2-attestor-feed
 } sudo systemctl enable --now bloch-l2-attestor
-  journalctl -fu bloch-l2-attestor -o cat
-Then re-seal your backup (INSTALL.md) and remove the transport bundle copy from this host ($BUNDLE); its offline backup stays with you.
+  sudo journalctl -fu bloch-l2-attestor -o cat
+Then re-seal your offline backup under your own passphrase (INSTALL.md step 9) and delete every copy
+of the transport bundle, here ($BUNDLE) and elsewhere (INSTALL.md step 10).
 MSG
 }
 

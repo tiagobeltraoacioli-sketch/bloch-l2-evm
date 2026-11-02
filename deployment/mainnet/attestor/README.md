@@ -9,7 +9,11 @@ The claim carries three signatures over
 `SHA3("BLOCH:L2:WITHDRAW-ATTEST:1" ‖ network f47d3e49… ‖ chain 700770 ‖ root)`.
 
 Each of the five operators runs one agent with one key, on their own host. The agent does the
-signing by itself. Operators act only on alerts.
+signing by itself. Operators check it daily and act on alerts.
+
+**Operators: this file is the technical reference.** Install from `INSTALL.md` and
+`ONBOARDING.md` in your bundle; where this file and those two differ, they win. The "Upgrade
+(HF1–HF3)" section below is history: those forks are past, and a new install needs none of it.
 
 ## Contents
 
@@ -38,8 +42,9 @@ The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keysto
 - `l2-claim attest --sealed`;
 - `l2-claim verify-attestation`.
 
-Consensus code is unchanged. The other binaries come from the RC pinned build (`build-release.sh`):
-`bloch-l2-native-follower` and `bloch-l2-produce-dev`.
+Consensus code is unchanged. The other binaries come from the next L2 release build
+`bloch-l2-2026-11-02-next-native-78d4921c` (build commit 17383fe, `build-release.sh`):
+`bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…`.
 
 ## What the agent does each cycle (default 60 s)
 
@@ -151,7 +156,9 @@ Notes:
 - After the first command, wait for the follower's first replay (about 60–90 min).
 - `check` prints `check-ok`. It covers the pins, opening the key, the follower, the RPC quorum and
   the rebuild check.
-- When everything works, delete the bundle copy from the host. The operator keeps the offline backup.
+- When everything works, the operator re-seals an offline backup under a passphrase only they know
+  (`INSTALL.md` step 9), then deletes every copy of the transport bundle, on the host and elsewhere
+  (step 10). The transport bundle is **not** the backup: the key holder can open it.
 
 Rehearsal without root or systemd: `install … --prefix /scratch/host-I` installs every file under
 that directory as the invoking user, writes the units to `/scratch/host-I/systemd` without loading
@@ -197,8 +204,13 @@ is pinned.
 
 ## Upgrade (HF1–HF3: follower and producer v2)
 
-The L1 hard forks start at epoch 7180 (HF1, 2026-11-01 16:11 UTC). Each attestor host must run the
-v2 follower and producer **before epoch 7178 (15:39 UTC)**:
+**History.** This section was written for hosts installed before HF1 (epoch 7180, 2026-11-01 16:11
+UTC). HF1 and HF2 are past. A host installed from a current bundle already runs these binaries and
+needs no upgrade. `upgrade-rollback` is refused now (see the end of this section). The same
+`upgrade` command, with new `--follower-sha256`/`--produce-sha256` values, is the path for later
+binary changes, one host at a time.
+
+Each attestor host had to run the v2 follower and producer **before epoch 7178 (15:39 UTC)**:
 
 - `bloch-l2-native-follower` `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2`
 - `bloch-l2-produce-dev` `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69`
@@ -208,7 +220,7 @@ and producer. They are built into `install-attestor.sh` as the defaults. Use `--
 `--produce-sha256` only for a later corrected build whose hashes the coordinator published.
 
 Upgrade **one host at a time**, so that at least 3 of 5 stay up. Each host is down for about
-75 min (measured in report 02: 62 min re-verify, 13 min finality). Run the upgrade inside `tmux` or `screen`:
+75 min (measured on 2026-10-19 at about 181,000 L1 blocks: 62 min re-verify, 13 min finality; longer as the chain grows). Run the upgrade inside `tmux` or `screen`:
 
 ```
 sudo ./install-attestor.sh upgrade --artifacts /root/hf123
@@ -242,7 +254,7 @@ script does the manual procedure and stops at the first failure:
 10. It removes `PAUSE` and starts the agent (`--no-unpause` stops before this step).
 
 At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower cdf5da5c, produce
-e3f1a290`. Post that line in the operators' channel; the next operator then starts.
+e3f1a290`. Post that line in the operators' group the coordinator set up; the next operator then starts.
 
 If a step fails, `PAUSE` stays in place, the agent stays stopped and the follower keeps running.
 Fix the cause, then continue from the follower start with
@@ -287,8 +299,8 @@ in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
 
 | Event | Action |
 | --- | --- |
-| `signed` | None. Expected for every large withdrawal. Check it against the L2 explorer if unsure. |
-| `held` | Check the withdrawal. If it is legitimate, add the printed `INDEX LEAF` line to `approvals.txt`. |
+| `signed` | None. Expected for every large withdrawal. |
+| `held` | Send the alert to the coordinator. Only on their written answer, add the printed `INDEX LEAF` line to `approvals.txt`. |
 | `refused-root-not-on-own-chain` / `refused-rebuild-differs` | Do not override. Compare with the other operators. Possible RPC or settler fault, or an attack. |
 | `halt` (exit 3) | A pin, identity or rebuild failure. Read the reason. The unit does not restart by itself. |
 | `waiting` | The follower is stale or there is no RPC quorum. Transient. |
@@ -299,7 +311,7 @@ The pause file stops all signing at once: `sudo touch /etc/bloch-l2-attestor/PAU
 ## Measured and known limits
 
 - **Live dry run, 2026-10-19, 45.77.142.123, read-only.** The run used the RC `bloch-l2-produce-dev`
-  (`192eda33…`) and a live mainnet follower.
+  of that day (`192eda33…`, superseded: do not install it) and a live mainnet follower.
   - Every pin matched: manifest, set file, the RPC quorum 3/3 (attestor set `1c06adbb…`, large-claim
     threshold 100 BLCH) and the rebuilt L2 genesis `632e45ae…`.
   - The rebuild of 155,365 L1 blocks took 9.8 s, with about 110 MB peak.
