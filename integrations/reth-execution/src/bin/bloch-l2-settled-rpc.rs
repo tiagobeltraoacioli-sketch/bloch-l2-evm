@@ -1055,6 +1055,7 @@ async fn main() -> Result<()> {
     );
     let state = provider.canonical_in_memory_state();
     let mut head_number = u64::MAX;
+    let mut head_hash = B256::ZERO;
     let mut finalized: Option<Header> = None;
     let mut safe: Option<Header> = None;
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
@@ -1066,8 +1067,10 @@ async fn main() -> Result<()> {
                 signal = &mut shutdown => { signal?; break; }
                 _ = interval.tick() => {
                     let number = factory.best_block_number()?;
-                    if number != head_number {
-                        let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
+                    let header = factory.sealed_header(number)?.ok_or_else(|| eyre::eyre!("head header missing"))?;
+                    // The hash too: a rewound head can be replaced at the same number between two polls.
+                    if number != head_number || header.hash() != head_hash {
+                        head_hash = header.hash();
                         // Which rules each served block ran, from the blocks themselves.
                         let known = spec.rules().next_from();
                         match spec.rules().discover(&factory) {
