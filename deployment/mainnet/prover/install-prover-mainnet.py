@@ -33,6 +33,7 @@ runs only when the settler connects. rollback removes exactly what install recor
 /etc/bloch-l2-mainnet-prover/installed.json (refusing while a proof is running).
 """
 import argparse
+import ast
 import fcntl
 import hashlib
 import json
@@ -123,13 +124,37 @@ def authorized_line(key, settler_host, release, config):
             f'--config {config}" {key}\n')
 
 
-def prover_config(release, state, prover_sha256, threads, memory_gib):
+def allowed_prover_env():
+    """The list of the remote_prover.py this kit ships (next to this file in a release, in devnet/ in the repo)."""
+    here = Path(__file__).resolve().parent
+    for path in (here / FILES[2], here.parent.parent / 'devnet' / FILES[2]):
+        if path.is_file():
+            for node in ast.parse(path.read_text()).body:
+                if isinstance(node, ast.Assign) and node.targets[0].id == 'PROVER_ENV_ALLOWED':
+                    return frozenset(ast.literal_eval(node.value.args[0]))
+    die('remote_prover.py with PROVER_ENV_ALLOWED not found')
+
+
+def parse_prover_env(items):
+    """NAME=VALUE options of --prover-env, refused here with the same rule remote_prover.py applies per job."""
+    settings, allowed = {}, allowed_prover_env()
+    for item in items or ():
+        name, separator, value = item.partition('=')
+        if not separator or name not in allowed or not value.isascii() \
+                or not value.isdigit() or int(value) < 1:
+            die(f'bad --prover-env {item!r}')
+        settings[name] = value
+    return settings
+
+
+def prover_config(release, state, prover_sha256, threads, memory_gib, prover_env=None, timeout_seconds=3500):
     return {'mainnet': True,
             'prover': str(release / FILES[0]), 'prover_sha256': prover_sha256,
             'guest': str(release / FILES[1]), 'guest_sha256': GUEST_SHA256,
             'workdir': str(state / 'work'), 'home': str(state / 'work'),
             'prover_threads': threads, 'gnark_image': GNARK_IMAGE,
-            'timeout_seconds': 3500, 'max_memory_bytes': memory_gib << 30}
+            'timeout_seconds': timeout_seconds, 'max_memory_bytes': memory_gib << 30,
+            **({'prover_env': prover_env} if prover_env else {})}
 
 
 def mem_available_gib():
@@ -205,7 +230,8 @@ def install(args, here):
     for name in FILES:
         shutil.copyfile(here / name, RELEASE / name)
         (RELEASE / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
-    config = prover_config(RELEASE, STATE, sums[FILES[0]], args.threads, args.memory_gib)
+    config = prover_config(RELEASE, STATE, sums[FILES[0]], args.threads, args.memory_gib,
+                           parse_prover_env(args.prover_env), args.timeout_seconds)
     (ETC / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
     (ETC / 'config.json').chmod(0o644)
     slice_file.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +287,8 @@ def main(argv=None):
     i.add_argument('--circuits', required=True)
     i.add_argument('--memory-gib', type=int, default=100)
     i.add_argument('--threads', type=int, default=24)
+    i.add_argument('--prover-env', action='append', metavar='NAME=VALUE')
+    i.add_argument('--timeout-seconds', type=int, default=3500)
     i.add_argument('--dry-run', action='store_true')
     r = sub.add_parser('rollback')
     r.add_argument('--dry-run', action='store_true')

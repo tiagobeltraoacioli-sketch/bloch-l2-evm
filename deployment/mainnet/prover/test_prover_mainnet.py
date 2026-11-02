@@ -73,6 +73,21 @@ class RemoteProverMainnet(unittest.TestCase):
         argv = (self.root / 'argv').read_text().split()
         self.assertEqual(argv[:4], ['--mainnet', 'prove-groth16', 'native-artifact', str(self.guest)])
 
+    def test_prover_env_reaches_the_host_and_the_list_is_closed(self):
+        self.prover.write_text(self.prover.read_text() + 'echo "$SP1_WORKER_NUM_CORE_WORKERS" > "$HOME/seen"\n')
+        self.config['prover_sha256'] = sha256(self.prover)
+        self.config['prover_env'] = {'SP1_WORKER_NUM_CORE_WORKERS': '1'}
+        self.write()
+        done = self.run_prover('--config', str(self.root / 'config.json'))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / 'work' / 'seen').read_text().strip(), '1')
+        for bad in ({'WITHOUT_VK_VERIFICATION': '1'}, {'SP1_WORKER_MAX_COMPOSE_ARITY': '2'}, {'LD_PRELOAD': '1'},
+                    {'SP1_WORKER_NUM_CORE_WORKERS': '0'}, {'SP1_WORKER_NUM_CORE_WORKERS': 1}, ['x']):
+            self.config['prover_env'] = bad
+            self.write()
+            done = self.run_prover('--config', str(self.root / 'config.json'))
+            self.assertEqual(done.returncode, 70, bad)
+
     def test_devnet_config_keeps_the_devnet_command(self):
         del self.config['mainnet']
         self.write()
@@ -164,6 +179,16 @@ class InstallPlan(unittest.TestCase):
 
     def test_remote_prover_pin_is_the_file_in_this_tree(self):
         self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)
+    def test_prover_env_option(self):
+        self.assertEqual(install.parse_prover_env(['SP1_WORKER_NUM_CORE_WORKERS=1']),
+                         {'SP1_WORKER_NUM_CORE_WORKERS': '1'})
+        self.assertEqual(install.allowed_prover_env(), rp.PROVER_ENV_ALLOWED)
+        for bad in ('WITHOUT_VK_VERIFICATION=1', 'SP1_WORKER_MAX_COMPOSE_ARITY=2', 'ELEMENT_THRESHOLD', 'ELEMENT_THRESHOLD=0'):
+            with self.assertRaises(SystemExit):
+                install.parse_prover_env([bad])
+        config = install.prover_config(Path('/opt/r'), Path('/var/lib/s'), 'aa' * 32, 12, 48, {'ELEMENT_THRESHOLD': '1'}, 7000)
+        self.assertEqual((config['prover_env'], config['timeout_seconds']), ({'ELEMENT_THRESHOLD': '1'}, 7000))
+        self.assertNotIn('prover_env', install.prover_config(Path('/opt/r'), Path('/var/lib/s'), 'aa' * 32, 12, 48))
 
     def test_memory_floor(self):
         for memory, threads in ((24, 8), (48, 0), (48, 64)):
