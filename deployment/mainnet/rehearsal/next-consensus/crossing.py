@@ -127,7 +127,7 @@ def produce(*args, target_retry=30):
         if 'refused' in last and 'database' not in last.lower() and 'lock' not in last.lower():
             break
         time.sleep(3)
-    raise RuntimeError(f'produce {args[0]}: {last[-1200:]}')
+    raise RuntimeError(f'produce {args[0]}: {last[:1200]}')
 
 
 def until(what, condition, timeout, every=5):
