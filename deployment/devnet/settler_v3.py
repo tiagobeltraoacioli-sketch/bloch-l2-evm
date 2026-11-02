@@ -1032,19 +1032,24 @@ class Settler:
                 batches = recorded_da_batches(state, self.chain_id, records, offset or 0)
             except (OSError, ValueError) as error:
                 log('da-batch-unrecoverable', number=number, reason=f'follower store: {error}'[:300])
-            mine = [r for r in records if (number, r['commitment']) in batches]
-            if not mine and not any(r['commitment'] in local for r in records):
-                # The follower stores finalized blocks only: wait for it to pass the record before giving up.
-                try:
-                    stored = len(follower_block_files(state))
-                except OSError:
-                    stored = 0
-                need = max(int(r['height']) for r in records) + (offset or 0)
-                started = self.reuse_waits.setdefault(number, self.clock())
-                limit = int(self.c['da'].get('reuse_wait_seconds', 3600))
-                if stored < need and self.clock() - started < limit:
-                    raise FollowerBehind(f'L1 records a DA batch for L2 block {number} at native height {need}; '
-                                         f'the follower has stored {stored} blocks')
+        missing = [r for r in records if (number, r['commitment']) not in batches and r['commitment'] not in local]
+        if missing:
+            # The follower stores finalized blocks only; a batch paid minutes ago is read from the native nodes
+            # (a quorum must return identical block bytes; the payload is checked against the recorded commitment).
+            batches.update(self.node_da_batches(missing, offset if offset is not None else self.native_height_offset()))
+        if state and not any((number, r['commitment']) in batches or r['commitment'] in local for r in records):
+            try:
+                stored = len(follower_block_files(state))
+            except OSError:
+                stored = 0
+            need = max(int(r['height']) for r in records) + (offset or 0)
+            started = self.reuse_waits.setdefault(number, self.clock())
+            # Off by default: anyone can post a DA record for any number, so waiting on records that are not
+            # ours would let a third party delay every block by the finality lag.
+            limit = int(self.c['da'].get('reuse_wait_seconds', 0))
+            if stored < need and self.clock() - started < limit:
+                raise FollowerBehind(f'L1 records a DA batch for L2 block {number} at native height {need}; '
+                                     f'the follower has stored {stored} blocks')
         payload = None
         for record in sorted(records, key=lambda r: (int(r['height']), r['commitment'])):
             key = (number, record['commitment'])
@@ -1073,6 +1078,38 @@ class Settler:
         log('da-batch-reused', number=number, commitment=da_commitment(number, payload, self.chain_id).hex(),
             transactions=len(transactions), returned_to_spool=returned, source=source)
         return pool
+
+    def node_da_batches(self, records, offset):
+        """{(number, commitment hex): (funding key, payload)} for DA records, from native blocks read by quorum
+        (getblockbyslot from the record's chain height up, then getblockraw)."""
+        found = {}
+        if offset is None:
+            return found
+        wanted = {(int(r['l2_number']), r['commitment']) for r in records}
+        for record in records:
+            target = int(record['height']) + offset
+            for slot in range(max(0, target - 2), target + 128):
+                try:
+                    block, _ = self.native.agreed('getblockbyslot', [slot])
+                    if not isinstance(block, dict) or 'block_id' not in block:
+                        continue
+                    if int(block['height']) > target + 2:
+                        break
+                    if int(block['height']) < target - 2:
+                        continue
+                    raw, _ = self.native.agreed('getblockraw', [block['block_id']])
+                except Exception:  # noqa: BLE001 - an empty slot or a failed read: next slot
+                    continue
+                if isinstance(raw, dict):
+                    raw = raw.get('hex', '')
+                try:
+                    found.update(scan_da_frames(bytes.fromhex(raw), self.chain_id, wanted - set(found)))
+                except (TypeError, ValueError):
+                    continue
+                if all(key in found for key in wanted if key[0] == int(record['l2_number'])
+                       and key[1] == record['commitment']):
+                    break
+        return found
 
     def native_height_offset(self):
         """Chain height minus the L2 state's native height (a search hint for DA records), or None."""
