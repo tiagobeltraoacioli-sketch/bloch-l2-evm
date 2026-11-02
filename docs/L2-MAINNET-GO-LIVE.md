@@ -8,13 +8,13 @@ The v2.1 plan is kept as `docs/L2-MAINNET-GO-LIVE-V21.md`. Do not mix the two: t
 
 **Kit tip moved after this plan was written:** see the newest change notice in `agents/PINS-NEXT.md` for the tip and the kit-file pins (F8 port, prover pins, release target in `GO-LIVE-PINS.sha256`). Binaries and the signing target `116bfaba…` did not move.
 
-**Kit source.** `~/worktrees/go-live-next-r7-20261102`, branch `codex/go-live-next-r7-20261102`: kit tip `9645efc` (583d8ec plus agent 118's gateway commits 3de3a3e and 51cbda1) plus documentation only. Check before staging that no kit file differs from 9645efc:
+**Kit source.** The frozen launch kit `4b7f4f7` (`codex/settler-reuse-revert-r8-20261102`: kit f1c8033 without agent 118's paid-batch reuse, agents/145). Check it out once, detached, at `~/worktrees/l2-launch-kit-20261103` (`git -C ~/worktrees/next-rpc-r4-20261101 worktree add --detach ~/worktrees/l2-launch-kit-20261103 4b7f4f7`), and check before staging that no kit file differs from 4b7f4f7:
 
 ```
-git -C ~/worktrees/go-live-next-r7-20261102 diff --stat 9645efc -- deployment
+git -C ~/worktrees/l2-launch-kit-20261103 diff --stat 4b7f4f7 -- deployment
 ```
 
-GO: empty output. **Never build a release from 9645efc or from this branch**: its `build.json` would name another `l2_commit`. Binaries come only from the 17383fe build output.
+GO: empty output. **Never build a release from 4b7f4f7 or from this branch**: its `build.json` would name another `l2_commit`. Binaries come only from the 17383fe build output.
 
 **What this build changes from v2.1:**
 
@@ -151,7 +151,7 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 | `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
 | `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
 
-`GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the build's `out/SHA256SUMS` (`1bad88ba…`), not the release `SHA256SUMS` `116bfaba…`. P2 stages the release, so that one line fails by design and P2 checks it separately. A kit commit should move it.
+`GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the release `SHA256SUMS` `116bfaba…` (since kit 2087b40). P2 still checks that line separately, by its own `sha256sum`.
 
 ### 3.3 Pins that do not change
 
@@ -206,7 +206,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 hotfix pending. Wait, and re-run G0.
 
 ```
-python3 ~/worktrees/go-live-next-r7-20261102/deployment/mainnet/l1_finality_history.py --rpc http://80.240.16.185:8080 --from-epoch 7180
+python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_history.py --rpc http://80.240.16.185:8080 --from-epoch 7180
 ```
 
 Rollback: nothing is installed yet.
@@ -252,11 +252,11 @@ scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/mainnet ubuntu@136.244.93.186:l2-golive-next/kit
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet ubuntu@136.244.93.186:l2-golive-next/kit
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-next/release-settler-v2/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-next/release-settler-v2/
 ```
 
 `scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 209 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
@@ -489,7 +489,7 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 **Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `601a52f4…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-next/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-next/
 ```
 
 ```
@@ -791,7 +791,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
-   - the kit `deployment/mainnet/attestor` from this plan's kit (9645efc, which contains ff839ba's package fixes with the pins moved to this build). Not `codex/attestor-packages-r4-20261101` ff839ba alone: it pins v2.1. Not `attestor-custody-20261030`.
+   - the kit `deployment/mainnet/attestor` from this plan's kit (4b7f4f7 plus agent 128's package texts 9f5c1f6; the attestor pins are the same at 9645efc, 9f5c1f6 and 4b7f4f7). Not `codex/attestor-packages-r4-20261101` ff839ba alone: it pins v2.1. Not `attestor-custody-20261030`.
 
    Not the RC binaries `821289e0…` / `192eda33…`: they halt.
 3. `check-operator-bundle.sh --open`, then `install-attestor.sh install … --l1-rpc-url <D4-style L1 RPC>`.

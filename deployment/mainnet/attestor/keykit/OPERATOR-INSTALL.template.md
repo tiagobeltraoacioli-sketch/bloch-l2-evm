@@ -43,7 +43,7 @@ to be trusted.
 ```
 
 It checks every bundle file, the pinned set, your public key, every artifact (including the
-follower `c18752fd…` and producer `fb0d5313…`), that the host can run them, and the sealed key
+follower `cdf5da5c…` and producer `e3f1a290…`), that the host can run them, and the sealed key
 header. With `--open` it asks for the **transport passphrase** (it arrived on its own channel, not
 with the bundle) and proves the key opens and signs for index @INDEX@. It must end with
 `BUNDLE OK for attestor @INDEX@`. Fix any `WARNING` line before you go on. A wrong passphrase prints

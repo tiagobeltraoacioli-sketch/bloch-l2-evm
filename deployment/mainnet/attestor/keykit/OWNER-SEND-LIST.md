@@ -1,7 +1,8 @@
 # What the key holder sends each attestor operator
 
 Package from the current kit, never from `~/worktrees/attestor-custody-20261030` (commit 922fec4): that tree pins the old
-producer `7c1cc62b…`, which halts on the first settled deposit. `package` here refuses those pins.
+producer `7c1cc62b…`, which halts on the first settled deposit. `package` here refuses those pins, and also v2.1's follower `c18752fd…` and
+producer `fb0d5313…`: packages for this build pin follower `cdf5da5c…` and producer `e3f1a290…` (build 17383fe).
 
 Build each package with the binaries inside (`package --artifacts DIR`, about 70 MB compressed or 90 MB as a tar). A non-expert
 then has nothing to fetch. `DIR` holds the five pinned files plus `carryover.tsv.gz.sha256`.
@@ -38,7 +39,7 @@ The reply template in `ONBOARDING.md` section 6: no secret in it. Check these be
 
 1. `check-ok` names `signer_index I` and set `1c06adbb…`.
 2. `curl -fsS http://THEIR_IPV4:8787/healthz` from your machine prints `ok`.
-3. Installed hashes: `bloch-pos 093909a2…`, follower `c18752fd…`, producer `fb0d5313…`.
+3. Installed hashes: `bloch-pos 093909a2…`, follower `cdf5da5c…`, producer `e3f1a290…`.
 4. Two epoch readings 16+ minutes apart, increasing.
 5. Offline backup re-sealed: yes.
 
