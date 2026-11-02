@@ -250,7 +250,7 @@ class Editor:
         pattern = re.compile(rf'(?<![0-9a-fA-F]){re.escape(old)}(?![0-9a-fA-F])' if bounded else re.escape(old))
         for tree in trees:
             for path, text in text_files(tree):
-                if old in text:
+                if old in text and path.name not in SELF_FILES:
                     self.write(path, text, pattern.sub(new, text), why)
 
     def report(self):
