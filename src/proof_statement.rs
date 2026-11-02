@@ -1282,3 +1282,25 @@ mod settlement_v3_tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "forced-inclusion"))]
+mod forced_configuration_tests {
+    use super::*;
+
+    /// The next mainnet rules with L1 forced inclusion: tag 4, a new configuration.
+    /// Native `PROGRAM_NEXT` (identity 3) and `FORCED_INCLUSION_CONFIGURATIONS` name this value.
+    #[test]
+    fn the_forced_next_rules_have_their_own_configuration() {
+        let next = ChainSpec::mainnet();
+        assert!(next.forced_inclusion);
+        let forced = configuration_commitment(&next).unwrap();
+        let plain = configuration_commitment(&ChainSpec { forced_inclusion: false, ..next.clone() }).unwrap();
+        assert_eq!(format!("{forced:x}"), "b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d");
+        // Without forced inclusion the next rules keep agent 115's configuration.
+        assert_eq!(format!("{plain:x}"), "975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878");
+        assert_ne!(forced, plain);
+        assert_eq!(ChainSpec::mainnet_rules_for(forced), Some(next));
+        // Forced inclusion needs the next rules.
+        assert!(configuration_commitment(&ChainSpec { forced_inclusion: true, ..ChainSpec::mainnet_v1() }).is_err());
+    }
+}
