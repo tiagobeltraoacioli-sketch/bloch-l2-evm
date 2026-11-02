@@ -38,7 +38,7 @@ is a second forced command on the same user, slice and work directory (one proof
   sudo python3 install-prover-mainnet.py rollback --program next
 
 It needs the activated program installed first, a second settler key (an SSH key selects one forced
-command), and settlement_v3_mainnet_sparse (SHA-256 75b9c635...418e, CANDIDATE) beside this file.
+command), and settlement_v3_mainnet_sparse (SHA-256 78c533fa...7bea, CANDIDATE) beside this file.
 
 install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
 beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
@@ -78,14 +78,14 @@ REMOTE_PROVER_SHA256 = '1f643ea3e27c0fb6ea83216d34e4c03aac9a99e8b2cad6ae8456191b
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
 # codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
 # recipient is a placeholder (TBD-owner), so the configuration and every value below move with it.
-NEXT_GUEST_SHA256 = '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e'
+NEXT_GUEST_SHA256 = '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea'
 PINNED_NEXT = {
     'chain_id': 700770,
     'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
     'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
-    'elf_keccak': '54d264b8969845b82b3c8d0cec54562567ab7ee6f59dae7e2678c7d9e848c011',
-    'vkey_koalabear': '5f802b085c7520f54383ee604e867d4d327a0d554388ca79254748973cf6c126',
-    'vkey_bn254': '00bf00561171d483d61c1f7304e867d4d64f41aab0e2329e52a3a44bbcf6c126',
+    'elf_keccak': '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
+    'vkey_koalabear': '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
+    'vkey_bn254': '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910',
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
 }
