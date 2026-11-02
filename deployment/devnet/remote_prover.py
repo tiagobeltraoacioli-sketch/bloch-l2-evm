@@ -161,29 +161,106 @@ def stop_group(process):
             return
         try:
             process.wait(grace)
-            return
+            break
         except subprocess.TimeoutExpired:
             pass
+    try:  # the leader is gone; whatever else of the group is left (the native runner) goes too
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
 
 
-def run_while_client_connected(argv, env, log, timeout, gone=client_gone, poll_seconds=1):
+def group_segments(pgid, directory):
+    """The SP1 shared-memory files (`sp1_*`, `sem.sp1_*` under `directory`) that processes of group `pgid` map or hold."""
+    found, prefix = set(), str(directory).rstrip('/') + '/'
+    for proc in Path('/proc').iterdir() if Path('/proc').is_dir() else ():
+        if not proc.name.isdigit():
+            continue
+        try:
+            stat = (proc / 'stat').read_text()
+            if int(stat.rsplit(')', 1)[1].split()[2]) != pgid:
+                continue
+            paths = [line.split(None, 5)[5] for line in (proc / 'maps').read_text().splitlines() if len(line.split(None, 5)) == 6]
+            paths += [os.readlink(fd) for fd in (proc / 'fd').iterdir()]
+        except (OSError, ValueError, IndexError):
+            continue
+        for path in paths:
+            path = path.replace(' (deleted)', '')
+            name = path[len(prefix):] if path.startswith(prefix) else ''
+            if name.startswith(('sp1_', 'sem.sp1_')) and '/' not in name:
+                found.add(path)
+    return found
+
+
+def segment_mapped(path):
+    """Whether any process we can see maps or holds `path`. Processes of other users cannot be read; they cannot have
+    opened this user's segment either (mode 0600), unless they run as root."""
+    target = str(path)
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if target in (proc / 'maps').read_text():
+                return True
+            if any(os.readlink(fd) == target for fd in (proc / 'fd').iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def remove_leaked_segments(paths, mapped=segment_mapped):
+    """Remove the given segments, which this run's prover processes mapped, once no process maps them. A killed SP1 native
+    runner never unlinks its segments (4.7 GB each in /dev/shm), and a full /dev/shm makes every later SP1 run on the
+    host crash. Only segments seen mapped by this run's own process group are candidates: nothing another job created."""
+    removed, paths = [], set(paths)
+    for path in list(paths):  # the semaphores of a segment this group used carry its name: sem.sp1_<id>_t_empty, _filled
+        head, name = os.path.split(path)
+        if name.startswith('sp1_'):
+            paths |= {os.path.join(head, f'sem.{name}_{end}') for end in ('empty', 'filled')}
+    for path in sorted(paths):
+        try:
+            if not os.path.exists(path) or mapped(path):
+                continue
+            os.unlink(path)
+            removed.append(os.path.basename(path))
+        except OSError:
+            continue
+    if removed:
+        print(json.dumps({'event': 'prover-shm-removed', 'segments': removed}), file=sys.stderr, flush=True)
+    return removed
+
+
+def run_while_client_connected(argv, env, log, timeout, gone=client_gone, poll_seconds=1, shm='/dev/shm'):
     """Run the prover in its own process group. A proof nobody can receive holds the lock and tens of GB
     for its whole duration and makes every retry of the restarted settler exit 75, so a dead client or
-    the timeout stops the whole group at once."""
+    the timeout stops the whole group at once. The SP1 shared-memory segments the group mapped are unlinked
+    afterwards: a killed native runner never does it, and they outlive this process in /dev/shm."""
     process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                start_new_session=True)
     deadline = time.monotonic() + timeout
+    ours = set()
+
+    def finish(reason=None):
+        ours.update(group_segments(process.pid, shm))
+        stop_group(process)
+        remove_leaked_segments(ours)
+        if reason:
+            fail(70, reason)
     while True:
+        ours.update(group_segments(process.pid, shm))
         try:
-            return process.wait(poll_seconds)
+            code = process.wait(poll_seconds)
         except subprocess.TimeoutExpired:
-            pass
+            code = None
+        if code is not None:
+            finish()
+            return code
         if gone():
-            stop_group(process)
-            fail(70, 'client disconnected: proof abandoned')
+            finish('client disconnected: proof abandoned')
         if time.monotonic() >= deadline:
-            stop_group(process)
-            fail(70, 'prover timed out')
+            finish('prover timed out')
 
 
 def main():

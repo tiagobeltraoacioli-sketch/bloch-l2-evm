@@ -1138,7 +1138,7 @@ class StuckNode(unittest.TestCase):
         self.assertTrue([c for c in r.checks if c['check'] == 'l1_stuck' and c['code'] == m.UNKNOWN])
 
     def test_identity_pins_untouched(self):
-        self.assertEqual(m.V2_BUILD['l2_commit'], 'a39b04e435b11bd2316dffe94d78df0163153c56')
+        self.assertEqual(m.V2_BUILD['l2_commit'], '17383feb88602926c26559802b95dee273484cd5')
         self.assertEqual(m.MAINNET_PINS['attestor_set'], '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b')
 
 

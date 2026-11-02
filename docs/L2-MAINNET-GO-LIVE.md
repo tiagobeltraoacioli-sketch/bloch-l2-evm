@@ -1,130 +1,92 @@
-# Bloch L2 mainnet (chain 700770): go-live plan for the v2.1 build
+# Bloch L2 mainnet (chain 700770): go-live plan for the next build (17383fe)
 
-Status: **plan only, updated for v2.1 on 2026-10-30 (L1 epoch ~7030).** Nothing in this document has been installed,
-started or broadcast. Every step that writes to a public chain is marked **MAINNET WRITE**, and every
-step that installs or starts something on a host is for the owner to run.
+Status: **plan only, written 2026-11-02 for the next build.** Nothing in this document has been installed, started or broadcast. Every step that writes to a public chain is marked **MAINNET WRITE**, every publication **PUBLISH**, and every step that installs or starts something on a host is for the owner to run.
 
-This plan replaces the 2026-10-19 owner runbooks. Their binaries were built before the hard forks and
-**halt at HF1 (epoch 7180)**. Do not open or install from them: every command an operator needs is in this document, in English.
+The v2.1 plan is kept as `docs/L2-MAINNET-GO-LIVE-V21.md`. Do not mix the two: the kit pins in this tree name the next build and refuse v2.1 artifacts.
 
-Kit source: `~/worktrees/go-live-fixes-r4-20261101`, branch `codex/go-live-fixes-r4-20261101`, on the owner's Mac. It is the v2.1 kit (`7531526`) plus the installer fixes of §3.5. No v2.1 release artifact differs. Operator packages for P10 come from another branch: see P10.
+**The build.** L2 build commit (`l2_commit`) `17383feb88602926c26559802b95dee273484cd5`, native 78d4921c, settlement-recovery lock `a3c38a46…`. Built reproducibly on three hosts (209 twice, 136, and independently 45.77 by agent 124). **Unsigned.** Release `bloch-l2-2026-11-02-next-native-78d4921c`, assembled independently on 209 and 136 with the same result; its `SHA256SUMS` is the signing target `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (D7). Source of every hash: `agents/PINS-NEXT.md`; if it disagrees with this file, it wins, and this file must be fixed.
 
-**What v2.1 changes from v2:** a new `bloch-l2-settled-rpc` with the spool and simulation limits and
-the receipt/`latest` fix; an nginx gateway on our own hosts that replaces the Cloudflare Worker (P11);
-kit gaps K1, K2 and K6 closed; one pinned settlement-recovery lock (`26bf4453…`). The follower, the
-producer, the guest, the program identity and the activation do not change.
+**Kit source.** `~/worktrees/go-live-next-r7-20261102`, branch `codex/go-live-next-r7-20261102`: kit tip `9645efc` (583d8ec plus agent 118's gateway commits 3de3a3e and 51cbda1) plus documentation only. Check before staging that no kit file differs from 9645efc:
+
+```
+git -C ~/worktrees/go-live-next-r7-20261102 diff --stat 9645efc -- deployment
+```
+
+GO: empty output. **Never build a release from 9645efc or from this branch**: its `build.json` would name another `l2_commit`. Binaries come only from the 17383fe build output.
+
+**What this build changes from v2.1:**
+
+- the export stop at L2 block 4097 is gone (8a77bf4); `MAX_L1_BLOCKS` is 5,000,000;
+- `bloch_getWithdrawalProof` in the settled RPC, so the withdraw tool `deployment/mainnet/withdraw/bloch-l2-withdraw.py` works against our RPC (`fetch`);
+- the clock-step and `.partial` fix (2782f5a, the same change as `9b8aaef`, so D14 of the v2.1 plan is done);
+- `safe` follows an L1 reorg down and never below `finalized`; by-hash reads check the canonical hash;
+- the follower can write status schema v3, but **defaults to v2** (unit `BLOCH_L2_STATUS_SCHEMA=v2`);
+- `--min-tip-wei` (0.1 gwei by default) in the RPC and the producer;
+- the settler's idle-block option (agent 92, 503757d; **not** 724bf4c, which wedges deposits), DA re-sign on a fee move and the database-behind-the-accepted-head recovery (agent 118, 738399f);
+- `LimitNOFILE=65536` in the RPC unit.
+
+The guest (`203114bf…`, the dense guest), the program identity, the proof policy and the activation do not change. The sparse witness guest (agents 81, 89) is **not** in this build.
 
 Related documents:
 
-- `deployment/mainnet/SETTLER-RUNBOOK.md`: settler worker and installer.
+- `deployment/mainnet/SETTLER-RUNBOOK.md`: settler worker and installer, idle blocks, foreign settlements, reorg recovery.
 - `deployment/mainnet/follower-rpc/install.sh`: follower and settled-RPC units.
 - `deployment/mainnet/attestor/README.md`: attestor kit.
 - `deployment/mainnet/public-rpc/README.md`: the public RPC gateway.
-- `docs/L2-HARD-FORK-OPERATOR-STEPS.md`: the L2 across HF1/HF2/HF3.
+- `deployment/mainnet/withdraw/README.md`: the withdraw tool.
+- `docs/MAINNET-RPC-READINESS.md`: RPC limits and the status-schema rollout order.
 - `docs/MAINNET-OPS-RUNBOOK.md`: the monitor and its thresholds.
 - `docs/L2-OPERATOR-RUNBOOK.md`: what to do per failure.
+- `docs/L1-STUCK-NODE-RUNBOOK.md`: stuck L1 nodes. **At 9645efc its wipe step is wrong for mainnet** (§6.1); the fix is on `codex/recovery-r6-20261102` (28c2b5f, 7554681), not merged here.
 - `docs/MAINNET-EXCHANGE-INTEGRATION.md`: exchange-facing behaviour.
 
-## 0. Where things stand (read-only checks, 2026-10-30 22:06 UTC)
+## 0. Where things stand
 
-- **L1.** All three L2-facing RPCs (80.240.16.185, 199.247.22.8 and 45.77.67.251, port 8080) are at
-  height 186552, epoch 7022, finalized epoch 7020, with the same finalized root `d65248bb…11ba`.
-  - `getchaininfo.hard_forks` lists HF1 7180/7180/7186, HF2 7270 ×4, HF3 7360 ×3 and KES enforce 8620,
-    all `active: false`.
-  - The RPCs now refuse requests without `Content-Type: application/json`. Every `curl` below sets it.
-- **L2.** It is activated (e5850, slot 187200) but has **never been settled**. `getl2settlement`
-  returns `accepted: null` with source height 1, slot 187200. The L2 head is the genesis
-  `632e45ae…f468`. No production L2 unit, user or directory exists on any host.
-- **Hosts.**
+Last read-only readings are in the v2.1 plan §0 (2026-10-30). Since then HF1 (e7180) and HF2 (e7270, 2026-11-02 about 16:11 UTC) were scheduled to activate; HF3 is e7360 (2026-11-03 16:11 UTC). Nothing in this plan relies on those readings: G0 re-reads everything. The L2 is activated (e5850, slot 187200) and has never been settled. No production L2 unit, user or directory exists on any host.
 
-  | Host | vCPU | RAM | Free disk | Notes |
-  | --- | --- | --- | --- | --- |
-  | 136.244.93.186 | 32 (Cascade Lake) | 125 GiB, 123 GiB available | 2.7 TB | Idle. No `bloch-l2*` units. The pinned gnark image `e1a1cd62…` is present. The 10-19 staging dir `~/l2-mainnet-install-20261019` is present, including the SP1 circuits (7.9 GB). |
-  | 45.77.142.123 | 32 | 125 GiB | 2.2 TB | Shared build host. It still runs the 10-18 scratch follower and RPC (127.0.0.1:19145, pre-HF build, PIDs 1304666 and 1452988). The unsigned v2.1 release is in `~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c`. `manifest` and `carryover` come from `~/hf-release-kit-20261020/l2-agents/07-rpc/artifacts`. |
+## 1. Owner decisions
 
-## 1. Owner decisions (all open)
-
-Nothing marked here may be filled in by an operator or an agent. `TBD-owner` means the owner supplies
-the value.
+Nothing here may be filled in by an operator or an agent. `TBD-OWNER` means the owner supplies the value.
 
 | # | Decision | Recommendation | Blocks phase |
 | --- | --- | --- | --- |
-| **D1** | Go-live start epoch | Not before G0 (§4) holds. Earliest e7365 (2026-11-03 17:31 UTC). Recommended **e7450 (2026-11-04 16:11 UTC)**, after one full day (90 epochs) of clean finality following HF3. | all |
-| **D2** | **Prover host** | While user transactions are off, 136.244.93.186 co-located with the settler works (blocks are empty or deposit-only). Before user transactions (D10), a dedicated prover host is recommended: the worst-case caps do not fit on 136 (§2). `TBD-owner`. | P5, D10 |
-| **D3** | Follower B / replica RPC host | 45.77.142.123 works (light load) but it is the shared build host. Recommended: a small dedicated VPS (§2, "follower B"). `TBD-owner`. | P3, P4, P11 |
-| **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8 (different sources on purpose). | P3 |
-| **D5** | **Attestor operators**: five people, five hosts, one index each, plus each operator's feed URL | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
-| **D6** | **Bloch Inc addresses** | **None is needed for the L2 core.** L2 fees go to the predeploy `0x4200…0011`, settlements pay no L1 fee, and the DA key is generated on the host. Still `TBD-owner`: (a) the L1 wallet that funds the DA key (5 BLCH, only when user transactions are enabled); (b) the L1 wallet and L2 recipient for the test deposit and test withdrawal; (c) the Bloch Inc Safe and bridge guardian addresses, which the DEX and bridge need later. Those are not part of this plan. | P12 |
-| **D7** | Release signature | Sign the reproducible release `bloch-l2-2026-10-30-v21-native-78d4921c` (its `SHA256SUMS` has SHA-256 `dded10b9b49a862d1b31f0667b945016b5da54e6c497eba123c42b32e0cd11f9`) with the owner's minisign key, after G0 gate 7 holds (an open item may change a binary and so the target) and before any install. `TBD-owner` key. | P2 |
-| **D8** | Retire the 10-18 scratch follower/RPC on 45.77 (they halt at HF1 anyway) | Stop them before or at G0. PIDs change after a restart, so first confirm with `ps -o pid,cmd -p 1452988,1304666` that they are the scratch follower and RPC, then the owner runs `kill 1452988 1304666`. | none (hygiene) |
-| **D9** | Public gateway | `l2rpc.blochl1.com` through the nginx + njs gateway on A and B (`deployment/mainnet/public-rpc/`). The Worker of `codex/l2-mainnet-public-20261019` is retired: do not deploy it. CORS is open to any origin (decided 2026-10-30). Still open: DNS timing, and origin failover: one proxied A record with a manual switch to B (default), or paid Cloudflare Load Balancing. `TBD-owner`. | P11 |
-| **D10** | When to enable user transactions | Only after the P12 deposit test, the DA rehearsal R2, the gas-heavy measurement, the stuck-block rehearsal (§3.4) and the next RPC build (D14). `18be911a…` does not carry `9b8aaef`. Until then deposits mint on the L2 but nobody can transact or withdraw. | P12 |
-| **D11** | Alert channel for the monitor | `TBD-owner`. | P9 |
-| **D13** | L2 finding F1 (timestamp and prevrandao not bound in the guest) | Do not delay block 1. Start with a deposit cap and a bridge value the owner would accept seeing frozen during an emergency fork. | P8, P12 |
-| **D14** | Adopt `9b8aaef` (clock step and `.partial` sweep fix, not in v2.1) | Yes, in the next RPC build, before user transactions. D10 depends on it. | D10 |
-| **D12** | DA signer `bloch-pos` | Use the 78d4921c `bloch-pos` (`700631b0…`), which `install-settler-mainnet.py` now enforces. It only generates and signs for the DA key; it judges no consensus. It has no `signature-forms` command, so the settler uses the v1 DA form (R2). Do not pin the `codex/hf-l2-compat-20261020` signer (its `--for-epoch` form is likely refused after HF2). | P6 |
+| **D1** | Go-live start epoch | Not before G0 holds. Earliest e7365 (2026-11-03 17:31 UTC). Recommended **e7450 (2026-11-04 16:11 UTC)**, after one day of clean finality after HF3. | all |
+| **D2** | Prover host | 136.244.93.186, co-located with the settler, while user transactions are off. Before D10, a dedicated 32 vCPU / 128 GB prover (§2). | P5, D10 |
+| **D3** | Follower B / replica RPC host | A small dedicated VPS (4 vCPU, 8 GB, 80 GB). 45.77.142.123 works but is the shared build host. | P3, P4, P11 |
+| **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8. | P3 |
+| **D5** | Attestor operators: five people, five hosts, one index each, feed URLs | `TBD-OWNER`. No operator holds more than one key or shares a host with a validator, the settler or another attestor. | P10 |
+| **D6** | Addresses | The L2 core needs none. Still `TBD-OWNER`: (a) the wallet that funds the DA key (only for D10); (b) the wallet and L2 recipient of the test deposit and withdrawal. | P12 |
+| **D7** | Release signature | Sign release `SHA256SUMS` `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (`bloch-l2-2026-11-02-next-native-78d4921c`, in `~/l2dexbridge-20261030/next-rpc-r4/release/` on 209 and 136) with the owner's minisign key, after G0 gate 7 and before P2. | P2 |
+| **D8** | Retire the 10-18 scratch follower/RPC on 45.77 | As in the v2.1 plan: check `ps -o pid,cmd -p 1452988,1304666` first, then `kill 1452988 1304666`. | none |
+| **D9** | Public gateway | nginx + njs on A and B; do not deploy the Worker. Open: DNS timing and failover (manual switch to B by default). | P11 |
+| **D10** | When to enable user transactions | **Not with this build while F5 is open** (K13): F5 fires only with idle blocks and user transactions together, so the deposit-only launch keeps `skip_idle_blocks` on and user transactions off, and user transactions stay off until F5 is fixed in a later build. Then only after: the P12 deposit test; R2 (DA after HF2) on a private net; the gas-heavy 15M measurement; the stuck-block rehearsal; a dedicated prover (D2); **and with `foreign_recovery` on** (D17). | P12 |
+| **D11** | Alert destinations | **`TBD-OWNER`**: webhook URL (and bearer file), Telegram bot token file and chat id, or an `alert_command`; plus a `heartbeat_url` (dead-man service). Until set, alerts are not delivered and WARN `alert_delivery` is expected. | P9 |
+| **D12** | DA signer `bloch-pos` | 78d4921c `700631b0…`, enforced by the installer. | P6 |
+| **D13** | L2 finding F1 (timestamp and prevrandao not bound in the guest) | Do not delay block 1. Cap deposits and bridge value at what the owner accepts seeing frozen during an emergency fork. | P8, P12 |
+| **D15** | **Idle blocks and pacing (deposit-only launch)** | `configure --skip-idle-blocks --max-idle-seconds 86400 --min-block-interval 1800` (agent 92): no block without demand, a heartbeat block at most every 24 h, at most one block per 30 min. Deposits then wait about 40–70 min to mint (two blocks after an idle stretch), longer as proofs slow with height. It is the only protection of the height against a depositor who forces blocks. `configure` runs once, so decide before P6. | P6, P9 |
+| **D16** | Block interval for the monitor's `l2_proof_cost` | `--set block_interval_seconds=1800`, equal to D15's pacing: WARN when the slowest logged proof passes 70 % (1,260 s), CRIT at 100 % (1,800 s). Expect WARN around L2 block 4,000 and CRIT before 8,191 (agent 93: 1,417–1,563 s at 4097, 2,731–2,809 s at 8191). At that point raise the interval, or get faster proving (§2). | P9 |
+| **D17** | Foreign settlement recovery | **Off at launch** (no `--follower-state`/`--follower-status` at P6, restart path unit not enabled). A deposit-only block is identical whoever builds it, so there is nothing to recover. Turn it on together with user transactions (P12 step 2), as agent 66 recommends. | P6, P12 |
+| **D18** | Monitor thresholds under idle | `l2_head_age` went CRIT with `--max-idle-seconds` on agent 92's rehearsal (the head's time is its anchor, older than its acceptance by the proof time). Choose N + 45 min, or N + 45 min + proof time. `deposit_wait` defaults (45/90 min) are short with 30 min pacing: suggested `--set deposit_wait_warn=5400 --set deposit_wait_crit=10800` (my value, not measured). | P9 |
+| **D19** | Weak-subjectivity checkpoint | Whether to publish one younger than 2,016 epochs. Without it, a broken mainnet L1 node recovers only by refill from a healthy node (§6.1). | §6 |
 
 ## 2. Host specification per role
 
-Measured numbers (sources: l2-agents reports 03, 05, 06, 07 of 2026-10-28 and the prover installer's
-own measurement of 2026-10-18):
+The v2.1 plan §2 numbers for the follower (about 600 MB RSS, about one core, 55–80 min replay at about 198k L1 blocks), producer and unit caps still hold: no follower or producer execution rule changed (agent 124).
 
-- **Native follower.** Peak RSS 602 MB on an offline replay of 174,031 blocks and 594 MB live. It uses
-  about one core.
-  - Replay from Genesis-4: 57 min 11 s offline; 46.0 min re-verify on restart, plus 58 s genesis
-    load. A fresh install also fetches all blocks first: about 10 min for 180k blocks, about 65 min
-    in total for 181k.
-  - The native state is 3.1–3.3 GB at 174–181k blocks, about 18 KB per block. At about 2,400 blocks
-    per day that is about 45 MB per day.
-- **Producer.** `reconstruct` over 181k blocks: 4.4 s and 107 MB. `rebuild-check`: about 2.5 s and 110 MB.
-- **Prover (SP1).** Peak RSS grows with block size, at 8 threads (2026-10-30, report 05):
+**Prover, from agent 93 (real proofs, 32 vCPU hosts, guest `203114bf…`):** empty-block cost grows with height up to block 8,191 (227.7M instructions; the EIP-4788 ring is then full and cost stops growing). With SP1 defaults block 8191 is OOM-killed at a 100 GiB cap. With `--threads 32` and `ELEMENT_THRESHOLD=268435456` it proved twice, in 2,731 s at 85.4 GiB and 2,809 s at 84.2 GiB. At 2048: 814–944 s at about 87–95 GiB (32 threads); at 4097: 1,563 s at 72.8 GiB with the threshold. The installer defaults are now `--memory-gib 100 --threads 32 --prover-env ELEMENT_THRESHOLD=268435456 --timeout-seconds 5400`; the settler's remote timeout is 5,700 s, above the prover's limit.
 
-  | Block | Instructions | Peak RSS | Proof time |
-  | --- | ---: | ---: | ---: |
-  | empty | 0.53M | 20.4 GiB | 11 min |
-  | 1 deposit, 4 transfers, 1 withdrawal | 1.57M | 25.5 GiB | 13 min |
-  | 1 deposit, 50 transfers | 8.86M | 45.2 GiB | 16 min |
-  | 1 deposit, 200 transfers | 33.6M | 96.5 GiB | 28 min |
+Without the 4097 stop, the limit at high heights is proof time, not a hard stop: about 46 min per block at 8191 on 32 vCPU. 12–15 min per block there needs about 64 physical cores / 128 threads and 256 GB (agent 93 estimate, not measured). With D15 the height grows with demand: agent 92's model gives months to years before block 4096 at a few deposits a day, and about 100 days under a griefer at 30 min pacing.
 
-  A 40 GiB slice holds only about 38 transfers. The kit defaults are now `--memory-gib 100 --threads 32` with `ELEMENT_THRESHOLD=268435456` and a 5,400 s proof limit (agent 93: an empty block 8191 OOMs at 100 GiB on SP1 defaults and proves in 2,731–2,809 s at 84–85 GiB with these)
-  and `max_block_txs` 128. A 128-transfer block is about 22M instructions and **about 72 GiB by
-  extrapolation; it has not been proved.** No block above 5.3M instructions has been proved at 24 threads.
-- **gnark Groth16 container.** About 18.5 GB, under dockerd, outside every slice. The installer
-  requires 20 GiB of headroom above the prover slice.
-- **Settler unit.** `MemoryMax=32G`. It runs execute and verify, and a local proof only if the remote
-  prover fails and the block's `execute` count is at most `local_prove_max_instructions` (3,000,000;
-  32 GiB is about 4M). Larger blocks log `local-proof-refused` and wait for the prover.
-- **Unit caps.** Follower 6 G with `CPUQuota=200%`. Settled RPC 4 G. Shadow 4 G with
-  `CPUQuota=400%`.
-
-At the recommended start (e7450) L1 holds about 198k blocks. Plan for **about 55–65 min to re-verify
-on restart and about 65–80 min for a fresh install**, more on a busy host.
-
-| Role | Host | vCPU | RAM | Disk (SSD) | Memory budget |
+| Role | Host | vCPU | RAM | Disk | Notes |
 | --- | --- | --- | --- | --- | --- |
-| **A: settler + prover + follower A + RPC A + shadow + monitor + nginx origin** (user transactions off) | 136.244.93.186 (D2) | **32** (min 24) | **125 GiB** (136's real size) | **≥ 200 GB** (circuits 7.9 GB, settler about 50 GB, follower about 3.5 GB growing about 16 GB a year, Docker). 136 has 2.7 TB. | See the cap check below. |
-| **Dedicated prover** (recommended before D10) | `TBD-owner` | **32** (24 threads in the slice) | **128 GB** (100 G slice + 18.5 G gnark outside it + OS) | ≥ 200 GB NVMe, Docker | 118.5 G worst case |
-| Settler alone (prover remote) | 136 | 8 | 32 GB, or 56 GB if the local proof fallback stays enabled (32 G unit + about 20 G gnark) | ≥ 100 GB | |
-| **B: follower B + replica RPC + nginx origin** | 45.77.142.123 or a dedicated VPS (D3) | **4** | **8 GB** | **≥ 80 GB** | Follower 6 G cap (0.6 GB used) + RPC 4 G cap. Replica rebuild about 110 MB. |
-| **Attestor host** (×5, one per operator; **inbound TCP 8787 open to everyone** for the read-only feed) | `TBD-owner` (D5) | **4** (kit minimum 2) | **8 GB** | **≥ 80 GB** (kit minimum 40 GB) | Follower 0.6 GB + rebuild-check 0.1 GB + `bloch-pos` signing |
-| Monitor | runs on A (and optionally on B) | n/a | < 50 MB | n/a | |
+| A: settler + prover + follower A + RPC A + shadow + monitor + nginx (user transactions off) | 136.244.93.186 | 32 | 125 GiB | ≥ 200 GB | The prover cap check of the v2.1 plan §2 applies unchanged: fine while blocks are empty or deposit-only. |
+| Dedicated prover (before D10) | `TBD-OWNER` | 32 (16 physical cores) | 128 GB | ≥ 200 GB NVMe, Docker | 100 G slice + gnark 18.5 G outside it |
+| B: follower B + replica RPC + nginx | D3 | 4 | 8 GB | ≥ 80 GB | |
+| Attestor host (×5, inbound TCP 8787 open) | D5 | 4 | 8 GB | ≥ 80 GB | |
 
-**Cap check for all roles on 136 (125 GiB; the prover's `--memory-gib 100`, gnark 18.5 GiB outside the prover cgroup):**
+The prover installer requires MemAvailable ≥ cap + 20 GiB (120 GiB for 100). If it refuses, stop the settled RPC for the install rather than lowering the cap. **Do not roll the prover back while the settler must keep running on a busy host** (agent 86, G6): the reinstall is refused until the memory is free again, and the settler has no remote prover meanwhile.
 
-| Case | Sum | Fits 125 GiB? |
-| --- | ---: | --- |
-| All caps at once: prover 100 + gnark 18.5 + settler 32 + follower 6 + RPC 4 + shadow 4 | 164.5 GiB | **No, over by 39.5** |
-| Proofs are serial, so the settler holds about 2 GiB while the prover runs: 100 + 18.5 + 2 + 14 | 134.5 GiB | **No, over by 9.5** |
-| As above, with gnark not overlapping the prover's peak (one measurement: 200 transfers, 96.5 GiB RSS, 92.0 GiB host drop) | 116 GiB | Yes, by 9, on that single observation |
-| Expected at full transfer load: about 72 + 3 | about 75 GiB | Yes, extrapolated |
-| Expected with user transactions off: 26 + 18.5 + 3 | under 50 GiB | Yes |
-
-So the hard caps on 136 do not exclude a global OOM, the failure of the 2026-10-12 incident. Co-location is
-acceptable while user transactions are off. A dedicated prover removes the overcommit: 118.5 GiB there, and
-at most 64.5 GiB (settler fallback + gnark + follower + RPC + shadow) on 136.
-
-The prover installer also requires MemAvailable ≥ cap + 20 GiB, that is 120 GiB for 100, which leaves little
-room on 136 at P5. If it refuses, stop the settled RPC for the install rather than lowering the cap.
+Rule from the 2026-10-12 incident: never run validators on host A while the settler and prover run. The 30 `bloch-expansion@` units on 136 stay disabled.
 
 ### Layout of host B
 
@@ -132,7 +94,7 @@ B runs the `deployment/mainnet/follower-rpc` units, not the replica kit, because
 
 | Item | Value on B |
 | --- | --- |
-| Staged files | `/home/ubuntu/l2-golive-v2/artifacts` and `/home/ubuntu/l2-golive-v2/kit` |
+| Staged files | `/home/ubuntu/l2-golive-next/artifacts` and `/home/ubuntu/l2-golive-next/kit` |
 | Database owner | user `bloch-l2-mainnet-replica` |
 | Database | `/var/lib/bloch-l2-mainnet-replica/canonical`, replaced by the P4 refresh; old copies stay as `canonical.prev-*` |
 | Txpool directory | `/var/lib/bloch-l2-mainnet-replica/txpool`, required by `install.sh`, never passed to the RPC (`no-txpool.conf` is permanent on B) |
@@ -145,99 +107,68 @@ B runs the `deployment/mainnet/follower-rpc` units, not the replica kit, because
 Rule from the 2026-10-12 incident: never run validators on host A while the settler and prover run.
 The 30 `bloch-expansion@` units on 136 are disabled and must stay so.
 
-## 3. Pins: the v2.1 build and what stays
+## 3. Pins
 
-### 3.1 v2.1 artifacts (L2 commit `a39b04e4`, native 78d4921c, valid for the fa980367 fleet)
+### 3.1 The next build (build commit 17383fe)
 
-Built twice from fresh trees and fresh targets at the reference WORK path
-`/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2` (a bind mount in a private mount namespace).
-Both builds are byte-identical. Source: `45.77.142.123:~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/`.
+Build output on 209: `~/l2dexbridge-20261030/next-rpc-r4/rel4/work-a/out/` (identical copy in `work-b/out/`), six files.
 
-| Artifact | SHA-256 | v2 | Used by (phase) |
+| Artifact | SHA-256 | v2.1 | Used by |
 | --- | --- | --- | --- |
-| `bloch-l2-native-follower` | `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a` | unchanged, byte-identical | follower A, follower B (P3), attestor hosts (P10) |
-| `bloch-l2-produce-dev` | `fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9` | **changed**, was `7c1cc62b…` (see below) | canonical DB init A/B (P3), settler release (P6), shadow (P7), replica rebuild B (P4), attestors (P10) |
-| `bloch-l2-settled-rpc` | `18be911a47f0ab8975e1f079c860adef08dfc43c4b5062eca7b040e2e6eee83f` | **changed**, was `4fc9fa1e…` | RPC A, RPC B (P4) |
-| `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | unchanged | shadow (P7) |
-| `build.json` | `b12ed2b6d643896f98c2792663de0cdf6779f6a5b613a2168b51c79decc03cb4` | changed | check `l2_commit` `a39b04e4`, `l1_activation_epochs` 7180/7180/7186/7270×4/7360×3/8620 and `l2_tracked_changes: 0` |
-| `out/SHA256SUMS` | `c07531b7e92d05e356648815a43a8529ec15e6e2b30caaa856c0789ddc34da4b` | changed | Build output only. It is not in the release directory. `install.sh` checks the release `SHA256SUMS` below. |
-| release `SHA256SUMS` (signing target, D7) | `dded10b9b49a862d1b31f0667b945016b5da54e6c497eba123c42b32e0cd11f9` | changed | owner signature |
-| `NATIVE_LOCK` (settlement-recovery, 78d4921c) | `26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8` | unchanged | rebuilds. Committed as `deployment/mainnet/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock`, and `build-release.sh` refuses any other lock for this native commit. |
+| `bloch-l2-settled-rpc` | `e5754d05a1d6b217374a652d6959acf1fcd9323703d82226e07aa1d77a1754e8` | `18be911a…` | RPC A, RPC B (P4) |
+| `bloch-l2-native-follower` | `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2` | `c18752fd…` | followers (P3), attestors (P10) |
+| `bloch-l2-produce-dev` | `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69` | `fb0d5313…` | DB init, settler, shadow, replica, attestors |
+| `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | same | shadow (P7) |
+| `build.json` | `c745e7aae828b8213143bc8cc6c15e170d671a878768d6051c3e14d414382b10` | `b12ed2b6…` | check `l2_commit` 17383feb, `l2_tracked_changes: 0`, lock `a3c38a46…`, HF epochs |
+| `out/SHA256SUMS` | `1bad88bad33043200ceabfb0ac4438cf21b464c945167565cfd9ce0a0f58fb08` | | build output only; not in the release dir. `install.sh` checks the release `SHA256SUMS` |
+| Lock `settlement-recovery.native-78d4921c.Cargo.lock` | `a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9` | `26bf4453…` | rebuilds |
+| Release `SHA256SUMS` (signing target, D7) | `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` | `dded10b9…` | owner signature. BUILD-INFO `1aca646b…`, `release.json` `25ce440a…` |
 
-Why the producer hash changed: `reconstruct` now numbers follower blocks on the L2 registry's count. Before this fix, the first settled deposit made every rebuild fail with `Deposits`. A block built by `extend` is unchanged: v2 and v2.1 produce the same hash and state root for the same inputs (one comparison, an empty block on a synthetic anchor). The guest and the consensus code are not touched.
+To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.patch`, `build-release.sh` at the WORK path `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2`.
 
-To reproduce: check out L2 `a39b04e435b11bd2316dffe94d78df0163153c56`, native 78d4921c and reth 8eb21017 plus
-`reth-snapshot.patch`, then run `build-release.sh` at the WORK path above. A different WORK path gives
-different hashes, because cargo hashes the absolute paths of the native path dependencies.
+### 3.2 Kit files at 9645efc
 
-### 3.2 Pins that do not change (the HF forks do not touch the guest, the proof or the settlement format)
+| File | SHA-256 |
+| --- | --- |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `442beec339f88574af4245ec1733bc84ba10256c561aa5ca3f63fdc847d0de52` |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `f668ecec63600f74ad0cfb37fef077455bf1aaafeadd4195592a0e3fd04f4697` |
+| `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
+| `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
+| `deployment/mainnet/install-settler-mainnet.py` | `0fefcbf47092f3383538a9db6e17cd44a5526c2bf50d89794fcbd749198b9215` |
+| `deployment/mainnet/l2_reorg_recover.py` | `7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57` (the settler installer pins it) |
+| `deployment/mainnet/prover/install-prover-mainnet.py` | `d022527d9d2d18b344ac0ec8be9f471ba73848a828993db78d4fe877b598baf8` |
+| `deployment/devnet/remote_prover.py` | `ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
+| `deployment/devnet/settler_v3.py` | `8861b0bc3578b29dcc6306138cb4fdc46dce42935ac721bfbc80cd5eff5bcf97` |
+| `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
+| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `24aa5cb8d76e5fc8ff926bd49a21497635959c032783fbfdeee38dd2917aac48` (`LimitNOFILE=65536`) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `ab24bda0770a1e196f8ffe4340e46520c81f2dd891dd4b1413b6bbec9bee0780` |
+| `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
+| `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
+| `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
 
-The L2 source the guest compiles from has no diff against v2.
+`GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the build's `out/SHA256SUMS` (`1bad88ba…`), not the release `SHA256SUMS` `116bfaba…`. P2 stages the release, so that one line fails by design and P2 checks it separately. A kit commit should move it.
 
-| Item | Value | Used by |
-| --- | --- | --- |
-| Guest `settlement_v3_mainnet` | `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473` | settler, prover |
-| Proof policy V3 | `154869964f…747d` | settler dry-run report |
-| SP1 host `bloch-evm-sp1-settlement-v3` | `3a24c36d…973a` (the settler-v2 staging on 136). The file hash depends on the build path and is not the pin; the identity is. Earlier builds `617d191f…86b3` and `505500af…aa07` print the same `--mainnet identity` (ELF keccak `6e4c8440…`, vkeys `389cfbde…` / `007139f7…`). | settler, prover |
-| `remote_prover.py` | `ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a` (**the kit**, agent 93's prover settings on top of `3c11d9be…`, which already stops the prover on client disconnect. The v2 tree and the 10-19 staging hold the old `99bbc1bc…`, which must not be used) | prover |
-| `settler_v3.py` | `3ddb260a1caaadb3f874d436282715900c640cb410a458ee94609ea1bf3fdfe4` (**the kit**; adds the local-proof limit and atomic state files. v2 `875f4cca…` and the settler-v2 staging on 136 must not be used) | settler |
-| Settler `bloch-pos` (DA key only) | `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e` (78d4921c; rebuilt with `--no-cache`, byte-identical). Enforced by `install-settler-mainnet.py`. | settler (D12) |
-| `mainnet.manifest` | `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd` | all |
-| `carryover.tsv.gz` / `carryover.tsv` | `4d1e2738baec39ec25e2e33968f72a47abb261f271de62fb48a33be55bfc83be` / `84ddbbac2afdd5c78618096a7d4f66cf5b04a3e5757a03fe90550e50096183f6` | followers, attestors |
-| `l2-config.bin` | 264 B, `292f4fa8…4f6b` (derived in code) | settler |
-| gnark image | `ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d` | prover, settler fallback |
-| SP1 circuits v6.1.0 | `groth16_vk.bin` `4388a21c…e696` (7.9 GB tree on 136) | prover, settler fallback |
-| L2 genesis / state root | `632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468` / `2ad7e807…c05d` | all |
-| Network pin / domain | `f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966` / `1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733` | all |
-| Attestor set | `1c06adbb…cc4b` (3-of-5); set file `9bb94e333f76de0c726d4d3ae7f619b447b41def18b01615b51ac1261d13cde0` | attestors |
-| Attestor `bloch-pos` (signing only) | Linux build of bloch-sis-pow `codex/l2-attestor-keystore-20261019` e7d2c8b2. The rehearsal binary was `093909a2…`. The production hash is `TBD-owner` (recorded at build). | attestors |
+### 3.3 Pins that do not change
 
-### 3.3 Kit gaps found while writing this plan
+As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473`; proof policy `154869964f…747d`; SP1 host `bloch-evm-sp1-settlement-v3` `3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a`; settler `bloch-pos` `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e`; `mainnet.manifest` `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd`; `carryover.tsv.gz` `4d1e2738baec39ec25e2e33968f72a47abb261f271de62fb48a33be55bfc83be`; gnark image `sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d`; SP1 circuits v6.1.0; L2 genesis `632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468`; network pin `f47d3e49…1966`; domain `1c3f8772…0733`; attestor set `1c06adbb…cc4b` (3-of-5); attestor `bloch-pos` `093909a2…` (rehearsal; production hash `TBD-OWNER`).
 
-| # | Gap | Effect | Fix | Phase |
-| --- | --- | --- | --- | --- |
-| K1 | **Closed in v2.1.** `install-shadow.sh` pinned the pre-HF RC producer `192eda33…`. | It now pins the v2.1 producer, and `--verify` also checks `SHA256SUMS` and `build.json` (commit, native, lock, genesis, gates). | Stage the kit from this branch. | P7 |
-| K2 | **Closed in v2.1.** The attestor agent did not pin the follower binary (report 06). | `config.json` now carries `follower_sha256`, the agent checks it, and `install-attestor.sh upgrade` covers older configs. | Stage the kit from this branch. | P10 |
-| K4 | `install.sh` prints "~155k blocks, 30–40 min" | Cosmetic. The real figure is in §2. | none | P3 |
-| K5 | Replica B advances only by a manual `reconstruct`. `deployment/mainnet/replica/` has a refresh timer, but it serves port 18965 and the gateway reads 18955, so it is not used on B (§2) | B drops out of the gateway rotation when it is more than 16 blocks behind A. It never serves wrong data. | Run the P4 refresh after each finalized settlement until a timer exists. | P4, P11 |
-| K6 | **Closed in v2.1.** The 8 `tests/ffg_recovery.rs` failures were stale fixtures, not a follower bug: the native genesis commitment changed, and the settlement wire tag moved from 0x0E to 0x12. | Fixtures regenerated against 78d4921c with a real proof. All 8 pass, and settlement-recovery passes 67 of 67. No library or follower code changed. The legacy WS-checkpoint store fails closed on current chains, the release follower does not use it, and it is retired (owner decision). | none | P6 |
-| K10 | **Closed on the kit branch, §3.5.** `install-settler-mainnet.py` `16aba9b6…` called `runuser` with `PATH=/usr/bin:/bin`, so `configure` and `dry-run` failed on Ubuntu 24.04, with `config.json` already written. | The installer uses `/usr/sbin/runuser` and writes `config.json` only after its checks pass. | Stage the kit from the kit branch. | P6 |
-| K11 | **Closed on the kit branch, §3.5.** The staging `release-prover/` holds `remote_prover.py` `99bbc1bc…` with a passing `SHA256SUMS`. | The prover installer pins the file, and P5 checks against `GO-LIVE-PINS-PROVER.sha256`. | P5. | P5 |
-| K7 | `docs/L2-HARD-FORK-OPERATOR-STEPS.md` §4.2 step 2 still says to pin the compat-branch DA signer | Wrong for 78d4921c (report 05). | Follow D12. | P12 |
-| K8 | The per-transaction gas limit in the settled RPC is a constant, 15,000,000, equal to the settler's `max_block_gas` | If `max_block_gas` is lowered without changing the constant, the spool squat reopens below it. | Do not lower `max_block_gas` without a new settled-RPC build. | P12 |
-| K9 | A settler `extend` over a maximal spool needs about 1.5 GB RSS for about 5 s | Only relevant with user transactions on; the unit cap of 32 G covers it. | Keep it in mind when sizing a separate settler host. | P12 |
+**Do not use:** any v2.1 binary (`18be911a…`, `c18752fd…`, `fb0d5313…`) with this kit; the superseded next candidates `d49bcb88…` (72ed5bd), `87aa896f…`, `6052d4bb…`; `remote_prover.py` `99bbc1bc…` or `3c11d9be…`; the staging `release-prover/` and its installer `ed9a001d…`; `settler_v3.py` `3ddb260a…`, `8589d5e2…`, `4059d3a6…`, `0ad4900f…`; produce-dev `7c1cc62b…`; anything built from 724bf4c; the 10-19 runbooks and staging binaries.
 
-### 3.5 Which pins move for the kit fixes
+### 3.4 Known gaps and residual risks of this build
 
-Kit files only. **The signing target `dded10b9…` does not move**: the release `SHA256SUMS` lists BUILD-INFO, the three binaries, `build.json`, `release.json`, the sequencer and the lock, and no installer or kit file. `build.json`, `out/SHA256SUMS`, the guest, the identity and the build commit `a39b04e` do not move either.
-
-| File | From | To | Why |
+| # | Item | Effect | What to do |
 | --- | --- | --- | --- |
-| `install-settler-mainnet.py` | `16aba9b60c1de6e71869bf90d4f3ab2e53132a64f11bbc5b27d86811fab8e37e` | `ce9ddc01742c497a6786bcdd89935cc5a2b2546aa93ee3250ad9cbd79c68c311` | `runuser` path, configure retry, installs and pins the reorg tool; remote prover timeout 5,700 s |
-| `prover/install-prover-mainnet.py` | `f0b847260e236527c13556bde2aa0b2955f20cd31e0a6b36d4bfaddf81434482` | `d022527d9d2d18b344ac0ec8be9f471ba73848a828993db78d4fe877b598baf8` | pins `remote_prover.py`; defaults `--threads 32`, `ELEMENT_THRESHOLD=268435456`, 5,400 s (agent 93) |
-| `remote_prover.py` | `3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5` | `ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a` | passes the allowed SP1 settings (`prover_env`) and the proof limit (9af3549) |
-| `l2_reorg_recover.py` | `d688e59fa61c93294f60778e2e9e19a6445c8f6f1ceb05bc03e327bbca645623` | `678482bfcd3c782b4b6dee2295572c283992f0e1927ea28393a11c1f6aec98b2` | stdout is exactly one JSON document |
-
-New kit files, with no earlier pin: `l1_finality_history.py` (G0), `GO-LIVE-PINS.sha256`, `GO-LIVE-PINS-PROVER.sha256`.
-
-### 3.4 Residual risks the go/no-go checks cover
-
-- **R1. Real post-fork blocks.** No v2 follower has yet verified blocks produced under HF1/HF2/HF3. The
-  forced-gate qualification could not cross real history. The **first real proof is P3**: a fresh
-  replay after G0 crosses e7180, e7270 and e7360 on mainnet. Any halt there is an absolute no-go.
-- **User transactions stay off (D10) until both of these are done:**
-  - **Gas-heavy 15M blocks are unmeasured.** Every sizing number above is for transfers. `max_block_txs`
-    does not bound cost: 5 contract transactions cost as much as about 30 transfers. Measure instructions
-    for a real 15M-gas block with an execute-only run first.
-  - **Stuck-block recovery is not rehearsed.** A block is committed before its proof. If the proof runs out
-    of memory, the settler retries the same block and restarts indefinitely; settlement, deposits and
-    withdrawals stop until an operator acts. No path shrinks or replaces a committed block. Rehearse
-    proving a stuck block on a bigger machine and returning it to the settler.
-- **R2. The DA signature after HF2** (relevant only when user transactions are enabled). The analysis
-  says a v1 DA signature from the 78b7343a/78d4921c signer stays valid (`CompatiblePinned`). That was
-  inferred from code, not tested. Before D10, rehearse one 0x15 on a **private** network running a
-  78d4921c node with the gates forced into the past. Build it from a fresh build context and check
-  that its `source_digest` differs from `35c2b943…`.
+| K5 | Replica B advances only by a manual `reconstruct` | B leaves the gateway rotation when > 16 blocks behind; never serves wrong data | Run the P4 refresh after each finalized settlement |
+| K8 | Per-transaction gas limit is a constant 15M, equal to `max_block_gas` | Lowering `max_block_gas` alone reopens the spool squat | Do not lower it without a new RPC build |
+| K12 | `spool-step-restart` residual (report 62) | After a restart under a wrong clock, held spool entries expire; users resend. No funds move | Accept; keep host clocks on NTP |
+| K13 | F5 (agent 121): held nonce-gap entries count as demand, so every cycle is due (5 of 5 on 17383fe) | Needs both `skip_idle_blocks` and user transactions. Junk in the spool forces blocks | **The deposit-only launch keeps idle blocks on and user transactions off. User transactions stay off until F5 is fixed**; turning idle blocks off instead gives up the height protection of D15 |
+| K14 | Agent 118's required-tip file | `--required-tip-file` is inert: nothing writes it, no unit passes it. The gateway commits 3de3a3e and 51cbda1 are in this kit | None at launch |
+| K15 | Two low findings of agent 124 on DA re-sign and paid-batch reuse | Worst case one extra DA fee | Only with D10 |
+| R1 | First real crossing of HF1–HF3 by this follower | Any halt in P3 is an absolute NO-GO | P3 |
+| R2 | DA signature after HF2 | Untested; inferred from code | Rehearse one 0x15 on a private net before D10 |
+| R3 | Gas-heavy 15M blocks unmeasured; stuck-block recovery not rehearsed | A proof that OOMs makes the settler retry the same committed block forever | Before D10 |
+| R4 | Statement and block-1 references of P6 were measured on v2.1 (`fb0d5313…`) | Expected equal (no execution rule changed, agent 124) but not re-measured on `e3f1a290…` | A difference is NO-GO until explained |
 
 ## 4. G0: HF3 finalized cleanly (entry gate for everything below)
 
@@ -259,18 +190,18 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
    Heights within 3 blocks.
 3. No finality stall since e7180. Run the command below against each of the three nodes. It reads every finished epoch's last block header and the block its `finalized_root` names. It takes one call per epoch or more. GO on exit 0 with `"ok": true`, `empty_epochs` empty and `over_limit` empty. Header lag reads higher than the lag of gate 2: a healthy private net read 3 to 4 where `getchaininfo` read 2, so the default limit is 5. Any epoch at 5 or near it deserves a look. An epoch with no block at all is reported in `empty_epochs` and fails the gate.
 4. No L1 release after fa980367 changed a crate the L2 links (see `L2-HARD-FORK-OPERATOR-STEPS.md`
-   §0). If one did, rebuild the L2 against it first: NO-GO with v2.1.
+   §0). If one did, rebuild the L2 against it first: NO-GO with this build.
 5. `getl2settlement`: `accepted` = `null`, source height 1, slot 187200, `profile.activated` true.
    Record `inbox` (expected `count` 0, `consumed` 0, `escrow_sat` "0"). If deposits arrived in the meantime, L2 block 1 will differ from
    `0ff59c11…ab25` and the P6 dry-run reference changes accordingly.
-6. D1, D2, D3, D4, D13 and D7 are decided, and the v2.1 release is signed.
-7. The items that block go-live in the owner's guide (`GO-LIVE-L2-PT.md` §1) have a result: the settlement-reorg procedure has been trained, and real proofs per height exist to set the cadence. If one required a binary change, the signing target changed: stop and re-pin first.
+6. D1, D2, D3, D4, D7, D13, D15, D16 and D17 are decided, and release `SHA256SUMS` `116bfaba…` is signed.
+7. The items that block go-live in the owner's guide (`GO-LIVE-L2-PT.md` §1) have a result. If one required a binary change, the build and the signing target changed: stop and re-pin first (`agents/PINS-NEXT.md` change notices).
 
 **NO-GO:** any HF entry not active, a finality lag > 3, nodes on different finalized roots, or an L1
 hotfix pending. Wait, and re-run G0.
 
 ```
-python3 ~/worktrees/go-live-fixes-r4-20261101/deployment/mainnet/l1_finality_history.py --rpc http://80.240.16.185:8080 --from-epoch 7180
+python3 ~/worktrees/go-live-next-r7-20261102/deployment/mainnet/l1_finality_history.py --rpc http://80.240.16.185:8080 --from-epoch 7180
 ```
 
 Rollback: nothing is installed yet.
@@ -293,78 +224,75 @@ is `e1a1cd62…`. B: ≥ 4 vCPU, ≥ 8 GB, ≥ 80 GB free.
 
 Rollback: none needed.
 
-## P2. Stage and verify the v2.1 release (no install)
+## P2. Stage and verify the build (no install)
 
-1. Owner signs the release `SHA256SUMS` (D7) and keeps the `.minisig` with the release dir. After the copy in step 2, verify it on A with `minisign -Vm /home/ubuntu/l2-golive-v2/artifacts/SHA256SUMS -P <owner public key>`, and confirm that `sha256sum SHA256SUMS` prints `dded10b9…`. `minisign` is not installed by default.
-2. Stage on A, from the Mac. Each command is one block.
-
-```
-ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkdir -p l2-golive-v2/artifacts l2-golive-v2/release-settler-v2
-```
+1. The owner signs the release `SHA256SUMS` (D7) and keeps the `.minisig` with the release dir. After the copy, verify on A with `minisign -Vm /home/ubuntu/l2-golive-next/artifacts/SHA256SUMS -P <owner public key>`, and confirm that `sha256sum SHA256SUMS` prints `116bfaba…`.
+2. Stage on A, from the Mac. Each command is one block. The release comes from 209 (identical copy on 136); `manifest` and `carryover` from 45.77 as before.
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-v2/artifacts/
+ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkdir -p l2-golive-next/artifacts l2-golive-next/release-settler-v2
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@136.244.93.186:l2-golive-v2/artifacts/
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@209.250.236.240:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-next/artifacts/
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/mainnet ubuntu@136.244.93.186:l2-golive-v2/kit
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@136.244.93.186:l2-golive-next/artifacts/
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-v2/release-settler-v2/
-```
-
-`scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-v2/kit` first. The kit copy takes about 4 minutes over a long link.
-
-Stage B the same way (D3, layout in §2). `B` below stands for its IP. Run the `mkdir`, the two `scp -3` and the kit `scp -r` with `ubuntu@B` as the destination, and check on B, which holds no settler directory:
-
-```
-cd /home/ubuntu/l2-golive-v2 && grep ' artifacts/' kit/GO-LIVE-PINS.sha256 | sha256sum -c
-```
-
-3. On A, check the release and assemble the settler release dir. `bloch-l2-produce-dev`, the kit
-   installer and the settler come from this release. The guest, the SP1 host and the 78d4921c
-   `bloch-pos` come from the settler-v2 staging on 136. The 10-19 staging is not usable: the installer
-   refuses its `bloch-pos`.
-
-```
-cd /home/ubuntu/l2-golive-v2/artifacts && sha256sum -c --ignore-missing SHA256SUMS
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/mainnet ubuntu@136.244.93.186:l2-golive-next/kit
 ```
 
 ```
-cp /home/ubuntu/l2-golive-v2/artifacts/bloch-l2-produce-dev /home/ubuntu/l2-golive-v2/artifacts/mainnet.manifest /home/ubuntu/l2-golive-v2/kit/install-settler-mainnet.py /home/ubuntu/l2-golive-v2/kit/l2_reorg_recover.py /home/ubuntu/l2-golive-v2/release-settler-v2/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-next/release-settler-v2/
+```
+
+`scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 209 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
+
+Stage B the same way (D3, layout in §2), with `ubuntu@B` as the destination, and check on B:
+
+```
+cd /home/ubuntu/l2-golive-next && grep ' artifacts/' kit/GO-LIVE-PINS.sha256 | grep -v ' artifacts/SHA256SUMS$' | sha256sum -c && sha256sum artifacts/SHA256SUMS
+```
+
+3. On A, check the build and assemble the settler release dir. The guest, the SP1 host and the 78d4921c `bloch-pos` still come from the settler-v2 staging on 136.
+
+```
+cd /home/ubuntu/l2-golive-next/artifacts && sha256sum -c --strict SHA256SUMS
 ```
 
 ```
-cp /home/ubuntu/l2dexbridge-20261030/settler-v2/release-settler/bloch-evm-sp1-settlement-v3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-settler/settlement_v3_mainnet /home/ubuntu/l2dexbridge-20261030/settler-v2/release-settler/bloch-pos /home/ubuntu/l2-golive-v2/release-settler-v2/
+cp /home/ubuntu/l2-golive-next/artifacts/bloch-l2-produce-dev /home/ubuntu/l2-golive-next/artifacts/mainnet.manifest /home/ubuntu/l2-golive-next/kit/install-settler-mainnet.py /home/ubuntu/l2-golive-next/kit/l2_reorg_recover.py /home/ubuntu/l2-golive-next/release-settler-v2/
 ```
 
 ```
-cd /home/ubuntu/l2-golive-v2 && sha256sum -c kit/GO-LIVE-PINS.sha256
+cp /home/ubuntu/l2dexbridge-20261030/settler-v2/release-settler/bloch-evm-sp1-settlement-v3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-settler/settlement_v3_mainnet /home/ubuntu/l2dexbridge-20261030/settler-v2/release-settler/bloch-pos /home/ubuntu/l2-golive-next/release-settler-v2/
 ```
 
 ```
-bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --verify /home/ubuntu/l2-golive-v2/artifacts
+cd /home/ubuntu/l2-golive-next && sha256sum kit/GO-LIVE-PINS.sha256 artifacts/SHA256SUMS && grep -v ' artifacts/SHA256SUMS$' kit/GO-LIVE-PINS.sha256 | sha256sum -c
+```
+
+```
+bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-golive-next/artifacts
 ```
 
 **GO when:**
 
-- `SHA256SUMS` is OK.
-- `install-shadow.sh --verify` prints `verify OK`.
-- `sha256sum -c kit/GO-LIVE-PINS.sha256` exits 0 with every line `OK`. Those are the §3.1, §3.2 and §3.5 pins, in full. Before trusting the file, compare it: `sha256sum kit/GO-LIVE-PINS.sha256` must be `044b116a2334b3fa76f93675f43c26448162a3603cc1aeff69fa78820824a120`.
-- `artifacts/build.json` shows `l2_commit` `a39b04e4`, `l2_tracked_changes: 0` and the HF epochs.
+- `SHA256SUMS` is OK;
+- `kit/GO-LIVE-PINS.sha256` hashes to `442beec339f88574af4245ec1733bc84ba10256c561aa5ca3f63fdc847d0de52`, `artifacts/SHA256SUMS` to `116bfaba…`, and every other pin line is `OK`;
+- `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
+- `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
-**NO-GO:** any mismatch. Re-copy from the build host. Never use `~/l2-mainnet-install-20261019/out-release`
-or `release-settler/bloch-l2-produce-dev` (`3736860e…`, pre-HF), and never `4fc9fa1e…` (the settled RPC
-with the spool squat).
+**NO-GO:** any mismatch. `install-shadow.sh --verify` refuses 72ed5bd's output and every v2.1 artifact by design.
 
-Rollback: `rm -rf /home/ubuntu/l2-golive-v2` on A.
+Rollback: `rm -rf /home/ubuntu/l2-golive-next` on A.
 
 ## P3. Follower A and follower B (first real crossing of HF1–HF3, R1)
+
+**Status schema.** Keep the follower on schema v2 (the unit default `BLOCH_L2_STATUS_SCHEMA=v2`) for the launch. Readers of the status (the settled RPC, attestors, the replica tools, bridge signers on other branches) must be upgraded **before** any follower writes v3: a v2.1 RPC on a v3 status closes `safe`/`finalized` (agent 76). The order, each step safe to stop at: (1) next RPC on every host that serves the status; (2) readers on that host; (3) the new follower binary, still v2; (4) `BLOCH_L2_STATUS_SCHEMA=v3` in `/etc/bloch-l2-mainnet/follower.env` and a restart, one host at a time. Going back is a restart with v2. On a fresh install all hosts already run this build, so (1)–(3) hold; do (4) only after the bridge signers read v3.
 
 ### A (136)
 
@@ -376,7 +304,7 @@ up as in P6.
 2. Canonical DB at the pinned genesis:
 
 ```
-sudo install -D -m 0755 /home/ubuntu/l2-golive-v2/artifacts/bloch-l2-produce-dev /opt/bloch/l2-mainnet-tools/bloch-l2-produce-dev
+sudo install -D -m 0755 /home/ubuntu/l2-golive-next/artifacts/bloch-l2-produce-dev /opt/bloch/l2-mainnet-tools/bloch-l2-produce-dev
 ```
 
 ```
@@ -392,7 +320,7 @@ sudo runuser -u bloch-l2-mainnet-settler -- /opt/bloch/l2-mainnet-tools/bloch-l2
 3. Install the units: dry-run first, then the same command without `--dry-run`.
 
 ```
-sudo bash /home/ubuntu/l2-golive-v2/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-v2/artifacts --l1-rpc-url http://80.240.16.185:8080 --canonical /var/lib/bloch-l2-mainnet-settler/canonical --canonical-user bloch-l2-mainnet-settler --txpool /var/lib/bloch-l2-mainnet-settler/txpool --dry-run
+sudo bash /home/ubuntu/l2-golive-next/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-next/artifacts --l1-rpc-url http://80.240.16.185:8080 --canonical /var/lib/bloch-l2-mainnet-settler/canonical --canonical-user bloch-l2-mainnet-settler --txpool /var/lib/bloch-l2-mainnet-settler/txpool --dry-run
 ```
 
 4. Keep RPC A without the txpool until D10. Create the drop-in:
@@ -428,7 +356,7 @@ sudo install -d -m 0700 -o bloch-l2-mainnet-replica -g bloch-l2-mainnet-replica 
 ```
 
 ```
-sudo install -D -m 0755 /home/ubuntu/l2-golive-v2/artifacts/bloch-l2-produce-dev /opt/bloch/l2-mainnet-tools/bloch-l2-produce-dev
+sudo install -D -m 0755 /home/ubuntu/l2-golive-next/artifacts/bloch-l2-produce-dev /opt/bloch/l2-mainnet-tools/bloch-l2-produce-dev
 ```
 
 ```
@@ -438,7 +366,7 @@ sudo runuser -u bloch-l2-mainnet-replica -- /opt/bloch/l2-mainnet-tools/bloch-l2
 Dry-run first, then the same command without `--dry-run`:
 
 ```
-sudo bash /home/ubuntu/l2-golive-v2/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-v2/artifacts --l1-rpc-url http://199.247.22.8:8080 --canonical /var/lib/bloch-l2-mainnet-replica/canonical --canonical-user bloch-l2-mainnet-replica --txpool /var/lib/bloch-l2-mainnet-replica/txpool --dry-run
+sudo bash /home/ubuntu/l2-golive-next/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-next/artifacts --l1-rpc-url http://199.247.22.8:8080 --canonical /var/lib/bloch-l2-mainnet-replica/canonical --canonical-user bloch-l2-mainnet-replica --txpool /var/lib/bloch-l2-mainnet-replica/txpool --dry-run
 ```
 
 ```
@@ -458,6 +386,8 @@ sudo systemctl enable --now bloch-l2-mainnet-follower
 ```
 
 **Do not** seed B from the 10-18 scratch state. It replays from zero, so that A and B verify the forks independently.
+
+The no-txpool drop-in replaces only `ExecStart`; the unit's `LimitNOFILE=65536` stays. `install.sh` prints a hint to enable `bloch-l2-mainnet-rpc-restart.path`: **do not enable it** until `foreign_recovery` is on (D17, P12 step 2).
 
 ### Go / no-go (both hosts, after about 65–80 min)
 
@@ -504,12 +434,19 @@ curl -s -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc
 curl -s -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"bloch_finality","params":[]}'
 ```
 
+```
+curl -s -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"bloch_getWithdrawalProof","params":[0]}'
+```
+
 GO when:
 
 - `eth_chainId` is `0xab162`;
 - `finalized` and `safe` are block 0, `0x632e45ae…f468`;
 - `bloch_finality` shows `l2_genesis.finalized: true` with activation `618c9b80…` at slot 187200, and `status.state: ok` with a small `age_s`;
-- `systemctl show -p ExecStart bloch-l2-mainnet-rpc` has no `--txpool`.
+- `systemctl show -p ExecStart bloch-l2-mainnet-rpc` has no `--txpool`;
+- `systemctl show -p LimitNOFILE bloch-l2-mainnet-rpc` is `65536` (at 1024, about 1,000 idle connections close finality, agent 65);
+- `bloch_finality.status.schema` is `v2`;
+- `bloch_getWithdrawalProof` answers (an error about the missing withdrawal, not -32601).
 
 NO-GO: `safe`/`finalized` `null` after the follower is ready, or a wrong chain id.
 
@@ -542,19 +479,19 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 **Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `ba309912…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-v2/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-next-r7-20261102/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-next/
 ```
 
 ```
-mkdir -p /home/ubuntu/l2-golive-v2/release-prover-v2
+mkdir -p /home/ubuntu/l2-golive-next/release-prover-v2
 ```
 
 ```
-cp /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/bloch-evm-sp1-settlement-v3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/settlement_v3_mainnet /home/ubuntu/l2-golive-v2/kit/prover/install-prover-mainnet.py /home/ubuntu/l2-golive-v2/remote_prover.py /home/ubuntu/l2-golive-v2/release-prover-v2/
+cp /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/bloch-evm-sp1-settlement-v3 /home/ubuntu/l2dexbridge-20261030/settler-v2/release-prover/settlement_v3_mainnet /home/ubuntu/l2-golive-next/kit/prover/install-prover-mainnet.py /home/ubuntu/l2-golive-next/remote_prover.py /home/ubuntu/l2-golive-next/release-prover-v2/
 ```
 
 ```
-cd /home/ubuntu/l2-golive-v2 && sha256sum -c kit/GO-LIVE-PINS-PROVER.sha256 && cd release-prover-v2 && sha256sum bloch-evm-sp1-settlement-v3 settlement_v3_mainnet remote_prover.py > SHA256SUMS
+cd /home/ubuntu/l2-golive-next && sha256sum -c kit/GO-LIVE-PINS-PROVER.sha256 && cd release-prover-v2 && sha256sum bloch-evm-sp1-settlement-v3 settlement_v3_mainnet remote_prover.py > SHA256SUMS
 ```
 
 GO only if that exits 0 with four `OK` lines. `SHA256SUMS` is written only after they pass. On any `FAILED`: NO-GO, and do not write `SHA256SUMS` by hand.
@@ -563,7 +500,7 @@ Install after the settler `configure` (P6 step 2) has created the settler SSH ke
 command without `--dry-run`:
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.py install --settler-pubkey /var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519.pub --settler-host 127.0.0.1 --circuits /home/ubuntu/l2-mainnet-install-20261019/circuits --memory-gib 100 --threads 32 --prover-env ELEMENT_THRESHOLD=268435456 --timeout-seconds 5400 --dry-run
+sudo python3 /home/ubuntu/l2-golive-next/release-prover-v2/install-prover-mainnet.py install --settler-pubkey /var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519.pub --settler-host 127.0.0.1 --circuits /home/ubuntu/l2-mainnet-install-20261019/circuits --memory-gib 100 --threads 32 --prover-env ELEMENT_THRESHOLD=268435456 --timeout-seconds 5400 --dry-run
 ```
 
 GO when:
@@ -578,7 +515,7 @@ NO-GO: an identity mismatch, `remote_prover.py is … not the pinned …`, or Me
 Rollback (refuses while a proof runs):
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.py rollback
+sudo python3 /home/ubuntu/l2-golive-next/release-prover-v2/install-prover-mainnet.py rollback
 ```
 
 ## P6. Settler: prepare, configure, dry-run, then dry-run with the proof
@@ -586,7 +523,7 @@ sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.
 1. **prepare** (local only; creates the DA key; done during P3):
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainnet.py prepare --release /home/ubuntu/l2-golive-v2/release-settler-v2
+sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py prepare --release /home/ubuntu/l2-golive-next/release-settler-v2
 ```
 
    Record `da_funding_script_hash`. Back up the DA keystore and the passphrase **separately**. Each `gpg` asks for a
@@ -625,21 +562,29 @@ sudo chown -R bloch-l2-mainnet-settler:bloch-l2-mainnet-settler /var/lib/bloch-l
    `rollback` does not undo it, so inspect what it created before you remove anything. Never remove a DA keystore that may already hold funds.
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainnet.py configure --prover-threads 6 --remote-prover bloch-l2-prover-mainnet@127.0.0.1 --prover-host-key /etc/ssh/ssh_host_ed25519_key.pub
+sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py configure --prover-threads 6 --remote-prover bloch-l2-prover-mainnet@127.0.0.1 --prover-host-key /etc/ssh/ssh_host_ed25519_key.pub --skip-idle-blocks --max-idle-seconds 86400 --min-block-interval 1800
 ```
+
+   This is D15. Leave out `--follower-state` and `--follower-status` (D17: foreign recovery off). `configure` runs once, so check the result before going on:
+
+```
+sudo python3 -c "import json;c=json.load(open('/etc/bloch-l2-mainnet-settler/config.json'));print(c.get('skip_idle_blocks'),c.get('max_idle_seconds'),c.get('min_block_interval_seconds'),c['user_transactions'],'foreign_recovery' in c,c['remote_prover']['timeout_seconds'])"
+```
+
+   GO: `True 86400 1800 False False 5700`. The flags are covered by the installer and settler unit tests; this exact command line was not run on a container.
 
    GO (the state root is in `dry-run-*/work/*/block.json`, not in the printed report):
    - the last line is `{"configured": "/etc/bloch-l2-mainnet-settler/config.json"}`;
    - `rpc-check` `ok: true` (3/3 same view, quorum 2);
    - dry-run `ok: true`, identity checked (mainnet, async, activated, attestor set);
    - with an empty inbox: L2 block 1 = `0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab25`,
-     state root `8a1c475a…136c`, SP1 execute matched.
+     state root `8a1c475a…136c`, SP1 execute matched. These references were measured with v2.1's producer (R4).
 
 3. Then P5 (prover install), then **dry-run with the Groth16 proof** (about 5–15 min for this empty block, about
    20 GiB prover RSS plus 18.5 GiB gnark):
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainnet.py dry-run --prove
+sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py dry-run --prove
 ```
 
 ```
@@ -679,7 +624,7 @@ The shadow rebuilds every block the settler produces and halts (exit 3) on any d
 proof reaches L1. That is why it goes **before** P8, although the original order listed it later.
 
 ```
-sudo bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh /home/ubuntu/l2-golive-v2/artifacts --start
+sudo bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh /home/ubuntu/l2-golive-next/artifacts --start
 ```
 
 GO:
@@ -698,7 +643,7 @@ NO-GO: a pin refusal (wrong release or kit) or a check failure.
 Rollback:
 
 ```
-sudo bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --rollback
+sudo bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --rollback
 ```
 
 Reinstall after P8, and repair after `l2_reorg_recover.py --apply`: run the rollback above, then the install command of this phase again. Once a settlement is accepted, `install-shadow.sh` no longer creates its database at genesis: it rebuilds it from L1 with `produce reconstruct --l1-follower` over the local follower, so its head is the accepted settlement and `check` passes. The follower must have reached that settlement. Its old data is kept as `*.rollback-<time>`.
@@ -709,15 +654,15 @@ Preconditions: P3 to P7 all GO on the same day. G0 re-checked within the last ho
 exists anywhere.
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-settler-v2/install-settler-mainnet.py start --confirm-mainnet
+sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py start --confirm-mainnet
 ```
 
 ```
 journalctl -u bloch-l2-mainnet-settler.service -f -o cat
 ```
 
-Expected, in order: `identity-checked` (mainnet true), `l2-block-produced` 1, `proof-generated`,
-`remote-proof` with exit code 0, `transaction-built`, `submitted`, `accepted`. The worker then starts block 2 at once.
+Expected, in order: `identity-checked` (mainnet true), `idle-end` with reason `max-idle` (the activation source is far older than 24 h), `l2-block-produced` 1, `proof-generated`,
+`remote-proof` with exit code 0, `transaction-built`, `submitted`, `accepted`. With D15 the worker does **not** start block 2 at once: it logs `idle-hold` (at most hourly) until a deposit arrives, 24 h pass, and in any case at least 30 min after the acceptance. When scripting waits on this journal, filter with `--since` the last restart: after a reorg an old `accepted` event of the same number matches (agent 86, G10).
 
 Independent check, on each of the three RPCs:
 
@@ -754,7 +699,7 @@ sudo useradd --system --user-group --no-create-home --home-dir /var/lib/bloch-l2
 ```
 
 ```
-sudo install -D -m 0644 /home/ubuntu/l2-golive-v2/kit/l2_monitor.py /opt/bloch/l2-monitor/l2_monitor.py
+sudo install -D -m 0644 /home/ubuntu/l2-golive-next/kit/l2_monitor.py /opt/bloch/l2-monitor/l2_monitor.py
 ```
 
 ```
@@ -762,17 +707,19 @@ sudo install -d -m 0755 /etc/bloch-l2-monitor
 ```
 
 ```
-sed -e 's/--phase prelaunch/--phase live/' -e 's# --l2-rpc B=http://TBD-owner:18955##' /home/ubuntu/l2-golive-v2/kit/monitor/monitor.env.example | sudo tee /etc/bloch-l2-monitor/monitor.env
+sed -e 's/--phase prelaunch/--phase live/' -e 's# --l2-rpc B=http://TBD-owner:18955##' -e 's#$# --max-idle-seconds 86400 --backlog-state /var/lib/bloch-l2-monitor/backlog.json --set block_interval_seconds=1800#' /home/ubuntu/l2-golive-next/kit/monitor/monitor.env.example | sudo tee /etc/bloch-l2-monitor/monitor.env
 ```
 
-Write the D11 targets into `/etc/bloch-l2-monitor/alert.json`, starting from `kit/monitor/alert.json.example`. Until D11 is decided, use the example unchanged: alerts are not delivered and the WARN `alert_delivery` is expected.
+The added flags are D15 and D16: `--max-idle-seconds` adds the idle allowance to the age checks and needs `--backlog-state` for `deposit_wait`; `block_interval_seconds=1800` grades `l2_proof_cost` (WARN at 1,260 s, CRIT at 1,800 s). Add the D18 `--set` values the owner picks. The env example also carries `--report dex=…`: remove it if the DEX monitor does not run on A.
+
+**Alert destinations are `TBD-OWNER` (D11).** In `/etc/bloch-l2-monitor/alert.json` they are `webhook_url` (+ `webhook_bearer_file`), `telegram.bot_token_file` and `telegram.chat_id`, `alert_command`, and `heartbeat_url`; every one is `TBD-OWNER` in the example. Until D11 is decided, install the example unchanged: nothing is delivered and WARN `alert_delivery` is expected. Nobody but the owner fills these in.
 
 ```
-sudo install -m 0644 /home/ubuntu/l2-golive-v2/kit/monitor/alert.json.example /etc/bloch-l2-monitor/alert.json
+sudo install -m 0644 /home/ubuntu/l2-golive-next/kit/monitor/alert.json.example /etc/bloch-l2-monitor/alert.json
 ```
 
 ```
-sudo install -m 0644 /home/ubuntu/l2-golive-v2/kit/monitor/bloch-l2-mainnet-monitor.service /home/ubuntu/l2-golive-v2/kit/monitor/bloch-l2-mainnet-monitor.timer /etc/systemd/system/
+sudo install -m 0644 /home/ubuntu/l2-golive-next/kit/monitor/bloch-l2-mainnet-monitor.service /home/ubuntu/l2-golive-next/kit/monitor/bloch-l2-mainnet-monitor.timer /etc/systemd/system/
 ```
 
 ```
@@ -794,12 +741,12 @@ sudo journalctl -u bloch-l2-mainnet-monitor.service -o cat --no-pager -n 40
 The command below needs root for `status.json` only if that file is not world-readable:
 
 ```
-python3 /home/ubuntu/l2-golive-v2/kit/l2_monitor.py --profile mainnet --phase live --l2-rpc A=http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service --binary /opt/bloch/l2-mainnet/bloch-l2-settled-rpc --build-json /home/ubuntu/l2-golive-v2/artifacts/build.json --json
+python3 /home/ubuntu/l2-golive-next/kit/l2_monitor.py --profile mainnet --phase live --max-idle-seconds 86400 --backlog-state /tmp/backlog.json --set block_interval_seconds=1800 --l2-rpc A=http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service --binary /opt/bloch/l2-mainnet/bloch-l2-settled-rpc --build-json /home/ubuntu/l2-golive-next/artifacts/build.json --json
 ```
 
 GO, after the first L2 finalization: exit 0, or 1 with only the expected WARN `alert_delivery` before D11. Between P8 and that
 finalization, `--phase live` exits 2 with `l2_finalized_age` CRIT, because the finalized block is still the old genesis. That CRIT alone is expected.
-Before P8, use `--phase prelaunch`; there `unit[settler]` is CRIT until the unit exists. A CRIT on `--binary` means an installed binary is not the v2.1 pin. Thresholds:
+Before P8, use `--phase prelaunch`; there `unit[settler]` is CRIT until the unit exists. A CRIT on `--binary` means an installed binary is not this build's pin. Known false alarm (D18): `l2_head_age` may go CRIT on a healthy idle chain. Thresholds:
 `MAINNET-OPS-RUNBOOK.md` §3. Also watch `age_s` in `bloch_finality.status` (check `l2_finality_status`): a stopped follower keeps serving its last finality.
 
 Rollback: `sudo systemctl disable --now bloch-l2-mainnet-monitor.timer`. It is read-only.
@@ -814,11 +761,11 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    (`keykit/KEY-HANDOFF-CHECKLIST.md`). The keys never travel unsealed. The
    originals are now destroyed before the handoff, gated on verified bundles and two read-back media.
 2. Each operator host (§2 spec) gets an `ARTEFATOS` dir with:
-   - `bloch-l2-native-follower` `c18752fd…` and `bloch-l2-produce-dev` `fb0d5313…`;
+   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `ab24bda0…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
-   - the kit `deployment/mainnet/attestor` from `codex/attestor-packages-r4-20261101` ff839ba, not from the kit branch of this plan: the kit at `7531526` leaves operators publishing nothing.
+   - the kit `deployment/mainnet/attestor` from this plan's kit (9645efc, which contains ff839ba's package fixes with the pins moved to this build). Not `codex/attestor-packages-r4-20261101` ff839ba alone: it pins v2.1. Not `attestor-custody-20261030`.
 
    Not the RC binaries `821289e0…` / `192eda33…`: they halt.
 3. `check-operator-bundle.sh --open`, then `install-attestor.sh install … --l1-rpc-url <D4-style L1 RPC>`.
@@ -828,7 +775,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
 sha256sum /opt/bloch/l2-attestor/bloch-l2-native-follower /opt/bloch/l2-attestor/bloch-l2-produce-dev
 ```
 
-   Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Build the operator packages from `codex/attestor-packages-r4-20261101`: the agent's re-sign on an oversized signature is in its scripts, and `IDENTITY.txt` records the kit commit.
+   Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Build the operator packages from this kit; `IDENTITY.txt` records the kit commit. Attestor followers stay on status schema v2 (P3).
 4. Start the follower and wait about 65–80 min. Then run `attestor_agent.py check`, then start the
    agent. The printed `check` command passes the passphrase with systemd `LoadCredential`. It has run only in containers, where systemd 255 does not mount credentials (`/run/credentials/…/passphrase: No such file`); with a stand-in `CREDENTIALS_DIRECTORY` all three operators reported `check-ok` (agent 86). Run it once on a real VM before relying on it, and report a failure there as a kit defect. Fresh installs may run in parallel: there is no existing quorum to protect.
 
@@ -858,27 +805,26 @@ Prerequisites: P4 on both hosts, and the gateway package from the kit. On each h
 - Place `/etc/ssl/bloch-l2rpc/origin.pem` and `origin.key` (Cloudflare Origin CA) and `/etc/ssl/bloch-l2rpc/cloudflare-aop-ca.pem` (Authenticated Origin Pulls CA).
 - Run `setup-gateway.sh peer-cert`, then copy each host's `/etc/nginx/bloch-l2rpc/peer/self.crt` to the other host as `/etc/nginx/bloch-l2rpc/peer/peer.crt`.
 
-`setup-gateway.sh` renders with CORS open to any origin and `--backend-conns 400`, which is correct
-for settled RPC v2.1. The `plan` command only renders, and it exits 0 even when it prints `MISSING:` lines, so read its output. `apply` installs.
+`setup-gateway.sh` renders with CORS open to any origin and `--backend-conns 400`, below the RPC's 1,024 HTTP connection limit. Gateway `l2rpc-gateway.js` `d1229ca1…`, with agent 118's fee routing to the sequencer and HTTP 503 for an unanswered split batch. The `plan` command only renders, and it exits 0 even when it prints `MISSING:` lines, so read its output. `apply` installs.
 
 On A:
 
 ```
-sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh plan
+sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh plan
 ```
 
 ```
-sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh apply
+sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh apply
 ```
 
 On B (the commands assume 45.77; for a D3 VPS use its IP in both hosts' `PEER` and `PEER_ALLOW`):
 
 ```
-sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh plan
+sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh plan
 ```
 
 ```
-sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh apply
+sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh apply
 ```
 
 Then in the Cloudflare dashboard (zone blochl1.com): add the proxied A record `l2rpc` → 136.244.93.186, set
@@ -916,7 +862,7 @@ transactions return -32053 until A is back, by design.
 Rollback, on each host, then delete the DNS record:
 
 ```
-sudo PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh rollback
+sudo PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh rollback
 ```
 
 (on B use `PEER_ALLOW=136.244.93.186`).
@@ -935,20 +881,26 @@ sudo PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setu
    - after finality, `eth_getBalance` on RPC A and B (and the gateway) at `finalized` equals
      amount × 10¹⁰ wei;
    - the monitor `escrow_backing` is OK and `escrow_conserved` is true.
-2. **Enable user transactions (D10).** Only after:
+   With D15 the deposit made while idle takes two blocks: the first carries nothing, the next mints it, each after the 30 min pacing. Expect 40–70 min at low heights.
+
+2. **Enable user transactions (D10) and foreign recovery (D17).** **Not on this build while F5 is open (K13).** Only after:
    - the deposit block is finalized;
    - R2 has been rehearsed on a private network;
-   - gas-heavy 15M blocks have been measured and stuck-block recovery has been rehearsed (§3.4);
-   - the DA key is funded (5 BLCH in two outputs to `da_funding_script_hash`, from the D6(a) wallet);
-   - replica B has been rebuilt from L1 DA (K5);
-   - the next RPC build is installed (D14).
+   - gas-heavy 15M blocks have been measured and stuck-block recovery has been rehearsed (R3);
+   - the dedicated prover is in place (D2);
+   - the DA key is funded: 5 BLCH to `da_funding_script_hash` from the D6(a) wallet. The plan says two outputs; the wallet's `transfer-v2` makes one output per transaction, so that is two transactions (agent 86). No command is given here: use the D6(a) wallet's own tool;
+   - replica B has been rebuilt from L1 DA (K5).
 
-   With the txpool on, the settled RPC enforces the v2.1 limits (§3.3 K8; `docs/MAINNET-RPC-READINESS.md` R7).
+   With the txpool on, the settled RPC enforces its limits (K8; `docs/MAINNET-RPC-READINESS.md` R7) and refuses effective tips below 0.1 gwei. Signed L2 transactions need `--rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679` in `produce-dev sign-tx`, or the RPC refuses them with `WrongChain` (agent 86, G4).
 
-   Then, on A, one command per block:
+   Then, on A, one command per block. The first sets both switches; the follower paths are outside `/home` and must be readable by the settler user (check with `sudo -u bloch-l2-mainnet-settler test -r /var/lib/bloch-l2-mainnet-follower/status.json && echo ok`):
 
 ```
-sudo python3 -c "import json;p='/etc/bloch-l2-mainnet-settler/config.json';c=json.load(open(p));c['user_transactions']=True;json.dump(c,open(p,'w'),indent=2)"
+sudo python3 -c "import json;p='/etc/bloch-l2-mainnet-settler/config.json';c=json.load(open(p));c['user_transactions']=True;c['foreign_recovery']={'follower_state':'/var/lib/bloch-l2-mainnet-follower/native','follower_status':'/var/lib/bloch-l2-mainnet-follower/status.json'};json.dump(c,open(p,'w'),indent=2)"
+```
+
+```
+sudo systemctl enable --now bloch-l2-mainnet-rpc-restart.path
 ```
 
 ```
@@ -970,7 +922,17 @@ sudo systemctl restart bloch-l2-mainnet-rpc
    `no-txpool.conf` stays on B.
 
    **Never** do this inside e7269–e7271 of a future signature fork.
-3. **Withdrawal test.** Withdraw 0.5 BLCH (under 100 BLCH, so no attestors are needed) from the test L2 address. The v2.1 settled RPC has no `bloch_getWithdrawalProof`, so the proof comes from the settler's own database with `produce-dev` (agent 86 ran this end to end on v2.1). `WALLET_DIR`, `FUNDING_PUBKEY` and `TXID:VOUT:SATS` are the D6(b) wallet. First read the claimable settlement:
+3. **Withdrawal test** (needs step 2: a burn is an L2 transaction). Withdraw 0.5 BLCH (under 100 BLCH, so no attestors are needed) from the test L2 address. **The withdraw tool now works**: this build's RPC serves `bloch_getWithdrawalProof`, so `deployment/mainnet/withdraw/bloch-l2-withdraw.py` (`1791d8ca…`) runs `burn`, `find`, `fetch`, `verify` and `status` without an L2 database (README in the same directory). On A, against RPC A:
+
+```
+python3 /home/ubuntu/l2-golive-next/kit/withdraw/bloch-l2-withdraw.py find --l2-rpc http://127.0.0.1:18955 --tx 0xBURN_TX_HASH
+```
+
+```
+python3 /home/ubuntu/l2-golive-next/kit/withdraw/bloch-l2-withdraw.py fetch --l2-rpc http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --index I --recipient-pubkey me.pubkey.hex --sats 50000000 --out /home/ubuntu/claim-0.proof.json --wait 7200
+```
+
+   Then prepare, sign and send with the commands `fetch` prints (as below), and decide with `status --proof … --tx TXID` (exit 0 = claimed and finalized). Agent 67 ran the tool against a next-build RPC and a forced L1, not against `e5754d05…` on mainnet. Fallback, as on v2.1 (agent 86): build the proof from the settler's database. First read the claimable settlement:
 
 ```
 curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://80.240.16.185:8080 | python3 -c 'import json,sys;w=json.load(sys.stdin)["result"]["withdrawals"];print(w["claimable"], w["claimed"])'
@@ -983,11 +945,11 @@ sudo runuser -u bloch-l2-mainnet-settler -- /opt/bloch/l2-mainnet-tools/bloch-l2
 ```
 
 ```
-bloch-pos l2-claim prepare --genesis /home/ubuntu/l2-golive-v2/artifacts/mainnet.manifest --funding-pubkey FUNDING_PUBKEY --input TXID:VOUT:SATS --proof /home/ubuntu/claim-0.proof.json --base-fee N --tip 0 --out claim-unsigned.hex
+bloch-pos l2-claim prepare --genesis /home/ubuntu/l2-golive-next/artifacts/mainnet.manifest --funding-pubkey FUNDING_PUBKEY --input TXID:VOUT:SATS --proof /home/ubuntu/claim-0.proof.json --base-fee N --tip 0 --out claim-unsigned.hex
 ```
 
 ```
-bloch-pos l2-claim sign --genesis /home/ubuntu/l2-golive-v2/artifacts/mainnet.manifest --tx claim-unsigned.hex --dir WALLET_DIR --out claim-signed.hex
+bloch-pos l2-claim sign --genesis /home/ubuntu/l2-golive-next/artifacts/mainnet.manifest --tx claim-unsigned.hex --dir WALLET_DIR --out claim-signed.hex
 ```
 
    Then `sendrawtransaction` with the contents of `claim-signed.hex`. **The `accepted` reply is not a confirmation:** a claim over the release-window cap is answered `accepted` and refused afterwards with `RateLimited` (agent 67). Re-run the first command until the `claimed` bitmap has the withdrawal's bit set.
@@ -1015,7 +977,7 @@ Only after P8 to the P12 deposit are GO and at least three attestors are live. F
 - `{{L2_NODE_GUIDE_URL}}` = `TBD-owner`;
 - the measured `safe`/`finalized` latency from P8/P12.
 
-Do not resend earlier notices about a pause in claims across HF1: they are historical by then. State that the L2 is live with deposits. Announce transfers only once D10 is done, and withdrawals only once the P12 step 3 is GO. When you announce withdrawals, state that claims of 100 BLCH or
+Do not resend earlier notices about a pause in claims across HF1: they are historical by then. State that the L2 is live with deposits, that a deposit mints in about 40–70 min (D15), and that `latest` time stands still while the chain is idle. Point integrators to the withdraw tool README for claims, and state that a `sendrawtransaction` `accepted` reply is not a confirmation (the notice still says a claim over the cap "waits": fix that text, agent 86 G8). Announce transfers only once D10 is done, and withdrawals only once the P12 step 3 is GO. When you announce withdrawals, state that claims of 100 BLCH or
 more need 3-of-5 attestation and 2,880 blocks, and the release window limits.
 
 Rollback: a correction notice. The chain state is unaffected.
@@ -1024,16 +986,77 @@ Rollback: a correction notice. The chain state is unaffected.
 
 | When (UTC) | Phase |
 | --- | --- |
-| Before 2026-11-03 | D2–D9 and D13 decided. No host changes. |
-| After G0 gate 7, before P2 | Release v2.1 signed (D7). |
+| Before 2026-11-03 | D2–D9, D13, D15–D17 decided. No host changes. |
+| After G0 gate 7, before P2 | Release signed (D7). |
 | 2026-11-03 16:11 (e7360) | HF3. Observe only. |
 | 2026-11-04 16:11 (e7450) | G0, P1, P2 |
-| +0:30 | P6 step 1 (prepare + DA key backup), P3 A and B start (replay about 65–80 min) |
+| +0:30 | P6 step 1 (prepare + DA key backup), P3 A and B (replay about 65–80 min) |
 | +2:00 | P3 go/no-go, P4 |
-| +2:30 | P6 configure, P5, P6 dry-run `--prove` (about 20 min) |
-| +3:15 | P7 shadow, then P8 (first settlement); finality about 1 h later |
-| +4:30 | P9 monitor. L2 core live. |
-| Day +1 to +3 | P10 attestors (about 65–80 min per host, in parallel), P11 gateway, P12 deposit test |
-| After R2 + DA funding | P12 user transactions and the withdrawal test |
+| +2:30 | P6 configure (with D15), P5, P6 dry-run `--prove` (about 20 min) |
+| +3:15 | P7 shadow, then P8 (block 1 as a `max-idle` heartbeat); finality about 1 h later |
+| +4:30 | P9 monitor. L2 core live, idle until demand. |
+| Day +1 to +3 | P10 attestors, P11 gateway, P12 deposit test (about 40–70 min to mint) |
+| After F5 is fixed in a later build, R2, R3, D2 and DA funding | P12 step 2 (user transactions + foreign recovery) and step 3 (withdrawal test with the tool) |
 | After all GO | P13 exchange notice |
 | Before e8620 (2026-11-17) | KES enforce. Settlement after a KES period change has not been exercised: have that result first. |
+| When `l2_proof_cost` WARNs (around L2 block 4,000) | Raise the interval (D16) or add proving capacity (§2). |
+
+## 6. Recovery steps (agent 106, measured 2026-11-02)
+
+### 6.1 An L1 node that does not come back (refill from a healthy node)
+
+Applies to any L1 node the L2 reads (D4) or any node of our fleet. Symptom: `bloch_pos_blocks_parked` at 32 or more and a finalized epoch that does not move while peers advance; detector `deployment/mainnet/l1_stuck_check.py`.
+
+**Wiping the data alone does not work on mainnet.** The fa980367 binary `01c98b68…` with an empty data dir exits at once with `ERR_WS_REQUIRE_CHECKPOINT` (genesis beyond the 2,016-epoch weak-subjectivity window); keeping `ws_latest.bin` does not help. `docs/L1-STUCK-NODE-RUNBOOK.md` at 9645efc still says to wipe: follow this section instead.
+
+Order: (1) one restart (it helped 1 time in 3); (2) refill from a healthy node of our own, below (97 s to serve the copied head with `state.cache`; 51–54 min replay without it); (3) only with a published checkpoint (D19), wipe and start from it (about 11.5–15 h).
+
+Refill. Pick a node that `l1_stuck_check.py` reports OK and that follows the reference head, preferably one that does not validate, with no proposal due. `HEALTHY_UNIT`, `HEALTHY_DATA_DIR`, `UNIT`, `DATA_DIR` and `NODE_USER` are that node's and the stuck node's. On the healthy host, copy by name, never with a glob:
+
+```
+sudo systemctl stop HEALTHY_UNIT
+```
+
+```
+sudo tar -C HEALTHY_DATA_DIR -cf /tmp/chain.tar blocks.log blocks.idx meta.bin ws_latest.bin state.cache
+```
+
+```
+sudo systemctl start HEALTHY_UNIT
+```
+
+```
+tar -tf /tmp/chain.tar
+```
+
+GO to move it only if the list holds exactly those five names: no `validator.key`, `validator.kes`, `slashing_protection.bin` or `mesh_identity.bin`. On the stuck host, with `UNIT` stopped, move the old chain files aside (do not delete them), then:
+
+```
+sudo tar -C DATA_DIR -xf /tmp/chain.tar
+```
+
+```
+sudo chown -R NODE_USER: DATA_DIR
+```
+
+```
+sudo ls -l DATA_DIR/validator.key DATA_DIR/slashing_protection.bin
+```
+
+```
+sudo systemctl start UNIT
+```
+
+**Never delete or overwrite `validator.key`, `validator.kes` or `slashing_protection.bin`.** Without its slashing protection a node refuses to start (`SIGNING ROLLBACK REFUSED`), which is correct. Restart validators in waves with doppelganger protection on. Limits: measured on a copy of mainnet to e6596 over a loopback devnet transport, not libp2p across hosts; a copy between hosts adds the transfer of about 3 GB.
+
+If the refilled node is a follower's only L1 source, the follower may have halted with exit 3 (P3): restart it once after the node shows the common finalized root.
+
+### 6.2 L2 side
+
+| Loss | Recovery | Time measured |
+| --- | --- | --- |
+| Follower host | Reinstall (P3) and replay from L1 | 57 min to e6596, about 75 min today |
+| Settled RPC view | Restart; it rebuilds the view | 0.8 s (small L2) |
+| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This build's `l2_reorg_recover.py` `7c918bb7…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118). | 0.16 s rebuild (3 blocks) |
+| DA fee key | New key, fund it, restart with the same paths; the old key's balance is lost. Hence the separate backups in P6 | 6 s funding |
+| Prover host | Reinstall P5 and prove the next block | 11–28 min plus install (not run) |

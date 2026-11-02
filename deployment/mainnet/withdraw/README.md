@@ -4,7 +4,16 @@
 
 ## On the v2.1 build
 
-The settled RPC `18be911a…` of v2.1 has no `bloch_getWithdrawalProof`: that method is in the next RPC build. Against v2.1, `burn`, `find`, `verify` and `status` work; `fetch` exits 1 at once with the reason, whatever `--wait` says. Whoever holds an L2 database can write the proof file with `bloch-l2-produce-dev withdrawal-proof --target DIR --index I --root HEX --count N`, with the root and count from the L1's `claimable` record (not run through `verify` end to end).
+The settled RPC `18be911a…` of v2.1 has no `bloch_getWithdrawalProof`: that method is in the next RPC build. Against v2.1:
+
+| Step | v2.1 |
+|---|---|
+| `burn`, `find` | work, they need only `eth_getTransactionReceipt` |
+| `fetch` | exits 1 at once with the reason. It cannot work, whatever `--wait` says |
+| proof file | whoever holds an L2 database runs `bloch-l2-produce-dev withdrawal-proof --target DIR --index I --root HEX --count N` with the root and count from the L1's `claimable` record. Same fields as `fetch` writes; this path has not been run through `verify` end to end |
+| `verify`, `status` | read only the file and the L1 |
+
+The "without a local L2 database" promise below therefore holds only from the next RPC build on. The sections on `status`, on why a claim is dropped and on trust apply to both, as L1 behaviour. Report 67 measured them against a next-build RPC and a forced L1 build, not against v2.1 binaries.
 
 ## The flow
 

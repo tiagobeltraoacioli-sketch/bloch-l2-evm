@@ -13,7 +13,7 @@ needs no inbound port besides sshd; outbound only Docker's pinned Gnark image
 Run as root from a directory holding:
   bloch-evm-sp1-settlement-v3   host built by build-program.sh (features source-settlement,node-artifact)
   settlement_v3_mainnet         guest ELF, SHA-256 203114bf...c473 (build-reproducible.sh)
-  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet" / "witness"), SHA-256 1f643ea3...f7a3
+  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet" / "witness"), SHA-256 0d239251...8b69
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
@@ -74,7 +74,7 @@ GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473
 # Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
 # Agent 93's measured low-memory setting, used unless --prover-env is given.
 DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
-REMOTE_PROVER_SHA256 = '1f643ea3e27c0fb6ea83216d34e4c03aac9a99e8b2cad6ae8456191b9a85f7a3'
+REMOTE_PROVER_SHA256 = '0d239251d7366d24b816336eb59ab88b993b6cb3fc54d6e214d1d441491e8b69'
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
 # codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
 # recipient is a placeholder (TBD-owner), so the configuration and every value below move with it.

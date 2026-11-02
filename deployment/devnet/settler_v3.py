@@ -144,6 +144,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -513,6 +514,68 @@ def da_frame_fields(tx):
     return chain, number, take(at + 20, size)
 
 
+def da_frame_key(tx):
+    """The funding public key of a native 0x15 wire frame (the spend authority that paid its fee)."""
+    if len(tx) < 37 or tx[0] != DA_TAG:
+        raise Halt('not a DA transaction')
+    size = int.from_bytes(tx[33:37], 'little')
+    if 37 + size > len(tx):
+        raise Halt('malformed DA transaction')
+    return tx[37:37 + size]
+
+
+def follower_block_files(state_dir):
+    """The follower's verified native blocks, in index order: [Path]."""
+    state = Path(state_dir)
+    lines = (state / 'index').read_text().split()
+    return [state / 'blocks' / f'{line.strip().lower()}.bin' for line in lines if line.strip()]
+
+
+def scan_da_frames(data, chain_id, wanted):
+    """{(number, commitment hex): (funding key, payload)} of the 0x15 frames inside raw block bytes whose
+    (l2 number, commitment) is in `wanted`. Candidate offsets are only a search: a hit is the frame whose payload
+    hashes to a recorded commitment, so a false match is impossible."""
+    found, at = {}, data.find(bytes([DA_TAG]))
+    numbers = {number for number, _ in wanted}
+    while at >= 0 and len(found) < len(wanted):
+        try:
+            frame = data[at:]
+            chain, number, payload = da_frame_fields(frame)
+            if chain == chain_id and number in numbers and da_batch_count(payload) is not None:
+                key = (number, da_commitment(number, payload, chain_id).hex())
+                if key in wanted and key not in found:
+                    found[key] = (da_frame_key(frame), payload)
+        except Halt:
+            pass
+        at = data.find(bytes([DA_TAG]), at + 1)
+    return found
+
+
+def recorded_da_batches(state_dir, chain_id, records, window=8):
+    """{(number, commitment hex): (funding key, payload)} for DA `records` (getl2settlement entries with
+    l2_number, commitment, height), read from the follower's verified L1 blocks near each record's height. Records
+    whose block is not (yet) in the follower store are left out."""
+    wanted = {(int(r['l2_number']), r['commitment']) for r in records}
+    if not wanted:
+        return {}
+    files = follower_block_files(state_dir)
+    heights = sorted({int(r['height']) for r in records})
+    seen, found = set(), {}
+    # The index lists blocks from height 1 in order; a store that started later is covered by the tail scan.
+    candidates = [i for h in heights for i in range(max(0, h - 1 - window), min(len(files), h + window))]
+    candidates += list(range(len(files) - 1, max(-1, len(files) - 1 - 4 * window), -1))
+    for index in candidates:
+        if index in seen or len(found) == len(wanted):
+            continue
+        seen.add(index)
+        try:
+            data = files[index].read_bytes()
+        except OSError:
+            continue
+        found.update(scan_da_frames(data, chain_id, wanted - set(found)))
+    return found
+
+
 def da_batch_transactions(payload):
     """The raw transactions of a canonical DA batch (u32 BE count, then u32 BE length + bytes each)."""
     if da_batch_count(payload) is None:
@@ -863,6 +926,67 @@ def parse_proof_artifact(data):
     return values, proof
 
 
+def group_segments(pgid, directory):
+    """The SP1 shared-memory files (`sp1_*`, `sem.sp1_*` under `directory`) that processes of group `pgid` map or hold."""
+    found, prefix = set(), str(directory).rstrip('/') + '/'
+    for proc in Path('/proc').iterdir() if Path('/proc').is_dir() else ():
+        if not proc.name.isdigit():
+            continue
+        try:
+            stat = (proc / 'stat').read_text()
+            if int(stat.rsplit(')', 1)[1].split()[2]) != pgid:
+                continue
+            paths = [line.split(None, 5)[5] for line in (proc / 'maps').read_text().splitlines() if len(line.split(None, 5)) == 6]
+            paths += [os.readlink(fd) for fd in (proc / 'fd').iterdir()]
+        except (OSError, ValueError, IndexError):
+            continue
+        for path in paths:
+            path = path.replace(' (deleted)', '')
+            name = path[len(prefix):] if path.startswith(prefix) else ''
+            if name.startswith(('sp1_', 'sem.sp1_')) and '/' not in name:
+                found.add(path)
+    return found
+
+
+def segment_mapped(path):
+    """Whether any process we can see maps or holds `path`. Processes of other users cannot be read; they cannot have
+    opened this user's segment either (mode 0600), unless they run as root."""
+    target = str(path)
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if target in (proc / 'maps').read_text():
+                return True
+            if any(os.readlink(fd) == target for fd in (proc / 'fd').iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def remove_leaked_segments(paths, mapped=segment_mapped):
+    """Remove the given segments, which this run's prover processes mapped, once no process maps them. A killed SP1 native
+    runner never unlinks its segments (4.7 GB each in /dev/shm), and a full /dev/shm makes every later SP1 run on the
+    host crash. Only segments seen mapped by this run's own process group are candidates: nothing another job created."""
+    removed, paths = [], set(paths)
+    for path in list(paths):  # the semaphores of a segment this group used carry its name: sem.sp1_<id>_t_empty, _filled
+        head, name = os.path.split(path)
+        if name.startswith('sp1_'):
+            paths |= {os.path.join(head, f'sem.{name}_{end}') for end in ('empty', 'filled')}
+    for path in sorted(paths):
+        try:
+            if not os.path.exists(path) or mapped(path):
+                continue
+            os.unlink(path)
+            removed.append(os.path.basename(path))
+        except OSError:
+            continue
+    if removed:
+        log('prover-shm-removed', segments=removed)
+    return removed
+
+
 class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
         kind = config.get('network_kind', DEFAULTS['network_kind'])
@@ -876,6 +1000,7 @@ class Settler:
         self.mainnet_path = kind in MAINNET_PATH_KINDS
         self.c = {**DEFAULTS, **(MAINNET_DEFAULTS if self.mainnet else {}), **config}
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
+        self.wall = time.time  # wall time persisted in DA attempt records (clock is monotonic)
         self.chain_id = MAINNET['chain_id'] if self.mainnet_path else CHAIN_ID
         self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet_path else []
         self.prover_args = list(self.c.get('prover_args', ['--mainnet'] if self.mainnet_path else []))
@@ -1048,13 +1173,14 @@ class Settler:
         except ValueError:
             raise ProducerError(f'producer printed no JSON for {args[0]}') from None
 
-    def extend(self, parent, anchor, deposits, anchor_slot, number):
+    def extend(self, parent, anchor, deposits, anchor_slot, number, spool=True):
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            if self.c.get('max_block_sp1_gas'):
+            # A batch this DA key already paid is rebuilt exactly (its spool), never re-chosen by the budget.
+            if self.c.get('max_block_sp1_gas') and spool is True:
                 return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
-            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=spool))
         except ProducerError as error:
             if not self.c['user_transactions']:
                 raise
@@ -1183,7 +1309,8 @@ class Settler:
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
         if self.c['user_transactions'] and spool and self.spool_open:
-            args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
+            pool = spool if isinstance(spool, (str, Path)) else self.c['txpool_dir']
+            args += ['--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
             if self.c.get('min_tip_wei'):
                 args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
@@ -1281,6 +1408,71 @@ class Settler:
             log('l2-block-reproved-for-program', number=number, program=self.program['name'])
             self.supersede(directory)
 
+    def follower_state_dir(self):
+        """The native follower's verified block store, when configured (`follower_state`, or the one of
+        `foreign_recovery`)."""
+        recovery = self.c.get('foreign_recovery') or {}
+        return self.c.get('follower_state') or recovery.get('follower_state')
+
+    def paid_batch_spool(self, number, view, directory):
+        """A spool holding exactly the batch this worker's DA key already paid for L2 block `number`, or None.
+
+        A database restored to the accepted head (an old backup, a rebuild from L1) no longer holds the unsettled
+        block whose batch is on L1, and the spool may no longer hold its transactions. Building the block from
+        whatever the spool holds now would publish another batch for the same number and pay a second DA fee,
+        while the paid transactions are dropped. Built from exactly the paid batch, the block carries the recorded
+        commitment and publish_da finds it already on L1. Only batches signed by this worker's own funding key are
+        reused: anyone can publish a DA record for any number, and a block must never be filled with a third
+        party's choice of transactions. The transactions also go back to the main spool, so none is lost if the
+        rebuilt block differs."""
+        if not self.c['user_transactions']:
+            return None
+        records = [r for r in view.get('data_availability', []) if r.get('l2_number') == number]
+        if not records:
+            return None
+        local = {}
+        for other in sorted(self.work.glob(f'{number:08d}-*')):
+            payload_file = other / 'da-payload.hex'
+            if payload_file.exists():
+                payload = bytes.fromhex(payload_file.read_text().strip())
+                local[da_commitment(number, payload, self.chain_id).hex()] = payload
+        own = bytes.fromhex(Path(self.c['da']['funding_pubkey']).read_text().strip())
+        batches = {}
+        state = self.follower_state_dir()
+        if state:
+            try:
+                batches = recorded_da_batches(state, self.chain_id, records)
+            except (OSError, ValueError) as error:
+                log('da-batch-unrecoverable', number=number, reason=f'follower store: {error}'[:300])
+        payload = None
+        for record in sorted(records, key=lambda r: (int(r['height']), r['commitment'])):
+            key = (number, record['commitment'])
+            if key in batches and batches[key][0] == own:
+                payload, source = batches[key][1], 'follower'
+                break
+            if record['commitment'] in local:
+                payload, source = local[record['commitment']], 'work'
+                break
+        if payload is None:
+            log('da-batch-unrecoverable', number=number, records=[r['commitment'] for r in records],
+                follower_state=bool(state), reason='no recorded batch of this DA key found')
+            return None
+        transactions = da_batch_transactions(payload)
+        pool = directory / 'da-reuse-spool'
+        shutil.rmtree(pool, ignore_errors=True)
+        pool.mkdir()
+        main = Path(self.c['txpool_dir'])
+        returned = 0
+        for raw in transactions:
+            name = f'{keccak256(raw).hex()}.tx'
+            atomic_write(pool / name, raw.hex() + '\n')
+            if not (main / name).exists():
+                atomic_write(main / name, raw.hex() + '\n')
+                returned += 1
+        log('da-batch-reused', number=number, commitment=da_commitment(number, payload, self.chain_id).hex(),
+            transactions=len(transactions), returned_to_spool=returned, source=source)
+        return pool
+
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
         self.program = self.program_of(view)
@@ -1312,9 +1504,13 @@ class Settler:
             anchor_slot = int(source['request'].splitlines()[3])
             self.preflight_source = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n' + (
                 f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n" if 'inbox_count' in source else '')
-            block = self.extend(parent, anchor, deposits, anchor_slot, number)
+            reuse = self.paid_batch_spool(number, view, directory)
+            block = self.extend(parent, anchor, deposits, anchor_slot, number, spool=reuse or True)
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
+            if reuse:
+                atomic_write(directory / 'da-reuse.json', json.dumps({'transactions': block.get('transactions', 0),
+                                                                       'hash': block.get('hash')}) + '\n')
             atomic_write(produced, json.dumps(block, sort_keys=True) + '\n')
             log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
                                                                'withdrawal_count', 'rules', 'timestamp') if k in block},
@@ -1391,7 +1587,7 @@ class Settler:
                     result = types.SimpleNamespace(returncode=75)
                 else:
                     with (directory / f'{name}.log').open('w') as out:
-                        result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                        result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
                 if result.returncode == 0:
                     break
                 if name == 'prove':
@@ -1430,6 +1626,42 @@ class Settler:
             return True
         log('local-proof-refused', directory=str(directory), instructions=instructions, limit=limit)
         return False
+
+    def run_bounded(self, argv, timeout, **kwargs):
+        """Run a prover with a time limit that holds for everything it starts. subprocess.run kills only the direct child
+        on a timeout: the SP1 native runner it spawned would live on and keep its memory. So the prover gets its own
+        process group, which is killed on a timeout and after every exit. An injected runner (tests) is used as given."""
+        if self.run is not subprocess.run:
+            return self.run(argv, timeout=timeout, **kwargs)
+        shm = str(Path(self.c.get('prover_shm_dir', '/dev/shm')) if hasattr(self, 'c') else Path('/dev/shm'))
+        process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        ours = set()  # segments a process of this run's group mapped: only these may be removed afterwards
+        deadline = time.monotonic() + timeout
+        try:
+            while process.poll() is None:
+                ours |= group_segments(process.pid, shm)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                time.sleep(0.5)
+        except BaseException:
+            ours |= group_segments(process.pid, shm)
+            self.kill_group(process.pid)
+            process.wait()
+            time.sleep(0.2)
+            remove_leaked_segments(ours)
+            raise
+        ours |= group_segments(process.pid, shm)
+        self.kill_group(process.pid)  # whatever it left running
+        time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
+        remove_leaked_segments(ours)
+        return subprocess.CompletedProcess(argv, process.returncode)
+
+    @staticmethod
+    def kill_group(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     def prove_remote(self, directory, proof):
         """Groth16 on the remote prover; the caller still verifies it locally."""
@@ -1508,8 +1740,36 @@ class Settler:
                                   for r in view.get('data_availability', []))
 
     def publish_da(self, number, directory, values):
-        """Publish the block's batch on L1 and wait until the record is committed."""
+        """Publish the block's batch on L1 and wait until the record is committed.
+
+        A DA transaction is valid only in a block whose base fee is the one it was signed for (exact fee
+        conservation). Once the next base fee moves, the signed bytes can no longer be included, so the batch is
+        re-signed at the new fee at once instead of waiting `inclusion_timeout_seconds`. Every attempt spends the
+        inputs of the previous one (they are put first), so at most one attempt can ever be included and the fee is
+        paid once. Stale attempts stay in node mempools until their TTL and count against the per-source mempool
+        cap (MEMPOOL_MAX_PER_SOURCE 64, TTL 100 slots): at most `da.max_attempts_per_window` (default 32) attempts
+        are signed per `da.attempt_window_seconds` (default 3000 s, 100 slots of 30 s); past that the worker waits
+        on the last attempt as before."""
         commitment = values[T + DA_COMMITMENT:T + DA_COMMITMENT + 32]
+        while True:
+            outcome = self.publish_da_attempt(number, directory, commitment)
+            if outcome != 'fee-moved':
+                return outcome
+
+    def da_attempts_in_window(self, directory):
+        """Signed attempts of this block within the mempool-retention window."""
+        window = int(self.c['da'].get('attempt_window_seconds', 3000))
+        now, count = self.wall(), 0
+        for meta in directory.glob('da-meta-*.json'):
+            try:
+                signed = json.loads(meta.read_text()).get('signed_unix')
+            except ValueError:
+                continue
+            count += signed is None or now - signed < window
+        return count
+
+    def publish_da_attempt(self, number, directory, commitment):
+        """One sign-or-rebroadcast and wait. True: recorded; False: give up this cycle; 'fee-moved': re-sign now."""
         if self.da_recorded(number, commitment):
             return True
         da = self.c['da']
@@ -1521,9 +1781,7 @@ class Settler:
         if balance < int(da.get('low_balance_sat', 0)):
             log('da-funding-low', balance_sat=balance, low_balance_sat=int(da['low_balance_sat']),
                 funding_script=self.da_script)
-        utxos = sorted(utxos, key=lambda u: (-int(u['value_sat']), u['txid'], u['vout']))[:DA_MAX_INPUTS]
-        if not utxos:
-            raise Halt('the DA funding key has no spendable outputs')
+        utxos = sorted(utxos, key=lambda u: (-int(u['value_sat']), u['txid'], u['vout']))
         if self.dry_run:
             raise Halt(f'dry run never signs or broadcasts the DA batch (fee estimate {estimate} sat)')
         form = self.da_signature_form()
@@ -1535,12 +1793,23 @@ class Settler:
         # Rebroadcast the last signed bytes while they can still be included: consensus needs exact
         # conservation at the including block's base fee, and every input must still be unspent.
         last = directory / f'da-meta-{attempt - 1}.json'
-        if attempt and last.exists() and (directory / f'da-signed-{attempt - 1}.hex').exists():
-            meta = json.loads(last.read_text())
-            unspent = {f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos}
-            if meta['base_fee'] == base_fee and set(meta['inputs']) <= unspent and meta.get('form', []) == form:
-                tx = bytes.fromhex((directory / f'da-signed-{attempt - 1}.hex').read_text().strip())
-                return self.submit_da(number, directory, tx, commitment, attempt - 1, estimate)
+        meta = json.loads(last.read_text()) if attempt and last.exists() else None
+        unspent = {f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos}
+        if meta and (directory / f'da-signed-{attempt - 1}.hex').exists() and set(meta['inputs']) <= unspent:
+            # A new attempt spends the previous one's inputs first, so two attempts can never both be included.
+            first = {item: i for i, item in enumerate(meta['inputs'])}
+            utxos.sort(key=lambda u: first.get(f"{u['txid']}:{u['vout']}:{u['value_sat']}", len(first)))
+            tx = bytes.fromhex((directory / f'da-signed-{attempt - 1}.hex').read_text().strip())
+            limited = self.da_attempts_in_window(directory) >= int(da.get('max_attempts_per_window', 32))
+            if (meta['base_fee'] == base_fee and meta.get('form', []) == form) or (limited and meta.get('form', []) == form):
+                if limited and meta['base_fee'] != base_fee:
+                    log('da-resign-limited', number=number, attempts=attempt, signed_base_fee=meta['base_fee'],
+                        base_fee=base_fee)
+                return self.submit_da(number, directory, tx, commitment, attempt - 1, estimate,
+                                      None if limited else meta['base_fee'])
+        utxos = utxos[:DA_MAX_INPUTS]
+        if not utxos:
+            raise Halt('the DA funding key has no spendable outputs')
         env = {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'BLOCH_KEYSTORE_PASSPHRASE_FILE': da['passphrase_file']}
         unsigned, signed = directory / f'da-unsigned-{attempt}.hex', directory / f'da-signed-{attempt}.hex'
         result, inputs = None, []
@@ -1567,8 +1836,8 @@ class Settler:
         if da_frame_fields(tx) != (self.chain_id, number, payload):
             raise Halt('signed DA transaction does not carry this block batch')
         atomic_write(directory / f'da-meta-{attempt}.json', json.dumps({'base_fee': base_fee, 'inputs': inputs,
-                                                                        'form': form}) + '\n')
-        return self.submit_da(number, directory, tx, commitment, attempt, estimate)
+                                                                        'form': form, 'signed_unix': int(self.wall())}) + '\n')
+        return self.submit_da(number, directory, tx, commitment, attempt, estimate, base_fee)
 
     def da_signature_form(self):
         """The `l2-da sign` signature flags for the next DA transaction (L1 hard fork
@@ -1594,16 +1863,18 @@ class Settler:
             return None
         return ['--for-epoch', str(epoch)]
 
-    def submit_da(self, number, directory, tx, commitment, attempt, estimate):
+    def submit_da(self, number, directory, tx, commitment, attempt, estimate, signed_base_fee=None):
+        """Send the DA bytes and wait for the record. With `signed_base_fee`, return 'fee-moved' as soon as the
+        next base fee differs from it: those bytes can then no longer be included, and waiting is pointless."""
         da = self.c['da']
         port, response = self.native.submit(tx.hex())
         log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'),
-            port=port, attempt=attempt, fee_estimate_sat=estimate)
+            port=port, attempt=attempt, fee_estimate_sat=estimate, signed_base_fee=signed_base_fee)
         deadline = self.clock() + da.get('inclusion_timeout_seconds', 300)
         while self.clock() < deadline:
             self.sleep(self.c['poll_seconds'])
             if self.da_recorded(number, commitment):
-                log('da-included', number=number, commitment=commitment.hex())
+                log('da-included', number=number, commitment=commitment.hex(), attempt=attempt)
                 return True
             # Settling a block removes its DA records: this one will never show up, so do not wait for it.
             view = self.native_view()
@@ -1611,6 +1882,14 @@ class Settler:
             if accepted and statement_fields(accepted['statement'])['l2_number'] >= number:
                 log('da-wait-ended-block-settled', number=number)
                 return False
+            if signed_base_fee is not None:
+                try:
+                    now = str(self.native.bounded_value('getchaininfo', 'next_base_fee_millisat_per_gas'))
+                except Exception:  # noqa: BLE001 - no fee read this poll; keep waiting
+                    continue
+                if now != signed_base_fee:
+                    log('da-fee-moved', number=number, attempt=attempt, signed_base_fee=signed_base_fee, base_fee=now)
+                    return 'fee-moved'
         log('da-inclusion-timeout', number=number)
         return False
 

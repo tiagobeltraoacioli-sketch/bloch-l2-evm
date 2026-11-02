@@ -301,10 +301,10 @@ print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
 }
 
 # ------------------------------------------------------------------------------------------ upgrade
-# The HF1-3 build (v2.1, L2 a39b04e4 against L1 78d4921c). Override only for a later
+# The next RPC build (L2 17383feb against L1 78d4921c, provisional, unsigned). Override only for a later
 # corrected build whose hashes the coordinator published.
-V2_FOLLOWER_SHA256=c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a
-V2_PRODUCE_SHA256=fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9
+V2_FOLLOWER_SHA256=cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2
+V2_PRODUCE_SHA256=e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69
 V2_BLOCH_POS_SHA256=093909a2bda70381bb3f71535029ceeb0b8b21378c3419c4c1dd0783a1a3387e
 L1_GENESIS_UNIX=1786656679 L1_EPOCH_SECONDS=960 HF1_EPOCH=7180
 ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF1 starts

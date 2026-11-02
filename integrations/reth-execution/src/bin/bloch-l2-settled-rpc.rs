@@ -88,13 +88,15 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2|mainnet [--domain HEX --genesis-time SECS]] [--txpool DIR] [--min-tip-wei N]\n\
+const USAGE: &str = "bloch-l2-settled-rpc --data-dir CANONICAL --view-dir NEW_DIR --finality-status FILE --network HEX [--port 8546] [--poll-ms 2000] [--rules v3|v2|mainnet [--domain HEX --genesis-time SECS]] [--txpool DIR] [--min-tip-wei N] [--required-tip-file FILE [--tip-headroom-percent 25]]\n\
 RPC over the settled database; with --txpool, eth_sendRawTransaction spools authenticated\n\
 transactions for the settlement worker (the sequencer). finalized comes only from verified native FFG finality of L2 settlements;\n\
 safe from the settlement the local native node accepted at its head. --rules selects the settlement\n\
 execution rules the canonical database was written under (default v3: ChainSpec::testnet_v3; mainnet:\n\
 ChainSpec::mainnet, chain id 700770, with the ceremony's --domain and wall-clock --genesis-time).\n\
-pending: latest state, next-block environment for calls/estimates, latest block for block queries.\n";
+pending: latest state, next-block environment for calls/estimates, latest block for block queries.\n\
+--required-tip-file: the sequencer's current required priority fee (JSON, `required_tip_wei` or the `tip` of the\n\
+settler's sequencer-policy.json). The fee methods then suggest it plus --tip-headroom-percent, never below --min-tip-wei.\n";
 
 struct Options {
     data_dir: PathBuf,
@@ -107,6 +109,10 @@ struct Options {
     txpool: Option<PathBuf>,
     /// Smallest priority fee the spool admits and the fee methods suggest.
     min_tip: u128,
+    /// The sequencer's dynamic required tip (congestion tip of the sequencer policy), when it publishes one.
+    required_tip_file: Option<PathBuf>,
+    /// Margin added to the required tip in suggestions, for a rise before the transaction is selected.
+    tip_headroom_percent: u128,
 }
 
 /// Admission bounds of the spool (security review 2026-10-18, finding 2: an
@@ -168,7 +174,7 @@ fn parse() -> Result<Options> {
         ensure!(
             [
                 "--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules", "--domain",
-                "--genesis-time", "--txpool", "--min-tip-wei",
+                "--genesis-time", "--txpool", "--min-tip-wei", "--required-tip-file", "--tip-headroom-percent",
             ].contains(&pair[0].as_str()),
             "unknown option {}\n{USAGE}",
             pair[0]
@@ -193,7 +199,103 @@ fn parse() -> Result<Options> {
         .map_err(|e| eyre::eyre!("{e}\n{USAGE}"))?,
         txpool: map.get("--txpool").map(PathBuf::from),
         min_tip: map.get("--min-tip-wei").map_or(Ok(DEFAULT_MIN_TIP_WEI), |v| v.parse())?,
+        required_tip_file: map.get("--required-tip-file").map(PathBuf::from),
+        tip_headroom_percent: map.get("--tip-headroom-percent").map_or(Ok(DEFAULT_TIP_HEADROOM_PERCENT), |v| v.parse())?,
     })
+    .and_then(|options| {
+        ensure!(options.tip_headroom_percent <= 1_000, "--tip-headroom-percent must be at most 1000");
+        ensure!(
+            options.required_tip_file.is_some() || !map.contains_key("--tip-headroom-percent"),
+            "--tip-headroom-percent needs --required-tip-file"
+        );
+        Ok(options)
+    })
+}
+
+/// Default margin over the sequencer's required tip in fee suggestions. The congestion tip moves once per L2 block
+/// (agents/90: at most about 7% per block while saturated); 25% keeps a suggestion valid for a few blocks of rise.
+const DEFAULT_TIP_HEADROOM_PERCENT: u128 = 25;
+/// How often the required-tip file is checked for a change (one stat per check; read only when it changed).
+const TIP_FILE_RECHECK: Duration = Duration::from_millis(1_000);
+/// A required-tip file larger than this is not read (the sequencer state is far smaller).
+const TIP_FILE_MAX_BYTES: u64 = 8 << 20;
+
+/// The tip the fee methods suggest: the static floor (`--min-tip-wei`), or, with `--required-tip-file`, the
+/// sequencer's current required tip plus headroom when that is higher. The settler's sequencer policy raises its
+/// required tip under sustained load and leaves pending whatever offers less, so a wallet that signed the static
+/// floor would wait in the spool for as long as the congestion lasts. The spool still admits from the floor: a
+/// transaction signed a moment before the tip rose stays valid and waits rather than being refused.
+struct RequiredTip {
+    floor: u128,
+    file: Option<PathBuf>,
+    headroom_percent: u128,
+    cache: std::sync::Mutex<TipCache>,
+}
+
+#[derive(Default)]
+struct TipCache {
+    checked: Option<std::time::Instant>,
+    stamp: Option<(Option<std::time::SystemTime>, u64)>,
+    tip: Option<u128>,
+}
+
+impl RequiredTip {
+    fn new(floor: u128, file: Option<PathBuf>, headroom_percent: u128) -> Self {
+        Self { floor, file, headroom_percent, cache: std::sync::Mutex::new(TipCache::default()) }
+    }
+
+    /// The priority fee to suggest now.
+    fn suggested(&self) -> u128 {
+        let Some(path) = &self.file else { return self.floor };
+        let mut cache = self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = std::time::Instant::now();
+        if cache.checked.is_none_or(|at| now.duration_since(at) >= TIP_FILE_RECHECK) {
+            cache.checked = Some(now);
+            match std::fs::metadata(path) {
+                Ok(meta) => {
+                    let stamp = (meta.modified().ok(), meta.len());
+                    if cache.stamp != Some(stamp) {
+                        cache.stamp = Some(stamp);
+                        let read = (meta.len() <= TIP_FILE_MAX_BYTES)
+                            .then(|| std::fs::read_to_string(path).ok())
+                            .flatten()
+                            .and_then(|text| required_tip_from(&text));
+                        match read {
+                            Some(tip) => cache.tip = Some(tip),
+                            // Keep the last good value over a file that does not parse; it is replaced whole.
+                            None => eprintln!("required tip: {} does not hold a tip; keeping {:?}", path.display(), cache.tip),
+                        }
+                    }
+                }
+                Err(_) => {
+                    // No file: no published congestion tip (sequencer policy off or not started yet).
+                    cache.stamp = None;
+                    cache.tip = None;
+                }
+            }
+        }
+        cache.tip.map_or(self.floor, |tip| self.floor.max(with_headroom(tip, self.headroom_percent)))
+    }
+}
+
+/// `tip` raised by `percent`, rounded up.
+fn with_headroom(tip: u128, percent: u128) -> u128 {
+    tip.saturating_add(tip.saturating_mul(percent).div_ceil(100))
+}
+
+/// The required tip in a JSON document: `required_tip_wei`, else `tip` (the sequencer policy state), as a
+/// non-negative integer or a decimal or 0x-hex string.
+fn required_tip_from(text: &str) -> Option<u128> {
+    let document: serde_json::Value = serde_json::from_str(text).ok()?;
+    let value = document.get("required_tip_wei").or_else(|| document.get("tip"))?;
+    match value {
+        serde_json::Value::Number(number) => number.as_u64().map(u128::from),
+        serde_json::Value::String(text) => match text.strip_prefix("0x") {
+            Some(hex) => u128::from_str_radix(hex, 16).ok(),
+            None => text.parse().ok(),
+        },
+        _ => None,
+    }
 }
 
 fn rpc_error(message: impl Into<String>) -> jsonrpsee::types::ErrorObjectOwned {
@@ -701,17 +803,18 @@ fn floored_quantity(value: &serde_json::Value, floor: u128) -> serde_json::Value
 /// legacy senders read `eth_gasPrice`.
 fn floor_fee_suggestions(
     module: &mut jsonrpsee::RpcModule<()>,
-    min_tip: u128,
+    tip: Arc<RequiredTip>,
     factory: BlochProviderFactory,
     spec: ChainSpec,
 ) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     for method in ["eth_maxPriorityFeePerGas", "eth_gasPrice", "eth_feeHistory"] {
         ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
-        let (original, factory, spec) = (original.clone(), factory.clone(), spec.clone());
+        let (original, factory, spec, tip) = (original.clone(), factory.clone(), spec.clone(), tip.clone());
         module.register_async_method(method, move |params, _, _| {
-            let (original, factory, spec) = (original.clone(), factory.clone(), spec.clone());
+            let (original, factory, spec, tip) = (original.clone(), factory.clone(), spec.clone(), tip.clone());
             async move {
+                let min_tip = tip.suggested();
                 let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
                 let mut result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
                     jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
@@ -1436,7 +1539,8 @@ async fn main() -> Result<()> {
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
-    floor_fee_suggestions(&mut module, options.min_tip, factory.clone(), rules())?;
+    let tip = Arc::new(RequiredTip::new(options.min_tip, options.required_tip_file.clone(), options.tip_headroom_percent));
+    floor_fee_suggestions(&mut module, tip, factory.clone(), rules())?;
     limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT)?;
     let levels_closed = Arc::new(ClosedLevels::new(true));
     refuse_closed_levels(&mut module, levels_closed.clone())?;
@@ -1648,6 +1752,50 @@ mod tests {
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{Address, Signature, TxKind};
     use k256::ecdsa::SigningKey;
+
+    #[test]
+    fn required_tip_is_read_from_the_sequencer_state() {
+        assert_eq!(required_tip_from(r#"{"tip": 830000000, "senders": {}}"#), Some(830_000_000));
+        assert_eq!(required_tip_from(r#"{"required_tip_wei": "0x3b9aca00", "tip": 1}"#), Some(1_000_000_000));
+        assert_eq!(required_tip_from(r#"{"required_tip_wei": "250"}"#), Some(250));
+        for bad in [r#"{"tip": -1}"#, r#"{"tip": 1.5}"#, r#"{"tip": null}"#, r#"{"senders": {}}"#, "not json", "[]"] {
+            assert_eq!(required_tip_from(bad), None, "{bad}");
+        }
+        assert_eq!(with_headroom(100, 25), 125);
+        assert_eq!(with_headroom(101, 25), 127);
+        assert_eq!(with_headroom(0, 25), 0);
+        assert_eq!(with_headroom(u128::MAX, 25), u128::MAX);
+    }
+
+    #[test]
+    fn fee_suggestions_follow_the_required_tip_file() {
+        let dir = std::env::temp_dir().join(format!("required-tip-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sequencer-policy.json");
+        let floor = 100_000_000;
+        assert_eq!(RequiredTip::new(floor, None, 25).suggested(), floor, "no file option: the static floor");
+        let tip = RequiredTip::new(floor, Some(file.clone()), 25);
+        let recheck = |tip: &RequiredTip| tip.cache.lock().unwrap().checked = None;
+        assert_eq!(tip.suggested(), floor, "file not written yet");
+        std::fs::write(&file, r#"{"tip": 4000000000, "senders": {"0xaa": [[1, 2]]}}"#).unwrap();
+        recheck(&tip);
+        assert_eq!(tip.suggested(), 5_000_000_000, "the congestion tip plus 25%");
+        std::fs::write(&file, r#"{"tip": 1}"#).unwrap();
+        recheck(&tip);
+        assert_eq!(tip.suggested(), floor, "never below the floor the spool admits");
+        std::fs::write(&file, r#"{"tip": 8000000000000}"#).unwrap();
+        assert_eq!(tip.suggested(), floor, "a change is seen at the next recheck, not on every call");
+        recheck(&tip);
+        assert_eq!(tip.suggested(), 10_000_000_000_000);
+        std::fs::write(&file, "{truncated").unwrap();
+        recheck(&tip);
+        assert_eq!(tip.suggested(), 10_000_000_000_000, "an unreadable document keeps the last good tip");
+        std::fs::remove_file(&file).unwrap();
+        recheck(&tip);
+        assert_eq!(tip.suggested(), floor, "no file: no published congestion tip");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn only_queries_at_a_closed_level_are_refused() {

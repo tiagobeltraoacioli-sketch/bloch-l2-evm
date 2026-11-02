@@ -59,7 +59,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
-| `l2_reorg_recover.py` | `deployment/mainnet/l2_reorg_recover.py` | `3e8ad3f0…f07d` (enforced) |
+| `l2_reorg_recover.py` | `deployment/mainnet/l2_reorg_recover.py` | `7c918bb7…9a57` (enforced) |
 | `settlement_v3_mainnet_sparse` | sparse-witness guest (CANDIDATE, the program swap's `PROGRAM_NEXT`) | `78c533fa…7bea` (enforced) |
 
 **Program swap (fork candidate, native `L2_NEXT_PROGRAM_EPOCH` inert).** The host of this kit serves both programs: `--mainnet-v1` proves the activated program and `--mainnet --sparse` the next one, so `configure` writes `prover_args: ["--mainnet-v1"]` and a `next_program` with the sparse guest and `l2-config.next.bin`. Until L1 reports the next program the worker passes `--rule-set base` and nothing else changes. With `--remote-prover`, `configure` also makes a second key, `ssh/id_ed25519_next`, for the next program's forced command (`install-prover-mainnet.py install --program next`). An optional `fallback_program` (the complete-witness guest `44d4c9d7…`, pinned to `MAINNET_NEXT`) follows the inert rollback gate; `configure` does not write it.
@@ -280,7 +280,7 @@ sudo systemctl stop bloch-l2-mainnet-settler bloch-l2-mainnet-rpc
 sudo -u bloch-l2-mainnet-settler python3 REL/l2_reorg_recover.py --config /etc/bloch-l2-mainnet-settler/config.json --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json
 ```
 
-`--follower-status` is required: the installed config does not name that file. `prepare` refuses any file but the pinned tool `3e8ad3f0…`. Its stdout is exactly one JSON document; worker log lines go to stderr. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
+`--follower-status` is required: the installed config does not name that file. `prepare` refuses any file but the pinned tool `7c918bb7…`. Its stdout is exactly one JSON document; worker log lines go to stderr. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
 
 Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool, and keeps the old database for review.
 

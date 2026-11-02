@@ -276,7 +276,7 @@ in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
    and the release it carries) has no `l2-claim verify-attestation`: it answers `l2-claim: expected prepare,
    inspect, sign, attestor-set, set-attestors, attest or --help`, and the aggregator then reports every set
    as refused, which reads like bad signatures. A claimant who sees that message has the wrong binary, not
-   bad partials.
+   bad partials. The tool now says so.
 
 3. Use the printed `--attestors … --attestation …` arguments in `bloch-pos l2-claim prepare`, then
    `sign`.

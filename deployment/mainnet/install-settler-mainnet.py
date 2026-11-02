@@ -9,7 +9,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
-      l2_reorg_recover.py (SHA-256 3e8ad3f0...) and, for the program swap (CANDIDATE, native
+      l2_reorg_recover.py (SHA-256 7c918bb7...) and, for the program swap (CANDIDATE, native
       L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 78c533fa...).
       The host of this kit serves both programs: the activated one with --mainnet-v1, the
       next one with --mainnet --sparse (see "Program swap" in SETTLER-RUNBOOK.md).
@@ -68,7 +68,7 @@ PINS = {
     'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
     # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
-    'l2_reorg_recover.py': '3e8ad3f0737b21fbe11dbeea537c753a605eca889ca12ff63bb9b3d995d5f07d',
+    'l2_reorg_recover.py': '7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (TBD-owner) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
