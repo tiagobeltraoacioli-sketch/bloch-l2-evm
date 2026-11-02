@@ -179,6 +179,7 @@ async fn main() -> Result<ExitCode> {
     let (mut blocks, mut differ, mut user_txs, mut with_real, mut matched_real, mut with_request) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut withdrawals, mut deposits, mut failed_txs, mut elf_runs, mut tampered, mut tamper_survived) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut elf_tampered = 0u64;
+    let (mut code_tampered, mut code_refused, mut code_elf_refused) = (0u64, 0u64, 0u64);
     let mut height = 1u64;
     let mut seed = alloy_primitives::keccak256(b"sparse-diff");
     loop {
@@ -291,6 +292,34 @@ async fn main() -> Result<ExitCode> {
                                     Err(_) => {}
                                 }
                             }
+                            // A second attack (agent 115): remove one entry of the code list. The
+                            // generator lists only code the block loads, so the native path and the
+                            // guest must both refuse.
+                            if !witness.codes.is_empty() {
+                                let mut changed = witness.clone();
+                                changed.codes.remove(((pick >> 32) % changed.codes.len() as u64) as usize);
+                                code_tampered += 1;
+                                match verify_node_batch_sparse(&spec, domain, &changed, &context, &body, mode) {
+                                    Ok(_) => problems.push("a witness without a loaded code was accepted".into()),
+                                    Err(_) => {
+                                        code_refused += 1;
+                                        let sparse_elf = if spec == ChainSpec::mainnet_v1() {
+                                            Some("settlement_v3_mainnet_v1_sparse")
+                                        } else if spec == ChainSpec::mainnet() {
+                                            Some("settlement_v3_mainnet_sparse")
+                                        } else {
+                                            None
+                                        };
+                                        if let (true, Some(name)) = (use_elf, sparse_elf) {
+                                            if run_elf(&executor, &elf_dir.join(name), sparse_stdin(&changed, &stored, &settlement_context)).await.is_ok() {
+                                                problems.push("the guest accepted a witness without a loaded code".into());
+                                            } else {
+                                                code_elf_refused += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if use_elf {
                                 let (complete_elf, sparse_elf) = if spec == ChainSpec::mainnet_v1() {
                                     ("complete_v1", "settlement_v3_mainnet_v1_sparse")
@@ -375,7 +404,7 @@ async fn main() -> Result<ExitCode> {
     }
     let _ = U256::ZERO;
     println!(
-        "{{\"summary\":true,\"work\":{work:?},\"last_height\":{},\"artifacts_top\":{},\"blocks\":{blocks},\"user_txs\":{user_txs},\"failed_txs\":{failed_txs},\"deposits\":{deposits},\"withdrawals\":{withdrawals},\"with_request\":{with_request},\"with_real_proof\":{with_real},\"statement_equals_real_proof\":{matched_real},\"elf_pairs\":{elf_runs},\"tampered\":{tampered},\"elf_refused_tampered\":{elf_tampered},\"tamper_harmless\":{tamper_survived},\"differences\":{differ}}}",
+        "{{\"summary\":true,\"work\":{work:?},\"last_height\":{},\"artifacts_top\":{},\"blocks\":{blocks},\"user_txs\":{user_txs},\"failed_txs\":{failed_txs},\"deposits\":{deposits},\"withdrawals\":{withdrawals},\"with_request\":{with_request},\"with_real_proof\":{with_real},\"statement_equals_real_proof\":{matched_real},\"elf_pairs\":{elf_runs},\"tampered\":{tampered},\"elf_refused_tampered\":{elf_tampered},\"tamper_harmless\":{tamper_survived},\"code_tampered\":{code_tampered},\"code_refused\":{code_refused},\"code_elf_refused\":{code_elf_refused},\"differences\":{differ}}}",
         height - 1,
         by_height.keys().next_back().copied().unwrap_or(0),
     );
