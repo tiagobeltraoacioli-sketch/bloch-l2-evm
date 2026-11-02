@@ -402,6 +402,12 @@ fn run(args: &[String]) -> Result<String, String> {
                                   "hash": d.hash.map(hex::encode), "reason": d.reason.describe()}))
                                   .collect::<Vec<_>>(),
                       "below_min_tip": below_min_tip,
+                      "tx_stats": selection.stats.iter().map(|t| json!({"hash": hex::encode(t.hash),
+                                  "sender": hex::encode(t.sender), "gas_used": t.gas_used,
+                                  "effective_tip": t.effective_tip.to_string(),
+                                  "fresh_slots": t.fresh_slots.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>(),
+                                  "cleared_slots": t.cleared_slots.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>()}))
+                                  .collect::<Vec<_>>(),
                       "pruned": pruned});
             report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
             Ok(out.to_string())

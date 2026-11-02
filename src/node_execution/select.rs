@@ -38,7 +38,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use revm::{context::TxEnv, database::CacheDB, DatabaseRef};
 
 /// Per-block production limits. Each is clamped to the protocol bound
@@ -159,9 +159,29 @@ pub struct DroppedTransaction {
     pub reason: DropReason,
 }
 
+/// What one included transaction did, for a producer's own policy. Reported only:
+/// no block rule reads it, and replay never computes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxStats {
+    /// Transaction hash.
+    pub hash: B256,
+    /// Recovered sender.
+    pub sender: Address,
+    /// Gas actually used.
+    pub gas_used: u64,
+    /// Priority fee per gas paid at this block's base fee.
+    pub effective_tip: u128,
+    /// Non-zero storage slots this transaction added, per account.
+    pub fresh_slots: Vec<(Address, u64)>,
+    /// Non-zero storage slots this transaction cleared, per account.
+    pub cleared_slots: Vec<(Address, u64)>,
+}
+
 /// Result of [`select_node_transactions`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockSelection {
+    /// One entry per included transaction, in block order.
+    pub stats: Vec<TxStats>,
     /// Included signed envelopes, in block order.
     pub transactions: Vec<Bytes>,
     /// Hashes of `transactions`, in the same order.
@@ -338,8 +358,20 @@ pub fn select_node_transactions<DB: DatabaseRef>(
             defer(reason, queue, &mut selection.deferred);
             continue;
         }
+        let tip = candidate.effective_tip(base_fee);
+        let before = cached_storage(session.database());
         match session.try_transaction(&candidate.env, |_| true) {
-            Ok(_) => {
+            Ok(outcome) => {
+                let gas_used = outcome.map_or(0, |outcome| outcome.gas_used);
+                let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
+                selection.stats.push(TxStats {
+                    hash: candidate.hash,
+                    sender,
+                    gas_used,
+                    effective_tip: tip,
+                    fresh_slots,
+                    cleared_slots,
+                });
                 selection.declared_gas += candidate.env.gas_limit;
                 selection.bytes += candidate.raw.len();
                 selection.hashes.push(candidate.hash);
@@ -361,4 +393,51 @@ pub fn select_node_transactions<DB: DatabaseRef>(
     selection.deferred.sort_by_key(|d| d.index);
     selection.dropped.sort_by_key(|d| d.index);
     Ok(selection)
+}
+
+type StorageView = BTreeMap<Address, BTreeMap<U256, U256>>;
+
+fn cached_storage<DB>(db: &CacheDB<DB>) -> StorageView {
+    db.cache
+        .accounts
+        .iter()
+        .map(|(address, account)| (*address, account.storage.iter().map(|(k, v)| (*k, *v)).collect()))
+        .collect()
+}
+
+/// Slots added and cleared since `before`, per account. A slot the block had not touched
+/// yet has its value in the parent state.
+#[allow(clippy::type_complexity)]
+fn storage_growth<DB: DatabaseRef>(
+    db: &CacheDB<DB>,
+    before: &StorageView,
+) -> Result<(Vec<(Address, u64)>, Vec<(Address, u64)>), BlockExecutionError> {
+    let (mut fresh, mut cleared) = (Vec::new(), Vec::new());
+    for (address, account) in &db.cache.accounts {
+        let (mut added, mut removed) = (0u64, 0u64);
+        let known = before.get(address);
+        for (slot, value) in &account.storage {
+            let previous = match known.and_then(|slots| slots.get(slot)) {
+                Some(previous) => *previous,
+                None => db
+                    .db
+                    .storage_ref(*address, *slot)
+                    .map_err(|_| BlockExecutionError::Database("parent storage read failed".to_string()))?,
+            };
+            match (previous.is_zero(), value.is_zero()) {
+                (true, false) => added += 1,
+                (false, true) => removed += 1,
+                _ => {}
+            }
+        }
+        if added > 0 {
+            fresh.push((*address, added));
+        }
+        if removed > 0 {
+            cleared.push((*address, removed));
+        }
+    }
+    fresh.sort();
+    cleared.sort();
+    Ok((fresh, cleared))
 }
