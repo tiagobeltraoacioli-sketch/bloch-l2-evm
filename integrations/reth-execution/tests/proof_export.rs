@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
-use bloch_execution_artifact::ExecutionArtifact;
+use bloch_execution_artifact::{ExecutionArtifact, SparseExecutionArtifact};
 use bloch_l2_evm::{ChainSpec, DepositMint, DepositProvenance};
 use bloch_reth_execution::{
     prepare_genesis,
-    proof_export::{export_canonical_witness, MAX_REPLAY_BLOCKS},
+    proof_export::{export_canonical_sparse_witness, export_canonical_witness, MAX_REPLAY_BLOCKS},
     BlochChainSpec, BlochNextBlockEnvCtx, BlochProviderFactory, BlochRethTransaction, BlochTables,
     CanonicalCoordinator,
 };
@@ -154,6 +154,24 @@ fn contract_export(anchor: B256, artifact_variable: Option<&str>, directory_vari
             .expected(),
         artifact.expected()
     );
+    // CANDIDATE: the sparse artifact of the same block reaches the same statement,
+    // carries no complete storage, and is refused by the complete decoder.
+    let sparse = export_canonical_sparse_witness(&factory, 3).unwrap();
+    assert_eq!(sparse.expected(), artifact.expected());
+    assert_eq!(sparse.header(), artifact.header());
+    assert_eq!(sparse.witness().new_state_root, tip.0.state_root);
+    let sparse_bytes = sparse.encode().unwrap();
+    assert_eq!(
+        SparseExecutionArtifact::decode(&sparse_bytes, spec.execution(), spec.domain())
+            .unwrap()
+            .expected(),
+        artifact.expected()
+    );
+    assert!(ExecutionArtifact::decode(&sparse_bytes, spec.execution(), spec.domain()).is_err());
+    assert!(SparseExecutionArtifact::decode(&encoded, spec.execution(), spec.domain()).is_err());
+    for invalid in [0, 4, MAX_REPLAY_BLOCKS + 1] {
+        assert!(export_canonical_sparse_witness(&factory, invalid).is_err());
+    }
     for invalid in [0, 4, MAX_REPLAY_BLOCKS + 1] {
         assert!(export_canonical_witness(&factory, invalid).is_err());
         assert_eq!(factory.best_block_number().unwrap(), 3);
