@@ -99,6 +99,8 @@ GATE_CONSTANTS = {
     # The L2 program swap and its rollback (inert until a release arms them; l1_gates.py reads both).
     'l2_next_program': 'L2_NEXT_PROGRAM_EPOCH',
     'l2_program_rollback': 'L2_PROGRAM_ROLLBACK_EPOCH',
+    # L1 forced inclusion (candidate, inert; native params::L2_FORCED_INCLUSION_EPOCH, = L2_NEXT_PROGRAM_EPOCH).
+    'l2_forced_inclusion': 'L2_FORCED_INCLUSION_EPOCH',
 }
 V2_COMPILED_GATES: Dict[str, Any] = {
     'HF1_CLAIM_FINALITY_EPOCH': 7180, 'HF1_FROZEN_FINALITY_SET_EPOCH': 7180, 'HF1_OWN_TARGET_VOTES_EPOCH': 7186,
@@ -106,8 +108,10 @@ V2_COMPILED_GATES: Dict[str, Any] = {
     'MLDSA_PIN_ACTIVATION_EPOCH': ['0', '7270'], 'HF3_KES_EPOCH': 7360, 'HF3_KES_ENFORCE_EPOCH': 8620,
     'HF3_SLH_SUITE_EPOCH': 7360, 'HF3_PQ_MIGRATION_EPOCH': 7360,
     # Absent before the program-swap build, which is the same as inert: an L2 build without them halts at an armed swap.
-    'L2_NEXT_PROGRAM_EPOCH': 'inert', 'L2_PROGRAM_ROLLBACK_EPOCH': 'inert',
+    'L2_NEXT_PROGRAM_EPOCH': 'inert', 'L2_PROGRAM_ROLLBACK_EPOCH': 'inert', 'L2_FORCED_INCLUSION_EPOCH': 'inert',
 }
+# getl2settlement.forced: the surcharge doubles every 32 pending weight units (native forced::SURCHARGE_DOUBLING).
+FORCED_SURCHARGE_DOUBLING = 32
 
 FINALITY_CLOSED_CODE = -32001  # bloch-l2-settled-rpc: safe and finalized refused without a valid follower status
 SUPPLY_LEDGER = '0x4200000000000000000000000000000000000100'
@@ -657,6 +661,17 @@ def check_escrow_and_backlog(nodes: List[Dict[str, Any]], p: Dict[str, Any], r: 
              f'{backlog} L1 deposits not yet consumed by the L2')
     if idle_state:
         check_deposit_wait(backlog, int(inbox.get('consumed', 0)), idle_state, p, now, r)
+    forced = head.get('forced')
+    if isinstance(forced, dict):
+        # Present only once L1 forced inclusion is enabled. Above 32 units the surcharge doubles: someone may be
+        # filling the queue (agent 122: about 1.8M sat per settlement interval keeps it full).
+        weight, cap = int(forced.get('pending_weight', 0)), int(forced.get('max_pending_weight', 256))
+        r.facts['forced_queue'] = {k: forced.get(k) for k in ('queued', 'consumed', 'pending', 'pending_weight',
+                                                               'max_pending_weight', 'next_surcharge_sat')}
+        level = CRIT if weight >= cap else WARN if weight > FORCED_SURCHARGE_DOUBLING else OK
+        r.add('forced_queue', level, f'{forced.get("pending", 0)} forced L2 transactions pending on L1, weight {weight} of '
+                                     f'{cap} (surcharge doubles above {FORCED_SURCHARGE_DOUBLING}, '
+                                     f'next unit {forced.get("next_surcharge_sat")} sat)', value=weight)
     da = head.get('data_availability') or []
     r.graded('da_backlog', len(da), p['da_backlog_warn'], p['da_backlog_crit'],
              f'{len(da)} DA records awaiting their settlement')

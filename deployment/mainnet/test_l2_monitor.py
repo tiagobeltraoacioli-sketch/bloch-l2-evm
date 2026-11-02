@@ -560,6 +560,41 @@ class MonitorTests(unittest.TestCase):
             bj.write_text(json.dumps({'l1_activation_epochs': {'L2_NEXT_PROGRAM_EPOCH': 10060}}))
             self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
 
+    def test_forced_queue_is_reported_once_enabled_and_warns_above_the_doubling(self):
+        w = healthy()
+        self.assertNotIn('forced_queue', {c['check'] for c in run(w)[0].checks})
+        for weight, expected in ((0, 'OK'), (32, 'OK'), (33, 'WARN'), (256, 'CRIT')):
+            for node in w['l1'].values():
+                node['l2']['forced'] = {'queued': 5, 'consumed': 4, 'pending': 1, 'pending_weight': weight,
+                                        'max_pending_weight': 256, 'due': [], 'next_surcharge_sat': '1000'}
+            r, _ = run(w)
+            self.assertEqual(level(r, 'forced_queue'), expected, weight)
+        self.assertEqual(r.facts['forced_queue']['pending_weight'], 256)
+
+    def test_the_forced_inclusion_gate_is_compared_with_the_l2_build(self):
+        self.assertEqual(m.GATE_CONSTANTS['l2_forced_inclusion'], 'L2_FORCED_INCLUSION_EPOCH')
+        w = healthy()
+        for node in w['l1'].values():
+            node['info']['hard_forks']['l2_forced_inclusion'] = {'activation_epoch': 10060, 'active': False}
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_FORCED_INCLUSION_EPOCH': 'inert'}}))
+            self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'CRIT')
+            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_FORCED_INCLUSION_EPOCH': 10060}}))
+            self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
+
+    def test_l1_gates_resolves_a_gate_defined_as_another_gate(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import l1_gates
+        source = ('pub const L2_NEXT_PROGRAM_EPOCH: u64 = 10060;\n'
+                  'pub const L2_FORCED_INCLUSION_EPOCH: u64 = L2_NEXT_PROGRAM_EPOCH;\n'
+                  'pub const L2_PROGRAM_ROLLBACK_EPOCH: u64 = u64::MAX;\n'
+                  'pub const HF9_ODD_EPOCH: u64 = SOMETHING_ELSE + 1;\n')
+        self.assertEqual(l1_gates.gates(source), {'L2_NEXT_PROGRAM_EPOCH': 10060, 'L2_FORCED_INCLUSION_EPOCH': 10060,
+                                                  'L2_PROGRAM_ROLLBACK_EPOCH': 'inert', 'HF9_ODD_EPOCH': '?SOMETHING_ELSE + 1'})
+        inert = source.replace('10060', 'u64::MAX')
+        self.assertEqual(l1_gates.gates(inert)['L2_FORCED_INCLUSION_EPOCH'], 'inert')
+
     def test_l1_without_hard_forks_warns(self):
         w = healthy()
         for node in w['l1'].values():
