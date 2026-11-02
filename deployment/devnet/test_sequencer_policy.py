@@ -58,6 +58,13 @@ class Gate(unittest.TestCase):
         self.assertEqual(refused['grow'], ('deposit-exposure', False))
         self.assertEqual(passing, [])
 
+    def test_exempt_sender_passes_limits_and_its_slots_still_count(self):
+        q = planner(fresh_slot_price_wei=10**18, fresh_slots_per_block=1, max_account_slots=5, write_limit_exempt_senders=['op'])
+        stats = [tx('deploy', 'op', fresh=[['c', 5]]), tx('other', 'x', tip=10**15, fresh=[['c', 1]])]
+        passing, refused = q.gate(stats, 1)
+        self.assertEqual(passing, ['deploy'])
+        self.assertEqual(refused['other'], ('account-slot-cap', False))
+
     def test_cooldown(self):
         q = planner()
         q.state['strikes']['s'] = 9

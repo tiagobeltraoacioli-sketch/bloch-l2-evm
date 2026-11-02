@@ -34,6 +34,7 @@ Price and rate of storage writes:
                         write rate, and falls otherwise. The protocol base fee reacts to EVM gas above 15M only, and so
                         never saw sustained inflation; this does. Not a block rule, so it needs no guest change.
   strike_cooldown_blocks  a sender whose transaction was quarantined waits this long.
+  write_limit_exempt_senders  senders outside the price, rates and caps: the operator's deployments and the bridge signers.
 """
 import json
 import os
@@ -102,12 +103,15 @@ class Planner:
         max_tx_gas = self.c.get('max_tx_gas')
         account_cap = self.c.get('max_account_slots')
         exposure_cap = self.c.get('max_deposit_exposure_slots')
+        exempt = set(self.c.get('write_limit_exempt_senders', []))
         in_block = 0
         by_sender = {}
         slots = {a: int(n) for a, n in self.state['account_slots'].items()}
         for tx in stats:
             name, sender, gas, tip = tx['hash'], tx['sender'], int(tx['gas_used']), int(tx['effective_tip'])
-            fresh = sum(int(n) for _, n in tx.get('fresh_slots', []))
+            # The operator's deployments and bridge signers are not limited or priced as writers. Their writes still count
+            # towards account sizes below.
+            fresh = 0 if sender in exempt else sum(int(n) for _, n in tx.get('fresh_slots', []))
             reason = None
             if self.state['strikes'].get(sender, 0) > number:
                 reason = ('sender-cooldown', False)
@@ -127,11 +131,13 @@ class Planner:
                     reason = ('larger-than-sender-write-limit', True)
                 elif used + fresh > per_sender:
                     reason = ('sender-write-limit', False)
-            if reason is None and fresh and (account_cap is not None or exposure_cap is not None):
+            if reason is None and tx.get('fresh_slots') and (account_cap is not None or exposure_cap is not None):
                 after = dict(slots)
                 for account, n in tx.get('fresh_slots', []):
                     after[account] = after.get(account, 0) + int(n)
-                if account_cap is not None and any(after[a] > account_cap for a, _ in tx['fresh_slots']):
+                if sender in exempt:
+                    slots = after
+                elif account_cap is not None and any(after[a] > account_cap for a, _ in tx['fresh_slots']):
                     reason = ('account-slot-cap', False)
                 elif exposure_cap is not None and self.exposure(after) > exposure_cap:
                     reason = ('deposit-exposure', False)

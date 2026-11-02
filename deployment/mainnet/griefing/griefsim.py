@@ -21,7 +21,7 @@ import heavy_gen as g  # noqa: E402
 import sequencer_policy as P  # noqa: E402
 
 CHAIN = 700770
-MAX_FEE = 10**13  # 10,000 gwei: the attacker never loses a block to the fee cap
+FEE_CAP = 4 * 10**9  # plus twice the tip: above any base fee these runs reach, without tying up much balance
 BC = json.load(open(os.environ['GS_BYTECODE']))
 MAX = 2**256 - 1
 COIN = 10**18
@@ -141,7 +141,8 @@ class Sim:
         sender = g.address(key)
         nonce = self.nonces.get(sender, 0)
         self.nonces[sender] = nonce + 1
-        raw = g.tx(key, CHAIN, nonce, gas, to, value, data, max_fee=MAX_FEE, tip=tip if tip is not None else self.tip())
+        tip = tip if tip is not None else self.tip()
+        raw = g.tx(key, CHAIN, nonce, gas, to, value, data, max_fee=FEE_CAP + 2 * tip, tip=tip)
         return raw.hex()
 
     def tip(self):
@@ -194,6 +195,13 @@ class Sim:
     # Real contracts
 
     def setup(self):
+        policy, self.p = self.p, None  # the operator's deployments are not what is being measured
+        try:
+            return self._setup()
+        finally:
+            self.p = policy
+
+    def _setup(self):
         c, sd = self, g.address(self.main)
         k = self.main
         c.block([], [(sd, 100_000_000_000)])
@@ -277,8 +285,9 @@ def write_tip(sim, slots, gas_per_slot=20_000):
 class Filler:
     """One block of new slots at a time, within what the design allows, with new funded senders when a sender is at its limit."""
 
-    def __init__(self, sim, key, griefer, data, gas_per_slot):
+    def __init__(self, sim, key, griefer, data, gas_per_slot, master=None):
         self.sim, self.key, self.griefer, self.data, self.gas_per_slot = sim, key, griefer, data, gas_per_slot
+        self.master = master or key
         config = sim.p.c if sim.p else {}
         self.per_block = config.get('fresh_slots_per_block')
         self.per_sender = config.get('fresh_slots_per_sender')
@@ -287,12 +296,16 @@ class Filler:
         self.refusals = []
         self.limit = 10**9
         self.done = False  # one new slot at a time was refused
+        if config.get('strike_cooldown_blocks'):
+            self.new_sender()  # the main key only funds, so a strike cannot stop the funding
 
     def new_sender(self):
         sim = self.sim
         fresh = sim.new_key()
         sim.mark(fresh)
-        sim.block([sim.tx(self.key, g.address(fresh), b'', 21_000, value=COIN * 2, tip=sim.tip())])
+        # Principal moved from the attacker's main balance, not spent.
+        needed = 3 * 5_000_000 * (FEE_CAP + 2 * write_tip(sim, 1))
+        sim.block([sim.tx(self.master, g.address(fresh), b'', 21_000, value=max(COIN, needed), tip=sim.tip())])
         self.key, self.sender_used = fresh, 0
 
     def block(self, wanted=None):
@@ -321,15 +334,17 @@ class Filler:
         if not added or len(chosen) < len(raws):
             sim.resync([g.address(self.key)])
         if not added:
-            # Near the budget a smaller transaction may still fit. A quarantined sender is cooling down: use another.
-            self.done = room <= 1
-            self.limit = max(room // 2, 1)
-            if 'over-budget-alone' in self.refusals or 'sender-cooldown' in self.refusals:
+            # A sender at its limit or cooling down: use another. Over a write limit by the griefer's own first slot: one less.
+            # Near the budget a smaller transaction may still fit.
+            if {'over-budget-alone', 'sender-cooldown', 'sender-write-limit'} & set(self.refusals):
                 self.new_sender()
+            if 'sender-write-limit' not in self.refusals:
+                self.done = room <= 1
+                self.limit = max(room - 1, 1) if 'larger-than-block-write-limit' in self.refusals else max(room // 2, 1)
         return added
 
 
-def freeze(sim, target='busdc', max_fee=100.0, max_blocks=2_000, check_every=500, gas_per_slot=30_000):
+def freeze(sim, target='busdc', max_fee=100.0, max_blocks=2_000, check_every=500, gas_per_slot=30_000, pace=None):
     """Grow a real token through `approve` until an honest `transfer` on it no longer fits a block. Needs none of the token."""
     token = sim.n[target]
     key = sim.funded_attacker(1_000_000_000_000)
@@ -340,7 +355,7 @@ def freeze(sim, target='busdc', max_fee=100.0, max_blocks=2_000, check_every=500
     while True:
         if spent(sim) > max_fee or sim.number - start > max_blocks:
             return out(event='verdict', attack='freeze', design=sim.design, target=target, frozen=False, reason='attacker limit', slots=slots, fee_blch=spent(sim), blocks=sim.number - start)
-        added = filler.block()
+        added = filler.block(pace)
         slots += added
         if not added:
             refused += 1
@@ -384,16 +399,16 @@ def finish_freeze(sim, target, slots, start, reasons):
 
 def halt_deposit(sim, contracts=8, per_contract=None, max_fee=100.0, chunk=None, limit_blocks=3_000):
     """Grow own contracts, then deposit to all of them in one block. L1 caps that block at 64 deposits and requires all."""
-    key = sim.funded_attacker(1_000_000_000_000)
+    master = key = sim.funded_attacker(1_000_000_000_000)
     griefers = []
     start = sim.number
     slots_total = 0
     deposit = 1_000_000
     cost = None
     for index in range(contracts):
-        griefer = sim.griefer(key, tip=write_tip(sim, 10))
+        griefer = sim.griefer(master, tip=write_tip(sim, 10))
         griefers.append(griefer)
-        filler = Filler(sim, key, griefer, lambda n: sel('fillRaw(uint256)') + w(n), 24_000)
+        filler = Filler(sim, master, griefer, lambda n: sel('fillRaw(uint256)') + w(n), 24_000, master=master)
         slots = 0
         while not (per_contract and slots >= per_contract):
             if spent(sim) > max_fee or sim.number - start > limit_blocks:
@@ -406,7 +421,6 @@ def halt_deposit(sim, contracts=8, per_contract=None, max_fee=100.0, chunk=None,
                 continue
             slots += added
             slots_total += added
-        key = filler.key
         batch = [(g_, deposit) for g_ in griefers]
         cost = sim.cost([], batch)
         fail = cost is None or cost.sp1_gas >= FAIL_SP1 or cost.instructions >= FAIL_INSTR
@@ -461,6 +475,23 @@ def deposits64(sim, slots=0, chunk=620):
         reply = sim.call('measure', 'complete,sparse' if slots <= 20_000 else 'sparse', sim.deps(batch), '-')
         out(event='deposit-case', case=name, reply=reply)
     out(event='verdict', attack='deposits64', design=sim.design, slots=grown)
+
+
+def deposits_code(sim, contracts=64):
+    """The sparse guest's worst deposit block: 64 distinct contracts, each with the largest code the rules allow."""
+    key = sim.funded_attacker()
+    init = bytes.fromhex('6160005ff3')  # return 24,576 zero bytes
+    addresses = []
+    while len(addresses) < contracts:
+        raws = []
+        for _ in range(min(3, contracts - len(addresses))):
+            addresses.append(creat(g.address(key), sim.nonces.get(g.address(key), 0)))
+            raws.append(sim.tx(key, b'', init, 4_990_000, tip=sim.tip()))
+        _, chosen, _, reply, _ = sim.block(raws)
+        if len(chosen) != len(raws) or not all(r[0] for r in reply['results']):
+            raise RuntimeError(f'deployment failed: {reply}')
+    reply = sim.call('measure', 'complete,sparse', sim.deps([(a, 1_000_000) for a in addresses]), '-')
+    out(event='verdict', attack='deposits-code', design=sim.design, contracts=contracts, fee_blch=spent(sim), reply=reply)
 
 
 def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, honest_every=1):
@@ -548,6 +579,8 @@ def worst_writes(sim, slots=5_000):
         ('rewrites-300', sel('rewriteApprove(address,uint256,uint256,uint256)') + cat(w(token), w(1), w(300), w(3)), 15_000_000),
         ('new-100', sel('fillApprove(address,uint256)') + cat(w(token), w(100)), 5_000_000),
         ('new-380', sel('fillApprove(address,uint256)') + cat(w(token), w(380)), 15_000_000),
+        ('reads-3300', sel('readAllowances(address,address,uint256,uint256)') + cat(w(token), w(griefer), w(1), w(3300)), 15_000_000),
+        ('rewrites-1600', sel('rewriteApprove(address,uint256,uint256,uint256)') + cat(w(token), w(1), w(1600), w(4)), 15_000_000),
     ):
         raw = sim.tx(key, griefer, data, gas, tip=TIP_FLOOR)
         report = sim.select([raw])
@@ -567,7 +600,7 @@ def base_fee(sim, idle=4_200):
     out(event='verdict', attack='base-fee', number=head['number'], next_base_fee=head['next_base_fee'])
 
 
-ATTACKS = dict(freeze=freeze, halt=halt_deposit, heavy=heavy_tx, deposits64=deposits64, congestion=congestion, spam=spam, work=worst_writes, fee=base_fee)
+ATTACKS = dict(deposits_code=deposits_code, freeze=freeze, halt=halt_deposit, heavy=heavy_tx, deposits64=deposits64, congestion=congestion, spam=spam, work=worst_writes, fee=base_fee)
 
 
 def main():
