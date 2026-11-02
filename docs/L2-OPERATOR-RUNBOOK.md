@@ -189,6 +189,26 @@ Fund the `da_funding_script_hash` printed by `prepare`, in two outputs. See `SET
 
 Evidence: Alert: `da_balance` CRIT at mainnet thresholds on a really underfunded key (5000 sat), WARN with a raised threshold. **A falling balance, the worker event and an empty key were not rehearsed:** those need proofs. Plain spends sent from the key on the private net were accepted by the RPC and then did not land, for a reason not established.
 
+### DA fee key lost
+
+The keystore or its passphrase is gone, or the key is suspected compromised. Batches with user transactions stop at the next DA signature. Its balance is lost; the protocol does not pin the DA key, so a new one works at once. Paths are the installer's; `REL` is the release directory with the pinned `bloch-pos`. As root:
+
+```
+systemctl stop bloch-l2-mainnet-settler
+mv /var/lib/bloch-l2-mainnet-da /var/lib/bloch-l2-mainnet-da.lost-$(date +%s)
+mv /var/lib/bloch-l2-mainnet-settler/da.passphrase /var/lib/bloch-l2-mainnet-settler/da.passphrase.lost-$(date +%s)
+install -d -m 0700 -o bloch-l2-mainnet-settler -g bloch-l2-mainnet-settler /var/lib/bloch-l2-mainnet-da
+(umask 377; openssl rand -hex 48 > /var/lib/bloch-l2-mainnet-settler/da.passphrase)
+chown bloch-l2-mainnet-settler: /var/lib/bloch-l2-mainnet-settler/da.passphrase
+sudo -u bloch-l2-mainnet-settler env BLOCH_KEYSTORE_PASSPHRASE_FILE=/var/lib/bloch-l2-mainnet-settler/da.passphrase REL/bloch-pos keygen --dir /var/lib/bloch-l2-mainnet-da --index 0
+sudo -u bloch-l2-mainnet-settler REL/bloch-pos keygen-public --dir /var/lib/bloch-l2-mainnet-da | cut -f2 > /etc/bloch-l2-mainnet-settler/public/da.pubkey.hex
+python3 -c "import hashlib; print(hashlib.sha3_256(bytes.fromhex(open('/etc/bloch-l2-mainnet-settler/public/da.pubkey.hex').read().strip())).hexdigest())"
+```
+
+The last line prints the new `da_funding_script_hash`. Fund it in two outputs, back up the new keystore and passphrase separately, then `systemctl start bloch-l2-mainnet-settler`. The config needs no change: it names the same paths.
+
+Evidence: Drill on a private net: keystore moved away, new throwaway key, one transfer to its script hash included in 6 s, settler restarted with no config change; the next user-transaction block (3 transactions) paid its DA fee from the new key, one fee of 2196 sat, and settled. The old key kept its balance, out of reach. On mainnet the keygen and the funding transfer are owner steps; the commands above were not run on a mainnet host.
+
 ## 9. Disk
 
 `disk[*]` WARN below 15% or 20 GiB free, CRIT below 5% or 5 GiB. Point it at each role's state filesystem.
@@ -261,7 +281,8 @@ What to keep, what is rebuilt, and how long it takes. Measured 2026-11-02 in age
 | Follower state lost | Full re-verification from Genesis-4: 57 min to the e6596 copy with the pinned `c18752fd…` (173,967 blocks, 3.1 GB of state, 516 MB RSS); about 75 min for today's chain. `safe` and `finalized` stay closed meanwhile | An L1 RPC that serves full history | Operator of that host |
 | Settled RPC view (`rpc-view`) lost | Under 1 s on a 3-block L2: it is rebuilt from the database at start | The database | Unaided after restart |
 | Prover host lost | Install on a new host + one proof (11 to 28 min, entry 2). Nothing is paid meanwhile | Signed prover release; SSH identity | Settler operator |
-| DA fee keystore or passphrase lost | Minutes: new key, one transfer to fund it, restart | Funds for the new key. The old key's balance is lost | Owner (funds), settler operator |
+| DA fee keystore or passphrase lost | Minutes: new key, one transfer to fund it (included in 6 s on the private net), restart; see entry 8 | Funds for the new key. The old key's balance is lost | Owner (funds), settler operator |
+| DA keystore and passphrase restored from backup | Milliseconds; the restored key signs | `validator.key` and the passphrase file. `LOCK` is not needed | Key holder |
 
 ### Settler state restored from an old backup
 
