@@ -206,6 +206,29 @@ class InstallPlan(unittest.TestCase):
         self.assertEqual(install.PROGRAMS['activated']['host_args'], ['--mainnet-v1'])
         self.assertEqual(install.PROGRAMS['next']['host_args'], ['--mainnet', '--sparse'])
 
+    def test_the_fallback_program_is_the_settlers_complete_next_guest(self):
+        good = dict(install.PINNED_FALLBACK, program='settlement_v3_mainnet')
+        install.check_identity(json.dumps(good), 'fallback')
+        for other in ('activated', 'next'):
+            with self.assertRaises(SystemExit):
+                install.check_identity(json.dumps(good), other)
+        with self.assertRaises(SystemExit):  # the old macOS build 44d4c9d7 of 776c6cb
+            install.check_identity(json.dumps(dict(good, elf_keccak='f3c20f71b84bb09cbab76a75c83a62c507fbefff4b347f787ef2d89aceb6f2b8')),
+                                   'fallback')
+        config = install.prover_config(Path('/opt/r-fallback'), Path('/var/lib/s'), 'aa' * 32, 12, 48, program='fallback')
+        self.assertEqual((config['mainnet_flag'], config['witness']), ('--mainnet', 'complete'))
+        self.assertTrue(config['guest'].endswith('/settlement_v3_mainnet_fallback'))
+        self.assertEqual(config['workdir'], '/var/lib/s/work')
+        spec = importlib.util.spec_from_file_location('settler_v3_pins', DEVNET / 'settler_v3.py')
+        settler = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, str(DEVNET))
+        spec.loader.exec_module(settler)
+        fallback = settler.MAINNET_FALLBACK
+        self.assertEqual(fallback['guest_sha256'], install.FALLBACK_GUEST_SHA256)
+        for key in ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254'):
+            self.assertEqual(fallback[key], install.PINNED_FALLBACK[key])
+        self.assertEqual(install.PINNED_FALLBACK['configuration'], install.PINNED_NEXT['configuration'])
+
     def test_remote_prover_pin_is_the_file_in_this_tree(self):
         self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)
     def test_prover_env_option(self):

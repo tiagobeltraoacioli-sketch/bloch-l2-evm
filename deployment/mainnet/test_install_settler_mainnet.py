@@ -28,7 +28,7 @@ class Installer(unittest.TestCase):
         self.etc = root / 'etc'
         self.etc.mkdir()
         (root / 'public').mkdir()
-        for name in ('l2-config.bin', 'l2-config.next.bin', 'da.pubkey.hex'):
+        for name in ('l2-config.bin', 'l2-config.next.bin', 'l2-config.fallback.bin', 'da.pubkey.hex'):
             (root / 'public' / name).write_text('x')
         rel = root / 'rel'
         rel.mkdir()
@@ -79,6 +79,10 @@ class Installer(unittest.TestCase):
         self.assertEqual(config['next_program']['prover_args'], ['--mainnet', '--sparse'])
         self.assertTrue(config['next_program']['guest'].endswith('/settlement_v3_mainnet_sparse'))
         self.assertTrue(config['next_program']['l2_config'].endswith('/l2-config.next.bin'))
+        self.assertEqual(config['fallback_program']['witness'], 'complete')
+        self.assertEqual(config['fallback_program']['prover_args'], ['--mainnet'])
+        self.assertTrue(config['fallback_program']['guest'].endswith('/settlement_v3_mainnet_fallback'))
+        self.assertTrue(config['fallback_program']['l2_config'].endswith('/l2-config.fallback.bin'))
 
     def test_the_proving_budget_is_set_only_when_given(self):
         import json
@@ -93,6 +97,8 @@ class Installer(unittest.TestCase):
         spec.loader.exec_module(settler)
         self.assertEqual(settler.MAINNET_NEXT_SPARSE['guest_sha256'], m.PINS['settlement_v3_mainnet_sparse'])
         self.assertEqual(settler.MAINNET['guest_sha256'], m.PINS['settlement_v3_mainnet'])
+        self.assertEqual(settler.MAINNET_FALLBACK['guest_sha256'], m.PINS['settlement_v3_mainnet_fallback'])
+        self.assertIn('settlement_v3_mainnet_fallback', m.FILES)
 
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)

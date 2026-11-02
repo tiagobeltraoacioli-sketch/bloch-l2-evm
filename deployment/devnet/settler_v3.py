@@ -230,15 +230,18 @@ def mainnet_l2_config(program=None):
     return out + bytes.fromhex(MAINNET['l2_genesis']) + bytes.fromhex(MAINNET['l2_genesis_state'])
 
 
-# CANDIDATE, not scheduled: the program native `l2_settlement::mainnet::PROGRAM_NEXT` installs at the
-# gate. Its configuration carries a placeholder fee-sweep recipient (TBD-owner), so all of these move
-# when the recipient is fixed. The proof policy, the L2 genesis and the attestor set stay.
+# CANDIDATE, not scheduled: the next rules proved by the complete-witness guest (`settlement_v3_mainnet`
+# 3ad3a4f0, the pinned container build, integrations/sp1-execution/guest/build-container.sh, of bloch-l2-evm
+# codex/fork-candidate-l2-r7-20261102 e8feb2b; it replaces 44d4c9d7, which that tree does not reproduce).
+# Native `l2_settlement::mainnet::PROGRAM_FALLBACK` names it (MAINNET_FALLBACK below). Its configuration
+# carries a placeholder fee-sweep recipient (TBD-owner), so all of these move when the recipient is fixed.
+# The proof policy, the L2 genesis and the attestor set stay.
 MAINNET_NEXT = {
     'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
-    'elf_keccak': 'f3c20f71b84bb09cbab76a75c83a62c507fbefff4b347f787ef2d89aceb6f2b8',
-    'vkey_koalabear': '50bd69a513f2463e748a8a62277bc25a08df69a4420a660e2a2ee3f957dca9f7',
-    'vkey_bn254': '00a17ad34a4fc918fba454531277bc25a11bed3490829983951771fcd7dca9f7',
-    'guest_sha256': '44d4c9d7b828c13ee6edc06fa499a53dc3594243bf599d517432c5076cb6ce47',
+    'elf_keccak': 'c9f8cd40b703b47c1fdfb183c223da9977ac9839e3d1c436c28c9b7f331aacf8',
+    'vkey_koalabear': '792452aa47ddaef1523907c03c39d3917df21180585eec804b27841626027d60',
+    'vkey_bn254': '00f248a5551f76bbc691c83e03c39d391fbe42301617bb202593c20b26027d60',
+    'guest_sha256': '3ad3a4f02b6f03768674de8804934064cc9f8f0b47fedbe0456dce79ddaa53b3',
 }
 
 # CANDIDATE, not scheduled: the same next rules proved by the sparse-witness guest
