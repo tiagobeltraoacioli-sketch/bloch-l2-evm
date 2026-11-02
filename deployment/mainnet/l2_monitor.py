@@ -132,7 +132,7 @@ _COMMON: Dict[str, Any] = {
     'status_age_warn': 300, 'status_age_crit': 900,
     # Height runways. Export: the producer refuses to export a block above this (None: no such limit in this build).
     'l2_export_limit': 4096, 'l2_export_warn': 1024, 'l2_export_crit': 3000,
-    # Native blocks one `reconstruct` reads: attestor rebuilds, replica refresh and foreign recovery stop above it.
+    # Native blocks one `reconstruct` reads: attestor rebuilds and replica refresh stop above it.
     'l1_reconstruct_limit': 1000000,
     # Cost of an empty block by height, measured on guest 203114bf. Above the first figure the local fallback is gone;
     # the others are what has been proved at the planned limits.
@@ -538,7 +538,7 @@ def check_height_runway(settled: Optional[int], l1_up: List[Dict[str, Any]], p: 
         limit = p['l1_reconstruct_limit']
         r.graded('l1_reconstruct_runway', height, limit * 4 // 5, limit * 19 // 20,
                  f'L1 height {height}: `reconstruct` refuses a follower store above {limit} blocks (attestor rebuild, replica '
-                 'refresh, foreign recovery)', limit=limit)
+                 'refresh)', limit=limit)
 
 
 def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str, now: float, r: Report) -> List[dict]:
