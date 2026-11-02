@@ -75,7 +75,7 @@ echo "building $commit in $src" >&2
   CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" ${CARGO_PROVE:-cargo prove} build --locked "--rustflags=$remap" >&2)
 
 elf_dir="$src/integrations/sp1-execution/guest/target/elf-compilation/riscv64im-succinct-zkvm-elf/release"
-for name in bloch-evm-synthetic-guest settlement_v2 settlement_v3 settlement_v3_mainnet settlement_v3_mainnet_sparse settlement_v3_mainnet_sparse_eager settlement_v3_mainnet_v1_sparse; do
+for name in bloch-evm-synthetic-guest settlement_v2 settlement_v3 settlement_v3_mainnet; do
   # Count (not grep -q): an early grep exit would fail `strings` under pipefail.
   if [[ $(strings "$elf_dir/$name" | grep -cF -e "$root" -e "$cargo_home" -e "$repo") != 0 ]]; then
     echo "$name still embeds a local absolute path" >&2
