@@ -702,7 +702,9 @@ systemctl show bloch-l2-mainnet-rpc-restart.service -p Result -p ExecMainStatus
 
 ```
 sudo systemctl enable --now bloch-l2-mainnet-rpc-restart.path
-``` The flags are covered by the installer and settler unit tests; this exact command line was not run on a container.
+```
+
+   The `configure` flags are covered by the installer and settler unit tests; this exact command line was not run on a container.
 
    GO (the state root is in `dry-run-*/work/*/block.json`, not in the printed report):
    - the last line is `{"configured": "/etc/bloch-l2-mainnet-settler/config.json"}`;
