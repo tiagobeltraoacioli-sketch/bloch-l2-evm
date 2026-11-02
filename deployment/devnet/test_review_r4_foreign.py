@@ -28,7 +28,6 @@ class Starvation(F.ForeignTest):
             settler.cycle()
             finalized.append(entry)
             world.finalize(*finalized[:-1])
-            world.finalized_only = len(finalized) - 1
             settler.cycle()
         return finalized
 
@@ -41,11 +40,39 @@ class Starvation(F.ForeignTest):
         world.l1 = []  # the rolling settlements below start again at block 1, so the L1 list must match their numbers
         finalized = self.rolling_foreign(world, settler, 12)
         rebuilds = [c for c in world.calls if 'reconstruct' in c]
-        self.assertEqual(self.local()[-1], finalized[-2][0], 'the database ends on the newest finalized settlement')
+        self.assertEqual(self.local()[-1], finalized[-1][0], 'a rebuild holds what the follower verified, the tail included')
         self.assertTrue(rebuilds and self.events('foreign-settlement-recovered'),
                         f'after {len(finalized)} foreign settlements, {len(finalized) - 1} of them finalized, the worker never '
                         f'rebuilt: local chain {[h[:4] for h in self.local()]}, events '
                         f'{len(self.events("foreign-settlement-waiting-finality"))} waiting, 0 recovered')
+
+    def test_recovery_when_the_rebuild_holds_settled_blocks_above_the_finalized_prefix(self):
+        """`reconstruct --l1-follower` replays every verified block in the follower's index (read_l1_follower), and the
+        follower verifies past its own FFG-final point. So the rebuild's head is the newest settled block, not the prefix."""
+        world = F.World(self.root, b'')
+        self.lost_race(world, F.block('b1'))
+        settler = self.settler(world)
+        self.assertFalse(settler.cycle())
+        world.during_prove = None
+        world.l1 = []
+        finalized = []
+        for n in range(1, 13):
+            entry = F.block(f'{(n % 9) + 1}{(n // 9) % 9 + 1}')
+            world.l1.append(entry)
+            world.foreign(n, entry)
+            settler.cycle()
+            finalized.append(entry)
+            world.finalize(*finalized[:-1])
+            # finalized_only stays None: the rebuild holds everything verified, the unfinalized tip included.
+            settler.cycle()
+        rebuilds = [c for c in world.calls if 'reconstruct' in c]
+        self.assertEqual(self.local()[-1], finalized[-1][0], 'the worker reaches the newest settled block')
+        self.assertLessEqual(len(rebuilds), 7, 'a settlement in every window costs at most one rebuild per two settlements')
+        self.assertEqual(len(rebuilds), len(self.events('foreign-settlement-recovered')), 'no rebuild is thrown away')
+        self.assertFalse(self.events('foreign-rebuild-behind-view'))
+        self.assertTrue(self.events('foreign-settlement-recovered'),
+                        f'{len(rebuilds)} full rebuilds, all thrown away ({len(self.events("foreign-rebuild-behind-view"))} '
+                        f'foreign-rebuild-behind-view), 0 recovered; local chain {[h[:4] for h in self.local()]}')
 
     def test_the_monitor_sees_a_worker_that_only_waits(self):
         now = time.time()

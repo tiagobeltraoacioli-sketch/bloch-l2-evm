@@ -52,5 +52,43 @@ class Failures(unittest.TestCase):
         self.assertEqual(kind, 'NotReady', text)
 
 
+    def tool(self, *argv):
+        return W.main(list(argv))
+
+    def test_exit_3_never_writes_a_proof_and_never_says_verified(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        l1, l1_url = serve(502, b'<html>502</html>')
+        l2, l2_url = serve(200, b'{"jsonrpc":"2.0","id":1,"error":{"code":-32046,"message":"frozen"}}')
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, 'proof.json')
+                text = io.StringIO()
+                with contextlib.redirect_stdout(text), contextlib.redirect_stderr(text):
+                    code = self.tool('fetch', '--l2-rpc', l2_url, '--l1-rpc', l1_url, '--index', '0', '--any-recipient', '--out', out)
+                self.assertEqual(code, W.NOT_READY, text.getvalue())
+                self.assertFalse(os.path.exists(out))
+                self.assertNotIn('VERIFIED', text.getvalue())
+                doc = os.path.join(tmp, 'doc.json')
+                leaf = W.leaf_hash(700770, 0, b'\x11' * 32, 2_000_000)
+                sib = [bytes(32)] * 32
+                root = W.root_from_proof(leaf, 0, sib)
+                with open(doc, 'w') as f:
+                    import json
+                    json.dump({'chain_id': 700770, 'number': 1, 'withdrawal_root': root.hex(), 'withdrawal_count': 1, 'index': 0,
+                               'withdrawal': {'nonce': 0, 'l1_recipient': '11' * 32, 'sats': 2_000_000, 'sender': '', 'l2_block': 1, 'leaf': leaf.hex()},
+                               'siblings': [s.hex() for s in sib]}, f)
+                text = io.StringIO()
+                with contextlib.redirect_stdout(text), contextlib.redirect_stderr(text):
+                    code = self.tool('verify', '--proof', doc, '--l1-rpc', l1_url)
+                self.assertEqual(code, W.NOT_READY, text.getvalue())
+                self.assertNotIn('VERIFIED', text.getvalue())
+        finally:
+            l1.shutdown()
+            l2.shutdown()
+
+
 if __name__ == '__main__':
     unittest.main()

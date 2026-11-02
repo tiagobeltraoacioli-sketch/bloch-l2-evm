@@ -232,6 +232,11 @@ class ProducerError(RuntimeError):
     """bloch-l2-produce-dev refused a command: retryable (bounded), never a permanent halt."""
 
 
+def follower_verified_tip(status_path):
+    """How far the follower has verified, to tell whether a rebuild has new input."""
+    return json.loads(Path(status_path).read_text()).get('verified_tip')
+
+
 def follower_finals(status_path):
     """{L2 number: L2 hash} of every finalized settlement in a follower status file: the list in schema v2, or
     the log a schema v3 status names (the part the status covers; a crash can leave more after it)."""
@@ -835,6 +840,7 @@ class Settler:
             if not isinstance(recovery.get('keep', 2), int) or recovery.get('keep', 2) < 1:
                 raise Halt('foreign_recovery.keep must be a positive integer')
         self.work = Path(self.c['workdir'])
+        self.rebuild_discarded_at = None
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
@@ -1404,6 +1410,10 @@ class Settler:
             if not prefix or self.holds_block(prefix, finals[prefix]):
                 return False
             number, l2_hash, expected_root = prefix, finals[prefix], None
+        # One rebuild per input: a rebuild that did not hold the target is not repeated until the follower has more.
+        tip = follower_verified_tip(recovery['follower_status'])
+        if self.rebuild_discarded_at is not None and self.rebuild_discarded_at == tip:
+            return False
         db = Path(self.c['l2_db'])
         rebuilding = db.with_name(db.name + '.rebuilding')
         shutil.rmtree(rebuilding, ignore_errors=True)
@@ -1420,11 +1430,16 @@ class Settler:
         document = json.loads(result.stdout)
         blocks = {b['number']: b for b in document.get('blocks', [])}
         rebuilt = blocks.get(number)
-        if document.get('head') != l2_hash or rebuilt is None or expected_root not in (None, rebuilt['state_root']):
-            # Another settlement landed since the view was read; the next cycle starts over from a fresh view.
+        # `reconstruct` replays everything the follower verified, so the head can lie above the target. The target
+        # must be there; the worker then holds the newest settled block and competes from it. A later reorg of that
+        # unfinalized tail on L1 is one more divergence, recovered the same way.
+        if rebuilt is None or rebuilt['hash'] != l2_hash or expected_root not in (None, rebuilt['state_root']):
             shutil.rmtree(rebuilding, ignore_errors=True)
+            self.rebuild_discarded_at = tip
             log('foreign-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
             return False
+        self.rebuild_discarded_at = None
+        number, l2_hash = max(blocks), blocks[max(blocks)]['hash']
         wrong = [n for n, h in finals.items() if n in blocks and blocks[n]['hash'] != h]
         if wrong:
             shutil.rmtree(rebuilding, ignore_errors=True)

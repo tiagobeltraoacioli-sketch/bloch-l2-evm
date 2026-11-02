@@ -188,21 +188,20 @@ function finalityOpen(s) {
   return fresh(s) && s.ok && (s.statusState === 'ok' || s.statusState === 'lagging');
 }
 
-// 'local' or 'peer': the first backend for a finality read. Current beats open beats the read target;
-// between equals the higher finalized level, so that routing by head does not move a client backwards.
+// 'local' or 'peer': the first backend for a finality read. Among open backends the higher finalized level,
+// so that routing does not move a client backwards; then current; then the read target.
 function finalityTarget() {
   const l = readState('local');
   const p = cfg.peerProbeUrl ? readState('peer') : null;
-  const pick = (good) => {
-    if (good(l) && good(p)) {
-      const lf = l.finalized === null ? -1 : l.finalized;
-      const pf = p.finalized === null ? -1 : p.finalized;
-      return lf === pf ? readTarget() : lf > pf ? 'local' : 'peer';
-    }
-    if (good(l)) return 'local';
-    return good(p) ? 'peer' : null;
-  };
-  return pick(finalityCurrent) || pick(finalityOpen) || readTarget();
+  if (finalityOpen(l) && finalityOpen(p)) {
+    const lf = l.finalized === null ? -1 : l.finalized;
+    const pf = p.finalized === null ? -1 : p.finalized;
+    if (lf !== pf) return lf > pf ? 'local' : 'peer';
+    if (finalityCurrent(l) !== finalityCurrent(p)) return finalityCurrent(l) ? 'local' : 'peer';
+    return readTarget();
+  }
+  if (finalityOpen(l)) return 'local';
+  return finalityOpen(p) ? 'peer' : readTarget();
 }
 
 function closedAnswer(reply) {

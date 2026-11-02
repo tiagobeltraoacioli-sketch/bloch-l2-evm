@@ -229,7 +229,9 @@ installs it, and turning `foreign_recovery` on needs `sudo systemctl enable --no
 `foreign-settlement-recovered` reports the block, the orphans, `wasted_proofs` and `wasted_da_signed`.
 
 A tip that keeps moving does not hold recovery back: when the database has left the finalized prefix, the worker rebuilds
-to the newest finalized settlement and keeps waiting for the tip. A database already on the prefix just waits.
+from everything the follower verified, which holds the prefix and any settled blocks above it, and competes from that head.
+A database already on the prefix just waits, and a rebuild that did not hold the target is not repeated until the follower has
+verified more. Griefing stays a liveness cost: the worker can still lose every race.
 
 Repeated events are an attack on liveness, not on funds. `l2_monitor.py` counts recovered and waited-on settlements over
 24 h from `--unit` or `--event-log`: `foreign_settlements` is WARN at one and CRIT above one per day. Meanwhile `safe` is

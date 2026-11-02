@@ -1031,6 +1031,19 @@ fn verified_levels(
     // A tip this database has not reached advances nothing, so a syncing RPC does not reread the log at each poll.
     if let Some(tip) = settlement_log::tip_number(&status) {
         if provider.sealed_header(tip)?.is_none() {
+            // A lag only if nothing contradicts: the genesis, what this database holds of the newest
+            // settlements, and a log of the size the status names. A database further behind than the
+            // newest settlements has nothing here to compare until it reaches them.
+            let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
+            final_genesis(&status, chain_id, genesis.hash())?;
+            for entry in settlement_log::recent_entries(&status) {
+                let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad l2_number"))?;
+                let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
+                if let Some(local) = provider.sealed_header(number)? {
+                    ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
+                }
+            }
+            settlement_log::check_log_present(status_path, &status).map_err(|e| eyre::eyre!(e))?;
             return Err(NotLocalYet { number: tip, written_at, schema }.into());
         }
     }
@@ -1041,16 +1054,35 @@ fn verified_levels(
             bail!("{why}");
         }
     }
-    let delta = match settlement_log::read_delta(status_path, &mut status, cursor) {
+    // Same settlements in other bytes (a follower build that writes other JSON): read the whole log once and
+    // compare it with this chain below. Fewer settlements than verified stays a regression.
+    let first_try = if settlement_log::log_rewritten(&status, cursor) { None } else { Some(cursor) };
+    let start = settlement_log::Cursor::default();
+    let cursor_used = first_try.unwrap_or(&start);
+    let identity = if first_try.is_none() { settlement_log::log_identity(status_path, &status) } else { identity };
+    if let (Some(identity), Some((seen, why))) = (&identity, &*refused_log) {
+        if identity == seen {
+            bail!("{why}");
+        }
+    }
+    let delta = match settlement_log::read_delta(status_path, &mut status, cursor_used) {
         Ok(delta) => delta,
         Err(why) => {
-            if let Some(identity) = identity {
+            // Content only: an I/O error may clear with nothing else changing.
+            if let (Some(identity), false) = (identity.clone(), why.contains(settlement_log::IO_ERROR)) {
                 *refused_log = Some((identity, why.clone()));
             }
             bail!("{why}");
         }
     };
     *refused_log = None;
+    // A whole history read and contradicted is not read again either, until the log changes.
+    let contradicted = |why: String, identity: &Option<String>, refused_log: &mut Option<(String, String)>| {
+        if let Some(identity) = identity {
+            *refused_log = Some((identity.clone(), why.clone()));
+        }
+        eyre::eyre!(why)
+    };
     let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
     let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);
     // New entries once, then the newest ones at every poll: a block hash commits to its parents, so
@@ -1061,7 +1093,9 @@ fn verified_levels(
         let local = provider
             .sealed_header(number)?
             .ok_or_else(|| NotLocalYet { number, written_at, schema: schema.clone() })?;
-        ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
+        if local.hash() != hash {
+            return Err(contradicted(format!("settled L2 block {number} differs from the local canonical header"), &identity, refused_log));
+        }
         best = Some(local);
     }
     let finalized_number = best.as_ref().map_or(0, |h: &Header| h.0.number);
@@ -1087,7 +1121,10 @@ fn verified_levels(
             }
         }
     };
-    Ok(Some(Levels { finalized: best, safe, safe_refused, status, new_settlements: delta.entries, cursor: delta.cursor }))
+    let mut new_settlements = delta.entries;
+    // After a whole-log read, what this process already adopted is not new.
+    new_settlements.retain(|entry| entry["l2_number"].as_u64().is_some_and(|n| n > cursor.count));
+    Ok(Some(Levels { finalized: best, safe, safe_refused, status, new_settlements, cursor: delta.cursor }))
 }
 
 /// Whether the status proves the local L2 genesis final: the follower reports
@@ -1469,7 +1506,6 @@ async fn main() -> Result<()> {
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
-                        Ok(None) if finalized.is_none() && safe.is_none() => {}
                         // The cursor and the settlement index stay: what was verified stays verified, closed
                         // readers are refused at the door, and a poll while closed costs what it costs while open.
                         Ok(None) => closing = Some(("missing", "file missing".to_string())),
@@ -1481,7 +1517,9 @@ async fn main() -> Result<()> {
                                     lag_seen = Some(lag.number);
                                 }
                                 let mut view = finality.write().expect("finality lock");
-                                view["status"] = status_signal("lagging", lag.written_at, lag.schema.as_deref());
+                                // `behind`: nothing published yet in this process, so the levels are closed. `lagging`: they stand.
+                                let state = if levels_closed.finalized.load(Ordering::Acquire) { "behind" } else { "lagging" };
+                                view["status"] = status_signal(state, lag.written_at, lag.schema.as_deref());
                                 view["status"]["missing_settlement"] = lag.number.into();
                             } else {
                                 println!("finality not advanced: {error}");

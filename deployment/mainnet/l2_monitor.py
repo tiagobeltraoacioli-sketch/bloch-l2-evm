@@ -498,6 +498,9 @@ def check_finality_status(tag: str, finality: Any, p: Dict[str, Any], r: Report)
     state, age = status.get('state'), status.get('age_s')
     if state == 'starting':
         r.add(f'l2_finality_status{tag}', WARN, 'the RPC has not finished its first read of the follower status: levels are closed')
+    elif state == 'behind':
+        r.add(f'l2_finality_status{tag}', CRIT, f'this database has not reached settlement {status.get("missing_settlement")}, and nothing '
+              'was published since this RPC started: safe and finalized are closed. Check the producer or the replica refresh.')
     elif state == 'lagging':
         real = age if isinstance(age, (int, float)) else 0
         r.add(f'l2_finality_status{tag}', CRIT if real >= p['status_age_crit'] else WARN,

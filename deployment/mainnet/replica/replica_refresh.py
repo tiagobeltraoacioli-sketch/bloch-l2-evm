@@ -64,6 +64,8 @@ def settlements_of(status, path):
     if len(data) != size or len(lines) != entries:
         raise ValueError('the follower settlement log does not match its status')
     settlements = [json.loads(line) for line in lines]
+    if [s.get('l2_number') for s in settlements] != list(range(1, len(settlements) + 1)):
+        raise ValueError('the follower settlement log is not contiguous from block 1')
     recent = status.get('finalized_settlements_recent') or []
     if entries and (not recent or settlements[-len(recent):] != recent):
         raise ValueError('the follower settlement log differs from its status')
