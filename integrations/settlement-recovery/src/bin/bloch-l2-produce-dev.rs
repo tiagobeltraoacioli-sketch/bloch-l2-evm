@@ -63,7 +63,7 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
   bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
                               [--timestamp-rule FROM:GENESIS:SLOT_MS --anchor-slot N]
-                              [--rule-set base|next]
+                              [--rule-set base|next] [--forced FILE]
   bloch-l2-produce-dev select ... as extend, with --txs: reports the selection and commits nothing
   bloch-l2-produce-dev rewind --target DIR --number N --hash HEX [--respool DIR]
   bloch-l2-produce-dev export --target DIR --number N --out FILE [--witness complete|sparse]
@@ -84,6 +84,10 @@ start time of the anchored native slot (--anchor-slot), never less than parent +
 reconstruct must be given the same rule. HEX is 64 lowercase hex
 characters without 0x. --deposits is a JSON list of native inbox records
 ({height,tx_index,txid,vout,sats,recipient}) minted at block start, in order.
+--forced (CANDIDATE, forced inclusion) is the JSON list getl2settlement.forced.due
+gives ({height,l1_txid,envelope_hash,gas_limit,envelope}): after the deposits and
+before the pool, each runs or is skipped by the forced rule, outside the limits;
+a sidecar DIR/forced/NNNNNNNN.json lets export and da find them.
 --txs is the pending pool: a JSON list of signed transaction hex strings, or a
 spool directory of *.tx files (one hex transaction each). Deposits are minted
 first; transactions are selected in a deterministic order within --max-gas
