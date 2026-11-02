@@ -9,6 +9,7 @@ attestor agents' partials, and verify it with the native code before any transac
 
 --proof   the claim's withdrawal proof (bloch-l2-produce-dev withdrawal-proof) against the root the
           claim will prove against: for >= 100 BLCH, getl2settlement withdrawals.matured_large.
+--bloch-pos  the attestor build (SHA-256 093909a2…), not the node's: the node build has no verify-attestation.
 --source  a feed holding `<chain>/<root>/attestor-<i>.partial` (an operator's read-only endpoint,
           an agent outbox directory, or any HTTP(S) base URL). Give all of them: sources are untrusted.
           Fetches are capped in bytes and wall-clock time. Every distinct well-formed partial over the
@@ -87,6 +88,10 @@ def aggregate(proof_path, sources, out, bloch_pos, genesis, attestors, pins=lib.
         raise SystemExit('the attestor set file is not the pinned set')
     if lib.sha256_file(genesis) != pins.manifest_sha256:
         raise SystemExit('the genesis manifest is not the pinned one')
+    probe = subprocess.run([bloch_pos, 'l2-claim', '--help'], capture_output=True, text=True)
+    if 'verify-attestation' not in probe.stdout + probe.stderr:
+        raise SystemExit(f'{bloch_pos} has no l2-claim verify-attestation: this is a node build. Use the attestor build '
+                         '(SHA-256 093909a2…, ARTIFACTS.sha256 in an operator package). This is not a signature problem.')
     if rpc:
         matured = rpc_matured_large(rpc)
         if matured == 'no-quorum' or not matured or matured.get('root') != root:

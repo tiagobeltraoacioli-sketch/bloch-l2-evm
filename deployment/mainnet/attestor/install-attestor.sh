@@ -12,7 +12,7 @@
 #        [--publish-command '["rsync","-a","{file}","drop@host:/srv/attest/{relpath}"]'] \
 #        [--feed-port N [--feed-bind ADDR]] \
 #        [--alert-command '["/usr/local/bin/notify-attestor","{event}"]'] [--dry-run]
-#        [--prefix DIR [--rehearsal-set attestors.set]]
+#        [--prefix DIR [--rehearsal-set attestors.set [--rehearsal-any-manifest]]]
 #   sudo ./install-attestor.sh rollback [--purge-key]      (UNINSTALL: removes the units)
 #   sudo ./install-attestor.sh status
 #
@@ -29,6 +29,10 @@
 # upgrade-rollback: restore the .TAG backup (binaries, agent scripts, config.json), move status.json
 # aside, then the same wait/check/unpause tail. Refused from 70 min before epoch 7180 (HF1, 2026-11-01
 # 16:11 UTC) on: the pre-fork follower cannot follow the chain past the fork. Fix forward instead.
+#
+# install refuses any bloch-pos, follower or producer whose SHA-256 is not the published one below, even when
+# DIR/SHA256SUMS lists it: that file travels with the binaries and cannot vouch for them.
+# A wrong transport passphrase, or a host that cannot be resolved, leaves nothing behind: just run install again.
 #
 # DIR holds: bloch-pos (built from codex/l2-attestor-keystore-20261019: l2-claim seal-key/key-check/
 # attest --sealed), bloch-l2-native-follower and bloch-l2-produce-dev (the RC pinned build,
@@ -52,7 +56,9 @@
 # --prefix DIR (rehearsal/staging): install every file under DIR instead of /opt, /etc and
 # /var/lib, as the invoking user, without useradd, chown or systemctl (units are written to
 # DIR/systemd and never loaded). --rehearsal-set FILE (only with --prefix) accepts a THROWAWAY
-# attestor set instead of the pinned one, to rehearse the owner flow end to end without real keys.
+# attestor set instead of the pinned one, to rehearse the owner flow end to end without real keys, and
+# lifts the published-binary check. --rehearsal-any-manifest (only with --rehearsal-set) also accepts a private
+# net's genesis as mainnet.manifest.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 OPT=/opt/bloch/l2-attestor ETC=/etc/bloch-l2-attestor STATE=/var/lib/bloch-l2-attestor
@@ -68,10 +74,10 @@ usage() { sed -n '3,/^set -euo/p' "$0" | sed '$d'; }
 DRY=0
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad URL $1"; echo "${BASH_REMATCH[1]}"; }
-ip_of() { getent ahostsv4 "$1" | awk 'NR==1{print $1}'; }
+ip_of() { { getent ahostsv4 "$1" || true; } | awk 'NR==1{print $1}'; }
 
 cmd_install() {
-  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET= FEED_PORT= FEED_BIND=0.0.0.0
+  local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET= FEED_PORT= FEED_BIND=0.0.0.0 ANYMANIFEST=0
   while [ $# -gt 0 ]; do
     case $1 in
       --artifacts) ART=$2; shift 2;; --index) INDEX=$2; shift 2;; --bundle) BUNDLE=$2; shift 2;;
@@ -80,9 +86,11 @@ cmd_install() {
       --publish-command) PUB_CMD=$2; shift 2;; --alert-command) ALERT=$2; shift 2;;
       --feed-port) FEED_PORT=$2; shift 2;; --feed-bind) FEED_BIND=$2; shift 2;;
       --dry-run) DRY=1; shift;; --prefix) PREFIX=$2; shift 2;; --rehearsal-set) RSET=$2; shift 2;;
+      --rehearsal-any-manifest) ANYMANIFEST=1; shift;;
       *) die "unknown option $1";;
     esac
   done
+  [ $ANYMANIFEST = 0 ] || [ -n "$RSET" ] || die "--rehearsal-any-manifest needs --rehearsal-set"
   [ -z "$FEED_PORT" ] || [[ $FEED_PORT =~ ^[0-9]{2,5}$ ]] || die "--feed-port must be a port number"
   [[ $FEED_BIND =~ ^[0-9A-Fa-f:.]+$ ]] || die "--feed-bind must be an IP address"
   [ -z "$RSET" ] || [ -n "$PREFIX" ] || die "--rehearsal-set needs --prefix (never on a real install)"
@@ -109,18 +117,30 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$PREFIX" ] || die "run as root"
   [ -n "$PUB_URL$PUB_CMD$FEED_PORT" ] || echo "WARNING: no --feed-port/--publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
   [ -z "$PUB_TOKEN" ] || [ -n "$PUB_URL" ] || die "--publish-token-file goes with --publish-url"
-  for f in "$UNITS/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor-follower.service" "$OPT/bloch-pos" "$ETC/attestor.sealed"; do
-    [ ! -e "$f" ] || die "$f exists; refusing to overwrite (rollback first)"
+  for f in "$UNITS/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor-follower.service" "$ETC/attestor.sealed"; do
+    [ ! -e "$f" ] || die "$f exists: this host already has an attestor. To replace it on purpose: install-attestor.sh rollback --purge-key, and have your offline backup first"
   done
   local py; py=$(command -v python3) || die "python3 is required"
   [ "$py" = /usr/bin/python3 ] || echo "note: the unit runs /usr/bin/python3" >&2
 
   # 1. Artifacts and public inputs, by hash.
+  for b in bloch-pos bloch-l2-native-follower bloch-l2-produce-dev; do
+    [ -f "$ART/$b" ] || die "$ART/$b is missing"
+    [ -x "$ART/$b" ] || chmod +x "$ART/$b" 2>/dev/null || [ $DRY = 1 ] || die "$ART/$b is not executable and cannot be made so"
+  done
+  [ -f "$ART/SHA256SUMS" ] || die "$ART/SHA256SUMS is missing: run ./check-operator-bundle.sh first, it writes it"
   (cd "$ART" && sha256sum -c --strict SHA256SUMS) || die "binary hashes do not match SHA256SUMS"
+  if [ -z "$RSET" ]; then
+    local got want
+    for b in "bloch-pos $V2_BLOCH_POS_SHA256" "bloch-l2-native-follower $V2_FOLLOWER_SHA256" "bloch-l2-produce-dev $V2_PRODUCE_SHA256"; do
+      got=$(sha256sum "$ART/${b% *}" | cut -d' ' -f1); want=${b#* }
+      [ "$got" = "$want" ] || die "$ART/${b% *} is $got, not the published $want: do not install it. Ask the coordinator for the published build"
+    done
+  fi
   for b in bloch-pos bloch-l2-native-follower bloch-l2-produce-dev; do
     grep -q "  $b\$" "$ART/SHA256SUMS" || die "SHA256SUMS does not cover $b"
   done
-  echo "$MANIFEST_SHA256  $ART/mainnet.manifest" | sha256sum -c --strict || die "mainnet.manifest is not Genesis-4"
+  [ $ANYMANIFEST = 1 ] || echo "$MANIFEST_SHA256  $ART/mainnet.manifest" | sha256sum -c --strict || die "mainnet.manifest is not Genesis-4"
   echo "$SET_FILE_SHA256  $SETF" | sha256sum -c --strict || die "attestors.set is not the pinned set"
   echo "$(cut -d' ' -f1 "$ART/carryover.tsv.gz.sha256")  $ART/carryover.tsv.gz" | sha256sum -c --strict \
     || die "carryover.tsv.gz does not match carryover.tsv.gz.sha256"
@@ -128,8 +148,28 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   local info; info=$("$ART/bloch-pos" l2-claim key-info --sealed "$BUNDLE") || die "$BUNDLE is not a sealed attestor key"
   grep -qx "signer_index $INDEX" <<<"$info" || die "$BUNDLE is not attestor $INDEX"
   grep -qx "set_hash $SET_HASH" <<<"$info" || die "$BUNDLE belongs to another attestor set"
+  local allow_agent="localhost" allow_follower h ip
+  for u in "${RPCS[@]}" ${PUB_URL:+"$PUB_URL"}; do
+    h=$(host_of "$u"); ip=$(ip_of "$h"); [ -n "$ip" ] || die "cannot resolve $h"; allow_agent+=" $ip"
+  done
+  h=$(host_of "$L1"); allow_follower=$(ip_of "$h"); [ -n "$allow_follower" ] || die "cannot resolve $h"
 
-  # 2. Users and directories.
+  # 2. The key comes first: a mistyped passphrase must leave nothing that blocks a second try.
+  if [ $DRY = 1 ]; then echo "+ re-seal $BUNDLE -> $ETC/attestor.sealed under a new random $ETC/keystore.passphrase (0400 root)"
+  else
+    install -d -m 0755 "$ETC"
+    (umask 077; head -c 48 /dev/urandom | base64 | tr -d '\n=+/' > "$ETC/keystore.passphrase")
+    chmod 0400 "$ETC/keystore.passphrase"
+    echo "Type the TRANSPORT passphrase of attestor $INDEX's bundle (the one you received out of band):"
+    "$ART/bloch-pos" l2-claim seal-key --sealed "$BUNDLE" --attestors "$SETF" --signer-index "$INDEX" \
+      --passphrase-file "$ETC/keystore.passphrase" --out "$ETC/attestor.sealed.new" \
+      || { rm -f "$ETC/attestor.sealed.new"; shred -fu "$ETC/keystore.passphrase"; die "re-seal failed. Nothing was installed. Check the passphrase and run the same command again"; }
+    "$ART/bloch-pos" l2-claim key-check --sealed "$ETC/attestor.sealed.new" --attestors "$SETF" \
+      --signer-index "$INDEX" --passphrase-file "$ETC/keystore.passphrase" \
+      || { rm -f "$ETC/attestor.sealed.new"; shred -fu "$ETC/keystore.passphrase"; die "host key check failed. Nothing was installed"; }
+  fi
+
+  # 3. Users and directories.
   local own_agent=(-o $USER_AGENT -g $USER_AGENT) own_follower=(-o $USER_FOLLOWER -g $USER_FOLLOWER)
   if [ -n "$PREFIX" ]; then own_agent=() own_follower=()
   else
@@ -148,18 +188,10 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   if [ $DRY = 1 ]; then echo "+ gunzip carryover.tsv.gz > $ETC/public/carryover.tsv"
   else gunzip -c "$ART/carryover.tsv.gz" > "$ETC/public/carryover.tsv"; chmod 0644 "$ETC/public/carryover.tsv"; fi
 
-  # 3. The key: re-seal the transport bundle under a fresh random host passphrase.
-  if [ $DRY = 1 ]; then echo "+ re-seal $BUNDLE -> $ETC/attestor.sealed under a new random $ETC/keystore.passphrase (0400 root)"
-  else
-    (umask 077; head -c 48 /dev/urandom | base64 | tr -d '\n=+/' > "$ETC/keystore.passphrase")
-    chmod 0400 "$ETC/keystore.passphrase"
-    echo "Type the TRANSPORT passphrase of attestor $INDEX's bundle (the one you received out of band):"
-    "$OPT/bloch-pos" l2-claim seal-key --sealed "$BUNDLE" --attestors "$ETC/public/attestors.set" --signer-index "$INDEX" \
-      --passphrase-file "$ETC/keystore.passphrase" --out "$ETC/attestor.sealed" \
-      || { shred -u "$ETC/keystore.passphrase"; die "re-seal failed (nothing installed for the key)"; }
-    [ -n "$PREFIX" ] || chown root:$USER_AGENT "$ETC/attestor.sealed"; chmod 0440 "$ETC/attestor.sealed"
-    "$OPT/bloch-pos" l2-claim key-check --sealed "$ETC/attestor.sealed" --attestors "$ETC/public/attestors.set" \
-      --signer-index "$INDEX" --passphrase-file "$ETC/keystore.passphrase" || die "host key check failed"
+  # The re-sealed key takes its final name last among the key steps; its presence marks an installed host.
+  if [ $DRY = 0 ]; then
+    [ -n "$PREFIX" ] || chown root:$USER_AGENT "$ETC/attestor.sealed.new"
+    chmod 0440 "$ETC/attestor.sealed.new"; mv "$ETC/attestor.sealed.new" "$ETC/attestor.sealed"
   fi
   if [ -n "$PUB_TOKEN" ]; then run install -m 0400 -o root -g root "$PUB_TOKEN" "$ETC/publish-token"; fi
   [ -e "$ETC/approvals.txt" ] || run install -m 0644 /dev/null "$ETC/approvals.txt"
@@ -197,12 +229,8 @@ PY
   else (umask 027; echo "$config" > "$ETC/config.json"); [ -n "$PREFIX" ] || chown root:$USER_AGENT "$ETC/config.json"; fi
 
   # 5. Units (not enabled, not started) and the network allow-list.
-  local allow_agent="localhost" h ip
-  for u in "${RPCS[@]}" ${PUB_URL:+"$PUB_URL"}; do
-    h=$(host_of "$u"); ip=$(ip_of "$h"); [ -n "$ip" ] || die "cannot resolve $h"; allow_agent+=" $ip"
-  done
   [ -z "$PUB_URL" ] || echo "note: the drop host is pinned by IP ($PUB_URL); re-run the drop-in if its address changes" >&2
-  h=$(host_of "$L1"); ip=$(ip_of "$h"); [ -n "$ip" ] || die "cannot resolve $h"
+  ip=$allow_follower
   if [ $DRY = 1 ]; then echo "+ units, follower.env ($L1), drop-ins: agent IPAddressAllow=$allow_agent; follower IPAddressAllow=localhost $ip"
   else
     printf 'BLOCH_L1_RPC_URL=%s\n' "$L1" > "$ETC/follower.env"; chmod 0644 "$ETC/follower.env"
@@ -227,15 +255,16 @@ MSG
     return 0
   fi
   cat <<MSG
-Installed attestor $INDEX, NOT started. Next (each step is read-only until the last):
-  sudo systemctl enable --now bloch-l2-attestor-follower      # first replay of ~155k L1 blocks: 30-60 min
-  journalctl -fu bloch-l2-attestor-follower                    # wait for l2_genesis.finalized=true in $FSTATE/status.json
+Installed attestor $INDEX, NOT started. Follow INSTALL.md from step 6. The commands, in order:
+  sudo systemctl enable --now bloch-l2-attestor-follower
+  journalctl -fu bloch-l2-attestor-follower
+  (the first replay takes 60-90 min; wait for l2_genesis.finalized=true in $FSTATE/status.json)
   sudo systemd-run --pipe --wait -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \\
        /usr/bin/python3 -I $OPT/attestor_agent.py check --config $ETC/config.json
- ${FEED_PORT:+ sudo systemctl enable --now bloch-l2-attestor-feed                # read-only endpoint on TCP $FEED_PORT
+ ${FEED_PORT:+ sudo systemctl enable --now bloch-l2-attestor-feed
 } sudo systemctl enable --now bloch-l2-attestor
-  journalctl -fu bloch-l2-attestor -o cat                      # 'started', then 'waiting'/'awaiting-own-finality'/'signed'
-Then remove the transport bundle copy from this host ($BUNDLE); its offline backup stays with you.
+  journalctl -fu bloch-l2-attestor -o cat
+Then re-seal your backup (INSTALL.md) and remove the transport bundle copy from this host ($BUNDLE); its offline backup stays with you.
 MSG
 }
 
@@ -243,6 +272,11 @@ cmd_rollback() {
   local PURGE=0
   while [ $# -gt 0 ]; do case $1 in --purge-key) PURGE=1; shift;; --dry-run) DRY=1; shift;; *) die "unknown option $1";; esac; done
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || die "run as root"
+  if [ $PURGE = 1 ] && [ $DRY = 0 ]; then
+    echo "--purge-key destroys this host's copy of the attestor key. Without your offline backup AND its passphrase the key is gone, and replacing it needs an L1 hard fork."
+    local answer; read -r -p "Type PURGE to continue: " answer
+    [ "$answer" = PURGE ] || die "not purged; nothing changed"
+  fi
   for unit in bloch-l2-attestor-feed bloch-l2-attestor bloch-l2-attestor-follower; do
     run systemctl disable --now "$unit.service" || true
     run rm -rf "$UNITS/$unit.service" "$UNITS/$unit.service.d"
@@ -250,7 +284,7 @@ cmd_rollback() {
   run systemctl daemon-reload
   if [ $PURGE = 1 ]; then
     for f in "$ETC/attestor.sealed" "$ETC/keystore.passphrase" "$ETC/publish-token"; do
-      [ ! -e "$f" ] || run shred -u "$f"
+      [ ! -e "$f" ] || run shred -fu "$f"
     done
     echo "Host key removed. The offline transport bundle is now the only copy of attestor's key on your side."
   fi
@@ -271,6 +305,7 @@ print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
 # corrected build whose hashes the coordinator published.
 V2_FOLLOWER_SHA256=c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a
 V2_PRODUCE_SHA256=fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9
+V2_BLOCH_POS_SHA256=093909a2bda70381bb3f71535029ceeb0b8b21378c3419c4c1dd0783a1a3387e
 L1_GENESIS_UNIX=1786656679 L1_EPOCH_SECONDS=960 HF1_EPOCH=7180
 ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF1 starts
 KIT_FILES=(attestor_agent.py attestor_lib.py aggregate_attestation.py sigfeed.py)

@@ -27,6 +27,7 @@ signing by itself. Operators act only on alerts.
 | `public/` | The pinned `attestors.set` and the five public keys. |
 | `tests/` | `python3 -m unittest -v test_attestor` (needs `BLOCH_POS` and `MAINNET_MANIFEST`) and `python3 -m unittest -v test_upgrade` (no native binary; follower pin and `upgrade`/`upgrade-rollback`). |
 | `tests/rehearse_upgrade.sh` | Rehearsal of `upgrade`/`upgrade-rollback` on old-kit `--prefix` installs against live L1 (`rehearsal_services.sh` stands in for systemctl, `rehearsal_check.py` runs `check` with a throwaway set). |
+| `tests/test_package_guards.py` | `python3 -m unittest -v test_package_guards` on Linux: refusals for stale pins, unpublished binaries, and the retry after a failed key step. No native binary. |
 | `tests/rehearse_owner_flow.sh` | End-to-end owner rehearsal with throwaway keys (`tty_driver.py` types the passphrases). |
 | `tests/rehearse_custody_flow.sh` | Custody rehearsal with throwaway keys: `owner` part (macOS or Linux) and `operator` part (Linux, v2 artifacts). |
 
@@ -126,8 +127,9 @@ must then serve the same paths over GET. This target belongs to that operator al
 
 ## Operator install (each of the five hosts)
 
-The host must not be a mainnet validator host or the settler. It needs 2 cores, 8 GB RAM and
-40 GB disk. The follower's copy of L1 was 2.8 GB at 155k blocks and keeps growing. All commands run as root. Nothing below sends a transaction.
+The host must not be a mainnet validator host or the settler. It needs 2 cores, 8 GB RAM and an
+80 GB disk (`keykit/OPERATOR-ONBOARDING.md`). All commands run as root. Nothing below sends a transaction.
+An operator follows the package's `INSTALL.md`; this is the short form.
 
 ```
 sudo ./install-attestor.sh install --artifacts DIR --index I --bundle attestor-I.sealed \
@@ -144,7 +146,9 @@ Notes:
 
 - `install` asks once for the **transport passphrase** of the operator's bundle. It then re-seals
   the key under a fresh random host passphrase, stored in `keystore.passphrase` (root, 0400).
-- After the first command, wait for the follower's first replay (about 30–60 min).
+- A wrong passphrase leaves nothing installed: run the command again.
+- `install` refuses a follower, producer or `bloch-pos` that is not the published build, whatever `SHA256SUMS` says.
+- After the first command, wait for the follower's first replay (about 60–90 min).
 - `check` prints `check-ok`. It covers the pins, opening the key, the follower, the RPC quorum and
   the rebuild check.
 - When everything works, delete the bundle copy from the host. The operator keeps the offline backup.
@@ -157,7 +161,7 @@ owner flow this way with throwaway keys (seal, verify, install for 3 operators, 
 synthetic root, aggregate 3-of-5, native verify, shred). Rehearsed on 2026-10-19 on 209.250.236.240.
 
 To uninstall, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
-and the key. `--purge-key` also shreds the host key and passphrase. It is not a binary rollback: for
+and the key. `--purge-key` also shreds the host key and passphrase, after you type `PURGE`. It is not a binary rollback: for
 that, see `upgrade-rollback` below.
 
 ## Claimants: retry `l2-claim sign` on a shape error
@@ -203,7 +207,7 @@ These hashes are built into `install-attestor.sh` as the defaults. Use `--follow
 `--produce-sha256` only for a later corrected build whose hashes the coordinator published.
 
 Upgrade **one host at a time**, so that at least 3 of 5 stay up. Each host is down for about
-50–60 min. Run the upgrade inside `tmux` or `screen`:
+75 min (measured in report 02: 62 min re-verify, 13 min finality). Run the upgrade inside `tmux` or `screen`:
 
 ```
 sudo ./install-attestor.sh upgrade --artifacts /root/hf123
@@ -261,11 +265,15 @@ in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
 2. Run:
 
    ```
-   aggregate_attestation.py --proof proof.json --source https://drop.example/attest --out att/ \
-       --bloch-pos bloch-pos --genesis mainnet.manifest --attestors attestors.set \
+   aggregate_attestation.py --proof proof.json \
+       --source http://OPERATOR-0:8787 --source http://OPERATOR-1:8787 --source http://OPERATOR-2:8787 \
+       --source http://OPERATOR-3:8787 --source http://OPERATOR-4:8787 --out att/ \
+       --bloch-pos ATTESTOR-BUILD/bloch-pos --genesis mainnet.manifest --attestors attestors.set \
        --rpc http://80.240.16.185:8080 --rpc http://199.247.22.8:8080 --rpc http://45.77.67.251:8080
    ```
 
+   `--bloch-pos` must be the attestor build (`093909a2…`). The node's `bloch-pos` has no
+   `verify-attestation`, and the tool says so.
 3. Use the printed `--attestors … --attestation …` arguments in `bloch-pos l2-claim prepare`, then
    `sign`.
 4. Broadcast separately.
@@ -279,7 +287,7 @@ in for `systemctl`. `--now-unix` (prefix only) moves the clock for the HF1 gate.
 | `refused-root-not-on-own-chain` / `refused-rebuild-differs` | Do not override. Compare with the other operators. Possible RPC or settler fault, or an attack. |
 | `halt` (exit 3) | A pin, identity or rebuild failure. Read the reason. The unit does not restart by itself. |
 | `waiting` | The follower is stale or there is no RPC quorum. Transient. |
-| `publish-failed` | The drop is unreachable. The agent retries every cycle. The outbox still holds the partial. |
+| `publish-failed` | An optional push target is unreachable. The agent retries every cycle. The outbox still holds the partial, and the feed serves it. |
 
 The pause file stops all signing at once: `sudo touch /etc/bloch-l2-attestor/PAUSE`.
 

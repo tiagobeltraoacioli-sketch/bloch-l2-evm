@@ -98,7 +98,9 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh package
       `ARTIFACTS.sha256` (v2 follower `c18752fd…`, producer `fb0d5313…`, `bloch-pos` `093909a2…`,
       manifest `7eef82a7…`, carryover `4d1e2738…`), `INSTALL.md`, `ONBOARDING.md`, the kit and
       `check-operator-bundle.sh`, all listed in `CONTENTS.sha256`.
-- [ ] Optional: `--artifacts DIR` embeds the Linux binaries after checking them against the pins.
+- [ ] Recommended: `--artifacts DIR` embeds the Linux binaries after checking them against the pins, so the operator fetches nothing.
+- [ ] Package from a clean checkout of the current kit. `package` refuses local changes, the old producer `7c1cc62b…` and pins that disagree with `install-attestor.sh`. Do not use `~/worktrees/attestor-custody-20261030`.
+- [ ] What to send each operator: `OWNER-SEND-LIST.md`.
 
 ## 4. Two offline backups
 
