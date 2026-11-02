@@ -171,9 +171,48 @@ async fn main() -> Result<()> {
     let executor = LightProver::new().await;
     let (public, report) = executor.execute(Elf::from(fs::read(&elf)?), stdin).await?;
     expected.check_expected(public.as_slice())?;
+    // Attacks on the ELF: the guest must refuse what the native path refuses.
+    let run_attack = |w: &bloch_l2_evm::sparse_witness::SparseBatchWitness| {
+        let mut stdin = SP1Stdin::new();
+        stdin.write(w);
+        stdin.write(&ctx);
+        stdin.write_vec(alloy_rlp::encode(&body));
+        stdin.write(&settlement);
+        stdin
+    };
+    let mut attacks = Vec::new();
+    // 1. Leave out the account of every forced sender, one at a time (skipped ones included).
+    for f in &forced {
+        let Ok(tx) = bloch_l2_evm::decode_signed_transaction(&spec, &f.envelope) else { continue };
+        let sender = tx.sender();
+        let mut changed = witness.clone();
+        let before = changed.pre_accounts.len() + changed.absent_accounts.len();
+        changed.pre_accounts.retain(|a| a.address != sender);
+        changed.absent_accounts.retain(|a| *a != sender);
+        if changed.pre_accounts.len() + changed.absent_accounts.len() == before {
+            continue;
+        }
+        let native = execute_settlement_statement_v3_sparse(&spec, MAINNET_DOMAIN, &changed, &ctx, &body, settlement, BlockHashes::Lazy).is_err();
+        let elf_refused = executor.execute(Elf::from(fs::read(&elf)?), run_attack(&changed)).await.is_err();
+        attacks.push(format!("{{\"attack\":\"sender-omitted\",\"native_refused\":{native},\"elf_refused\":{elf_refused}}}"));
+        if !native || !elf_refused {
+            return Err("a witness without a forced sender was accepted".into());
+        }
+    }
+    // 2. Drop the forced list: whatever executes, the statement must differ from the honest one.
+    let mut dropped = witness.clone();
+    dropped.forced.clear();
+    let differs = match executor.execute(Elf::from(fs::read(&elf)?), run_attack(&dropped)).await {
+        Err(_) => true,
+        Ok((public, _)) => expected.check_expected(public.as_slice()).is_err(),
+    };
+    attacks.push(format!("{{\"attack\":\"list-dropped\",\"statement_differs_or_refused\":{differs}}}"));
+    if !differs {
+        return Err("dropping the forced list kept the statement".into());
+    }
     let declared: u64 = forced.iter().map(|f| f.record.gas_limit).sum();
     println!(
-        "{{\"mode\":\"{mode}\",\"forced\":{},\"included\":{},\"skipped\":{},\"declared_gas\":{declared},\"l2_gas_used\":{},\"witness_bytes\":{},\"instructions\":{},\"sp1_gas\":{},\"user_tx_count\":{},\"public_values_match\":true}}",
+        "{{\"mode\":\"{mode}\",\"forced\":{},\"included\":{},\"skipped\":{},\"declared_gas\":{declared},\"l2_gas_used\":{},\"witness_bytes\":{},\"instructions\":{},\"sp1_gas\":{},\"user_tx_count\":{},\"public_values_match\":true,\"attacks\":[{}]}}",
         forced.len(),
         selection.included.len(),
         selection.skipped.len(),
@@ -182,6 +221,7 @@ async fn main() -> Result<()> {
         report.total_instruction_count(),
         report.gas().map_or("null".to_string(), |g| g.to_string()),
         expected.user_tx_count,
+        attacks.join(","),
     );
     Ok(())
 }
