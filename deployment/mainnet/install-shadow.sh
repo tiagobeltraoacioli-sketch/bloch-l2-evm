@@ -144,6 +144,9 @@ id "$USER_" >/dev/null 2>&1 || { echo "user $USER_ missing: run install-settler-
 install -d -m 0755 "$OPT"
 install -m 0755 "$OUT/bloch-l2-produce-dev" "$OPT/bloch-l2-produce-dev"
 install -m 0644 "$OUT/sequencer_mainnet.py" "$OPT/sequencer_mainnet.py"
+# The copies are what runs: check them, not only OUT (which may change after verify_out).
+echo "$PRODUCE_SHA256  $OPT/bloch-l2-produce-dev" | sha256sum -c - && echo "$SEQUENCER_SHA256  $OPT/sequencer_mainnet.py" | sha256sum -c - \
+  || { echo "the installed copies differ from the pins; nothing started (run --rollback)"; exit 1; }
 install -d -m 0700 -o "$USER_" -g "$USER_" "$VAR" "$VAR/work" "$VAR/tmp"
 install -d -m 0755 "$ETC"
 cat > "$ETC/config.json" <<JSON

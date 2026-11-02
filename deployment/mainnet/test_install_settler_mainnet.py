@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('install_settler', HERE / 'install-settler-mainnet.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+STATE, DA_DIR = m.STATE, m.DA_DIR  # before any test patches them
 
 
 class Done:
@@ -80,6 +81,15 @@ class Installer(unittest.TestCase):
                 golive[name.split('/', 1)[1]] = value
         for name in m.FILES:
             self.assertEqual(golive[name], m.PINS[name], name)
+
+    def test_units_running_as_the_settler_user_hide_its_secrets(self):
+        hidden = {'/run/docker.sock', str(DA_DIR), str(STATE / 'da.passphrase'), str(STATE / 'ssh')}
+        for unit in (HERE / 'bloch-l2-mainnet-shadow.service', HERE / 'follower-rpc' / 'bloch-l2-mainnet-rpc.service'):
+            paths = set()
+            for line in unit.read_text().splitlines():
+                if line.startswith('InaccessiblePaths='):
+                    paths |= {p.lstrip('-') for p in line.split('=', 1)[1].split()}
+            self.assertLessEqual(hidden, paths, unit.name)
 
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)
