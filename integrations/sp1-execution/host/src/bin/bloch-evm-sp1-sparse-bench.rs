@@ -4,6 +4,7 @@
 //!
 //! usage: bloch-evm-sp1-sparse-bench RULES HEIGHT SLOTS READS UPDATES INSERTS
 //!            [--complete ELF] [--sparse ELF] [--eager ELF] [--tamper omit-read|omit-exclusion|forge-leaf]
+//!            [--transfers N] [--prove-groth16 FILE]
 //!
 //! RULES is `mainnet` or `mainnet-v1`. HEIGHT is the number of empty blocks before
 //! the measured block (the EIP-4788 ring grows 2 slots per block to 16,380). SLOTS is
@@ -15,7 +16,9 @@
 //! Each ELF runs in the SP1 executor. The committed statement is checked byte for
 //! byte against the host's complete-witness execution. Prints one JSON line per ELF.
 //! With --tamper the sparse witness is altered and the guest must fail: the line
-//! says whether it did.
+//! says whether it did. --transfers adds N value transfers to new accounts to the
+//! measured block. --prove-groth16 makes one real proof with the sparse guest, verifies
+//! it and writes it to FILE. Take the host's proof lock first.
 
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
@@ -32,7 +35,7 @@ use bloch_l2_evm::{
     BlockContext, ChainSpec, DepositMint, DepositProvenance, L2State,
 };
 use k256::ecdsa::SigningKey;
-use sp1_sdk::{Elf, LightProver, Prover, SP1Stdin};
+use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, SP1Stdin};
 use std::{error::Error, fs, io, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -102,6 +105,26 @@ impl Chain {
             .map_err(|e| io::Error::other(e.to_string()))?
             .into();
         Ok(TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into())
+    }
+
+    fn tx_value(&mut self, to: TxKind, value: u64) -> Result<Vec<Bytes>> {
+        let transaction = TxEip1559 {
+            chain_id: self.spec.chain_id,
+            nonce: self.nonce,
+            to,
+            value: U256::from(value),
+            gas_limit: 21_000,
+            max_fee_per_gas: 2_000_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            ..Default::default()
+        };
+        self.nonce += 1;
+        let signature: Signature = self
+            .key
+            .sign_prehash_recoverable(transaction.signature_hash().as_slice())
+            .map_err(|e| io::Error::other(e.to_string()))?
+            .into();
+        Ok(vec![TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()])
     }
 
     fn context(&self) -> Result<BlockContext> {
@@ -252,7 +275,7 @@ fn forge_leaf(witness: &mut SparseBatchWitness, contract: Address, slot: u64) ->
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-sparse-bench RULES HEIGHT SLOTS READS UPDATES INSERTS [--complete ELF] [--sparse ELF] [--eager ELF] [--tamper omit-read|omit-exclusion|forge-leaf]";
+    let usage = "usage: bloch-evm-sp1-sparse-bench RULES HEIGHT SLOTS READS UPDATES INSERTS [--complete ELF] [--sparse ELF] [--eager ELF] [--tamper omit-read|omit-exclusion|forge-leaf] [--transfers N] [--prove-groth16 FILE]";
     if args.len() < 6 {
         return Err(usage.into());
     }
@@ -270,6 +293,8 @@ async fn main() -> Result<()> {
     let mut sparse_elf = None;
     let mut eager_elf = None;
     let mut tamper = None;
+    let mut transfers = 0u64;
+    let mut prove_file = None;
     let mut rest = args[6..].iter();
     while let Some(flag) = rest.next() {
         let value = rest.next().ok_or(usage)?.clone();
@@ -278,6 +303,8 @@ async fn main() -> Result<()> {
             "--sparse" => sparse_elf = Some(value),
             "--eager" => eager_elf = Some(value),
             "--tamper" => tamper = Some(value),
+            "--transfers" => transfers = value.parse().map_err(|_| usage)?,
+            "--prove-groth16" => prove_file = Some(value),
             _ => return Err(usage.into()),
         }
     }
@@ -327,7 +354,8 @@ async fn main() -> Result<()> {
     // The measured block.
     let mut transactions = Vec::new();
     if reads > 0 {
-        transactions.push(chain.tx(TxKind::Call(contract), ops(1, 0, reads), spec.gas_limit / 2)?);
+        let gas = if updates + inserts + transfers == 0 { spec.gas_limit - 2_000_000 } else { spec.gas_limit / 2 };
+        transactions.push(chain.tx(TxKind::Call(contract), ops(1, 0, reads), gas)?);
     }
     if updates > 0 {
         let start = slots.saturating_sub(updates);
@@ -335,6 +363,21 @@ async fn main() -> Result<()> {
     }
     if inserts > 0 {
         transactions.push(chain.tx(TxKind::Call(contract), ops(0, slots + 1_000_000, inserts), spec.gas_limit / 2)?);
+    }
+    if transfers > 0 && contract == Address::ZERO {
+        // The sender needs funds; the measured block's deposit arrives in the block.
+        let deposit = chain.deposit();
+        let body = NodeBodyV2 {
+            deposits: vec![deposit],
+            transactions: vec![],
+        };
+        chain.commit(&body)?;
+    }
+    for index in 0..transfers {
+        let mut recipient = [0x5a; 20];
+        recipient[12..].copy_from_slice(&index.to_be_bytes());
+        let mut value = chain.tx_value(TxKind::Call(Address::from(recipient)), 1_000_000_000_000)?;
+        transactions.append(&mut value);
     }
     let body = if transactions.is_empty() {
         NodeBodyV2::default()
@@ -421,6 +464,27 @@ async fn main() -> Result<()> {
                 size.accounts, size.account_nodes, size.storage_nodes, size.node_bytes
             ),
         );
+        if let (Some(file), BlockHashes::Lazy) = (&prove_file, mode) {
+            let mut stdin = SP1Stdin::new();
+            stdin.write(&witness);
+            stdin.write(&context);
+            stdin.write_vec(encoded_body.clone());
+            stdin.write(&settlement);
+            let prover = ProverClient::builder().cpu().build().await;
+            let started = Instant::now();
+            let key = prover.setup(Elf::from(fs::read(elf)?)).await?;
+            let setup_seconds = started.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let proof = prover.prove(&key, stdin).groth16().await?;
+            let prove_seconds = started.elapsed().as_secs_f64();
+            expected.check_expected(proof.public_values.as_slice())?;
+            prover.verify(&proof, key.verifying_key(), None)?;
+            proof.save(file)?;
+            println!(
+                "{{\"proof\":\"groth16\",\"verified\":true,\"setup_seconds\":{setup_seconds:.1},\"prove_seconds\":{prove_seconds:.1},\"peak_rss_bytes\":{}}}",
+                peak_rss_bytes()
+            );
+        }
     }
     Ok(())
 }
