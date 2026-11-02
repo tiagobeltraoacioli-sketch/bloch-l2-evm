@@ -183,7 +183,14 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # The getl2settlement fields the worker reads; everything else (native_height,
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 FRESH_SOURCE_SECONDS = 600  # skip_idle_blocks: a source older than this (above the pacing) takes no user transaction
-SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability', 'program')
+SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability', 'program',
+                          'forced')
+# Of `getl2settlement.forced` (present only once L1 forced inclusion is enabled) the worker reads the records the next
+# settlement must consume; queue totals and the surcharge move with every L1 block and are not part of the quorum.
+FORCED_VIEW_FIELDS = ('due', 'due_hash')
+# L1 forced inclusion (candidate; native l2_settlement::forced, bloch_l2_evm::forced_inclusion).
+INBOX_DOMAIN = b'BLOCH:L2:INBOX:2'
+FORCED_MAX_PER_SETTLEMENT, FORCED_MAX_GAS_PER_SETTLEMENT = 16, 300_000
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sequencer_policy  # noqa: E402  (installed beside this file)
 
@@ -396,6 +403,116 @@ def keccak256(data):
     return b''.join(state[i % 5][i // 5].to_bytes(8, 'little') for i in range(4))
 
 
+# ---- rehearsal-only: the sender of an L2 envelope (the `censor_senders` knob, never on mainnet) ----
+SECP_P = 2 ** 256 - 2 ** 32 - 977
+SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+SECP_G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+          0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _ec_add(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and (a[1] + b[1]) % SECP_P == 0:
+        return None
+    if a == b:
+        m = 3 * a[0] * a[0] * pow(2 * a[1], -1, SECP_P)
+    else:
+        m = (b[1] - a[1]) * pow(b[0] - a[0], -1, SECP_P)
+    x = (m * m - a[0] - b[0]) % SECP_P
+    return x, (m * (a[0] - x) - a[1]) % SECP_P
+
+
+def _ec_mul(k, point):
+    out = None
+    while k:
+        if k & 1:
+            out = _ec_add(out, point)
+        point, k = _ec_add(point, point), k >> 1
+    return out
+
+
+def rlp_decode(data):
+    """Minimal RLP decoder: bytes or nested lists of bytes. Refuses trailing bytes."""
+    def item(at):
+        b = data[at]
+        if b < 0x80:
+            return data[at:at + 1], at + 1
+        if b < 0xb8:
+            return data[at + 1:at + 1 + b - 0x80], at + 1 + b - 0x80
+        if b < 0xc0:
+            n = b - 0xb7
+            size = int.from_bytes(data[at + 1:at + 1 + n], 'big')
+            return data[at + 1 + n:at + 1 + n + size], at + 1 + n + size
+        if b < 0xf8:
+            start, end = at + 1, at + 1 + b - 0xc0
+        else:
+            n = b - 0xf7
+            start = at + 1 + n
+            end = start + int.from_bytes(data[at + 1:at + 1 + n], 'big')
+        out, cursor = [], start
+        while cursor < end:
+            value, cursor = item(cursor)
+            out.append(value)
+        if cursor != end:
+            raise ValueError('rlp list length')
+        return out, end
+    value, end = item(0)
+    if end != len(data):
+        raise ValueError('rlp trailing bytes')
+    return value
+
+
+def rlp_encode(value):
+    if isinstance(value, list):
+        body = b''.join(rlp_encode(v) for v in value)
+        return (bytes([0xc0 + len(body)]) if len(body) < 56 else
+                bytes([0xf7 + (len(body).bit_length() + 7) // 8]) + len(body).to_bytes((len(body).bit_length() + 7) // 8, 'big')) + body
+    if len(value) == 1 and value[0] < 0x80:
+        return value
+    return (bytes([0x80 + len(value)]) if len(value) < 56 else
+            bytes([0xb7 + (len(value).bit_length() + 7) // 8]) + len(value).to_bytes((len(value).bit_length() + 7) // 8, 'big')) + value
+
+
+def ecrecover_address(digest, recid, r, s):
+    """The 20-byte address that signed `digest`, or None."""
+    if not (0 < r < SECP_N and 0 < s < SECP_N) or recid not in (0, 1):
+        return None
+    y = pow((r ** 3 + 7) % SECP_P, (SECP_P + 1) // 4, SECP_P)
+    if (r ** 3 + 7 - y * y) % SECP_P:
+        return None
+    if (y & 1) != recid:
+        y = SECP_P - y
+    e = int.from_bytes(digest, 'big')
+    inv = pow(r, -1, SECP_N)
+    q = _ec_add(_ec_mul(s * inv % SECP_N, (r, y)), _ec_mul((-e * inv) % SECP_N, SECP_G))
+    if q is None:
+        return None
+    return keccak256(q[0].to_bytes(32, 'big') + q[1].to_bytes(32, 'big'))[12:]
+
+
+def envelope_sender(raw):
+    """The sender of a signed L2 envelope (legacy/EIP-155, EIP-2930 or EIP-1559), or None if it does not parse.
+    Rehearsal tooling only: the producer, not this, authenticates what a block contains."""
+    try:
+        num = lambda b: int.from_bytes(b, 'big')  # noqa: E731
+        if raw and raw[0] in (1, 2):
+            fields = rlp_decode(raw[1:])
+            unsigned, (parity, r, s) = fields[:-3], fields[-3:]
+            return ecrecover_address(keccak256(raw[:1] + rlp_encode(unsigned)), num(parity), num(r), num(s))
+        fields = rlp_decode(raw)
+        v, r, s = num(fields[6]), num(fields[7]), num(fields[8])
+        if v in (27, 28):
+            return ecrecover_address(keccak256(rlp_encode(fields[:6])), v - 27, r, s)
+        chain_id = (v - 35) // 2
+        unsigned = fields[:6] + [chain_id.to_bytes((chain_id.bit_length() + 7) // 8, 'big'), b'', b'']
+        return ecrecover_address(keccak256(rlp_encode(unsigned)), (v - 35) % 2, r, s)
+    except (ValueError, IndexError, TypeError):
+        return None
+
+
 def deposits_hash(records):
     """bloch_l2_evm::executor::deposits_hash of the deposits minted for these
     native inbox records: keccak(recipient || height BE8 || tx_index BE4 ||
@@ -408,6 +525,88 @@ def deposits_hash(records):
         preimage += (recipient + int(r['height']).to_bytes(8, 'big') + int(r['tx_index']).to_bytes(4, 'big') + txid
                      + int(r['vout']).to_bytes(4, 'big') + int(r['sats']).to_bytes(8, 'big'))
     return keccak256(preimage)
+
+
+def forced_record(r):
+    """The 80-byte native record: height BE8 || l1_txid || envelope_hash || gas_limit BE8."""
+    txid, envelope_hash = bytes.fromhex(strip0x(r['l1_txid'])), bytes.fromhex(strip0x(r['envelope_hash']))
+    if len(txid) != 32 or len(envelope_hash) != 32:
+        raise Halt('malformed native forced record')
+    return int(r['height']).to_bytes(8, 'big') + txid + envelope_hash + int(r['gas_limit']).to_bytes(8, 'big')
+
+
+def forced_hash(records):
+    """keccak256 of the concatenated forced records (keccak256(b'') when empty)."""
+    return keccak256(b''.join(forced_record(r) for r in records))
+
+
+def inbox_hash(deposit_hash, records):
+    """The V3 `deposits_hash` slot under forced inclusion: the deposits hash itself when no forced record is consumed,
+    else keccak256("BLOCH:L2:INBOX:2" || deposits_hash || forced_hash)."""
+    if not records:
+        return deposit_hash
+    return keccak256(INBOX_DOMAIN + deposit_hash + forced_hash(records))
+
+
+def strip0x(value):
+    return str(value).removeprefix('0x')
+
+
+def forced_due(view):
+    """The forced records the next settlement must consume, normalised (hex without 0x), or None while the native
+    queue is not enabled. Each record keeps the envelope the producer needs. Refuses a malformed or over-cap list."""
+    forced = view.get('forced') if isinstance(view, dict) else None
+    if forced is None:
+        return None
+    due = forced.get('due')
+    if not isinstance(due, list) or len(due) > FORCED_MAX_PER_SETTLEMENT:
+        raise Halt('native forced.due is malformed or above the per-settlement cap')
+    out = []
+    for r in due:
+        try:
+            record = {'height': int(r['height']), 'l1_txid': strip0x(r['l1_txid']).lower(),
+                      'envelope_hash': strip0x(r['envelope_hash']).lower(), 'gas_limit': int(r['gas_limit']),
+                      'envelope': strip0x(r['envelope']).lower()}
+            envelope = bytes.fromhex(record['envelope'])
+        except (KeyError, TypeError, ValueError):
+            raise Halt('native forced record is malformed or carries no envelope') from None
+        forced_record(record)
+        if keccak256(envelope).hex() != record['envelope_hash']:
+            raise Halt('native forced record envelope does not hash to its envelope_hash')
+        out.append(record)
+    if sum(r['gas_limit'] for r in out) > FORCED_MAX_GAS_PER_SETTLEMENT:
+        raise Halt('native forced.due declares more gas than one settlement consumes')
+    if 'due_hash' in forced and strip0x(forced['due_hash']).lower() != forced_hash(out).hex():
+        raise Halt('native forced.due_hash does not match its records')
+    return out
+
+
+def user_count(block):
+    """The sequencer's transactions in a producer block report: `user_transactions` when the block ran forced
+    envelopes (they are not user transactions of the statement and not in its DA batch), else `transactions`."""
+    return int(block.get('user_transactions', block.get('transactions', 0)))
+
+
+def check_forced_block(block, due):
+    """The producer consumed exactly the due forced records: every one was run first, included or skipped."""
+    report = block.get('forced')
+    if not due:
+        if report and int(report.get('due', 0)):
+            raise Halt('producer consumed forced records the native view does not name')
+        return
+    if not isinstance(report, dict) or int(report.get('due', -1)) != len(due):
+        raise Halt(f'producer did not consume the {len(due)} due forced records')
+    included, skipped = int(report.get('included', -1)), len(report.get('skipped', []))
+    if included < 0 or included + skipped != len(due):
+        raise Halt('producer forced report does not account for every due record')
+    if int(block.get('transactions', 0)) - included != user_count(block):
+        raise Halt('producer user_transactions is not the body minus the included forced envelopes')
+
+
+def read_forced(directory):
+    """The forced records a block directory was built with (forced.json), [] without the file."""
+    path = Path(directory) / 'forced.json'
+    return json.loads(path.read_text()) if path.exists() else []
 
 
 def withdrawal_leaf(chain_id, nonce, l1_recipient, sats):
@@ -611,7 +810,10 @@ def settlement_view(view):
     """The safety-relevant projection of a getl2settlement answer."""
     if not isinstance(view, dict):
         return view
-    return {k: view[k] for k in SETTLEMENT_VIEW_FIELDS if k in view}
+    out = {k: view[k] for k in SETTLEMENT_VIEW_FIELDS if k in view}
+    if isinstance(out.get('forced'), dict):
+        out['forced'] = {k: out['forced'][k] for k in FORCED_VIEW_FIELDS if k in out['forced']}
+    return out
 
 
 def identity_view(view):
@@ -626,6 +828,8 @@ def identity_view(view):
 
 def check_mainnet_config(c):
     """Every mainnet pin the configuration can get wrong, before any RPC."""
+    if 'censor_senders' in c:
+        raise Halt('censor_senders is a rehearsal knob and never runs on mainnet')
     if c.get('network') != MAINNET['network']:
         raise Halt('mainnet network must be the Genesis-4 admission domain')
     if c.get('l2_genesis') != MAINNET['l2_genesis']:
@@ -1093,6 +1297,17 @@ class Settler:
             raise Halt('min_block_interval_seconds must be a non-negative integer')
         if pace and not self.c.get('skip_idle_blocks'):
             raise Halt('min_block_interval_seconds requires skip_idle_blocks')
+        censor = self.c.get('censor_senders')
+        if censor is not None:
+            # Rehearsal only: a sequencer that censors these L2 senders, to show the L1 forced-inclusion path.
+            if self.mainnet:
+                raise Halt('censor_senders is a rehearsal knob and never runs on mainnet')
+            if not self.c['user_transactions']:
+                raise Halt('censor_senders needs user_transactions')
+            if not isinstance(censor, list) or not all(isinstance(a, str) and re.fullmatch(r'(0x)?[0-9a-fA-F]{40}', a)
+                                                       for a in censor):
+                raise Halt('censor_senders must list 20-byte hex L2 addresses')
+        self.censor = {a.lower().removeprefix('0x') for a in censor or []}
         self.spool_open = True  # false: the next block is built without the spool (see hold_block)
         self.holding_since = None  # monotonic time this worker began to hold; None while it builds
         self.hold_logged_at = None
@@ -1257,8 +1472,10 @@ class Settler:
         settlement; it carries nothing else, and the operator's exit is a bigger prover. See that module."""
         entries = self.spool_entries() if self.c['user_transactions'] else []
         pending = json.loads(deposits.read_text())
+        # Forced records bypass the budget like deposits: L1 names them for this settlement (agent 122, tip 3).
+        forced = read_forced(deposits.parent)
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
-        if not entries and not pending:
+        if not entries and not pending and not forced:
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
         self.preflight_request = self.preflight_source
         tags = itertools.count()
@@ -1267,12 +1484,12 @@ class Settler:
             [raw for _, raw in entries],
             lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
             lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
-            number, has_deposits=bool(pending))
+            number, has_deposits=bool(pending) or bool(forced))
         if plan.deposits_over_budget:
             atomic_write(deposits.parent / 'deposits-over-budget.json', json.dumps(
                 {'number': number, 'sp1_gas': plan.base.sp1_gas if plan.base else None,
                  'instructions': plan.base.instructions if plan.base else None, 'budget': planner.budget,
-                 'deposits': len(pending)}, sort_keys=True) + '\n')
+                 'deposits': len(pending), 'forced': len(forced)}, sort_keys=True) + '\n')
         quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
         for name, reason in plan.quarantine:
             if name in by_hash:
@@ -1305,6 +1522,9 @@ class Settler:
 
     def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
+        if read_forced(Path(deposits).parent):
+            # L1 forced inclusion: the producer runs these first, after the deposits, outside every sequencer limit.
+            args += ['--forced', str(Path(deposits).parent / 'forced.json')]
         if self.c.get('timestamp_rule'):
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
@@ -1334,6 +1554,29 @@ class Settler:
                         for a in self.native.gather('getl2settlement').values())
         return values[max(0, len(values) - 1 - self.native.faults)]
 
+    def forced_backlog(self):
+        """Forced records L1 holds and no settlement has consumed (0 while the queue is not enabled). Like the inbox, the
+        queue freezes with the source, so a record queued later is due only one settlement after the next. Bounded by an
+        honest endpoint's answer."""
+        values = sorted(int((a.get('forced') or {}).get('pending', 0)) for a in self.native.gather('getl2settlement').values())
+        return values[max(0, len(values) - 1 - self.native.faults)] if values else 0
+
+    def censor_spool(self, number):
+        """Rehearsal only (`censor_senders`): move the spool entries of censored senders aside, so no block of this
+        worker carries them. The L1 forced-inclusion path must still get them in."""
+        if not self.censor:
+            return
+        aside = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-censored')
+        for path, raw in self.spool_entries():
+            sender = envelope_sender(bytes.fromhex(raw))
+            if sender is not None and sender.hex() in self.censor:
+                aside.mkdir(exist_ok=True, mode=0o700)
+                try:
+                    path.replace(aside / path.name)
+                except FileNotFoundError:
+                    continue
+                log('tx-censored', number=number, hash=keccak256(bytes.fromhex(raw)).hex(), sender=sender.hex())
+
     def hold_block(self, view):
         """With `skip_idle_blocks`: whether to build no block in this cycle. Not a block rule: L1, the guest, the follower
         and every rebuild only see fewer blocks, each with an older anchor. See SETTLER-RUNBOOK.md, "Idle blocks".
@@ -1350,12 +1593,15 @@ class Settler:
         try:
             age = self.source_age(view)
             backlog = self.inbox_backlog()
+            forced = self.forced_backlog() if 'forced' in view else 0
         except Exception as error:  # noqa: BLE001 - the quorum view just passed: try again next cycle
             log('idle-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
             return True
         spooled = bool(self.c['user_transactions'] and any(Path(self.c['txpool_dir']).glob('*.tx')))
         pace = self.c.get('min_block_interval_seconds', 0)
-        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if spooled
+        # A due forced record is never held: every settlement on this source must consume it, whoever settles.
+        reason = ('forced' if forced or (view.get('forced') or {}).get('due') else
+                  'deposits' if backlog or view['source'].get('pending') else 'transactions' if spooled
                   else 'max-idle' if age >= self.c['max_idle_seconds'] else None)
         if reason is None or age < pace:
             now = self.clock()
@@ -1492,6 +1738,15 @@ class Settler:
         if deposits.exists() and deposits.read_text() != deposits_text:
             raise Halt(f'{deposits} already holds different deposits')
         atomic_write(deposits, deposits_text)
+        due = forced_due(view)
+        forced = directory / 'forced.json'
+        if due is not None:
+            forced_text = json.dumps(due, sort_keys=True)
+            if forced.exists() and forced.read_text() != forced_text:
+                raise Halt(f'{forced} already holds different forced records')
+            atomic_write(forced, forced_text)
+        elif forced.exists() and json.loads(forced.read_text()):
+            raise Halt(f'{forced} holds forced records, the native view has no forced queue')
         head = self.produce('head', '--target', self.c['l2_db'])
         produced = directory / 'block.json'
         if head['number'] < number - 1:
@@ -1505,15 +1760,18 @@ class Settler:
             self.preflight_source = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n' + (
                 f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n" if 'inbox_count' in source else '')
             reuse = self.paid_batch_spool(number, view, directory)
+            if not reuse:
+                self.censor_spool(number)
             block = self.extend(parent, anchor, deposits, anchor_slot, number, spool=reuse or True)
-            if block.get('transactions', 0) and not self.c['user_transactions']:
+            check_forced_block(block, due or [])
+            if user_count(block) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
             if reuse:
-                atomic_write(directory / 'da-reuse.json', json.dumps({'transactions': block.get('transactions', 0),
+                atomic_write(directory / 'da-reuse.json', json.dumps({'transactions': user_count(block),
                                                                        'hash': block.get('hash')}) + '\n')
             atomic_write(produced, json.dumps(block, sort_keys=True) + '\n')
-            log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
-                                                               'withdrawal_count', 'rules', 'timestamp') if k in block},
+            log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions', 'user_transactions',
+                                                               'forced', 'withdrawal_count', 'rules', 'timestamp') if k in block},
                 deferred=len(block.get('deferred', [])), dropped=block.get('dropped', []))
         elif head['number'] == number:
             # Crash after extend: reuse only the block built on this exact parent and anchor.
@@ -1694,8 +1952,11 @@ class Settler:
         field = lambda offset: values[T + offset:T + offset + 32]  # noqa: E731
         number = lambda offset: int.from_bytes(values[T + offset:T + offset + 8], 'big')  # noqa: E731
         pending = json.loads((directory / 'deposits.json').read_text())
-        if field(DEPOSITS_HASH) != deposits_hash(pending):
-            raise Halt('statement deposits_hash does not match the native pending deposits')
+        forced = read_forced(directory)
+        # Under L1 forced inclusion the slot binds the consumed deposits and the due forced records together.
+        if field(DEPOSITS_HASH) != inbox_hash(deposits_hash(pending), forced):
+            raise Halt('statement deposits_hash does not match the native pending deposits' +
+                       (' and forced records' if forced else ''))
         if field(TRANSACTIONS_ROOT) == bytes(32) or field(RECEIPTS_ROOT) == bytes(32):
             raise Halt('statement has a zero transactions or receipts root')
         root, count = check_withdrawals(values, previous)
@@ -1705,7 +1966,8 @@ class Settler:
         produced = directory / 'block.json'
         if produced.exists():
             block = json.loads(produced.read_text())
-            expected = block.get('transactions', 0)
+            check_forced_block(block, forced)
+            expected = user_count(block)
             if users != expected:
                 raise Halt(f'statement reports {users} user transactions, the producer included {expected}')
             if 'withdrawal_count' in block and (block['withdrawal_root'] != root.hex()
@@ -2287,7 +2549,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
                 return done(False, reason=f'producer L2 genesis {head.get("hash")} differs from {config["l2_genesis"]}')
         number, directory = settler.prepare_block(view)
         block = json.loads((directory / 'block.json').read_text()) if (directory / 'block.json').exists() else {}
-        report['l2_block'] = {'number': number, **{k: block[k] for k in ('hash', 'deposits', 'transactions',
+        report['l2_block'] = {'number': number, **{k: block[k] for k in ('hash', 'deposits', 'transactions', 'user_transactions', 'forced',
                                                                           'withdrawal_count') if k in block}}
         report['native_request'] = (directory / 'native-request.txt').read_text().splitlines()
         if not prove:
