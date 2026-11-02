@@ -132,10 +132,10 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `1bc1da0cc8bda03e380a7ced923d2177ced105314ca5fd91e9047cb6209f3996` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `824be97b28f816b759104110f1b233ced18ee1d83b770da3180844d62bc52f3f` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `65715d136c401eec751cbf1677a6691ffca281b5d47667b7c8f4885aa607c91d` |
 | `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
-| `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
+| `deployment/mainnet/l2_monitor.py` | `5b1c08f85e983f7ecbae1c7bc7ac7d70654ff10a37421e25baf0328136c9b564` |
 | `deployment/mainnet/install-settler-mainnet.py` | `57de4dfca34b6aea45826ba159762666a399d9e7d40c85336aed5f52f76add40` |
 | `deployment/mainnet/l2_reorg_recover.py` | `d1a91c46688bb4d37fc12d54f96df04727f105dffbf336dddc896524e548623a` (the settler installer pins it) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `f342deab986b419dccd89070bb1ac0088729c90258cc57a646b83e9a31787e39` |

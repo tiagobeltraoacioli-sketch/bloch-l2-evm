@@ -1128,5 +1128,250 @@ class StuckNode(unittest.TestCase):
         self.assertEqual(m.MAINNET_PINS['attestor_set'], '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b')
 
 
+def stamp(age):
+    return m.datetime.datetime.fromtimestamp(NOW - age, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+ACTIVE = 'LoadState=loaded\nActiveState=active\nSubState=running\nNRestarts=0\nExecMainStatus=0\nResult=success\n'
+REPO = Path(__file__).resolve().parents[2]
+
+
+def journal(lines_by_unit):
+    """A runner whose journal for each unit is the given lines (dicts become settler JSON events, strings stay text)."""
+    def runner(argv):
+        if argv[0] == 'systemctl':
+            return 0, ACTIVE
+        lines = lines_by_unit.get(argv[2], [])
+        return 0, '\n'.join(json.dumps(x) if isinstance(x, dict) else x for x in lines)
+    return runner
+
+
+def with_accepted(world, number, l2_hash):
+    """Every L1 node accepted L2 block `number` with hash `l2_hash` (a full-length statement)."""
+    raw = bytearray(22 + 432)
+    raw[22 + 264:22 + 272] = number.to_bytes(8, 'big')
+    raw[22 + 336:22 + 368] = bytes.fromhex(l2_hash)
+    for node in world['l1'].values():
+        node['l2']['accepted']['statement'] = raw.hex()
+    return world
+
+
+class ByNumber(Fake):
+    """Fake that also answers eth_getBlockByNumber for a hex number, from world['l2'][url]['by_number']."""
+
+    def __call__(self, url, method, params):
+        if method == 'eth_getBlockByNumber' and str(params[0]).startswith('0x') and url in self.world['l2']:
+            self.calls.append((url, method))
+            return self.world['l2'][url].get('by_number', {}).get(int(params[0], 16))
+        return super().__call__(url, method, params)
+
+
+def run_by_number(world, *extra):
+    argv = ['--profile', 'mainnet', '--phase', 'live', '--l2-rpc', f'A={L2A}', '--l2-rpc', f'B={L2B}']
+    argv += sum((['--l1-rpc', u] for u in L1), []) + list(extra)
+    fake = ByNumber(world)
+    return m.run(m.parse(argv), fake, now=NOW, run_cmd=lambda a: (1, ''), fetch=lambda u: None), fake
+
+
+class MonitorGapTests(unittest.TestCase):
+    """Agent 157, round 10: failure modes of rounds 1-8 that reached no check. One test per gap."""
+
+    # ---- 94 / L1-6b: part of the L1 finalizes, part is frozen on a branch of its own
+    def test_l1_finality_spread_names_the_node_on_a_dead_branch(self):
+        w = healthy()
+        self.assertEqual(level(run(w)[0], 'l1_finality_spread'), 'OK')
+        w['l1'][L1[0]]['info']['finalized']['epoch'] = EPOCH - 4  # 2 behind the others
+        self.assertEqual(level(run(w)[0], 'l1_finality_spread'), 'WARN')
+        w['l1'][L1[0]]['info']['finalized']['epoch'] = EPOCH - 580  # report 94: frozen at e290 while the rest went on
+        w['l1'][L1[0]]['info']['height'] -= 5  # a minority branch has fewer proposers: its head trails a little
+        r, _ = run(w)
+        c = next(c for c in r.checks if c['check'] == 'l1_finality_spread')
+        self.assertEqual(c['level'], 'CRIT')
+        self.assertEqual(c['behind'], [L1[0]])
+        self.assertIn('branch of its own', c['message'])
+        self.assertEqual(level(r, 'l1_finality_lag'), 'OK', 'the best node still finalizes: the old check stays quiet')
+
+    def test_l1_finality_spread_tells_a_syncing_node_apart(self):
+        w = healthy()
+        w['l1'][L1[1]]['info']['finalized']['epoch'] = EPOCH - 40
+        w['l1'][L1[1]]['info']['height'] = 150000
+        c = next(c for c in run(w)[0].checks if c['check'] == 'l1_finality_spread')
+        self.assertEqual(c['level'], 'CRIT')
+        self.assertIn('syncing or stuck', c['message'])
+
+    def test_one_epoch_boundary_difference_is_normal(self):
+        w = healthy()
+        w['l1'][L1[2]]['info']['finalized']['epoch'] = EPOCH - 3
+        self.assertEqual(level(run(w)[0], 'l1_finality_spread'), 'OK')
+
+    # ---- L2-12 / 94: the RPC serves a block that L1 did not accept
+    def test_rpc_block_at_the_accepted_number_must_be_the_accepted_block(self):
+        good = 'ab' * 32
+        w = with_accepted(healthy(), 100, good)
+        for b in w['l2'].values():
+            b['by_number'] = {100: {'hash': '0x' + good}}
+        r, _ = run_by_number(w)
+        self.assertEqual(level(r, 'l2_rpc_vs_l1[A]'), 'OK')
+        self.assertEqual(m.LEVEL_NAMES[r.status], 'OK', json.dumps(r.checks, indent=1))
+        w['l2'][L2B]['by_number'] = {100: {'hash': '0x' + 'cd' * 32}}  # B kept the reorged-out settlement
+        r, _ = run_by_number(w)
+        self.assertEqual(level(r, 'l2_rpc_vs_l1[A]'), 'OK')
+        self.assertEqual(level(r, 'l2_rpc_vs_l1[B]'), 'CRIT')
+        self.assertIn('l2_reorg_recover', next(c['message'] for c in r.checks if c['check'] == 'l2_rpc_vs_l1[B]'))
+
+    def test_rpc_safe_above_the_accepted_number_warns(self):
+        good = 'ab' * 32
+        w = with_accepted(healthy(), 99, good)
+        for b in w['l2'].values():
+            b['by_number'] = {99: {'hash': '0x' + good}}
+        self.assertEqual(level(run_by_number(w)[0], 'l2_rpc_vs_l1[A]'), 'WARN')  # safe 100 > accepted 99
+
+    def test_short_statement_or_prelaunch_makes_no_extra_call(self):
+        self.assertNotIn('l2_rpc_vs_l1[A]', [c['check'] for c in run(healthy())[0].checks])
+        r, _ = run(prelaunch(), phase='prelaunch')
+        self.assertEqual(m.LEVEL_NAMES[r.status], 'OK')
+
+    # ---- 141 R-1: remote prover busy, local fallback; no prover at all
+    def test_remote_busy_then_local_proof_is_a_fallback_warning(self):
+        d = '/var/lib/settler/work/00000001-x'
+        lines = [{'time': stamp(900), 'event': 'remote-proof', 'target': 'p', 'exit_code': 75, 'bytes': 0},
+                 {'time': stamp(900), 'event': 'prover-failed', 'directory': d, 'where': 'remote', 'exit_code': 75},
+                 {'time': stamp(60), 'event': 'proof-generated', 'directory': d, 'seconds': 1639.2}]
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': lines}))
+        c = next(c for c in r.checks if c['check'] == 'prover_path[settler]')
+        self.assertEqual(c['level'], 'WARN')
+        self.assertIn('local fallback', c['message'])
+        self.assertIn('75', c['message'])
+        self.assertEqual(c['blocks'], ['00000001-x'])
+
+    def test_remote_failed_and_local_refused_twice_is_crit(self):
+        d = '/w/00000040-y'
+        cycle = [{'time': stamp(600), 'event': 'prover-failed', 'directory': d, 'where': 'remote', 'exit_code': 75},
+                 {'time': stamp(600), 'event': 'local-proof-refused', 'directory': d, 'instructions': 3_100_000,
+                  'limit': 3_000_000},
+                 {'time': stamp(600), 'event': 'prover-failed', 'directory': d, 'where': 'local', 'exit_code': 75}]
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': cycle}))
+        self.assertEqual(level(r, 'prover_path[settler]'), 'WARN', 'one failed cycle: the settler retries')
+        self.assertEqual(level(r, 'events[settler]'), 'WARN')
+        self.assertIn('local-proof-refused', next(c['message'] for c in r.checks if c['check'] == 'events[settler]'))
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': cycle * 2}))
+        self.assertEqual(level(r, 'prover_path[settler]'), 'CRIT')
+
+    def test_a_later_proof_clears_the_block(self):
+        d = '/w/00000002-z'
+        lines = [{'time': stamp(600), 'event': 'prover-failed', 'directory': d, 'where': 'local', 'exit_code': 137}] * 3 + \
+                [{'time': stamp(60), 'event': 'proof-generated', 'directory': d, 'seconds': 300}]
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': lines}))
+        self.assertEqual(level(r, 'prover_path[settler]'), 'WARN')
+
+    def test_no_prover_failure_no_prover_path_check(self):
+        lines = [{'time': stamp(60), 'event': 'proof-generated', 'directory': '/w/1', 'seconds': 300}]
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': lines}))
+        self.assertNotIn('prover_path[settler]', [c['check'] for c in r.checks])
+
+    # ---- L2-18 and the rest of the settler's silent events
+    def test_settler_events_that_were_graded_by_nobody(self):
+        for event in ('da-resign-limited', 'da-batch-unrecoverable', 'foreign-rebuild-behind-view', 'idle-check-failed',
+                      'spool-demand-unknown', 'local-proof-refused'):
+            r, _ = run(healthy(), '--unit', 'settler=s.service',
+                       runner=journal({'s.service': [{'time': stamp(60), 'event': event}]}))
+            self.assertEqual(level(r, 'events[settler]'), 'WARN', event)
+
+    def test_every_settler_event_is_classified(self):
+        """settler_v3.py's log() names: each is graded, progress, or listed here as informational. A new event name fails
+        this test until someone decides whether it alerts."""
+        import re
+        source = (REPO / 'deployment' / 'devnet' / 'settler_v3.py').read_text()
+        names = set(re.findall(r"\blog\('([a-z0-9-]+)'", source))
+        info = {'started', 'identity-checked', 'dry-run', 'rpc-check', 'rpc-endpoint-view', 'rpc-endpoint-agrees',
+                'rpc-endpoint-recovered', 'rpc-quorum-restored', 'transaction-built', 'submitted', 'remote-proof',
+                'prover-stages-done', 'prover-shm-removed', 'l2-block-produced', 'l2-block-reused', 'idle-hold', 'idle-end',
+                'da-submitted', 'da-included', 'da-wait-ended-block-settled', 'da-batch-reused', 'da-reuse-waiting-follower',
+                'da-fee-moved', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
+                'foreign-settlement-recovered', 'foreign-settlement-waiting-finality'}
+        graded = m.CRIT_EVENTS | m.WARN_EVENTS | m.PROGRESS_EVENTS | info
+        self.assertGreater(len(names), 40)
+        self.assertEqual(sorted(names - graded), [])
+
+    # ---- L2-20: acknowledged transactions evicted as expired
+    def test_spool_expired_evictions_in_the_rpc_journal(self):
+        lines = ['spooled tx=0xaa from=0x01 nonce=3', 'evicted tx file=0001-aa.tx (expired)',
+                 'evicted tx file=0002-bb.tx (nonce used)', 'spool sweep evicted 1 stale entries']
+        r, _ = run(healthy(), '--unit', 'rpc=r.service', runner=journal({'r.service': lines}))
+        c = next(c for c in r.checks if c['check'] == 'spool_expired[rpc]')
+        self.assertEqual(c['level'], 'WARN')
+        self.assertEqual(c['value'], 1)
+        r, _ = run(healthy(), '--unit', 'rpc=r.service',
+                   runner=journal({'r.service': [f'evicted tx file=000{i}-cc.tx (expired)' for i in range(5)]}))
+        self.assertEqual(level(r, 'spool_expired[rpc]'), 'CRIT')
+        r, _ = run(healthy(), '--unit', 'rpc=r.service', runner=journal({'r.service': lines[2:]}))
+        self.assertNotIn('spool_expired[rpc]', [c['check'] for c in r.checks])
+
+    def test_the_rpc_still_prints_the_eviction_line_the_check_reads(self):
+        rs = (REPO / 'integrations' / 'reth-execution' / 'src' / 'bin' / 'bloch-l2-settled-rpc.rs').read_text()
+        self.assertIn('println!("evicted tx file={} ({reason})"', rs)
+        self.assertIn('Some("expired")', rs)
+
+    # ---- F8 of report 121 / report 94: /dev/shm full of leaked SP1 segments
+    def test_shm_free_space_and_leaked_segments(self):
+        gib = 2 ** 30
+
+        def shm_level(free_gib, segments):
+            with tempfile.TemporaryDirectory() as d:
+                for name, age in segments:
+                    f = Path(d, name)
+                    f.write_bytes(b'x' * 1024)
+                    os.utime(f, (NOW - age, NOW - age))
+                fake = os.statvfs_result((4096, 4096, 63 * gib // 4096, 0, int(free_gib * gib) // 4096, 0, 0, 0, 0, 255))
+                with mock.patch.object(m.os, 'statvfs', return_value=fake):
+                    r, _ = run(healthy(), '--shm', f'sp1={d}')
+            return next(c for c in r.checks if c['check'] == 'shm[sp1]')
+        self.assertEqual(shm_level(60, [('sp1_live_t', 600)])['level'], 'OK')
+        self.assertEqual(shm_level(60, [('sem.other', 99999)])['level'], 'OK', 'only sp1_ segments count')
+        c = shm_level(40, [('sp1_old_t', 4 * 3600), ('sp1_live_t', 60)])
+        self.assertEqual(c['level'], 'WARN')
+        self.assertEqual(c['stale'], 1)
+        self.assertEqual(shm_level(10, [])['level'], 'WARN')
+        self.assertEqual(shm_level(4, [])['level'], 'CRIT')
+        self.assertEqual(shm_level(0, [('sp1_a_t', 9 * 3600)] * 1)['level'], 'CRIT')
+
+    def test_shm_unreadable_is_unknown(self):
+        r, _ = run(healthy(), '--shm', '/nonexistent/shm')
+        self.assertEqual(level(r, 'shm[shm]'), 'UNKNOWN')
+
+    # ---- 105's gap (signer /healthz) and L1-2 (indexer /health)
+    def test_http_health_routes(self):
+        answers = {'http://s1/healthz': (200, b'{"ok":true}'), 'http://idx/health': (503, b''),
+                   'http://s2/healthz': (200, b'{"ok":false}')}
+
+        def probe(url):
+            if url not in answers:
+                raise OSError('connection refused')
+            return answers[url]
+        argv = ['--profile', 'mainnet', '--l2-rpc', f'A={L2A}', '--l2-rpc', f'B={L2B}'] + \
+            sum((['--l1-rpc', u] for u in L1), []) + \
+            ['--http', 'signer1=http://s1/healthz|"ok":true', '--http', 'signer2=http://s2/healthz|"ok":true',
+             '--http', 'indexer=http://idx/health', '--http', 'gone=http://gone/health']
+        r = m.run(m.parse(argv), Fake(healthy()), now=NOW, run_cmd=lambda a: (1, ''), fetch=lambda u: None, probe=probe)
+        self.assertEqual(level(r, 'http[signer1]'), 'OK')
+        self.assertEqual(level(r, 'http[signer2]'), 'CRIT')
+        self.assertEqual(level(r, 'http[indexer]'), 'CRIT')
+        self.assertEqual(level(r, 'http[gone]'), 'CRIT')
+
+    def test_http_probe_refuses_other_schemes(self):
+        with self.assertRaises(ValueError):
+            m.http_probe(1.0)('file:///etc/passwd')
+
+    def test_new_checks_stay_quiet_on_the_healthy_snapshot_and_alert_once(self):
+        """The new checks reach the same alert path: one raise for a new CRIT, nothing on the repeat."""
+        w = healthy()
+        w['l1'][L1[0]]['info']['finalized']['epoch'] = EPOCH - 580
+        r, _ = run(w)
+        state = {}
+        self.assertEqual(m.decide_alert(r, state, NOW, 3600, m.WARN), 'raise')
+        state.update({'bad': {c['check']: c['level'] for c in r.checks if c['code'] != m.OK}, 'sent_at': NOW})
+        self.assertIsNone(m.decide_alert(r, state, NOW + 60, 3600, m.WARN))
+
+
 if __name__ == '__main__':
     unittest.main()
