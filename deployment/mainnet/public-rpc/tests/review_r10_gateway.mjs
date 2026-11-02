@@ -31,15 +31,31 @@ assert.ok(src.includes("import cfg from 'l2rpc-config.js';"));
 writeFileSync(join(out, 'gateway.mjs'), src.replace("import cfg from 'l2rpc-config.js';", "import cfg from './config.mjs';"));
 writeFileSync(join(out, 'config.mjs'), readFileSync(join(out, 'l2rpc-config.js'), 'utf8'));
 
+// Wall clock the gateway reads (Date.now); tests move it forward.
+let offsetMs = 0;
+const realNow = Date.now.bind(Date);
+Date.now = () => realNow() + offsetMs;
+
+// ngx.shared as in ngx_js_shared_dict.c (njs 0.8.2): with a zone timeout, add, set and incr (re)arm the
+// expiry at now + timeout; an expired key reads as absent; incr on an absent key stores init + delta.
 class Dict {
-  constructor() { this.m = new Map(); }
-  get(k) { return this.m.get(k); }
-  set(k, v) { this.m.set(k, v); return this; }
-  // ngx_js_dict_incr: an absent key becomes init + delta.
-  incr(k, delta, init) { const v = (this.m.has(k) ? this.m.get(k) : (init || 0)) + delta; this.m.set(k, v); return v; }
+  constructor(timeoutMs) { this.m = new Map(); this.timeoutMs = timeoutMs || 0; }
+  live(k) {
+    const e = this.m.get(k);
+    if (e && this.timeoutMs && e.expire <= Date.now()) { this.m.delete(k); return undefined; }
+    return e;
+  }
+  get(k) { const e = this.live(k); return e ? e.v : undefined; }
+  set(k, v) { this.m.set(k, { v, expire: Date.now() + this.timeoutMs }); return this; }
+  incr(k, delta, init) {
+    const e = this.live(k);
+    const v = (e ? e.v : (init || 0)) + delta;
+    this.set(k, v);
+    return v;
+  }
 }
 
-globalThis.ngx = { shared: { l2rate: new Dict(), l2state: new Dict() }, fetch: async () => { throw new Error('no fetch in tests'); } };
+globalThis.ngx = { shared: { l2rate: new Dict(120000), l2state: new Dict() }, fetch: async () => { throw new Error('no fetch in tests'); } };
 const gw = (await import(pathToFileURL(join(out, 'gateway.mjs')).href)).default;
 const cfg = (await import(pathToFileURL(join(out, 'config.mjs')).href)).default;
 
@@ -50,7 +66,8 @@ function healthy() {
 }
 
 function reset() {
-  ngx.shared.l2rate = new Dict();
+  offsetMs = 0;
+  ngx.shared.l2rate = new Dict(120000); // js_shared_dict_zone zone=l2rate:16m timeout=120s
   healthy();
 }
 
@@ -191,9 +208,17 @@ test('G3: a client that closes its connection mid-simulation does not lose its s
   be.release();
   await tick();
   be.hold = false;
-  const later = request(ethCall(1), ip, be);
-  await gw.handle(later);
-  assert.notEqual(later.status, 429, `slots still taken: l2rate "s ${ip}" = ${ngx.shared.l2rate.get('s ' + ip)}`);
+  // The client keeps using the endpoint: one eth_call a minute for ten minutes.
+  const statuses = [];
+  for (let minute = 1; minute <= 10; minute++) {
+    offsetMs = minute * 60000;
+    const later = request(ethCall(minute), ip, be);
+    await gw.handle(later);
+    statuses.push(later.status);
+  }
+  healthy();
+  assert.notEqual(statuses[statuses.length - 1], 429,
+    `ten minutes later still 429 (${JSON.stringify(statuses)}); l2rate "s ${ip}" = ${ngx.shared.l2rate.get('s ' + ip)}`);
 });
 
 test('G7 (Info): duplicate ids inside a split batch get their own answers', async () => {
