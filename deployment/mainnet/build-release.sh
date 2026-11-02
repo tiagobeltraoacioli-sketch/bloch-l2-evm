@@ -31,9 +31,9 @@
 # this release.
 #
 # FORK CANDIDATE (codex/fork-candidate-l2-r7-20261102): the default native is the candidate of the L2 program
-# swap, bloch-sis-pow codex/fork-candidate-native-r7-20261102 324998b5 (guest activation 0fbd07a6 + node RC
-# c6f20bd2; L2_NEXT_PROGRAM_EPOCH and L2_PROGRAM_ROLLBACK_EPOCH inert), with its one pinned lock
-# follower-rpc/settlement-recovery.native-324998b5.Cargo.lock (sha256 ab7b3a09...): the 78d4921c lock plus
+# swap, bloch-sis-pow codex/fork-candidate-native-r7-20261102 a494bf10 (guest activation 0fbd07a6 + node RC
+# c6f20bd2 + hf-gates discover fix; L2_NEXT_PROGRAM_EPOCH and L2_PROGRAM_ROLLBACK_EPOCH inert), with its one pinned lock
+# follower-rpc/settlement-recovery.native-a494bf10.Cargo.lock (sha256 ab7b3a09...): the 78d4921c lock plus
 # pqcrypto-mlkem and the mesh transport's dependencies, nothing else moved. NATIVE_COMMIT=78d4921c... with
 # the 78d4921c lock still builds the release this branch came from. A native commit that arms the gate is
 # another commit, and needs its own lock line here. build.json records every L1 activation epoch the binaries were compiled with
@@ -42,7 +42,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-CANDIDATE_NATIVE_COMMIT=324998b5eaede9d2f04aba4b69ba22a6065d7f52
+CANDIDATE_NATIVE_COMMIT=a494bf10610ed835e4f86ac0410388236f2b95ee
 CANDIDATE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 NATIVE_COMMIT=${NATIVE_COMMIT:-$CANDIDATE_NATIVE_COMMIT}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
@@ -57,7 +57,7 @@ RETH=$W/src/reth-bloch-rpc-snapshot
 HERE=$L2/deployment/mainnet
 SR=$L2/integrations/settlement-recovery
 if [ "$NATIVE_COMMIT" = "$CANDIDATE_NATIVE_COMMIT" ]; then
-  NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-324998b5.Cargo.lock}
+  NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-a494bf10.Cargo.lock}
 else
   NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock}
 fi
