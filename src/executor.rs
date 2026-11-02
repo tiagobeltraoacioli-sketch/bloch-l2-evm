@@ -2621,3 +2621,11 @@ mod tests {
         assert_ne!(h.hash(), h3.hash(), "chain id is part of the domain");
     }
 }
+
+// Kept at the end of the file: code above keeps its line numbers, which the guest's panic locations include.
+impl<DB> BlockSession<DB> {
+    /// The session's database, for reports of a producer's selection.
+    pub(crate) fn database(&self) -> &CacheDB<DB> {
+        &self.db
+    }
+}

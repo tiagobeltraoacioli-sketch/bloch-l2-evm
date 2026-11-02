@@ -366,11 +366,25 @@ async fn main() -> Result<()> {
     if mode == "execute" {
         let executor = LightProver::new().await;
         let started = Instant::now();
-        let (public, report) = executor.execute(elf, stdin(&qualification)).await?;
+        let (public, report) = executor.execute(elf, stdin(&qualification)).calculate_gas(true).await?;
         if report.exit_code != 0 {
             return Err(io::Error::other("settlement V3 guest execution failed").into());
         }
         expected.check_expected(public.as_slice())?;
+        // Proving-cost indicators: precompile work does not show in the instruction count.
+        let syscalls: Vec<String> = report
+            .syscall_counts
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(code, count)| format!("{code:?}={count}"))
+            .collect();
+        println!(
+            "Settlement V3 cost: gas={} touched_memory={} record_bytes={} syscalls={}",
+            report.gas().map_or("none".to_string(), |g| g.to_string()),
+            report.touched_memory_addresses,
+            report.total_record_size(),
+            syscalls.join(",")
+        );
         println!(
             "Settlement V3 guest matched the independent host statement: {} instructions in {:?}",
             report.total_instruction_count(),
