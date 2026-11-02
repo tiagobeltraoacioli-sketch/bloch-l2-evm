@@ -105,7 +105,8 @@ def respool_payloads(payloads, pool):
 
 def own_l1_batches(config, settler, view, number, follower_state):
     """{(l2 number, commitment): payload} of the DA batches above `number` that the settler's own DA key published,
-    read from the follower's verified L1 blocks. Batches of other keys are never respooled."""
+    read from the follower's verified L1 blocks, else by quorum from the native nodes. Batches of other keys are
+    never respooled."""
     records = [r for r in view.get('data_availability', []) if int(r['l2_number']) > number]
     da = config.get('da') or {}
     if not records or not da.get('funding_pubkey'):
@@ -113,6 +114,9 @@ def own_l1_batches(config, settler, view, number, follower_state):
     own = bytes.fromhex(Path(da['funding_pubkey']).read_text().strip())
     offset = getattr(settler, 'native_height_offset', lambda: 0)() or 0
     found = S.recorded_da_batches(follower_state, settler.chain_id, records, offset)
+    missing = [r for r in records if (int(r['l2_number']), r['commitment']) not in found]
+    if missing and hasattr(settler, 'node_da_batches'):
+        found.update(settler.node_da_batches(missing, offset))  # not finalized yet: a quorum of native nodes
     return {key: payload for key, (key_bytes, payload) in found.items() if key_bytes == own}
 
 
