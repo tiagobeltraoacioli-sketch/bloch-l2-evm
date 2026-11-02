@@ -28,7 +28,7 @@ SP1 defaults OOM at 100 GiB; --threads 32 --prover-env ELEMENT_THRESHOLD=2684354
 timeout above it.
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
 
-install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
+install refuses unless: the host, the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
 beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
 prints exactly the program the native mainnet activation pins (ELF Keccak, KoalaBear and
 BN254 vkeys, proof policy, domain, configuration); the Gnark image is present; nothing is
@@ -51,6 +51,7 @@ import pwd
 import shutil
 import subprocess
 import sys
+import tempfile
 
 USER = 'bloch-l2-prover-mainnet'
 RELEASE = Path('/opt/bloch/l2-mainnet-prover')
@@ -63,6 +64,9 @@ GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473
 # Agent 93's measured low-memory setting, used unless --prover-env is given.
 DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
 REMOTE_PROVER_SHA256 = '183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab'
+# The SP1 host (GO-LIVE-PINS-PROVER.sha256). Pinned so that root never executes an unpinned binary: the
+# `--mainnet identity` check below runs it, and its output is only as honest as the binary.
+PROVER_SHA256 = '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a'
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {
@@ -174,20 +178,38 @@ def mem_available_gib():
     die('no MemAvailable')
 
 
-def install(args, here):
-    check_sizes(args.memory_gib, args.threads)
+def stage(here, staged):
+    """Copy the three files into a private directory and check the COPIES: the source directory (often under
+    /home/ubuntu) may change after any check of it, so only these hashed bytes are executed and installed."""
     sums = {}
     for line in (here / 'SHA256SUMS').read_text().splitlines():
         if line.strip():
             value, name = line.split()
             sums[Path(name.lstrip('*')).name] = value
     for name in FILES:
-        if digest(here / name) != sums.get(name):
+        shutil.copyfile(here / name, staged / name)
+        (staged / name).chmod(0o700 if name.startswith('bloch-') else 0o600)
+        if digest(staged / name) != sums.get(name):
             die(f'{name} differs from SHA256SUMS')
     if sums[FILES[1]] != GUEST_SHA256:
         die('settlement_v3_mainnet is not the pinned guest')
     if sums[FILES[2]] != REMOTE_PROVER_SHA256:
         die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
+    if sums[FILES[0]] != PROVER_SHA256:
+        die(f'bloch-evm-sp1-settlement-v3 is {sums[FILES[0]]}, not the pinned {PROVER_SHA256}')
+    return sums
+
+
+def install(args, here):
+    check_sizes(args.memory_gib, args.threads)
+    staged = Path(tempfile.mkdtemp(prefix='bloch-l2-prover-stage-'))  # 0700, owned by the caller
+    try:
+        install_staged(args, staged, stage(here, staged))
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def install_staged(args, here, sums):
     identity = check_identity(run([here / FILES[0], '--mainnet', 'identity', here / FILES[1]]))
     circuits = Path(args.circuits)
     if not (circuits / 'groth16').is_dir():
@@ -241,6 +263,8 @@ def install(args, here):
     for name in FILES:
         shutil.copyfile(here / name, RELEASE / name)
         (RELEASE / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
+        if digest(RELEASE / name) != sums[name]:
+            die(f'{RELEASE / name} differs from its pin after the copy (installed.json is in place: run rollback)')
     config = prover_config(RELEASE, STATE, sums[FILES[0]], args.threads, args.memory_gib,
                            parse_prover_env(args.prover_env or DEFAULT_PROVER_ENV), args.timeout_seconds)
     (ETC / 'config.json').write_text(json.dumps(config, indent=2) + '\n')

@@ -177,6 +177,56 @@ class InstallPlan(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, 'remote_prover.py is'):
                     install.install(argparse.Namespace(memory_gib=100, threads=24), here)
 
+    def test_install_refuses_an_unpinned_host_before_running_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            here = Path(tmp)
+            for name in install.FILES:
+                (here / name).write_bytes(b'file: ' + name.encode())
+            sums = {name: sha256(here / name) for name in install.FILES}
+            (here / 'SHA256SUMS').write_text(''.join(f'{v}  {n}\n' for n, v in sums.items()))
+            pins = dict(GUEST_SHA256=sums[install.FILES[1]], REMOTE_PROVER_SHA256=sums[install.FILES[2]])
+            with mock.patch.multiple(install, **pins), mock.patch.object(install, 'run') as run:
+                with self.assertRaisesRegex(SystemExit, 'bloch-evm-sp1-settlement-v3 is .*not the pinned'):
+                    install.install(argparse.Namespace(memory_gib=100, threads=24), here)
+            run.assert_not_called()
+
+    def test_install_checks_and_runs_the_staged_copies_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            here = Path(tmp)
+            for name in install.FILES:
+                (here / name).write_bytes(b'file: ' + name.encode())
+            sums = {name: sha256(here / name) for name in install.FILES}
+            (here / 'SHA256SUMS').write_text(''.join(f'{v}  {n}\n' for n, v in sums.items()))
+            pins = dict(GUEST_SHA256=sums[install.FILES[1]], REMOTE_PROVER_SHA256=sums[install.FILES[2]],
+                        PROVER_SHA256=sums[install.FILES[0]])
+            real_copy, seen = install.shutil.copyfile, []
+
+            def swapped(src, dst):
+                real_copy(src, dst)
+                if Path(src).name == install.FILES[0]:
+                    Path(dst).write_bytes(b'swapped while copying')
+
+            def identity(argv, **_kw):
+                seen.append([str(a) for a in argv])
+                raise SystemExit('stop after identity')
+
+            with mock.patch.multiple(install, **pins), mock.patch.object(install, 'run', identity):
+                with mock.patch.object(install.shutil, 'copyfile', swapped):
+                    with self.assertRaisesRegex(SystemExit, 'differs from SHA256SUMS'):
+                        install.install(argparse.Namespace(memory_gib=100, threads=24), here)
+                self.assertEqual(seen, [])
+                with self.assertRaisesRegex(SystemExit, 'stop after identity'):
+                    install.install(argparse.Namespace(memory_gib=100, threads=24), here)
+            self.assertEqual(len(seen), 1)
+            self.assertFalse(seen[0][0].startswith(str(here)), seen)
+            self.assertFalse(Path(seen[0][0]).exists(), 'the staging directory is removed')
+
+    def test_prover_pin_matches_go_live_pins(self):
+        lines = dict(reversed(line.split()) for line in (HERE.parent / 'GO-LIVE-PINS-PROVER.sha256').read_text().splitlines())
+        self.assertEqual(lines['release-prover-v2/bloch-evm-sp1-settlement-v3'], install.PROVER_SHA256)
+        self.assertEqual(lines['release-prover-v2/remote_prover.py'], install.REMOTE_PROVER_SHA256)
+        self.assertEqual(lines['release-prover-v2/settlement_v3_mainnet'], install.GUEST_SHA256)
+
     def test_remote_prover_pin_is_the_file_in_this_tree(self):
         self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)
     def test_prover_env_option(self):
