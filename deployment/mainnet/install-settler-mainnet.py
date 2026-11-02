@@ -8,16 +8,19 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
   sudo python3 install-settler-mainnet.py prepare --release DIR
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
-      78d4921c, SHA-256 700631b0...) and mainnet.manifest (SHA-256 7eef82a7...).
+      78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
+      l2_reorg_recover.py (SHA-256 678482bf...).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
       whose passphrase is generated here and never printed. Prints the funding
       script hash to send the DA fee budget to.
   sudo python3 install-settler-mainnet.py configure [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
-      Writes config.json (user transactions OFF unless asked), then runs, as the
-      settler user, `--check-rpc` and the read-only `--dry-run` (SP1 execute of the
-      next L2 block against the live request). Never broadcasts.
+      Runs, as the settler user, `--check-rpc` and the read-only `--dry-run` (SP1
+      execute of the next L2 block against the live request) on a pending config, and
+      only then writes config.json (user transactions OFF unless asked). A failed check
+      leaves no config.json, so `start` stays refused and configure can simply be re-run.
+      Never broadcasts.
   sudo python3 install-settler-mainnet.py dry-run [--prove]
       Re-runs the dry run; --prove also generates and verifies the Groth16 proof and
       writes the 1155-byte settlement it WOULD submit (~20 GB RAM at 6 threads, Docker).
@@ -45,9 +48,13 @@ STATE = Path('/var/lib/bloch-l2-mainnet-settler')
 DA_DIR = Path('/var/lib/bloch-l2-mainnet-da')
 ETC = Path('/etc/bloch-l2-mainnet-settler')
 PUBLIC = ETC / 'public'
+CONFIG = ETC / 'config.json'
+PENDING = ETC / 'config.json.pending'
 OPT = Path('/opt/bloch/l2-mainnet-settler')
 UNIT_NAME = 'bloch-l2-mainnet-settler.service'
 UNIT = Path('/etc/systemd/system') / UNIT_NAME
+# Absolute: as_settler runs with PATH=/usr/bin:/bin, and on Ubuntu 24.04 runuser is only in /usr/sbin.
+RUNUSER = '/usr/sbin/runuser'
 RPC_URLS = ['http://80.240.16.185:8080', 'http://199.247.22.8:8080', 'http://45.77.67.251:8080']
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 PINS = {
@@ -56,9 +63,11 @@ PINS = {
     # source-digest 35c2b943... Used only as the DA keygen and DA signer.
     'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
+    # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
+    'l2_reorg_recover.py': '678482bfcd3c782b4b6dee2295572c283992f0e1927ea28393a11c1f6aec98b2',
 }
 FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
-         'bloch-pos', 'mainnet.manifest')
+         'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
@@ -91,9 +100,9 @@ def settler_module(directory):
     return settler_v3
 
 
-def as_settler(argv, env=None):
-    clean = {'PATH': '/usr/bin:/bin', 'HOME': str(STATE), 'BLOCH_SETTLER_CONFIG': str(ETC / 'config.json')}
-    return subprocess.run(['runuser', '-u', USER, '--', *map(str, argv)], env={**clean, **(env or {})},
+def as_settler(argv, env=None, config=CONFIG):
+    clean = {'PATH': '/usr/bin:/bin', 'HOME': str(STATE), 'BLOCH_SETTLER_CONFIG': str(config)}
+    return subprocess.run([RUNUSER, '-u', USER, '--', *map(str, argv)], env={**clean, **(env or {})},
                           capture_output=True, text=True)
 
 
@@ -148,7 +157,7 @@ def prepare(args):
 
 
 def configure(args):
-    assert STATE.is_dir() and not (ETC / 'config.json').exists(), 'run prepare first, configure once'
+    assert STATE.is_dir() and not CONFIG.exists(), 'run prepare first, configure once'
     rel = release()
     settler = settler_module(rel)
     threads = int(option(args, '--prover-threads', '6'))
@@ -177,7 +186,7 @@ def configure(args):
         assert host_key.split()[0] in ('ssh-ed25519', 'ecdsa-sha2-nistp256') and '\n' not in host_key
         owner = pwd.getpwnam(USER)
         if not (STATE / 'ssh/id_ed25519').exists():
-            run(['runuser', '-u', USER, '--', 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', USER,
+            run([RUNUSER, '-u', USER, '--', 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', USER,
                  '-f', STATE / 'ssh/id_ed25519'])
         known = STATE / 'ssh/known_hosts'
         known.write_text(f"{target.split('@')[-1]} {' '.join(host_key.split()[:2])}\n")
@@ -188,25 +197,29 @@ def configure(args):
         print('remote prover key (authorize it on the prover host with the forced command):')
         print((STATE / 'ssh/id_ed25519.pub').read_text().strip())
     settler.Settler(config)  # every pin, offline (no RPC call before cycle())
-    (ETC / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
-    (ETC / 'config.json').chmod(0o644)
-    check = as_settler(['/usr/bin/python3', '-u', rel / 'settler_v3.py', '--check-rpc'])
+    # config.json appears only after every check passed: a failed check can be retried, and start stays refused.
+    PENDING.write_text(json.dumps(config, indent=2) + '\n')
+    PENDING.chmod(0o644)
+    check = as_settler(['/usr/bin/python3', '-u', rel / 'settler_v3.py', '--check-rpc'], config=PENDING)
     print(check.stdout + check.stderr)
     assert check.returncode == 0, 'the mainnet RPC quorum check failed'
-    dry_run([])
+    dry_run([], config=PENDING)
+    os.replace(PENDING, CONFIG)
+    print(json.dumps({'configured': str(CONFIG)}))
 
 
-def dry_run(args):
+def dry_run(args, config=CONFIG):
+    assert Path(config).exists(), 'run configure first'
     rel = release()
     argv = ['/usr/bin/python3', '-u', rel / 'settler_v3.py', '--dry-run'] + (['--prove'] if '--prove' in args else [])
-    done = as_settler(argv, {'TMPDIR': str(STATE / 'tmp')})
+    done = as_settler(argv, {'TMPDIR': str(STATE / 'tmp')}, config=config)
     print(done.stdout[-6000:] + done.stderr[-2000:])
-    assert done.returncode == 0, 'dry run failed: read its dry-run-report.json'
+    assert done.returncode == 0, 'dry run failed: see the output above (a run that stopped early writes no dry-run-report.json)'
 
 
 def start(args):
     assert '--confirm-mainnet' in args, 'start submits to Bloch L1 mainnet: pass --confirm-mainnet'
-    assert (ETC / 'config.json').exists() and not UNIT.exists(), 'configure first; start once'
+    assert CONFIG.exists() and not UNIT.exists(), 'configure first; start once'
     rel = release()
     UNIT.write_text(f'''[Unit]
 Description=Bloch L2 MAINNET settlement worker (chain 700770; 0x13 settlements, 0x15 DA)
