@@ -45,6 +45,11 @@ impl Rng {
     }
 }
 
+/// `REVIEW_SCALE` multiplies the randomized rounds.
+fn scale() -> u64 {
+    std::env::var("REVIEW_SCALE").ok().and_then(|text| text.parse().ok()).unwrap_or(1)
+}
+
 // ---------------------------------------------------------------------------
 // Trie-level property
 // ---------------------------------------------------------------------------
@@ -233,7 +238,7 @@ fn property_round(rng: &mut Rng, stats: &mut PropertyStats) {
 fn any_exposure_of_any_trie_answers_truly_or_refuses() {
     let mut rng = Rng::new(b"review-trie-property");
     let mut stats = PropertyStats::default();
-    for _ in 0..4000 {
+    for _ in 0..4000 * scale() {
         property_round(&mut rng, &mut stats);
     }
     std::println!("{stats:?}");
@@ -1622,6 +1627,7 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
         addresses.push(factory.create2(*salt, keccak256(&storing)));
     }
     let mut stats = (0u64, 0u64);
+    let mut coverage = FuzzCoverage::default();
     for block in 0..blocks {
         let mut transactions = Vec::new();
         for _ in 0..rng.next(6) {
@@ -1692,21 +1698,60 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
                 }
             }
         }
-        chain.commit(&body);
+        let outcome = chain.commit(&body);
+        coverage.txs += outcome.transactions.len() as u64;
+        coverage.failed_txs += outcome.transactions.iter().filter(|tx| !tx.success).count() as u64;
+        coverage.withdrawals += outcome.withdrawals.as_ref().map_or(0, |summary| summary.withdrawals.len() as u64);
+        for account in &witness.pre_accounts {
+            if chain.state.account(&account.address).is_none() {
+                coverage.accounts_removed += 1;
+            }
+            let view = IndexedTrieView::from_proof(account.storage_root, &account.storage_proof).unwrap();
+            for slot in &slots {
+                if let Ok(Some(_)) = view.lookup(&storage_key(&u(*slot))) {
+                    if chain.state.storage_of(&account.address, u(*slot)).is_zero() {
+                        coverage.slots_deleted += 1;
+                    }
+                }
+            }
+            if chain.state.account(&account.address).is_some_and(|after| after.code_hash != KECCAK_EMPTY) && account.code.is_empty() {
+                coverage.created_over_a_leaf += 1;
+            }
+        }
+        coverage.accounts_created += witness
+            .absent_accounts
+            .iter()
+            .filter(|address| chain.state.account(address).is_some())
+            .count() as u64;
     }
-    std::println!("seed {seed:?}: node removals {}, harmless survivors {}", stats.0, stats.1);
+    std::println!("seed {seed:?}: node removals {}, harmless survivors {}, {coverage:?}", stats.0, stats.1);
+    assert!(
+        coverage.accounts_removed > 0 && coverage.accounts_created > 0 && coverage.slots_deleted > 0 && coverage.withdrawals > 0,
+        "{coverage:?}"
+    );
+}
+
+#[derive(Default, Debug)]
+struct FuzzCoverage {
+    txs: u64,
+    failed_txs: u64,
+    withdrawals: u64,
+    accounts_removed: u64,
+    accounts_created: u64,
+    created_over_a_leaf: u64,
+    slots_deleted: u64,
 }
 
 #[test]
 fn fuzz_rich_blocks_v1_rules() {
-    for seed in [&b"r1"[..], b"r2", b"r3"] {
-        fuzz_chain(seed, ChainSpec::mainnet_v1(), 250);
+    for round in 0..3 * scale() {
+        fuzz_chain(alloc::format!("r{round}").as_bytes(), ChainSpec::mainnet_v1(), 250);
     }
 }
 
 #[test]
 fn fuzz_rich_blocks_next_rules() {
-    for seed in [&b"n1"[..], b"n2"] {
-        fuzz_chain(seed, ChainSpec::mainnet(), 250);
+    for round in 0..2 * scale() {
+        fuzz_chain(alloc::format!("n{round}").as_bytes(), ChainSpec::mainnet(), 250);
     }
 }
