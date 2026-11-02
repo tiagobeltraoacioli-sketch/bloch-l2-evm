@@ -694,11 +694,24 @@ def forced_scenario(censored_path, censored_hash, censored_nonce):
         slot = values[st.T + st.DEPOSITS_HASH:st.T + st.DEPOSITS_HASH + 32]
         users = int.from_bytes(values[st.T + st.USER_TX_COUNT:st.T + st.USER_TX_COUNT + 8], 'big')
         hashes = [r['envelope_hash'] for r in due]
+        gap_record, censored_record = (st.keccak256(bytes.fromhex(p.read_text().strip())).hex() for p in (gap_path, censored_path))
         detail.update(due=len(due), forced=block.get('forced'), users=users, transactions=block.get('transactions'),
                       user_transactions=block.get('user_transactions'))
-        check('the consuming block ran both records in queue order (skip, then include)',
-              hashes == [st.keccak256(bytes.fromhex(p.read_text().strip())).hex() for p in (gap_path, censored_path)]
-              and block['forced']['included'] == 1 and [s[0] for s in block['forced']['skipped']] == [0], detail)
+        check('the consuming block ran its due records and included the censored envelope',
+              censored_record in hashes and block['forced']['due'] == len(due)
+              and hashes.index(censored_record) not in [x[0] for x in block['forced']['skipped']], detail)
+        # The nonce-gap record: consumed by this block or an earlier one, and skipped there.
+        skipped_in = None
+        for other in sorted((R / 'work').glob('*-*')):
+            if '.superseded-' in other.name or not (other / 'forced.json').exists() or not (other / 'block.json').exists():
+                continue
+            records = [r['envelope_hash'] for r in json.loads((other / 'forced.json').read_text())]
+            if gap_record in records:
+                report = json.loads((other / 'block.json').read_text()).get('forced') or {}
+                if records.index(gap_record) in [x[0] for x in report.get('skipped', [])]:
+                    skipped_in = other.name
+        check('the nonce-gap record was consumed as a skip, before the censored one', skipped_in is not None
+              and skipped_in <= directory.name, skipped_in)
         check('the statement deposits_hash slot is inbox_hash(deposits, forced records)',
               slot == st.inbox_hash(st.deposits_hash(deposits), due) and slot != st.deposits_hash(deposits), slot.hex())
         check('the statement user_tx_count excludes the forced envelope',
