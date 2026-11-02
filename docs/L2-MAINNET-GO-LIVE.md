@@ -132,7 +132,9 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `1bc1da0cc8bda03e380a7ced923d2177ced105314ca5fd91e9047cb6209f3996` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `8482dfbc23926be01f333e839aa24b13f39901d6da95cc68ce9b8379aa7baa4e` (release-signing branch; `1bc1da0c…` at f1c8033) |
+| `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (pins release key `1A5D96A5C4955EF7`) |
+| `deployment/mainnet/follower-rpc/install.sh` | `45eb83cd52e5356907141a0c8bf8f0dcd9171df156b6b9de6da44bc82a7680de` (refuses an unsigned release) |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `65715d136c401eec751cbf1677a6691ffca281b5d47667b7c8f4885aa607c91d` |
 | `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
 | `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
@@ -228,7 +230,12 @@ Rollback: none needed.
 
 ## P2. Stage and verify the build (no install)
 
-1. The owner signs the release `SHA256SUMS` (D7) and keeps the `.minisig` with the release dir. After the copy, verify on A with `minisign -Vm /home/ubuntu/l2-golive-next/artifacts/SHA256SUMS -P <owner public key>`, and confirm that `sha256sum SHA256SUMS` prints `116bfaba…`.
+1. The owner signs the release `SHA256SUMS` (D7) following `docs/RELEASE-SIGNING.md`, and puts `SHA256SUMS.minisig` in the release dir on 209 and 136 before the copy below. After the copy, on A and on B (the verifier pins key `1A5D96A5C4955EF7`, checks the canonical trusted comment and every `SHA256SUMS` line; `follower-rpc/install.sh` runs the same check and refuses an unsigned release):
+
+```
+python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+```
+
 2. Stage on A, from the Mac. Each command is one block. The release comes from 209 (identical copy on 136); `manifest` and `carryover` from 45.77 as before.
 
 ```
