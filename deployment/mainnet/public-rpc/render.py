@@ -84,8 +84,10 @@ def main():
     a.add_argument('--conn-per-ip', type=int, default=32)
     a.add_argument('--calls-per-minute', type=int, default=1200, help='JSON-RPC calls per minute per client IP (a batch counts each call)')
     a.add_argument('--tx-per-minute', type=int, default=30)
-    a.add_argument('--sim-per-ip', type=int, default=16,
-                   help='eth_call/eth_estimateGas/eth_createAccessList in flight per client IP (a batch counts each call)')
+    a.add_argument('--sim-per-ip', type=int, default=2,
+                   help='eth_call/eth_estimateGas/eth_createAccessList in flight per client (IPv4 address or IPv6 /64; a batch counts each call)')
+    a.add_argument('--sim-total', type=int, default=8,
+                   help='simulations in flight through this gateway for all clients: at most the permits of the backends (2 x 4)')
     a.add_argument('--backend-conns', type=int, default=48,
                    help='active connections from this gateway to the local settled RPC for reads (sequencer/peer paths get a quarter each)')
     a.add_argument('--max-batch', type=int, default=100, help='calls per batch (ethers v6 batches up to 100)')
@@ -236,6 +238,7 @@ server {{
         'callsPerMinute': o.calls_per_minute,
         'txPerMinute': o.tx_per_minute,
         'simPerIp': o.sim_per_ip,
+        'simTotal': o.sim_total,
         'maxLogBlockRange': o.max_log_range,
         'maxLogAddresses': 256,
         'maxLagBlocks': o.max_lag,
