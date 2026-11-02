@@ -24,6 +24,11 @@
 # unit only with --start. The shadow never signs, proves or submits and never opens the settler's
 # database: starting it sends nothing to Bloch L1. It reads getl2settlement only.
 #
+# After an accepted settlement (a reinstall after --rollback, or the repair after l2_reorg_recover.py --apply:
+# --rollback, then install again) the shadow database is not created at genesis: it is rebuilt from L1 with
+# `produce reconstruct --l1-follower` over the local follower's verified blocks, so its head is the accepted
+# settlement and `check` passes. Needs the local follower (P3) at or past that settlement.
+#
 # Rollback: stops and disables the unit, removes the unit file, and MOVES (never deletes)
 # /opt/bloch/l2-mainnet-shadow, its config and /var/lib/bloch-l2-mainnet-shadow aside with a
 # timestamp. The settler is not touched; nothing on L1 depends on the shadow.
@@ -41,7 +46,33 @@ ETC=/etc/bloch-l2-mainnet-shadow
 VAR=/var/lib/bloch-l2-mainnet-shadow
 USER_=bloch-l2-mainnet-settler
 SETTLER_WORK=/var/lib/bloch-l2-mainnet-settler/work
+FOLLOWER_NATIVE=/var/lib/bloch-l2-mainnet-follower/native
+DOMAIN=1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733
+GENESIS_TIME=1786656679
+TIMESTAMP_RULE=1:1786656679:30000
 HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Prints the accepted commitment when a quorum (2 of 3) of the mainnet nodes report the same accepted settlement,
+# "none" when a quorum reports none, and fails otherwise.
+accepted_number() {
+  python3 -I - "$@" <<'PY'
+import collections, json, sys, urllib.request
+views = []
+for url in sys.argv[1:]:
+    try:
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getl2settlement', 'params': []}).encode()
+        reply = json.load(urllib.request.urlopen(urllib.request.Request(url, body, {'content-type': 'application/json'}), timeout=15))
+        accepted = reply['result'].get('accepted')
+        views.append(json.dumps(accepted, sort_keys=True))
+    except Exception as why:
+        print(f'{url}: {why}', file=sys.stderr)
+view, count = collections.Counter(views).most_common(1)[0] if views else (None, 0)
+if count < 2:
+    sys.exit('no quorum of 2 nodes agrees on the accepted settlement')
+accepted = json.loads(view)
+print('none' if accepted is None else 'commitment ' + str(accepted.get('commitment')))
+PY
+}
 
 verify_out() {
   local out=$1
@@ -130,7 +161,16 @@ JSON
 chmod 0644 "$ETC/config.json"
 
 S="runuser -u $USER_ -- env BLOCH_SEQUENCER_CONFIG=$ETC/config.json TMPDIR=$VAR/tmp /usr/bin/python3 -u $OPT/sequencer_mainnet.py"
-$S init        # shadow database; refuses unless the genesis is 632e45ae...f468 / 2ad7e807...c05d
+ACCEPTED=$(accepted_number http://80.240.16.185:8080 http://199.247.22.8:8080 http://45.77.67.251:8080) || {
+  echo "cannot read the accepted settlement; unit NOT installed"; exit 1; }
+if [ "$ACCEPTED" = none ]; then
+  $S init      # shadow database; refuses unless the genesis is 632e45ae...f468 / 2ad7e807...c05d
+else
+  echo "accepted settlement ($ACCEPTED): rebuilding the shadow database from L1 (follower $FOLLOWER_NATIVE)"
+  [ -d "$FOLLOWER_NATIVE" ] || { echo "$FOLLOWER_NATIVE missing: install and sync the follower first (P3)"; exit 1; }
+  runuser -u "$USER_" -- "$OPT/bloch-l2-produce-dev" reconstruct --target "$VAR/canonical" --l1-follower "$FOLLOWER_NATIVE" \
+    --rules mainnet --domain "$DOMAIN" --genesis-time "$GENESIS_TIME" --timestamp-rule "$TIMESTAMP_RULE"
+fi
 $S check || { echo "read-only check failed (see above); unit NOT installed"; exit 1; }
 install -m 0644 "$HERE/$UNIT" "/etc/systemd/system/$UNIT"
 systemctl daemon-reload

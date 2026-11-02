@@ -193,7 +193,8 @@ def configure(args):
         os.chown(known, owner.pw_uid, owner.pw_gid)
         known.chmod(0o600)
         config['remote_prover'] = {'target': target, 'key': str(STATE / 'ssh/id_ed25519'), 'known_hosts': str(known),
-                                   'order': ['remote', 'local'], 'timeout_seconds': 3600}
+                                   'order': ['remote', 'local'], 'timeout_seconds': 5700}
+        # Above the prover's own 5,400 s limit (install-prover-mainnet.py), so the prover stops first and says why.
         print('remote prover key (authorize it on the prover host with the forced command):')
         print((STATE / 'ssh/id_ed25519.pub').read_text().strip())
     settler.Settler(config)  # every pin, offline (no RPC call before cycle())

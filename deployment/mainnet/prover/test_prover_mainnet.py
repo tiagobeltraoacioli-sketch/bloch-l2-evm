@@ -190,6 +190,12 @@ class InstallPlan(unittest.TestCase):
         self.assertEqual((config['prover_env'], config['timeout_seconds']), ({'ELEMENT_THRESHOLD': '1'}, 7000))
         self.assertNotIn('prover_env', install.prover_config(Path('/opt/r'), Path('/var/lib/s'), 'aa' * 32, 12, 48))
 
+    def test_defaults_are_the_measured_settings(self):
+        source = (HERE / 'install-prover-mainnet.py').read_text()
+        self.assertIn("'--threads', type=int, default=32", source)
+        self.assertIn("'--timeout-seconds', type=int, default=5400", source)
+        self.assertEqual(install.parse_prover_env(install.DEFAULT_PROVER_ENV), {'ELEMENT_THRESHOLD': '268435456'})
+
     def test_memory_floor(self):
         for memory, threads in ((24, 8), (48, 0), (48, 64)):
             with self.subTest(memory=memory, threads=threads), self.assertRaises(SystemExit):

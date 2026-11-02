@@ -86,7 +86,7 @@ own measurement of 2026-10-18):
   | 1 deposit, 50 transfers | 8.86M | 45.2 GiB | 16 min |
   | 1 deposit, 200 transfers | 33.6M | 96.5 GiB | 28 min |
 
-  A 40 GiB slice holds only about 38 transfers. The kit defaults are now `--memory-gib 100 --threads 24`
+  A 40 GiB slice holds only about 38 transfers. The kit defaults are now `--memory-gib 100 --threads 32` with `ELEMENT_THRESHOLD=268435456` and a 5,400 s proof limit (agent 93: an empty block 8191 OOMs at 100 GiB on SP1 defaults and proves in 2,731–2,809 s at 84–85 GiB with these)
   and `max_block_txs` 128. A 128-transfer block is about 22M instructions and **about 72 GiB by
   extrapolation; it has not been proved.** No block above 5.3M instructions has been proved at 24 threads.
 - **gnark Groth16 container.** About 18.5 GB, under dockerd, outside every slice. The installer
@@ -179,7 +179,7 @@ The L2 source the guest compiles from has no diff against v2.
 | Guest `settlement_v3_mainnet` | `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473` | settler, prover |
 | Proof policy V3 | `154869964f…747d` | settler dry-run report |
 | SP1 host `bloch-evm-sp1-settlement-v3` | `3a24c36d…973a` (the settler-v2 staging on 136). The file hash depends on the build path and is not the pin; the identity is. Earlier builds `617d191f…86b3` and `505500af…aa07` print the same `--mainnet identity` (ELF keccak `6e4c8440…`, vkeys `389cfbde…` / `007139f7…`). | settler, prover |
-| `remote_prover.py` | `3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5` (**the kit**; stops the prover on client disconnect. The v2 tree and the 10-19 staging hold the old `99bbc1bc…`, which must not be used) | prover |
+| `remote_prover.py` | `ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a` (**the kit**, agent 93's prover settings on top of `3c11d9be…`, which already stops the prover on client disconnect. The v2 tree and the 10-19 staging hold the old `99bbc1bc…`, which must not be used) | prover |
 | `settler_v3.py` | `3ddb260a1caaadb3f874d436282715900c640cb410a458ee94609ea1bf3fdfe4` (**the kit**; adds the local-proof limit and atomic state files. v2 `875f4cca…` and the settler-v2 staging on 136 must not be used) | settler |
 | Settler `bloch-pos` (DA key only) | `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e` (78d4921c; rebuilt with `--no-cache`, byte-identical). Enforced by `install-settler-mainnet.py`. | settler (D12) |
 | `mainnet.manifest` | `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd` | all |
@@ -213,8 +213,9 @@ Kit files only. **The signing target `dded10b9…` does not move**: the release 
 
 | File | From | To | Why |
 | --- | --- | --- | --- |
-| `install-settler-mainnet.py` | `16aba9b60c1de6e71869bf90d4f3ab2e53132a64f11bbc5b27d86811fab8e37e` | `124a0bdabfa37c73ace27bfee27c4c8a942ac29a3c9922144343a4a5a2d22d96` | `runuser` path, configure retry, installs and pins the reorg tool |
-| `prover/install-prover-mainnet.py` | `f0b847260e236527c13556bde2aa0b2955f20cd31e0a6b36d4bfaddf81434482` | `3f9fbb55576960e10187d5dc645af25e3c3174d7526df13854f229f7ec11d98b` | pins `remote_prover.py` |
+| `install-settler-mainnet.py` | `16aba9b60c1de6e71869bf90d4f3ab2e53132a64f11bbc5b27d86811fab8e37e` | `ce9ddc01742c497a6786bcdd89935cc5a2b2546aa93ee3250ad9cbd79c68c311` | `runuser` path, configure retry, installs and pins the reorg tool; remote prover timeout 5,700 s |
+| `prover/install-prover-mainnet.py` | `f0b847260e236527c13556bde2aa0b2955f20cd31e0a6b36d4bfaddf81434482` | `d022527d9d2d18b344ac0ec8be9f471ba73848a828993db78d4fe877b598baf8` | pins `remote_prover.py`; defaults `--threads 32`, `ELEMENT_THRESHOLD=268435456`, 5,400 s (agent 93) |
+| `remote_prover.py` | `3c11d9be0ee6c2abaaacd94768e90080ad89abad61428c29bb060d098141d8e5` | `ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a` | passes the allowed SP1 settings (`prover_env`) and the proof limit (9af3549) |
 | `l2_reorg_recover.py` | `d688e59fa61c93294f60778e2e9e19a6445c8f6f1ceb05bc03e327bbca645623` | `678482bfcd3c782b4b6dee2295572c283992f0e1927ea28393a11c1f6aec98b2` | stdout is exactly one JSON document |
 
 New kit files, with no earlier pin: `l1_finality_history.py` (G0), `GO-LIVE-PINS.sha256`, `GO-LIVE-PINS-PROVER.sha256`.
@@ -354,7 +355,7 @@ bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --verify /home/ubuntu/l2-go
 
 - `SHA256SUMS` is OK.
 - `install-shadow.sh --verify` prints `verify OK`.
-- `sha256sum -c kit/GO-LIVE-PINS.sha256` exits 0 with every line `OK`. Those are the §3.1, §3.2 and §3.5 pins, in full. Before trusting the file, compare it: `sha256sum kit/GO-LIVE-PINS.sha256` must be `b8ac87cbc5ff7ad2c3b6b7ff3072a7912043379aa25e565b962667c3fe38323e`.
+- `sha256sum -c kit/GO-LIVE-PINS.sha256` exits 0 with every line `OK`. Those are the §3.1, §3.2 and §3.5 pins, in full. Before trusting the file, compare it: `sha256sum kit/GO-LIVE-PINS.sha256` must be `044b116a2334b3fa76f93675f43c26448162a3603cc1aeff69fa78820824a120`.
 - `artifacts/build.json` shows `l2_commit` `a39b04e4`, `l2_tracked_changes: 0` and the HF epochs.
 
 **NO-GO:** any mismatch. Re-copy from the build host. Never use `~/l2-mainnet-install-20261019/out-release`
@@ -476,8 +477,9 @@ GO when:
 sudo journalctl -u bloch-l2-mainnet-follower --no-pager | grep -cE 'halted|StateRootMismatch|Transition'
 ```
 
-**NO-GO (stop the whole go-live):** any halt. It means the verifier disagrees with the L1 on a
-post-fork block. Keep the state for analysis and do not skip a block.
+**NO-GO (stop the whole go-live):** any halt on a post-fork block. It means the verifier disagrees with the L1. Keep the state for analysis and do not skip a block.
+
+One halt is not a verifier disagreement: `node's finalized chain does not descend from the verified head`, exit 3, when the follower's single L1 RPC regressed (a node resynced or restored from older data; agent 86). Check that node first: `getchaininfo` on it must again show the finalized root the other two nodes show. Then restart the follower once (`sudo systemctl restart bloch-l2-mainnet-follower`; it re-verifies from Genesis-4, about an hour). If it halts again with that node caught up, it is a NO-GO. The unit does not restart on exit 3 by design. To avoid the case, keep each follower's L1 node out of resyncs during go-live, or move that follower to its other D4-style source before a planned resync.
 
 Rollback, as root on each host: `systemctl disable --now bloch-l2-mainnet-rpc bloch-l2-mainnet-follower`, then remove
 `/etc/systemd/system/bloch-l2-mainnet-rpc.service.d`, `/etc/systemd/system/bloch-l2-mainnet-follower.service.d` and the two
@@ -537,7 +539,7 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 
 ## P5. Prover (D2; on A unless decided otherwise)
 
-**Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `3c11d9be…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
+**Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `ba309912…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
 
 ```
 scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-v2/
@@ -561,15 +563,15 @@ Install after the settler `configure` (P6 step 2) has created the settler SSH ke
 command without `--dry-run`:
 
 ```
-sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.py install --settler-pubkey /var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519.pub --settler-host 127.0.0.1 --circuits /home/ubuntu/l2-mainnet-install-20261019/circuits --memory-gib 100 --threads 24 --dry-run
+sudo python3 /home/ubuntu/l2-golive-v2/release-prover-v2/install-prover-mainnet.py install --settler-pubkey /var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519.pub --settler-host 127.0.0.1 --circuits /home/ubuntu/l2-mainnet-install-20261019/circuits --memory-gib 100 --threads 32 --prover-env ELEMENT_THRESHOLD=268435456 --timeout-seconds 5400 --dry-run
 ```
 
 GO when:
 
 - the dry-run prints `memory_ok: true`, the identity equals the pins (ELF keccak `6e4c8440…`, policy
-  `154869964f…747d`) and the slice is 100 G / 24 threads;
+  `154869964f…747d`) the slice is 100 G / 32 threads, `prover_env` is `ELEMENT_THRESHOLD: 268435456` and `timeout_seconds` 5400;
 - `authorized_keys` ends in `bloch-l2-mainnet-settler` with `from="127.0.0.1"`;
-- the `sha256` block shows `remote_prover.py` `3c11d9be…`.
+- the `sha256` block shows `remote_prover.py` `ba309912…`.
 
 NO-GO: an identity mismatch, `remote_prover.py is … not the pinned …`, or MemAvailable < 120 GiB.
 
@@ -699,6 +701,8 @@ Rollback:
 sudo bash /home/ubuntu/l2-golive-v2/kit/install-shadow.sh --rollback
 ```
 
+Reinstall after P8, and repair after `l2_reorg_recover.py --apply`: run the rollback above, then the install command of this phase again. Once a settlement is accepted, `install-shadow.sh` no longer creates its database at genesis: it rebuilds it from L1 with `produce reconstruct --l1-follower` over the local follower, so its head is the accepted settlement and `check` passes. The follower must have reached that settlement. Its old data is kept as `*.rollback-<time>`.
+
 ## P8. Settler live: first settlement (L2 block 1) — **MAINNET WRITE**
 
 Preconditions: P3 to P7 all GO on the same day. G0 re-checked within the last hour. Only one settler
@@ -826,7 +830,7 @@ sha256sum /opt/bloch/l2-attestor/bloch-l2-native-follower /opt/bloch/l2-attestor
 
    Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Build the operator packages from `codex/attestor-packages-r4-20261101`: the agent's re-sign on an oversized signature is in its scripts, and `IDENTITY.txt` records the kit commit.
 4. Start the follower and wait about 65–80 min. Then run `attestor_agent.py check`, then start the
-   agent. Fresh installs may run in parallel: there is no existing quorum to protect.
+   agent. The printed `check` command passes the passphrase with systemd `LoadCredential`. It has run only in containers, where systemd 255 does not mount credentials (`/run/credentials/…/passphrase: No such file`); with a stand-in `CREDENTIALS_DIRECTORY` all three operators reported `check-ok` (agent 86). Run it once on a real VM before relying on it, and report a failure there as a kit defect. Fresh installs may run in parallel: there is no existing quorum to protect.
 
 GO:
 
@@ -966,13 +970,34 @@ sudo systemctl restart bloch-l2-mainnet-rpc
    `no-txpool.conf` stays on B.
 
    **Never** do this inside e7269–e7271 of a future signature fork.
-3. **Withdrawal test.** The v2.1 settled RPC has no `bloch_getWithdrawalProof`, which the withdraw tool needs, so this step waits for the next RPC build and for an L1 claim shown with the tool. Withdraw 0.5 BLCH (under 100 BLCH, so no attestors are needed) from the test
-   L2 address.
+3. **Withdrawal test.** Withdraw 0.5 BLCH (under 100 BLCH, so no attestors are needed) from the test L2 address. The v2.1 settled RPC has no `bloch_getWithdrawalProof`, so the proof comes from the settler's own database with `produce-dev` (agent 86 ran this end to end on v2.1). `WALLET_DIR`, `FUNDING_PUBKEY` and `TXID:VOUT:SATS` are the D6(b) wallet. First read the claimable settlement:
+
+```
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://80.240.16.185:8080 | python3 -c 'import json,sys;w=json.load(sys.stdin)["result"]["withdrawals"];print(w["claimable"], w["claimed"])'
+```
+
+   When `claimable` is not `None`, use its `l2_number`, `root` and `count`, and the withdrawal's index (0 for the first):
+
+```
+sudo runuser -u bloch-l2-mainnet-settler -- /opt/bloch/l2-mainnet-tools/bloch-l2-produce-dev withdrawal-proof --target /var/lib/bloch-l2-mainnet-settler/canonical --index 0 --number L2_NUMBER --root ROOT --count COUNT --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679 > /home/ubuntu/claim-0.proof.json
+```
+
+```
+bloch-pos l2-claim prepare --genesis /home/ubuntu/l2-golive-v2/artifacts/mainnet.manifest --funding-pubkey FUNDING_PUBKEY --input TXID:VOUT:SATS --proof /home/ubuntu/claim-0.proof.json --base-fee N --tip 0 --out claim-unsigned.hex
+```
+
+```
+bloch-pos l2-claim sign --genesis /home/ubuntu/l2-golive-v2/artifacts/mainnet.manifest --tx claim-unsigned.hex --dir WALLET_DIR --out claim-signed.hex
+```
+
+   Then `sendrawtransaction` with the contents of `claim-signed.hex`. **The `accepted` reply is not a confirmation:** a claim over the release-window cap is answered `accepted` and refused afterwards with `RateLimited` (agent 67). Re-run the first command until the `claimed` bitmap has the withdrawal's bit set.
 
    GO:
    - the 0x15 DA record and the settlement are accepted;
-   - after FFG finality + 64 blocks, `l2-claim prepare/sign` succeeds and the L1 output appears;
-   - `claims_vs_withdrawn` is OK.
+   - the `claimed` bitmap has bit 0 set;
+   - `inbox.escrow_sat` fell by exactly the claim, and `withdrawals.release_window.released_sat` rose by it;
+   - the recipient has the output (`getutxos`), and `escrow_conserved` is true;
+   - the monitor's `claims_vs_withdrawn` is OK.
 
 NO-GO: any escrow invariant warning, a deposit not consumed within 2 cycles, a DA refusal (R2) or a
 claim refused as anything but `NotFinalized` timing.
