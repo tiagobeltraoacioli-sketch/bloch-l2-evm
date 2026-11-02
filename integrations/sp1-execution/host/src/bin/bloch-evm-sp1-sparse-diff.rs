@@ -178,6 +178,7 @@ async fn main() -> Result<ExitCode> {
     let mut parent_hash: Option<B256> = None;
     let (mut blocks, mut differ, mut user_txs, mut with_real, mut matched_real, mut with_request) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut withdrawals, mut deposits, mut failed_txs, mut elf_runs, mut tampered, mut tamper_survived) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut elf_tampered = 0u64;
     let mut height = 1u64;
     let mut seed = alloy_primitives::keccak256(b"sparse-diff");
     loop {
@@ -264,11 +265,30 @@ async fn main() -> Result<ExitCode> {
                                 let key = keys[((pick >> 16) % keys.len() as u64) as usize];
                                 account.storage_proof.remove(&key);
                                 tampered += 1;
-                                if let Ok(outcome) = verify_node_batch_sparse(&spec, domain, &changed, &context, &body, mode) {
-                                    tamper_survived += 1;
-                                    if outcome.header != header {
-                                        problems.push("a tampered witness gave another header".into());
+                                match verify_node_batch_sparse(&spec, domain, &changed, &context, &body, mode) {
+                                    Ok(outcome) => {
+                                        tamper_survived += 1;
+                                        if outcome.header != header {
+                                            problems.push("a tampered witness gave another header".into());
+                                        }
                                     }
+                                    Err(_) if use_elf => {
+                                        // The guest must refuse what the native path refuses.
+                                        let sparse_elf = if spec == ChainSpec::mainnet_v1() {
+                                            Some("settlement_v3_mainnet_v1_sparse")
+                                        } else if spec == ChainSpec::mainnet() {
+                                            Some("settlement_v3_mainnet_sparse")
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(name) = sparse_elf {
+                                            elf_tampered += 1;
+                                            if run_elf(&executor, &elf_dir.join(name), sparse_stdin(&changed, &stored, &settlement_context)).await.is_ok() {
+                                                problems.push("the guest accepted a witness the native path refused".into());
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {}
                                 }
                             }
                             if use_elf {
@@ -355,7 +375,7 @@ async fn main() -> Result<ExitCode> {
     }
     let _ = U256::ZERO;
     println!(
-        "{{\"summary\":true,\"work\":{work:?},\"last_height\":{},\"artifacts_top\":{},\"blocks\":{blocks},\"user_txs\":{user_txs},\"failed_txs\":{failed_txs},\"deposits\":{deposits},\"withdrawals\":{withdrawals},\"with_request\":{with_request},\"with_real_proof\":{with_real},\"statement_equals_real_proof\":{matched_real},\"elf_pairs\":{elf_runs},\"tampered\":{tampered},\"tamper_harmless\":{tamper_survived},\"differences\":{differ}}}",
+        "{{\"summary\":true,\"work\":{work:?},\"last_height\":{},\"artifacts_top\":{},\"blocks\":{blocks},\"user_txs\":{user_txs},\"failed_txs\":{failed_txs},\"deposits\":{deposits},\"withdrawals\":{withdrawals},\"with_request\":{with_request},\"with_real_proof\":{with_real},\"statement_equals_real_proof\":{matched_real},\"elf_pairs\":{elf_runs},\"tampered\":{tampered},\"elf_refused_tampered\":{elf_tampered},\"tamper_harmless\":{tamper_survived},\"differences\":{differ}}}",
         height - 1,
         by_height.keys().next_back().copied().unwrap_or(0),
     );
