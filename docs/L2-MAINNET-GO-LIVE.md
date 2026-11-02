@@ -256,7 +256,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
    (8620) and `hf3_lattice_emergency` (null) stay inactive.
 2. `finalized.epoch` ≥ 7362. `epoch − finalized.epoch` ≤ 3. The same `finalized.root` on all three.
    Heights within 3 blocks.
-3. No finality stall since e7180. Run the command below against each of the three nodes. It reads every finished epoch's last block header and the block its `finalized_root` names. It takes one call per epoch or more. GO on exit 0 with `"ok": true`, `empty_epochs` empty and `over_limit` empty. The limit of 4 is the lag ≤ 3 of gate 2 plus 1, because a checkpoint with an empty first slot names an earlier block.
+3. No finality stall since e7180. Run the command below against each of the three nodes. It reads every finished epoch's last block header and the block its `finalized_root` names. It takes one call per epoch or more. GO on exit 0 with `"ok": true`, `empty_epochs` empty and `over_limit` empty. Header lag reads higher than the lag of gate 2: a healthy private net read 3 to 4 where `getchaininfo` read 2, so the default limit is 5. Any epoch at 5 or near it deserves a look. An epoch with no block at all is reported in `empty_epochs` and fails the gate.
 4. No L1 release after fa980367 changed a crate the L2 links (see `L2-HARD-FORK-OPERATOR-STEPS.md`
    §0). If one did, rebuild the L2 against it first: NO-GO with v2.1.
 5. `getl2settlement`: `accepted` = `null`, source height 1, slot 187200, `profile.activated` true.

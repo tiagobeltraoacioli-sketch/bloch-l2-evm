@@ -2,10 +2,10 @@
 """Read-only: did L1 finality ever lag since an epoch? Answers from block headers, so it needs no earlier sampling.
 
 Each block header carries `finalized_root`. For every epoch in the range this takes the last block of the epoch,
-finds the block that root names, and reports epoch minus that block's epoch. A checkpoint whose first slot was empty
-names an earlier block, so a single epoch can read one too high: the exit status allows for it with --max-lag.
+finds the block that root names, and reports epoch minus that block's epoch. This reads higher than getchaininfo's
+epoch minus finalized epoch: a healthy private net (64 s epochs) read 3, sometimes 4, while getchaininfo read 2.
 
-  l1_finality_history.py --rpc URL --from-epoch 7180 [--to-epoch N] [--max-lag 4] [--slots-per-epoch 32]
+  l1_finality_history.py --rpc URL --from-epoch 7180 [--to-epoch N] [--max-lag 5] [--slots-per-epoch 32]
 
 Prints one JSON document. Exit: 0 no epoch over the limit, 2 at least one over the limit, 3 could not read.
 Calls getchaininfo, getblockbyslot and getblockbyid only. Dependency-free Python 3.9+.
@@ -61,7 +61,7 @@ def main():
     parser.add_argument('--rpc', required=True)
     parser.add_argument('--from-epoch', type=int, required=True)
     parser.add_argument('--to-epoch', type=int)
-    parser.add_argument('--max-lag', type=int, default=4)
+    parser.add_argument('--max-lag', type=int, default=5)
     parser.add_argument('--slots-per-epoch', type=int, default=32)
     options = parser.parse_args()
     try:
