@@ -31,6 +31,16 @@
 //! (which fixes nonce, balance, code hash and storage root) -> storage multiproof.
 //! `prev_state_root` itself is bound by the settlement statement, as today.
 //!
+//! # Code
+//!
+//! An account leaf fixes the account's code hash, and the witness carries that hash,
+//! not the code. Code travels in a separate list, [`SparseBatchWitness::codes`],
+//! which holds only the code the block loads. The guest hashes each entry once and
+//! keys it by the hash it computed, so an entry can only ever be served for its own
+//! hash. A code the block loads and the list does not hold is a database error, which
+//! fails the block like an unwitnessed slot. An entry the block never loads is
+//! unused. So a deposit to a contract, or a `BALANCE` of one, costs no code.
+//!
 //! The post-state root is derived from the same views. A write under an opaque
 //! subtree is an error, and so is a zero write there, because it could be a deletion.
 //!
@@ -67,6 +77,13 @@ use crate::{BlockContext, ChainSpec, L2State};
 
 #[cfg(feature = "serde")]
 const MAX_WITNESS_TRIE_NODE_BYTES: usize = 1024;
+/// Allocation guard for [`SparseBatchWitness::codes`]: entries. Not a rule: far
+/// above what a block's gas can load, as each load of a cold account costs 2,600 gas.
+#[cfg(feature = "serde")]
+const MAX_WITNESS_CODES: usize = 1 << 16;
+/// Allocation guard for [`SparseBatchWitness::codes`]: bytes over all entries.
+#[cfg(feature = "serde")]
+const MAX_WITNESS_CODE_BYTES: usize = 1 << 30;
 
 /// A settlement witness with sparse storage. All vectors are sorted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,10 +108,16 @@ pub struct SparseBatchWitness {
         serde(deserialize_with = "crate::serde_bounded::streaming_vector")
     )]
     pub absent_accounts: Vec<Address>,
+    /// Code the block loads, sorted by hash, each entry once. The guest hashes every
+    /// entry and serves it only for that hash; see the module documentation.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_codes"))]
+    pub codes: Vec<Bytes>,
 }
 
 /// A touched pre-state account. It carries no slot values: every value is a leaf of
-/// `storage_proof`, so nothing here can state a value the trie does not hold.
+/// `storage_proof`, so nothing here can state a value the trie does not hold. It
+/// carries no code either: `code_hash` is bound by the account leaf, and the code
+/// itself, when the block loads it, comes from [`SparseBatchWitness::codes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseWitnessAccount {
@@ -104,9 +127,9 @@ pub struct SparseWitnessAccount {
     pub balance: U256,
     /// Nonce.
     pub nonce: u64,
-    /// Contract code (empty for an account without code).
-    #[cfg_attr(feature = "serde", serde(deserialize_with = "deserialize_code"))]
-    pub code: Vec<u8>,
+    /// Code hash, `KECCAK_EMPTY` for an account without code; authenticated by the
+    /// account leaf.
+    pub code_hash: B256,
     /// Storage root; authenticated by the account leaf.
     pub storage_root: B256,
     /// Storage multiproof against `storage_root`.
@@ -120,8 +143,13 @@ fn deserialize_proof<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
 }
 
 #[cfg(feature = "serde")]
-fn deserialize_code<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-    crate::serde_bounded::byte_vector::<_, { revm::primitives::eip170::MAX_CODE_SIZE }>(deserializer)
+fn deserialize_codes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Bytes>, D::Error> {
+    crate::serde_bounded::byte_vectors::<
+        _,
+        MAX_WITNESS_CODES,
+        { revm::primitives::eip170::MAX_CODE_SIZE },
+        MAX_WITNESS_CODE_BYTES,
+    >(deserializer)
 }
 
 /// How `BLOCKHASH` reaches the block-hash ring.
@@ -243,8 +271,12 @@ pub enum SparseVerifyError {
     DuplicateAccount(Address),
     /// A witness account is EIP-161 empty.
     EmptyAccount(Address),
-    /// A witness account's code does not decode.
-    InvalidCode(Address),
+    /// An entry of `codes` is empty or does not decode; its index.
+    InvalidCode(usize),
+    /// Two entries of `codes` have the same hash.
+    DuplicateCode(B256),
+    /// A witness account states the zero code hash, which no account leaf holds.
+    ZeroCodeHash(Address),
     /// A witness account does not open against `prev_state_root` with these fields.
     AccountNotProven(Address),
     /// An address listed as absent is not proved absent.
@@ -269,7 +301,9 @@ impl core::fmt::Display for SparseVerifyError {
             Self::Storage(a, e) => write!(f, "storage proof of {a}: {e}"),
             Self::DuplicateAccount(a) => write!(f, "address {a} listed twice"),
             Self::EmptyAccount(a) => write!(f, "pre-account {a} is EIP-161 empty"),
-            Self::InvalidCode(a) => write!(f, "pre-account {a}: invalid code"),
+            Self::InvalidCode(i) => write!(f, "code entry {i} is empty or invalid"),
+            Self::DuplicateCode(h) => write!(f, "code {h} listed twice"),
+            Self::ZeroCodeHash(a) => write!(f, "pre-account {a} states the zero code hash"),
             Self::AccountNotProven(a) => write!(f, "pre-account {a} does not open against prev_state_root"),
             Self::AccountNotProvenAbsent(a) => write!(f, "address {a} is not proved absent"),
             Self::UnknownAccount(a) => write!(f, "account {a} has no authenticated origin"),
@@ -312,24 +346,33 @@ pub fn hydrate_sparse(
         }
     }
 
+    // Each code entry is keyed by the hash computed here, never by a claim.
+    let mut codes: BTreeMap<B256, Bytecode> = BTreeMap::new();
+    for (index, code) in witness.codes.iter().enumerate() {
+        if code.is_empty() {
+            return Err(SparseVerifyError::InvalidCode(index));
+        }
+        let bytecode = Bytecode::new_raw_checked(code.clone()).map_err(|_| SparseVerifyError::InvalidCode(index))?;
+        let hash = bytecode.hash_slow();
+        if codes.insert(hash, bytecode).is_some() {
+            return Err(SparseVerifyError::DuplicateCode(hash));
+        }
+    }
+
     let mut storage = BTreeMap::new();
     let mut pre_leaves = BTreeMap::new();
     let mut pre_storage_roots = BTreeMap::new();
     let mut infos = Vec::with_capacity(witness.pre_accounts.len());
     for account in &witness.pre_accounts {
-        let code = if account.code.is_empty() {
-            None
-        } else {
-            Some(
-                Bytecode::new_raw_checked(account.code.clone().into())
-                    .map_err(|_| SparseVerifyError::InvalidCode(account.address))?,
-            )
-        };
+        if account.code_hash == B256::ZERO {
+            return Err(SparseVerifyError::ZeroCodeHash(account.address));
+        }
+        // No code here: revm loads it by hash, from `codes` or not at all.
         let info = AccountInfo {
             balance: account.balance,
             nonce: account.nonce,
-            code_hash: code.as_ref().map(|c| c.hash_slow()).unwrap_or(KECCAK_EMPTY),
-            code,
+            code_hash: account.code_hash,
+            code: None,
             ..Default::default()
         };
         if !info_exists(&info) {
@@ -365,9 +408,13 @@ pub fn hydrate_sparse(
     });
     for (address, info) in infos {
         // `insert_account_info` leaves the account state `None`: slot reads go down
-        // to the backing. Never mark these accounts `StorageCleared`.
+        // to the backing. Never mark these accounts `StorageCleared`. With `code`
+        // unset it adds nothing to the contract cache.
         state.insert_account_info(address, info);
     }
+    // A code load finds its entry here; a load of any other hash falls through to
+    // `SparseBacking::code_by_hash_ref`, which fails the block.
+    state.cache.contracts.extend(codes);
     Ok(HydratedSparse {
         state,
         account_view,
@@ -429,9 +476,13 @@ fn derive_post_root(
             continue;
         }
         let leaf = match account.account_state {
-            // Created in this block (revm's commit, or a protocol materialization of
-            // an account that did not exist): the cached storage is all there is.
-            AccountState::StorageCleared | AccountState::NotExisting => account_leaf(account),
+            // Created or wiped in this block: by revm's commit, or by a protocol
+            // write to an account that did not exist (`ensure_system_account`,
+            // `credit_balance`). The cached storage is all the account has.
+            AccountState::StorageCleared => account_leaf(account),
+            // `account_exists` is false for this state, so the loop has already
+            // continued. Refuse rather than derive a leaf if that ever changes.
+            AccountState::NotExisting => return Err(SparseVerifyError::UnknownAccount(*address)),
             AccountState::None | AccountState::Touched => {
                 let written = account.storage.iter().map(|(slot, value)| (*slot, *value));
                 let root = match (db.db.storage.get(address), pre_storage_roots.get(address)) {
@@ -559,6 +610,8 @@ pub enum SparseNodeError {
     ColdCommitment,
     /// A proof could not be built (host only).
     ProofBuild(Address),
+    /// The block loaded a code the pre-state does not hold (host only).
+    MissingCode(B256),
     /// The sparse path did not reproduce the canonical outcome (host only).
     OutcomeMismatch,
 }
@@ -571,6 +624,7 @@ impl core::fmt::Display for SparseNodeError {
             Self::Canonical(e) => e.fmt(f),
             Self::ColdCommitment => f.write_str("sparse witness generation needs a warm commitment"),
             Self::ProofBuild(a) => write!(f, "could not build a proof for {a}"),
+            Self::MissingCode(h) => write!(f, "the pre-state holds no code {h}"),
             Self::OutcomeMismatch => f.write_str("sparse path differs from the canonical outcome"),
         }
     }
@@ -661,6 +715,19 @@ struct RecordingDb<'a> {
     block_info: Address,
     accounts: RefCell<BTreeSet<Address>>,
     slots: RefCell<BTreeMap<Address, BTreeSet<U256>>>,
+    codes: RefCell<BTreeSet<B256>>,
+}
+
+/// The pre-state code of `hash`: from the contract cache, or from an account that
+/// holds it inline.
+fn pre_state_code(db: &InMemoryDB, hash: B256) -> Option<Bytecode> {
+    db.cache.contracts.get(&hash).cloned().or_else(|| {
+        db.cache
+            .accounts
+            .values()
+            .find(|account| account.info.code_hash == hash)
+            .and_then(|account| account.info.code.clone())
+    })
 }
 
 impl RecordingDb<'_> {
@@ -674,11 +741,20 @@ impl DatabaseRef for RecordingDb<'_> {
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         self.accounts.borrow_mut().insert(address);
-        self.inner.basic_ref(address)
+        // Without its code, as the guest hydrates it, so that every code load reaches
+        // `code_by_hash_ref` and is recorded.
+        Ok(self.inner.basic_ref(address)?.map(|mut info| {
+            info.code = None;
+            info
+        }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.inner.code_by_hash_ref(code_hash)
+        self.codes.borrow_mut().insert(code_hash);
+        match pre_state_code(self.inner, code_hash) {
+            Some(code) => Ok(code),
+            None => self.inner.code_by_hash_ref(code_hash),
+        }
     }
 
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
@@ -715,6 +791,7 @@ pub fn generate_sparse_node_witness(
         block_info: spec.block_info,
         accounts: RefCell::new(BTreeSet::new()),
         slots: RefCell::new(BTreeMap::new()),
+        codes: RefCell::new(BTreeSet::new()),
     };
     let (db, _) = run_sparse_block(spec, domain, CacheDB::new(recording), previous_root, context, body, block_hashes)
         .map_err(SparseNodeError::Execution)?;
@@ -771,22 +848,11 @@ pub fn generate_sparse_node_witness(
         } else {
             account.info.code_hash
         };
-        let code = if code_hash == KECCAK_EMPTY {
-            Vec::new()
-        } else {
-            account
-                .info
-                .code
-                .as_ref()
-                .or_else(|| pre.db().cache.contracts.get(&code_hash))
-                .map(|code| code.original_bytes().to_vec())
-                .unwrap_or_default()
-        };
         pre_accounts.push(SparseWitnessAccount {
             address: *address,
             balance: account.info.balance,
             nonce: account.info.nonce,
-            code,
+            code_hash,
             storage_root,
             storage_proof,
         });
@@ -799,6 +865,15 @@ pub fn generate_sparse_node_witness(
     let proof = trie
         .proof(targets.iter().copied())
         .ok_or(SparseNodeError::ColdCommitment)?;
+    // Only the code the block loaded, in hash order (`codes` is a sorted set).
+    let mut codes = Vec::new();
+    for hash in db.db.codes.borrow().iter() {
+        if *hash == KECCAK_EMPTY || *hash == B256::ZERO {
+            continue;
+        }
+        let code = pre_state_code(pre.db(), *hash).ok_or(SparseNodeError::MissingCode(*hash))?;
+        codes.push(code.original_bytes());
+    }
 
     let witness = SparseBatchWitness {
         prev_state_root: previous_root,
@@ -806,6 +881,7 @@ pub fn generate_sparse_node_witness(
         proof,
         pre_accounts,
         absent_accounts,
+        codes,
     };
     let verified = verify_node_batch_sparse(spec, domain, &witness, context, body, block_hashes)?;
     if verified.header != canonical.header

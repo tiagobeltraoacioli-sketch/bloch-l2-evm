@@ -1510,13 +1510,17 @@ fn every_witness_part_attacked_on_a_rich_block() {
                 0 => target.balance = target.balance + U256::from(1u64),
                 1 => target.nonce += 1,
                 2 => target.storage_root = rng.word(),
-                3 => target.code = if target.code.is_empty() { vec![0x00] } else { Vec::new() },
+                3 => target.code_hash = if target.code_hash == KECCAK_EMPTY { keccak256([0x00]) } else { KECCAK_EMPTY },
                 _ => {
-                    if target.code.is_empty() {
+                    // The code itself: corrupt the entry this account's hash names.
+                    let hash = target.code_hash;
+                    let Some(position) = changed.codes.iter().position(|code| keccak256(code) == hash) else {
                         continue;
-                    }
-                    let last = target.code.len() - 1;
-                    target.code[last] ^= 1;
+                    };
+                    let mut code = changed.codes[position].to_vec();
+                    let last = code.len() - 1;
+                    code[last] ^= 1;
+                    changed.codes[position] = code.into();
                 }
             }
             assert_fails_fatally(chain.verify(&changed, &context, &body), "account field");
@@ -1558,7 +1562,7 @@ fn every_witness_part_attacked_on_a_rich_block() {
             address,
             balance: U256::from(1_000_000u64),
             nonce: 3,
-            code: vec![0x00],
+            code_hash: keccak256([0x00]),
             storage_root: alloy_trie::EMPTY_ROOT_HASH,
             storage_proof: BTreeMap::new(),
         });
@@ -1714,7 +1718,7 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
                     }
                 }
             }
-            if chain.state.account(&account.address).is_some_and(|after| after.code_hash != KECCAK_EMPTY) && account.code.is_empty() {
+            if chain.state.account(&account.address).is_some_and(|after| after.code_hash != KECCAK_EMPTY) && account.code_hash == KECCAK_EMPTY {
                 coverage.created_over_a_leaf += 1;
             }
         }
@@ -1757,17 +1761,13 @@ fn fuzz_rich_blocks_next_rules() {
 }
 
 // ---------------------------------------------------------------------------
-// Findings: these fail on the candidate. Run with --ignored.
+// Finding I1, fixed (agent 115): code travels by hash, and only when loaded
 // ---------------------------------------------------------------------------
 
-/// FINDING I1 (cost, not soundness, not a stop). A deposit cannot be refused, and it
-/// runs no code. Yet the witness must carry the whole code of the recipient, and
-/// hydration analyses and hashes it. L1 caps a settlement at 64 deposits
-/// (`MAX_INBOX_PER_SETTLEMENT`), so the forced cost is bounded: about 50M SP1 gas with
-/// 64 recipients of 24,576 bytes, measured by `bloch-evm-sp1-sparse-code-cost`. Inside
-/// the proven class. A lazy code map would remove it.
+/// FINDING I1, fixed. A deposit cannot be refused, and it runs no code. The candidate
+/// carried and hashed the recipient's whole code. Now the account carries its code
+/// hash, bound by the leaf, and `codes` holds only what the block loads.
 #[test]
-#[ignore = "finding I1: fails on the candidate, a forced deposit carries the recipient's code"]
 fn a_deposit_does_not_carry_the_code_of_its_recipient() {
     let mut chain = Chain::new(ChainSpec::mainnet_v1());
     // PUSH2 24576 PUSH1 0 RETURN: 24,576 zero bytes of runtime.
@@ -1781,11 +1781,150 @@ fn a_deposit_does_not_carry_the_code_of_its_recipient() {
     };
     let (witness, _, _) = chain.differential(&body, "deposit to a large contract");
     let account = witness.pre_accounts.iter().find(|account| account.address == target).unwrap();
+    assert_ne!(account.code_hash, KECCAK_EMPTY, "the recipient is a contract");
+    let code_bytes: usize = witness.codes.iter().map(|code| code.len()).sum();
     assert!(
-        account.code.len() < 100,
-        "the recipient's code is {} bytes in the witness of a block that never runs it",
-        account.code.len()
+        code_bytes < 100,
+        "the witness of a block that never runs code carries {code_bytes} bytes of code"
     );
+}
+
+/// The victim of the code tests: the script runtime with unreachable trailing bytes,
+/// so its code hash differs from the outer and inner frames' code.
+fn victim_runtime() -> Vec<u8> {
+    let mut code = script_runtime();
+    code.extend_from_slice(&[0x00, 0x11, 0x50]);
+    code
+}
+
+/// Every opcode that reaches another account's code, from inside a frame the outer
+/// contract catches. The witness must carry the code exactly when revm loads it, and
+/// leaving it out, or putting another code in its place, must fail the block: never a
+/// failed inner call, never empty code. An opcode that does not load code (BALANCE)
+/// must not make the witness carry it.
+#[test]
+fn every_code_load_is_witnessed_and_fails_the_block_when_left_out() {
+    let mut chain = Chain::new(ChainSpec::mainnet_v1());
+    let outer = chain.deploy_script();
+    let inner = chain.deploy_script();
+    let victim = chain.sender.create(chain.nonce);
+    let tx = chain.tx(TxKind::Create, U256::ZERO, deploy_code(&victim_runtime()).into(), 3_000_000);
+    let body = chain.body(vec![tx]);
+    assert!(chain.commit(&body).transactions[0].success);
+    let victim_hash = keccak256(victim_runtime());
+    assert_ne!(victim_hash, keccak256(script_runtime()));
+    let other_code: Bytes = storing_initcode(1, &[0x00]).into();
+
+    let mut carried = alloc::vec::Vec::new();
+    for (op, name) in [
+        (BALANCE, "BALANCE"),
+        (EXTCODESIZE, "EXTCODESIZE"),
+        (EXTCODEHASH, "EXTCODEHASH"),
+        (EXTCODECOPY, "EXTCODECOPY"),
+        (CALL, "CALL"),
+        (STATICCALL, "STATICCALL"),
+        (DELEGATECALL, "DELEGATECALL"),
+        (CALLCODE, "CALLCODE"),
+    ] {
+        let mut data = entry(FORWARD, word_of(inner), u(800_000));
+        data.extend_from_slice(&entry(op, word_of(victim), u(0)));
+        let tx = chain.call(outer, data.into());
+        let body = chain.body(vec![tx]);
+        let (witness, canonical, context) = chain.differential(&body, name);
+        assert!(canonical.transactions[0].success, "{name}");
+        let account = witness.pre_accounts.iter().find(|account| account.address == victim).unwrap();
+        assert_eq!(account.code_hash, victim_hash, "{name}: the leaf's code hash");
+        let position = witness.codes.iter().position(|code| keccak256(code) == victim_hash);
+        if let Some(position) = position {
+            carried.push(name);
+            // Left out.
+            let mut omitted = witness.clone();
+            omitted.codes.remove(position);
+            assert!(
+                matches!(
+                    chain.verify(&omitted, &context, &body),
+                    Err(SparseNodeError::Execution(_))
+                ),
+                "{name}: omitted code"
+            );
+            // Another valid code in its place.
+            let mut swapped = witness.clone();
+            swapped.codes[position] = other_code.clone();
+            assert_fails_fatally(chain.verify(&swapped, &context, &body), name);
+            // The account claims the other code's hash: the leaf refuses it.
+            let mut claimed = swapped.clone();
+            let index = claimed.pre_accounts.iter().position(|account| account.address == victim).unwrap();
+            claimed.pre_accounts[index].code_hash = keccak256(&other_code);
+            assert!(
+                matches!(
+                    chain.verify(&claimed, &context, &body),
+                    Err(SparseNodeError::Verify(SparseVerifyError::AccountNotProven(_)))
+                ),
+                "{name}: claimed code hash"
+            );
+        }
+        chain.commit(&body);
+    }
+    std::println!("victim code carried for: {carried:?}");
+    assert!(!carried.contains(&"BALANCE"), "BALANCE does not load code");
+    for name in ["EXTCODESIZE", "EXTCODECOPY", "CALL", "STATICCALL", "DELEGATECALL", "CALLCODE"] {
+        assert!(carried.contains(&name), "{name} loads code: {carried:?}");
+    }
+}
+
+/// The code list itself: duplicates, empty entries, invalid entries and the zero
+/// code hash are refused; an extra entry the block never loads changes nothing.
+#[test]
+fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
+    let mut chain = Chain::new(ChainSpec::mainnet_v1());
+    let target = chain.deploy_script();
+    let tx = chain.call(target, script(&[(SSTORE, u(1), u(2))]));
+    let body = chain.body(vec![tx]);
+    let (witness, canonical, context) = chain.differential(&body, "base");
+    assert_eq!(witness.codes.len(), 1, "the script's code, once");
+
+    let mut changed = witness.clone();
+    changed.codes.push(changed.codes[0].clone());
+    assert!(matches!(
+        chain.verify(&changed, &context, &body),
+        Err(SparseNodeError::Verify(SparseVerifyError::DuplicateCode(_)))
+    ));
+    let mut changed = witness.clone();
+    changed.codes.push(Bytes::new());
+    assert!(matches!(
+        chain.verify(&changed, &context, &body),
+        Err(SparseNodeError::Verify(SparseVerifyError::InvalidCode(1)))
+    ));
+    let mut changed = witness.clone();
+    let index = changed.pre_accounts.iter().position(|account| account.address == target).unwrap();
+    changed.pre_accounts[index].code_hash = B256::ZERO;
+    assert!(matches!(
+        chain.verify(&changed, &context, &body),
+        Err(SparseNodeError::Verify(SparseVerifyError::ZeroCodeHash(_)))
+    ));
+    let sender = changed.pre_accounts.iter().position(|account| account.address == chain.sender).unwrap();
+    let mut changed = witness.clone();
+    changed.pre_accounts[sender].code_hash = B256::ZERO;
+    assert!(matches!(
+        chain.verify(&changed, &context, &body),
+        Err(SparseNodeError::Verify(SparseVerifyError::ZeroCodeHash(_)))
+    ));
+    // The sender is an EOA: giving it the script's code hash is refused by the leaf.
+    let mut changed = witness.clone();
+    changed.pre_accounts[sender].code_hash = keccak256(script_runtime());
+    assert!(matches!(
+        chain.verify(&changed, &context, &body),
+        Err(SparseNodeError::Verify(SparseVerifyError::AccountNotProven(_)))
+    ));
+    // Unused extra code: harmless, same outcome.
+    let mut changed = witness.clone();
+    changed.codes.push(victim_runtime().into());
+    let outcome = chain.verify(&changed, &context, &body).unwrap();
+    assert_eq!(outcome.header, canonical.header);
+    // An empty list: the call loads the script's code and fails the block.
+    let mut changed = witness.clone();
+    changed.codes.clear();
+    assert!(matches!(chain.verify(&changed, &context, &body), Err(SparseNodeError::Execution(_))));
 }
 
 /// Not a finding: the witness is malleable, and the statement does not depend on it.
@@ -1816,7 +1955,7 @@ fn witness_malleability_does_not_reach_the_statement() {
         address: bystander,
         balance: info.balance,
         nonce: info.nonce,
-        code: script_runtime(),
+        code_hash: keccak256(script_runtime()),
         storage_root: trie.storage_root_cached(&bystander).unwrap(),
         storage_proof: trie.storage_proof(&bystander, [storage_key(&u(1))]).unwrap(),
     });
