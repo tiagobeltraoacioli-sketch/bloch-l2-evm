@@ -128,11 +128,10 @@ test('model: the call budget holds for one IPv4 address (61st batch of 20 is 429
   assert.equal(statuses[60], 429);
 });
 
-test('model: 17 eth_call from one client exceed the rendered simPerIp of 16', async () => {
+test('model: simPerIp + 1 eth_call in one batch are refused', async () => {
   reset();
   const be = backend();
-  assert.equal(cfg.simPerIp, 16);
-  const r = request(Array.from({ length: 17 }, (_, i) => ethCall(i)), '192.0.2.11', be);
+  const r = request(Array.from({ length: cfg.simPerIp + 1 }, (_, i) => ethCall(i)), '192.0.2.11', be);
   await gw.handle(r);
   assert.equal(r.status, 429);
 });
@@ -184,8 +183,10 @@ test('G2: simulations in flight across all clients stay within the permits of bo
   const be = backend();
   be.hold = true;
   const pending = [];
-  for (let c = 0; c < 4; c++) {
-    const r = request(Array.from({ length: 4 }, (_, i) => ethCall(i)), `198.51.100.${c + 1}`, be);
+  // Eight clients, each within its own per-client limit (min(4, simPerIp) calls).
+  const each = Math.min(4, cfg.simPerIp);
+  for (let c = 0; c < 8; c++) {
+    const r = request(Array.from({ length: each }, (_, i) => ethCall(i)), `198.51.100.${c + 1}`, be);
     pending.push({ r, done: gw.handle(r) });
   }
   await tick();
@@ -193,7 +194,7 @@ test('G2: simulations in flight across all clients stay within the permits of bo
   be.release();
   await Promise.all(pending.map((p) => p.done));
   assert.ok(admitted <= BACKEND_PERMITS * BACKENDS,
-    `4 IPv4 clients have ${admitted} eth_call in flight, ${BACKEND_PERMITS * BACKENDS} permits exist; the rest wait up to 10 s and fail -32005`);
+    `8 IPv4 clients have ${admitted} eth_call in flight, ${BACKEND_PERMITS * BACKENDS} permits exist; the rest wait up to 10 s and fail -32005`);
 });
 
 test('G3: a client that closes its connection mid-simulation does not lose its simulation slots for good', async () => {
@@ -228,4 +229,23 @@ test('G7 (Info): duplicate ids inside a split batch get their own answers', asyn
   await gw.handle(r);
   assert.equal(r.status, 200);
   assert.notDeepEqual(r.body[0], r.body[1], `both calls got ${JSON.stringify(r.body[1])}`);
+});
+
+test('fix check: budget keys group an IPv6 /64 and keep IPv4 addresses apart', () => {
+  if (typeof gw.client !== 'function') assert.fail('no l2rpc.client (budget key) export');
+  const key = (a) => gw.client({ variables: { remote_addr: a } });
+  assert.equal(key('2001:db8:1:2::1'), key('2001:db8:1:2:ffff:ffff:ffff:ffff'));
+  assert.equal(key('2001:db8:1:2::1'), key('2001:0db8:0001:0002:0:0:0:9'));
+  assert.notEqual(key('2001:db8:1:2::1'), key('2001:db8:1:3::1'));
+  assert.equal(key('2001:db8::1'), key('2001:db8:0:0:1::'));
+  assert.equal(key('::ffff:192.0.2.1'), '192.0.2.1');
+  assert.notEqual(key('192.0.2.1'), key('192.0.2.2'));
+});
+
+test('fix check: a wallet still gets eth_estimateGas and eth_call together', async () => {
+  reset();
+  const be = backend();
+  const r = request([ethCall(1), call(2, 'eth_estimateGas', [{ to: '0x' + '00'.repeat(20) }])], '192.0.2.90', be);
+  await gw.handle(r);
+  assert.equal(r.status, 200);
 });
