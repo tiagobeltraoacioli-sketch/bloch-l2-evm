@@ -145,7 +145,7 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   echo "$SET_FILE_SHA256  $SETF" | sha256sum -c --strict || die "attestors.set is not the pinned set"
   echo "$(cut -d' ' -f1 "$ART/carryover.tsv.gz.sha256")  $ART/carryover.tsv.gz" | sha256sum -c --strict \
     || die "carryover.tsv.gz does not match carryover.tsv.gz.sha256"
-  "$ART/bloch-pos" l2-claim --help | grep -q 'seal-key' || die "$ART/bloch-pos has no l2-claim seal-key (build the attestor-keystore branch)"
+  "$ART/bloch-pos" l2-claim --help | grep 'seal-key' >/dev/null || die "$ART/bloch-pos has no l2-claim seal-key (build the attestor-keystore branch)"
   local info; info=$("$ART/bloch-pos" l2-claim key-info --sealed "$BUNDLE") || die "$BUNDLE is not a sealed attestor key"
   grep -qx "signer_index $INDEX" <<<"$info" || die "$BUNDLE is not attestor $INDEX"
   grep -qx "set_hash $SET_HASH" <<<"$info" || die "$BUNDLE belongs to another attestor set"

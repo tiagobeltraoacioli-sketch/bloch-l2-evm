@@ -192,7 +192,7 @@ No other kit file names the release. `verify_release_signature.py` reads the rel
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `b773201f82fa46150be4a704aacd731651e56a08e0616e6de3ea163a9d32f11d` (agent 154 8d1c873) |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `27ad850586eaebc96fab0a8ab1888a45f396674292f2f1a3bc821a514b1753e1` (agent 154 8d1c873) |
 | `deployment/mainnet/public-rpc/render.py` | `c03bbf9945807bac82bfad66c6827b92d7a01cd5cea96dd15be2b015ac757b93` (agent 154 8d1c873) |
-| `deployment/mainnet/attestor/install-attestor.sh` | `3722708241f4eb25aacd960b2b29ccefff1d94907f9c282644558d7c71586a52` (agent 156 texts only; was `ab24bda0…`) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `02a11a0ac516d4c67c5e9f9a500c841c6d00565bb30aeccd3ff7260eba532c74` (agent 156 texts; agent 198 pipefail fix; was `ab24bda0…`) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `208d7a0d54e8fa870c979c8761125546d9a0ef47db2f58fe9cf58c738d88943a` |
 | `deployment/mainnet/attestor/attestor_lib.py` | `b996845f0e77b82aea66a7d73d1ad46525ba868fdafefe06380e2a7ac91fcc78` |
@@ -387,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `dfc3e8b8be1e6d95ed33d50ad69585ca358e33caad8c769dedd948d3fd31c994` (§3.2) (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `dfc3e8b8be1e6d95ed33d50ad69585ca358e33caad8c769dedd948d3fd31c994` (§3.2) (§3.2) (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
@@ -907,7 +907,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    (`keykit/KEY-HANDOFF-CHECKLIST.md`). The keys never travel unsealed. The
    originals are now destroyed before the handoff, gated on verified bundles and two read-back media.
 2. Each operator host (§2 spec) gets an `ARTEFATOS` dir with:
-   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `37227082…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
+   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `02a11a0a…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
