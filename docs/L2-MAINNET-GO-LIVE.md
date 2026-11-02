@@ -291,7 +291,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `442beec339f88574af4245ec1733bc84ba10256c561aa5ca3f63fdc847d0de52`, `artifacts/SHA256SUMS` to `116bfaba…`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to the value in the §3.2 table at the frozen kit tip (`8482dfbc…` on the release-signing branch; `1bc1da0c…` at f1c8033; the `442beec3…` written here before was stale), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
