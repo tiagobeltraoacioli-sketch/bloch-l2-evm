@@ -40,6 +40,13 @@ is a second forced command on the same user, slice and work directory (one proof
 It needs the activated program installed first, a second settler key (an SSH key selects one forced
 command), and settlement_v3_mainnet_sparse (SHA-256 78c533fa...7bea, CANDIDATE) beside this file.
 
+The fallback program (native PROGRAM_FALLBACK, installed by the inert L2_PROGRAM_ROLLBACK_EPOCH: the same next
+rules under the complete witness, `--mainnet`) is a third forced command in the same way, with a third settler key
+and settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...53b3, CANDIDATE) beside this file:
+
+  sudo python3 install-prover-mainnet.py install --program fallback --settler-pubkey FILE3 --settler-host IP
+  sudo python3 install-prover-mainnet.py rollback --program fallback
+
 install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
 beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
 prints exactly the program the native mainnet activation pins (ELF Keccak, KoalaBear and
@@ -89,6 +96,23 @@ PINNED_NEXT = {
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
 }
+# CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_FALLBACK` (bloch-sis-pow
+# codex/fallback-repin-native-r8-20261102), which the inert L2_PROGRAM_ROLLBACK_EPOCH installs in place of the sparse
+# guest: the same next rules proved by the complete-witness guest `settlement_v3_mainnet` of bloch-l2-evm
+# codex/fork-candidate-l2-r7-20261102 e8feb2b, pinned container build (integrations/sp1-execution/guest/
+# build-container.sh). The kit ships it as settlement_v3_mainnet_fallback (the activated guest keeps the plain
+# name). It moves with the fee-sweep recipient (TBD-owner) like PINNED_NEXT.
+FALLBACK_GUEST_SHA256 = '3ad3a4f02b6f03768674de8804934064cc9f8f0b47fedbe0456dce79ddaa53b3'
+PINNED_FALLBACK = {
+    'chain_id': 700770,
+    'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
+    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+    'elf_keccak': 'c9f8cd40b703b47c1fdfb183c223da9977ac9839e3d1c436c28c9b7f331aacf8',
+    'vkey_koalabear': '792452aa47ddaef1523907c03c39d3917df21180585eec804b27841626027d60',
+    'vkey_bn254': '00f248a5551f76bbc691c83e03c39d391fbe42301617bb202593c20b26027d60',
+    'sp1_circuit_version': 'v6.1.0',
+    'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
+}
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {
@@ -109,7 +133,13 @@ PROGRAMS = {
              'guest_sha256': NEXT_GUEST_SHA256, 'pins': PINNED_NEXT, 'host_args': ['--mainnet', '--sparse'],
              'config': {'mainnet_flag': '--mainnet', 'witness': 'sparse'},
              'release': Path(str(RELEASE) + '-next'), 'etc': Path(str(ETC) + '-next')},
+    'fallback': {'program': 'settlement_v3_mainnet', 'guest': 'settlement_v3_mainnet_fallback',
+                 'guest_sha256': FALLBACK_GUEST_SHA256, 'pins': PINNED_FALLBACK, 'host_args': ['--mainnet'],
+                 'config': {'mainnet_flag': '--mainnet', 'witness': 'complete'},
+                 'release': Path(str(RELEASE) + '-fallback'), 'etc': Path(str(ETC) + '-fallback')},
 }
+# The programs that run beside the activated one, each with its own forced command and settler key.
+EXTRA_PROGRAMS = ('next', 'fallback')
 # Measured on 136.244.93.186 (Cascade Lake, 32 vCPU, 2026-10-30) at 8 threads: prover peak RSS 20.4 GiB
 # (empty block), 25.5 GiB (5 txs), 45.2 GiB (50 transfers), 96.5 GiB (200 transfers). The default 100 GiB
 # (MemoryHigh 96) is sized for the settler's max_block_txs 128 as transfers, about 72 GiB by extrapolation.
@@ -214,8 +244,8 @@ def mem_available_gib():
 
 
 def install(args, here):
-    if getattr(args, 'program', 'activated') == 'next':
-        return install_next(args, here)
+    if getattr(args, 'program', 'activated') in EXTRA_PROGRAMS:
+        return install_next(args, here, args.program)
     check_sizes(args.memory_gib, args.threads)
     sums = {}
     for line in (here / 'SHA256SUMS').read_text().splitlines():
@@ -310,31 +340,32 @@ def read_sums(here, names):
     return sums
 
 
-def install_next(args, here):
-    """The next program beside an installed activated one: its own release and config, the same user, slice and
-    work directory (so one proof runs at a time across both), and a second settler key bound to its forced command."""
-    spec = PROGRAMS['next']
+def install_next(args, here, program='next'):
+    """The next (or fallback) program beside an installed activated one: its own release and config, the same user,
+    slice and work directory (so one proof runs at a time across all), and its own settler key bound to its forced
+    command."""
+    spec = PROGRAMS[program]
     names = (FILES[0], spec['guest'], FILES[2])
     sums = read_sums(here, names)
     if sums[spec['guest']] != spec['guest_sha256']:
-        die(f'{spec["guest"]} is not the pinned next guest')
+        die(f'{spec["guest"]} is not the pinned {program} guest')
     if sums[FILES[2]] != REMOTE_PROVER_SHA256:
         die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
-    identity = check_identity(run([here / FILES[0], *spec['host_args'], 'identity', here / spec['guest']]), 'next')
+    identity = check_identity(run([here / FILES[0], *spec['host_args'], 'identity', here / spec['guest']]), program)
     if not (ETC / 'installed.json').is_file():
-        die('install the activated program first: the next program shares its user, slice and work directory')
+        die(f'install the activated program first: the {program} program shares its user, slice and work directory')
     base = json.loads((ETC / 'installed.json').read_text())
     if base.get('sha256', {}).get(FILES[0]) != sums[FILES[0]]:
-        die('the next program must use the host the activated program runs (install both from one kit)')
+        die(f'the {program} program must use the host the activated program runs (install all from one kit)')
     for path in (spec['release'], spec['etc']):
         if path.exists():
-            die(f'{path} exists: already installed (rollback --program next first)')
+            die(f'{path} exists: already installed (rollback --program {program} first)')
     keys = STATE / '.ssh' / 'authorized_keys'
     line = authorized_line(Path(args.settler_pubkey).read_text(), args.settler_host, spec['release'],
                            spec['etc'] / 'config.json')
     if keys.is_file() and line.split('" ', 1)[1] in keys.read_text():
-        die('the next program needs its own settler key: one key selects one forced command')
-    plan = {'program': 'next', 'user': USER, 'release': str(spec['release']), 'etc': str(spec['etc']), 'state': str(STATE),
+        die(f'the {program} program needs its own settler key: one key selects one forced command')
+    plan = {'program': program, 'user': USER, 'release': str(spec['release']), 'etc': str(spec['etc']), 'state': str(STATE),
             'identity': identity, 'sha256': {n: sums[n] for n in names}, 'authorized_keys': line.strip()}
     if args.dry_run:
         print(json.dumps({'dry_run': True, **plan}, indent=2))
@@ -346,7 +377,7 @@ def install_next(args, here):
         shutil.copyfile(here / name, spec['release'] / name)
         (spec['release'] / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
     config = prover_config(spec['release'], STATE, sums[FILES[0]], base['threads'], base['memory_gib'],
-                           base.get('prover_env'), base.get('timeout_seconds', 5400), program='next')
+                           base.get('prover_env'), base.get('timeout_seconds', 5400), program=program)
     (spec['etc'] / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
     (spec['etc'] / 'config.json').chmod(0o644)
     with keys.open('a') as out:
@@ -354,8 +385,8 @@ def install_next(args, here):
     print(json.dumps({'installed': True, **plan}, indent=2))
 
 
-def rollback_next(args):
-    spec = PROGRAMS['next']
+def rollback_next(args, program='next'):
+    spec = PROGRAMS[program]
     record = spec['etc'] / 'installed.json'
     if not record.is_file():
         die(f'{record} missing: nothing recorded to roll back')
@@ -373,10 +404,11 @@ def rollback_next(args):
 
 
 def rollback(args):
-    if getattr(args, 'program', 'activated') == 'next':
-        return rollback_next(args)
-    if PROGRAMS['next']['etc'].exists():
-        die('roll back the next program first (rollback --program next)')
+    if getattr(args, 'program', 'activated') in EXTRA_PROGRAMS:
+        return rollback_next(args, args.program)
+    for program in EXTRA_PROGRAMS:
+        if PROGRAMS[program]['etc'].exists():
+            die(f'roll back the {program} program first (rollback --program {program})')
     record = ETC / 'installed.json'
     if not record.is_file():
         die(f'{record} missing: nothing recorded to roll back')

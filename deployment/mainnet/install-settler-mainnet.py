@@ -10,7 +10,8 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
       l2_reorg_recover.py (SHA-256 7c918bb7...) and, for the program swap (CANDIDATE, native
-      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 78c533fa...).
+      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 78c533fa...) and, for the
+      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...).
       The host of this kit serves both programs: the activated one with --mainnet-v1, the
       next one with --mainnet --sparse (see "Program swap" in SETTLER-RUNBOOK.md).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
@@ -72,11 +73,15 @@ PINS = {
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (TBD-owner) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
+    # CANDIDATE, not scheduled: the complete-witness guest that native PROGRAM_FALLBACK names (the same next
+    # rules; installed by the inert rollback gate). Pinned container build of the fork candidate e8feb2b.
+    'settlement_v3_mainnet_fallback': '3ad3a4f02b6f03768674de8804934064cc9f8f0b47fedbe0456dce79ddaa53b3',
 }
 # This kit's host takes --mainnet for the NEXT rules; the activated program is --mainnet-v1.
 ACTIVATED_PROVER_ARGS = ['--mainnet-v1']
 FILES = ('settler_v3.py', 'sequencer_policy.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
-         'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py', 'settlement_v3_mainnet_sparse')
+         'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py', 'settlement_v3_mainnet_sparse',
+         'settlement_v3_mainnet_fallback')
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
@@ -126,6 +131,7 @@ def prepare(args):
     settler = settler_module(source)
     assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
     assert settler.MAINNET_NEXT_SPARSE['guest_sha256'] == PINS['settlement_v3_mainnet_sparse']
+    assert settler.MAINNET_FALLBACK['guest_sha256'] == PINS['settlement_v3_mainnet_fallback']
     build = run([source / 'bloch-pos', '--version']) + run([source / 'bloch-pos', 'buildinfo'])
     assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
     run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', STATE,
@@ -146,6 +152,7 @@ def prepare(args):
     (PUBLIC / 'l2-config.bin').write_bytes(settler.mainnet_l2_config())
     assert digest(PUBLIC / 'l2-config.bin') == settler.MAINNET_L2_CONFIG_SHA256
     (PUBLIC / 'l2-config.next.bin').write_bytes(settler.mainnet_l2_config(settler.MAINNET_NEXT_SPARSE))
+    (PUBLIC / 'l2-config.fallback.bin').write_bytes(settler.mainnet_l2_config(settler.MAINNET_FALLBACK))
     STATE.mkdir(mode=0o700)
     for sub in ('work', 'tmp', 'txpool', 'ssh'):
         (STATE / sub).mkdir(mode=0o700)
@@ -192,6 +199,14 @@ def configure(args):
             'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),
             'guest': str(rel / 'settlement_v3_mainnet_sparse'), 'guest_sha256': digest(rel / 'settlement_v3_mainnet_sparse'),
             'l2_config': str(PUBLIC / 'l2-config.next.bin'), 'l2_config_sha256': digest(PUBLIC / 'l2-config.next.bin')},
+        # The program L1 installs at the (inert) rollback gate in place of the sparse guest: the same rules, the
+        # complete witness. Nothing is rewound at a rollback; the block in flight is proved again with this guest.
+        'fallback_program': {
+            'witness': 'complete', 'prover_args': ['--mainnet'],
+            'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),
+            'guest': str(rel / 'settlement_v3_mainnet_fallback'), 'guest_sha256': digest(rel / 'settlement_v3_mainnet_fallback'),
+            'l2_config': str(PUBLIC / 'l2-config.fallback.bin'),
+            'l2_config_sha256': digest(PUBLIC / 'l2-config.fallback.bin')},
         'gnark_image': GNARK_IMAGE, 'prover_threads': threads, 'timestamp_rule': settler.MAINNET_TIMESTAMP_RULE,
         'acceptance_timeout_seconds': 1800, 'poll_seconds': 15, 'resubmit_seconds': 300,
         'idle_seconds': 30, 'max_consecutive_failures': 8,
@@ -234,11 +249,19 @@ def configure(args):
             run([RUNUSER, '-u', USER, '--', 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', USER + '-next',
                  '-f', STATE / 'ssh/id_ed25519_next'])
         config['next_program']['remote_prover'] = {**config['remote_prover'], 'key': str(STATE / 'ssh/id_ed25519_next')}
+        # And the fallback program's (install-prover-mainnet.py install --program fallback).
+        if not (STATE / 'ssh/id_ed25519_fallback').exists():
+            run([RUNUSER, '-u', USER, '--', 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', USER + '-fallback',
+                 '-f', STATE / 'ssh/id_ed25519_fallback'])
+        config['fallback_program']['remote_prover'] = {**config['remote_prover'],
+                                                       'key': str(STATE / 'ssh/id_ed25519_fallback')}
         # Above the prover's own 5,400 s limit (install-prover-mainnet.py), so the prover stops first and says why.
         print('remote prover key (authorize it on the prover host with the forced command):')
         print((STATE / 'ssh/id_ed25519.pub').read_text().strip())
         print('next-program key (authorize it with install-prover-mainnet.py install --program next):')
         print((STATE / 'ssh/id_ed25519_next.pub').read_text().strip())
+        print('fallback-program key (authorize it with install-prover-mainnet.py install --program fallback):')
+        print((STATE / 'ssh/id_ed25519_fallback.pub').read_text().strip())
     settler.Settler(config)  # every pin, offline (no RPC call before cycle())
     # config.json appears only after every check passed: a failed check can be retried, and start stays refused.
     PENDING.write_text(json.dumps(config, indent=2) + '\n')
