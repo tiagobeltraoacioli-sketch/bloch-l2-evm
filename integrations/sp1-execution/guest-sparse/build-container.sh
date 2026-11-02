@@ -7,6 +7,7 @@
 #   WORK         host scratch directory (default /tmp/bloch-guest-sparse-container);
 #                its contents are replaced
 #   DOWNLOADS    directory with the two release tarballs; fetched when missing
+#   MEMORY       container memory cap (default 24g)
 #   KEEP_CARGO=1 reuse WORK/cargo (the crate registry) from an earlier run
 #
 # Writes OUT_DIR/<program> and OUT_DIR/SHA256SUMS ("sha256  name" lines) and
@@ -50,7 +51,7 @@ git -C "$repo" archive "$commit" | tar -x -C "$src"
 if [[ ${KEEP_CARGO:-0} != 1 ]]; then rm -rf "$work/cargo"; fi
 mkdir -p "$work/cargo"
 remap="--remap-path-prefix=/bloch-l2-evm=/bloch-l2-evm,--remap-path-prefix=/cargo=/cargo"
-$docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+$docker run --rm --memory "${MEMORY:-24g}" --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -v "$src:/bloch-l2-evm" -v "$work/cargo:/cargo" "$image" \
   cargo prove build --locked "--rustflags=$remap" >&2
 versions="$($docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "$image" sh -c 'cargo prove --version; rustc +succinct -vV | head -1; rustc -vV | head -1')"
