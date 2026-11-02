@@ -123,6 +123,17 @@ Differences, all deliberate:
   selects the host flag of each program: the release host takes `--mainnet` for the
   activated program; a host that serves both takes `--mainnet-v1` for it and
   `--mainnet` for the next one. Without `next_program` the worker behaves as before.
+* program schedule (`getl2settlement.program_schedule`, agent 89; candidate): L1 also lists the compiled program
+  changes still ahead, as (epoch, program). A worker with `next_program` picks the program for the epoch its
+  settlement would land in: the L1 head slot plus `program_switch_lead_seconds` (default 1800, the expected time
+  from the start of a proof to acceptance), divided by `slots_per_epoch` (default 32). When a change falls inside
+  that window, the block is built and proved for the program L1 will hold then (swap: the block in flight is
+  rewound and built under the next rules; rollback: the same block is proved by the fallback guest), and nothing
+  is published or submitted until L1 holds that program. No proof is started for a program that cannot land
+  before the gate. A finished proof of the current program is still submitted while its gate is ahead. If the
+  schedule is missing or malformed, names a program this worker does not know, or the L1 head slot cannot be
+  read, the worker logs `program-schedule-unusable` and uses the program L1 holds now (the behaviour before the
+  schedule): at worst one proof is wasted at a gate, and a proof of a program L1 does not hold is never sent.
 
 * `--dry-run [--prove]`: builds the next settlement against the live network
   in a scratch copy of the L2 database and validates it (identity, request,
@@ -183,7 +194,8 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # The getl2settlement fields the worker reads; everything else (native_height,
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 FRESH_SOURCE_SECONDS = 600  # skip_idle_blocks: a source older than this (above the pacing) takes no user transaction
-SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability', 'program')
+SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability', 'program',
+                          'program_schedule')
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sequencer_policy  # noqa: E402  (installed beside this file)
 
@@ -1045,6 +1057,12 @@ class Settler:
                                          'l2_config': f['l2_config'], 'prover_args': list(f.get('prover_args', ['--mainnet'])),
                                          'remote_prover': f.get('remote_prover'), 'witness': 'complete'}
         self.program = self.base_program
+        self.schedule_problem = None  # the last reason program_schedule could not be used, logged once
+        self.scheduled_logged = None  # the last (gate, program) logged as program-scheduled
+        for key, default in (('program_switch_lead_seconds', 1800), ('slots_per_epoch', 32)):
+            value = self.c.setdefault(key, default)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise Halt(f'{key} must be a positive integer')
         if self.c['user_transactions']:
             # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
             # development networks and the activated mainnet profile (checked live as well).
@@ -1155,17 +1173,83 @@ class Settler:
         self.accepted_floor = number if unanimous else max(self.accepted_floor, number)
         return view
 
+    def program_named(self, reported):
+        """The configured program whose identity L1 reports (a `program` or `program_schedule` entry), or None."""
+        fields = ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254', 'proof_policy')
+        identity = b''.join(bytes.fromhex(reported[k]) for k in fields)
+        if len(identity) != 160:
+            raise ValueError('a program identity is five 32-byte fields')
+        for program in (self.base_program, self.next_program, self.fallback_program):
+            if program is not None and Path(program['l2_config']).read_bytes()[32:192] == identity:
+                return program
+        return None
+
     def program_of(self, view):
         """The program L1 holds now, from a quorum view. A node without the report is on the activated one."""
         reported = view.get('program')
         if self.next_program is None or reported is None:
             return self.base_program
-        fields = ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254', 'proof_policy')
-        identity = b''.join(bytes.fromhex(reported[k]) for k in fields)
-        for program in (self.base_program, self.next_program, self.fallback_program):
-            if program is not None and Path(program['l2_config']).read_bytes()[32:192] == identity:
-                return program
-        raise Halt(f'L1 reports a program this worker is not configured for: {reported}')
+        program = self.program_named(reported)
+        if program is None:
+            raise Halt(f'L1 reports a program this worker is not configured for: {reported}')
+        return program
+
+    def schedule_unusable(self, reason):
+        """Fail safe: no program change is anticipated. Logged once per distinct reason."""
+        if self.schedule_problem != reason:
+            log('program-schedule-unusable', reason=reason[:300])
+        self.schedule_problem = reason
+        return None
+
+    def scheduled_program(self, view, directory):
+        """The program a settlement started now would land under, from `program_schedule`, or None to use the
+        program L1 holds now (no change inside the window, or the schedule cannot be used: see the module notes).
+        A finished proof of the current program for `directory` keeps that program while its gate is ahead."""
+        if self.next_program is None:
+            return None
+        schedule = view.get('program_schedule')
+        if not isinstance(schedule, list):
+            return self.schedule_unusable('getl2settlement has no program_schedule list')
+        entries, last = [], -1
+        try:
+            for entry in schedule:
+                epoch = entry['epoch']
+                if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch <= last:
+                    raise ValueError(f'epochs must be increasing integers: {epoch!r}')
+                program = self.program_named(entry)
+                if program is None:
+                    raise ValueError(f'a scheduled program this worker is not configured for at epoch {epoch}')
+                entries.append((epoch, program))
+                last = epoch
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            return self.schedule_unusable(f'program_schedule: {error}')
+        if not entries:
+            self.schedule_problem = None
+            return None
+        try:
+            slot = self.native.bounded_value('getchaininfo', 'slot')
+            if not isinstance(slot, int) or slot < 0:
+                raise ValueError(f'bad slot {slot!r}')
+        except Exception as error:  # noqa: BLE001 - fail safe: no anticipation without a clock
+            return self.schedule_unusable(f'L1 head slot unreadable: {type(error).__name__}: {error}')
+        self.schedule_problem = None
+        rule = self.c.get('timestamp_rule')
+        slot_ms = int(rule.split(':')[2]) if rule else 30_000
+        spe = self.c['slots_per_epoch']
+        now_epoch = slot // spe
+        landing_epoch = (slot - (-self.c['program_switch_lead_seconds'] * 1000 // slot_ms)) // spe
+        due = [(epoch, program) for epoch, program in entries if epoch <= landing_epoch]
+        if not due:
+            return None
+        gate, target = due[-1]
+        marker = directory / 'program.json'
+        if (directory / 'proved.json').exists() and marker.exists() and entries[0][0] > now_epoch \
+                and json.loads(marker.read_text()).get('name') == self.program_of(view)['name']:
+            return None  # a finished proof of the program L1 holds: send it before the gate
+        if target is not self.program_of(view) and self.scheduled_logged != (gate, target['name']):
+            self.scheduled_logged = (gate, target['name'])
+            log('program-scheduled', program=target['name'], gate_epoch=gate, l1_slot=slot, landing_epoch=landing_epoch)
+        return target
 
     def produce(self, *args):
         result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
@@ -1484,6 +1568,7 @@ class Settler:
         parent = statement_fields(accepted['statement'])['l2_hash'] if accepted else self.c['l2_genesis']
         anchor = view['source']['block']
         directory = self.work / f'{number:08d}-{anchor[:16]}'
+        self.program = self.scheduled_program(view, directory) or self.program
         self.follow_program(number, directory)
         directory.mkdir(parents=True, exist_ok=True)
         source = view['source']
@@ -1969,8 +2054,8 @@ class Settler:
         if current is None or current['source'] != view['source'] or current.get('accepted') != view.get('accepted'):
             log('request-moved-before-submit', number=number)
             return False
-        if current.get('program') != view.get('program'):
-            # The proof is of the old program: L1 refuses it from here on. The next cycle rebuilds this block.
+        if self.program_moved(current, view):
+            # The proof is of another program than L1 holds: L1 refuses it. The next cycle rebuilds this block.
             log('program-moved-before-submit', number=number, program=current.get('program'))
             return False
         path = directory / 'submitted.json'
@@ -1994,7 +2079,7 @@ class Settler:
             if current['source'] != view['source']:
                 log('request-moved-after-submit', number=number)
                 return False
-            if current.get('program') != view.get('program'):
+            if self.program_moved(current, view):
                 log('program-moved-after-submit', number=number, program=current.get('program'))
                 return False
             if sent == 'terminal':
@@ -2009,6 +2094,21 @@ class Settler:
         if height is not None and now is not None and now <= height:
             log('l1-not-advancing', number=number, l1_height=now)  # the L1 is stalled; nothing to fix here
         return False
+
+    def program_moved(self, current, view):
+        """Whether L1 no longer holds the program this block was proved for. With `next_program` that is the
+        program this cycle selected (it may be a scheduled one, proved ahead of its gate); without it, any change
+        of the report since `view`."""
+        if self.next_program is None:
+            return current.get('program') != view.get('program')
+        return self.program_of(current) is not self.program
+
+    def program_pending(self, current):
+        """Whether the program this cycle selected is still ahead in `current`'s schedule (proved before its gate)."""
+        try:
+            return any(self.program_named(e) is self.program for e in current.get('program_schedule') or [])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
 
     def record_accepted(self, number, directory, accepted):
         atomic_write(directory / 'accepted.json', json.dumps(accepted, indent=2) + '\n')
@@ -2038,6 +2138,19 @@ class Settler:
             if self.request_moved(view):
                 log('request-moved-after-proof', number=number)
                 return False
+            if self.next_program is not None:
+                # Proved ahead of a scheduled gate: no DA fee and no settlement until L1 holds this program.
+                current = self.native_view()
+                if current is None:
+                    return False
+                holds = self.program_of(current)
+                if holds is not self.program:
+                    if self.program_pending(current):
+                        log('program-gate-pending', number=number, program=self.program['name'], holds=holds['name'])
+                    else:
+                        # The proof is of a program L1 no longer holds: the next cycle rebuilds this block.
+                        log('program-moved-before-submit', number=number, program=current.get('program'))
+                    return False
             tx = self.transaction(directory, proof, view.get('accepted'))
             values = tx[33:33 + VALUES_BYTES]
             if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big') and \
@@ -2289,6 +2402,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
             if head.get('number') != 0 or head.get('hash') != config['l2_genesis']:
                 return done(False, reason=f'producer L2 genesis {head.get("hash")} differs from {config["l2_genesis"]}')
         number, directory = settler.prepare_block(view)
+        report['program'] = settler.program['name']  # the scheduled one near a gate (program_schedule)
         block = json.loads((directory / 'block.json').read_text()) if (directory / 'block.json').exists() else {}
         report['l2_block'] = {'number': number, **{k: block[k] for k in ('hash', 'deposits', 'transactions',
                                                                           'withdrawal_count') if k in block}}
