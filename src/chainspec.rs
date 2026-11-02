@@ -119,6 +119,11 @@ pub const GENESIS4_SLOT_MS: u64 = 30_000;
 /// rebuilder could derive a varying value from.
 pub const L2_BLOCK_PREVRANDAO: B256 = B256::repeat_byte(0x07);
 
+/// Base-fee floor of the next mainnet rules: 0.1 gwei (agent 197; the middle,
+/// in log terms, of the 0.0089 gwei DA break-even and the 1 gwei initial base
+/// fee of report 34, and the sequencer policy's tip floor).
+pub const MAINNET_MIN_BASE_FEE: u64 = 100_000_000;
+
 /// CANDIDATE PLACEHOLDER, `TBD-owner`: the immutable recipient of the fee-vault
 /// sweep, the Bloch Inc Safe's L2 address once the owner fixes it. This value
 /// enters the configuration commitment, so the configuration, ELF and verifying
@@ -222,6 +227,10 @@ pub struct ChainSpec {
     /// rule set installs [`fee_vault_sweep_code`] at both vault addresses if it
     /// is not there yet, keeping their balances. `None` on every earlier rule set.
     pub fee_vault_sweep: Option<Address>,
+    /// Lowest base fee (wei per gas) [`Self::next_base_fee`] may return: the
+    /// protocol revenue floor of an idle chain (agent 197, L1-12). Zero on every
+    /// earlier rule set, where integer rounding alone stops the decay (249 wei).
+    pub min_base_fee: u64,
 }
 
 /// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
@@ -299,6 +308,7 @@ impl ChainSpec {
             withdrawal_outbox: None,
             block_derivation: None,
             fee_vault_sweep: None,
+            min_base_fee: 0,
         }
     }
 
@@ -343,6 +353,7 @@ impl ChainSpec {
                 prevrandao: L2_BLOCK_PREVRANDAO,
             }),
             fee_vault_sweep: Some(MAINNET_FEE_SWEEP_RECIPIENT),
+            min_base_fee: MAINNET_MIN_BASE_FEE,
             ..Self::mainnet_v1()
         }
     }
@@ -431,6 +442,11 @@ impl ChainSpec {
     /// invalid spec, see [`Self::validate`]) the base fee is left unchanged
     /// rather than dividing by zero.
     pub fn next_base_fee(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
+        core::cmp::max(self.min_base_fee, self.next_base_fee_unfloored(parent_base_fee, parent_gas_used))
+    }
+
+    /// The EIP-1559 step alone, before [`Self::min_base_fee`].
+    fn next_base_fee_unfloored(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
         let target = self.gas_target();
         if target == 0 || self.base_fee_denominator == 0 {
             return parent_base_fee;
@@ -592,14 +608,48 @@ mod tests {
     }
 
     #[test]
-    fn next_mainnet_rules_add_only_block_derivation_and_the_sweep() {
+    fn next_mainnet_rules_add_only_block_derivation_the_sweep_and_the_floor() {
         let next = ChainSpec::mainnet();
         next.validate().expect("the next mainnet spec is valid");
         assert!(next.block_derivation.is_some() && next.fee_vault_sweep.is_some());
+        assert_eq!(next.min_base_fee, MAINNET_MIN_BASE_FEE);
         assert_eq!(
-            ChainSpec { block_derivation: None, fee_vault_sweep: None, ..next.clone() },
+            ChainSpec { block_derivation: None, fee_vault_sweep: None, min_base_fee: 0, ..next.clone() },
             ChainSpec::mainnet_v1()
         );
+    }
+
+    /// Agent 197 (L1-12): the floor holds an idle chain at 0.1 gwei, where the
+    /// current rules decay to the 249 wei rounding fixed point; above the floor
+    /// the EIP-1559 step is unchanged; earlier rule sets have no floor.
+    #[test]
+    fn base_fee_floor_holds_an_idle_chain_and_leaves_the_step_unchanged() {
+        let v1 = ChainSpec::mainnet_v1();
+        let next = ChainSpec::mainnet();
+        assert_eq!(v1.min_base_fee, 0);
+        let (mut old, mut new) = (v1.initial_base_fee, next.initial_base_fee);
+        for _ in 0..5_000 {
+            old = v1.next_base_fee(old, 0);
+            new = next.next_base_fee(new, 0);
+        }
+        assert_eq!(old, 249, "today's rules: the rounding fixed point of report 34");
+        assert_eq!(new, MAINNET_MIN_BASE_FEE, "next rules: the floor");
+        assert_eq!(next.next_base_fee(1, 0), MAINNET_MIN_BASE_FEE, "a parent below the floor is lifted at once");
+        let target = next.gas_target();
+        for (parent, used) in [(1_000_000_000, 0), (1_000_000_000, target), (1_000_000_000, 2 * target), (MAINNET_MIN_BASE_FEE, 2 * target)] {
+            let step = v1.next_base_fee(parent, used);
+            assert_eq!(next.next_base_fee(parent, used), step.max(MAINNET_MIN_BASE_FEE));
+        }
+        assert!(next.next_base_fee(MAINNET_MIN_BASE_FEE, 2 * target) > MAINNET_MIN_BASE_FEE, "congestion still raises it");
+    }
+
+    #[test]
+    fn a_floor_outside_the_next_rules_is_refused_by_the_commitment() {
+        let floored_v1 = ChainSpec { min_base_fee: 1, ..ChainSpec::mainnet_v1() };
+        assert!(crate::proof_statement::configuration_commitment(&floored_v1).is_err());
+        let a = crate::proof_statement::configuration_commitment(&ChainSpec::mainnet()).unwrap();
+        let b = crate::proof_statement::configuration_commitment(&ChainSpec { min_base_fee: 1, ..ChainSpec::mainnet() }).unwrap();
+        assert_ne!(a, b, "the floor is committed");
     }
 
     #[test]

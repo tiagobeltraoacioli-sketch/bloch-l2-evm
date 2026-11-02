@@ -46,7 +46,12 @@ impl RuleSchedule {
     /// A base and a next rule set. Refused unless they differ only in the block
     /// derivation and the fee-vault sweep.
     pub fn new(base: ChainSpec, next: ChainSpec) -> Result<Self, BlockExecutionError> {
-        let comparable = ChainSpec { block_derivation: base.block_derivation, fee_vault_sweep: base.fee_vault_sweep, ..next.clone() };
+        let comparable = ChainSpec {
+            block_derivation: base.block_derivation,
+            fee_vault_sweep: base.fee_vault_sweep,
+            min_base_fee: base.min_base_fee,
+            ..next.clone()
+        };
         if comparable != base || next.fee_vault_sweep.is_none() || base.fee_vault_sweep.is_some() {
             return Err(BlockExecutionError::msg(
                 "the next rule set may add only the block derivation and the fee-vault sweep",
