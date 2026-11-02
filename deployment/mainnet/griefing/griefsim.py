@@ -521,25 +521,27 @@ def congestion(sim, blocks=120, fill_slots=20_000, read_batch=None, honest_every
         if cost and abs(cost.sp1_gas - room) < room // 10:
             break
         batch = int(batch * room / (cost.sp1_gas if cost else room * 2))
-    out(event='batch', batch=batch, sp1=cost.sp1_gas if cost else None)
+    # One transaction stops at the gas cap: send as many as the budget holds, each reading other slots.
+    copies = max(1, round(room / cost.sp1_gas)) if cost else 1
+    out(event='batch', batch=batch, copies=copies, sp1=cost.sp1_gas if cost else None)
     waits, honest_paid = [], 0
     pending = None
     pending_since = None
     for i in range(blocks):
         tip = sim.tip()
-        raw = sim.tx(key, griefer, sel('readAllowances(address,address,uint256,uint256)') + cat(w(token), w(griefer), w(1), w(batch)), 5_000_000, tip=tip)
+        raws = [sim.tx(key, griefer, sel('readAllowances(address,address,uint256,uint256)') + cat(w(token), w(griefer), w(1 + k * batch), w(batch)), 5_000_000, tip=tip) for k in range(copies)]
         if pending is None:
             sim.resync([g.address(sim.honest)])
             pending = sim.honest_transfer()
             pending_since = i
         before = spent(sim)
-        plan, chosen, stats, reply, fee = sim.block([raw, pending])
+        plan, chosen, stats, reply, fee = sim.block(raws + [pending])
         sim.resync([g.address(key)])
         if pending in chosen:
             waits.append(i - pending_since)
             honest_paid += next(int(t['gas_used']) * (reply['base_fee'] + int(t['effective_tip'])) for t in stats if t['hash'] == g.keccak(bytes.fromhex(pending)).hex())
             pending = None
-        out(event='congestion-block', i=i, tip=tip, attacker_block_fee_blch=spent(sim) - before, attacker_in=raw in chosen, sp1=plan.cost.sp1_gas if plan else None, base_fee=reply['base_fee'], waits=len(waits))
+        out(event='congestion-block', i=i, tip=tip, attacker_block_fee_blch=spent(sim) - before, attacker_in=sum(r in chosen for r in raws), sp1=plan.cost.sp1_gas if plan else None, base_fee=reply['base_fee'], waits=len(waits))
     out(event='verdict', attack='congestion', design=sim.design, blocks=blocks, slots=slots, grown_fee_blch=grown_fee, fee_blch=spent(sim) - grown_fee, tip_end=sim.tip(), honest_mean_wait=sum(waits) / max(len(waits), 1), honest_max_wait=max(waits or [0]), honest_mean_fee_blch=honest_paid / max(len(waits), 1) / COIN, honest_included=len(waits))
 
 
