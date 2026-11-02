@@ -132,18 +132,18 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `d8e6dd9100f497c9322e92c92b387b9e87b3840c4f4e25e60a57e5c96c4cae90` |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `65715d136c401eec751cbf1677a6691ffca281b5d47667b7c8f4885aa607c91d` |
-| `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `5849afc9cf65b478c42df4b9223d0fb423e9cb1cca44081f416afc2d203e884b` |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `bdc2dcbfdbcee151e77557ac28db27f788f7462911f8c340cbb8e409a6d5cb4e` |
+| `deployment/mainnet/install-shadow.sh` | `5eb5437b7f518a118483a5a3eca1870e6044e457ddf6c78d464e05d9a79242df` |
 | `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
-| `deployment/mainnet/install-settler-mainnet.py` | `33e1d9ff4fb4abbe98c1fbad3a1dfcf60ef80037d6edca7f10b069eb80b340b3` |
+| `deployment/mainnet/install-settler-mainnet.py` | `493b0f10175cf35818b5fe785e9ba6f0bdcccad6b818657305a99a9a4566ec0c` |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a0cfabd0ab9f30d4ef78838c96daa1ff086c87c42ff7e7b501d4e7951c6b5b1` (the settler installer pins it) |
-| `deployment/mainnet/prover/install-prover-mainnet.py` | `f342deab986b419dccd89070bb1ac0088729c90258cc57a646b83e9a31787e39` |
+| `deployment/mainnet/prover/install-prover-mainnet.py` | `5cf1dcfa3f41b1f693a17319a67b99dbdad1968f92205d5e69b6abe29e6f50f5` |
 | `deployment/devnet/remote_prover.py` | `183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
 | `deployment/devnet/settler_v3.py` | `8e2c67f54efff1f3fe69de1361b8cdbdcc622ee187b29dffd64c3c3f58edf1d8` |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
-| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `24aa5cb8d76e5fc8ff926bd49a21497635959c032783fbfdeee38dd2917aac48` (`LimitNOFILE=65536`) |
+| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `70d565a9d88a30ae192aa2d45738fb7132a2c4939374eedfe538fff8ed490493` (`LimitNOFILE=65536`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `ab24bda0770a1e196f8ffe4340e46520c81f2dd891dd4b1413b6bbec9bee0780` |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
@@ -284,7 +284,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `d8e6dd9100f497c9322e92c92b387b9e87b3840c4f4e25e60a57e5c96c4cae90`, `artifacts/SHA256SUMS` to `116bfaba…`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `5849afc9cf65b478c42df4b9223d0fb423e9cb1cca44081f416afc2d203e884b`, `artifacts/SHA256SUMS` to `116bfaba…`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
