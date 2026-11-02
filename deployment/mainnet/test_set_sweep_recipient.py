@@ -171,6 +171,7 @@ class Steps(unittest.TestCase):
         out = json.loads(run('audit', '--l2', self.l2, '--native', self.native,
                              *sum((['--old', v] for v in OLD['sparse'] + OLD['complete']), [])))
         self.assertEqual(out['stale_values'], [])
+        self.assertEqual(out['tbd_owner_sweep_mentions'], [])
         self.assertFalse(out['placeholder'])
 
     def test_native_commit_refuses_a_lock_change(self):

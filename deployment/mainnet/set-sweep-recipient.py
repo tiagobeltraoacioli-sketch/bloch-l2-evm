@@ -160,6 +160,25 @@ PLACEHOLDER_DOC = ('/// CANDIDATE PLACEHOLDER, `TBD-owner`: the immutable recipi
 NATIVE_PLACEHOLDER_DOC = ('    /// The configuration carries a PLACEHOLDER fee-sweep recipient, `TBD-owner`,\n'
                           '    /// and the guest is a candidate, so these values are examples until\n')
 
+# Placeholder sentences in kit comments and docs, rewritten by `apply` ({a} = the EIP-55 recipient).
+COMMENT_EDITS = (
+    ('deployment/devnet/settler_v3.py',
+     '# carries a placeholder fee-sweep recipient (TBD-owner), so all of these move when the recipient is fixed.',
+     "# carries the owner's fee-sweep recipient {a} (src/chainspec.rs); these values are built with it."),
+    ('deployment/mainnet/install-settler-mainnet.py',
+     "    # fee-sweep recipient (TBD-owner) and with the audit's fixes.",
+     "    # fee-sweep recipient ({a}, fixed) and with the audit's fixes."),
+    ('deployment/mainnet/prover/install-prover-mainnet.py',
+     '# recipient is a placeholder (TBD-owner), so the configuration and every value below move with it.',
+     '# recipient is {a} (fixed by the owner); the configuration and every value below are built with it.'),
+    ('deployment/mainnet/prover/install-prover-mainnet.py',
+     '# name). It moves with the fee-sweep recipient (TBD-owner) like PINNED_NEXT.',
+     '# name). It is built with the fee-sweep recipient {a} like PINNED_NEXT.'),
+    ('docs/AUDIT-SCOPE-SPARSE.md',
+     '- **The sweep recipient is a placeholder**, so the next-rules ELF and its keys move\n  once it is set.',
+     '- **The sweep recipient is `{a}`** (set by the owner); the next-rules ELF and\n  its keys are built with it.'),
+)
+
 
 def owner_doc(recipient):
     return ('/// The immutable recipient of the fee-vault sweep, fixed by the owner:\n'
@@ -289,6 +308,11 @@ def cmd_apply(args):
         p = native / NATIVE_PINS
         t = p.read_text()
         ed.write(p, t, t.replace(NATIVE_PLACEHOLDER_DOC, native_owner_doc(r)), 'PROGRAM_NEXT doc')
+        for rel, before, after in COMMENT_EDITS:
+            p = l2 / rel
+            if p.is_file():
+                t = p.read_text()
+                ed.write(p, t, t.replace(before, after.format(a=eip55(r))), 'placeholder comment')
     ed.report()
     print(json.dumps({'old_recipient': eip55(old), 'recipient': eip55(r), 'old_configuration': old_cfg,
                       'configuration': new_cfg, 'next': 'build both guests in the pinned container on two hosts, '
@@ -421,7 +445,7 @@ def cmd_audit(args):
                 for name, v in stale.items():
                     if v in line and path.name not in SELF_FILES:
                         hits.append(f'{path}:{n}: {name}')
-                if 'TBD-owner' in line and re.search(r'sweep|recipient', line, re.I):
+                if 'TBD-owner' in line and re.search(r'sweep|recipient', line, re.I) and path.name not in SELF_FILES:
                     notes.append(f'{path}:{n}: {line.strip()[:140]}')
     native_cfg = native_program(native, 'PROGRAM_NEXT')[0]
     result = {'recipient': eip55(r), 'placeholder': r == stale['placeholder recipient'], 'configuration': cfg,
