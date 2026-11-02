@@ -106,7 +106,13 @@ Differences, all deliberate:
   counts as held; when an acceptance window ends with the bytes held and the
   L1 head advancing, `settlement-not-included` is logged, and after
   `max_unincluded_windows` such windows in a row (default 4, 0 = alert only)
-  the worker halts for the operator.
+  the worker halts for the operator. Review r10 L1: a partial quorum that
+  stays below the in-memory accepted floor (one endpoint down for good during
+  a real L1 reorg) is no longer a silent wait: after
+  `quorum_floor_stall_seconds` (default 1200, 0 = off) it logs
+  `rpc-quorum-behind-floor` and raises, so the bounded retry exits 1 and the
+  restart resets the floor. Review r10 L6: a prover timeout is a failed
+  attempt at that location, so the next one in `remote_prover.order` is tried.
 
 * stop signals (review r10 M1): SIGTERM, SIGINT and SIGHUP take the same
   cleanup path as a prover timeout: the prover's process group is killed,
@@ -274,6 +280,16 @@ def follower_finals(status_path):
         raise Halt('the follower settlement log does not match its status')
     entries = [json.loads(line) for line in lines]
     return {x['l2_number']: x['l2_hash'] for x in entries}
+
+
+TIMEOUT_EXIT = 124  # exit code recorded for a prover attempt that ran out of time (as timeout(1) reports it)
+
+
+class QuorumFloorStall(RuntimeError):
+    """Review r10 L1: a partial quorum has reported the same accepted number below the in-memory floor for
+    `quorum_floor_stall_seconds`. Raised every cycle until `max_consecutive_failures` makes the process exit 1;
+    the restart resets the floor, so a real L1 reorg is followed (or halts with its own reason) instead of a
+    silent wait."""
 
 
 class Halt(Exception):
@@ -1197,6 +1213,10 @@ class Settler:
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
+        self.floor_stall = None  # (number, first seen, reads) while a partial quorum stays behind the floor
+        stall = self.c.get('quorum_floor_stall_seconds', 1200)
+        if not isinstance(stall, int) or isinstance(stall, bool) or stall < 0:
+            raise Halt('quorum_floor_stall_seconds must be a non-negative integer')
         self.unincluded = {}  # consecutive acceptance windows the same bytes were held but not included
         limit = self.c.get('max_unincluded_windows', 4)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
@@ -1242,12 +1262,33 @@ class Settler:
             # A partial quorum must not move the accepted head backwards (two stale
             # endpoints); a unanimous view is trusted as before.
             log('rpc-quorum-view-behind', accepted=number, seen=self.accepted_floor, ports=support)
+            self.floor_stall_check(number, support)
             return None
+        self.floor_stall = None
         self.accepted_floor = number if unanimous else max(self.accepted_floor, number)
         return view
 
-    def produce(self, *args):
-        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
+    def floor_stall_check(self, number, support):
+        """Review r10 L1. With one endpoint down for good, a real L1 reorg below the floor never reaches a
+        unanimous view. After `quorum_floor_stall_seconds` (default 1200, 0 = off) of the same behind-floor
+        quorum answer, raise so that the bounded retry exits 1 and the restart resets the in-memory floor.
+        Two stale endpoints after that restart meet the database and anchor checks in prepare_block, or the
+        `settlement-not-included` limit; each ends in a logged halt."""
+        limit = self.c.get('quorum_floor_stall_seconds', 1200)
+        now = self.clock()
+        if self.floor_stall is None or self.floor_stall[0] != number:
+            self.floor_stall = (number, now, 1)
+            return
+        _, since, reads = self.floor_stall
+        self.floor_stall = (number, since, reads + 1)
+        if limit and now - since >= limit and reads + 1 >= 3:
+            log('rpc-quorum-behind-floor', accepted=number, seen=self.accepted_floor, ports=support,
+                seconds=round(now - since))
+            raise QuorumFloorStall(f'a partial quorum has reported accepted L2 {number} below the floor '
+                                   f'{self.accepted_floor} for {round(now - since)} s')
+
+    def produce(self, *args, timeout=300):
+        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise ProducerError(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         try:
@@ -1472,17 +1513,24 @@ class Settler:
             for where in order:
                 if name == 'prove':
                     proof.unlink(missing_ok=True)
-                if where == 'remote':
-                    result = self.prove_remote(directory, proof)
-                elif name == 'prove' and not self.local_proof_fits(directory):
-                    result = types.SimpleNamespace(returncode=75)
-                else:
-                    with (directory / f'{name}.log').open('w') as out:
-                        result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                timed_out = False
+                try:
+                    if where == 'remote':
+                        result = self.prove_remote(directory, proof)
+                    elif name == 'prove' and not self.local_proof_fits(directory):
+                        result = types.SimpleNamespace(returncode=75)
+                    else:
+                        with (directory / f'{name}.log').open('w') as out:
+                            result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                except subprocess.TimeoutExpired:
+                    # Review r10 L6: a timeout is a failed attempt at this location, so the next one in
+                    # `remote_prover.order` is still tried. run_bounded has already killed and cleaned the group.
+                    result, timed_out = types.SimpleNamespace(returncode=TIMEOUT_EXIT), True
                 if result.returncode == 0:
                     break
                 if name == 'prove':
-                    log('prover-failed', directory=str(directory), where=where, exit_code=result.returncode)
+                    log('prover-failed', directory=str(directory), where=where, exit_code=result.returncode,
+                        **({'timeout': True} if timed_out else {}))
             steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:

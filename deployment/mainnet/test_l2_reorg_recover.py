@@ -93,7 +93,7 @@ class FakeSettler:
     def local_hash(self, number):
         return 'aa' * 32
 
-    def produce(self, *args):
+    def produce(self, *args, timeout=300):
         self.calls.append(args)
         if args[0] == 'head':
             return {'number': self.head, 'hash': 'aa' * 32}
