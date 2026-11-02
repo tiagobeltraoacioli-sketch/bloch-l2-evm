@@ -224,6 +224,19 @@ MAINNET_NEXT = {
     'guest_sha256': '44d4c9d7b828c13ee6edc06fa499a53dc3594243bf599d517432c5076cb6ce47',
 }
 
+# CANDIDATE, not scheduled: the same next rules proved by the sparse-witness guest
+# (`settlement_v3_mainnet_sparse`, bloch-l2-evm codex/sparse-witness-r4-20261101), the program
+# agent 89's native branch names in `PROGRAM_NEXT`. Same configuration; ELF and keys differ.
+# A `next_program` with `"witness": "sparse"` must match this pin, exports the sparse artifact
+# (`produce export --witness sparse`) and runs the prover with `--mainnet --sparse`.
+MAINNET_NEXT_SPARSE = {
+    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+    'elf_keccak': '54d264b8969845b82b3c8d0cec54562567ab7ee6f59dae7e2678c7d9e848c011',
+    'vkey_koalabear': '5f802b085c7520f54383ee604e867d4d327a0d554388ca79254748973cf6c126',
+    'vkey_bn254': '00bf00561171d483d61c1f7304e867d4d64f41aab0e2329e52a3a44bbcf6c126',
+    'guest_sha256': '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e',
+}
+
 
 # ---- L1 fee estimate for the DA (0x15) transaction (bloch-pos-committee fee_market, l2_da) ----
 GAS_PER_BYTE, TX_FLAT_GAS, HYBRID_VERIFY_GAS = 16, 5_000, 72_748
@@ -523,12 +536,16 @@ def check_next_program(c):
         return
     if not isinstance(program, dict):
         raise Halt('next_program must be an object')
-    if Path(program['l2_config']).read_bytes() != mainnet_l2_config(MAINNET_NEXT):
+    witness = program.get('witness', 'complete')
+    if witness not in ('complete', 'sparse'):
+        raise Halt('next_program witness must be complete or sparse')
+    pin, args = (MAINNET_NEXT_SPARSE, ['--mainnet', '--sparse']) if witness == 'sparse' else (MAINNET_NEXT, ['--mainnet'])
+    if Path(program['l2_config']).read_bytes() != mainnet_l2_config(pin):
         raise Halt('next_program l2_config differs from the pinned next program')
-    if program.get('guest_sha256') != MAINNET_NEXT['guest_sha256']:
+    if program.get('guest_sha256') != pin['guest_sha256']:
         raise Halt('next_program guest must be the pinned next settlement_v3_mainnet ELF')
-    if list(program.get('prover_args', ['--mainnet'])) != ['--mainnet']:
-        raise Halt('next_program prover_args must select the next rules')
+    if list(program.get('prover_args', args)) != args:
+        raise Halt('next_program prover_args must select the next rules and its witness')
     if list(c.get('prover_args', ['--mainnet'])) not in (['--mainnet'], ['--mainnet-v1']):
         raise Halt('prover_args must select the activated rules')
 
@@ -795,7 +812,7 @@ class Settler:
             check_rehearsal_config(self.c)
         self.base_program = {'name': 'base', 'prover': self.c['prover'], 'guest': self.c['guest'],
                              'l2_config': self.c['l2_config'], 'prover_args': self.prover_args,
-                             'remote_prover': self.c.get('remote_prover')}
+                             'remote_prover': self.c.get('remote_prover'), 'witness': 'complete'}
         self.next_program = None
         if self.c.get('next_program') is not None:
             if not self.mainnet_path:
@@ -805,9 +822,11 @@ class Settler:
             for key in ('prover', 'guest', 'l2_config'):
                 if digest(n[key]) != n[key + '_sha256']:
                     raise Halt(f'next_program {key} differs from its pin')
+            witness = n.get('witness', 'complete')
+            default_args = ['--mainnet', '--sparse'] if witness == 'sparse' else ['--mainnet']
             self.next_program = {'name': 'next', 'prover': n['prover'], 'guest': n['guest'], 'l2_config': n['l2_config'],
-                                 'prover_args': list(n.get('prover_args', ['--mainnet'])),
-                                 'remote_prover': n.get('remote_prover')}
+                                 'prover_args': list(n.get('prover_args', default_args)),
+                                 'remote_prover': n.get('remote_prover'), 'witness': witness}
         self.program = self.base_program
         if self.c['user_transactions']:
             # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
@@ -938,6 +957,11 @@ class Settler:
             args += ['--rule-set', self.program['name']]
         return args
 
+    def export_witness(self):
+        """The export option of the witness the current program's guest reads (none for the complete one,
+        so an older producer keeps working)."""
+        return ['--witness', 'sparse'] if self.program.get('witness') == 'sparse' else []
+
     def supersede(self, directory):
         """Keep the work of a block that can no longer settle, under a name no later cycle reuses."""
         if directory.exists():
@@ -999,7 +1023,8 @@ class Settler:
             # Crash after extend: reuse only the block built on this exact parent and anchor.
             probe = self.work / f'.probe-{number}.artifact'
             probe.unlink(missing_ok=True)
-            info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe))
+            info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe),
+                                *self.export_witness())
             probe.unlink()
             if info['anchor'] != anchor:
                 raise Halt(f'unsettled L2 block {number} has anchor {info["anchor"]}, native now requests {anchor}')
@@ -1008,7 +1033,8 @@ class Settler:
             raise Halt(f'L2 head {head["number"]} cannot extend accepted settlement {number - 1}')
         artifact = directory / 'block.artifact'
         if not artifact.exists():
-            self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact))
+            self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact),
+                         *self.export_witness())
         request = directory / 'native-request.txt'
         text = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
         if 'inbox_count' in source:

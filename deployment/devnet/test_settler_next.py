@@ -213,6 +213,52 @@ class ProgramSwapTest(unittest.TestCase):
         with self.assertRaisesRegex(s.Halt, 'pinned next program'):
             s.Settler(self.config_with_stale_config(config), rpc=fake.rpc, run=fake.run)
 
+    def test_a_sparse_next_program_exports_the_sparse_witness_and_selects_its_guest(self):
+        sparse = s.MAINNET_NEXT_SPARSE
+        report = {k: sparse[k] for k in ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254')}
+        report['proof_policy'] = M['proof_policy']
+        (self.root / 'next-settlement-v3').write_bytes(b'next prover')
+        (self.root / 'settlement_v3_mainnet_sparse').write_bytes(b'sparse guest')
+        (self.root / 'l2-config.next.bin').write_bytes(s.mainnet_l2_config(sparse))
+        next_program = {'prover': str(self.root / 'next-settlement-v3'), 'guest': str(self.root / 'settlement_v3_mainnet_sparse'),
+                        'l2_config': str(self.root / 'l2-config.next.bin'), 'witness': 'sparse',
+                        'guest_sha256': s.digest(self.root / 'settlement_v3_mainnet_sparse')}
+        for key in ('prover', 'l2_config'):
+            next_program[key + '_sha256'] = s.digest(next_program[key])
+        config = self.base_config(next_program=next_program)
+        fake = SwapFake(self.root, mn.mainnet_statement())
+        with mock.patch.object(s, 'log'), self.assertRaisesRegex(s.Halt, 'pinned next settlement_v3_mainnet'):
+            s.Settler(config, rpc=fake.rpc, run=fake.run)
+        pin = mock.patch.dict(s.MAINNET_NEXT_SPARSE, guest_sha256=next_program['guest_sha256'])
+        pin.start()
+        self.addCleanup(pin.stop)
+        bad = json.loads(json.dumps(config))
+        bad['next_program']['prover_args'] = ['--mainnet']
+        with self.assertRaisesRegex(s.Halt, 'its witness'):
+            s.Settler(bad, rpc=fake.rpc, run=fake.run)
+        fake.next_values = mn.mainnet_statement(**{'64': s.mainnet_l2_config(sparse)[:160]})
+        fake.live['program'] = dict(report)
+        fake.values = fake.next_values
+        clock = iter(range(0, 1_000_000, 5))
+        settler = s.Settler(config, rpc=fake.rpc, run=fake.run, sleep=lambda _: None, clock=lambda: next(clock))
+        with mock.patch.object(s, 'log'):
+            self.assertTrue(settler.cycle())
+        self.assertEqual(settler.program['name'], 'next')
+        exports = [c for c in fake.calls if c[1] == 'export']
+        self.assertTrue(exports)
+        for call in exports:
+            self.assertEqual(call[call.index('--witness') + 1], 'sparse')
+        for call in self.prover_calls(fake):
+            self.assertEqual(call[1:3], ['--mainnet', '--sparse'])
+            self.assertIn(str(self.root / 'settlement_v3_mainnet_sparse'), call)
+
+    def test_a_complete_program_exports_without_the_witness_option(self):
+        fake = SwapFake(self.root, mn.mainnet_statement())
+        with mock.patch.object(s, 'log'):
+            self.assertTrue(self.settler(fake).cycle())
+        for call in (c for c in fake.calls if c[1] == 'export'):
+            self.assertNotIn('--witness', call)
+
     def config_with_stale_config(self, config):
         config['next_program']['l2_config_sha256'] = s.digest(self.root / 'l2-config.next.bin')
         return config
