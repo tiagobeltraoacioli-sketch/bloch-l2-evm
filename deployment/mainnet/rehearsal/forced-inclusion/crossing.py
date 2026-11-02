@@ -630,8 +630,8 @@ def stream(gate):
           and (Path(str(R / 'txpool') + '-censored') / f'{censored_hash}.tx').exists(),
           {'events': len(settler_events('tx-censored')), 'accepted': accepted_number(), 'from': censored_from})
     forced_scenario(censored_path, censored_hash, censored_nonce)
-    receipt = until('the sweep is mined', lambda: l2('eth_getTransactionReceipt', '0x' + sweep.removeprefix('0x')), WAIT, 10)
-    check('the sweep transaction succeeded', receipt['status'] == '0x1', receipt['status'])
+    sweep_receipt = until('the sweep is mined', lambda: l2('eth_getTransactionReceipt', '0x' + sweep.removeprefix('0x')), WAIT, 10)
+    check('the sweep transaction succeeded', sweep_receipt['status'] == '0x1', sweep_receipt['status'])
     check('the sweep moved the vault balance to the recipient', balance_at(SWEEP_RECIPIENT) > recipient_before, balance_at(SWEEP_RECIPIENT))
     check('a deposit made after the gate is minted', balance_at(state()['l2_late']) >= 7 * SAT * 10 ** 10, balance_at(state()['l2_late']))
     # Claims of a withdrawal from each side of the switch.
@@ -693,7 +693,7 @@ def forced_scenario(censored_path, censored_hash, censored_nonce):
         deposits = json.loads((directory / 'deposits.json').read_text())
         block = json.loads((directory / 'block.json').read_text())
         values = (directory / 'transaction.bin').read_bytes()[33:33 + st.VALUES_BYTES]
-        slot = values[st.T + st.DEPOSITS_HASH:st.T + st.DEPOSITS_HASH + 32]
+        slot_value = values[st.T + st.DEPOSITS_HASH:st.T + st.DEPOSITS_HASH + 32]
         users = int.from_bytes(values[st.T + st.USER_TX_COUNT:st.T + st.USER_TX_COUNT + 8], 'big')
         hashes = [r['envelope_hash'] for r in due]
         gap_record, censored_record = (st.keccak256(bytes.fromhex(p.read_text().strip())).hex() for p in (gap_path, censored_path))
@@ -715,7 +715,7 @@ def forced_scenario(censored_path, censored_hash, censored_nonce):
         check('the nonce-gap record was consumed as a skip, before the censored one', skipped_in is not None
               and skipped_in <= directory.name, skipped_in)
         check('the statement deposits_hash slot is inbox_hash(deposits, forced records)',
-              slot == st.inbox_hash(st.deposits_hash(deposits), due) and slot != st.deposits_hash(deposits), slot.hex())
+              slot_value == st.inbox_hash(st.deposits_hash(deposits), due) and slot_value != st.deposits_hash(deposits), slot_value.hex())
         check('the statement user_tx_count excludes the forced envelope',
               users == block['user_transactions'] == block['transactions'] - block['forced']['included'], detail)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
