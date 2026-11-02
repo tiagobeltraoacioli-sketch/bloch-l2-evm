@@ -77,6 +77,8 @@ FORCED_GAS = 21_000
 FORCED_BOUND = 2  # the record must be in an L2 block settled by the 2nd settlement accepted after its L1 transaction
 PASS = R / 'keystore.passphrase'
 fails = []
+# Every wait on settlements; the shared proof lock can hold a proof back for an hour or more (agent 137).
+WAIT = int(os.environ.get('NC_WAIT', '10800'))
 
 
 def now():
@@ -556,8 +558,8 @@ def stream(gate):
     save(gate=gate, gate_slot=gate_slot)
     deposit('user', 500 * SAT)
     deposit('censored', 20 * SAT)
-    until('L2 credits the deposit', lambda: balance_at(state()['l2_user']) > 0, 3600, 10)
-    until('L2 credits the censored user', lambda: balance_at(state()['l2_censored']) > 0, 3600, 10)
+    until('L2 credits the deposit', lambda: balance_at(state()['l2_user']) > 0, WAIT, 10)
+    until('L2 credits the censored user', lambda: balance_at(state()['l2_censored']) > 0, WAIT, 10)
 
     # User traffic before the gate, and one withdrawal that will be claimed after it.
     first = send_tx('user', '--withdraw-to', state()['wallet_script'], '--sats', 3 * SAT)
@@ -584,7 +586,7 @@ def stream(gate):
     deposit('late', 7 * SAT)
     after = base_upto
     until('first settlement under the next program', lambda: accepted_number() > base_upto and view()['accepted'] and
-          bytes.fromhex(view()['accepted']['statement'])[22 + 96:22 + 128].hex() == NEXT_PROGRAM['configuration'], 7200, 10)
+          bytes.fromhex(view()['accepted']['statement'])[22 + 96:22 + 128].hex() == NEXT_PROGRAM['configuration'], WAIT, 10)
     first_next = accepted_number()
     note('first next settlement', number=first_next, slot=slot(), proofs=proof_table())
     rewinds, moved = settler_events('l2-block-rewound-at-swap'), settler_events('program-moved-before-submit') + settler_events('program-moved-after-submit')
@@ -621,19 +623,19 @@ def stream(gate):
     save(withdrawal_after=second)
     sweep = send_tx('user', '--to', VAULTS['base'], '--value-wei', 0, '--gas', 200_000)
     note('sweep sent', tx=sweep, vault=settled_vault)
-    until('three settlements under the next program', lambda: accepted_number() >= first_next + 2, 7200, 15)
-    until('two settlements after the censored transaction', lambda: accepted_number() >= censored_from + 2, 7200, 15)
+    until('three settlements under the next program', lambda: accepted_number() >= first_next + 2, WAIT, 15)
+    until('two settlements after the censored transaction', lambda: accepted_number() >= censored_from + 2, WAIT, 15)
     check('the sequencer censored the transaction over two settlements', receipt(censored_hash) is None
           and balance_at(CENSOR_RECIPIENT) == 0 and bool(settler_events('tx-censored'))
           and (Path(str(R / 'txpool') + '-censored') / f'{censored_hash}.tx').exists(),
           {'events': len(settler_events('tx-censored')), 'accepted': accepted_number(), 'from': censored_from})
     forced_scenario(censored_path, censored_hash, censored_nonce)
-    receipt = until('the sweep is mined', lambda: l2('eth_getTransactionReceipt', '0x' + sweep.removeprefix('0x')), 3600, 10)
+    receipt = until('the sweep is mined', lambda: l2('eth_getTransactionReceipt', '0x' + sweep.removeprefix('0x')), WAIT, 10)
     check('the sweep transaction succeeded', receipt['status'] == '0x1', receipt['status'])
     check('the sweep moved the vault balance to the recipient', balance_at(SWEEP_RECIPIENT) > recipient_before, balance_at(SWEEP_RECIPIENT))
     check('a deposit made after the gate is minted', balance_at(state()['l2_late']) >= 7 * SAT * 10 ** 10, balance_at(state()['l2_late']))
     # Claims of a withdrawal from each side of the switch.
-    tree = until('the withdrawals are claimable', lambda: (lambda w: w if w.get('claimable') and w['claimable']['count'] >= 2 and w['claimable']['l2_number'] >= first_next else None)(view()['withdrawals']), 7200, 15)
+    tree = until('the withdrawals are claimable', lambda: (lambda w: w if w.get('claimable') and w['claimable']['count'] >= 2 and w['claimable']['l2_number'] >= first_next else None)(view()['withdrawals']), WAIT, 15)
     note('withdrawals view', claimable=tree['claimable'])
     for index, sats, label in ((0, 3 * SAT, 'before'), (1, 2 * SAT, 'after')):
         escrow = int(view()['inbox']['escrow_sat'])
@@ -643,10 +645,10 @@ def stream(gate):
         check(f'claim of the withdrawal from {label} the switch moves exactly its amount', escrow - int(view()['inbox']['escrow_sat']) == sats)
     check('escrow conserved', view()['withdrawals'].get('escrow_conserved') is True)
     # Finality past the switch, then the common checks.
-    until('L2 finalized passes the switch', lambda: any(e['l2_number'] >= first_next + 1 for e in status()['finalized_settlements']), 3600, 15)
+    until('L2 finalized passes the switch', lambda: any(e['l2_number'] >= first_next + 1 for e in status()['finalized_settlements']), WAIT, 15)
     if state().get('forced_block'):
         until('L2 finalized passes the forced block',
-              lambda: any(e['l2_number'] >= state()['forced_block'] for e in status()['finalized_settlements']), 3600, 15)
+              lambda: any(e['l2_number'] >= state()['forced_block'] for e in status()['finalized_settlements']), WAIT, 15)
     switch, _ = common_checks(gate, base_upto)
     check('the switch is the first block not settled before the gate', switch == base_upto + 1 or switch > after, (switch, base_upto))
     events = {k: len(settler_events(k)) for k in ('accepted', 'proof-generated', 'da-included', 'halt', 'retry', 'l2-block-rewound-at-swap', 'program-moved-before-submit', 'program-moved-after-submit')}
@@ -671,9 +673,9 @@ def forced_scenario(censored_path, censored_hash, censored_nonce):
     note('forced transactions queued', accepted=queued_at, forced=after)
     check('L1 queued both forced transactions', after['queued'] == before['queued'] + 2 and after['pending'] >= 1, after)
     check('the next surcharge is still the base unit (two transfers queued)', int(after['next_surcharge_sat']) == 1000, after)
-    mined = until('the forced transaction is in an L2 block', lambda: receipt(censored_hash), 7200, 10)
+    mined = until('the forced transaction is in an L2 block', lambda: receipt(censored_hash), WAIT, 10)
     number = int(mined['blockNumber'], 16)
-    until('the block with the forced transaction is settled', lambda: accepted_number() >= number, 7200, 10)
+    until('the block with the forced transaction is settled', lambda: accepted_number() >= number, WAIT, 10)
     waited = time.time() - submitted
     note('forced transaction settled', l2_block=number, queued_at=queued_at, seconds=int(waited))
     check(f'the forced transaction is settled within {FORCED_BOUND} settlements of its L1 transaction',
@@ -773,11 +775,11 @@ def reset(gate):
     start_settler()
     start_rpc()
     until('block 1 settles again under the next program', lambda: accepted_number() >= 1 and view()['accepted'] and
-          bytes.fromhex(view()['accepted']['statement'])[22 + 96:22 + 128].hex() == NEXT_PROGRAM['configuration'], 7200, 10)
-    until('a second block settles', lambda: accepted_number() >= 2, 7200, 15)
+          bytes.fromhex(view()['accepted']['statement'])[22 + 96:22 + 128].hex() == NEXT_PROGRAM['configuration'], WAIT, 10)
+    until('a second block settles', lambda: accepted_number() >= 2, WAIT, 15)
     check('the settlement stream continues from the genesis under the next program', accepted_number() >= 2, accepted_number())
     check('the deposit is minted on the recovered chain', balance_at(state()['l2_user']) >= 50 * SAT * 10 ** 10, balance_at(state()['l2_user']))
-    until('L2 finalized passes the reset', lambda: any(e['configuration'] == NEXT_PROGRAM['configuration'] and e['l2_number'] >= 1 for e in status()['finalized_settlements']), 3600, 15)
+    until('L2 finalized passes the reset', lambda: any(e['configuration'] == NEXT_PROGRAM['configuration'] and e['l2_number'] >= 1 for e in status()['finalized_settlements']), WAIT, 15)
     st = status()['finalized_settlements']
     check('the follower dropped the discarded block', all(e['configuration'] == NEXT_PROGRAM['configuration'] for e in st) and [e['l2_number'] for e in st] == list(range(1, len(st) + 1)), [(e['l2_number'], e['configuration'][:8]) for e in st])
     target, report = rebuild(label='rebuild-after-reset')
