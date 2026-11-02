@@ -267,6 +267,20 @@ pub fn statement_fields(
     Some((inbox_hash(deposits_hash, consumed), u64::try_from(sequencer).ok()?))
 }
 
+/// The DA commitment under forced inclusion: over the sequencer's
+/// transactions only (`body[included_forced..]`), so a block whose only
+/// transactions are forced has a zero commitment and a zero user count, which
+/// is what the native rule requires of a block without user transactions.
+pub fn sequencer_da_commitment(
+    chain_id: u64,
+    l2_block_number: u64,
+    body_transactions: &[Bytes],
+    included_forced: usize,
+) -> Option<B256> {
+    let sequencer = body_transactions.get(included_forced..)?;
+    crate::data_availability::block_da_commitment(chain_id, l2_block_number, sequencer).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +322,21 @@ mod tests {
         // A skipped record is consumed but not in the body.
         assert_eq!(statement_fields(d, &[record, record], 1, 0), Some((inbox_hash(d, &[record, record]), 1)));
         assert_eq!(statement_fields(d, &[record], 0, 1), None);
+    }
+
+    #[test]
+    fn forced_envelopes_are_not_in_the_da_batch() {
+        let forced = Bytes::from_static(&[0x02, 0xc1, 0x01]);
+        let sequencer = Bytes::from_static(&[0x02, 0xc0]);
+        // Forced only: zero, like a block without user transactions.
+        assert_eq!(sequencer_da_commitment(7, 3, &[forced.clone()], 1), Some(B256::ZERO));
+        // Mixed: the batch of the sequencer's part, exactly.
+        let mixed = [forced.clone(), sequencer.clone()];
+        assert_eq!(
+            sequencer_da_commitment(7, 3, &mixed, 1),
+            crate::data_availability::block_da_commitment(7, 3, &[sequencer]).ok()
+        );
+        assert_ne!(sequencer_da_commitment(7, 3, &mixed, 1), sequencer_da_commitment(7, 3, &mixed, 0));
+        assert_eq!(sequencer_da_commitment(7, 3, &[forced], 2), None);
     }
 }
