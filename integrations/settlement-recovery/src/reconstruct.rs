@@ -47,6 +47,9 @@ pub struct SettledBlockInputs {
     pub settled_at: u64,
     pub parent_hash: B256,
     pub previous_state_root: B256,
+    /// The configuration commitment L1 compared with its policy when it accepted
+    /// this settlement: it names the rules this block ran.
+    pub configuration: B256,
     pub anchor: B256,
     /// Native slot of the anchored block (the L2 timestamp rule's L1 origin).
     pub anchor_slot: u64,
@@ -152,12 +155,29 @@ pub fn l2_registry_blocks(
 }
 
 /// Derive the inputs of every L2 block settled in `blocks` for `chain_id`,
-/// starting from the L2 genesis (`genesis_hash`, `genesis_state_root`).
+/// starting from the L2 genesis (`genesis_hash`, `genesis_state_root`), under
+/// the head reset this build's native consensus would apply, if any.
 pub fn derive_settled_blocks(
     blocks: &[NativeBlockTransactions],
     chain_id: u64,
     genesis_hash: B256,
     genesis_state_root: B256,
+) -> Result<Vec<SettledBlockInputs>, ReconstructError> {
+    let reset = bloch_pos_committee::l2_settlement::mainnet::HEAD_RESET.map(|reset| reset.number);
+    derive_settled_blocks_with_reset(blocks, chain_id, genesis_hash, genesis_state_root, reset)
+}
+
+/// [`derive_settled_blocks`] with the kept block of an optional head reset named
+/// explicitly. A settlement that extends that block while the settled chain has
+/// gone past it means the native gate moved the head back: L1 accepted it, so the
+/// blocks above are no longer part of the chain and are dropped here too. Without
+/// a reset the rule stays that every settlement extends the previous one.
+pub fn derive_settled_blocks_with_reset(
+    blocks: &[NativeBlockTransactions],
+    chain_id: u64,
+    genesis_hash: B256,
+    genesis_state_root: B256,
+    reset: Option<u64>,
 ) -> Result<Vec<SettledBlockInputs>, ReconstructError> {
     let mut inbox: Vec<InboxRecord> = Vec::new();
     // (L2 number, commitment) -> payload; first publication wins (identical bytes).
@@ -208,6 +228,22 @@ pub fn derive_settled_blocks(
                         return Err(ReconstructError::Chain { height: block.height, chain_id: base.chain_id });
                     }
                     let number = base.l2_number;
+                    if let Some(kept) = reset.filter(|kept| number == kept + 1 && head_number > *kept) {
+                        let target = usize::try_from(kept).ok().filter(|k| *k <= out.len());
+                        let (hash, root, withdrawals) = match target {
+                            Some(0) => (genesis_hash, genesis_state_root, WithdrawalCommitment::empty()),
+                            Some(k) => {
+                                let block = &out[k - 1];
+                                (block.header_hash, block.state_root, block.withdrawals.unwrap_or_else(WithdrawalCommitment::empty))
+                            }
+                            None => return Err(ReconstructError::Successor { height: block.height, number }),
+                        };
+                        if base.l2_parent_hash == hash && base.l2_previous_state_root == root {
+                            out.truncate(target.unwrap_or_default());
+                            (head_hash, head_root, head_number) = (hash, root, kept);
+                            head_withdrawals = withdrawals;
+                        }
+                    }
                     if number != head_number + 1
                         || base.l2_parent_hash != head_hash
                         || base.l2_previous_state_root != head_root
@@ -251,6 +287,7 @@ pub fn derive_settled_blocks(
                         settled_at: block.height,
                         parent_hash: base.l2_parent_hash,
                         previous_state_root: base.l2_previous_state_root,
+                        configuration: base.configuration,
                         anchor: base.l1_block,
                         anchor_slot: base.l1_slot,
                         deposits,

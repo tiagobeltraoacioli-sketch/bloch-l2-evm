@@ -112,6 +112,17 @@ Differences, all deliberate:
   block or local damage. Without `foreign_recovery` any foreign statement halts, as before. Readers of
   the database must reopen it after a swap: the worker rewrites `<workdir>/../l2-db-generation.json`,
   which a systemd path unit watches to restart the settled RPC.
+* program swap (`next_program`, candidate; native `L2_NEXT_PROGRAM_EPOCH` inert):
+  L1 replaces the program at a compiled epoch boundary and reports it in
+  `getl2settlement.program`. Each cycle follows that report: the block, the prover,
+  the guest and the l2-config are those of the program L1 holds now. A block built
+  under the old rules and not settled when the program moved can never settle: it
+  is rewound (its user transactions go back to the spool), its work directory is
+  kept aside as `.superseded-*`, and the same number is built, proved and submitted
+  under the new rules. Nothing stops and no operator is needed. `prover_args`
+  selects the host flag of each program: the release host takes `--mainnet` for the
+  activated program; a host that serves both takes `--mainnet-v1` for it and
+  `--mainnet` for the next one. Without `next_program` the worker behaves as before.
 
 * `--dry-run [--prove]`: builds the next settlement against the live network
   in a scratch copy of the L2 database and validates it (identity, request,
@@ -170,7 +181,7 @@ QUORUM_READ_ATTEMPTS, QUORUM_RETRY_SECONDS = 3, 1  # fresh re-reads when healthy
 # The getl2settlement fields the worker reads; everything else (native_height,
 # inbox totals, withdrawal bookkeeping) moves with every head and is not used.
 FRESH_SOURCE_SECONDS = 600  # skip_idle_blocks: a source older than this (above the pacing) takes no user transaction
-SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability')
+SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'accepted', 'source', 'data_availability', 'program')
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
             'poll_seconds': 6, 'resubmit_seconds': 120}
@@ -204,12 +215,38 @@ MAINNET_PRODUCE_ARGS = ('--rules', 'mainnet', '--domain', MAINNET['l2_domain'],
 MAINNET_DEFAULTS = {'poll_seconds': 15, 'resubmit_seconds': 300, 'timestamp_rule': MAINNET_TIMESTAMP_RULE}
 
 
-def mainnet_l2_config():
+def mainnet_l2_config(program=None):
     """The 264-byte l2-config.bin of chain 700770 (layout of devnet4/make_l2_config.py)."""
-    out = b''.join(bytes.fromhex(MAINNET[k]) for k in ('l2_domain', 'configuration', 'elf_keccak',
-                                                         'vkey_koalabear', 'vkey_bn254', 'proof_policy'))
+    pins = {**MAINNET, **(program or {})}
+    out = b''.join(bytes.fromhex(pins[k]) for k in ('l2_domain', 'configuration', 'elf_keccak',
+                                                    'vkey_koalabear', 'vkey_bn254', 'proof_policy'))
     out += MAINNET['chain_id'].to_bytes(8, 'little')
     return out + bytes.fromhex(MAINNET['l2_genesis']) + bytes.fromhex(MAINNET['l2_genesis_state'])
+
+
+# CANDIDATE, not scheduled: the program native `l2_settlement::mainnet::PROGRAM_NEXT` installs at the
+# gate. Its configuration carries a placeholder fee-sweep recipient (TBD-owner), so all of these move
+# when the recipient is fixed. The proof policy, the L2 genesis and the attestor set stay.
+MAINNET_NEXT = {
+    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+    'elf_keccak': 'f3c20f71b84bb09cbab76a75c83a62c507fbefff4b347f787ef2d89aceb6f2b8',
+    'vkey_koalabear': '50bd69a513f2463e748a8a62277bc25a08df69a4420a660e2a2ee3f957dca9f7',
+    'vkey_bn254': '00a17ad34a4fc918fba454531277bc25a11bed3490829983951771fcd7dca9f7',
+    'guest_sha256': '44d4c9d7b828c13ee6edc06fa499a53dc3594243bf599d517432c5076cb6ce47',
+}
+
+# CANDIDATE, not scheduled: the same next rules proved by the sparse-witness guest
+# (`settlement_v3_mainnet_sparse`, bloch-l2-evm codex/sparse-witness-r4-20261101), the program
+# agent 89's native branch names in `PROGRAM_NEXT`. Same configuration; ELF and keys differ.
+# A `next_program` with `"witness": "sparse"` must match this pin, exports the sparse artifact
+# (`produce export --witness sparse`) and runs the prover with `--mainnet --sparse`.
+MAINNET_NEXT_SPARSE = {
+    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+    'elf_keccak': '54d264b8969845b82b3c8d0cec54562567ab7ee6f59dae7e2678c7d9e848c011',
+    'vkey_koalabear': '5f802b085c7520f54383ee604e867d4d327a0d554388ca79254748973cf6c126',
+    'vkey_bn254': '00bf00561171d483d61c1f7304e867d4d64f41aab0e2329e52a3a44bbcf6c126',
+    'guest_sha256': '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e',
+}
 
 
 # ---- L1 fee estimate for the DA (0x15) transaction (bloch-pos-committee fee_market, l2_da) ----
@@ -227,6 +264,11 @@ def da_fee_sat(payload_bytes, inputs=1, base_fee_millisat_per_gas=MIN_BASE_FEE_M
     gas = TX_FLAT_GAS + GAS_PER_BYTE * tx_bytes + HYBRID_VERIFY_GAS * inputs
     part = lambda price: -(-gas * price // 1000)  # noqa: E731
     return part(base_fee_millisat_per_gas) + part(tip)
+
+
+class WaitForProgram(RuntimeError):
+    """L1 reports the old program while the L2 head already runs the next rules: an L1 reorganization
+    across the gate. The next epoch boundary on any branch installs it again, so this only waits."""
 
 
 class ProducerError(RuntimeError):
@@ -540,6 +582,27 @@ def check_rehearsal_config(c):
         raise Halt('mainnet-rehearsal guest must be the pinned settlement_v3_mainnet ELF')
 
 
+def check_next_program(c):
+    """`next_program` of a mainnet-path worker: exactly the candidate the native gate would install."""
+    program = c.get('next_program')
+    if program is None:
+        return
+    if not isinstance(program, dict):
+        raise Halt('next_program must be an object')
+    witness = program.get('witness', 'complete')
+    if witness not in ('complete', 'sparse'):
+        raise Halt('next_program witness must be complete or sparse')
+    pin, args = (MAINNET_NEXT_SPARSE, ['--mainnet', '--sparse']) if witness == 'sparse' else (MAINNET_NEXT, ['--mainnet'])
+    if Path(program['l2_config']).read_bytes() != mainnet_l2_config(pin):
+        raise Halt('next_program l2_config differs from the pinned next program')
+    if program.get('guest_sha256') != pin['guest_sha256']:
+        raise Halt('next_program guest must be the pinned next settlement_v3_mainnet ELF')
+    if list(program.get('prover_args', args)) != args:
+        raise Halt('next_program prover_args must select the next rules and its witness')
+    if list(c.get('prover_args', ['--mainnet'])) not in (['--mainnet'], ['--mainnet-v1']):
+        raise Halt('prover_args must select the activated rules')
+
+
 def check_chain_overrides(c, chain_id, network_args):
     """`chain_id` / `network_args` (written by the 2026-10-18 rehearsal driver) are derived from
     network_kind; they may be repeated in a configuration, never changed."""
@@ -787,7 +850,7 @@ class Settler:
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
         self.chain_id = MAINNET['chain_id'] if self.mainnet_path else CHAIN_ID
         self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet_path else []
-        self.prover_args = ['--mainnet'] if self.mainnet_path else []
+        self.prover_args = list(self.c.get('prover_args', ['--mainnet'] if self.mainnet_path else []))
         check_chain_overrides(self.c, self.chain_id, self.network_args)
         for key in ('prover', 'guest', 'l2_config'):
             if digest(self.c[key]) != self.c[key + '_sha256']:
@@ -800,6 +863,24 @@ class Settler:
             check_mainnet_config(self.c)
         elif self.rehearsal:
             check_rehearsal_config(self.c)
+        self.base_program = {'name': 'base', 'prover': self.c['prover'], 'guest': self.c['guest'],
+                             'l2_config': self.c['l2_config'], 'prover_args': self.prover_args,
+                             'remote_prover': self.c.get('remote_prover'), 'witness': 'complete'}
+        self.next_program = None
+        if self.c.get('next_program') is not None:
+            if not self.mainnet_path:
+                raise Halt('next_program applies only to the mainnet program path')
+            check_next_program(self.c)
+            n = self.c['next_program']
+            for key in ('prover', 'guest', 'l2_config'):
+                if digest(n[key]) != n[key + '_sha256']:
+                    raise Halt(f'next_program {key} differs from its pin')
+            witness = n.get('witness', 'complete')
+            default_args = ['--mainnet', '--sparse'] if witness == 'sparse' else ['--mainnet']
+            self.next_program = {'name': 'next', 'prover': n['prover'], 'guest': n['guest'], 'l2_config': n['l2_config'],
+                                 'prover_args': list(n.get('prover_args', default_args)),
+                                 'remote_prover': n.get('remote_prover'), 'witness': witness}
+        self.program = self.base_program
         if self.c['user_transactions']:
             # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
             # development networks and the activated mainnet profile (checked live as well).
@@ -904,6 +985,18 @@ class Settler:
         self.accepted_floor = number if unanimous else max(self.accepted_floor, number)
         return view
 
+    def program_of(self, view):
+        """The program L1 holds now, from a quorum view. A node without the report is on the activated one."""
+        reported = view.get('program')
+        if self.next_program is None or reported is None:
+            return self.base_program
+        fields = ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254', 'proof_policy')
+        identity = b''.join(bytes.fromhex(reported[k]) for k in fields)
+        for program in (self.base_program, self.next_program):
+            if Path(program['l2_config']).read_bytes()[32:192] == identity:
+                return program
+        raise Halt(f'L1 reports a program this worker is not configured for: {reported}')
+
     def produce(self, *args):
         result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
         if result.returncode:
@@ -937,6 +1030,8 @@ class Settler:
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
             if self.c.get('min_tip_wei'):
                 args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
+        if self.next_program is not None:
+            args += ['--rule-set', self.program['name']]
         return args
 
     def source_age(self, view):
@@ -994,13 +1089,45 @@ class Settler:
         self.holding_since = None
         return False
 
+    def export_witness(self):
+        """The export option of the witness the current program's guest reads (none for the complete one,
+        so an older producer keeps working)."""
+        return ['--witness', 'sparse'] if self.program.get('witness') == 'sparse' else []
+
+    def supersede(self, directory):
+        """Keep the work of a block that can no longer settle, under a name no later cycle reuses."""
+        if directory.exists():
+            directory.rename(directory.with_name(f'{directory.name}.superseded-{int(time.time())}'))
+
+    def follow_program(self, number, directory):
+        """Make the database and the work directory fit the program L1 holds now."""
+        if self.next_program is None:
+            return
+        head = self.produce('head', '--target', self.c['l2_db'])
+        head_next = head.get('rules') == 'next'
+        if self.program is self.base_program:
+            if head_next:
+                raise WaitForProgram(f'L2 head {head["number"]} runs the next rules, L1 reports the activated program')
+            return
+        if head['number'] == number and not head_next:
+            pool = ['--respool', self.c['txpool_dir']] if self.c['user_transactions'] else []
+            rewound = self.produce('rewind', '--target', self.c['l2_db'], '--number', str(number), '--hash', head['hash'], *pool)
+            log('l2-block-rewound-at-swap', number=number, hash=head['hash'], respooled=rewound.get('respooled', 0))
+        produced = directory / 'block.json'
+        if produced.exists() and json.loads(produced.read_text()).get('rules') != 'next':
+            self.supersede(directory)
+        elif directory.exists() and not produced.exists() and (directory / 'proved.json').exists():
+            self.supersede(directory)
+
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
+        self.program = self.program_of(view)
         accepted = view.get('accepted')
         number = statement_fields(accepted['statement'])['l2_number'] + 1 if accepted else 1
         parent = statement_fields(accepted['statement'])['l2_hash'] if accepted else self.c['l2_genesis']
         anchor = view['source']['block']
         directory = self.work / f'{number:08d}-{anchor[:16]}'
+        self.follow_program(number, directory)
         directory.mkdir(parents=True, exist_ok=True)
         source = view['source']
         pending = source.get('pending', [])
@@ -1026,7 +1153,7 @@ class Settler:
                 raise Halt('producer included user transactions while user_transactions is false')
             atomic_write(produced, json.dumps(block, sort_keys=True) + '\n')
             log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
-                                                               'withdrawal_count') if k in block},
+                                                               'withdrawal_count', 'rules', 'timestamp') if k in block},
                 deferred=len(block.get('deferred', [])), dropped=block.get('dropped', []))
         elif head['number'] == number:
             # Crash after extend: reuse only the block built on this exact parent and anchor.
@@ -1035,7 +1162,8 @@ class Settler:
                                         '(another settler?)')
             probe = self.work / f'.probe-{number}.artifact'
             probe.unlink(missing_ok=True)
-            info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe))
+            info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe),
+                                *self.export_witness())
             probe.unlink()
             if info['anchor'] != anchor:
                 raise Halt(f'unsettled L2 block {number} has anchor {info["anchor"]}, native now requests {anchor}')
@@ -1044,7 +1172,8 @@ class Settler:
             raise Halt(f'L2 head {head["number"]} cannot extend accepted settlement {number - 1}')
         artifact = directory / 'block.artifact'
         if not artifact.exists():
-            self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact))
+            self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact),
+                         *self.export_witness())
         request = directory / 'native-request.txt'
         text = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
         if 'inbox_count' in source:
@@ -1081,12 +1210,12 @@ class Settler:
         for name, args in (('execute', ['execute']), ('prove', ['prove-groth16']), ('verify', ['verify-groth16'])):
             if name not in stages:
                 continue
-            argv = [self.c['prover'], *self.prover_args, *args, 'native-artifact', self.c['guest']] \
+            argv = [self.program['prover'], *self.program['prover_args'], *args, 'native-artifact', self.program['guest']] \
                 + ([] if name == 'execute' else [str(proof)])
             if name == 'prove':
                 proof.unlink(missing_ok=True)
             start = self.clock()
-            order = self.c['remote_prover']['order'] if name == 'prove' and self.c.get('remote_prover') else ['local']
+            order = self.program['remote_prover']['order'] if name == 'prove' and self.program.get('remote_prover') else ['local']
             for where in order:
                 if name == 'prove':
                     proof.unlink(missing_ok=True)
@@ -1112,7 +1241,7 @@ class Settler:
             log('prover-stages-done', directory=str(directory), steps=steps)
             return None
         atomic_write(directory / 'proved.json', json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
-        log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
+        log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps), program=self.program['name'])
         return proof
 
     def local_proof_fits(self, directory):
@@ -1131,7 +1260,7 @@ class Settler:
 
     def prove_remote(self, directory, proof):
         """Groth16 on the remote prover; the caller still verifies it locally."""
-        r = self.c['remote_prover']
+        r = self.program['remote_prover']
         request = (directory / 'native-request.txt').read_bytes()
         artifact = (directory / 'block.artifact').read_bytes()
         frame = (REMOTE_MAGIC + struct.pack('>I', len(request)) + request
@@ -1314,7 +1443,7 @@ class Settler:
 
     def transaction(self, directory, proof_path, accepted=None):
         values, proof = parse_proof_artifact(proof_path.read_bytes())
-        config = Path(self.c['l2_config']).read_bytes()
+        config = Path(self.program['l2_config']).read_bytes()
         request = (directory / 'native-request.txt').read_text().splitlines()
         checks = [values[T:T + 32].hex() == request[0], values[T + 32:T + 64].hex() == request[1],
                   values[T + 400:T + 432].hex() == request[2], int.from_bytes(values[T + 432:T + 440], 'big') == int(request[3]),
@@ -1385,6 +1514,10 @@ class Settler:
         if current is None or current['source'] != view['source'] or current.get('accepted') != view.get('accepted'):
             log('request-moved-before-submit', number=number)
             return False
+        if current.get('program') != view.get('program'):
+            # The proof is of the old program: L1 refuses it from here on. The next cycle rebuilds this block.
+            log('program-moved-before-submit', number=number, program=current.get('program'))
+            return False
         path = directory / 'submitted.json'
         record = json.loads(path.read_text()) if path.exists() else {}
         if record.get('tx_sha256') not in (None, hashlib.sha256(tx).hexdigest()):
@@ -1405,6 +1538,9 @@ class Settler:
                 return self.record_accepted(number, directory, current['accepted'])
             if current['source'] != view['source']:
                 log('request-moved-after-submit', number=number)
+                return False
+            if current.get('program') != view.get('program'):
+                log('program-moved-after-submit', number=number, program=current.get('program'))
                 return False
             if sent == 'terminal':
                 # The bytes are invalid against the request they were built for: never loop on them.
@@ -1435,7 +1571,11 @@ class Settler:
         try:
             if self.c.get('skip_idle_blocks') and self.hold_block(view):
                 return False
-            number, directory = self.prepare_block(view)
+            try:
+                number, directory = self.prepare_block(view)
+            except WaitForProgram as wait:
+                log('waiting-for-program', reason=str(wait))
+                return False
             proof = self.prove(directory, view=view)
             # A proof takes many minutes: never pay DA for a block another settlement made stale meanwhile.
             if proof is None:
@@ -1717,7 +1857,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
                     transaction={'tag': hex(tx[0]), 'bytes': len(tx), 'sha256': hashlib.sha256(tx).hexdigest(),
                                  'proof_policy': tx[1:33].hex(), 'user_transactions': users,
                                  'file': str(base / 'settlement-tx.hex')}, **fee)
-    except (Halt, ProducerError, ForeignSettlement) as error:
+    except (Halt, ProducerError, ForeignSettlement, WaitForProgram) as error:
         return done(False, reason=str(error))
 
 

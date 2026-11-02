@@ -9,7 +9,7 @@
 //! its domain and genesis timestamp come from the pinned genesis ceremony and
 //! must be given explicitly, and its genesis timestamp must be wall-clock
 //! seconds so L2 time is wall-clock from block 0.
-use crate::{rpc::WALL_CLOCK_FLOOR_SECS, BlochChainSpec};
+use crate::{rpc::WALL_CLOCK_FLOOR_SECS, BlochChainSpec, RuleSchedule};
 use alloy_primitives::B256;
 use bloch_l2_evm::{BlockExecutionError, ChainSpec};
 
@@ -19,8 +19,10 @@ pub const DEVNET_DOMAIN: B256 = B256::repeat_byte(0xd3);
 /// Execution rules, domain and genesis of one L2 network.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct L2Network {
-    /// Kernel execution rules (chain id included).
+    /// Kernel execution rules of the chain's first blocks (chain id included).
     pub rules: ChainSpec,
+    /// The rule set later blocks switch to, on a network that has one.
+    pub next_rules: Option<ChainSpec>,
     /// V2 header domain.
     pub domain: B256,
     /// Genesis block timestamp (unix seconds on mainnet).
@@ -34,6 +36,7 @@ impl L2Network {
     pub fn devnet_v3() -> Self {
         Self {
             rules: ChainSpec::testnet_v3(),
+            next_rules: None,
             domain: DEVNET_DOMAIN,
             genesis_timestamp: 0,
             mainnet: false,
@@ -48,7 +51,8 @@ impl L2Network {
         }
     }
 
-    /// The mainnet profile: [`ChainSpec::mainnet`] (chain id 700770) with the
+    /// The mainnet profile: [`ChainSpec::mainnet_v1`] switching to
+    /// [`ChainSpec::mainnet`] (chain id 700770, see [`RuleSchedule`]) with the
     /// ceremony's domain and a wall-clock genesis timestamp.
     pub fn mainnet(domain: B256, genesis_timestamp: u64) -> Result<Self, String> {
         if domain.is_zero() || domain == DEVNET_DOMAIN {
@@ -60,7 +64,8 @@ impl L2Network {
             ));
         }
         Ok(Self {
-            rules: ChainSpec::mainnet(),
+            rules: ChainSpec::mainnet_v1(),
+            next_rules: Some(ChainSpec::mainnet()),
             domain,
             genesis_timestamp,
             mainnet: true,
@@ -101,7 +106,12 @@ impl L2Network {
 
     /// The provider configuration bound to this network's genesis.
     pub fn chain_spec(&self) -> Result<BlochChainSpec, BlockExecutionError> {
-        BlochChainSpec::new(self.rules.clone(), self.domain, self.genesis_timestamp)
+        let rules = match &self.next_rules {
+            Some(next) => RuleSchedule::new(self.rules.clone(), next.clone())
+                .map_err(|_| BlockExecutionError::InvalidChainSpec(bloch_l2_evm::ChainSpecError::PartialNextRules))?,
+            None => RuleSchedule::single(self.rules.clone()),
+        };
+        BlochChainSpec::scheduled(rules, self.domain, self.genesis_timestamp)
     }
 }
 
@@ -175,7 +185,8 @@ mod tests {
     fn mainnet_needs_the_ceremony_domain_and_a_wall_clock_genesis() {
         let mainnet = L2Network::parse("mainnet", Some(DOMAIN), Some("1800000000")).unwrap();
         assert!(mainnet.mainnet);
-        assert_eq!(mainnet.rules, ChainSpec::mainnet());
+        assert_eq!(mainnet.rules, ChainSpec::mainnet_v1());
+        assert_eq!(mainnet.next_rules, Some(ChainSpec::mainnet()));
         assert_eq!(mainnet.rules.chain_id, MAINNET_CHAIN_ID);
         let spec = mainnet.chain_spec().unwrap();
         assert_eq!(spec.chain().id(), 700_770);

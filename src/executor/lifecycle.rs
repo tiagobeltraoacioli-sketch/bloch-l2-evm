@@ -39,6 +39,8 @@ pub struct ActiveBlock {
     context: BlockContext,
     run: BlockRun,
     header_policy: HeaderPolicy,
+    /// Timestamp of the V2 parent head (zero under the V1 header policy).
+    parent_timestamp: u64,
 }
 
 /// A prepared candidate borrowing its originating block's accounting.
@@ -122,11 +124,12 @@ fn prepare_start<DB: Database>(
     header_policy: HeaderPolicy,
 ) -> Result<PreparedBlockStart, BlockExecutionError> {
     validate_block_input(spec, input)?;
-    let (changes, (parent_hash, block_hashes)) = stage_protocol(db, |overlay| {
-        let parent_hash = match header_policy {
-            HeaderPolicy::V1 => apply_header_rules(spec, overlay, previous_root, &input.context)?,
+    let (changes, (parent_hash, parent_timestamp, block_hashes)) = stage_protocol(db, |overlay| {
+        let (parent_hash, parent_timestamp) = match header_policy {
+            HeaderPolicy::V1 => (apply_header_rules(spec, overlay, previous_root, &input.context)?, 0),
             HeaderPolicy::Node { domain, previous_root } => {
-                crate::node_execution::prepare_parent(spec, domain, overlay, previous_root, &input.context)?
+                let timestamp = crate::node_execution::head::read_head_v2(overlay, spec.block_info)?.base.timestamp;
+                (crate::node_execution::prepare_parent(spec, domain, overlay, previous_root, &input.context)?, timestamp)
             }
         };
         let start = input.context.number.saturating_sub(BLOCK_HASH_HISTORY);
@@ -135,13 +138,15 @@ fn prepare_start<DB: Database>(
             .collect();
         ensure_system_account(overlay, BEACON_ROOTS_ADDRESS, Some(&beacon_roots_bytecode())).map_err(db_error)?;
         install_outbox(overlay, spec)?;
-        Ok((parent_hash, block_hashes))
+        install_fee_vault_sweep(overlay, spec)?;
+        Ok((parent_hash, parent_timestamp, block_hashes))
     })?;
     Ok(PreparedBlockStart {
         changes,
         next: PendingSystemCall {
             active: ActiveBlock {
                 header_policy,
+                parent_timestamp,
                 spec: spec.clone(),
                 context: input.context.clone(),
                 run: BlockRun {
@@ -318,6 +323,7 @@ impl ActiveBlock {
                     receipts,
                     transactions: self.run.tx_outcomes,
                     withdrawals: self.run.withdrawals,
+                    parent_timestamp: self.parent_timestamp,
                 },
             },
         })

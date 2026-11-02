@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Immutable provider configuration for the explicit Bloch V2 genesis.
-use crate::BlochNodeHeader;
+use crate::{BlochNodeHeader, RuleSchedule};
 use alloy_eips::{eip1559::BaseFeeParams, eip7840::BlobParams};
 use alloy_genesis::{ChainConfig, Genesis, GenesisAccount};
 use alloy_primitives::{B256, U256};
@@ -24,6 +24,7 @@ use std::fmt::Display;
 #[derive(Clone, Debug)]
 pub struct BlochChainSpec {
     execution: ChainSpec,
+    rules: RuleSchedule,
     domain: B256,
     genesis: Genesis,
     header: BlochNodeHeader,
@@ -33,6 +34,12 @@ pub struct BlochChainSpec {
 impl BlochChainSpec {
     /// Construct canonical genesis data; arbitrary prefunded allocations are not accepted.
     pub fn new(execution: ChainSpec, domain: B256, timestamp: u64) -> Result<Self, BlockExecutionError> {
+        Self::scheduled(RuleSchedule::single(execution), domain, timestamp)
+    }
+
+    /// The same for a chain whose rules may change at a block ([`RuleSchedule`]).
+    pub fn scheduled(rules: RuleSchedule, domain: B256, timestamp: u64) -> Result<Self, BlockExecutionError> {
+        let execution = rules.base().clone();
         let state = genesis_v2(&execution, timestamp)?;
         let header = BlochNodeHeader(node_head(&execution, domain, &state)?);
         let alloc = state
@@ -94,6 +101,7 @@ impl BlochChainSpec {
         };
         Ok(Self {
             execution,
+            rules,
             domain,
             genesis,
             header,
@@ -101,9 +109,18 @@ impl BlochChainSpec {
         })
     }
 
-    /// Kernel rules used to construct this configuration.
+    /// The base kernel rules. Everything a next rule set may not change reads
+    /// these; block execution reads [`Self::execution_at`].
     pub fn execution(&self) -> &ChainSpec {
         &self.execution
+    }
+    /// The kernel rules block `number` runs.
+    pub fn execution_at(&self, number: u64) -> &ChainSpec {
+        self.rules.at(number)
+    }
+    /// Which rules each block runs.
+    pub fn rules(&self) -> &RuleSchedule {
+        &self.rules
     }
     /// Caller-authenticated V2 domain identity.
     pub fn domain(&self) -> B256 {

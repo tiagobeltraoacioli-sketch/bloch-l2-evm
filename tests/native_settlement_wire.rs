@@ -3,9 +3,6 @@ use bloch_l2_evm::{
     l1::{FinalizedCheckpoint, TransactionInclusionEvidenceV1},
     native_settlement::SettlementExpectationV1,
     native_settlement::{SettlementTransactionV1, SettlementWireFormat, NATIVE_SETTLEMENT_BYTES},
-    settlement_admission::{
-        authenticate_settlement_inclusion, SettlementAdmissionErrorV1, SettlementAdmissionExpectationV1,
-    },
 };
 use sha3::{Digest, Sha3_256};
 const TX: &[u8] = include_bytes!("fixtures/native-settlement/transaction.bin");
@@ -46,35 +43,6 @@ fn native_envelope_is_exact_and_legacy_codec_remains_distinct() {
         .encode_wire(SettlementWireFormat::NativeV1);
     assert!(SettlementTransactionV1::decode_wire(&forged).is_err());
 }
-#[test]
-fn native_admission_binds_the_actual_authenticated_parent() {
-    let (tx, _) = SettlementTransactionV1::decode_wire(TX).unwrap();
-    for changed in [false, true] {
-        let mut header = HEADER.to_vec();
-        if changed {
-            header[4] ^= 1;
-        }
-        let ev = evidence(&header, vec![Bytes::copy_from_slice(TX)]);
-        let included = ev.authenticate_exact(TX).unwrap();
-        let expected = SettlementAdmissionExpectationV1 {
-            settlement: SettlementExpectationV1 {
-                statement: *tx.statement(),
-                source_predecessor: B256::ZERO,
-            },
-            block: included.block(),
-            slot: included.slot(),
-            checkpoint: included.checkpoint(),
-            transaction_index: 0,
-        };
-        let result = authenticate_settlement_inclusion(included, &expected);
-        if changed {
-            assert!(matches!(result, Err(SettlementAdmissionErrorV1::SourceAnchor)));
-        } else {
-            assert_eq!(result.unwrap().transaction(), TX);
-        }
-    }
-}
-
 #[test]
 fn native_source_digest_is_rederived_before_proof_verification() {
     use bloch_l2_evm::native_settlement::{

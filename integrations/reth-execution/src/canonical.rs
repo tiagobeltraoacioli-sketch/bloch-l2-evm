@@ -15,12 +15,51 @@ use reth_node_types::NodeTypesWithDBAdapter;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{
     providers::{BlockchainProvider, SaveBlocksMode},
-    BlockNumReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+    BlockExecutionWriter, BlockNumReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider,
+    ProviderFactory,
 };
 use std::sync::Arc;
 
 pub type BlochProviderFactory = ProviderFactory<NodeTypesWithDBAdapter<BlochNodeTypes, Arc<DatabaseEnv>>>;
 pub type BlochBlockchainProvider = BlockchainProvider<NodeTypesWithDBAdapter<BlochNodeTypes, Arc<DatabaseEnv>>>;
+
+/// Remove the head block, an unsettled one the caller names by hash, from every
+/// backend, and return its new head. Nothing else may write this database.
+///
+/// The one case that needs it: L1 replaced the program while the head was still
+/// unsettled, so that block can no longer be proved under the rules it ran.
+pub fn rewind_canonical_head(
+    factory: &BlochProviderFactory,
+    expected: B256,
+) -> Result<SealedHeader<BlochNodeHeader>, BlockExecutionError> {
+    let number = factory.best_block_number().map_err(BlockExecutionError::other)?;
+    if number == 0 {
+        return Err(BlockExecutionError::msg("the L2 genesis cannot be rewound"));
+    }
+    let head = factory
+        .sealed_header(number)
+        .map_err(BlockExecutionError::other)?
+        .ok_or_else(|| BlockExecutionError::msg("canonical head is missing"))?;
+    if head.hash() != expected {
+        return Err(BlockExecutionError::msg("the canonical head is not the block to rewind"));
+    }
+    let writer = factory.database_provider_rw().map_err(BlockExecutionError::other)?;
+    writer.remove_block_and_execution_above(number - 1).map_err(BlockExecutionError::other)?;
+    writer.commit().map_err(BlockExecutionError::other)?;
+    let parent = factory
+        .sealed_header(number - 1)
+        .map_err(BlockExecutionError::other)?
+        .ok_or_else(|| BlockExecutionError::msg("parent of the rewound head is missing"))?;
+    let root = factory
+        .latest()
+        .map_err(BlockExecutionError::other)?
+        .state_root(Default::default())
+        .map_err(BlockExecutionError::other)?;
+    if factory.best_block_number().map_err(BlockExecutionError::other)? != number - 1 || root != parent.0.state_root {
+        return Err(BlockExecutionError::msg("the rewound database does not match its parent"));
+    }
+    Ok(parent)
+}
 
 /// Own the sole canonical writer for an initialized database.
 ///
@@ -163,11 +202,11 @@ impl CanonicalCoordinator {
         limits: SelectionLimits,
     ) -> Result<BlockSelection, BlockExecutionError> {
         let spec = self.factory.chain_spec();
-        let config = BlochEvmConfig::new(spec.execution(), spec.domain());
+        let config = BlochEvmConfig::for_chain(&spec);
         let context = config.next_context(self.head.header(), attributes)?;
         let state = self.factory.latest().map_err(BlockExecutionError::other)?;
         select_node_transactions(
-            spec.execution(),
+            spec.execution_at(context.number),
             spec.domain(),
             reth_revm::database::StateProviderDatabase::new(state.as_ref()),
             self.head.0.state_root,
@@ -236,7 +275,7 @@ impl CanonicalCoordinator {
             return Err(BlockExecutionError::msg("stale canonical parent"));
         }
         let spec = self.factory.chain_spec();
-        let config = BlochEvmConfig::new(spec.execution(), spec.domain());
+        let config = BlochEvmConfig::for_chain(&spec);
         let executed = {
             let state = self.factory.latest().map_err(BlockExecutionError::other)?;
             execute_next_block(&config, state.as_ref(), &self.head, attributes, transactions)?

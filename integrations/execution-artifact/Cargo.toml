@@ -9,7 +9,7 @@ publish = false
 [workspace]
 
 [dependencies]
-bloch-l2-evm = { path = "../..", default-features = false, features = ["std", "serde"] }
+bloch-l2-evm = { path = "../..", default-features = false, features = ["std", "serde", "sparse-witness"] }
 alloy-primitives = { version = "=1.6.1", default-features = false, features = ["serde"] }
 alloy-rlp = "=0.3.16"
 serde = { version = "1.0", features = ["derive"] }

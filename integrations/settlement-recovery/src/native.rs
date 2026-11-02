@@ -614,6 +614,12 @@ impl IncrementalNativeVerifierV1 {
         Ok(())
     }
 
+    /// The L2 policy in the replayed state: the program the next settlement must
+    /// prove, which moves at the native gate. `None` before the L2 is installed.
+    pub fn l2_policy(&self) -> Option<&Policy> {
+        self.state.l2_settlement().map(|registry| registry.policy())
+    }
+
     /// The verified finality capability at the current branch tip.
     pub fn snapshot(&self) -> Result<VerifiedNativeFinalityV1, NativeFinalityErrorV1> {
         use NativeFinalityErrorV1 as E;

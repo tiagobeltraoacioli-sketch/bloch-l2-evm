@@ -115,6 +115,52 @@ pub const MAINNET_GENESIS_TIMESTAMP: u64 = 1_786_656_679;
 /// third field of the mainnet timestamp rule `1:GENESIS:SLOT_MS`.
 pub const GENESIS4_SLOT_MS: u64 = 30_000;
 
+/// The constant prevrandao of every Bloch L2 block. L1 publishes nothing a
+/// rebuilder could derive a varying value from.
+pub const L2_BLOCK_PREVRANDAO: B256 = B256::repeat_byte(0x07);
+
+/// CANDIDATE PLACEHOLDER, `TBD-owner`: the immutable recipient of the fee-vault
+/// sweep, the Bloch Inc Safe's L2 address once the owner fixes it. This value
+/// enters the configuration commitment, so the configuration, ELF and verifying
+/// keys built with it are examples and change when it is set.
+pub const MAINNET_FEE_SWEEP_RECIPIENT: Address = Address::new(hex!("00000000000000000000000000000000000fee01"));
+
+/// How a settled block's timestamp and prevrandao follow from public L1 data.
+///
+/// The L2 header commits both values, and L1 publishes neither, so a block that
+/// departs from this rule cannot be rebuilt from L1. A rule set that carries it
+/// has the settlement statement refuse such a block. The rule depends only on
+/// the block's parent and its L1-checked anchor slot, so it needs no activation
+/// height and tolerates any earlier parent timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockDerivation {
+    /// Unix seconds of native slot 0.
+    pub l1_genesis_time: u64,
+    /// Native slot duration in milliseconds.
+    pub l1_slot_millis: u64,
+    /// The constant prevrandao of every block.
+    pub prevrandao: B256,
+}
+
+impl BlockDerivation {
+    /// `max(parent + 1, start of native slot l1_slot)`; `None` on overflow.
+    pub fn timestamp(&self, parent_timestamp: u64, l1_slot: u64) -> Option<u64> {
+        let slot_time = self.l1_genesis_time.checked_add(l1_slot.checked_mul(self.l1_slot_millis)? / 1000)?;
+        Some(parent_timestamp.checked_add(1)?.max(slot_time))
+    }
+}
+
+/// `CALL(gas, recipient, selfbalance, 0, 0, 0, 0)`, reverting if the call fails.
+/// No owner, no storage and no selector: any call sends the whole balance to the
+/// recipient compiled into the program.
+pub fn fee_vault_sweep_code(recipient: Address) -> [u8; 37] {
+    let mut code = [0u8; 37];
+    code[..6].copy_from_slice(&[0x5f, 0x5f, 0x5f, 0x5f, 0x47, 0x73]);
+    code[6..26].copy_from_slice(recipient.as_slice());
+    code[26..].copy_from_slice(&[0x5a, 0xf1, 0x15, 0x60, 0x21, 0x57, 0x00, 0x5b, 0x5f, 0x5f, 0xfd]);
+    code
+}
+
 /// Genesis / consensus-parameter knobs for the Bloch EVM L2, mirroring
 /// `docs/specs/BLOCH-L2-EVM-DESIGN.md` §1's ChainSpec.
 ///
@@ -170,6 +216,12 @@ pub struct ChainSpec {
     /// Settlement V3 requires it ([`ChainSpec::testnet_v3`]); the V2 testnet
     /// rules ([`ChainSpec::testnet`], devnet2/devnet3 history) have none.
     pub withdrawal_outbox: Option<Address>,
+    /// See [`BlockDerivation`]. `None` on every earlier rule set.
+    pub block_derivation: Option<BlockDerivation>,
+    /// Immutable recipient of both fee vaults: each block executed under this
+    /// rule set installs [`fee_vault_sweep_code`] at both vault addresses if it
+    /// is not there yet, keeping their balances. `None` on every earlier rule set.
+    pub fee_vault_sweep: Option<Address>,
 }
 
 /// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
@@ -199,6 +251,9 @@ pub enum ChainSpecError {
     /// Two system addresses (vaults, ledger, block info, EIP-4788 predeploy,
     /// withdrawal outbox) coincide.
     SystemAddressCollision(Address),
+    /// Block derivation and the fee-vault sweep ship together, on a chain with
+    /// the withdrawal outbox.
+    PartialNextRules,
 }
 
 impl core::fmt::Display for ChainSpecError {
@@ -214,6 +269,9 @@ impl core::fmt::Display for ChainSpecError {
             ChainSpecError::ZeroDepositGas => write!(f, "deposit_gas must not be zero"),
             ChainSpecError::DepositGasAboveGasLimit => write!(f, "deposit_gas must not exceed gas_limit"),
             ChainSpecError::SystemAddressCollision(a) => write!(f, "system address {a} is used twice"),
+            ChainSpecError::PartialNextRules => {
+                write!(f, "block derivation and the fee-vault sweep ship together, with the outbox")
+            }
         }
     }
 }
@@ -239,6 +297,8 @@ impl ChainSpec {
             max_l1_sats: MAX_L1_SATS,
             deposit_gas: DEPOSIT_GAS,
             withdrawal_outbox: None,
+            block_derivation: None,
+            fee_vault_sweep: None,
         }
     }
 
@@ -261,11 +321,39 @@ impl ChainSpec {
     /// different program identity from every devnet: the SP1 settlement guest
     /// built for it has its own vkey (see `docs/MAINNET-RPC-READINESS.md`).
     /// The devnet constructors are unchanged.
-    pub fn mainnet() -> Self {
+    ///
+    /// These are the rules of the program the epoch-5850 activation pinned
+    /// (configuration `8ec1c804…`): every settlement accepted under that policy
+    /// replays with them.
+    pub fn mainnet_v1() -> Self {
         Self {
             chain_id: MAINNET_CHAIN_ID,
             ..Self::testnet_v3()
         }
+    }
+
+    /// The rules of the next mainnet program (candidate, not scheduled):
+    /// [`Self::mainnet_v1`] plus the settlement-bound [`BlockDerivation`] and the
+    /// fee-vault sweep. The genesis is unchanged, because neither rule touches it.
+    pub fn mainnet() -> Self {
+        Self {
+            block_derivation: Some(BlockDerivation {
+                l1_genesis_time: MAINNET_GENESIS_TIMESTAMP,
+                l1_slot_millis: GENESIS4_SLOT_MS,
+                prevrandao: L2_BLOCK_PREVRANDAO,
+            }),
+            fee_vault_sweep: Some(MAINNET_FEE_SWEEP_RECIPIENT),
+            ..Self::mainnet_v1()
+        }
+    }
+
+    /// The mainnet rule set of a settled statement, from its configuration
+    /// commitment (the field L1 compares with the policy of that moment).
+    /// `None` for a commitment that is neither of the two.
+    pub fn mainnet_rules_for(configuration: B256) -> Option<Self> {
+        [Self::mainnet_v1(), Self::mainnet()].into_iter().find(|rules| {
+            crate::proof_statement::configuration_commitment(rules).is_ok_and(|c| c == configuration)
+        })
     }
 
     /// Check every knob for consistency. The executor calls this before any
@@ -306,6 +394,7 @@ impl ChainSpec {
             Some(self.block_info),
             Some(BEACON_ROOTS_ADDRESS),
             self.withdrawal_outbox,
+            self.fee_vault_sweep,
         ];
         for (i, a) in system.iter().enumerate() {
             let Some(a) = a else { continue };
@@ -503,8 +592,19 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_is_the_v3_rules_under_its_own_chain_id() {
-        let mainnet = ChainSpec::mainnet();
+    fn next_mainnet_rules_add_only_block_derivation_and_the_sweep() {
+        let next = ChainSpec::mainnet();
+        next.validate().expect("the next mainnet spec is valid");
+        assert!(next.block_derivation.is_some() && next.fee_vault_sweep.is_some());
+        assert_eq!(
+            ChainSpec { block_derivation: None, fee_vault_sweep: None, ..next.clone() },
+            ChainSpec::mainnet_v1()
+        );
+    }
+
+    #[test]
+    fn mainnet_v1_is_the_v3_rules_under_its_own_chain_id() {
+        let mainnet = ChainSpec::mainnet_v1();
         mainnet.validate().expect("the mainnet spec is valid");
         assert_eq!(mainnet.chain_id, 700_770);
         assert_eq!(MAINNET_CHAIN_ID, 700_770);

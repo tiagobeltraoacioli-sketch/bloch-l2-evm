@@ -58,6 +58,13 @@ impl BlochEvmConfig {
             rpc_block_hashes: false,
         }
     }
+    /// The configuration of a provider's chain: the base rules for everything a
+    /// next rule set may not change, and per block for execution.
+    pub fn for_chain(chain: &crate::BlochChainSpec) -> Self {
+        let mut config = Self::new(chain.execution(), chain.domain());
+        config.factory = config.factory.with_rules(chain.rules().clone());
+        config
+    }
     /// Only RPC construction enables provider ancestry and explicit block overrides.
     /// Canonical block executors still install their shared-kernel snapshot.
     pub(crate) fn for_rpc(mut self) -> Self {

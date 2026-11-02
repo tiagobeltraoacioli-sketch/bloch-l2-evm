@@ -3,10 +3,12 @@
 //! accepted only if it hashes to the parent's committed state root, so the cost depends on the state, not the height.
 //! Local selection is trusted; this is not native deposit/finality authentication.
 use crate::BlochProviderFactory;
-use bloch_execution_artifact::{ExecutionArtifact, Result};
+use bloch_execution_artifact::{ExecutionArtifact, Result, SparseExecutionArtifact};
 use bloch_l2_evm::{
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
-    BlockContext, L2State,
+    node_primitives::{NodeBodyV2, NodeHeaderV2},
+    sparse_witness::{generate_sparse_node_witness, BlockHashes},
+    BlockContext, ChainSpec, L2State,
 };
 use reth_chainspec::EthChainSpec;
 use alloy_primitives::{Address, B256, U256};
@@ -123,11 +125,66 @@ pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> R
 
 /// [`export_canonical_witness`], reporting the size of the pre-state.
 pub fn export_with_report(source: &BlochProviderFactory, number: u64) -> Result<ExportReport> {
+    let (artifact, state_entries) = export_from_state(source, number, complete_artifact)?;
+    Ok(ExportReport { artifact, state_entries })
+}
+
+/// CANDIDATE: [`export_canonical_witness`] for the sparse-witness guest (lazy
+/// `BLOCKHASH`). The same pre-state and checks; only the witness differs. The
+/// generator also runs the complete-witness path and refuses any difference.
+pub fn export_canonical_sparse_witness(source: &BlochProviderFactory, number: u64) -> Result<SparseExecutionArtifact> {
+    Ok(export_sparse_with_report(source, number)?.0)
+}
+
+/// [`export_canonical_sparse_witness`], with the number of pre-state entries (accounts plus slots) loaded.
+pub fn export_sparse_with_report(source: &BlochProviderFactory, number: u64) -> Result<(SparseExecutionArtifact, u64)> {
+    export_from_state(source, number, sparse_artifact)
+}
+
+fn complete_artifact(
+    state: &L2State,
+    rules: &ChainSpec,
+    domain: B256,
+    context: &BlockContext,
+    parent: &NodeHeaderV2,
+    header: &NodeHeaderV2,
+    body: &NodeBodyV2,
+) -> Result<ExecutionArtifact> {
+    let (witness, recorded) = generate_node_batch_witness(state, rules, domain, context, body)?;
+    if recorded.header != *header {
+        return Err(invalid("exported witness execution differs from stored block"));
+    }
+    ExecutionArtifact::new(rules, domain, parent, header, body, witness)
+}
+
+fn sparse_artifact(
+    state: &L2State,
+    rules: &ChainSpec,
+    domain: B256,
+    context: &BlockContext,
+    parent: &NodeHeaderV2,
+    header: &NodeHeaderV2,
+    body: &NodeBodyV2,
+) -> Result<SparseExecutionArtifact> {
+    let (witness, recorded) = generate_sparse_node_witness(state, rules, domain, context, body, BlockHashes::Lazy)?;
+    if recorded.header != *header {
+        return Err(invalid("exported witness execution differs from stored block"));
+    }
+    SparseExecutionArtifact::new(rules, domain, parent, header, body, witness)
+}
+
+/// The block's rules are those of its height (`execution_at`), so a block past a rule switch is exported
+/// under the next rules and one below it under the base rules.
+#[allow(clippy::type_complexity)]
+fn export_from_state<T>(
+    source: &BlochProviderFactory,
+    number: u64,
+    make: fn(&L2State, &ChainSpec, B256, &BlockContext, &NodeHeaderV2, &NodeHeaderV2, &NodeBodyV2) -> Result<T>,
+) -> Result<(T, u64)> {
     if number == 0 {
         return Err(invalid("proof export height outside the non-genesis chain"));
     }
     let spec = source.chain_spec();
-    let kernel = spec.execution();
     let domain = spec.domain();
     let tip_number = source.best_block_number()?;
     if number > tip_number {
@@ -152,7 +209,8 @@ pub fn export_with_report(source: &BlochProviderFactory, number: u64) -> Result<
         return Err(invalid("proof export state does not hash to the parent's state root"));
     }
     let header = &block.header.0;
-    header.validate_parent(kernel, &parent.0)?;
+    let rules = spec.execution_at(number);
+    header.validate_parent(rules, &parent.0)?;
     let body = block.body.as_core();
     let context = BlockContext {
         number: header.number,
@@ -161,27 +219,38 @@ pub fn export_with_report(source: &BlochProviderFactory, number: u64) -> Result<
         prevrandao: header.prevrandao,
         anchor_root: header.anchor_root,
     };
-    let (witness, recorded) = generate_node_batch_witness(&state, kernel, domain, &context, body)?;
-    if recorded.header != *header {
-        return Err(invalid("exported witness execution differs from stored block"));
-    }
-    let artifact = ExecutionArtifact::new(kernel, domain, &parent.0, header, body, witness)?;
+    let artifact = make(&state, rules, domain, &context, &parent.0, header, body)?;
     if source.best_block_number()? != tip_number || source.sealed_header(tip_number)?.as_ref() != Some(&tip) {
         return Err(invalid("canonical selection changed during proof export"));
     }
     if source.sealed_header(number)?.as_ref() != Some(&selected) {
         return Err(invalid("selected export header changed before publication"));
     }
-    Ok(ExportReport { artifact, state_entries })
+    Ok((artifact, state_entries))
 }
 
 /// The former export: re-execute the whole prefix from genesis. Kept as the reference that tests and audits
 /// compare [`export_canonical_witness`] with, byte for byte. Bounded, and not used by the settlement path.
 pub fn export_by_replay(source: &BlochProviderFactory, number: u64) -> Result<ExecutionArtifact> {
+    export_by_replay_with(source, number, complete_artifact)
+}
+
+/// [`export_by_replay`] for the sparse-witness guest: the reference for [`export_canonical_sparse_witness`].
+pub fn export_sparse_by_replay(source: &BlochProviderFactory, number: u64) -> Result<SparseExecutionArtifact> {
+    export_by_replay_with(source, number, sparse_artifact)
+}
+
+#[allow(clippy::type_complexity)]
+fn export_by_replay_with<T>(
+    source: &BlochProviderFactory,
+    number: u64,
+    make: fn(&L2State, &ChainSpec, B256, &BlockContext, &NodeHeaderV2, &NodeHeaderV2, &NodeBodyV2) -> Result<T>,
+) -> Result<T> {
     if number == 0 || number > MAX_REPLAY_BLOCKS {
         return Err(invalid("proof export height outside bounded non-genesis prefix"));
     }
     let spec = source.chain_spec();
+    // The genesis and every parent check are the same under each rule set.
     let kernel = spec.execution();
     let domain = spec.domain();
     let tip_number = source.best_block_number()?;
@@ -218,7 +287,8 @@ pub fn export_by_replay(source: &BlochProviderFactory, number: u64) -> Result<Ex
             return Err(invalid("proof export body/header canonical selection mismatch"));
         }
         let header = &block.header.0;
-        header.validate_parent(kernel, &parent)?;
+        let rules = spec.execution_at(height);
+        header.validate_parent(rules, &parent)?;
         let body = block.body.as_core();
         let context = BlockContext {
             number: header.number,
@@ -231,13 +301,9 @@ pub fn export_by_replay(source: &BlochProviderFactory, number: u64) -> Result<Ex
             if selected != expected_selected {
                 return Err(invalid("selected export header changed during reconstruction"));
             }
-            let (witness, recorded) = generate_node_batch_witness(&state, kernel, domain, &context, body)?;
-            if recorded.header != *header {
-                return Err(invalid("exported witness execution differs from stored block"));
-            }
-            exported = Some(ExecutionArtifact::new(kernel, domain, &parent, header, body, witness)?);
+            exported = Some(make(&state, rules, domain, &context, &parent, header, body)?);
         }
-        let outcome = execute_node_block(kernel, domain, &mut state, &context, body)?;
+        let outcome = execute_node_block(rules, domain, &mut state, &context, body)?;
         if outcome.header != *header {
             return Err(invalid("canonical prefix execution differs from stored block"));
         }

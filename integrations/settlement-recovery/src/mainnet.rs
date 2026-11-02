@@ -85,6 +85,16 @@ mod tests {
     use bloch_reth_execution::L2Network;
     use reth_chainspec::EthChainSpec;
 
+    /// The candidate program the native gate would install runs these rules.
+    #[test]
+    fn native_next_program_pins_the_next_configuration() {
+        let next = bloch_pos_committee::l2_settlement::mainnet::PROGRAM_NEXT;
+        let configuration =
+            bloch_l2_evm::proof_statement::configuration_commitment(&bloch_l2_evm::ChainSpec::mainnet()).unwrap();
+        assert_eq!(next.identities[0], configuration.0);
+        assert_eq!(bloch_pos_committee::params::L2_NEXT_PROGRAM_EPOCH, u64::MAX);
+    }
+
     #[test]
     fn pinned_policy_matches_the_mainnet_execution_profile() {
         let policy = mainnet_settlement_policy();
@@ -99,7 +109,7 @@ mod tests {
         assert_eq!(spec.genesis_header().0.chain_id, 700_770);
         assert_eq!(
             policy.configuration,
-            bloch_l2_evm::proof_statement::configuration_commitment(&bloch_l2_evm::ChainSpec::mainnet()).unwrap(),
+            bloch_l2_evm::proof_statement::configuration_commitment(&bloch_l2_evm::ChainSpec::mainnet_v1()).unwrap(),
         );
         assert_eq!(
             MAINNET_NETWORK,

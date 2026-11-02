@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Execution-only cycle benchmark for the settlement V3 guest (no proof).
 //!
-//! usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals> N SETTLEMENT_V3_ELF
+//! usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet] [after-mainnet-v1|after-mainnet]
 //!
 //! Builds a deterministic block (one deposit plus N transfers; one deposit,
 //! a deployment and N contract calls; or one deposit and N outbox
-//! withdrawals) under the settlement V3 rules (`ChainSpec::testnet_v3`), re-executes it on the host to derive
+//! withdrawals) under the selected rules (default `ChainSpec::testnet_v3`; the ELF must be the
+//! guest of those rules), re-executes it on the host to derive
 //! the expected V3 statement, runs the guest in the SP1 executor, checks the
 //! committed statement byte-for-byte and prints one JSON line: SP1 instruction
 //! count (cycles), syscalls, SP1 gas, execution wall time and this process's
 //! peak RSS. Run one configuration per process so peak RSS is per block.
 //! Program identities in the context are synthetic: execution does not depend
-//! on them, and no verifying key is derived (that would dominate RSS).
+//! on them, and no verifying key is derived (that would dominate RSS). A last
+//! argument makes the measured block a block 2, after an empty block 1 under those
+//! rules: `mainnet` after `after-mainnet-v1` is the block that installs the fee-vault
+//! sweep at the switch, after `after-mainnet` a block on the installed code.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -44,16 +48,33 @@ fn peak_rss_bytes() -> u64 {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals> N SETTLEMENT_V3_ELF";
-    if args.len() != 3 {
+    let usage = "usage: bloch-evm-sp1-settlement-v3-bench <transfers|calls|withdrawals|empty> N SETTLEMENT_V3_ELF [testnet-v3|mainnet-v1|mainnet] [after-mainnet-v1|after-mainnet]";
+    if !(3..=5).contains(&args.len()) {
         return Err(usage.into());
     }
     let n: u64 = args[1].parse().map_err(|_| usage)?;
-    let spec = ChainSpec::testnet_v3();
+    let spec = match args.get(3).map_or("testnet-v3", String::as_str) {
+        "testnet-v3" => ChainSpec::testnet_v3(),
+        "mainnet-v1" => ChainSpec::mainnet_v1(),
+        "mainnet" => ChainSpec::mainnet(),
+        _ => return Err(usage.into()),
+    };
+    match args.get(4).map(String::as_str) {
+        None => {}
+        Some("after-mainnet-v1") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet_v1()).map_err(|_| usage)?,
+        Some("after-mainnet") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet()).map_err(|_| usage)?,
+        _ => return Err(usage.into()),
+    }
+    let domain = if spec.chain_id == bloch_l2_evm::chainspec::MAINNET_CHAIN_ID {
+        bloch_l2_evm::chainspec::MAINNET_DOMAIN
+    } else {
+        B256::repeat_byte(0xd3)
+    };
     let fixture = match args[0].as_str() {
         "transfers" => fixture::fixture_transfers(&spec, n)?,
         "calls" => fixture::fixture_calls(&spec, n)?,
         "withdrawals" => fixture::fixture_withdrawals(&spec, n)?,
+        "empty" => fixture::fixture_empty_in(&spec, domain)?,
         _ => return Err(usage.into()),
     };
     let context = SettlementContextV2 {
@@ -67,13 +88,13 @@ async fn main() -> Result<()> {
         l1_height: 1,
         source_commitment: B256::repeat_byte(0x46),
         inbox_root: B256::repeat_byte(0x47),
-        inbox_count: 1,
+        inbox_count: fixture.body.deposits.len() as u64,
         consumed_start: 0,
-        consumed_end: 1,
+        consumed_end: fixture.body.deposits.len() as u64,
     };
     let expected = execute_settlement_statement_v3(
         &spec,
-        B256::repeat_byte(0xd3),
+        domain,
         &fixture.witness,
         &fixture.context,
         &fixture.body,
@@ -97,8 +118,9 @@ async fn main() -> Result<()> {
     }
     expected.check_expected(public.as_slice())?;
     println!(
-        "{{\"kind\":\"{}\",\"n\":{},\"user_txs\":{},\"withdrawal_count\":{},\"block_gas_used\":{},\"body_bytes\":{},\"witness_bytes\":{},\"cycles\":{},\"syscalls\":{},\"sp1_gas\":{},\"execute_seconds\":{:.2},\"peak_rss_bytes\":{}}}",
+        "{{\"kind\":\"{}\",\"after\":\"{}\",\"n\":{},\"user_txs\":{},\"withdrawal_count\":{},\"block_gas_used\":{},\"body_bytes\":{},\"witness_bytes\":{},\"cycles\":{},\"syscalls\":{},\"sp1_gas\":{},\"execute_seconds\":{:.2},\"peak_rss_bytes\":{}}}",
         args[0],
+        args.get(4).map_or("genesis", String::as_str),
         n,
         expected.user_tx_count,
         expected.withdrawal_count,

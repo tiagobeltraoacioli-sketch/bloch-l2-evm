@@ -23,6 +23,7 @@ use alloy_primitives::{hex, Address, B256, U256};
 use bloch_l2_evm::{
     data_availability::{da_commitment, encode_da_payload},
     node_execution::select::SelectionLimits,
+    proof_statement::configuration_commitment,
     withdrawal::{
         empty_withdrawal_root, verify_withdrawal_proof, Withdrawal, WithdrawalCommitment, WithdrawalTree,
         OUTBOX_NONCE_SLOT, OUTBOX_ROOT_SLOT,
@@ -34,13 +35,14 @@ use bloch_settlement_recovery::reconstruct::{
 };
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
-    prepare_genesis, proof_export::export_with_report, BlochChainSpec, BlochNextBlockEnvCtx,
+    canonical::rewind_canonical_head, prepare_genesis,
+    proof_export::{export_sparse_with_report, export_with_report}, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
 };
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
-    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
+    BlockNumReader, BlockReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
     ReceiptProvider, StateProvider, StateProviderFactory,
 };
 use reth_tasks::{Runtime, RuntimeBuilder, RuntimeConfig};
@@ -60,7 +62,9 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
   bloch-l2-produce-dev extend --target DIR --parent HEX --anchor HEX [--deposits FILE]
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
                               [--timestamp-rule FROM:GENESIS:SLOT_MS --anchor-slot N]
-  bloch-l2-produce-dev export --target DIR --number N --out FILE
+                              [--rule-set base|next]
+  bloch-l2-produce-dev rewind --target DIR --number N --hash HEX [--respool DIR]
+  bloch-l2-produce-dev export --target DIR --number N --out FILE [--witness complete|sparse]
   bloch-l2-produce-dev head   --target DIR
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
   bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
@@ -109,9 +113,16 @@ txpool spool entry) from that key: a plain transfer, or with --withdraw-to an
 outbox initiateWithdrawal(l1Recipient) carrying --sats (the L1 recipient is
 the native owner script hash, SHA3-256 of the hybrid public key). The key
 FILE is a development hot key: never use it for value.
---rules mainnet selects ChainSpec::mainnet (chain id 700770) with the ceremony's
---domain and wall-clock --genesis-time, and requires extend/reconstruct to use a
---timestamp-rule from L2 block 1 (wall-clock time from genesis). The default
+--rules mainnet selects ChainSpec::mainnet_v1 switching to ChainSpec::mainnet (chain
+id 700770) with the ceremony's --domain and wall-clock --genesis-time, and requires
+extend/reconstruct to use a --timestamp-rule from L2 block 1 (wall-clock time from
+genesis). Which rules a block runs: reconstruct reads each settlement's configuration
+commitment; everything else derives the switch from the database, and extend switches
+with --rule-set next, which the settler gives once L1 reports the next program. A
+block under the next rules takes its timestamp and prevrandao from the compiled
+derivation, and --rule-set base is refused after the switch. rewind removes the
+head block, named by number and hash, when L1 replaced the program before it
+settled; --respool writes its user transactions back to a spool directory. The default
 (v3) keeps the devnet identity: ChainSpec::testnet_v3, domain d3..d3, genesis 0.
 Development only: no settlement or finality is implied.
 ";
@@ -151,6 +162,25 @@ fn select_network(rest: &[String]) -> Result<Vec<String>, String> {
         return Err("network selected twice".into());
     }
     Ok(kept)
+}
+
+/// Timestamp and prevrandao of block `number`: from the derivation its rules
+/// compile, or under rules without one from the configured development rule.
+fn block_attributes(
+    rules: &ChainSpec,
+    rule: Option<&TimestampRule>,
+    number: u64,
+    parent_timestamp: u64,
+    anchor_slot: Option<u64>,
+) -> Result<(u64, B256), String> {
+    if let Some(derivation) = rules.block_derivation {
+        let slot = anchor_slot.ok_or("the next rules need --anchor-slot")?;
+        let timestamp = derivation.timestamp(parent_timestamp, slot).ok_or("timestamp overflow")?;
+        return Ok((timestamp, derivation.prevrandao));
+    }
+    let timestamp = next_timestamp(rule, number, parent_timestamp, anchor_slot)
+        .ok_or("timestamp overflow, or --anchor-slot missing under --timestamp-rule")?;
+    Ok((timestamp, B256::repeat_byte(7)))
 }
 
 /// On mainnet every block after genesis follows the wall-clock rule.
@@ -273,7 +303,15 @@ fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFac
             ));
         }
     }
+    if !create {
+        factory.chain_spec().rules().discover(&factory).map_err(|e| e.to_string())?;
+    }
     Ok(factory)
+}
+
+/// The name a report gives the rules of block `number`.
+fn rule_set_name(factory: &BlochProviderFactory, number: u64) -> &'static str {
+    if factory.chain_spec().rules().is_next(number) { "next" } else { "base" }
 }
 
 fn run(args: &[String]) -> Result<String, String> {
@@ -307,7 +345,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 rest,
                 &[
                     "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
-                    "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei",
+                    "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set",
                 ],
             )?;
             let deposits = match rest.chunks(2).find(|p| p[0] == "--deposits") {
@@ -316,8 +354,9 @@ fn run(args: &[String]) -> Result<String, String> {
             };
             let parent = hash(option(rest, "--parent")?, "--parent")?;
             let anchor = hash(option(rest, "--anchor")?, "--anchor")?;
-            let mut coordinator =
-                CanonicalCoordinator::attach(open(&target, &runtime, false)?).map_err(|e| e.to_string())?;
+            let factory = open(&target, &runtime, false)?;
+            let schedule = factory.chain_spec().rules().clone();
+            let mut coordinator = CanonicalCoordinator::attach(factory).map_err(|e| e.to_string())?;
             let head = coordinator.head().clone();
             if head.hash() != parent {
                 return Err(format!(
@@ -331,11 +370,20 @@ fn run(args: &[String]) -> Result<String, String> {
                 Ok(value) => Some(value.parse::<u64>().map_err(|_| "--anchor-slot must be decimal")?),
                 Err(_) => None,
             };
-            let timestamp = next_timestamp(rule.as_ref(), head.0.number + 1, head.0.timestamp, anchor_slot)
-                .ok_or("timestamp overflow, or --anchor-slot missing under --timestamp-rule")?;
+            let number = head.0.number + 1;
+            match option(rest, "--rule-set") {
+                Ok("next") if !schedule.is_next(number) => schedule.switch_at(number).map_err(|e| e.to_string())?,
+                Ok("next") | Err(_) => {}
+                Ok("base") if schedule.is_next(number) => {
+                    return Err(format!("block {number} is past the switch to the next rules"));
+                }
+                Ok("base") => {}
+                Ok(other) => return Err(format!("--rule-set must be base or next, not {other}")),
+            }
+            let (timestamp, prevrandao) = block_attributes(schedule.at(number), rule.as_ref(), number, head.0.timestamp, anchor_slot)?;
             let attributes = BlochNextBlockEnvCtx {
                 timestamp,
-                prevrandao: B256::repeat_byte(7),
+                prevrandao,
                 anchor_root: anchor,
                 deposits: deposits.clone(),
             };
@@ -353,7 +401,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                           "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
                           "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
-                          "transactions": 0});
+                          "transactions": 0, "rules": if schedule.is_next(number) { "next" } else { "base" }});
                 report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
                 return Ok(out.to_string());
             };
@@ -391,6 +439,7 @@ fn run(args: &[String]) -> Result<String, String> {
             let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                       "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
                       "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
+                      "rules": if schedule.is_next(number) { "next" } else { "base" },
                       "transactions": selection.transactions.len(),
                       "declared_gas": selection.declared_gas, "bytes": selection.bytes,
                       "limits": {"max_gas": limits.max_gas, "max_bytes": limits.max_bytes,
@@ -406,23 +455,65 @@ fn run(args: &[String]) -> Result<String, String> {
             report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
             Ok(out.to_string())
         }
+        "rewind" => {
+            only(rest, &["--target", "--number", "--hash", "--respool"])?;
+            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let expected = hash(option(rest, "--hash")?, "--hash")?;
+            let factory = open(&target, &runtime, false)?;
+            let head = factory.best_block_number().map_err(|e| e.to_string())?;
+            if head != number {
+                return Err(format!("the head is block {head}, not {number}"));
+            }
+            let block = factory.block_by_number(number).map_err(|e| e.to_string())?.ok_or("head block is missing")?;
+            let mut respooled = 0usize;
+            if let Ok(directory) = option(rest, "--respool") {
+                for raw in block.body.as_core().transactions.iter() {
+                    let name = format!("{}.tx", hex::encode(alloy_primitives::keccak256(raw)));
+                    let path = Path::new(directory).join(&name);
+                    if path.exists() {
+                        continue;
+                    }
+                    let temporary = Path::new(directory).join(format!(".{name}.rewind"));
+                    fs::write(&temporary, format!("{}\n", hex::encode(raw))).map_err(|e| format!("--respool: {e}"))?;
+                    fs::rename(&temporary, &path).map_err(|e| format!("--respool: {e}"))?;
+                    respooled += 1;
+                }
+            }
+            let parent = rewind_canonical_head(&factory, expected).map_err(|e| e.to_string())?;
+            factory.chain_spec().rules().discover(&factory).map_err(|e| e.to_string())?;
+            Ok(json!({"number": parent.0.number, "hash": hex::encode(parent.hash()),
+                      "state_root": hex::encode(parent.0.state_root), "rewound": number,
+                      "rewound_hash": hex::encode(expected), "respooled": respooled}).to_string())
+        }
         "export" => {
-            only(rest, &["--target", "--number", "--out"])?;
+            only(rest, &["--target", "--number", "--out", "--witness"])?;
+            let sparse = match option(rest, "--witness") {
+                Err(_) => false,
+                Ok("complete") => false,
+                Ok("sparse") => true,
+                Ok(other) => return Err(format!("--witness must be complete or sparse, not {other}")),
+            };
             let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
             let out = PathBuf::from(option(rest, "--out")?);
             let factory = open(&target, &runtime, false)?;
-            let report = export_with_report(&factory, number).map_err(|e| e.to_string())?;
-            let artifact = report.artifact;
-            let bytes = artifact.encode().map_err(|e| e.to_string())?;
+            // CANDIDATE: `--witness sparse` writes the artifact of the sparse-witness guest.
+            let (bytes, hash, anchor, state_entries) = if sparse {
+                let (artifact, state_entries) = export_sparse_with_report(&factory, number).map_err(|e| e.to_string())?;
+                (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, state_entries)
+            } else {
+                let report = export_with_report(&factory, number).map_err(|e| e.to_string())?;
+                let artifact = report.artifact;
+                (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, report.state_entries)
+            };
             let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
             file.write_all(&bytes).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             File::open(out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))
                 .and_then(|d| d.sync_all())
                 .map_err(|e| e.to_string())?;
-            Ok(json!({"number": number, "hash": hex::encode(artifact.header().hash()),
-                      "anchor": hex::encode(artifact.context().anchor_root), "bytes": bytes.len(),
-                      "state_entries": report.state_entries})
+            Ok(json!({"number": number, "hash": hex::encode(hash),
+                      "anchor": hex::encode(anchor), "bytes": bytes.len(),
+                      "state_entries": state_entries, "sparse": sparse})
             .to_string())
         }
         "hash" => {
@@ -480,6 +571,14 @@ fn run(args: &[String]) -> Result<String, String> {
             writer.commit().map_err(|e| e.to_string())?;
             let settled = derive_settled_blocks(&blocks, chain_id, genesis_header.hash(), genesis_header.0.state_root)
                 .map_err(|e| e.to_string())?;
+            let schedule = factory.chain_spec().rules().clone();
+            let configurations = match schedule.next() {
+                Some(next) => Some((
+                    configuration_commitment(schedule.base()).map_err(|e| e.to_string())?,
+                    configuration_commitment(next).map_err(|e| e.to_string())?,
+                )),
+                None => None,
+            };
             let mut coordinator = CanonicalCoordinator::attach(factory).map_err(|e| e.to_string())?;
             let mut report = Vec::new();
             for block in &settled {
@@ -487,10 +586,20 @@ fn run(args: &[String]) -> Result<String, String> {
                 if head.hash() != block.parent_hash || head.0.state_root != block.previous_state_root {
                     return Err(format!("L2 block {}: rebuilt parent differs from the settled parent", block.number));
                 }
+                // The statement names the rules: L1 compared this field with its policy.
+                if let Some((base, next)) = configurations {
+                    if block.configuration == next {
+                        if !schedule.is_next(block.number) {
+                            schedule.switch_at(block.number).map_err(|e| e.to_string())?;
+                        }
+                    } else if block.configuration != base || schedule.is_next(block.number) {
+                        return Err(format!("L2 block {}: settled under an unexpected configuration {}", block.number, hex::encode(block.configuration)));
+                    }
+                }
+                let (timestamp, prevrandao) = block_attributes(schedule.at(block.number), rule.as_ref(), block.number, head.0.timestamp, Some(block.anchor_slot))?;
                 let attributes = BlochNextBlockEnvCtx {
-                    timestamp: next_timestamp(rule.as_ref(), block.number, head.0.timestamp, Some(block.anchor_slot))
-                        .ok_or("timestamp overflow")?,
-                    prevrandao: B256::repeat_byte(7),
+                    timestamp,
+                    prevrandao,
                     anchor_root: block.anchor,
                     deposits: block.deposits.clone(),
                 };
@@ -524,6 +633,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 }
                 report.push(json!({"number": block.number, "settled_at": block.settled_at,
                                    "hash": hex::encode(tip.hash()), "state_root": hex::encode(tip.0.state_root),
+                                   "rules": if schedule.is_next(block.number) { "next" } else { "base" },
                                    "deposits": block.deposits.len(), "transactions": block.transactions.len(),
                                    "da_commitment": hex::encode(block.da_commitment),
                                    "withdrawal_root": hex::encode(withdrawals.root),
@@ -531,7 +641,7 @@ fn run(args: &[String]) -> Result<String, String> {
             }
             Ok(json!({"genesis": hex::encode(genesis_header.hash()), "native_blocks": blocks.len(),
                       "settled": report.len(), "head": report.last().map(|b| b["hash"].clone()),
-                      "blocks": report})
+                      "next_rules_from": schedule.next_from(), "blocks": report})
             .to_string())
         }
         "head" => {
@@ -542,6 +652,8 @@ fn run(args: &[String]) -> Result<String, String> {
             let withdrawals = outbox_commitment(factory.latest().map_err(|e| e.to_string())?.as_ref())?;
             Ok(json!({"number": number, "hash": hex::encode(header.hash()),
                       "state_root": hex::encode(header.0.state_root),
+                      "rules": rule_set_name(&factory, number),
+                      "next_rules_from": factory.chain_spec().rules().next_from(),
                       "withdrawal_root": hex::encode(withdrawals.root), "withdrawal_count": withdrawals.count})
             .to_string())
         }

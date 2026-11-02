@@ -74,6 +74,8 @@ impl reth_node_types::NodeTypes for BlochNodeTypes {
     type Payload = BlochPayloadTypes;
 }
 pub mod node_factory;
+pub mod rules;
+pub use rules::RuleSchedule;
 pub mod primitives;
 pub mod storage;
 pub mod supervisor;

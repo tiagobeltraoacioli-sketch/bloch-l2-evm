@@ -151,21 +151,17 @@ not populate Reth's `finalized` head.
 
 Historical note: the Unix store, the settlement authority and every
 `SettlementStoreV1` or `open_proof_verified_authority_stores` entry point named in
-this document were retired on 2026-10-30. The kernel and the `settlement_admission`
-adapter remain: the pinned SP1 guests compile that source, so removing it would
-change the mainnet ELF.
+this document were retired on 2026-10-30. The `settlement_admission` adapter was
+removed with the next-program candidate, whose guest ELF changes anyway; that
+removal alone would change the pinned ELF. The kernel remains.
 
 The dormant `native_settlement` V1 kernel closes a narrower transition-shape
 gap: it has fixed canonical framing, pinned policy/program identities, exact
 consensus-selected statement comparison, deterministic proof-verifier input,
-replay-safe predecessor/cursor checks and atomic in-memory publication. The
-`settlement_admission` adapter composes that kernel with exact authenticated body
-inclusion and binds the distinct earlier source anchor to the later containing
-block. The optional Unix store adds single-writer, create-once snapshots, CAS
-marks and an externally retained rollback floor. Neither component supplies a
+replay-safe predecessor/cursor checks and atomic in-memory publication. It does not supply a
 Genesis-4 transaction decoder/state key, checkpoint authority, consensus-owned
 expectation construction, validator execution, distributed durability, reorg
-handling or conformance evidence. Consequently they do not satisfy
+handling or conformance evidence. Consequently it does not satisfy
 `native-settlement-consensus-active`, `l2-settlement-inclusion-verified` or
 `settlement-cursor-durable`, and RPC `finalized` remains `null`.
 

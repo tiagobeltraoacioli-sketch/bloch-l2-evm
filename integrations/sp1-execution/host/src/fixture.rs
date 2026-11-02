@@ -269,8 +269,18 @@ pub(crate) fn execute_fixture_with(
     body: NodeBodyV2,
     anchor_root: B256,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
-    execute_fixture_in(spec, B256::repeat_byte(0xd3), body, anchor_root)
+    // A mainnet rule set runs under the domain its guest compiles.
+    let domain = if spec.chain_id == bloch_l2_evm::chainspec::MAINNET_CHAIN_ID {
+        bloch_l2_evm::chainspec::MAINNET_DOMAIN
+    } else {
+        B256::repeat_byte(0xd3)
+    };
+    execute_fixture_in(spec, domain, body, anchor_root)
 }
+
+/// Rules of an empty block 1 to run before the measured block, so the fixture is
+/// block 2: a benchmark then sees a parent under those rules instead of the genesis.
+pub static FIRST_BLOCK_RULES: std::sync::OnceLock<ChainSpec> = std::sync::OnceLock::new();
 
 pub(crate) fn execute_fixture_in(
     spec: &ChainSpec,
@@ -279,11 +289,34 @@ pub(crate) fn execute_fixture_in(
     anchor_root: B256,
 ) -> Result<(Fixture, L2State, bloch_l2_evm::node_execution::NodeExecutionOutcome), Box<dyn Error>> {
     let mut pre_state = genesis_v2(spec, 0)?;
+    if let Some(first) = FIRST_BLOCK_RULES.get() {
+        // BLOCH_BENCH_PARENT_BLOCKS empty blocks first (default one): a benchmark at an L2 height.
+        let blocks: u64 = std::env::var("BLOCH_BENCH_PARENT_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        pre_state.commit_root();
+        for number in 1..=blocks {
+            let parent = node_head(first, domain, &pre_state)?;
+            let context = BlockContext {
+                number,
+                timestamp: match first.block_derivation {
+                    Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
+                    None => number,
+                },
+                base_fee_per_gas: first.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
+                prevrandao: B256::repeat_byte(7),
+                anchor_root,
+            };
+            execute_node_block(first, domain, &mut pre_state, &context, &NodeBodyV2::default())?;
+        }
+    }
     let previous_state_root = pre_state.commit_root();
     let parent = node_head(spec, domain, &pre_state)?;
+    // Fixtures anchor to native slot 1 (`l1_slot` of the synthetic contexts).
     let context = BlockContext {
-        number: 1,
-        timestamp: 1,
+        number: parent.number + 1,
+        timestamp: match spec.block_derivation {
+            Some(rule) => rule.timestamp(parent.timestamp, 1).ok_or("timestamp overflow")?,
+            None => parent.timestamp + 1,
+        },
         base_fee_per_gas: spec.next_base_fee(parent.base_fee_per_gas, parent.gas_used),
         prevrandao: B256::repeat_byte(7),
         anchor_root,

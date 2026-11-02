@@ -51,6 +51,8 @@ pub struct NodeExecutionOutcome {
     /// Outbox effect and post-block withdrawal commitment (`None` on a chain
     /// without the withdrawal outbox).
     pub withdrawals: Option<crate::withdrawal::WithdrawalSummary>,
+    /// Timestamp of the parent head, read from the authenticated pre-state.
+    pub parent_timestamp: u64,
 }
 
 /// Reconstruct the V2 head from committed state and trusted configuration.
@@ -150,6 +152,7 @@ pub(crate) struct PendingOutcome {
     pub(crate) receipts: Vec<ReceiptEnvelope>,
     pub(crate) transactions: Vec<TxOutcome>,
     pub(crate) withdrawals: Option<crate::withdrawal::WithdrawalSummary>,
+    pub(crate) parent_timestamp: u64,
 }
 impl PendingOutcome {
     pub(crate) fn finalize(self, spec: &ChainSpec, domain: B256, root: B256) -> NodeExecutionOutcome {
@@ -158,6 +161,7 @@ impl PendingOutcome {
             receipts: self.receipts,
             transactions: self.transactions,
             withdrawals: self.withdrawals,
+            parent_timestamp: self.parent_timestamp,
         }
     }
 }
@@ -171,7 +175,9 @@ fn run_node_block<DB: DatabaseRef>(
     body: &NodeBodyV2,
 ) -> Result<(CacheDB<DB>, PendingOutcome), NodeExecutionError> {
     let input = body.authenticated_input(spec).map_err(NodeExecutionError::Body)?;
+    let mut parent_timestamp = 0;
     let mut session = BlockSession::begin_with_header(spec, db, context, &body.deposits, |db| {
+        parent_timestamp = head::read_head_v2(db, spec.block_info)?.base.timestamp;
         prepare_parent(spec, domain, db, previous_root, context)
     })?;
     for tx in &input.txs {
@@ -189,6 +195,7 @@ fn run_node_block<DB: DatabaseRef>(
             receipts,
             transactions: run.tx_outcomes,
             withdrawals: run.withdrawals,
+            parent_timestamp,
         },
     ))
 }

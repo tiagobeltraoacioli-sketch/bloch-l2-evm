@@ -169,6 +169,9 @@ pub enum SettlementStatementV2Error {
     DataAvailability(crate::data_availability::DaPayloadError),
     /// Settlement V3 on a chain without the withdrawal outbox.
     Withdrawals,
+    /// The block's timestamp or prevrandao departs from the rule set's
+    /// [`crate::chainspec::BlockDerivation`].
+    BlockDerivation,
 }
 
 impl core::fmt::Display for SettlementStatementV2Error {
@@ -176,6 +179,7 @@ impl core::fmt::Display for SettlementStatementV2Error {
         match self {
             Self::Context => f.write_str("invalid settlement V2 context"),
             Self::Encoding => f.write_str("invalid settlement V2 encoding"),
+            Self::BlockDerivation => f.write_str("block timestamp or prevrandao departs from the derivation rule"),
             Self::Mismatch => f.write_str("settlement V2 statement differs from trusted expectation"),
             Self::Execution(error) => write!(f, "settlement V2 execution failed: {error}"),
             Self::DataAvailability(error) => write!(f, "settlement V3 data availability: {error}"),
@@ -565,6 +569,15 @@ pub fn execute_settlement_statement_v3(
 ) -> Result<SettlementStatementV3, SettlementStatementV2Error> {
     let outcome =
         verify_node_batch(spec, domain, witness, context, body).map_err(SettlementStatementV2Error::Execution)?;
+    if let Some(rule) = spec.block_derivation {
+        // `parent_timestamp` was read from the authenticated pre-state, and L1
+        // compares `l1_slot` with the anchored block when it accepts the statement.
+        if rule.timestamp(outcome.parent_timestamp, settlement.l1_slot) != Some(context.timestamp)
+            || context.prevrandao != rule.prevrandao
+        {
+            return Err(SettlementStatementV2Error::BlockDerivation);
+        }
+    }
     let configuration = configuration_commitment(spec).map_err(|error| {
         SettlementStatementV2Error::Execution(NodeWitnessError::Execution(
             crate::node_execution::NodeExecutionError::Execution(crate::BlockExecutionError::InvalidChainSpec(error)),
@@ -591,6 +604,12 @@ pub fn execute_settlement_statement_v3(
 /// 20 bytes) and [`crate::withdrawal::MIN_WITHDRAWAL_SATS`] (u64): the
 /// withdrawal rules are part of the configuration a verifier pins. Chains
 /// without the outbox keep the version 1 bytes.
+///
+/// A chain with [`crate::chainspec::BlockDerivation`] and the fee-vault sweep
+/// uses the tag `BLOCH:EVM:CONFIG:3:CANCUN`, the version 2 fields, then the L1
+/// genesis time and slot duration (two u64s), the prevrandao (32 bytes) and the
+/// sweep recipient (raw 20 bytes). The two rules ship together: other
+/// combinations are refused.
 pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError> {
     spec.validate()?;
     // Exhaustive destructuring makes new configuration fields a compile error.
@@ -610,8 +629,17 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         max_l1_sats,
         deposit_gas,
         withdrawal_outbox,
+        block_derivation,
+        fee_vault_sweep,
     } = spec;
-    let tag: &[u8] = if withdrawal_outbox.is_some() {
+    let version_3 = match (block_derivation, fee_vault_sweep, withdrawal_outbox) {
+        (Some(derivation), Some(recipient), Some(_)) => Some((derivation, recipient)),
+        (None, None, _) => None,
+        _ => return Err(ChainSpecError::PartialNextRules),
+    };
+    let tag: &[u8] = if version_3.is_some() {
+        b"BLOCH:EVM:CONFIG:3:CANCUN"
+    } else if withdrawal_outbox.is_some() {
         b"BLOCH:EVM:CONFIG:2:CANCUN"
     } else {
         b"BLOCH:EVM:CONFIG:1:CANCUN"
@@ -637,6 +665,12 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
     if let Some(outbox) = withdrawal_outbox {
         bytes.extend_from_slice(outbox.as_slice());
         bytes.extend_from_slice(&crate::withdrawal::MIN_WITHDRAWAL_SATS.to_be_bytes());
+    }
+    if let Some((derivation, recipient)) = version_3 {
+        bytes.extend_from_slice(&derivation.l1_genesis_time.to_be_bytes());
+        bytes.extend_from_slice(&derivation.l1_slot_millis.to_be_bytes());
+        bytes.extend_from_slice(derivation.prevrandao.as_slice());
+        bytes.extend_from_slice(recipient.as_slice());
     }
     Ok(keccak256(bytes))
 }

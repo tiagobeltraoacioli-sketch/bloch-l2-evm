@@ -26,7 +26,9 @@ Mainnet (chain 700770): the same script serves the `settlement_v3_mainnet`
 program when its config has `"mainnet": true` (the pinned host then runs with
 `--mainnet`, i.e. ChainSpec::mainnet and MAINNET_DOMAIN). A forced command may
 name its config explicitly (`remote_prover.py --config PATH`), so a devnet and a
-mainnet prover can share one release of this file without sharing a config.
+mainnet prover can share one release of this file without sharing a config. Around
+a program swap, one forced command per program: a host that serves both takes
+`"mainnet_flag": "--mainnet-v1"` in the config of the activated program.
 Exit codes: 0 proof written, 64 bad request, 70 prover failed, 75 busy.
 Dependency-free Python 3.9+.
 """
@@ -166,6 +168,8 @@ def main():
         fail(64 if isinstance(error, ValueError) and 'usage' in str(error) else 70, f'config: {error}')
     if not isinstance(c.get('mainnet', False), bool):
         fail(70, 'config: mainnet must be a boolean')
+    if c.get('mainnet_flag', '--mainnet') not in ('--mainnet', '--mainnet-v1'):
+        fail(70, 'config: mainnet_flag must be --mainnet or --mainnet-v1')
     for key in ('prover', 'guest'):
         if digest(c[key]) != c[key + '_sha256']:
             fail(70, f'{key} differs from its pin')
@@ -196,7 +200,7 @@ def main():
                'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact')}
         # `"mainnet": true` proves the mainnet program (settlement_v3_mainnet); the settler
         # verifies the result locally with the same flag, so a wrong program is never submitted.
-        argv = [c['prover'], *(['--mainnet'] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
+        argv = [c['prover'], *([c.get('mainnet_flag', '--mainnet')] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
                 c['guest'], str(proof)]
         with (work / 'last-prove.log').open('w') as log:
             returncode = run_while_client_connected(argv, env, log, c.get('timeout_seconds', 3500))

@@ -9,6 +9,10 @@
 //! The chain id and domain enter the configuration commitment and every
 //! header, so this is a different program, with different keys, from every
 //! devnet guest. `settlement_v3` (devnet4) is unchanged.
+//!
+//! CANDIDATE next program: `ChainSpec::mainnet` now also binds the timestamp and
+//! prevrandao to L1 data and installs the fee-vault sweep. The program the
+//! activation pinned is this file at f0d53fe (ELF SHA-256 `203114bf…c473`).
 #![no_main]
 
 use alloy_rlp::Decodable;

@@ -8,6 +8,7 @@ use bloch_l2_evm::{
     node_primitives::{NodeBodyV2, NodeHeaderV2},
     proof_statement::{configuration_commitment, execute_statement, ExecutionStatement},
     proving::BatchWitness,
+    sparse_witness::{verify_node_batch_sparse, BlockHashes, SparseBatchWitness},
     BlockContext, ChainSpec,
 };
 use serde::{Deserialize, Serialize};
@@ -136,6 +137,133 @@ impl ExecutionArtifact {
         &self.context
     }
     pub fn witness(&self) -> &BatchWitness {
+        &self.wire.witness
+    }
+}
+
+const SPARSE_FORMAT: &str = "BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SparseWire {
+    format: String,
+    configuration: B256,
+    domain: B256,
+    parent_rlp: Bytes,
+    header_rlp: Bytes,
+    body_rlp: Bytes,
+    witness: SparseBatchWitness,
+}
+
+/// CANDIDATE: [`ExecutionArtifact`] for the sparse-witness guest. Its own format
+/// string, so neither decoder accepts the other's file. It carries no complete
+/// witness, whose size grows with the touched accounts' storage. Validation runs
+/// the stateless sparse verifier with lazy `BLOCKHASH`, as the guest does.
+pub struct SparseExecutionArtifact {
+    wire: SparseWire,
+    parent: NodeHeaderV2,
+    header: NodeHeaderV2,
+    body: NodeBodyV2,
+    context: BlockContext,
+    expected: ExecutionStatement,
+}
+
+impl SparseExecutionArtifact {
+    pub fn new(
+        spec: &ChainSpec,
+        domain: B256,
+        parent: &NodeHeaderV2,
+        header: &NodeHeaderV2,
+        body: &NodeBodyV2,
+        witness: SparseBatchWitness,
+    ) -> Result<Self> {
+        body.validate(spec)?;
+        Self::validate(
+            spec,
+            domain,
+            SparseWire {
+                format: SPARSE_FORMAT.into(),
+                configuration: configuration_commitment(spec)?,
+                domain,
+                parent_rlp: alloy_rlp::encode(parent).into(),
+                header_rlp: alloy_rlp::encode(header).into(),
+                body_rlp: alloy_rlp::encode(body).into(),
+                witness,
+            },
+        )
+    }
+
+    pub fn decode(bytes: &[u8], spec: &ChainSpec, domain: B256) -> Result<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(invalid("execution artifact byte limit exceeded"));
+        }
+        Self::validate(spec, domain, serde_json::from_slice(bytes)?)
+    }
+
+    fn validate(spec: &ChainSpec, domain: B256, wire: SparseWire) -> Result<Self> {
+        if wire.format != SPARSE_FORMAT || wire.domain != domain || wire.configuration != configuration_commitment(spec)? {
+            return Err(invalid("sparse execution artifact identity/configuration mismatch"));
+        }
+        if wire.parent_rlp.len() > 2048 || wire.header_rlp.len() > 2048 {
+            return Err(invalid("execution artifact header byte limit exceeded"));
+        }
+        let parent: NodeHeaderV2 = exact(&wire.parent_rlp)?;
+        let header: NodeHeaderV2 = exact(&wire.header_rlp)?;
+        let body: NodeBodyV2 = exact(&wire.body_rlp)?;
+        parent.validate_configuration(spec, domain)?;
+        header.validate_configuration(spec, domain)?;
+        header.validate_parent(spec, &parent)?;
+        if wire.witness.prev_state_root != parent.state_root || wire.witness.new_state_root != header.state_root {
+            return Err(invalid("execution artifact witness/selected roots disagree"));
+        }
+        let context = BlockContext {
+            number: header.number,
+            timestamp: header.timestamp,
+            base_fee_per_gas: header.base_fee_per_gas,
+            prevrandao: header.prevrandao,
+            anchor_root: header.anchor_root,
+        };
+        let outcome = verify_node_batch_sparse(spec, domain, &wire.witness, &context, &body, BlockHashes::Lazy)?;
+        if outcome.header.hash() != header.hash() {
+            return Err(invalid("execution artifact re-execution differs from selected header"));
+        }
+        let expected = ExecutionStatement {
+            configuration: wire.configuration,
+            domain,
+            previous_state_root: wire.witness.prev_state_root,
+            header_hash: outcome.header.hash(),
+        };
+        Ok(Self {
+            wire,
+            parent,
+            header,
+            body,
+            context,
+            expected,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut output = BoundedOutput(Vec::new());
+        serde_json::to_writer(&mut output, &self.wire)?;
+        Ok(output.0)
+    }
+    pub fn expected(&self) -> ExecutionStatement {
+        self.expected
+    }
+    pub fn parent(&self) -> &NodeHeaderV2 {
+        &self.parent
+    }
+    pub fn header(&self) -> &NodeHeaderV2 {
+        &self.header
+    }
+    pub fn body(&self) -> &NodeBodyV2 {
+        &self.body
+    }
+    pub fn context(&self) -> &BlockContext {
+        &self.context
+    }
+    pub fn witness(&self) -> &SparseBatchWitness {
         &self.wire.witness
     }
 }

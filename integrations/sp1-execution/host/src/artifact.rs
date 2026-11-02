@@ -2,7 +2,7 @@
 //! Independently selected local block transport for the unchanged developer guest.
 use crate::{invalid, Result};
 use alloy_primitives::B256;
-use bloch_execution_artifact::{ExecutionArtifact, MAX_ARTIFACT_BYTES};
+use bloch_execution_artifact::{ExecutionArtifact, SparseExecutionArtifact, MAX_ARTIFACT_BYTES};
 use bloch_l2_evm::ChainSpec;
 use std::{io::Read, path::Path};
 
@@ -21,7 +21,20 @@ pub fn load_selected_artifact_for(path: impl AsRef<Path>, spec: &ChainSpec) -> R
 /// [`load_selected_artifact_for`] under the V2 domain a program embeds (the
 /// development domain `0xd3…d3`, or `MAINNET_DOMAIN` for the mainnet guest).
 pub fn load_selected_artifact_in(path: impl AsRef<Path>, spec: &ChainSpec, domain: B256) -> Result<ExecutionArtifact> {
-    let mut file = crate::open_regular(path.as_ref(), false)?;
+    ExecutionArtifact::decode(&read_bounded(path.as_ref())?, spec, domain)
+}
+
+/// CANDIDATE: [`load_selected_artifact_in`] for the sparse-witness guest's artifact.
+pub fn load_selected_sparse_artifact_in(
+    path: impl AsRef<Path>,
+    spec: &ChainSpec,
+    domain: B256,
+) -> Result<SparseExecutionArtifact> {
+    SparseExecutionArtifact::decode(&read_bounded(path.as_ref())?, spec, domain)
+}
+
+fn read_bounded(path: &Path) -> Result<Vec<u8>> {
+    let mut file = crate::open_regular(path, false)?;
     let length = file.metadata()?.len();
     if length == 0 || length > MAX_ARTIFACT_BYTES as u64 {
         return Err(invalid("execution artifact file outside 64 MiB bound"));
@@ -34,5 +47,5 @@ pub fn load_selected_artifact_in(path: impl AsRef<Path>, spec: &ChainSpec, domai
         return Err(invalid("execution artifact length changed while reading"));
     }
     // The guest embeds exactly this policy. A transport cannot choose another.
-    ExecutionArtifact::decode(&bytes, spec, domain)
+    Ok(bytes)
 }
