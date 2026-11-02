@@ -422,7 +422,7 @@ fn storage_growth<DB: DatabaseRef>(
                 None => db
                     .db
                     .storage_ref(*address, *slot)
-                    .map_err(|_| BlockExecutionError::Database("parent storage read failed".to_string()))?,
+                    .map_err(|_| BlockExecutionError::Database { detail: "parent storage read failed".to_string() })?,
             };
             match (previous.is_zero(), value.is_zero()) {
                 (true, false) => added += 1,
