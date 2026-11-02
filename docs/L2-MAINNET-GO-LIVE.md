@@ -8,13 +8,27 @@ The v2.1 plan is kept as `docs/L2-MAINNET-GO-LIVE-V21.md`. Do not mix the two: t
 
 **Kit tip moved after this plan was written:** see the newest change notice in `agents/PINS-NEXT.md` for the tip and the kit-file pins (F8 port, prover pins, release target in `GO-LIVE-PINS.sha256`). Binaries and the signing target `116bfaba…` did not move.
 
-**Kit source.** The frozen launch kit `4b7f4f7` (`codex/settler-reuse-revert-r8-20261102`: kit f1c8033 without agent 118's paid-batch reuse, agents/145). Check it out once, detached, at `~/worktrees/l2-launch-kit-20261103` (`git -C ~/worktrees/next-rpc-r4-20261101 worktree add --detach ~/worktrees/l2-launch-kit-20261103 4b7f4f7`), and check before staging that no kit file differs from 4b7f4f7:
+**Kit source.** The frozen launch kit is the tip of `codex/kit-integration-r10-20261102` named in the newest change notice of `agents/PINS-NEXT.md` (agent 198's integration of the round-10 kit fixes on top of `4b7f4f7`). Check it out once, detached, at `~/worktrees/l2-launch-kit-20261103`:
 
 ```
-git -C ~/worktrees/l2-launch-kit-20261103 diff --stat 4b7f4f7 -- deployment
+git -C ~/worktrees/next-rpc-r4-20261101 worktree add --detach ~/worktrees/l2-launch-kit-20261103 KIT_TIP
 ```
 
-GO: empty output. **Never build a release from 4b7f4f7 or from this branch**: its `build.json` would name another `l2_commit`. Binaries come only from the 17383fe build output.
+`KIT_TIP` is the full commit from PINS-NEXT. **Do not stage from `f1c8033`**: its settler and reorg tool take a DA batch for ours from unauthenticated bytes (agents/145 F1-F3). Do not stage from `9645efc`, `codex/go-live-next-r7-20261102` or `~/worktrees/next-rpc-r4-20261101` either: they predate the F5, F8, refill and round-10 fixes. Before staging, check the tip, that it contains `4b7f4f7`, and that no kit file was changed locally:
+
+```
+git -C ~/worktrees/l2-launch-kit-20261103 rev-parse HEAD
+```
+
+```
+git -C ~/worktrees/l2-launch-kit-20261103 merge-base --is-ancestor 4b7f4f7 HEAD
+```
+
+```
+git -C ~/worktrees/l2-launch-kit-20261103 status --porcelain -- deployment docs
+```
+
+GO: the full commit PINS-NEXT names, exit 0, and empty output. **Never build a release from the kit tip**: its `build.json` would name another `l2_commit`. Binaries come only from the 17383fe build output.
 
 **What this build changes from v2.1:**
 
@@ -151,7 +165,7 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 | `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
 | `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
 
-`GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the release `SHA256SUMS` `116bfaba…` (since kit 2087b40). P2 still checks that line separately, by its own `sha256sum`.
+Since kit tip 2087b40, `GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the release `SHA256SUMS` `116bfaba…` (before, it held the build's `out/SHA256SUMS` `1bad88ba…`). P2 still checks that line separately, after the signature check.
 
 ### 3.3 Pins that do not change
 
@@ -791,7 +805,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
-   - the kit `deployment/mainnet/attestor` from this plan's kit (4b7f4f7 plus agent 128's package texts 9f5c1f6; the attestor pins are the same at 9645efc, 9f5c1f6 and 4b7f4f7). Not `codex/attestor-packages-r4-20261101` ff839ba alone: it pins v2.1. Not `attestor-custody-20261030`.
+   - the kit `deployment/mainnet/attestor` from this plan's kit, with agent 128's `9f5c1f6` merged (operator texts name this build; `package` and `check-operator-bundle.sh` refuse v2.1's `c18752fd…`/`fb0d5313…`). Without that merge the bundle's README, INSTALL.md and ONBOARDING.md still tell operators to install v2.1. Not `codex/attestor-packages-r4-20261101` ff839ba alone: it pins v2.1. Not `attestor-custody-20261030`.
 
    Not the RC binaries `821289e0…` / `192eda33…`: they halt.
 3. `check-operator-bundle.sh --open`, then `install-attestor.sh install … --l1-rpc-url <D4-style L1 RPC>`.
@@ -1033,7 +1047,7 @@ Rollback: a correction notice. The chain state is unaffected.
 
 Applies to any L1 node the L2 reads (D4) or any node of our fleet. Symptom: `bloch_pos_blocks_parked` at 32 or more and a finalized epoch that does not move while peers advance; detector `deployment/mainnet/l1_stuck_check.py`.
 
-**Wiping the data alone does not work on mainnet.** The fa980367 binary `01c98b68…` with an empty data dir exits at once with `ERR_WS_REQUIRE_CHECKPOINT` (genesis beyond the 2,016-epoch weak-subjectivity window); keeping `ws_latest.bin` does not help. `docs/L1-STUCK-NODE-RUNBOOK.md` at 9645efc still says to wipe: follow this section instead.
+**Wiping the data alone does not work on mainnet.** The fa980367 binary `01c98b68…` with an empty data dir exits at once with `ERR_WS_REQUIRE_CHECKPOINT` (genesis beyond the 2,016-epoch weak-subjectivity window); keeping `ws_latest.bin` does not help. `docs/L1-STUCK-NODE-RUNBOOK.md` said to wipe up to kit tip 9645efc; since 2087b40 it has the refill steps below. Use a copy from the frozen kit, never an older one.
 
 Order: (1) one restart (it helped 1 time in 3); (2) refill from a healthy node of our own, below (97 s to serve the copied head with `state.cache`; 51–54 min replay without it); (3) only with a published checkpoint (D19), wipe and start from it (about 11.5–15 h).
 
