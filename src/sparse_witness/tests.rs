@@ -969,3 +969,368 @@ fn the_statement_is_byte_identical_to_the_complete_witness() {
         }
     }
 }
+
+// ── Forced inclusion (candidate) on the sparse path ──────────────────────────
+
+mod forced {
+    use super::*;
+    use crate::forced_inclusion::{forced_hash, inbox_hash, ForcedRecord, ForcedTransaction};
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes((&[seed; 32]).into()).unwrap()
+    }
+
+    fn signed(spec: &ChainSpec, key: &SigningKey, nonce: u64, to: Address, gas_limit: u64) -> Bytes {
+        let transaction = TxEip1559 {
+            chain_id: spec.chain_id,
+            nonce,
+            to: TxKind::Call(to),
+            value: U256::from(1_000_000u64),
+            gas_limit,
+            max_fee_per_gas: 200_000_000_000,
+            max_priority_fee_per_gas: 0,
+            ..Default::default()
+        };
+        let signature: Signature = key.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
+        TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()
+    }
+
+    fn record(height: u64, envelope: Bytes, declared: u64) -> ForcedTransaction {
+        ForcedTransaction {
+            record: ForcedRecord {
+                l1_height: height,
+                l1_txid: [height as u8; 32],
+                envelope_hash: keccak256(&envelope),
+                gas_limit: declared,
+            },
+            envelope,
+        }
+    }
+
+    fn settlement(deposits: u64) -> SettlementContextV2 {
+        SettlementContextV2 {
+            network: B256::repeat_byte(1),
+            genesis: B256::repeat_byte(2),
+            program_elf_keccak: B256::repeat_byte(3),
+            program_vkey_koalabear: B256::repeat_byte(4),
+            program_vkey_bn254: B256::repeat_byte(5),
+            previous_settlement: B256::repeat_byte(6),
+            l1_slot: 1,
+            l1_height: 1,
+            source_commitment: B256::repeat_byte(7),
+            inbox_root: B256::repeat_byte(8),
+            inbox_count: deposits,
+            consumed_start: 0,
+            consumed_end: deposits,
+        }
+    }
+
+    /// A chain under the next rules (forced inclusion on), the censored user funded.
+    struct Fixture {
+        chain: Chain,
+        censored: SigningKey,
+        unfunded: Address,
+        queue: Vec<ForcedTransaction>,
+    }
+
+    fn fixture() -> Fixture {
+        let mut chain = Chain::new(ChainSpec::mainnet());
+        assert!(chain.spec.forced_inclusion);
+        let censored = key(0x33);
+        let censored_address = Address::from_public_key(censored.verifying_key());
+        let fund = chain.tx(TxKind::Call(censored_address), U256::from(10u128.pow(18)), Bytes::new(), 21_000);
+        let body = chain.body(vec![fund]);
+        assert!(chain.commit(&body).transactions[0].success);
+        let unfunded_key = key(0x44);
+        let unfunded = Address::from_public_key(unfunded_key.verifying_key());
+        let spec = chain.spec.clone();
+        let to = Address::repeat_byte(0x55);
+        let queue = vec![
+            // Valid: included first.
+            record(10, signed(&spec, &censored, 0, to, 21_000), 21_000),
+            // Nonce gap: refused before execution, skipped.
+            record(10, signed(&spec, &censored, 7, to, 21_000), 21_000),
+            // Not a transaction: skipped.
+            record(11, Bytes::from_static(&[0xde, 0xad]), 21_000),
+            // An unfunded sender: skipped, and its account must be in the witness.
+            record(11, signed(&spec, &unfunded_key, 0, to, 21_000), 21_000),
+            // Gas above the declared gas: skipped.
+            record(12, signed(&spec, &censored, 1, to, 50_000), 21_000),
+            // Valid after the first.
+            record(12, signed(&spec, &censored, 1, to, 21_000), 21_000),
+        ];
+        Fixture { chain, censored, unfunded, queue }
+    }
+
+    fn honest_body(f: &mut Fixture) -> NodeBodyV2 {
+        let sequencer = f.chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), Bytes::new(), 21_000);
+        f.chain.body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone(), sequencer])
+    }
+
+    #[test]
+    fn forced_records_run_first_bind_the_statement_and_cover_skipped_senders() {
+        let mut f = fixture();
+        let body = honest_body(&mut f);
+        let context = f.chain.context();
+        let (witness, canonical) = generate_sparse_node_witness_forced(
+            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+        )
+        .expect("an honest forced block generates and self-verifies");
+        assert_eq!(witness.forced, f.queue);
+        // The skipped unfunded sender was read, so the witness proves it absent.
+        assert!(witness.absent_accounts.contains(&f.unfunded));
+        let censored = Address::from_public_key(f.censored.verifying_key());
+        assert!(witness.pre_accounts.iter().any(|a| a.address == censored));
+        let (outcome, included) = verify_node_batch_sparse_forced(
+            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, BlockHashes::Lazy,
+        )
+        .unwrap();
+        assert_eq!(included, 2);
+        assert_eq!(outcome.header, canonical.header);
+        assert!(outcome.transactions.iter().all(|t| t.success));
+        // The complete path executes the same body to the same header.
+        let mut full = f.chain.state.clone();
+        assert_eq!(execute_node_block(&f.chain.spec, MAINNET_DOMAIN, &mut full, &context, &body).unwrap().header, canonical.header);
+
+        let statement = execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .unwrap();
+        let records: Vec<ForcedRecord> = f.queue.iter().map(|q| q.record).collect();
+        assert_eq!(statement.deposits_hash, inbox_hash(body.deposits_hash(), &records));
+        assert_ne!(statement.deposits_hash, body.deposits_hash());
+        assert_ne!(forced_hash(&records), forced_hash(&records[..5]));
+        assert_eq!(statement.user_tx_count, 1, "only the sequencer's transaction counts");
+        assert_eq!(
+            statement.da_commitment,
+            crate::data_availability::block_da_commitment(context_chain(&f), context.number, &body.transactions[2..]).unwrap()
+        );
+        assert_eq!(
+            configuration_commitment(&f.chain.spec).unwrap(),
+            statement.base.configuration,
+            "the statement names the forced configuration (tag 4)"
+        );
+        assert_ne!(statement.base.configuration, {
+            let mut plain = f.chain.spec.clone();
+            plain.forced_inclusion = false;
+            configuration_commitment(&plain).unwrap()
+        });
+    }
+
+    fn context_chain(f: &Fixture) -> u64 {
+        f.chain.spec.chain_id
+    }
+
+    #[test]
+    fn a_body_that_omits_reorders_or_skips_a_due_forced_transaction_is_refused() {
+        let mut f = fixture();
+        let honest = honest_body(&mut f);
+        let context = f.chain.context();
+        let sequencer = honest.transactions[2].clone();
+        let bodies = [
+            // Omitted.
+            vec![f.queue[5].envelope.clone(), sequencer.clone()],
+            vec![sequencer.clone()],
+            // Swapped.
+            vec![f.queue[5].envelope.clone(), f.queue[0].envelope.clone(), sequencer.clone()],
+            // Behind a sequencer transaction.
+            vec![sequencer.clone(), f.queue[0].envelope.clone(), f.queue[5].envelope.clone()],
+        ];
+        for transactions in bodies {
+            let body = NodeBodyV2 { deposits: honest.deposits.clone(), transactions };
+            let result = generate_sparse_node_witness_forced(
+                &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+            );
+            assert!(result.is_err(), "a body without the exact forced prefix must not generate");
+        }
+        // The honest witness against a body that drops the forced prefix.
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &honest, BlockHashes::Lazy, &f.queue,
+        )
+        .unwrap();
+        let dropped = NodeBodyV2 { deposits: honest.deposits.clone(), transactions: vec![sequencer] };
+        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, &dropped, BlockHashes::Lazy).is_err());
+    }
+
+    #[test]
+    fn a_witness_without_a_skipped_sender_cannot_turn_the_skip_into_a_pass_or_a_valid_one_into_a_skip() {
+        let mut f = fixture();
+        let body = honest_body(&mut f);
+        let context = f.chain.context();
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+        )
+        .unwrap();
+        // Remove the unfunded (skipped) sender's absence proof: a database error, never a skip.
+        let mut missing = witness.clone();
+        missing.absent_accounts.retain(|a| *a != f.unfunded);
+        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy).is_err());
+        // Remove the censored (included) sender: the forced transaction cannot be skipped instead.
+        let censored = Address::from_public_key(f.censored.verifying_key());
+        let mut missing = witness.clone();
+        missing.pre_accounts.retain(|a| a.address != censored);
+        let without_forced = NodeBodyV2 { deposits: body.deposits.clone(), transactions: vec![body.transactions[2].clone()] };
+        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &without_forced, BlockHashes::Lazy).is_err());
+        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy).is_err());
+    }
+
+    #[test]
+    fn a_tampered_forced_list_changes_the_statement_or_fails() {
+        let mut f = fixture();
+        let body = honest_body(&mut f);
+        let context = f.chain.context();
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+        )
+        .unwrap();
+        let honest = execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .unwrap();
+        // Dropping a skipped record: still executes, but the slot no longer matches L1's queue.
+        let mut fewer = witness.clone();
+        fewer.forced.remove(3);
+        let statement = execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &fewer, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .unwrap();
+        assert_ne!(statement.deposits_hash, honest.deposits_hash);
+        // Dropping every record: the forced envelopes become sequencer transactions and the slot is the plain hash.
+        let mut none = witness.clone();
+        none.forced.clear();
+        let statement = execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &none, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .unwrap();
+        assert_eq!(statement.deposits_hash, body.deposits_hash());
+        assert_ne!(statement.deposits_hash, honest.deposits_hash);
+        // An envelope that does not hash to its record.
+        let mut swapped = witness.clone();
+        swapped.forced[1].envelope = swapped.forced[5].envelope.clone();
+        assert!(execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &swapped, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .is_err());
+        // More than the per-settlement bounds.
+        let mut many = witness.clone();
+        while many.forced.len() <= crate::forced_inclusion::MAX_PER_SETTLEMENT {
+            many.forced.push(many.forced[2].clone());
+        }
+        assert!(execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &many, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn forced_records_are_refused_under_rules_without_forced_inclusion() {
+        let mut chain = Chain::new(ChainSpec::mainnet_v1());
+        assert!(!chain.spec.forced_inclusion);
+        let tx = chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), Bytes::new(), 21_000);
+        let body = chain.body(vec![tx.clone()]);
+        let context = chain.context();
+        let queue = vec![record(3, tx, 21_000)];
+        assert!(generate_sparse_node_witness_forced(
+            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &queue,
+        )
+        .is_err());
+        // And with none, the block is exactly the 115 path: an empty list in the witness.
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &[],
+        )
+        .unwrap();
+        assert!(witness.forced.is_empty());
+    }
+
+    #[test]
+    fn a_forced_only_block_has_no_user_transactions_and_no_da() {
+        let mut f = fixture();
+        let body = f.chain.body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
+        let context = f.chain.context();
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+        )
+        .unwrap();
+        let statement = execute_settlement_statement_v3_sparse(
+            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), BlockHashes::Lazy,
+        )
+        .unwrap();
+        assert_eq!(statement.user_tx_count, 0);
+        assert_eq!(statement.da_commitment, B256::ZERO);
+    }
+
+    #[test]
+    fn the_producer_selection_builds_the_body_the_guest_accepts() {
+        let mut f = fixture();
+        let context = f.chain.context();
+        let deposits = vec![f.chain.deposit()];
+        let sequencer = f.chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), Bytes::new(), 21_000);
+        // The censored user's own pool transaction duplicates its forced one: dropped there.
+        let candidates = vec![f.queue[0].envelope.clone(), sequencer.clone()];
+        let (forced, selection) = crate::node_execution::select::select_node_transactions_after_forced(
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            f.chain.state.db(),
+            f.chain.state.state_root(),
+            &context,
+            &deposits,
+            &f.queue,
+            &candidates,
+            crate::node_execution::select::SelectionLimits::protocol(&f.chain.spec),
+        )
+        .unwrap();
+        assert_eq!(forced.included, vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
+        assert_eq!(forced.skipped.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(selection.transactions, vec![sequencer]);
+        let body = NodeBodyV2 {
+            deposits,
+            transactions: forced.included.iter().chain(&selection.transactions).cloned().collect(),
+        };
+        generate_sparse_node_witness_forced(
+            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+        )
+        .expect("the producer's body is the one the verifier accepts");
+    }
+}
+
+mod forced_funded_skip {
+    use super::*;
+    use crate::forced_inclusion::{ForcedRecord, ForcedTransaction};
+
+    #[test]
+    fn a_funded_skipped_sender_left_out_of_the_witness_fails_the_block() {
+        let mut chain = Chain::new(ChainSpec::mainnet());
+        let other = SigningKey::from_bytes((&[0x77u8; 32]).into()).unwrap();
+        let other_address = Address::from_public_key(other.verifying_key());
+        let fund = chain.tx(TxKind::Call(other_address), U256::from(10u128.pow(18)), Bytes::new(), 21_000);
+        let body = chain.body(vec![fund]);
+        assert!(chain.commit(&body).transactions[0].success);
+        // A nonce gap: skipped, but its sender's account decides it.
+        let transaction = TxEip1559 {
+            chain_id: chain.spec.chain_id,
+            nonce: 9,
+            to: TxKind::Call(Address::repeat_byte(0x55)),
+            value: U256::from(1u64),
+            gas_limit: 21_000,
+            max_fee_per_gas: 200_000_000_000,
+            ..Default::default()
+        };
+        let signature: Signature = other.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
+        let envelope: Bytes = TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into();
+        let forced = vec![ForcedTransaction {
+            record: ForcedRecord { l1_height: 5, l1_txid: [5; 32], envelope_hash: keccak256(&envelope), gas_limit: 21_000 },
+            envelope,
+        }];
+        let body = chain.body(vec![]);
+        let context = chain.context();
+        let (witness, _) = generate_sparse_node_witness_forced(
+            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &forced,
+        )
+        .unwrap();
+        assert!(witness.pre_accounts.iter().any(|a| a.address == other_address), "the skipped sender is witnessed");
+        let mut missing = witness.clone();
+        missing.pre_accounts.retain(|a| a.address != other_address);
+        let result = verify_node_batch_sparse_forced(&chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy);
+        assert!(result.is_err(), "accepted: {:?}", result.map(|(o, n)| (o.header.state_root, n)));
+    }
+}

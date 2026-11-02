@@ -7,7 +7,7 @@ use bloch_execution_artifact::{ExecutionArtifact, Result, SparseExecutionArtifac
 use bloch_l2_evm::{
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
     node_primitives::{NodeBodyV2, NodeHeaderV2},
-    sparse_witness::{generate_sparse_node_witness, BlockHashes},
+    sparse_witness::{generate_sparse_node_witness, generate_sparse_node_witness_forced, BlockHashes},
     BlockContext, ChainSpec, L2State,
 };
 use reth_chainspec::EthChainSpec;
@@ -141,6 +141,24 @@ pub fn export_sparse_with_report(source: &BlochProviderFactory, number: u64) -> 
     export_from_state(source, number, sparse_artifact)
 }
 
+/// CANDIDATE (forced inclusion): [`export_sparse_with_report`] for a block that consumed these forced records.
+/// The witness carries them, and the generator re-runs the forced rule, so a body that does not start with
+/// exactly the forced selection is refused here.
+pub fn export_sparse_forced_with_report(
+    source: &BlochProviderFactory,
+    number: u64,
+    forced: &[bloch_l2_evm::forced_inclusion::ForcedTransaction],
+) -> Result<(SparseExecutionArtifact, u64)> {
+    export_from_state(source, number, |state, rules, domain, context, parent, header, body| {
+        let (witness, recorded) =
+            generate_sparse_node_witness_forced(state, rules, domain, context, body, BlockHashes::Lazy, forced)?;
+        if recorded.header != *header {
+            return Err(invalid("exported witness execution differs from stored block"));
+        }
+        SparseExecutionArtifact::new(rules, domain, parent, header, body, witness)
+    })
+}
+
 fn complete_artifact(
     state: &L2State,
     rules: &ChainSpec,
@@ -179,7 +197,7 @@ fn sparse_artifact(
 fn export_from_state<T>(
     source: &BlochProviderFactory,
     number: u64,
-    make: fn(&L2State, &ChainSpec, B256, &BlockContext, &NodeHeaderV2, &NodeHeaderV2, &NodeBodyV2) -> Result<T>,
+    make: impl Fn(&L2State, &ChainSpec, B256, &BlockContext, &NodeHeaderV2, &NodeHeaderV2, &NodeBodyV2) -> Result<T>,
 ) -> Result<(T, u64)> {
     if number == 0 {
         return Err(invalid("proof export height outside the non-genesis chain"));

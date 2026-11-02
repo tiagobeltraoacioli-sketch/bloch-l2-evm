@@ -218,6 +218,35 @@ impl CanonicalCoordinator {
         .map_err(BlockExecutionError::other)
     }
 
+    /// CANDIDATE (forced inclusion): the forced envelopes L1 names for this
+    /// block, by the rule of `bloch_l2_evm::forced_inclusion`, then
+    /// [`Self::select_pending`] after them. The block body is
+    /// `forced.included` followed by the selection's transactions.
+    pub fn select_pending_after_forced(
+        &self,
+        attributes: &BlochNextBlockEnvCtx,
+        forced: &[bloch_l2_evm::forced_inclusion::ForcedTransaction],
+        candidates: &[alloy_primitives::Bytes],
+        limits: SelectionLimits,
+    ) -> Result<(bloch_l2_evm::forced_inclusion::ForcedSelection, BlockSelection), BlockExecutionError> {
+        let spec = self.factory.chain_spec();
+        let config = BlochEvmConfig::for_chain(&spec);
+        let context = config.next_context(self.head.header(), attributes)?;
+        let state = self.factory.latest().map_err(BlockExecutionError::other)?;
+        bloch_l2_evm::node_execution::select::select_node_transactions_after_forced(
+            spec.execution_at(context.number),
+            spec.domain(),
+            reth_revm::database::StateProviderDatabase::new(state.as_ref()),
+            self.head.0.state_root,
+            &context,
+            &attributes.deposits,
+            forced,
+            candidates,
+            limits,
+        )
+        .map_err(BlockExecutionError::other)
+    }
+
     /// Select pending transactions ([`Self::select_pending`]) and extend the
     /// head with exactly that selection, deposits first.
     pub fn extend_with_pending(

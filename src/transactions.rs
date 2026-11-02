@@ -392,6 +392,23 @@ impl<DB: DatabaseRef> SignedBlockBuilder<DB> {
         Ok(outcome)
     }
 
+    /// CANDIDATE (forced inclusion): run one forced envelope by the rule of
+    /// [`crate::forced_inclusion`]; `Ok(None)` when it was included.
+    #[cfg(feature = "forced-inclusion")]
+    pub(crate) fn push_forced_one(
+        &mut self,
+        spec: &ChainSpec,
+        forced: &crate::forced_inclusion::ForcedTransaction,
+    ) -> Result<Option<crate::forced_inclusion::ForcedSkip>, BlockExecutionError> {
+        let skip = crate::forced_inclusion::forced_step(spec, &mut self.session, forced)?;
+        if skip.is_none() {
+            self.attempted_transactions += 1;
+            self.attempted_bytes = self.attempted_bytes.saturating_add(forced.envelope.len());
+            self.input.transactions.push(forced.envelope.clone());
+        }
+        Ok(skip)
+    }
+
     /// Finalize ledger/head changes and return the exact accepted signed input.
     ///
     /// Compute the complete post-state root from the returned execution overlay

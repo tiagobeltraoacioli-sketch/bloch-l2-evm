@@ -110,6 +110,8 @@ pub mod chainspec;
 pub mod data_availability;
 pub mod domain;
 pub mod executor;
+#[cfg(feature = "forced-inclusion")]
+pub mod forced_inclusion;
 pub mod l1;
 pub mod l1_context;
 pub mod l1_transfer;
