@@ -1,0 +1,31 @@
+[package]
+name = "bloch-evm-sparse-guest"
+version = "0.1.0-experimental"
+edition = "2021"
+rust-version = "1.94.1"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "CANDIDATE, inert: SP1 settlement guests with a sparse witness"
+
+# Keep native c-kzg/default features out of the guest dependency graph.
+[workspace]
+
+[dependencies]
+bloch-l2-evm = { path = "../../..", default-features = false, features = ["sparse-witness"] }
+# `tiny-keccak`: route every keccak256 through tiny-keccak, which the patch
+# below replaces with SP1's keccak-permute precompile (M3.0b).
+alloy-primitives = { version = "=1.6.1", default-features = false, features = ["tiny-keccak"] }
+alloy-rlp = { version = "=0.3.16", default-features = false }
+sp1-zkvm = { version = "=6.8.0", default-features = false, features = ["lib"] }
+
+[profile.release]
+panic = "abort"
+
+# SP1 6.x precompile patches (sp1-patches, tags for SP1 6.2.0, syscall ABI of
+# the 6.x line used by sp1-zkvm 6.8.0). They change only how secp256k1 and
+# Keccak-f are computed inside the zkVM, not their results; the execution
+# bench re-checks every statement byte against native host execution. Pinned
+# by tag here and by commit in Cargo.lock.
+[patch.crates-io]
+tiny-keccak = { git = "https://github.com/sp1-patches/tiny-keccak", tag = "patch-2.0.2-sp1-6.2.0" }
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.2.0" }

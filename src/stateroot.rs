@@ -737,6 +737,9 @@ pub fn stateless_new_root(
     SparseTrieView::from_proof(prev_state_root, proof)?.apply(changes)
 }
 
+#[cfg(feature = "sparse-witness")]
+include!("sparse_view.rs");
+
 #[cfg(test)]
 mod tests {
     use super::*;

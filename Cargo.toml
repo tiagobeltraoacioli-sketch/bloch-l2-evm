@@ -73,6 +73,9 @@ serde_json = "=1.0.151"
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
 
 [features]
+# CANDIDATE, inert: the sparse settlement witness (`src/sparse_witness.rs`). No release
+# enables it, and without it no program built from this crate changes by a byte.
+sparse-witness = ["serde"]
 # Local transition kernel only; no mainnet bridge or proof verifier.
 experimental-escrow = []
 default = ["std", "host-kzg"]
