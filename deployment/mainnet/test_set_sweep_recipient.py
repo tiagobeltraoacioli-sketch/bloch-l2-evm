@@ -187,5 +187,54 @@ class Steps(unittest.TestCase):
             run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native)
 
 
+class OnChain(unittest.TestCase):
+    """`onchain` against a loopback fake RPC: a 2-of-3 Safe v1.4.1, then a codeless address."""
+
+    def serve(self, code):
+        import http.server
+        import threading
+        owners = ['11' * 20, '22' * 20, '33' * 20]
+
+        def word(v):
+            return format(v, '064x')
+
+        answers = {
+            'eth_chainId': hex(700770), 'eth_getCode': code, 'eth_getBalance': hex(5 * 10**18),
+            '0xe75235b8': '0x' + word(2),
+            '0xa0e67e2b': '0x' + word(32) + word(3) + ''.join('0' * 24 + o for o in owners),
+            '0xffa1ad74': '0x' + word(32) + word(5) + b'1.4.1'.hex().ljust(64, '0'),
+        }
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                req = json.loads(self.rfile.read(int(self.headers['content-length'])))
+                key = req['params'][0]['data'] if req['method'] == 'eth_call' else req['method']
+                body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': answers[key]}).encode()
+                self.send_response(200)
+                self.send_header('content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f'http://127.0.0.1:{srv.server_port}'
+
+    def test_a_deployed_safe(self):
+        out = json.loads(run('onchain', '0x' + THROWAWAY, '--rpc', self.serve('0x6080')))
+        self.assertEqual((out['threshold'], len(out['owners']), out['safe_version']), (2, 3, '1.4.1'))
+        self.assertEqual(out['balance_wei'], 5 * 10**18)
+
+    def test_a_codeless_address_needs_the_flag(self):
+        url = self.serve('0x')
+        with self.assertRaises(SystemExit):
+            run('onchain', '0x' + THROWAWAY, '--rpc', url)
+        self.assertEqual(json.loads(run('onchain', '0x' + THROWAWAY, '--rpc', url, '--allow-codeless'))['code_bytes'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()
