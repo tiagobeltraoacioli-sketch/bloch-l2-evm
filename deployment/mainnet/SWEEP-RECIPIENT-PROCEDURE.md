@@ -42,8 +42,17 @@ the fork-candidate L2 tip, and `N` is a new branch from the fork-candidate nativ
 
 1. Validate the address and print the new configuration commitment. Nothing is written.
    `python3 S check 0xADDRESS`
-2. Read only: check the Safe on L2 (code, owners, threshold) at `finalized`.
-   `python3 S onchain 0xADDRESS --rpc http://127.0.0.1:18955`
+2. Check that the address is spendable on L2. Do this read-only.
+   - **If the Safe is already deployed on L2**, read its code, owners and threshold at `finalized`:
+     `python3 S onchain 0xADDRESS --rpc http://127.0.0.1:18955`
+   - **If it is not deployed yet** (the usual case while user transactions are off, because deploying a
+     Safe is a user transaction), the address is counterfactual. It must equal the plan of the DEX kit,
+     from postern-dex `deploy-safe.mjs`:
+     `node scripts/staging/deploy-safe.mjs blochinc --plan deployments/mainnet/700770/safe.plan.json`
+     That address follows from the bootstrap address and start nonce, the owners, the threshold and the
+     salt nonce. Fix all of them before `apply`. Then keep the bootstrap key unused on L2 700770, and safe,
+     until the Safe is deployed: without it, the address can never get code and every swept fee is
+     stranded there. Owners can still be rotated after deployment without moving the address.
 3. Phase 1 edits, with a dry run first. They cover the recipient constant (`src/chainspec.rs`), the two
    crossing `SWEEP_RECIPIENT`s and the configuration commitment everywhere it is pinned. That is native
    `PROGRAM_NEXT` / `PROGRAM_FALLBACK` identity 3, settler `MAINNET_NEXT*`, the prover installer, the
