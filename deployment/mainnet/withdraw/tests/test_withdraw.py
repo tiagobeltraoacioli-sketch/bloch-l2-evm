@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Unit tests of bloch-l2-withdraw.py against scripted L1 and L2 RPC servers on loopback. A lying RPC is the point."""
+import contextlib
 import copy
 import http.server
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -406,6 +408,19 @@ class RpcErrors(Base):
         for code in (-32044, -32601, -32602):
             with self.subTest(code):
                 self.assertEqual(self.fetch(self.url(lambda m, p: Fail(code))), tool.REFUSED)
+
+    def test_a_v21_rpc_without_the_method_refuses_at_once_and_says_why(self):
+        calls = []
+
+        def l2(method, params):
+            calls.append(method)
+            return Fail(-32601)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.fetch(self.url(l2), extra=['--wait', '600']), tool.REFUSED)
+        self.assertEqual(calls, ['bloch_getWithdrawalProof'])
+        self.assertIn('v2.1', err.getvalue())
 
     def test_an_unreachable_rpc_is_not_ready(self):
         self.assertEqual(self.fetch('http://127.0.0.1:9'), tool.NOT_READY)

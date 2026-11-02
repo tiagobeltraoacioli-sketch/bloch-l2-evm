@@ -395,6 +395,8 @@ def ask_proof(url, index, root=None):
     except RpcError as error:
         if error.code in RETRYABLE:
             raise NotReady(f'L2 RPC: {RETRYABLE[error.code]}: {error}') from None
+        if error.code == -32601:
+            raise Refused('this L2 RPC has no bloch_getWithdrawalProof (a v2.1 settled RPC does not); see "On the v2.1 build" in the README') from None
         raise Refused(f'L2 RPC: {error}') from None
 
 

@@ -184,7 +184,7 @@ class FollowerPinTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which('bash') and shutil.which('sha256sum'), 'needs bash and sha256sum')
 class UpgradeScriptTest(unittest.TestCase):
     OLD_FOLLOWER, OLD_PRODUCE = b'old follower 821289e0\n', b'old produce 192eda33\n'
-    NEW_FOLLOWER, NEW_PRODUCE = b'new follower c18752fd\n', b'new produce 7c1cc62b\n'
+    NEW_FOLLOWER, NEW_PRODUCE = b'new follower cdf5da5c\n', b'new produce 7c1cc62b\n'
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='upgrade-test-'))

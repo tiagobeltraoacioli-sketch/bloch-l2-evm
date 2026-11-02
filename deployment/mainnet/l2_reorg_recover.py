@@ -24,6 +24,7 @@ Stop the settler and every settled RPC on this database first: the swap is not v
 Without --apply it reports the plan and changes nothing. Exit: 0 done or planned, 75 not finalized yet, 3 refused.
 """
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -216,7 +217,10 @@ def main():
     if not config.get('follower_status'):
         parser.error('--follower-status is required')
     try:
-        print(json.dumps(plan(config, options.follower_state, options.apply, respool_from=options.respool_from), indent=1))
+        # The worker's progress lines go to stderr: stdout is exactly one JSON document.
+        with contextlib.redirect_stdout(sys.stderr):
+            report = plan(config, options.follower_state, options.apply, respool_from=options.respool_from)
+        print(json.dumps(report, indent=1))
     except NotYet as why:
         print(json.dumps({'not_yet': str(why)}))
         sys.exit(75)

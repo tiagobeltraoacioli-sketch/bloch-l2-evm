@@ -10,9 +10,9 @@
 #   install-shadow.sh OUT_DIR [--start]
 #   install-shadow.sh --rollback
 #
-# OUT_DIR is build-release.sh's OUT of the v2.1 L2 build `bloch-l2-2026-10-30-v21-native-78d4921c` (L2 a39b04e4, native 78d4921c
+# OUT_DIR is build-release.sh's OUT of the next L2 build (L2 17383feb, provisional and unsigned; native 78d4921c
 # = the armed L1 release with HF1 e7180/7186, HF2 e7270, HF3 e7360, KES enforce e8620; settlement-
-# recovery lock 26bf4453...): bloch-l2-produce-dev fb0d5313..., sequencer_mainnet.py 15daa26f...
+# recovery lock a3c38a46...): bloch-l2-produce-dev e3f1a290..., sequencer_mainnet.py 15daa26f...
 # (unchanged since the RC), SHA256SUMS and build.json.
 # The producer RUNS the native transition, so a shadow built against a pre-HF native (the RC pin
 # 192eda33..., native 78b7343a) halts at HF1. Install the v2 build before epoch 7178.
@@ -24,16 +24,21 @@
 # unit only with --start. The shadow never signs, proves or submits and never opens the settler's
 # database: starting it sends nothing to Bloch L1. It reads getl2settlement only.
 #
+# After an accepted settlement (a reinstall after --rollback, or the repair after l2_reorg_recover.py --apply:
+# --rollback, then install again) the shadow database is not created at genesis: it is rebuilt from L1 with
+# `produce reconstruct --l1-follower` over the local follower's verified blocks, so its head is the accepted
+# settlement and `check` passes. Needs the local follower (P3) at or past that settlement.
+#
 # Rollback: stops and disables the unit, removes the unit file, and MOVES (never deletes)
 # /opt/bloch/l2-mainnet-shadow, its config and /var/lib/bloch-l2-mainnet-shadow aside with a
 # timestamp. The settler is not touched; nothing on L1 depends on the shadow.
 set -euo pipefail
 # v2.1 build bloch-l2-2026-10-30-v21-native-78d4921c (out/SHA256SUMS). v2 was 7c1cc62b... (no flag-day rebuild fix). The RC pin was 192eda33... (native 78b7343a, pre-HF).
-PRODUCE_SHA256=fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9
+PRODUCE_SHA256=e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69
 SEQUENCER_SHA256=15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2
-L2_COMMIT=a39b04e435b11bd2316dffe94d78df0163153c56
+L2_COMMIT=17383feb88602926c26559802b95dee273484cd5
 NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
-NATIVE_LOCK_SHA256=26bf44539b996809bd75164a488d8a30137507716d06990721056a213364aef8
+NATIVE_LOCK_SHA256=a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9
 SETTLER_CONFIG=/etc/bloch-l2-mainnet-settler/config.json
 UNIT=bloch-l2-mainnet-shadow.service
 OPT=/opt/bloch/l2-mainnet-shadow
@@ -41,7 +46,33 @@ ETC=/etc/bloch-l2-mainnet-shadow
 VAR=/var/lib/bloch-l2-mainnet-shadow
 USER_=bloch-l2-mainnet-settler
 SETTLER_WORK=/var/lib/bloch-l2-mainnet-settler/work
+FOLLOWER_NATIVE=/var/lib/bloch-l2-mainnet-follower/native
+DOMAIN=1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733
+GENESIS_TIME=1786656679
+TIMESTAMP_RULE=1:1786656679:30000
 HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Prints the accepted commitment when a quorum (2 of 3) of the mainnet nodes report the same accepted settlement,
+# "none" when a quorum reports none, and fails otherwise.
+accepted_number() {
+  python3 -I - "$@" <<'PY'
+import collections, json, sys, urllib.request
+views = []
+for url in sys.argv[1:]:
+    try:
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getl2settlement', 'params': []}).encode()
+        reply = json.load(urllib.request.urlopen(urllib.request.Request(url, body, {'content-type': 'application/json'}), timeout=15))
+        accepted = reply['result'].get('accepted')
+        views.append(json.dumps(accepted, sort_keys=True))
+    except Exception as why:
+        print(f'{url}: {why}', file=sys.stderr)
+view, count = collections.Counter(views).most_common(1)[0] if views else (None, 0)
+if count < 2:
+    sys.exit('no quorum of 2 nodes agrees on the accepted settlement')
+accepted = json.loads(view)
+print('none' if accepted is None else 'commitment ' + str(accepted.get('commitment')))
+PY
+}
 
 verify_out() {
   local out=$1
@@ -130,7 +161,16 @@ JSON
 chmod 0644 "$ETC/config.json"
 
 S="runuser -u $USER_ -- env BLOCH_SEQUENCER_CONFIG=$ETC/config.json TMPDIR=$VAR/tmp /usr/bin/python3 -u $OPT/sequencer_mainnet.py"
-$S init        # shadow database; refuses unless the genesis is 632e45ae...f468 / 2ad7e807...c05d
+ACCEPTED=$(accepted_number http://80.240.16.185:8080 http://199.247.22.8:8080 http://45.77.67.251:8080) || {
+  echo "cannot read the accepted settlement; unit NOT installed"; exit 1; }
+if [ "$ACCEPTED" = none ]; then
+  $S init      # shadow database; refuses unless the genesis is 632e45ae...f468 / 2ad7e807...c05d
+else
+  echo "accepted settlement ($ACCEPTED): rebuilding the shadow database from L1 (follower $FOLLOWER_NATIVE)"
+  [ -d "$FOLLOWER_NATIVE" ] || { echo "$FOLLOWER_NATIVE missing: install and sync the follower first (P3)"; exit 1; }
+  runuser -u "$USER_" -- "$OPT/bloch-l2-produce-dev" reconstruct --target "$VAR/canonical" --l1-follower "$FOLLOWER_NATIVE" \
+    --rules mainnet --domain "$DOMAIN" --genesis-time "$GENESIS_TIME" --timestamp-rule "$TIMESTAMP_RULE"
+fi
 $S check || { echo "read-only check failed (see above); unit NOT installed"; exit 1; }
 install -m 0644 "$HERE/$UNIT" "/etc/systemd/system/$UNIT"
 systemctl daemon-reload

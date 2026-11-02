@@ -108,15 +108,7 @@ It will not restart. Read the reason, then match it:
 
 Any reorg of an accepted, unfinalized settlement causes this, shallow or deep. Effect while halted: no settlement. The RPC keeps serving the orphaned blocks as `latest` and `safe` (drill: `safe` stayed on a block L1 had dropped), and a DA fee for an orphaned block may already be spent. **Tell integrators that `latest` and `safe` are unreliable until this is done.** `finalized` was not affected in the drill.
 
-**Install the tool once, beforehand.** The v2.1 installer does not ship it. Copy it next to the installed worker, and check it against the pin. This adds a file and changes no pinned one. Proposed for the next build: `codex/l2-ops-settler-recover-r3-20261031` installs it in `prepare`. `REL` below is the directory `/opt/bloch/l2-mainnet-settler/<digest>`.
-
-```
-echo "d688e59fa61c93294f60778e2e9e19a6445c8f6f1ceb05bc03e327bbca645623  deployment/mainnet/l2_reorg_recover.py" | sha256sum -c
-```
-
-```
-sudo install -m 0644 deployment/mainnet/l2_reorg_recover.py REL/l2_reorg_recover.py
-```
+`install-settler-mainnet.py prepare` installs the tool next to the worker as `REL/l2_reorg_recover.py`, pinned `678482bf…`; `REL` is `/opt/bloch/l2-mainnet-settler/<digest>`. Its stdout is one JSON document; worker log lines go to stderr.
 
 Then, during the incident:
 
@@ -142,6 +134,8 @@ sudo -u bloch-l2-mainnet-settler python3 REL/l2_reorg_recover.py --config /etc/b
 sudo systemctl start bloch-l2-mainnet-rpc bloch-l2-mainnet-settler
 ```
 
+The shadow halts too after a reorg (`job N exists but the L2 head is M`). Repair it before the settler's next block: `install-shadow.sh --rollback`, then reinstall as in the go-live plan P7. After an accepted settlement the installer rebuilds the shadow database from L1 (`reconstruct --l1-follower`), so it starts at the accepted head.
+
 Evidence: Drill FAIL for the deep reorg without the tool (the halt above). Tool: 4 unit tests. Live drill: **none yet**, it was still queued on the drill host at the time of writing. Shallow reorgs halt the same way (drill FAIL: `L2 head 7 cannot extend accepted settlement 5`). Rehearse this procedure before relying on it. Whether the settler user can read the follower's `native` directory comes from the units' `UMask=0022`, and has not been run on an installed host.
 
 ## 5. L1 finality stall
@@ -160,6 +154,8 @@ Evidence: Alert: 3 of 5 validators stopped, mainnet thresholds: `l1_finality_lag
 | `l2_finality_closed`, `l2_finality_status` state not `ok` | The status file is missing or invalid. The RPC answers `-32001` for `safe` and `finalized`, and `latest` still works |
 
 Check the follower first. Do not restart it near an L1 gate.
+
+**Follower exit 3, `node's finalized chain does not descend from the verified head`:** its single L1 RPC regressed, for example a node resynced or restored from older data (agent 86). It is not a verifier disagreement. Wait until that node shows the same finalized root as the other two, then restart the follower once (`sudo systemctl restart bloch-l2-mainnet-follower`). A second halt with the node caught up is a real incident: keep the state. The unit does not restart on exit 3 by design; do not change that. To avoid it, keep the follower's L1 node out of resyncs, or point the follower at another node first.
 
 ```
 systemctl status bloch-l2-mainnet-follower --no-pager

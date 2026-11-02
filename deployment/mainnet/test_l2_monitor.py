@@ -448,13 +448,14 @@ class MonitorTests(unittest.TestCase):
             r = m.Report()
             m.check_height_runway(settled, [{'height': height}], p, r)
             return {c['check']: c['level'] for c in r.checks}, r
-        self.assertEqual(checks(40)[0]['l2_proof_cost'], 'OK')
-        self.assertEqual(checks(200)[0]['l2_proof_cost'], 'WARN')
-        self.assertEqual(checks(4000)[0]['l2_proof_cost'], 'CRIT')
+        self.assertNotIn('l2_proof_cost', checks(4000)[0], 'height alone no longer grades the proof cost')
         self.assertEqual(m.empty_block_instructions(9000), m.empty_block_instructions(8191), 'flat once the ring wraps')
         for height, expected in ((256, 11.2e6), (4096, 116.2e6), (8191, 227.7e6)):
             self.assertLess(abs(m.empty_block_instructions(height) - expected) / expected, 0.25, height)
-        self.assertIn('local fallback', [c['message'] for c in checks(200)[1].checks if c['check'] == 'l2_proof_cost'][0])
+        r = checks(200)[1]
+        m.check_proof_time(p, r)
+        self.assertEqual(level(r, 'l2_proof_cost'), 'OK')
+        self.assertIn('local fallback', next(c['message'] for c in r.checks if c['check'] == 'l2_proof_cost'))
         limit = p['l1_reconstruct_limit']
         self.assertEqual(checks(40, limit * 4 // 5 - 1)[0]['l1_reconstruct_runway'], 'OK')
         self.assertEqual(checks(40, limit * 4 // 5)[0]['l1_reconstruct_runway'], 'WARN')
@@ -605,6 +606,22 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'attestors'), 'OK')
 
     # ---- units and logs
+    def test_proof_time_against_the_block_interval(self):
+        def proof_level(seconds, *extra):
+            def runner(argv):
+                if argv[0] == 'systemctl':
+                    return 0, 'LoadState=loaded\nActiveState=active\nSubState=running\nNRestarts=0\nExecMainStatus=0\nResult=success\n'
+                t = m.datetime.datetime.fromtimestamp(NOW - 60, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                return 0, '\n'.join('x: ' + json.dumps({'time': t, 'event': 'proof-generated', 'seconds': s}) for s in seconds)
+            r, _ = run(healthy(), '--unit', 'settler=settler.service', *extra, runner=runner)
+            return level(r, 'l2_proof_cost')
+        interval = ('--set', 'block_interval_seconds=600')
+        self.assertEqual(proof_level([300, 410], *interval), 'OK')
+        self.assertEqual(proof_level([300, 420], *interval), 'WARN')
+        self.assertEqual(proof_level([610], *interval), 'CRIT')
+        self.assertEqual(proof_level([5000]), 'OK', 'without a configured interval it only reports')
+        self.assertEqual(proof_level([], *interval), 'OK', 'no proof in the window')
+
     def test_units_and_journal_events(self):
         def runner(argv):
             unit = argv[2]
@@ -777,7 +794,7 @@ class MonitorTests(unittest.TestCase):
         for b in w['l2'].values():
             b['latest'] = block(101, 50 * 60)
         with tempfile.TemporaryDirectory() as d:
-            args = self.alert_args(d, {'webhook_url': 'https://hook', 'realert_seconds': 600})
+            args = self.alert_args(d, {'webhook_url': 'https://hook', 'realert_seconds': 600, 'recover_runs': 1})
             bad, _ = run(w)
             self.assertEqual(m.handle_alerts(args, bad, NOW, sender), 'raise')
             self.assertIn('CRIT l2_head_age', sent[-1][1])
@@ -787,6 +804,98 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(m.handle_alerts(args, good, NOW + 800, sender), 'recover')
             self.assertIsNone(m.handle_alerts(args, good, NOW + 900, sender))
         self.assertEqual([e for e, _ in sent], ['raise', 'raise', 'recover'])
+
+    def test_flapping_check_is_one_alert_and_recovery_waits(self):
+        sent = []
+
+        def sender(cfg, text, payload, timeout, dry):
+            sent.append(payload['event'])
+            return ['command']
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            args = self.alert_args(d, {'alert_command': ['/bin/true'], 'realert_seconds': 3600})
+            bad, _ = run(w)
+            for i in range(10):  # bad, good, bad, good ... once a minute
+                r = bad if i % 2 == 0 else run(healthy())[0]
+                m.handle_alerts(args, r, NOW + 60 * i, sender)
+            self.assertEqual(sent, ['raise'])
+            for i in range(10, 13):  # three clean runs in a row: one recovery
+                m.handle_alerts(args, run(healthy())[0], NOW + 60 * i, sender)
+        self.assertEqual(sent, ['raise', 'recover'])
+
+    def test_alert_command_gets_text_and_payload(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'sink')
+            args = self.alert_args(d, {'alert_command': ['/bin/sh', '-c', f'cat > {out}; echo "$0" >> {out}', '{event}:{status}']})
+            r, _ = run(w)
+            self.assertEqual(m.handle_alerts(args, r, NOW), 'raise')
+            body = out.read_text()
+            self.assertIn('CRIT l2_head_age', body)
+            self.assertIn('raise:CRIT', body)
+            failing = self.alert_args(d, {'alert_command': ['/bin/false'], 'state_file': str(Path(d, 's2'))})
+            r2, _ = run(w)
+            m.handle_alerts(failing, r2, NOW)
+        self.assertEqual(level(r2, 'alert_delivery'), 'WARN')
+
+    def test_report_of_another_monitor_and_its_age(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = Path(d, 'dex.json')
+            rep.write_text(json.dumps({'level': 'CRIT', 'checks': [
+                {'name': 'keeper_budget', 'level': 2, 'status': 'CRIT', 'detail': 'count used up'},
+                {'name': 'closed_by_excess[WBLCH/bUSDC]', 'level': 1, 'status': 'WARN', 'detail': 'soft'},
+                {'name': 'rpc_identity', 'level': 0, 'status': 'OK', 'detail': ''}]}))
+            os.utime(rep, (NOW - 60, NOW - 60))
+            r = m.Report()
+            m.check_reports([f'dex={rep}:900'], dict(m.PROFILES['mainnet']), NOW, r)
+            self.assertEqual(level(r, 'dex/keeper_budget'), 'CRIT')
+            self.assertEqual(level(r, 'dex/closed_by_excess[WBLCH/bUSDC]'), 'WARN')
+            self.assertEqual(level(r, 'report_age[dex]'), 'OK')
+            os.utime(rep, (NOW - 3000, NOW - 3000))  # the DEX monitor died: its last report goes stale
+            r = m.Report()
+            m.check_reports([f'dex={rep}:900'], dict(m.PROFILES['mainnet']), NOW, r)
+            self.assertEqual(level(r, 'report_age[dex]'), 'CRIT')
+            r = m.Report()
+            m.check_reports([f'dex={Path(d, "missing.json")}'], dict(m.PROFILES['mainnet']), NOW, r)
+            self.assertEqual(level(r, 'report[dex]'), 'CRIT')
+
+    def test_l1_stall_is_seen_although_the_lag_is_constant(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = str(Path(d, 'l1.json'))
+            p = dict(m.PROFILES['mainnet'])
+            for dt, want in ((0, 'OK'), (700, 'WARN'), (2000, 'CRIT')):
+                r = m.Report()
+                r.facts['l1_height'] = 5000
+                m.check_l1_progress(st, p, NOW + dt, r)
+                self.assertEqual(level(r, 'l1_progress'), want, dt)
+            r = m.Report()
+            r.facts['l1_height'] = 5001
+            m.check_l1_progress(st, p, NOW + 2100, r)
+            self.assertEqual(level(r, 'l1_progress'), 'OK')
+
+    def test_memory_levels(self):
+        with tempfile.TemporaryDirectory() as d:
+            mi = Path(d, 'meminfo')
+            for avail, want in ((60, 'OK'), (12, 'WARN'), (5, 'CRIT')):
+                mi.write_text(f'MemTotal: {100 * 2**20} kB\nMemAvailable: {avail * 2**20} kB\nSwapTotal: 0 kB\n')
+                r = m.Report()
+                m.check_memory(True, dict(m.PROFILES['mainnet']), r, str(mi))
+                self.assertEqual(level(r, 'memory'), want, avail)
+
+    def test_guardian_open_finding_is_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            h = Path(d, 'h.json')
+            h.write_text(json.dumps({'t': NOW, 'healthy': False, 'verified_t': NOW, 'problems': {},
+                                     'findings': {'mint:0xfe': {'severity': 'hard'}}}))
+            r = m.Report()
+            m.check_guardian_health([f'busdc={h}'], dict(m.PROFILES['mainnet']), NOW, r)
+            c = next(c for c in r.checks if c['check'] == 'guardian[busdc]')
+        self.assertEqual(c['level'], 'CRIT')
+        self.assertIn('mint:0xfe', c['message'])
 
     def test_placeholder_targets_send_nothing_and_say_so(self):
         w = healthy()
@@ -869,6 +978,154 @@ class MonitorTests(unittest.TestCase):
             w = healthy()
             w['l2'][L2A]['bloch_finality']['status'] = {'state': 'ok', 'written_at_unix': NOW - age, 'age_s': age}
             self.assertEqual(level(run(w)[0], 'l2_finality_status[A]'), want, age)
+
+
+class StuckNode(unittest.TestCase):
+    """The decision code shared with l1_stuck_check.py, and the monitor check that wraps it."""
+    P = dict(m.PROFILES['mainnet'])
+
+    def seq(self, *rows):
+        st, out = None, []
+        for s in rows:
+            st, level, msg = m.stuck_step(st, s, self.P)
+            out.append(level)
+        self.msg = msg
+        return out
+
+    @staticmethod
+    def s(rf, fin, parked=32, head=False, **kw):
+        return {'ref_finalized': rf, 'finalized': fin, 'parked': parked, 'has_ref_head': head, **kw}
+
+    def test_shared_code_is_identical(self):
+        import ast
+        import l1_stuck_check as c
+        def body(path):
+            tree = ast.parse(Path(path).read_text())
+            return {n.name: ast.dump(n) for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name in ('stuck_step', 'stuck_metric')}
+        self.assertEqual(len(body(m.__file__)), 2)
+        self.assertEqual(body(m.__file__), body(c.__file__))
+        for k in ('stuck_sustain_epochs', 'stuck_parked_min', 'stuck_min_samples', 'stuck_max_gap_epochs'):
+            self.assertEqual(c.DEFAULTS[k], self.P[k])
+
+    def test_all_three_sustained_is_crit(self):
+        self.assertEqual(self.seq(*[self.s(20 + i, 14) for i in range(4)]), [m.OK, m.OK, m.OK, m.CRIT])
+        self.assertIn('STUCK', self.msg)
+
+    def test_parked_alone_never_alarms(self):
+        self.assertEqual(set(self.seq(*[self.s(20 + i, 18 + i, 32, True) for i in range(12)])), {m.OK})
+
+    def test_lagging_with_parked_and_head_known_never_alarms(self):
+        self.assertEqual(set(self.seq(*[self.s(20 + i, 14, 40, True) for i in range(12)])), {m.OK})
+
+    def test_finality_moving_resets(self):
+        rows = [self.s(20, 10), self.s(21, 11), self.s(22, 12), self.s(23, 13), self.s(24, 14), self.s(25, 15)]
+        self.assertEqual(set(self.seq(*rows)), {m.OK})
+
+    def test_reference_not_advancing_never_alarms(self):
+        self.assertEqual(set(self.seq(*[self.s(20, 14) for _ in range(30)])), {m.OK})
+
+    def test_parked_dip_resets_only_parked(self):
+        rows = [self.s(20, 14), self.s(21, 14), self.s(22, 14, 20), self.s(23, 14), self.s(24, 14), self.s(25, 14),
+                self.s(26, 14)]
+        out = self.seq(*rows)
+        self.assertEqual(out[3:6], [m.WARN, m.WARN, m.WARN])
+        self.assertEqual(out[6], m.CRIT)
+
+    def test_restart_keeps_frozen_clock_and_rearms_parked(self):
+        rows = [self.s(20 + i, 14) for i in range(4)]
+        rows += [{'ref_finalized': 24, 'down': True}, self.s(25, 14, 3), self.s(26, 14), self.s(27, 14), self.s(28, 14),
+                 self.s(29, 14), self.s(30, 14)]
+        out = self.seq(*rows)
+        self.assertEqual(out[3], m.CRIT)
+        self.assertEqual(out[4], m.OK)
+        self.assertNotEqual(out[6], m.CRIT)
+        self.assertEqual(out[-1], m.CRIT)
+
+    def test_normal_restart_is_quiet(self):
+        rows = [{'ref_finalized': 20 + i, 'down': True} for i in range(2)]
+        rows += [self.s(22, 14, 25), self.s(22, 14), self.s(23, 19), self.s(23, 21, 0, True), self.s(24, 22, 0, True)]
+        self.assertEqual(set(self.seq(*rows)), {m.OK})
+
+    def test_long_outage_is_unknown(self):
+        out = self.seq(*[{'ref_finalized': 20 + i, 'down': True} for i in range(5)])
+        self.assertEqual(out, [m.OK, m.OK, m.OK, m.UNKNOWN, m.UNKNOWN])
+
+    def test_no_metrics_tops_out_at_warn(self):
+        out = self.seq(*[self.s(20 + i, 14, None) for i in range(8)])
+        self.assertEqual(max(out), m.WARN)
+        self.assertIn('parked unknown', self.msg)
+
+    def test_finalizing_with_unknown_head_warns(self):
+        out = self.seq(*[self.s(20 + i, 20 + i - 2, 0, False) for i in range(5)])
+        self.assertEqual(out[-1], m.WARN)
+
+    def test_monitor_gap_clears_steady_evidence(self):
+        out = self.seq(self.s(20, 14), self.s(21, 14), self.s(22, 14), self.s(40, 14))
+        self.assertNotEqual(out[-1], m.CRIT)
+
+    def test_no_reference(self):
+        self.assertEqual(self.seq({'ref_finalized': None}), [m.UNKNOWN])
+
+    def test_failed_head_lookup_neither_starts_nor_clears(self):
+        out = self.seq(self.s(20, 14), self.s(21, 14), self.s(22, 14), self.s(23, 14, head=None), self.s(24, 14))
+        self.assertEqual(out[-1], m.CRIT)
+
+    def test_metric_parser(self):
+        text = '# HELP bloch_pos_blocks_parked x\nbloch_pos_blocks_parked 32\nbloch_pos_blocks_parked_other 1\n'
+        self.assertEqual(m.stuck_metric(text, 'bloch_pos_blocks_parked'), 32)
+        self.assertIsNone(m.stuck_metric(text, 'absent'))
+        self.assertIsNone(m.stuck_metric(None, 'absent'))
+
+    def monitor(self, tmp, epochs, stuck=True):
+        args = m.parse(['--phase', 'prelaunch', '--l1-rpc', 'http://ref', '--l1-stuck-node', 'n9=http://n9,http://n9/metrics',
+                        '--l1-stuck-state', os.path.join(tmp, 's.json')])
+        calls, levels = [], []
+        for e in range(epochs):
+            def transport(url, method, params, e=e):
+                calls.append((url, method))
+                if method == 'getchaininfo':
+                    fin = 20 + e if url == 'http://ref' or not stuck else 14
+                    return {'height': 1000, 'epoch': 22 + e, 'slot': 1, 'finalized_height': 900,
+                            'finalized': {'epoch': fin, 'root': 'aa'}, 'block_id': 'bb'}
+                if method == 'getblockbyid':
+                    if stuck:
+                        raise m.RpcError("{'code': -32000, 'message': 'no block bb is known to this node'}")
+                    return {'id': 'bb'}
+                raise m.RpcError('unavailable')
+            r = m.run(args, transport, now=NOW, fetch=lambda u: b'bloch_pos_blocks_parked 32\nbloch_pos_peer_count 28\n')
+            levels.append(next(c['code'] for c in r.checks if c['check'] == 'l1_stuck[n9]'))
+        return calls, levels
+
+    def test_monitor_check_alarms_and_reads_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls, levels = self.monitor(tmp, 4)
+        self.assertEqual(levels, [m.OK, m.OK, m.OK, m.CRIT])
+        self.assertTrue({c for _, c in calls} <= m.READ_ONLY_METHODS)
+
+    def test_monitor_healthy_node_quiet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, levels = self.monitor(tmp, 6, stuck=False)
+        self.assertEqual(set(levels), {m.OK})
+
+    def test_without_the_option_nothing_changes(self):
+        args = m.parse(['--phase', 'prelaunch', '--l1-rpc', 'http://ref'])
+        calls = []
+        def transport(url, method, params):
+            calls.append(method)
+            raise m.RpcError('down')
+        r = m.run(args, transport, now=NOW, fetch=lambda u: None)
+        self.assertNotIn('getblockbyid', calls)
+        self.assertFalse([c for c in r.checks if c['check'].startswith('l1_stuck')])
+
+    def test_option_without_state_is_unknown(self):
+        args = m.parse(['--phase', 'prelaunch', '--l1-stuck-node', 'n=http://n'])
+        r = m.run(args, lambda *a: (_ for _ in ()).throw(m.RpcError('x')), now=NOW, fetch=lambda u: None)
+        self.assertTrue([c for c in r.checks if c['check'] == 'l1_stuck' and c['code'] == m.UNKNOWN])
+
+    def test_identity_pins_untouched(self):
+        self.assertEqual(m.V2_BUILD['l2_commit'], '17383feb88602926c26559802b95dee273484cd5')
+        self.assertEqual(m.MAINNET_PINS['attestor_set'], '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b')
 
 
 if __name__ == '__main__':

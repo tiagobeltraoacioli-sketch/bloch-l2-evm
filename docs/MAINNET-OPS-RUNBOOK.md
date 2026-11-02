@@ -18,7 +18,9 @@ Scope: the operator side of the L2 installed on Bloch L1 at epoch 5850
 
 ## 2. Monitor
 
-Height runways: `l2_export_runway` (a build that refuses to export above L2 block 4096 stops settlement there; WARN at 1,024, CRIT at 3,000), `l1_reconstruct_runway` (WARN at 80%, CRIT at 95% of what `reconstruct` reads) and `l2_proof_cost` (the guest instructions of an empty block, which grow with height until L2 block 8,191 because the witness hydrates the EIP-4788 ring).
+Height runways: `l2_export_runway` (a build that refuses to export above L2 block 4096 stops settlement there; WARN at 1,024, CRIT at 3,000), `l1_reconstruct_runway` (WARN at 80%, CRIT at 95% of what `reconstruct` reads).
+
+`l2_proof_cost` grades the slowest `proof-generated` time the settler logged in the event window (local or remote, all stages) against the block interval you set with `--set block_interval_seconds=N`: WARN at 70%, CRIT at 100%, when settlement would fall behind production. Without that setting it only reports. Its message also shows the empty-block instruction model for the settled height (it grows until L2 block 8,191 because the witness hydrates the EIP-4788 ring). It needs `--unit settler=…` or `--event-log`.
 
 `finality_file_lag[FILE:RPC]` compares the follower file's newest settlement with the RPC's `finalized_height` (WARN at 1,
 CRIT at 3; needs `--follower-status`). A settled RPC up to v2.1 keeps `bloch_finality.status.age_s` young while its database
@@ -75,8 +77,32 @@ Options:
   (JSON POST with `text`, `status`, `checks`), `telegram.bot_token_file` +
   `telegram.chat_id`, `min_level`, `realert_seconds`. It alerts on a new or
   worse check, repeats every `realert_seconds` while unhealthy, and sends one
-  recovery. Values containing `TBD` count as unset (the run then reports
+  recovery once a cleared check has stayed clean for `recover_runs` runs
+  (default 3), so a flapping check is one alert, not one a minute.
+  `alert_command` (argv; `{event}`, `{status}`, `{text}` substituted, the JSON
+  payload on stdin) is a third target for a local pager or mail relay; a
+  non-zero exit is `alert_delivery` WARN. `heartbeat_url` is fetched on every
+  run whatever the status: point it at a dead-man service that alerts when the
+  pings stop, because a dead monitor, a stopped timer or a host down cannot
+  alert by itself. Values containing `TBD` count as unset (the run then reports
   `alert_delivery` WARN). `--alert-dry-run` decides without sending.
+- `--memory`: `MemAvailable` WARN under 15%, CRIT under 7%; swap in use WARN
+  at 50%. The 2026-10-12 OOMs stalled finality before any chain check moved.
+- `--l1-progress-state FILE`: the best L1 height not moving for 600 s is WARN,
+  1800 s CRIT. A stalled L1 keeps `l1_finality_lag` constant, so that check
+  alone stays quiet.
+- `--report NAME=PATH[:SECONDS]`: the `--json` report of another monitor
+  (postern-dex `dex-monitor.mjs`, written by its unit with
+  `StandardOutput=truncate:PATH`). Its WARN/CRIT checks are alerted here as
+  `NAME/<check>` with this monitor's deduplication; the file older than
+  SECONDS (default 900) is WARN, 3x is CRIT, which is how a dead DEX monitor
+  is noticed. The DEX monitor's own unit sends nothing.
+- Bridge guardians (`guardiao.py`, `sombra.py`) run `alert_command` once per
+  new finding (at most `alert_burst`, default 5, per round, then one `burst`
+  call) and keep `healthy: false` with the finding under `findings` while a
+  hard finding is open, even after the pause landed; `reservas.py watch` does
+  the same for a deficit, a surplus older than `surplus_alert_s` (lost signers
+  or a stopped relay) and repeated read failures, with `health_file`.
 
 Tests: `python3 -m unittest discover -s deployment/mainnet -p
 'test_l2_monitor.py' -v`. Run it every minute under an unprivileged user

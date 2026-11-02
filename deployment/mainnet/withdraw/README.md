@@ -2,6 +2,19 @@
 
 `bloch-l2-withdraw.py` takes a user from a burn on L2 to `bloch-pos l2-claim prepare` on L1. It needs Python 3.9 or newer and nothing else. It holds no key and sends no transaction.
 
+## On the v2.1 build
+
+The settled RPC `18be911a…` of v2.1 has no `bloch_getWithdrawalProof`: that method is in the next RPC build. Against v2.1:
+
+| Step | v2.1 |
+|---|---|
+| `burn`, `find` | work, they need only `eth_getTransactionReceipt` |
+| `fetch` | exits 1 at once with the reason. It cannot work, whatever `--wait` says |
+| proof file | whoever holds an L2 database runs `bloch-l2-produce-dev withdrawal-proof --target DIR --index I --root HEX --count N` with the root and count from the L1's `claimable` record. Same fields as `fetch` writes; this path has not been run through `verify` end to end |
+| `verify`, `status` | read only the file and the L1 |
+
+The "without a local L2 database" promise below therefore holds only from the next RPC build on. The sections on `status`, on why a claim is dropped and on trust apply to both, as L1 behaviour. Report 67 measured them against a next-build RPC and a forced L1 build, not against v2.1 binaries.
+
 ## The flow
 
 1. **Burn.** Print the outbox call, then sign it with your own wallet. Withdrawals below 0.01 BLCH revert. The recipient is your L1 owner script hash (SHA3-256 of your hybrid public key). Check it: only that key can spend on L1.
