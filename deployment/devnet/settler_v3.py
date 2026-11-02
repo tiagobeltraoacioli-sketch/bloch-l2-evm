@@ -1385,7 +1385,7 @@ class Settler:
         is cut to its longest fitting prefix. The transaction that broke the budget stays in the spool for a later block,
         unless it does not fit even alone: then it can never be settled and moves to the quarantine directory."""
         # hold_block closes the spool for a block on a stale source; this path reads the spool itself, so it must too.
-        entries = self.spool_entries() if self.spool_open else []
+        entries = self.spool_entries() if getattr(self, 'spool_open', True) else []
         if not entries:
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
         fits = lambda cost: cost is not None and cost <= 1  # noqa: E731

@@ -66,6 +66,13 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.names(), [])
         self.assertEqual(self.measures, ['full'])
 
+    def test_a_closed_spool_is_not_read_by_the_budget_path(self):
+        # Agent 147 (review r7 F4): hold_block closes the spool for a block on a stale source.
+        self.settler.spool_open = False
+        self.spool(a=10)
+        self.run_it()
+        self.assertEqual((self.committed, self.measures, self.names()), ([], [], ['a']))
+
     def test_heavy_transaction_is_quarantined_and_the_rest_settles(self):
         self.spool(a=10, b=10_000_000, c=10)
         self.run_it()
