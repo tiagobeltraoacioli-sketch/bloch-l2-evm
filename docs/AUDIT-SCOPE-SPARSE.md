@@ -173,6 +173,11 @@ output:
 | `settlement_v3_mainnet_v1_sparse` | `b1b09c1f5b98b744493f4fb9ee4b15e05792e28cfe6cddf4a8a4eddfdf0d246c` | `195e6f361989cb4334d24d3646ba05b8e36955691e33cb4f5495548f35991fea` | `13f4866d5bd744237d732bd85f6a0fd62980231c69ff67690d84c57e14a73510` | `0027e90cdb6f5d108feb995ec5f6a0fd653004639a7fd9da46c262bf14a73510` |
 | `settlement_v3_mainnet_sparse_eager` (measurement only) | `f3c68511ea70b1bd6044266fb1088eb4a2ceb39c280ddc2a4fb85322468dfc64` | | | |
 
+One real block proved with `settlement_v3_mainnet_sparse`: block 6 of a private
+crossing run (next rules, 2 user transactions, 2 withdrawals), through the
+settler's `--mainnet --sparse prove-groth16 native-artifact`: 371 s, 29.2 GiB
+peak, Groth16 proof reverified offline.
+
 Configuration commitment (next rules) `975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878`,
 proof policy V3 `154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d`.
 
