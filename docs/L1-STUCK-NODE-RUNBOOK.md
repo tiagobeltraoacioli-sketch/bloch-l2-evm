@@ -16,6 +16,8 @@ Neither cure is certain. On private rehearsal nets (one host, devnet transport, 
 
 How this behaves on libp2p across real hosts has not been tested.
 
+Those nets had a young genesis. On mainnet the genesis is older than the weak-subjectivity window, so a wiped node refuses to start unless it gets a checkpoint or a healthy node's chain files: see "Wipe and resync" below.
+
 ## 2. Detect
 
 All three signs must hold together, while the reference gains at least 3 finalized epochs:
@@ -74,6 +76,13 @@ A restart costs far less than a full resync and sometimes heals. Restart the stu
 
 ### Wipe and resync
 
+**A wiped mainnet node does not start without a weak-subjectivity checkpoint.** With the mainnet binary (fa980367, `01c98b68…`) and an empty data directory, `bloch-pos run` exits at once with `ERR_WS_REQUIRE_CHECKPOINT`: its only anchor, the genesis, is older than the 2016-epoch window. Keeping `ws_latest.bin` does not help; the node refuses the same way. So before you delete anything, have one of these ready:
+
+- **A published checkpoint** (preferred): the envelope, the signer-set file and the signer-set SHA3-256 fingerprint from an independent channel, as in `CHECKPOINT-RUNBOOK.md` §4. Add `--ws-checkpoint ENVELOPE --ws-signer-set SET --ws-signer-set-sha3 FINGERPRINT` to the unit's `ExecStart` for the first start. If no checkpoint younger than 2016 epochs is published, this path does not exist: do not wipe.
+- **The chain files of a healthy node you operate** (`blocks.*`, `meta.*`, `ws_latest*`, copied while that node is stopped; never its `validator.key`, `validator.kes` or `slashing_protection.bin`). The node then boots from that node's finalized history, needs no checkpoint, and replays every block before it serves; see "How long it takes" below.
+
+Without one of the two, a wipe turns a stuck validator into a stopped one.
+
 Replace `UNIT` and `DATA_DIR` with your values. Check each one before running. These commands are for the node being recovered only.
 
 Stop the node:
@@ -121,9 +130,43 @@ sudo systemctl start UNIT
 ### Afterwards
 
 - Watch `l1_stuck_check.py` until it reports OK, with the reference head known and the finalized epoch following the reference.
-- During the resync it reports OK or "does not answer". A long resync is expected. Resync time on mainnet has not been measured.
+- During the resync it reports OK or "does not answer". A long resync is expected. See "How long it takes" below.
 - **Keep watching after the resync starts.** A wiped node can stick again, as one did in rehearsal with doppelganger protection off: it shows CRIT at a finalized epoch below where it stood. Repeat the wipe once, with protection on and the peers confirmed reachable. If it sticks again, stop the node and escalate.
 - The log may show `slashing protection: refusing` lines. That is the protection doing its job on what the node signed on the stuck branch. Do not remove the file to silence them.
+
+### Refill from a healthy node you operate (no checkpoint needed)
+
+Use a node of your own fleet that `l1_stuck_check.py` reports OK and that follows the reference head; prefer one that does not validate (an RPC or archival node). Stop it briefly (it misses its duties meanwhile, so pick one with no proposal due), copy its chain files, start it again. Copy by name, never with a glob over the whole directory:
+
+```
+sudo systemctl stop HEALTHY_UNIT
+sudo tar -C HEALTHY_DATA_DIR -cf /tmp/chain.tar blocks.log blocks.idx meta.bin ws_latest.bin state.cache
+sudo systemctl start HEALTHY_UNIT
+```
+
+Move `/tmp/chain.tar` to the stuck node's host, then, with the stuck node stopped and after the delete above:
+
+```
+sudo tar -C DATA_DIR -xf /tmp/chain.tar
+sudo chown -R NODE_USER: DATA_DIR
+sudo ls -l DATA_DIR/validator.key DATA_DIR/slashing_protection.bin
+sudo systemctl start UNIT
+```
+
+The tar must hold no `validator.key`, `validator.kes`, `slashing_protection.bin` or `mesh_identity.bin`: list it with `tar -tf /tmp/chain.tar` before moving it. The node keeps its own key and its own slashing protection, and catches up from the copied head over the network.
+
+### How long it takes
+
+Measured 2026-11-02 (agents/106-recovery.md) with the mainnet binary fa980367 (`01c98b68…`) on a copy of mainnet history to slot 211072 (e6596, 174,032 blocks, 2.9 GB), on a shared 32-core host under load, nodes linked by the devnet transport on loopback inside a private network namespace (not libp2p, not across hosts). Mainnet is about 660 epochs longer today, so scale times by about a third.
+
+| Path | Time to serve the copied head | Needs |
+|---|---|---|
+| Wipe, then start | Never: exit `ERR_WS_REQUIRE_CHECKPOINT` | Not usable on mainnet |
+| Wipe, start with a weak-subjectivity checkpoint | Accepted, then fetches every block from slot 1 over the peer link at a steady 4.2 blocks/s (14,336 blocks in 3,394 s, 128 per 30 s): about 11.5 h for 174,032 blocks, about 15 h for today's chain, extrapolated | A published checkpoint, signer set and fingerprint |
+| Refill with a healthy node's files including `state.cache` | 97 s from start (cache restore 21 s); 5 s to copy 2.9 GB on one disk | A healthy node stopped for the copy |
+| Refill without `state.cache` (or `state.cache` lost) | Full replay: 51 to 54 min | A healthy node stopped for the copy |
+
+After it serves the copied head, the node still catches up over the network for the time since the copy was taken.
 
 ## 4. Avoiding it
 
