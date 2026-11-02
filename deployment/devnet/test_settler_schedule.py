@@ -249,9 +249,31 @@ class ProgramScheduleTest(unittest.TestCase):
             self.assertFalse(settler.cycle())
             fake.swap()
             self.assertTrue(settler.cycle())
-        self.assertIn('l2-block-reproved-for-program', [e for e, _ in events])
+        self.assertEqual([e for e, _ in events].count('l2-block-reproved-for-program'), 1)
         self.assertEqual(fake.rewound, [])
-        self.assertIn(str(self.root / 'settlement_v3_mainnet.fallback'), self.proofs(fake)[-1])
+        sparse, fallback = self.proofs(fake)  # the fallback proof made ahead of the gate is not made again after it
+        self.assertIn(str(self.root / 'settlement_v3_mainnet_sparse'), sparse)
+        self.assertIn(str(self.root / 'settlement_v3_mainnet.fallback'), fallback)
+        self.assertEqual(len(fake.sent), 1)
+
+    def test_a_block_reproved_for_the_rollback_is_not_proved_again_by_a_later_cycle(self):
+        # Without the schedule (old path): the rollback passes during the sparse proof, the block is re-proved by the
+        # fallback guest, acceptance times out; the next cycle must send that proof again, not make a third one.
+        config = self.rollback_config()
+        fake = self.rollback_fake(GATE_SLOT - LEAD_SLOTS - 10)
+        del fake.live['program_schedule']
+        fake.swap_during_prove = True
+        clock = iter(range(0, 1_000_000, 5))
+        with mock.patch.object(s, 'log'):
+            settler = s.Settler(config, rpc=fake.rpc, run=fake.run, sleep=lambda _: None, clock=lambda: next(clock))
+            self.assertFalse(settler.cycle())  # sparse proof, program moved before submit
+            fake.include = False
+            self.assertFalse(settler.cycle())  # fallback proof, sent, not accepted in time
+            fake.include = True
+            self.assertTrue(settler.cycle())
+        self.assertEqual(len(self.proofs(fake)), 2)
+        self.assertGreaterEqual(len(fake.sent), 2)
+        self.assertEqual(len(set(fake.sent)), 1)  # only the one fallback settlement, sent again
 
     def test_swap_and_rollback_both_inside_the_window_target_the_fallback(self):
         config = self.rollback_config()

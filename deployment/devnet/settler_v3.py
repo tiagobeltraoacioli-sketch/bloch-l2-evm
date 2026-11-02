@@ -1485,15 +1485,18 @@ class Settler:
             rewound = self.produce('rewind', '--target', self.c['l2_db'], '--number', str(number), '--hash', head['hash'], *pool)
             log('l2-block-rewound-at-swap', number=number, hash=head['hash'], respooled=rewound.get('respooled', 0))
         produced = directory / 'block.json'
+        marker = directory / 'program.json'
         if produced.exists() and json.loads(produced.read_text()).get('rules') != 'next':
             self.supersede(directory)
+        elif marker.exists():
+            # The work of a reused block (no block.json) is kept while it was made for this program: a block
+            # re-proved for the rollback, or proved ahead of a scheduled gate, is not proved a second time.
+            if json.loads(marker.read_text()).get('name') != self.program['name']:
+                # Same rules, other guest (the rollback): the block stays, its artifact and proof are made again.
+                log('l2-block-reproved-for-program', number=number, program=self.program['name'])
+                self.supersede(directory)
         elif directory.exists() and not produced.exists() and (directory / 'proved.json').exists():
-            self.supersede(directory)
-        elif (directory / 'program.json').exists() and \
-                json.loads((directory / 'program.json').read_text()).get('name') != self.program['name']:
-            # Same rules, other guest (the rollback): the block stays, its artifact and proof are made again.
-            log('l2-block-reproved-for-program', number=number, program=self.program['name'])
-            self.supersede(directory)
+            self.supersede(directory)  # proved before the program was recorded: of the old program
 
     def follower_state_dir(self):
         """The native follower's verified block store, when configured (`follower_state`, or the one of
