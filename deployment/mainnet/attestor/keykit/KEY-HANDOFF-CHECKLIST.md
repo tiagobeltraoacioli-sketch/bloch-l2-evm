@@ -58,6 +58,14 @@ While you still hold three or more bundles:
       (e7d2c8b2): `cargo build --release --bin bloch-pos` in `crates/bloch-pos-node` of
       `~/worktrees/l2-attestor-keystore-20261019`. The rehearsal used the Mac build `1d69e683…`.
       Operators use the Linux build pinned in `operator-pins-v2.sha256` (`093909a2…`).
+- [ ] **While still online:** copy the five pinned artifacts and `carryover.tsv.gz.sha256` into one
+      local directory `DIR` (follower and produce-dev from the release folder
+      `bloch-l2-2026-11-02-next-native-78d4921c`, `bloch-pos` `093909a2…`, `mainnet.manifest`,
+      `carryover.tsv.gz`), and check them with `shasum -a 256` against `operator-pins-v2.sha256`.
+      `package --artifacts DIR` needs them and the Mac will be offline.
+- [ ] Check out the kit commit you will package from: the frozen kit with
+      `codex/attestor-packages-r7-20261102` and `codex/attestor-docs-r10-20261102` merged. `package`
+      refuses a dirty tree.
 - [ ] Wi-Fi off. Then run `preflight`: it must show no `FAIL`.
 
 ```
@@ -90,7 +98,7 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh verify
 ## 3. Package
 
 ```
-deployment/mainnet/attestor/keykit/make-operator-bundles.sh package
+deployment/mainnet/attestor/keykit/make-operator-bundles.sh package --artifacts DIR
 ```
 
 - [ ] Each index prints `packaged attestor I: …/operator-I.tar (SHA-256)`. `PACKAGES.sha256` is public.
@@ -98,7 +106,7 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh package
       `ARTIFACTS.sha256` (follower `cdf5da5c…`, producer `e3f1a290…` of build 17383fe, `bloch-pos` `093909a2…`,
       manifest `7eef82a7…`, carryover `4d1e2738…`), `INSTALL.md`, `ONBOARDING.md`, the kit and
       `check-operator-bundle.sh`, all listed in `CONTENTS.sha256`.
-- [ ] Recommended: `--artifacts DIR` embeds the Linux binaries after checking them against the pins, so the operator fetches nothing.
+- [ ] `--artifacts DIR` embeds the Linux binaries after checking them against the pins, so the operator fetches nothing. Without it, `INSTALL.md` step 2 sends the operator to "the place the coordinator gives you", which does not exist yet.
 - [ ] Package from a clean checkout of the current kit. `package` refuses local changes, the old producer `7c1cc62b…`, v2.1's follower `c18752fd…` and producer `fb0d5313…`, and pins that disagree with `install-attestor.sh`. Do not use `~/worktrees/attestor-custody-20261030`.
 - [ ] What to send each operator: `OWNER-SEND-LIST.md`.
 
@@ -159,8 +167,10 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh release-owner-copy -
 
 - [ ] Keep `PACKAGES.sha256`, `CUSTODY-LEDGER.tsv` and a table: index → operator → host → endpoint.
       None of these is secret.
-- [ ] Host lost: the operator reinstalls from their own re-sealed backup (`install-attestor.sh
-      install --bundle attestor-I.operator.sealed`), typing their own passphrase.
+- [ ] Host lost: the operator reinstalls from their own re-sealed backup (`INSTALL.md` step 12:
+      `install-attestor.sh install --bundle attestor-I.operator.sealed`), typing their own passphrase.
+      They need the bundle's `kit/` and `artifacts/` again; if they lost those, send a package
+      without a key (an owner decision: how and from where).
 - [ ] A bundle **and** its passphrase compromised: `sudo touch /etc/bloch-l2-attestor/PAUSE` on that
       host and plan the set-rotation hard fork before a second key is at risk.
 
