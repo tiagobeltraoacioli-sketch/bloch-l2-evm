@@ -311,6 +311,39 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(next(c['level'] for c in r.checks if c['check'] == 'l1_finality'), 'CRIT')
 
 
+class StoredSideBlocks(unittest.TestCase):
+    """Finding for l1_stuck_check.py and l2_monitor --l1-stuck-node (agent 70): `has_ref_head` is bool(getblockbyid),
+    so a stuck node that has stored the reference head as a block it does not follow (`finality: not_canonical`,
+    engine.rs block_reply) counts as having it, the `missing` clock stops, and the node never reaches CRIT.
+    Synthetic: no recording kept the `finality` field."""
+
+    def test_l1_stuck_check_counts_a_stored_side_block_as_known(self):
+        rd = next(r for r in fixture('p1noq')['rounds'] if r['tag'] == 'e37')
+
+        def rpc(u, method, params, timeout):
+            if method == 'getchaininfo':
+                return rd['getchaininfo'][name_of(u)]
+            return {'block_id': params[0], 'finality': 'not_canonical'}
+        original = l1_stuck_check.rpc
+        l1_stuck_check.rpc = rpc
+        try:
+            s = l1_stuck_check.sample({'name': 'n9', 'rpc': url('n9'), 'metrics': None}, [url('n0')], 1.0)
+        finally:
+            l1_stuck_check.rpc = original
+        self.assertIs(s['has_ref_head'], True)  # agent 70's script: "reference head known"
+
+    def test_l1_monitor_does_not(self):
+        rd = next(r for r in fixture('p1noq')['rounds'] if r['tag'] == 'e37')
+        cfg, state = m.prepare(config(['n0', 'n9'])), {}
+
+        def call(u, method, params):
+            if method == 'getchaininfo':
+                return rd['getchaininfo'][name_of(u)]
+            return {'block_id': params[0], 'finality': 'not_canonical'}
+        r = m.run_once(cfg, call, fetch_for(rd), state, now=rd['now'])
+        self.assertIn('reference head NOT known', next(c['message'] for c in r.checks if c['check'] == 'l1_stuck[n9]'))
+
+
 class Config(unittest.TestCase):
     def test_settler_config_file_is_read_for_rpc_urls_and_quorum(self):
         with tempfile.TemporaryDirectory() as d:
