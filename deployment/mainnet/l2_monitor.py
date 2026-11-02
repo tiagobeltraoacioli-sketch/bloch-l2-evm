@@ -147,6 +147,8 @@ _COMMON: Dict[str, Any] = {
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
     # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
     'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
+    'mem_avail_pct_warn': 15.0, 'mem_avail_pct_crit': 7.0, 'swap_used_pct_warn': 50.0,
+    'report_age_warn': 900.0, 'l1_stall_warn_s': 600.0, 'l1_stall_crit_s': 1800.0,
     'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
     # --l1-stuck-node: docs/L1-STUCK-NODE-RUNBOOK.md. Epochs are finalized epochs gained by the reference.
     'stuck_sustain_epochs': 3, 'stuck_parked_min': 32, 'stuck_min_samples': 3, 'stuck_max_gap_epochs': 2,
@@ -1108,6 +1110,84 @@ def check_event_logs(specs: List[str], p: Dict[str, Any], now: float, r: Report)
         grade_events(name, parse_events(text, now - window), p, window, r)
 
 
+def check_l1_progress(path: Optional[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """--l1-progress-state: a stalled L1 keeps a constant finality lag, so `l1_finality_lag` stays quiet. This compares
+    the best height with the previous run's and grades how long it has not moved."""
+    if not path or 'l1_height' not in r.facts:
+        return
+    height = int(r.facts['l1_height'])
+    try:
+        st = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        st = {}
+    if st.get('height') != height:
+        st = {'height': height, 'since': now}
+    try:
+        tmp = Path(path).with_suffix('.tmp')
+        tmp.write_text(json.dumps(st))
+        os.replace(tmp, path)
+    except OSError as e:
+        r.add('l1_progress', WARN, f'cannot keep {path}: {e}')
+        return
+    still = now - float(st['since'])
+    r.graded('l1_progress', still, p['l1_stall_warn_s'], p['l1_stall_crit_s'], f'L1 height {height} for {still:.0f} s')
+
+
+def check_memory(enabled: bool, p: Dict[str, Any], r: Report, path: str = '/proc/meminfo') -> None:
+    """Host memory: the OOMs of 2026-10-12 stalled finality before any chain check moved. MemAvailable, and swap in use."""
+    if not enabled:
+        return
+    try:
+        info = {}
+        for line in Path(path).read_text().splitlines():
+            k, _, v = line.partition(':')
+            info[k.strip()] = int(v.split()[0])
+        total, avail = info['MemTotal'], info['MemAvailable']
+    except (OSError, ValueError, KeyError, IndexError) as e:
+        r.add('memory', UNKNOWN, f'{path}: {type(e).__name__}: {e}')
+        return
+    pct = 100.0 * avail / total
+    level = CRIT if pct < p['mem_avail_pct_crit'] else WARN if pct < p['mem_avail_pct_warn'] else OK
+    r.add('memory', level, f'{avail / 2**20:.1f} GiB available of {total / 2**20:.1f} GiB ({pct:.1f}%)', value=round(pct, 2))
+    swap_total = info.get('SwapTotal', 0)
+    if swap_total:
+        used = 100.0 * (swap_total - info.get('SwapFree', swap_total)) / swap_total
+        r.add('swap', WARN if used >= p['swap_used_pct_warn'] else OK, f'{used:.0f}% of swap in use', value=round(used, 1))
+
+
+def check_reports(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """NAME=PATH[:MAX_AGE_S]: the --json report of another monitor (dex-monitor.mjs, a second l2_monitor), written by its
+    unit. Its WARN/CRIT checks go out through this monitor's alert path with one deduplication, and a report older than
+    MAX_AGE_S (CRIT at 3x) means that monitor is dead or hung, which it cannot report itself."""
+    for spec in specs:
+        name, _, rest = spec.partition('=')
+        path, _, limit = rest.partition(':')
+        warn = float(limit) if limit else p['report_age_warn']
+        try:
+            mtime = os.stat(path).st_mtime
+            doc = json.loads(Path(path).read_text())
+            checks = doc['checks']
+            if not isinstance(checks, list):
+                raise ValueError('checks is not a list')
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            r.add(f'report[{name}]', CRIT, f'{path}: {type(e).__name__}: {e}')
+            continue
+        r.graded(f'report_age[{name}]', max(0.0, now - mtime), warn, warn * 3, f'{path} written {now - mtime:.0f} s ago')
+        bad = 0
+        for c in checks:
+            if not isinstance(c, dict):
+                continue
+            level = LEVEL_CODES.get(str(c.get('status') or c.get('level') or '').upper())
+            if level is None:
+                level = c.get('level') if c.get('level') in LEVEL_NAMES else UNKNOWN
+            if level != OK:
+                bad += 1
+                r.add(f'{name}/{c.get("name") or c.get("check")}', level, str(c.get('detail') or c.get('message') or '')[:300])
+        top = LEVEL_CODES.get(str(doc.get('level') or doc.get('status') or '').upper(), OK)
+        if not bad:
+            r.add(f'report[{name}]', top, f'{len(checks)} checks, none failing')
+
+
 def check_files(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
     for spec in specs:
         name, _, rest = spec.partition('=')
@@ -1140,10 +1220,13 @@ def check_guardian_health(specs: List[str], p: Dict[str, Any], now: float, r: Re
         r.graded(f'guardian_age[{name}]', max(0.0, now - written), warn, crit, f'{path} written {now - written:.0f} s ago')
         problems = doc.get('problems')
         ids = ', '.join(sorted(str(k) for k in problems)) if isinstance(problems, dict) else ''
+        findings = doc.get('findings')
+        open_ = ', '.join(sorted(str(k) for k in findings)) if isinstance(findings, dict) else ''
         if doc.get('healthy') is True:
             r.add(f'guardian[{name}]', OK, 'healthy')
         else:
-            r.add(f'guardian[{name}]', CRIT, f'unhealthy: {ids or "no problem listed"}')
+            r.add(f'guardian[{name}]', CRIT, 'unhealthy: ' + '; '.join(x for x in (ids, open_ and f'open hard findings: {open_}')
+                                                                          if x) or 'unhealthy: no problem listed')
         verified = doc.get('verified_t')
         if not isinstance(verified, (int, float)) or isinstance(verified, bool):
             r.add(f'guardian_verified[{name}]', CRIT, 'no round has verified the bridge yet')
@@ -1182,15 +1265,29 @@ def alert_text(profile: str, r: Report, min_level: int) -> str:
     return '\n'.join(lines)[:3800]
 
 
-def decide_alert(r: Report, state: Dict[str, Any], now: float, realert: float, min_level: int) -> Optional[str]:
+def decide_alert(r: Report, state: Dict[str, Any], now: float, realert: float, min_level: int,
+                 recover_runs: int = 1) -> Optional[str]:
     """Returns 'raise', 'recover' or None. Alerts on a new or worse check, a recovery, or every `realert`
-    seconds while something is still at or above min_level."""
+    seconds while something is still at or above min_level. A check that cleared stays in `bad` until it has been clean
+    for `recover_runs` runs, so a flapping check is one alert, not one per run."""
     current = {c['check']: c['code'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
     previous = {k: LEVEL_CODES[v] for k, v in (state.get('bad') or {}).items()}
+    clean = state.setdefault('clean', {})
+    for k in list(previous):
+        if k in current:
+            clean.pop(k, None)
+        else:
+            clean[k] = int(clean.get(k, 0)) + 1
+    for k in [k for k in clean if k not in previous]:
+        del clean[k]
+    held = {k: previous[k] for k in previous if k not in current and clean.get(k, 0) < recover_runs}
+    state['held'] = held
     if current:
         worse = any(SEVERITY[c] > SEVERITY[previous.get(k, OK)] for k, c in current.items())
         if worse or now - float(state.get('sent_at', 0)) >= realert:
             return 'raise'
+        return None
+    if held:
         return None
     return 'recover' if previous else None
 
@@ -1208,6 +1305,18 @@ def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout:
         else:
             urllib.request.urlopen(urllib.request.Request(hook, data=body, headers=headers), timeout=timeout).read()
             sent.append('webhook')
+    command = cfg.get('alert_command')
+    if isinstance(command, list) and command and all(configured(str(a)) for a in command):
+        argv = [str(a).replace('{event}', str(payload.get('event'))).replace('{status}', str(payload.get('status')))
+                .replace('{text}', text) for a in command]
+        if dry_run:
+            sent.append(f'command (dry run) {argv[0]}')
+        else:
+            done = subprocess.run(argv, input=json.dumps({'text': text, **payload}, default=str), capture_output=True,
+                                  text=True, timeout=timeout)
+            if done.returncode:
+                raise RuntimeError(f'alert_command exit {done.returncode}: {done.stderr.strip()[-200:]}')
+            sent.append('command')
     tg = cfg.get('telegram') or {}
     if configured(tg.get('bot_token_file')) and configured(str(tg.get('chat_id', ''))):
         if dry_run:
@@ -1222,6 +1331,26 @@ def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout:
     return sent
 
 
+def write_alert_state(path: Path, doc: Dict[str, Any]) -> None:
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(doc))
+    os.replace(tmp, path)
+
+
+def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report) -> None:
+    """`heartbeat_url`: fetched every run, whatever the status. A dead-man service (healthchecks.io style, or the
+    operator's own) alerts when the pings stop: a dead or hung monitor, a stopped timer or a host down. Nothing here
+    can report its own death."""
+    url = cfg.get('heartbeat_url')
+    if not configured(url) or args.alert_dry_run:
+        return
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, headers={'user-agent': 'bloch-l2-monitor'}),
+                               timeout=args.timeout).read()
+    except Exception as e:  # noqa: BLE001 - a missed ping is the dead-man's to alert on
+        r.add('heartbeat', WARN, f'heartbeat_url not reached: {e}')
+
+
 def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_alert) -> Optional[str]:
     if not args.alert_config:
         return None
@@ -1232,8 +1361,14 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
         state = {}
-    decision = decide_alert(r, state, now, float(cfg.get('realert_seconds', 3600)), min_level)
+    heartbeat(cfg, args, r)
+    decision = decide_alert(r, state, now, float(cfg.get('realert_seconds', 3600)), min_level,
+                            int(cfg.get('recover_runs', 3)))
     if decision is None:
+        if not args.alert_dry_run:  # the clean-run counters must survive, or a flapping check never settles
+            bad = {c['check']: c['level'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
+            bad.update({k: LEVEL_NAMES[v] for k, v in state.get('held', {}).items()})
+            write_alert_state(state_path, {'bad': bad, 'sent_at': state.get('sent_at', 0), 'clean': state.get('clean', {})})
         return None
     text = alert_text(args.profile, r, min_level) if decision == 'raise' else \
         f'BLOCH L2 {args.profile}: RECOVERED, status {LEVEL_NAMES[r.status]} ({utc(now)})'
@@ -1248,9 +1383,9 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         r.add('alert_delivery', WARN, 'alert due but no target configured (webhook_url / telegram are TBD-owner)')
     if not args.alert_dry_run:
         bad = {c['check']: c['level'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
-        tmp = state_path.with_suffix('.tmp')
-        tmp.write_text(json.dumps({'bad': bad, 'sent_at': now if sent else state.get('sent_at', 0)}))
-        os.replace(tmp, state_path)
+        bad.update({k: LEVEL_NAMES[v] for k, v in state.get('held', {}).items()})
+        write_alert_state(state_path, {'bad': bad, 'sent_at': now if sent else state.get('sent_at', 0),
+                                       'clean': state.get('clean', {}) if decision != 'recover' else {}})
     r.facts['alert'] = {'decision': decision, 'sent': sent}
     return decision
 
@@ -1294,6 +1429,9 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_units(args.unit or [], p, now, run_cmd, r)
     check_event_logs(args.event_log or [], p, now, r)
     check_files(args.file or [], p, now, r)
+    check_reports(args.report or [], p, now, r)
+    check_memory(args.memory, p, r)
+    check_l1_progress(args.l1_progress_state, p, now, r)
     check_guardian_health(args.guardian_health or [], p, now, r)
     check_binaries(args.binary or [], r)
     return r
@@ -1316,6 +1454,10 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--file', action='append', help='NAME=PATH[:MAX_AGE_S] heartbeat file to age-check')
     a.add_argument('--da-script', action='append', help='[NAME=]HEX funding script hash of the DA fee key (getutxos)')
     a.add_argument('--disk', action='append', help='[NAME=]PATH of a filesystem to check for free space')
+    a.add_argument('--report', action='append',
+                   help='NAME=PATH[:MAX_AGE_S] --json report of another monitor (dex-monitor.mjs) to alert on and age-check')
+    a.add_argument('--l1-progress-state', help='state file: alert when the best L1 height stops moving')
+    a.add_argument('--memory', action='store_true', help='check MemAvailable and swap of this host (/proc/meminfo)')
     a.add_argument('--guardian-health', action='append',
                    help='NAME=PATH[:MAX_AGE_S] health_file of a bridge guardian (WARN above MAX_AGE_S, CRIT above 3x)')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')

@@ -647,7 +647,7 @@ class MonitorTests(unittest.TestCase):
         for b in w['l2'].values():
             b['latest'] = block(101, 50 * 60)
         with tempfile.TemporaryDirectory() as d:
-            args = self.alert_args(d, {'webhook_url': 'https://hook', 'realert_seconds': 600})
+            args = self.alert_args(d, {'webhook_url': 'https://hook', 'realert_seconds': 600, 'recover_runs': 1})
             bad, _ = run(w)
             self.assertEqual(m.handle_alerts(args, bad, NOW, sender), 'raise')
             self.assertIn('CRIT l2_head_age', sent[-1][1])
@@ -657,6 +657,98 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(m.handle_alerts(args, good, NOW + 800, sender), 'recover')
             self.assertIsNone(m.handle_alerts(args, good, NOW + 900, sender))
         self.assertEqual([e for e, _ in sent], ['raise', 'raise', 'recover'])
+
+    def test_flapping_check_is_one_alert_and_recovery_waits(self):
+        sent = []
+
+        def sender(cfg, text, payload, timeout, dry):
+            sent.append(payload['event'])
+            return ['command']
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            args = self.alert_args(d, {'alert_command': ['/bin/true'], 'realert_seconds': 3600})
+            bad, _ = run(w)
+            for i in range(10):  # bad, good, bad, good ... once a minute
+                r = bad if i % 2 == 0 else run(healthy())[0]
+                m.handle_alerts(args, r, NOW + 60 * i, sender)
+            self.assertEqual(sent, ['raise'])
+            for i in range(10, 13):  # three clean runs in a row: one recovery
+                m.handle_alerts(args, run(healthy())[0], NOW + 60 * i, sender)
+        self.assertEqual(sent, ['raise', 'recover'])
+
+    def test_alert_command_gets_text_and_payload(self):
+        w = healthy()
+        for b in w['l2'].values():
+            b['latest'] = block(101, 50 * 60)
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'sink')
+            args = self.alert_args(d, {'alert_command': ['/bin/sh', '-c', f'cat > {out}; echo "$0" >> {out}', '{event}:{status}']})
+            r, _ = run(w)
+            self.assertEqual(m.handle_alerts(args, r, NOW), 'raise')
+            body = out.read_text()
+            self.assertIn('CRIT l2_head_age', body)
+            self.assertIn('raise:CRIT', body)
+            failing = self.alert_args(d, {'alert_command': ['/bin/false'], 'state_file': str(Path(d, 's2'))})
+            r2, _ = run(w)
+            m.handle_alerts(failing, r2, NOW)
+        self.assertEqual(level(r2, 'alert_delivery'), 'WARN')
+
+    def test_report_of_another_monitor_and_its_age(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = Path(d, 'dex.json')
+            rep.write_text(json.dumps({'level': 'CRIT', 'checks': [
+                {'name': 'keeper_budget', 'level': 2, 'status': 'CRIT', 'detail': 'count used up'},
+                {'name': 'closed_by_excess[WBLCH/bUSDC]', 'level': 1, 'status': 'WARN', 'detail': 'soft'},
+                {'name': 'rpc_identity', 'level': 0, 'status': 'OK', 'detail': ''}]}))
+            os.utime(rep, (NOW - 60, NOW - 60))
+            r = m.Report()
+            m.check_reports([f'dex={rep}:900'], dict(m.PROFILES['mainnet']), NOW, r)
+            self.assertEqual(level(r, 'dex/keeper_budget'), 'CRIT')
+            self.assertEqual(level(r, 'dex/closed_by_excess[WBLCH/bUSDC]'), 'WARN')
+            self.assertEqual(level(r, 'report_age[dex]'), 'OK')
+            os.utime(rep, (NOW - 3000, NOW - 3000))  # the DEX monitor died: its last report goes stale
+            r = m.Report()
+            m.check_reports([f'dex={rep}:900'], dict(m.PROFILES['mainnet']), NOW, r)
+            self.assertEqual(level(r, 'report_age[dex]'), 'CRIT')
+            r = m.Report()
+            m.check_reports([f'dex={Path(d, "missing.json")}'], dict(m.PROFILES['mainnet']), NOW, r)
+            self.assertEqual(level(r, 'report[dex]'), 'CRIT')
+
+    def test_l1_stall_is_seen_although_the_lag_is_constant(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = str(Path(d, 'l1.json'))
+            p = dict(m.PROFILES['mainnet'])
+            for dt, want in ((0, 'OK'), (700, 'WARN'), (2000, 'CRIT')):
+                r = m.Report()
+                r.facts['l1_height'] = 5000
+                m.check_l1_progress(st, p, NOW + dt, r)
+                self.assertEqual(level(r, 'l1_progress'), want, dt)
+            r = m.Report()
+            r.facts['l1_height'] = 5001
+            m.check_l1_progress(st, p, NOW + 2100, r)
+            self.assertEqual(level(r, 'l1_progress'), 'OK')
+
+    def test_memory_levels(self):
+        with tempfile.TemporaryDirectory() as d:
+            mi = Path(d, 'meminfo')
+            for avail, want in ((60, 'OK'), (12, 'WARN'), (5, 'CRIT')):
+                mi.write_text(f'MemTotal: {100 * 2**20} kB\nMemAvailable: {avail * 2**20} kB\nSwapTotal: 0 kB\n')
+                r = m.Report()
+                m.check_memory(True, dict(m.PROFILES['mainnet']), r, str(mi))
+                self.assertEqual(level(r, 'memory'), want, avail)
+
+    def test_guardian_open_finding_is_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            h = Path(d, 'h.json')
+            h.write_text(json.dumps({'t': NOW, 'healthy': False, 'verified_t': NOW, 'problems': {},
+                                     'findings': {'mint:0xfe': {'severity': 'hard'}}}))
+            r = m.Report()
+            m.check_guardian_health([f'busdc={h}'], dict(m.PROFILES['mainnet']), NOW, r)
+            c = next(c for c in r.checks if c['check'] == 'guardian[busdc]')
+        self.assertEqual(c['level'], 'CRIT')
+        self.assertIn('mint:0xfe', c['message'])
 
     def test_placeholder_targets_send_nothing_and_say_so(self):
         w = healthy()
