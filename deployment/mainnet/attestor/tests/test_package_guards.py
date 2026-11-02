@@ -96,6 +96,10 @@ class Guards(unittest.TestCase):
         old = self.tmp / 'old.pins'
         old.write_text(pins.replace(produce, OLD_PRODUCE + produce[8:]))
         self.assertIn('old producer', self.package(old, KIT).stderr)
+        for v21 in ('fb0d5313', 'c18752fd'):
+            stale = self.tmp / f'{v21}.pins'
+            stale.write_text(pins.replace(produce, v21 + produce[8:]))
+            self.assertIn("v2.1's", self.package(stale, KIT).stderr)
         other = self.tmp / 'other.pins'
         other.write_text(pins.replace(produce, 'ab' * 32))
         self.assertIn('disagree', self.package(other, KIT).stderr)
@@ -115,7 +119,8 @@ class Guards(unittest.TestCase):
         (bundle / 'IDENTITY.txt').write_text('attestor_index 0\nset_hash 1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b\n')
         pins = (KIT / 'keykit/operator-pins-v2.sha256').read_text()
         produce = re.search(r'^(\w+)  bloch-l2-produce-dev$', pins, re.M).group(1)
-        for text, expect in ((pins.replace(produce, OLD_PRODUCE + produce[8:]), 'old producer'), (pins.replace(produce, 'ab' * 32), 'disagree')):
+        for text, expect in ((pins.replace(produce, OLD_PRODUCE + produce[8:]), 'old producer'), (pins.replace(produce, 'fb0d5313' + produce[8:]), "v2.1's"),
+                             (pins.replace(produce, 'ab' * 32), 'disagree')):
             (bundle / 'ARTIFACTS.sha256').write_text(text)
             (bundle / 'CONTENTS.sha256').write_text('')
             done = subprocess.run(['bash', str(bundle / 'check-operator-bundle.sh')], capture_output=True, text=True, env={**os.environ})

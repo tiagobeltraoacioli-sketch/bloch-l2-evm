@@ -71,6 +71,9 @@ ok "kit/sigfeed.py $(sha256 kit/sigfeed.py)"
 if grep -q '^7c1cc62b' ARTIFACTS.sha256; then
   die "this bundle pins the old producer 7c1cc62b…, which halts on the first settled deposit. Ask the coordinator for a new bundle"
 fi
+if grep -qE '^(fb0d5313|c18752fd)' ARTIFACTS.sha256; then
+  die "this bundle pins v2.1's producer fb0d5313… or follower c18752fd…, which the next build replaces. Ask the coordinator for a new bundle"
+fi
 if [ $REHEARSAL = 0 ]; then
   for pair in bloch-pos:V2_BLOCH_POS_SHA256 bloch-l2-native-follower:V2_FOLLOWER_SHA256 bloch-l2-produce-dev:V2_PRODUCE_SHA256; do
     want=$(sed -n "s/^${pair#*:}=//p" kit/install-attestor.sh)

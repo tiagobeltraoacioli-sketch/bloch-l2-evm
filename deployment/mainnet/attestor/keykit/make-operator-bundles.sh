@@ -265,6 +265,7 @@ PY
   pin() { awk -v n="$1" '$2==n {print $1}' "$PINS"; }
   # A package fixes what the operator installs for good, so it must come from the tree it claims to be.
   grep -q '^7c1cc62b' "$PINS" && die "$PINS pins the old producer 7c1cc62b…: it halts on the first settled deposit. Package from the current kit"
+  grep -qE '^(fb0d5313|c18752fd)' "$PINS" && die "$PINS pins v2.1's producer fb0d5313… or follower c18752fd…: superseded by the next build. Package from the current kit"
   [ "$(sha256 "$KIT/sigfeed.py")" = "$(cut -d' ' -f1 "$KIT/sigfeed.sha256")" ] || die "$KIT/sigfeed.py does not match sigfeed.sha256"
   if [ "$EXPECT" = "$PINNED_SET_HASH" ]; then
     for pair in bloch-pos:V2_BLOCH_POS_SHA256 bloch-l2-native-follower:V2_FOLLOWER_SHA256 bloch-l2-produce-dev:V2_PRODUCE_SHA256; do
