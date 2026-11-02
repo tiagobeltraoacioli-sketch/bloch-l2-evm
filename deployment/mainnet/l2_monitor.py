@@ -124,6 +124,8 @@ _COMMON: Dict[str, Any] = {
     'l1_finality_epochs_warn': 4, 'l1_finality_epochs_crit': 8,
     'follower_epoch_lag_expected': 3, 'follower_epoch_lag_warn': 5, 'follower_epoch_lag_crit': 8,
     'inbox_backlog_warn': 50, 'inbox_backlog_crit': 500,
+    # --max-idle-seconds: how long deposits may wait with no consumption. Two proofs after an idle stretch.
+    'deposit_wait_warn': 45 * 60, 'deposit_wait_crit': 90 * 60,
     'da_backlog_warn': 3, 'da_backlog_crit': 10,
     'file_age_warn': 120, 'file_age_crit': 600,
     'guardian_age_warn': 300,
@@ -434,7 +436,8 @@ def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str,
     return with_l2
 
 
-def check_escrow_and_backlog(nodes: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+def check_escrow_and_backlog(nodes: List[Dict[str, Any]], p: Dict[str, Any], r: Report, now: float = 0.0,
+                             idle_state: Optional[str] = None) -> None:
     if not nodes:
         return
     head = max(nodes, key=lambda n: n['height'])['l2']
@@ -477,6 +480,8 @@ def check_escrow_and_backlog(nodes: List[Dict[str, Any]], p: Dict[str, Any], r: 
     backlog = int(inbox.get('count', 0)) - int(inbox.get('consumed', 0))
     r.graded('inbox_backlog', backlog, p['inbox_backlog_warn'], p['inbox_backlog_crit'],
              f'{backlog} L1 deposits not yet consumed by the L2')
+    if idle_state:
+        check_deposit_wait(backlog, int(inbox.get('consumed', 0)), idle_state, p, now, r)
     da = head.get('data_availability') or []
     r.graded('da_backlog', len(da), p['da_backlog_warn'], p['da_backlog_crit'],
              f'{len(da)} DA records awaiting their settlement')
@@ -1204,10 +1209,40 @@ def compiled_gates(args: argparse.Namespace) -> Dict[str, Any]:
     return V2_COMPILED_GATES if args.profile == 'mainnet' else {}
 
 
+def idle_thresholds(p: Dict[str, Any], max_idle: int) -> Dict[str, Any]:
+    """A settler with skip_idle_blocks may rightly settle nothing for max_idle seconds. Stopped work is then found by
+    unit[*], events[*] and deposit_wait, and by these checks only after the interval."""
+    moved = {f'{name}_age_{level}': p[f'{name}_age_{level}'] + max_idle
+             for name in ('head', 'settlement', 'finalized') for level in ('warn', 'crit')}
+    return {**p, **moved}
+
+
+def check_deposit_wait(backlog: int, consumed: int, path: str, p: Dict[str, Any], now: float, r: 'Report') -> None:
+    """Time since deposits began to wait with no consumption, kept in a state file: L1 reports only counts. A deposit that
+    arrives while idle is the one case settlement_age no longer covers, and a stopped settler is otherwise silent."""
+    state_path = Path(path)
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}
+    since = state.get('since') if backlog and state.get('consumed') == consumed else None
+    since = now if backlog and since is None else since
+    tmp = state_path.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'consumed': consumed, 'since': since}))
+    os.replace(tmp, state_path)
+    age = now - since if since is not None else 0.0
+    r.graded('deposit_wait', age, p['deposit_wait_warn'], p['deposit_wait_crit'],
+             f'{backlog} L1 deposits waiting, none consumed for {minutes(age)}' if backlog else 'no L1 deposit waiting')
+
+
 def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = None,
         run_cmd: Runner = subprocess_runner, fetch: Optional[Fetcher] = None) -> Report:
     now = time.time() if now is None else now
     p = thresholds(args)
+    if args.max_idle_seconds:
+        if not args.backlog_state:
+            raise SystemExit('--max-idle-seconds needs --backlog-state: without it a waiting deposit raises no alert')
+        p = idle_thresholds(p, args.max_idle_seconds)
     client = Client(transport)
     r = Report()
     r.facts.update({'profile': args.profile, 'phase': args.phase, 'checked_at': int(now)})
@@ -1215,7 +1250,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     views = check_l2(client, backends, p, args.phase, now, r)
     l1_up = check_l1(client, args.l1_rpc or [], p, r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
-    check_escrow_and_backlog(with_l2, p, r)
+    check_escrow_and_backlog(with_l2, p, r, now, args.backlog_state if args.max_idle_seconds else None)
     check_followers(client, views, args.follower_status or [], l1_up, p, now, r)
     check_da_balance(client, args.da_script or [], l1_up, p, r)
     check_disks(args.disk or [], p, r)
@@ -1248,6 +1283,9 @@ def parse(argv: List[str]) -> argparse.Namespace:
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')
     a.add_argument('--build-json', help='build.json of the L2 build (default: the v2 pins compiled in)')
     a.add_argument('--set', action='append', help='override a threshold, KEY=VALUE')
+    a.add_argument('--max-idle-seconds', type=int, default=0,
+                   help="the settler's max_idle_seconds when skip_idle_blocks is on; moves the age checks by that much")
+    a.add_argument('--backlog-state', help='state file of deposit_wait; required with --max-idle-seconds')
     a.add_argument('--alert-config', help='JSON: webhook_url, telegram{bot_token_file,chat_id}, min_level, ...')
     a.add_argument('--alert-dry-run', action='store_true', help='decide and print alerts, send nothing')
     a.add_argument('--timeout', type=float, default=8.0)

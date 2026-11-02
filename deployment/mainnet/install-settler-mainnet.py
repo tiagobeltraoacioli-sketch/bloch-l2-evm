@@ -169,6 +169,9 @@ def configure(args):
         'idle_seconds': 30, 'max_consecutive_failures': 8,
         'user_transactions': '--user-transactions' in args, 'txpool_dir': str(STATE / 'txpool'),
         'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128, 'min_tip_wei': 100_000_000,
+        **({'skip_idle_blocks': True, 'max_idle_seconds': int(option(args, '--max-idle-seconds', '86400')),
+            'min_block_interval_seconds': int(option(args, '--min-block-interval', '0'))}
+           if '--skip-idle-blocks' in args else {}),
         'local_prove_max_instructions': LOCAL_PROVE_MAX_INSTRUCTIONS,
         'da': {'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
                'genesis': str(rel / 'mainnet.manifest'), 'funding_pubkey': str(PUBLIC / 'da.pubkey.hex'),
