@@ -28,7 +28,7 @@ class Installer(unittest.TestCase):
         self.etc = root / 'etc'
         self.etc.mkdir()
         (root / 'public').mkdir()
-        for name in ('l2-config.bin', 'da.pubkey.hex'):
+        for name in ('l2-config.bin', 'l2-config.next.bin', 'da.pubkey.hex'):
             (root / 'public' / name).write_text('x')
         rel = root / 'rel'
         rel.mkdir()
@@ -68,6 +68,25 @@ class Installer(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'dry run failed'):
                 m.configure([])
         self.assertFalse((self.etc / 'config.json').exists())
+
+    def test_configure_names_both_programs_with_this_kits_host_flags(self):
+        import json
+        with mock.patch.object(m.subprocess, 'run', return_value=Done()):
+            m.configure([])
+        config = json.loads((self.etc / 'config.json').read_text())
+        self.assertEqual(config['prover_args'], ['--mainnet-v1'])
+        self.assertEqual(config['next_program']['witness'], 'sparse')
+        self.assertEqual(config['next_program']['prover_args'], ['--mainnet', '--sparse'])
+        self.assertTrue(config['next_program']['guest'].endswith('/settlement_v3_mainnet_sparse'))
+        self.assertTrue(config['next_program']['l2_config'].endswith('/l2-config.next.bin'))
+
+    def test_the_sparse_guest_pin_is_the_settlers(self):
+        spec = importlib.util.spec_from_file_location('settler_v3', HERE.parent / 'devnet' / 'settler_v3.py')
+        settler = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, str(HERE.parent / 'devnet'))
+        spec.loader.exec_module(settler)
+        self.assertEqual(settler.MAINNET_NEXT_SPARSE['guest_sha256'], m.PINS['settlement_v3_mainnet_sparse'])
+        self.assertEqual(settler.MAINNET['guest_sha256'], m.PINS['settlement_v3_mainnet'])
 
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)

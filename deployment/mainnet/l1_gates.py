@@ -14,7 +14,9 @@ import json
 import re
 import sys
 
-CONST = re.compile(r'^pub const (HF[0-9]+_[A-Z0-9_]+_EPOCH|[A-Z0-9_]+_ACTIVATION_EPOCH): u64 =\s*(.+?);\s*$', re.M)
+# L2_*_EPOCH: the program swap and its rollback (L2_NEXT_PROGRAM_EPOCH, L2_PROGRAM_ROLLBACK_EPOCH), which the
+# follower and the producer also run.
+CONST = re.compile(r'^pub const (HF[0-9]+_[A-Z0-9_]+_EPOCH|L2_[A-Z0-9_]+_EPOCH|[A-Z0-9_]+_ACTIVATION_EPOCH): u64 =\s*(.+?);\s*$', re.M)
 SLICE = re.compile(r'^pub const ([A-Z0-9_]+_RECOVERY_EPOCHS): &\[u64\] = &\[(.*?)\];', re.M)
 
 

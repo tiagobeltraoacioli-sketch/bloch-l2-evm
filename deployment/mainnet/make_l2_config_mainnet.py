@@ -62,14 +62,16 @@ def from_pins():
 def build(identity, genesis, native_policy=None):
     """The config from the binaries' own answers, refused unless every field equals the pin."""
     if identity.get('program') != PINS['program']:
-        raise SystemExit('identity is not the settlement_v3_mainnet program (run the host with --mainnet)')
+        raise SystemExit('identity is not the settlement_v3_mainnet program (run the host with --mainnet-v1, or --mainnet on a host older than the program swap)')
     if identity.get('chain_id') != PINS['chain_id']:
         raise SystemExit(f'identity chain id {identity.get("chain_id")} is not 700770')
     if identity.get('proof_policy_v3') is None:
         raise SystemExit('identity lacks proof_policy_v3: build the host with --features source-settlement')
     for key in IDENTITY_FIELDS + ('proof_policy_v3',):
         if h32(identity.get(key), key).hex() != PINS[key]:
-            raise SystemExit(f'identity {key} differs from the mainnet pin')
+            raise SystemExit(f'identity {key} differs from the mainnet pin'
+                             + (' (a program-swap host gives the next configuration under --mainnet: use --mainnet-v1)'
+                                if key == 'configuration' else ''))
     if native_policy is not None and h32(native_policy, '--native-policy').hex() != PINS['proof_policy_v3']:
         raise SystemExit('the native build disagrees on the V3 proof policy')
     if genesis.get('number') != 0:

@@ -73,6 +73,18 @@ class RemoteProverMainnet(unittest.TestCase):
         argv = (self.root / 'argv').read_text().split()
         self.assertEqual(argv[:4], ['--mainnet', 'prove-groth16', 'native-artifact', str(self.guest)])
 
+    def test_a_sparse_config_adds_the_sparse_flag_and_only_on_the_next_rules(self):
+        self.config['witness'] = 'sparse'
+        self.write()
+        done = self.run_prover('--config', str(self.root / 'config.json'))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / 'argv').read_text().split()[:3], ['--mainnet', '--sparse', 'prove-groth16'])
+        for bad in ({'mainnet_flag': '--mainnet-v1'}, {'mainnet': False}, {'witness': 'other'}):
+            with self.subTest(bad=bad):
+                self.config.update({'mainnet': True, 'mainnet_flag': '--mainnet', 'witness': 'sparse', **bad})
+                self.write()
+                self.assertEqual(self.run_prover('--config', str(self.root / 'config.json')).returncode, 70)
+
     def test_prover_env_reaches_the_host_and_the_list_is_closed(self):
         self.prover.write_text(self.prover.read_text() + 'echo "$SP1_WORKER_NUM_CORE_WORKERS" > "$HOME/seen"\n')
         self.config['prover_sha256'] = sha256(self.prover)
@@ -176,6 +188,23 @@ class InstallPlan(unittest.TestCase):
             with mock.patch.object(install, 'digest', pretend):
                 with self.assertRaisesRegex(SystemExit, 'remote_prover.py is'):
                     install.install(argparse.Namespace(memory_gib=100, threads=24), here)
+
+    def test_the_next_program_is_identified_and_configured_as_the_sparse_guest(self):
+        good = dict(install.PINNED_NEXT, program='settlement_v3_mainnet_sparse')
+        install.check_identity(json.dumps(good), 'next')
+        with self.assertRaises(SystemExit):
+            install.check_identity(json.dumps(good))  # the activated pins refuse it
+        with self.assertRaises(SystemExit):
+            install.check_identity(json.dumps(dict(install.PINNED, program='settlement_v3_mainnet')), 'next')
+        config = install.prover_config(Path('/opt/r-next'), Path('/var/lib/s'), 'aa' * 32, 12, 48, program='next')
+        self.assertEqual((config['mainnet_flag'], config['witness']), ('--mainnet', 'sparse'))
+        self.assertEqual(config['guest_sha256'], install.NEXT_GUEST_SHA256)
+        self.assertTrue(config['guest'].endswith('/settlement_v3_mainnet_sparse'))
+        self.assertEqual(config['workdir'], '/var/lib/s/work', 'one work directory, so one proof at a time across both')
+        activated = install.prover_config(Path('/opt/r'), Path('/var/lib/s'), 'aa' * 32, 12, 48)
+        self.assertEqual(activated['mainnet_flag'], '--mainnet-v1', "this kit's host takes --mainnet for the next rules")
+        self.assertEqual(install.PROGRAMS['activated']['host_args'], ['--mainnet-v1'])
+        self.assertEqual(install.PROGRAMS['next']['host_args'], ['--mainnet', '--sparse'])
 
     def test_remote_prover_pin_is_the_file_in_this_tree(self):
         self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)

@@ -32,7 +32,8 @@ def block(number, age, h=None):
 
 
 def hard_forks():
-    return {name: {'activation_epoch': (m.V2_COMPILED_GATES[c] if not isinstance(m.V2_COMPILED_GATES[c], list)
+    return {name: {'activation_epoch': (None if m.V2_COMPILED_GATES[c] == 'inert'
+                                        else m.V2_COMPILED_GATES[c] if not isinstance(m.V2_COMPILED_GATES[c], list)
                                         else 7270), 'active': False}
             for name, c in m.GATE_CONSTANTS.items()} | {'hf3_lattice_emergency': {'activation_epoch': None,
                                                                                    'active': False}}
@@ -545,6 +546,19 @@ class MonitorTests(unittest.TestCase):
             bj.write_text(json.dumps({'l1_activation_epochs': {'HF1_CLAIM_FINALITY_EPOCH': 7181}}))
             r, _ = run(healthy(), '--build-json', str(bj))
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
+
+    def test_an_armed_program_swap_the_l2_build_holds_inert_is_critical(self):
+        w = healthy()
+        for node in w['l1'].values():
+            node['info']['hard_forks']['l2_next_program'] = {'activation_epoch': 10060, 'active': False}
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_NEXT_PROGRAM_EPOCH': 'inert'}}))
+            r, _ = run(w, '--build-json', str(bj))
+            self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
+            self.assertIn('l2_next_program', next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build'))
+            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_NEXT_PROGRAM_EPOCH': 10060}}))
+            self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
 
     def test_l1_without_hard_forks_warns(self):
         w = healthy()

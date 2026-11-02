@@ -96,12 +96,17 @@ GATE_CONSTANTS = {
     'hf3_kes_enforce': 'HF3_KES_ENFORCE_EPOCH',
     'hf3_slh': 'HF3_SLH_SUITE_EPOCH',
     'hf3_pq_migration': 'HF3_PQ_MIGRATION_EPOCH',
+    # The L2 program swap and its rollback (inert until a release arms them; l1_gates.py reads both).
+    'l2_next_program': 'L2_NEXT_PROGRAM_EPOCH',
+    'l2_program_rollback': 'L2_PROGRAM_ROLLBACK_EPOCH',
 }
 V2_COMPILED_GATES: Dict[str, Any] = {
     'HF1_CLAIM_FINALITY_EPOCH': 7180, 'HF1_FROZEN_FINALITY_SET_EPOCH': 7180, 'HF1_OWN_TARGET_VOTES_EPOCH': 7186,
     'HF2_SLASHING_V2_EPOCH': 7270, 'HF2_GROWTH_CAP_EPOCH': 7270, 'SIG_CANONICAL_ACTIVATION_EPOCH': 7270,
     'MLDSA_PIN_ACTIVATION_EPOCH': ['0', '7270'], 'HF3_KES_EPOCH': 7360, 'HF3_KES_ENFORCE_EPOCH': 8620,
     'HF3_SLH_SUITE_EPOCH': 7360, 'HF3_PQ_MIGRATION_EPOCH': 7360,
+    # Absent before the program-swap build, which is the same as inert: an L2 build without them halts at an armed swap.
+    'L2_NEXT_PROGRAM_EPOCH': 'inert', 'L2_PROGRAM_ROLLBACK_EPOCH': 'inert',
 }
 
 FINALITY_CLOSED_CODE = -32001  # bloch-l2-settled-rpc: safe and finalized refused without a valid follower status

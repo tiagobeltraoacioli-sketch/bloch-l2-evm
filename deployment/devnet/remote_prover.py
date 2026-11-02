@@ -28,7 +28,9 @@ program when its config has `"mainnet": true` (the pinned host then runs with
 name its config explicitly (`remote_prover.py --config PATH`), so a devnet and a
 mainnet prover can share one release of this file without sharing a config. Around
 a program swap, one forced command per program: a host that serves both takes
-`"mainnet_flag": "--mainnet-v1"` in the config of the activated program.
+`"mainnet_flag": "--mainnet-v1"` in the config of the activated program. The
+sparse-witness guest (CANDIDATE, the fork's next program) takes `"witness": "sparse"`,
+which adds `--sparse` after `--mainnet`; the settler sends it the sparse artifact.
 Exit codes: 0 proof written, 64 bad request, 70 prover failed, 75 busy.
 Dependency-free Python 3.9+.
 """
@@ -195,6 +197,10 @@ def main():
         fail(70, 'config: mainnet must be a boolean')
     if c.get('mainnet_flag', '--mainnet') not in ('--mainnet', '--mainnet-v1'):
         fail(70, 'config: mainnet_flag must be --mainnet or --mainnet-v1')
+    if c.get('witness', 'complete') not in ('complete', 'sparse'):
+        fail(70, 'config: witness must be complete or sparse')
+    if c.get('witness') == 'sparse' and not (c.get('mainnet') and c.get('mainnet_flag', '--mainnet') == '--mainnet'):
+        fail(70, 'config: the sparse-witness guest proves the next mainnet rules only (mainnet, --mainnet)')
     try:
         tuning = prover_env(c)
     except ValueError as error:
@@ -229,8 +235,10 @@ def main():
                'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact'), **tuning}
         # `"mainnet": true` proves the mainnet program (settlement_v3_mainnet); the settler
         # verifies the result locally with the same flag, so a wrong program is never submitted.
-        argv = [c['prover'], *([c.get('mainnet_flag', '--mainnet')] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
-                c['guest'], str(proof)]
+        flags = [c.get('mainnet_flag', '--mainnet')] if c.get('mainnet') else []
+        if c.get('witness') == 'sparse':
+            flags.append('--sparse')
+        argv = [c['prover'], *flags, 'prove-groth16', 'native-artifact', c['guest'], str(proof)]
         with (work / 'last-prove.log').open('w') as log:
             returncode = run_while_client_connected(argv, env, log, c.get('timeout_seconds', 3500))
         if returncode or not proof.is_file() or not 0 < proof.stat().st_size <= MAX_PROOF_BYTES:

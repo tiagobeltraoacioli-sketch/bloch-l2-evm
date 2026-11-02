@@ -15,7 +15,11 @@ module `mainnet`) pins seven V2 identities, the proof policy and the L2 genesis:
   initial_l2_parent / initial_l2_state  L2 genesis header hash / state root
 
 Inputs (no network, no keys):
-  --identity FILE   `bloch-evm-sp1-settlement-v3 --mainnet identity settlement_v3_mainnet`
+  --identity FILE   `bloch-evm-sp1-settlement-v3 --mainnet-v1 identity settlement_v3_mainnet` (this kit's host
+                    takes --mainnet for the next rules), or, for the program swap (CANDIDATE),
+                    `--mainnet --sparse identity settlement_v3_mainnet_sparse`, which prints `PROGRAM_NEXT`
+  --const NAME      the Rust constant (default from the program: PROGRAM, PROGRAM_NEXT); PROGRAM_FALLBACK
+                    takes the complete-witness guest's `--mainnet identity` under the next rules
   --genesis FILE    `bloch-l2-produce-dev --rules mainnet --domain D --genesis-time T head`
                     right after `init` (number 0)
   --native-policy HEX   native `policy_commitment_v3()` (print_policy_commitment_v3)
@@ -34,6 +38,9 @@ import sys
 
 CHAIN_ID = 700770
 PROGRAM = 'settlement_v3_mainnet'
+# The host's program name, and the native constant it fills by default.
+PROGRAMS = {'settlement_v3_mainnet': 'PROGRAM', 'settlement_v3_mainnet_sparse': 'PROGRAM_NEXT'}
+CONSTS = ('PROGRAM', 'PROGRAM_NEXT', 'PROGRAM_FALLBACK')
 DEVNET_DOMAIN = 'd3' * 32
 
 
@@ -51,9 +58,15 @@ def rust(name, value):
     return f'{name}[{pairs}]'
 
 
-def build(identity, genesis, native_policy, network, native_genesis):
-    if identity.get('program') != PROGRAM or identity.get('chain_id') != CHAIN_ID:
-        raise SystemExit(f'identity is not the {PROGRAM} program of chain {CHAIN_ID}')
+def build(identity, genesis, native_policy, network, native_genesis, const=None):
+    program = identity.get('program')
+    if program not in PROGRAMS or identity.get('chain_id') != CHAIN_ID:
+        raise SystemExit(f'identity is not a {"/".join(PROGRAMS)} program of chain {CHAIN_ID}')
+    const = const or PROGRAMS[program]
+    if const not in CONSTS:
+        raise SystemExit(f'--const must be one of {", ".join(CONSTS)}')
+    if program == 'settlement_v3_mainnet_sparse' and const != 'PROGRAM_NEXT':
+        raise SystemExit('the sparse-witness guest is the next program only')
     if identity.get('domain') == DEVNET_DOMAIN:
         raise SystemExit('identity carries the development domain')
     if identity.get('proof_policy_v3') is None:
@@ -70,12 +83,19 @@ def build(identity, genesis, native_policy, network, native_genesis):
     parent, state = h32(genesis['hash'], 'genesis hash'), h32(genesis['state_root'], 'genesis state_root')
     names = ['genesis4_network', 'genesis4_genesis', 'l2_domain', 'configuration', 'elf_keccak',
              'vkey_koalabear', 'vkey_bn254']
-    literal = 'pub const PROGRAM: Option<Program> = Some(Program {\n    identities: [\n'
-    for n, v in zip(names, identities):
-        literal += f'        // {n}\n        {rust("", v)},\n'
-    literal += f'    ],\n    proof_policy: {rust("", policy)},\n'
-    literal += f'    initial_l2_parent: {rust("", parent)},\n    initial_l2_state: {rust("", state)},\n}});\n'
-    return {'chain_id': CHAIN_ID, 'program': PROGRAM, 'identities': dict(zip(names, identities)),
+    if const != 'PROGRAM':
+        # `NextProgram`: identities 3 to 6 and the policy; 0 to 2, the genesis and the attestor set stay.
+        literal = f'pub const {const}: NextProgram = NextProgram {{\n    identities: [\n'
+        for n, v in list(zip(names, identities))[3:]:
+            literal += f'        // {n}\n        h32("{v}"),\n'
+        literal += f'    ],\n    proof_policy: h32("{policy}"),\n}};\n'
+    else:
+        literal = f'pub const {const}: Option<Program> = Some(Program {{\n    identities: [\n'
+        for n, v in zip(names, identities):
+            literal += f'        // {n}\n        {rust("", v)},\n'
+        literal += f'    ],\n    proof_policy: {rust("", policy)},\n'
+        literal += f'    initial_l2_parent: {rust("", parent)},\n    initial_l2_state: {rust("", state)},\n}});\n'
+    return {'chain_id': CHAIN_ID, 'program': program, 'const': const, 'identities': dict(zip(names, identities)),
             'proof_policy': policy, 'initial_l2_parent': parent, 'initial_l2_state': state,
             'sp1_circuit_version': identity.get('sp1_circuit_version'), 'rust': literal}
 
@@ -85,9 +105,10 @@ def main(argv=None):
     for flag in ('--identity', '--genesis', '--native-policy', '--network', '--native-genesis'):
         p.add_argument(flag, required=True)
     p.add_argument('--elf')
+    p.add_argument('--const', choices=CONSTS)
     a = p.parse_args(argv)
     out = build(json.loads(Path(a.identity).read_text()), json.loads(Path(a.genesis).read_text()),
-                a.native_policy, a.network, a.native_genesis)
+                a.native_policy, a.network, a.native_genesis, a.const)
     if a.elf:
         out['elf_sha256'] = hashlib.sha256(Path(a.elf).read_bytes()).hexdigest()
     print(json.dumps(out, indent=2))

@@ -13,7 +13,7 @@ needs no inbound port besides sshd; outbound only Docker's pinned Gnark image
 Run as root from a directory holding:
   bloch-evm-sp1-settlement-v3   host built by build-program.sh (features source-settlement,node-artifact)
   settlement_v3_mainnet         guest ELF, SHA-256 203114bf...c473 (build-reproducible.sh)
-  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet"), SHA-256 3c11d9be...c8e5
+  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet" / "witness"), SHA-256 1f643ea3...f7a3
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
@@ -27,6 +27,18 @@ SP1 defaults OOM at 100 GiB; --threads 32 --prover-env ELEMENT_THRESHOLD=2684354
 2,731-2,809 s at 84-85 GiB, so it also needs --timeout-seconds 5400 and a settler remote
 timeout above it.
   sudo python3 install-prover-mainnet.py rollback [--dry-run]
+
+Program swap (fork candidate; native L2_NEXT_PROGRAM_EPOCH inert). The host of this kit serves both
+programs: `--mainnet-v1` selects the activated rules and `--mainnet --sparse` the next rules proved by
+the sparse-witness guest. So the activated program is installed and identified with `--mainnet-v1`
+(this host's `--mainnet` is the NEXT configuration, which the activated pins refuse). The next program
+is a second forced command on the same user, slice and work directory (one proof at a time across both):
+
+  sudo python3 install-prover-mainnet.py install --program next --settler-pubkey FILE2 --settler-host IP
+  sudo python3 install-prover-mainnet.py rollback --program next
+
+It needs the activated program installed first, a second settler key (an SSH key selects one forced
+command), and settlement_v3_mainnet_sparse (SHA-256 75b9c635...418e, CANDIDATE) beside this file.
 
 install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
 beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
@@ -62,7 +74,21 @@ GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473
 # Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
 # Agent 93's measured low-memory setting, used unless --prover-env is given.
 DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
-REMOTE_PROVER_SHA256 = 'ba309912cbb7faeb961eab80ade93e9cb2f4ebbaeb4df0a6904b3df53534ad0a'
+REMOTE_PROVER_SHA256 = '1f643ea3e27c0fb6ea83216d34e4c03aac9a99e8b2cad6ae8456191b9a85f7a3'
+# CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
+# codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
+# recipient is a placeholder (TBD-owner), so the configuration and every value below move with it.
+NEXT_GUEST_SHA256 = '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e'
+PINNED_NEXT = {
+    'chain_id': 700770,
+    'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
+    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+    'elf_keccak': '54d264b8969845b82b3c8d0cec54562567ab7ee6f59dae7e2678c7d9e848c011',
+    'vkey_koalabear': '5f802b085c7520f54383ee604e867d4d327a0d554388ca79254748973cf6c126',
+    'vkey_bn254': '00bf00561171d483d61c1f7304e867d4d64f41aab0e2329e52a3a44bbcf6c126',
+    'sp1_circuit_version': 'v6.1.0',
+    'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
+}
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {
@@ -74,6 +100,15 @@ PINNED = {
     'vkey_bn254': '007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e',
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
+}
+PROGRAMS = {
+    'activated': {'program': 'settlement_v3_mainnet', 'guest': 'settlement_v3_mainnet', 'guest_sha256': GUEST_SHA256,
+                  'pins': PINNED, 'host_args': ['--mainnet-v1'], 'config': {'mainnet_flag': '--mainnet-v1'},
+                  'release': RELEASE, 'etc': ETC},
+    'next': {'program': 'settlement_v3_mainnet_sparse', 'guest': 'settlement_v3_mainnet_sparse',
+             'guest_sha256': NEXT_GUEST_SHA256, 'pins': PINNED_NEXT, 'host_args': ['--mainnet', '--sparse'],
+             'config': {'mainnet_flag': '--mainnet', 'witness': 'sparse'},
+             'release': Path(str(RELEASE) + '-next'), 'etc': Path(str(ETC) + '-next')},
 }
 # Measured on 136.244.93.186 (Cascade Lake, 32 vCPU, 2026-10-30) at 8 threads: prover peak RSS 20.4 GiB
 # (empty block), 25.5 GiB (5 txs), 45.2 GiB (50 transfers), 96.5 GiB (200 transfers). The default 100 GiB
@@ -103,15 +138,17 @@ def check_sizes(memory_gib, threads):
         die('--threads must be within 1..63')
 
 
-def check_identity(text):
-    """The host's `--mainnet identity` output must be exactly the natively pinned program."""
+def check_identity(text, program='activated'):
+    """The host's identity output (`--mainnet-v1`, or `--mainnet --sparse` for the next program) must be exactly
+    the natively pinned program."""
+    spec = PROGRAMS[program]
     try:
         identity = json.loads(text)
     except ValueError:
         die('host identity is not JSON')
-    if identity.get('program') != 'settlement_v3_mainnet':
-        die(f'host identity is for {identity.get("program")!r}, not settlement_v3_mainnet')
-    for key, value in PINNED.items():
+    if identity.get('program') != spec['program']:
+        die(f'host identity is for {identity.get("program")!r}, not {spec["program"]}')
+    for key, value in spec['pins'].items():
         if identity.get(key) != value:
             die(f'identity {key} = {identity.get(key)!r}, mainnet pins {value!r}')
     return identity
@@ -157,10 +194,12 @@ def parse_prover_env(items):
     return settings
 
 
-def prover_config(release, state, prover_sha256, threads, memory_gib, prover_env=None, timeout_seconds=3500):
-    return {'mainnet': True,
+def prover_config(release, state, prover_sha256, threads, memory_gib, prover_env=None, timeout_seconds=3500,
+                  program='activated'):
+    spec = PROGRAMS[program]
+    return {'mainnet': True, **spec['config'],
             'prover': str(release / FILES[0]), 'prover_sha256': prover_sha256,
-            'guest': str(release / FILES[1]), 'guest_sha256': GUEST_SHA256,
+            'guest': str(release / spec['guest']), 'guest_sha256': spec['guest_sha256'],
             'workdir': str(state / 'work'), 'home': str(state / 'work'),
             'prover_threads': threads, 'gnark_image': GNARK_IMAGE,
             'timeout_seconds': timeout_seconds, 'max_memory_bytes': memory_gib << 30,
@@ -175,6 +214,8 @@ def mem_available_gib():
 
 
 def install(args, here):
+    if getattr(args, 'program', 'activated') == 'next':
+        return install_next(args, here)
     check_sizes(args.memory_gib, args.threads)
     sums = {}
     for line in (here / 'SHA256SUMS').read_text().splitlines():
@@ -188,7 +229,9 @@ def install(args, here):
         die('settlement_v3_mainnet is not the pinned guest')
     if sums[FILES[2]] != REMOTE_PROVER_SHA256:
         die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
-    identity = check_identity(run([here / FILES[0], '--mainnet', 'identity', here / FILES[1]]))
+    identity = check_identity(run([here / FILES[0], *PROGRAMS['activated']['host_args'], 'identity', here / FILES[1]]))
+    if not args.circuits:
+        die('--circuits is required')
     circuits = Path(args.circuits)
     if not (circuits / 'groth16').is_dir():
         die(f'{circuits}/groth16 missing (SP1 v6.1.0 Groth16 circuit artifacts, e.g. from a prover HOME/.sp1/circuits)')
@@ -255,7 +298,85 @@ def install(args, here):
     print(json.dumps({'installed': True, **plan, 'host_key': ' '.join(host_key[:2])}, indent=2))
 
 
+def read_sums(here, names):
+    sums = {}
+    for line in (here / 'SHA256SUMS').read_text().splitlines():
+        if line.strip():
+            value, name = line.split()
+            sums[Path(name.lstrip('*')).name] = value
+    for name in names:
+        if digest(here / name) != sums.get(name):
+            die(f'{name} differs from SHA256SUMS')
+    return sums
+
+
+def install_next(args, here):
+    """The next program beside an installed activated one: its own release and config, the same user, slice and
+    work directory (so one proof runs at a time across both), and a second settler key bound to its forced command."""
+    spec = PROGRAMS['next']
+    names = (FILES[0], spec['guest'], FILES[2])
+    sums = read_sums(here, names)
+    if sums[spec['guest']] != spec['guest_sha256']:
+        die(f'{spec["guest"]} is not the pinned next guest')
+    if sums[FILES[2]] != REMOTE_PROVER_SHA256:
+        die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
+    identity = check_identity(run([here / FILES[0], *spec['host_args'], 'identity', here / spec['guest']]), 'next')
+    if not (ETC / 'installed.json').is_file():
+        die('install the activated program first: the next program shares its user, slice and work directory')
+    base = json.loads((ETC / 'installed.json').read_text())
+    if base.get('sha256', {}).get(FILES[0]) != sums[FILES[0]]:
+        die('the next program must use the host the activated program runs (install both from one kit)')
+    for path in (spec['release'], spec['etc']):
+        if path.exists():
+            die(f'{path} exists: already installed (rollback --program next first)')
+    keys = STATE / '.ssh' / 'authorized_keys'
+    line = authorized_line(Path(args.settler_pubkey).read_text(), args.settler_host, spec['release'],
+                           spec['etc'] / 'config.json')
+    if keys.is_file() and line.split('" ', 1)[1] in keys.read_text():
+        die('the next program needs its own settler key: one key selects one forced command')
+    plan = {'program': 'next', 'user': USER, 'release': str(spec['release']), 'etc': str(spec['etc']), 'state': str(STATE),
+            'identity': identity, 'sha256': {n: sums[n] for n in names}, 'authorized_keys': line.strip()}
+    if args.dry_run:
+        print(json.dumps({'dry_run': True, **plan}, indent=2))
+        return
+    spec['etc'].mkdir(mode=0o755)
+    (spec['etc'] / 'installed.json').write_text(json.dumps(plan, indent=2) + '\n')
+    spec['release'].mkdir(parents=True, mode=0o755)
+    for name in names:
+        shutil.copyfile(here / name, spec['release'] / name)
+        (spec['release'] / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
+    config = prover_config(spec['release'], STATE, sums[FILES[0]], base['threads'], base['memory_gib'],
+                           base.get('prover_env'), base.get('timeout_seconds', 5400), program='next')
+    (spec['etc'] / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
+    (spec['etc'] / 'config.json').chmod(0o644)
+    with keys.open('a') as out:
+        out.write(line)
+    print(json.dumps({'installed': True, **plan}, indent=2))
+
+
+def rollback_next(args):
+    spec = PROGRAMS['next']
+    record = spec['etc'] / 'installed.json'
+    if not record.is_file():
+        die(f'{record} missing: nothing recorded to roll back')
+    plan = json.loads(record.read_text())
+    steps = [f'remove its line from {STATE}/.ssh/authorized_keys', f'remove {spec["release"]}', f'remove {spec["etc"]}']
+    if args.dry_run:
+        print(json.dumps({'dry_run': True, 'steps': steps}, indent=2))
+        return
+    keys = STATE / '.ssh' / 'authorized_keys'
+    if keys.is_file():
+        keys.write_text(''.join(l for l in keys.read_text().splitlines(True) if l.strip() != plan['authorized_keys']))
+    for path in (spec['release'], spec['etc']):
+        shutil.rmtree(path, ignore_errors=True)
+    print(json.dumps({'rolled_back': True, 'steps': steps}, indent=2))
+
+
 def rollback(args):
+    if getattr(args, 'program', 'activated') == 'next':
+        return rollback_next(args)
+    if PROGRAMS['next']['etc'].exists():
+        die('roll back the next program first (rollback --program next)')
     record = ETC / 'installed.json'
     if not record.is_file():
         die(f'{record} missing: nothing recorded to roll back')
@@ -295,15 +416,17 @@ def main(argv=None):
     i = sub.add_parser('install')
     i.add_argument('--settler-pubkey', required=True)
     i.add_argument('--settler-host', required=True)
-    i.add_argument('--circuits', required=True)
+    i.add_argument('--circuits', help='required for the activated program')
     i.add_argument('--memory-gib', type=int, default=100)
     i.add_argument('--threads', type=int, default=32)
     i.add_argument('--prover-env', action='append', metavar='NAME=VALUE',
                    help='default ELEMENT_THRESHOLD=268435456 (agent 93); give it explicitly to replace the default')
     i.add_argument('--timeout-seconds', type=int, default=5400)
     i.add_argument('--dry-run', action='store_true')
+    i.add_argument('--program', choices=sorted(PROGRAMS), default='activated')
     r = sub.add_parser('rollback')
     r.add_argument('--dry-run', action='store_true')
+    r.add_argument('--program', choices=sorted(PROGRAMS), default='activated')
     args = parser.parse_args(argv)
     if os.geteuid() != 0 and not args.dry_run:
         die('run as root (or --dry-run)')

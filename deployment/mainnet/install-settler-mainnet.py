@@ -9,7 +9,10 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
-      l2_reorg_recover.py (SHA-256 678482bf...).
+      l2_reorg_recover.py (SHA-256 3e8ad3f0...) and, for the program swap (CANDIDATE, native
+      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 75b9c635...).
+      The host of this kit serves both programs: the activated one with --mainnet-v1, the
+      next one with --mainnet --sparse (see "Program swap" in SETTLER-RUNBOOK.md).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
       whose passphrase is generated here and never printed. Prints the funding
@@ -64,10 +67,15 @@ PINS = {
     'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
     # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
-    'l2_reorg_recover.py': '678482bfcd3c782b4b6dee2295572c283992f0e1927ea28393a11c1f6aec98b2',
+    'l2_reorg_recover.py': '3e8ad3f0737b21fbe11dbeea537c753a605eca889ca12ff63bb9b3d995d5f07d',
+    # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
+    # fee-sweep recipient (TBD-owner) and with the audit's fixes.
+    'settlement_v3_mainnet_sparse': '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e',
 }
+# This kit's host takes --mainnet for the NEXT rules; the activated program is --mainnet-v1.
+ACTIVATED_PROVER_ARGS = ['--mainnet-v1']
 FILES = ('settler_v3.py', 'sequencer_policy.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
-         'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
+         'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py', 'settlement_v3_mainnet_sparse')
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
@@ -116,6 +124,7 @@ def prepare(args):
         assert digest(source / name) == pin, f'{name} differs from its pin {pin}'
     settler = settler_module(source)
     assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
+    assert settler.MAINNET_NEXT_SPARSE['guest_sha256'] == PINS['settlement_v3_mainnet_sparse']
     build = run([source / 'bloch-pos', '--version']) + run([source / 'bloch-pos', 'buildinfo'])
     assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
     run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', STATE,
@@ -125,7 +134,7 @@ def prepare(args):
     target.mkdir(parents=True, mode=0o755)
     for name in FILES:
         shutil.copyfile(source / name, target / name)
-        (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name == 'settlement_v3_mainnet'
+        (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name.startswith('settlement_v3_mainnet')
                               else 0o755)
     # The operator's repair after a reorg of an accepted settlement. Kit file next to this installer, not a pin:
     # it finds settler_v3.py beside itself, so it always matches the installed worker.
@@ -135,6 +144,7 @@ def prepare(args):
         path.mkdir(mode=0o755)
     (PUBLIC / 'l2-config.bin').write_bytes(settler.mainnet_l2_config())
     assert digest(PUBLIC / 'l2-config.bin') == settler.MAINNET_L2_CONFIG_SHA256
+    (PUBLIC / 'l2-config.next.bin').write_bytes(settler.mainnet_l2_config(settler.MAINNET_NEXT_SPARSE))
     STATE.mkdir(mode=0o700)
     for sub in ('work', 'tmp', 'txpool', 'ssh'):
         (STATE / sub).mkdir(mode=0o700)
@@ -171,8 +181,16 @@ def configure(args):
         'produce': str(rel / 'bloch-l2-produce-dev'), 'l2_db': str(STATE / 'canonical'),
         'workdir': str(STATE / 'work'), 'home': str(STATE),
         'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),
+        'prover_args': ACTIVATED_PROVER_ARGS,
         'guest': str(rel / 'settlement_v3_mainnet'), 'guest_sha256': digest(rel / 'settlement_v3_mainnet'),
         'l2_config': str(PUBLIC / 'l2-config.bin'), 'l2_config_sha256': digest(PUBLIC / 'l2-config.bin'),
+        # The program L1 installs at the (inert) gate. The worker follows getl2settlement.program; until the
+        # gate it only passes --rule-set base to the producer.
+        'next_program': {
+            'witness': 'sparse', 'prover_args': ['--mainnet', '--sparse'],
+            'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),
+            'guest': str(rel / 'settlement_v3_mainnet_sparse'), 'guest_sha256': digest(rel / 'settlement_v3_mainnet_sparse'),
+            'l2_config': str(PUBLIC / 'l2-config.next.bin'), 'l2_config_sha256': digest(PUBLIC / 'l2-config.next.bin')},
         'gnark_image': GNARK_IMAGE, 'prover_threads': threads, 'timestamp_rule': settler.MAINNET_TIMESTAMP_RULE,
         'acceptance_timeout_seconds': 1800, 'poll_seconds': 15, 'resubmit_seconds': 300,
         'idle_seconds': 30, 'max_consecutive_failures': 8,
@@ -206,9 +224,17 @@ def configure(args):
         known.chmod(0o600)
         config['remote_prover'] = {'target': target, 'key': str(STATE / 'ssh/id_ed25519'), 'known_hosts': str(known),
                                    'order': ['remote', 'local'], 'timeout_seconds': 5700}
+        # The next program's forced command on the same prover host takes its own key
+        # (install-prover-mainnet.py install --program next).
+        if not (STATE / 'ssh/id_ed25519_next').exists():
+            run([RUNUSER, '-u', USER, '--', 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', USER + '-next',
+                 '-f', STATE / 'ssh/id_ed25519_next'])
+        config['next_program']['remote_prover'] = {**config['remote_prover'], 'key': str(STATE / 'ssh/id_ed25519_next')}
         # Above the prover's own 5,400 s limit (install-prover-mainnet.py), so the prover stops first and says why.
         print('remote prover key (authorize it on the prover host with the forced command):')
         print((STATE / 'ssh/id_ed25519.pub').read_text().strip())
+        print('next-program key (authorize it with install-prover-mainnet.py install --program next):')
+        print((STATE / 'ssh/id_ed25519_next.pub').read_text().strip())
     settler.Settler(config)  # every pin, offline (no RPC call before cycle())
     # config.json appears only after every check passed: a failed check can be retried, and start stays refused.
     PENDING.write_text(json.dumps(config, indent=2) + '\n')
