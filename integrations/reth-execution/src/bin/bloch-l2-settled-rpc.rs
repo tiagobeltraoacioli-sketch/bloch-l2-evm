@@ -12,7 +12,7 @@
 //! - `safe`: the settlement the operator's own native node holds at its
 //!   canonical head (accepted on L1, not yet finalized), when it matches the
 //!   local canonical header; never below `finalized`.
-//! No checkpoint signature is involved. Neither level regresses. Both start
+//! No checkpoint signature is involved. `finalized` never regresses; `safe` follows an L1 reorg down to it. Both start
 //! closed. A status file that is lost, unreadable or whose finalized settlements
 //! are inconsistent with the local chain closes both: their tags,
 //! `bloch_settlement` and `bloch_getWithdrawalProof` answer -32001 until a valid
@@ -982,6 +982,8 @@ struct Levels {
     finalized: Option<Header>,
     /// `None` when the status has no safe settlement or it is not local yet.
     safe: Option<Header>,
+    /// The status names a safe settlement this database has not reached: keep the current level.
+    safe_not_local: bool,
     /// The safe settlement contradicts the local chain or is below finalized: `safe` closes, `finalized` stands.
     safe_refused: Option<String>,
     /// The scalar facts of the status; its settlement lists are moved out.
@@ -1100,6 +1102,7 @@ fn verified_levels(
     }
     let finalized_number = best.as_ref().map_or(0, |h: &Header| h.0.number);
     let mut safe_refused = None;
+    let mut safe_not_local = false;
     let safe = match status.get("safe_settlement").filter(|v| !v.is_null()) {
         None => None,
         Some(entry) => {
@@ -1111,7 +1114,10 @@ fn verified_levels(
             } else {
                 match provider.sealed_header(number)? {
                     // Not produced locally yet: keep the previous safe level.
-                    None => None,
+                    None => {
+                        safe_not_local = true;
+                        None
+                    }
                     Some(local) if local.hash() == hash => Some(local),
                     Some(_) => {
                         safe_refused = Some(format!("safe L2 block {number} differs from the local canonical header"));
@@ -1124,7 +1130,7 @@ fn verified_levels(
     let mut new_settlements = delta.entries;
     // After a whole-log read, what this process already adopted is not new.
     new_settlements.retain(|entry| entry["l2_number"].as_u64().is_some_and(|n| n > cursor.count));
-    Ok(Some(Levels { finalized: best, safe, safe_refused, status, new_settlements, cursor: delta.cursor }))
+    Ok(Some(Levels { finalized: best, safe, safe_not_local, safe_refused, status, new_settlements, cursor: delta.cursor }))
 }
 
 /// Whether the status proves the local L2 genesis final: the follower reports
@@ -1454,19 +1460,18 @@ async fn main() -> Result<()> {
                                 _ => {}
                             }
                             // safe follows the local node's accepted head, and is never below finalized.
+                            // It follows the L1 head down on a reorg, as Ethereum's `safe` may, and never below finalized.
                             let candidate = match levels.safe {
                                 _ if levels.safe_refused.is_some() => None,
+                                _ if levels.safe_not_local => safe.clone().filter(|h| h.0.number >= number_of(&finalized)).or_else(|| finalized.clone()),
                                 Some(h) if h.0.number >= number_of(&finalized) => Some(h),
                                 _ => finalized.clone(),
                             };
                             match candidate {
-                                Some(header) if above(&header, &safe) => {
+                                Some(header) if safe.as_ref().map(|c| c.hash()) != Some(header.hash()) => {
                                     state.set_safe(header.clone());
                                     println!("safe block={} hash={} (settlement accepted on the native head)", header.0.number, header.hash());
                                     safe = Some(header);
-                                }
-                                Some(header) if header.0.number < number_of(&safe) => {
-                                    println!("safe settlement regressed to {}; keeping {}", header.0.number, number_of(&safe));
                                 }
                                 _ => {}
                             }
