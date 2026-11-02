@@ -142,7 +142,7 @@ L1 epoch E starts at Unix time `1786656679 + E × 960`.
 
 | Gate | Epoch | Start (UTC) | What you do |
 | --- | --- | --- | --- |
-| Binaries | 7178 | Sun 2026-11-01 15:39 | Your host must run the follower `c18752fd…` and producer `fb0d5313…` (pinned in `ARTIFACTS.sha256`). A new install from this bundle has them. If you install after a date below, skip that row: the first replay crosses it for you. |
+| Binaries | 7178 | Sun 2026-11-01 15:39 | Your host must run the follower `cdf5da5c…` and producer `e3f1a290…` (pinned in `ARTIFACTS.sha256`). A new install from this bundle has them. If you install after a date below, skip that row: the first replay crosses it for you. |
 | HF1 | 7180 / 7186 | Sun 2026-11-01 16:11 / 17:47 | Watch `native_finalized_epoch` pass 7186 and keep increasing. No action if it does. |
 | HF2 | 7270 | Mon 2026-11-02 16:11 | Same check: the epoch passes 7270. |
 | HF3 | 7360 | Tue 2026-11-03 16:11 | Same check: the epoch passes 7360. |

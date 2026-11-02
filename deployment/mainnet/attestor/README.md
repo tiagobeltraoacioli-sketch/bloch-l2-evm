@@ -200,10 +200,11 @@ is pinned.
 The L1 hard forks start at epoch 7180 (HF1, 2026-11-01 16:11 UTC). Each attestor host must run the
 v2 follower and producer **before epoch 7178 (15:39 UTC)**:
 
-- `bloch-l2-native-follower` `c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a`
-- `bloch-l2-produce-dev` `fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9`
+- `bloch-l2-native-follower` `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2`
+- `bloch-l2-produce-dev` `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69`
 
-These hashes are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
+These are the hashes of the next build (build commit 17383fe), which replace v2.1's follower
+and producer. They are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
 `--produce-sha256` only for a later corrected build whose hashes the coordinator published.
 
 Upgrade **one host at a time**, so that at least 3 of 5 stay up. Each host is down for about
@@ -240,8 +241,8 @@ script does the manual procedure and stops at the first failure:
 9. It waits until `native_finalized_epoch` advances (`--advance-timeout`, default 40 min).
 10. It removes `PAUSE` and starts the agent (`--no-unpause` stops before this step).
 
-At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower c18752fd, produce
-fb0d5313`. Post that line in the operators' channel; the next operator then starts.
+At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower cdf5da5c, produce
+e3f1a290`. Post that line in the operators' channel; the next operator then starts.
 
 If a step fails, `PAUSE` stays in place, the agent stays stopped and the follower keeps running.
 Fix the cause, then continue from the follower start with
