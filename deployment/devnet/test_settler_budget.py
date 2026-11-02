@@ -23,7 +23,7 @@ class Budget(unittest.TestCase):
         self.deposits = self.dir / 'deposits.json'
         self.deposits.write_text('[]')
         self.settler = s.Settler.__new__(s.Settler)
-        self.settler.c = {'txpool_dir': str(self.pool), 'max_block_sp1_gas': 100, 'max_block_gas': 1, 'max_block_bytes': 1, 'max_block_txs': 9,
+        self.settler.c = {'txpool_dir': str(self.pool), 'max_block_instructions': 100, 'max_block_sp1_gas': 100, 'max_block_gas': 1, 'max_block_bytes': 1, 'max_block_txs': 9,
                           'l2_db': 'x', 'timestamp_rule': None, 'user_transactions': True}
         self.settler.preflight_source = 'request'
         self.cost = {}
@@ -40,7 +40,7 @@ class Budget(unittest.TestCase):
         def measure(parent, anchor, deposits, slot, number, raws, tag):
             self.measures.append(tag)
             total = 10 + sum(self.cost[r] for r in raws)
-            return (None if total > 10_000 else total), {'included': [s.keccak256(bytes.fromhex(r)).hex() for r in raws], 'dropped': []}
+            return (None if total > 10_000 else total / 100), {'included': [s.keccak256(bytes.fromhex(r)).hex() for r in raws], 'dropped': []}
         self.settler.measure_block = measure
 
     def spool(self, **costs):

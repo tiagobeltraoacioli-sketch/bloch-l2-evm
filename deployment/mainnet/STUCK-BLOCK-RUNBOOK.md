@@ -20,6 +20,7 @@ Do not act on one failure. A killed or rebooted prover also produces one.
 ## Why recovery is safe
 
 - Proof comes first. DA publication and settlement both need a proof, so a stuck block has nothing on L1.
+- Transactions waiting in the spool are evicted after 3 hours and must be sent again: a long stop costs users that, not funds.
 - `safe` and `finalized` on the RPC, the bridge signers, attestors and replicas read settled L1 data only. They never
   saw the block. Only `latest` on the RPC that reads the settler database shows it.
 - Deposits are minted again in the replacement: the native request names them and does not move.
@@ -44,8 +45,11 @@ sudo systemctl stop bloch-l2-mainnet-rpc
 Check that no prover survived, on the settler host and on the prover host.
 
 ```
-pgrep -af 'settlement-v3.*prove-groth16'
+pgrep -af 'settlement-v3.*prove-groth16|sp1-native-runner'
 ```
+
+A prover that was killed can leave `sp1-native-runner-bin` children and a Gnark container behind (about 4 GB each in the
+rehearsal). Stop those too.
 
 Read the block. This changes nothing.
 
@@ -67,7 +71,12 @@ Decide from these fields:
 Use this when the block is over the limits of this prover and you want to keep it exactly as it is. Nobody loses a
 transaction and the block hash does not change. A proof is valid wherever it is made, and the inputs are not secret.
 
-Use exit B instead when the block needs more than about a day of proving. See the table in the report for sizes.
+Settings that use less memory, at about twice the time, let this prover finish blocks above its default limit (193M
+instructions at 90 GiB, in 1 h 43 min, rehearsal host, about 20 cores). Set them on the proving command:
+`SP1_WORKER_NUM_CORE_WORKERS=2 SP1_WORKER_CORE_BUFFER_SIZE=1 SP1_WORKER_NUM_SPLICING_WORKERS=1 SP1_WORKER_SPLICING_BUFFER_SIZE=1 SP1_WORKER_GLOBAL_MEMORY_BUFFER_SIZE=2`.
+
+Use exit B when the block would need more than about half a day of proving. Extrapolated at those settings, the worst
+15M-gas block needs about 35 hours. That run was not measured.
 
 ```
 python3 l2_stuck_block.py export-job --config /etc/bloch-l2-mainnet-settler/settler.json --out /var/tmp/job-N
@@ -103,10 +112,10 @@ Use this when a transaction in the block cannot be proved at an acceptable cost.
 ### 1. Find the transactions
 
 `triage` runs the guest in execute mode for each transaction, in block order. It needs no proof and no lock. It takes
-seconds per transaction. It waits with exit 75 until the follower has finalized the accepted settlement. Run it again later.
+seconds per transaction, plus up to 1-2 minutes for a transaction of several billion instructions. It waits with exit 75 until the follower has finalized the accepted settlement. Run it again later.
 
 ```
-python3 l2_stuck_block.py triage --config /etc/bloch-l2-mainnet-settler/settler.json --budget 30000000 --follower-state /var/lib/bloch-l2-mainnet-follower/state --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --out /var/tmp/triage-N.json
+python3 l2_stuck_block.py triage --config /etc/bloch-l2-mainnet-settler/settler.json --budget 100000000 --budget-gas 240000000 --follower-state /var/lib/bloch-l2-mainnet-follower/state --follower-status /var/lib/bloch-l2-mainnet-follower/status.json --out /var/tmp/triage-N.json
 ```
 
 Read `exclude`, `kept` and `instructions_after` in the output. A 15M-gas transaction of a kind that cannot be proved shows up as a
@@ -157,5 +166,5 @@ Keep the quarantined file and the old database until the block is finalized.
 
 ## After any stuck block
 
-The offender can be sent again. If the budget of `settler_v3.py` (`max_block_instructions`) is not active, enable it before
+The offender can be sent again. If the budget of `settler_v3.py` (`max_block_instructions`, `max_block_sp1_gas`) is not active, enable it before
 reopening the spool. With it, a block over the budget is never committed, so this runbook covers only hardware failure.

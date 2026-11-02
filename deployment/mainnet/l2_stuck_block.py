@@ -8,7 +8,7 @@ has seen nothing of that block: a proof is what opens its DA publication and its
   export-job  writes the request and block artifact of the stuck block, to prove on a bigger machine;
   import-proof checks a proof from that machine against this block and hands it to the settler (same block, same hash);
   triage      measures the block transaction by transaction with the guest (execute mode, no proof) and names the
-              transactions that do not fit a budget, in SP1 gas (in instructions with a host that does not report it);
+              transactions that do not fit a budget;
   discard     replaces the unsettled block: rebuilds the database at the accepted settlement from verified L1 blocks,
               returns the block's transactions to the spool, and moves the named ones to a quarantine directory.
 
@@ -18,7 +18,7 @@ RPC on this database first: `discard` swaps the database, and `import-proof` wri
   l2_stuck_block.py status       --config settler.json
   l2_stuck_block.py export-job   --config settler.json --out NEW_DIR
   l2_stuck_block.py import-proof --config settler.json --proof FILE
-  l2_stuck_block.py triage       --config settler.json --budget COST --follower-state DIR --follower-status FILE [--out FILE]
+  l2_stuck_block.py triage       --config settler.json --budget INSTRUCTIONS [--budget-gas SP1_GAS] --follower-state DIR --follower-status FILE [--out FILE]
   l2_stuck_block.py discard      --config settler.json --follower-state DIR --follower-status FILE
                                  (--exclude HASH ... | --exclude-file FILE | --exclude-all) [--apply]
 
@@ -234,15 +234,16 @@ def measure(stuck, base, kept, workspace, tag):
     shutil.copy2(stuck.directory / 'native-request.txt', block_dir / 'native-request.txt')
     stuck.settler.prove(block_dir, stages=('execute',))
     log_text = (block_dir / 'execute.log').read_text(errors='replace')
-    found = re.findall(r'Settlement V3 cost: gas=(\d+)', log_text) or re.findall(r'(\d+) instructions', log_text)
+    found = re.findall(r'(\d+) instructions', log_text)
+    gas = re.findall(r'Settlement V3 cost: gas=(\d+)', log_text)
     shutil.rmtree(db, ignore_errors=True)
     shutil.rmtree(block_dir, ignore_errors=True)
     if not found:
-        raise Refuse('the guest did not report a cost')
-    return int(found[-1]), block
+        raise Refuse('the guest did not report an instruction count')
+    return int(found[-1]), int(gas[-1]) if gas else None, block
 
 
-def triage(stuck, budget, follower_state, follower_status, out=None):
+def triage(stuck, budget, budget_gas, follower_state, follower_status, out=None):
     """Greedy, in block order: keep a transaction when the block with it still fits the budget."""
     raws = stuck.raws()
     if not raws:
@@ -251,14 +252,14 @@ def triage(stuck, budget, follower_state, follower_status, out=None):
     base = stuck.rebuild(follower_state, follower_status)
     try:
         kept, quarantine, steps = [], [], []
-        current, _ = measure(stuck, base, [], workspace, 'base')
-        steps.append({'hash': None, 'instructions': current})
+        current, gas, _ = measure(stuck, base, [], workspace, 'base')
+        steps.append({'hash': None, 'instructions': current, 'sp1_gas': gas})
         for raw in raws:
             name = S.keccak256(raw).hex()
-            instructions, block = measure(stuck, base, kept + [raw], workspace, 'step')
+            instructions, gas, block = measure(stuck, base, kept + [raw], workspace, 'step')
             taken = name in block.get('included', [])
-            fits = instructions <= budget
-            steps.append({'hash': name, 'instructions': instructions, 'delta': instructions - current, 'included': taken, 'fits': fits})
+            fits = instructions <= budget and (budget_gas is None or gas is None or gas <= budget_gas)
+            steps.append({'hash': name, 'instructions': instructions, 'sp1_gas': gas, 'delta': instructions - current, 'included': taken, 'fits': fits})
             if fits:
                 kept.append(raw)
                 current = instructions
@@ -317,6 +318,7 @@ def main():
     parser.add_argument('--out')
     parser.add_argument('--proof')
     parser.add_argument('--budget', type=int)
+    parser.add_argument('--budget-gas', type=int)
     parser.add_argument('--follower-state')
     parser.add_argument('--follower-status')
     parser.add_argument('--exclude', action='append', default=[])
@@ -338,7 +340,7 @@ def main():
                 parser.error('--follower-state and --follower-status are required')
             if o.command == 'triage':
                 check_replaceable(stuck.facts())
-                result = triage(stuck, o.budget, o.follower_state, o.follower_status, o.out)
+                result = triage(stuck, o.budget, o.budget_gas, o.follower_state, o.follower_status, o.out)
             else:
                 exclude = list(o.exclude)
                 if o.exclude_file:

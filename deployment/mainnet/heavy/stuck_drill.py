@@ -68,7 +68,7 @@ def wait_event(pred, what, timeout):
                 return e
         if (RUN / 'settler.halted').exists():
             raise SystemExit(f'settler halted waiting for {what}')
-        time.sleep(3)
+        time.sleep(1)
     raise SystemExit(f'timeout waiting for {what}')
 
 

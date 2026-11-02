@@ -22,7 +22,7 @@ shutil.copytree(RUN / 'canonical', T / 'canonical', symlinks=True)
 (T / 'work' / 'b').mkdir(parents=True)
 cfg = json.loads((RUN / 'settler.json').read_text())
 cfg.update(l2_db=str(T / 'canonical'), workdir=str(T / 'work'), txpool_dir=str(T / 'txpool'),
-           max_block_sp1_gas=int(os.environ.get('BUDGET', '30000000')), max_block_txs=128, preflight_execute_seconds=int(os.environ.get('EXEC_LIMIT', '30')))
+           max_block_instructions=int(os.environ.get('BUDGET_INSTRUCTIONS', '100000000')), max_block_sp1_gas=int(os.environ.get('BUDGET_GAS', '240000000')), max_block_txs=128, preflight_execute_seconds=int(os.environ.get('EXEC_LIMIT', '30')))
 st = S.Settler(cfg)
 head = st.produce('head', '--target', cfg['l2_db'])
 state = json.loads((RUN / 'state.json').read_text())
