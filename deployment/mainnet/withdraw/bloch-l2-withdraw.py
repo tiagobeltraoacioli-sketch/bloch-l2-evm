@@ -12,6 +12,9 @@
               Fetch a proof, verify it here and write it only if it is claimable on L1.
   verify  --proof proof.json [--l1-rpc URL ...] [--chain-id N]
               Check a proof file again. Without --l1-rpc only its internal consistency is checked.
+              Exit 0 means the proof is valid and the withdrawal is NOT claimed yet. It is not a payment.
+  status  --proof proof.json --l1-rpc URL [--l1-rpc URL ...] [--tx TXID] [--sent-height H]
+              After sending a claim: has it paid? Use this one to decide whether to credit or to retry.
 
 The L2 RPC is never trusted. A proof is accepted only if this program recomputes the leaf and the
 root and the root is one the L1 itself retains as finalized (getl2settlement withdrawals). The L1
@@ -19,8 +22,9 @@ RPC is the trust anchor of this check: use your own node, or give several --l1-r
 agreement. The L1 verifies the proof again when the claim is included, so a wrong anchor can cost
 a rejected transaction but cannot release funds to the wrong owner.
 
-Exit status: 0 ok; 1 refused, tampered or usage error; 3 not ready yet, retry later;
-4 this withdrawal was already claimed.
+Exit status: 0 ok (status: the claim is final); 1 refused, tampered or usage error; 3 not ready yet,
+retry later; 4 this withdrawal was already claimed (status: claimed, finality of the paying output not shown);
+5 (status only) still unclaimed long after sending: presumed dropped, nothing moved, build a new claim.
 """
 import argparse
 import hashlib
@@ -52,7 +56,7 @@ RETRYABLE = {-32041: 'not finalized yet', -32045: 'RPC index catching up', -3204
              -32043: 'RPC does not know this finalized root yet', -32005: 'rate limited', -32053: 'no backend available',
              -32001: 'the RPC has closed its finality levels', -32046: 'this RPC froze its withdrawal index; another backend may hold it'}
 
-OK, REFUSED, NOT_READY, CLAIMED = 0, 1, 3, 4
+OK, REFUSED, NOT_READY, CLAIMED, DROPPED = 0, 1, 3, 4, 5
 
 
 class Refused(Exception):
@@ -308,17 +312,18 @@ def anchor(fields, views):
     """Require the proof's root on every L1 view as a retained finalized record with the same count and L2 block."""
     for url, view in views:
         check_own_finality(url, view)
+        # First: a claimed withdrawal stays claimed after its root leaves the L1's retained list.
+        if is_claimed(view, fields['index']):
+            raise AlreadyClaimed(f'withdrawal {fields["index"]} was already claimed on L1')
         record = record_of(view, fields['root'])
         if record is None:
-            raise Refused(f'{url}: root {fields["root"]} is not a withdrawal root the L1 retains')
+            raise Refused(f'{url}: root {fields["root"]} is not a withdrawal root the L1 retains. If this proof is old, run fetch again: a claim built on it is dropped, and a large claim also needs attestations for the new root')
         if record.get('count') != fields['count']:
             raise Refused(f'{url}: the L1 record counts {record.get("count")} withdrawals, the proof claims {fields["count"]}')
         if record.get('l2_number') != fields['number']:
             raise Refused(f'{url}: the L1 record is L2 block {record.get("l2_number")}, the proof claims {fields["number"]}')
         if record.get('finalized') is not True:
             raise NotReady(f'{url}: root {fields["root"]} is not finalized on L1 yet')
-        if is_claimed(view, fields['index']):
-            raise AlreadyClaimed(f'withdrawal {fields["index"]} was already claimed on L1')
 
 
 # ---- Commands ----
@@ -470,9 +475,13 @@ def cmd_fetch(args):
     if large:
         print('  this claim needs the attestors: run aggregate_attestation.py for this root and add --attestors and --attestation to prepare')
     if remaining is not None and fields['sats'] > int(remaining):
-        print(f'  the current release window has {remaining} sats left: the claim fits only as the first claim of a later window')
-    print('Next, with base fee and funding input from your L1 node:')
-    print(f'  bloch-pos l2-claim prepare --genesis genesis.bin --funding-pubkey relayer.pubkey.hex --input TXID:VOUT:SAT --proof {args.out} --base-fee NEXT_BASE_FEE --tip 0 --out claim-unsigned.hex')
+        print(f'  the current release window has {remaining} sats left: this claim is dropped now. It fits only as the FIRST claim of a later window, so send it right after a window opens (windows are {view.get("release_window", {}).get("blocks")} L1 blocks); any other claim sent first takes the window')
+    attest = ' --attestors attestors.set --attestation PARTIAL_1 --attestation PARTIAL_2 --attestation PARTIAL_3' if large else ''
+    print('Nothing has been paid yet. Next, with base fee (getchaininfo next_base_fee_millisat_per_gas) and funding input from your L1 node, and without delay, because a claim built with an old base fee is dropped:')
+    print(f'  bloch-pos l2-claim prepare --genesis genesis.bin --funding-pubkey relayer.pubkey.hex --input TXID:VOUT:SAT --proof {args.out} --base-fee NEXT_BASE_FEE --tip 0{attest} --out claim-unsigned.hex')
+    print('  bloch-pos l2-claim sign --genesis genesis.bin --tx claim-unsigned.hex --dir RELAYER_KEYSTORE_DIR --out claim.hex')
+    print('  bloch-pos l2-claim inspect --tx claim.hex prints the txid. Send claim.hex with sendrawtransaction. Its reply `accepted` is not a confirmation and its tx_hash is not a txid. Then:')
+    print(f'  bloch-l2-withdraw.py status --proof {args.out} --l1-rpc URL --tx TXID')
     return OK
 
 
@@ -488,8 +497,86 @@ def cmd_verify(args):
         return OK
     pins = pins_of(args)
     anchor(fields, [(url, l1_view(url, pins)) for url in args.l1_rpc])
-    print(f'VERIFIED withdrawal {fields["index"]}: {fields["sats"]} sats to {fields["recipient"]}, root {fields["root"]} retained and finalized on L1')
+    print(f'VALID, NOT CLAIMED: withdrawal {fields["index"]}, {fields["sats"]} sats to {fields["recipient"]}, root {fields["root"]} retained and finalized on L1. Nothing has been paid yet.')
     return OK
+
+
+DROP_REASONS = ('the base fee moved from the one the claim was prepared with', 'the root left the L1 retained list or has not matured',
+                'a large claim without a valid attestation', 'the claim did not fit the current release window', 'the funding input was spent')
+# Unclaimed this many L1 blocks after sending: presumed dropped. A proposer takes a valid claim long before this on a quiet chain.
+DROP_AFTER_BLOCKS = 32
+UTXO_PAGE = 1024
+
+
+def paying_outputs(url, recipient, sats):
+    """Outputs of exactly `sats` locked to the recipient. Their txids are the only consensus ids a sender can learn:
+    sendrawtransaction returns none (its tx_hash is a local handle that gettxstatus does not know)."""
+    try:
+        page = rpc(url, 'getutxos', [recipient, UTXO_PAGE])
+    except RpcError as error:
+        raise Refused(f'{url}: getutxos: {error}') from None
+    if not isinstance(page, dict) or not isinstance(page.get('utxos'), list):
+        raise Refused(f'{url}: not a getutxos answer')
+    return [u for u in page['utxos'] if str(u.get('value_sat')) == str(sats)], bool(page.get('truncated'))
+
+
+def cmd_status(args):
+    with open(args.proof, encoding='utf-8') as file:
+        try:
+            doc = json.load(file, object_pairs_hook=no_duplicates)
+        except ValueError:
+            raise Refused(f'{args.proof} is not JSON') from None
+    fields = check_proof(doc, args.chain_id)
+    pins = pins_of(args)
+    views = [(url, l1_view(url, pins)) for url in args.l1_rpc]
+    for url, view in views:
+        check_own_finality(url, view)
+    answers = {is_claimed(view, fields['index']) for _, view in views}
+    if len(answers) != 1:
+        raise NotReady('the L1 nodes disagree on whether this withdrawal is claimed; wait and ask again')
+    url = args.l1_rpc[0]
+    claimed = answers.pop()
+    tx_status = None
+    if args.tx:
+        answer = rpc(url, 'gettxstatus', [args.tx.removeprefix('0x')])
+        tx_status = answer.get('status') if isinstance(answer, dict) else None
+        if tx_status not in ('finalized', 'justified', 'included', 'pending', 'unknown'):
+            raise Refused(f'{url}: unexpected gettxstatus answer {tx_status!r}')
+    if not claimed:
+        if tx_status == 'pending':
+            raise NotReady(f'the claim is in this node\'s mempool, withdrawal {fields["index"]} is not claimed yet; ask again')
+        if tx_status in ('finalized', 'justified', 'included'):
+            raise Refused(f'{args.tx} is {tx_status} but withdrawal {fields["index"]} is not claimed: this transaction is not this claim')
+        if tx_status == 'unknown':
+            print(f'DROPPED: this node does not hold {args.tx} and withdrawal {fields["index"]} is not claimed. No claim paid and no fee was charged by a dropped claim. A new claim is safe: consensus pays an index once. Ask again first if you sent it moments ago or through another node. Possible causes: {"; ".join(DROP_REASONS)}.', file=sys.stderr)
+            return DROPPED
+        if args.sent_height is None:
+            raise NotReady(f'withdrawal {fields["index"]} is not claimed; give --tx (the txid from l2-claim inspect) or --sent-height to tell a pending claim from a dropped one')
+        info = rpc(url, 'getchaininfo', [])
+        age = unsigned(info.get('height'), 'height') - args.sent_height
+        if age < DROP_AFTER_BLOCKS:
+            raise NotReady(f'withdrawal {fields["index"]} is not claimed, {age} blocks after sending; ask again')
+        print(f'DROPPED, presumed: withdrawal {fields["index"]} is still not claimed {age} blocks after sending. No claim paid and no fee was charged by a dropped claim. A new claim is safe: consensus pays an index once. Possible causes: {"; ".join(DROP_REASONS)}.', file=sys.stderr)
+        return DROPPED
+    if tx_status == 'finalized':
+        print(json.dumps({'index': fields['index'], 'sats': fields['sats'], 'recipient': fields['recipient'], 'claimed_at_l1_head': True, 'tx_status': tx_status}))
+        print(f'FINAL: withdrawal {fields["index"]} is claimed and {args.tx} is in a finalized block')
+        return OK
+    if tx_status in ('included', 'justified', 'pending'):
+        raise NotReady(f'withdrawal {fields["index"]} is claimed at the L1 head and {args.tx} is {tx_status}; do not credit yet')
+    outputs, truncated = paying_outputs(url, fields['recipient'], fields['sats'])
+    states = {}
+    for output in outputs:
+        answer = rpc(url, 'gettxstatus', [output['txid']])
+        states[output['txid']] = answer.get('status') if isinstance(answer, dict) else None
+    print(json.dumps({'index': fields['index'], 'sats': fields['sats'], 'recipient': fields['recipient'], 'claimed_at_l1_head': True, 'candidate_outputs': states, 'utxo_page_truncated': truncated}))
+    if states and all(state == 'finalized' for state in states.values()):
+        print(f'FINAL: withdrawal {fields["index"]} is claimed and every unspent output of {fields["sats"]} sats to the recipient is in a finalized block')
+        return OK
+    if any(state in ('included', 'justified') for state in states.values()):
+        raise NotReady(f'withdrawal {fields["index"]} is claimed at the L1 head, in a block not finalized yet; do not credit yet')
+    print(f'CLAIMED at the L1 head, finality not shown: no output of exactly {fields["sats"]} sats to the recipient could be followed (spent, on a truncated page, or unknown to this node). Check the recipient\'s ledger.', file=sys.stderr)
+    return CLAIMED
 
 
 def parser():
@@ -533,6 +620,14 @@ def parser():
     verify.add_argument('--proof', required=True)
     verify.add_argument('--l1-rpc', action='append', default=[])
     verify.set_defaults(run=cmd_verify)
+
+    status = sub.add_parser('status')
+    common(status)
+    status.add_argument('--proof', required=True)
+    status.add_argument('--l1-rpc', action='append', default=[], required=True)
+    status.add_argument('--tx', help='the txid printed by bloch-pos l2-claim inspect')
+    status.add_argument('--sent-height', type=int, help='L1 height when you sent the claim; lets status report a dropped claim')
+    status.set_defaults(run=cmd_status)
     return top
 
 

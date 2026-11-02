@@ -16,17 +16,46 @@
    bloch-l2-withdraw.py find --l2-rpc https://l2rpc.blochl1.com --tx 0xBURN_TX_HASH
    ```
 
-3. **Wait, fetch and verify.** This keeps trying for up to `--wait` seconds. A claim of less than 100 BLCH needs 64 L1 blocks after an FFG-finalized settlement. A larger one needs 2,880 blocks plus the attestors.
+3. **Wait, fetch and verify.** This keeps trying for up to `--wait` seconds. A claim of less than 100 BLCH needs 64 L1 blocks after an FFG-finalized settlement. A larger one needs 2,880 blocks plus the attestors, and its window (below).
 
    ```
    bloch-l2-withdraw.py fetch --l2-rpc https://l2rpc.blochl1.com --l1-rpc http://YOUR_L1_NODE:8080 --index I --recipient-pubkey me.pubkey.hex --sats 2000000 --out proof.json --wait 7200
    ```
 
-4. **Prepare the claim** with the command that `fetch` prints, then `l2-claim sign` and `sendrawtransaction`, as before. A claim of 100 BLCH or more also needs `attestor/aggregate_attestation.py`, run with the attestor `bloch-pos` `093909a2…`: the node build has no `verify-attestation`, and every set then reads as refused.
+4. **Prepare, sign and send the claim** with the commands that `fetch` prints. `fetch` exit 0 means only that a claim can be built: **nothing has been paid.** Take the base fee from `getchaininfo` (`next_base_fee_millisat_per_gas`) right before preparing, and note the L1 height when you send. A claim of 100 BLCH or more also needs `attestor/aggregate_attestation.py`, run with the attestor `bloch-pos` `093909a2…`: the node build has no `verify-attestation`, and every set then reads as refused. `prepare` and `sign` can use the node `bloch-pos`. `l2-claim inspect --tx` prints the txid.
 
-5. **Confirm from the claimed set, not from the reply.** `sendrawtransaction` answering `accepted` or `duplicate` means only that the node's mempool took the bytes. Admission does not check the nullifier, so a repeated claim is answered the same way and is then dropped by consensus: nothing moves and no second payment is possible. To confirm, run `bloch-l2-withdraw.py verify --proof proof.json --l1-rpc URL`, which exits 4 once the index is claimed and the record is on L1.
+5. **Decide with `status`, not with the send reply and not with `verify`.**
 
-Exit status: 0 ok; 1 refused (bad proof, wrong owner, wrong network); 3 not ready yet; 4 already claimed.
+   ```
+   bloch-l2-withdraw.py status --proof proof.json --l1-rpc http://YOUR_L1_NODE:8080 --tx TXID
+   ```
+
+   | exit | meaning | what an exchange does |
+   |---|---|---|
+   | 0 | claimed, and the output paying it is in a finalized L1 block | credit |
+   | 3 | not claimed yet, or claimed in a block not finalized yet | wait, ask again |
+   | 4 | claimed, but the paying output cannot be followed (spent, or not known to this node) | check your own ledger; do not resend |
+   | 5 | unclaimed and this node no longer holds `--tx` (or 32 L1 blocks after `--sent-height`): presumed dropped, nothing moved | find the cause below, build a new claim |
+
+   **What misleads.**
+   - `sendrawtransaction` answering `accepted` or `duplicate` means only that the node's mempool took the bytes. Admission does not check the nullifier, the root, the delay, the attestation or the fee.
+   - Its `tx_hash` is a local handle. It is not a txid and `gettxstatus` answers `unknown` for it. The txid comes from `l2-claim inspect`. Give it as `--tx`. Without `--tx`, `status` follows the outputs paying the recipient (`getutxos`), which also covers a claim that another relayer sent.
+   - `verify` exit 0 means the proof is valid and the withdrawal is **not** claimed. It never means paid. It exits 4 once the index is claimed.
+
+   **Why a claim is dropped.** All of these were observed on a producing private net: the send reply said `accepted`, the mempool emptied within about ten blocks, nothing moved and the funding input stayed unspent. The node logs the reason (`removing indexed transaction refused by transition`) but no RPC returns it.
+
+   | log reason | cause | fix |
+   |---|---|---|
+   | `Conservation` | the base fee at inclusion differs from `--base-fee` | prepare again with the current value, send at once |
+   | `Proof` | the root left the retained list (proof too old), or the transaction was altered | `fetch` again; a large claim also needs attestations for the new root |
+   | `NotFinalized`, `NotMatured` | proved against a root that is not claimable yet | use the root that `fetch` selects |
+   | `AttestationRequired` | 100 BLCH or more without attestations; `prepare` does not refuse this | aggregate first |
+   | `RateLimited` | the claim exceeds what is left of the release window (`release_window.remaining_sat`) | wait for a new window. A claim larger than `cap_sat` fits only as the first claim of a window, so one earlier claim, however small, blocks it for that window (2,880 blocks) |
+   | `AlreadyClaimed` | the index was paid | nothing to do |
+
+   Resending is safe. Consensus pays an index once and a claim that is dropped costs its funding input nothing.
+
+Exit status: 0 ok; 1 refused (bad proof, wrong owner, wrong network); 3 not ready yet; 4 already claimed; 5 presumed dropped (`status` only).
 
 ## What is verified, and against what
 

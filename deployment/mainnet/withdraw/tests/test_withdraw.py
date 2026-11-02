@@ -329,6 +329,75 @@ class Anchor(Base):
         self.assertEqual(self.fetch(), tool.OK)
 
 
+class Status(Base):
+    def setUp(self):
+        super().setUp()
+        self.doc = proof_doc(0, 2, 5)
+        self.path = os.path.join(tempfile.mkdtemp(), 'proof.json')
+        with open(self.path, 'w') as file:
+            json.dump({k: v for k, v in self.doc.items() if k not in ('finalized', 'native_slot', 'native_block')}, file)
+
+    def ask(self, claimed, states=(), sent=None, height=1000):
+        rec = record(2, 5)
+        answer = l1_answer([rec], rec)
+        if claimed:
+            answer['withdrawals']['claimed'] = {'count': 1, 'floor': 0, 'words': [{'word': 0, 'bits': '01' + '00' * 31}]}
+        utxos = [{'txid': f'{i:064x}', 'vout': 0, 'value_sat': str(self.doc['withdrawal']['sats'])} for i in range(len(states))]
+
+        def script(method, params):
+            if method == 'getl2settlement':
+                return answer
+            if method == 'getutxos':
+                return {'utxos': utxos, 'truncated': False}
+            if method == 'getchaininfo':
+                return {'height': height}
+            return {'status': states[int(params[0], 16)]}
+        args = ['status', '--proof', self.path, '--l1-rpc', self.url(script)]
+        return tool.main(args + (['--sent-height', str(sent)] if sent is not None else []))
+
+    def test_only_a_finalized_output_is_final(self):
+        self.assertEqual(self.ask(True, ['finalized']), tool.OK)
+        for state in ('included', 'justified'):
+            self.assertEqual(self.ask(True, [state]), tool.NOT_READY)
+
+    def test_an_equal_output_not_final_holds_the_answer(self):
+        self.assertEqual(self.ask(True, ['finalized', 'included']), tool.NOT_READY)
+
+    def test_accepted_then_dropped_is_not_success(self):
+        self.assertEqual(self.ask(False), tool.NOT_READY)
+        self.assertEqual(self.ask(False, sent=990), tool.NOT_READY)
+        self.assertEqual(self.ask(False, sent=900), tool.DROPPED)
+
+    def ask_tx(self, claimed, state):
+        rec = record(2, 5)
+        answer = l1_answer([rec], rec)
+        if claimed:
+            answer['withdrawals']['claimed'] = {'count': 1, 'floor': 0, 'words': [{'word': 0, 'bits': '01' + '00' * 31}]}
+
+        def script(method, params):
+            return answer if method == 'getl2settlement' else {'status': state} if method == 'gettxstatus' else {'utxos': []}
+        return tool.main(['status', '--proof', self.path, '--l1-rpc', self.url(script), '--tx', 'ab' * 32])
+
+    def test_following_a_txid(self):
+        self.assertEqual(self.ask_tx(True, 'finalized'), tool.OK)
+        self.assertEqual(self.ask_tx(True, 'justified'), tool.NOT_READY)
+        self.assertEqual(self.ask_tx(False, 'pending'), tool.NOT_READY)
+        self.assertEqual(self.ask_tx(False, 'unknown'), tool.DROPPED)
+        self.assertEqual(self.ask_tx(False, 'finalized'), tool.REFUSED)
+        self.assertEqual(self.ask_tx(True, 'unknown'), tool.CLAIMED)
+        self.assertEqual(self.ask_tx(True, 'paid'), tool.REFUSED)
+
+    def test_claimed_with_no_followable_output(self):
+        self.assertEqual(self.ask(True), tool.CLAIMED)
+        self.assertEqual(self.ask(True, ['unknown']), tool.CLAIMED)
+
+    def test_verify_says_claimed_after_the_root_left_the_list(self):
+        answer = l1_answer([], None)
+        answer['withdrawals']['claimed'] = {'count': 1, 'floor': 0, 'words': [{'word': 0, 'bits': '01' + '00' * 31}]}
+        url = self.url(lambda m, p: answer)
+        self.assertEqual(tool.main(['verify', '--proof', self.path, '--l1-rpc', url]), tool.CLAIMED)
+
+
 class RpcErrors(Base):
     def test_retryable_errors_are_not_ready_and_others_refused(self):
         for code in (-32001, -32041, -32042, -32043, -32045, -32046):
