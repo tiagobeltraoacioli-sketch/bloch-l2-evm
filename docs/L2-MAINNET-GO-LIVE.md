@@ -72,7 +72,7 @@ Nothing here may be filled in by an operator or an agent. `TBD-OWNER` means the 
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8. | P3 |
 | **D5** | Attestor operators: five people, five hosts, one index each, feed URLs | `TBD-OWNER`. No operator holds more than one key or shares a host with a validator, the settler or another attestor. | P10 |
 | **D6** | Addresses | The L2 core needs none. Still `TBD-OWNER`: (a) the wallet that funds the DA key (only for D10); (b) the wallet and L2 recipient of the test deposit and withdrawal. | P12 |
-| **D7** | Release signature | Sign release `SHA256SUMS` `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (`bloch-l2-2026-11-02-next-native-78d4921c`, in `~/l2dexbridge-20261030/next-rpc-r4/release/` on 209 and 136) with the owner's minisign key, after G0 gate 7 and before P2. | P2 |
+| **D7** | Release signature | Sign release `SHA256SUMS` `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (`bloch-l2-2026-11-02-next-native-78d4921c`, in `~/l2dexbridge-20261030/next-rpc-r4/release/` on 209 and 136) with the Bloch release key `1A5D96A5C4955EF7` and `rsign` on the owner's Mac (minisign is not installed there), exactly as in `docs/RELEASE-SIGNING.md`, after G0 gates 1-5 and 7 and before P2. The signature completes gate 6. | P2 |
 | **D8** | Retire the 10-18 scratch follower/RPC on 45.77 | As in the v2.1 plan: check `ps -o pid,cmd -p 1452988,1304666` first, then `kill 1452988 1304666`. | none |
 | **D9** | Public gateway | nginx + njs on A and B; do not deploy the Worker. Open: DNS timing and failover (manual switch to B by default). | P11 |
 | **D10** | When to enable user transactions | **Not with this build while F5 is open** (K13): F5 fires only with idle blocks and user transactions together, so the deposit-only launch keeps `skip_idle_blocks` on and user transactions off, and user transactions stay off until F5 is fixed in a later build. Then only after: the P12 deposit test; R2 (DA after HF2) on a private net; the gas-heavy 15M measurement; the stuck-block rehearsal; a dedicated prover (D2); **and with `foreign_recovery` on** (D17). | P12 |
@@ -142,6 +142,33 @@ Build output on 209: `~/l2dexbridge-20261030/next-rpc-r4/rel4/work-a/out/` (iden
 
 To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.patch`, `build-release.sh` at the WORK path `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2`.
 
+### 3.1a PENDING: agent 195's settled-RPC release (the one place its pins go)
+
+**Status: not delivered.** Owner decision 2026-11-02 22:10 UTC (agent 154 item 2): the settled RPC gets a 15M gas cap on `eth_call`/`eth_estimateGas` and a simulation time limit, which moves `bloch-l2-settled-rpc`, the release `SHA256SUMS` and the signing target. Until agent 195's build is reproduced on two hosts and named in a change notice of `agents/PINS-NEXT.md`, **every value in §3.1, in `GO-LIVE-PINS.sha256` (`artifacts/` lines) and in `docs/RELEASE-SIGNING.md` is the current release `116bfaba…`, and the owner does not sign it.**
+
+| Field | Current release (stays until 195 delivers) | 195 release |
+| --- | --- | --- |
+| Release name | `bloch-l2-2026-11-02-next-native-78d4921c` | PENDING-195 |
+| Build commit (`l2_commit`) | `17383feb88602926c26559802b95dee273484cd5` | PENDING-195 |
+| `bloch-l2-settled-rpc` | `e5754d05a1d6b217374a652d6959acf1fcd9323703d82226e07aa1d77a1754e8` | PENDING-195 |
+| `bloch-l2-native-follower` | `cdf5da5c…` | PENDING-195 (same unless the build moved it) |
+| `bloch-l2-produce-dev` | `e3f1a290…` | PENDING-195 (same unless the build moved it) |
+| `build.json` | `c745e7aa…` | PENDING-195 |
+| Release `SHA256SUMS` (signing target) | `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` | PENDING-195 |
+
+The follow-up commit (one commit, kit and docs only, on top of the frozen kit tip) replaces the current values with 195's in exactly these places, then recomputes the pins in the order given:
+
+1. `deployment/mainnet/GO-LIVE-PINS.sha256`: the `artifacts/` lines that moved (`bloch-l2-settled-rpc`, `build.json`, `SHA256SUMS`, and `bloch-l2-native-follower`/`bloch-l2-produce-dev`/`release-settler-v2/bloch-l2-produce-dev` if they moved).
+2. `deployment/mainnet/replica/PINS.sha256`: `bloch-l2-settled-rpc` (and follower/produce-dev if moved).
+3. `deployment/mainnet/l2_monitor.py`: `V2_SHA256['bloch-l2-settled-rpc']` and `V2_BUILD['l2_commit']` (and the module docstring's hash list); `test_l2_monitor.py` `test_identity_pins_untouched`.
+4. `deployment/mainnet/install-shadow.sh`: `L2_COMMIT` (and `PRODUCE_SHA256` if moved).
+5. If the follower or produce-dev moved: `attestor/install-attestor.sh`, `attestor/keykit/operator-pins-v2.sha256`, `attestor/keykit/check-operator-bundle.sh` and the attestor texts (a new operator bundle cut).
+6. Docs: this section and §3.1, every `116bfaba…`/`e5754d05…`/`17383feb…`/release-name occurrence in this plan (D7, §3.1, P2, P4), `docs/RELEASE-SIGNING.md` (fetch path, `--expect-sha256`, trusted comment), `docs/MAINNET-OPS-RUNBOOK.md` and `docs/L2-OPERATOR-RUNBOOK.md` hash mentions.
+7. Recompute and write: `sha256` of `l2_monitor.py` into `GO-LIVE-PINS.sha256`; then `GO-LIVE-PINS.sha256`, `replica/PINS.sha256` and `install-shadow.sh` into the §3.2 table; then a change notice in `agents/PINS-NEXT.md` naming the new kit tip and the new signing target.
+8. Re-run every kit suite (agents/198-kit-integration.md lists them) and `install-shadow.sh --verify` against 195's output on a host.
+
+No other kit file names the release. `verify_release_signature.py` reads the release name, commits and target from `release.json`/`SHA256SUMS` and the operator's `--expect-sha256`, so it does not change.
+
 ### 3.2 Kit files at the kit tip named in agents/PINS-NEXT.md
 
 | File | SHA-256 |
@@ -191,14 +218,30 @@ As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd
 
 ## 4. G0: HF3 finalized cleanly (entry gate for everything below)
 
-Run from any machine, at or after the D1 epoch. Repeat for `199.247.22.8` and `45.77.67.251`.
+Run from any machine, at or after the D1 epoch, against all three L1 RPCs: 80.240.16.185, 199.247.22.8 and 45.77.67.251. These are the three `RPC_URLS` the settler installer fixes (L1-8): choosing another third RPC is a kit commit and a new freeze, before signing. Each command is one block.
 
 ```
 curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":[]}' http://80.240.16.185:8080
 ```
 
 ```
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":[]}' http://199.247.22.8:8080
+```
+
+```
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":[]}' http://45.77.67.251:8080
+```
+
+```
 curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://80.240.16.185:8080
+```
+
+```
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://199.247.22.8:8080
+```
+
+```
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://45.77.67.251:8080
 ```
 
 **GO only if all of these hold:**
@@ -216,11 +259,22 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 6. D1, D2, D3, D4, D7, D13, D15, D16 and D17 are decided, and release `SHA256SUMS` `116bfaba…` is signed.
 7. The items that block go-live in the owner's guide (`GO-LIVE-L2-PT.md` §1) have a result. If one required a binary change, the build and the signing target changed: stop and re-pin first (`agents/PINS-NEXT.md` change notices).
 
-**NO-GO:** any HF entry not active, a finality lag > 3, nodes on different finalized roots, or an L1
-hotfix pending. Wait, and re-run G0.
+**NO-GO:** any HF1/HF2/HF3 entry other than `hf3_kes_enforce` and `hf3_lattice_emergency` not active (those two
+active is also NO-GO: KES enforcement is e8620), a finality lag > 3, nodes on different finalized roots, a
+non-empty inbox not accounted for, or an L1 hotfix pending. Wait, and re-run G0.
+
+Gate 3, one block per node:
 
 ```
 python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_history.py --rpc http://80.240.16.185:8080 --from-epoch 7180
+```
+
+```
+python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_history.py --rpc http://199.247.22.8:8080 --from-epoch 7180
+```
+
+```
+python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_history.py --rpc http://45.77.67.251:8080 --from-epoch 7180
 ```
 
 Rollback: nothing is installed yet.
@@ -275,11 +329,31 @@ scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit
 
 `scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 209 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
 
-Stage B the same way (D3, layout in §2), with `ubuntu@B` as the destination, and check on B:
+Stage B (D3, layout in §2) from the Mac; `IP_OF_B` is the D3 host. Each command is one block:
 
 ```
-cd /home/ubuntu/l2-golive-next && grep ' artifacts/' kit/GO-LIVE-PINS.sha256 | grep -v ' artifacts/SHA256SUMS$' | sha256sum -c && sha256sum artifacts/SHA256SUMS
+ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@IP_OF_B mkdir -p l2-golive-next/artifacts
 ```
+
+```
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@209.250.236.240:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c/*' ubuntu@IP_OF_B:l2-golive-next/artifacts/
+```
+
+```
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@IP_OF_B:l2-golive-next/artifacts/
+```
+
+```
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet ubuntu@IP_OF_B:l2-golive-next/kit
+```
+
+Then on B (the signature check of step 1 first):
+
+```
+cd /home/ubuntu/l2-golive-next && grep ' artifacts/' kit/GO-LIVE-PINS.sha256 | grep -v ' artifacts/SHA256SUMS$' | sha256sum -c && sha256sum artifacts/SHA256SUMS kit/GO-LIVE-PINS.sha256
+```
+
+GO on B: every line `OK`, `artifacts/SHA256SUMS` = `116bfaba…`, and `kit/GO-LIVE-PINS.sha256` = the §3.2 value.
 
 3. On A, check the build and assemble the settler release dir. The guest, the SP1 host and the 78d4921c `bloch-pos` still come from the settler-v2 staging on 136.
 
@@ -472,7 +546,17 @@ GO when:
 - `bloch_finality.status.schema` is `v2`;
 - `bloch_getWithdrawalProof` answers (an error about the missing withdrawal, not -32601).
 
-NO-GO: `safe`/`finalized` `null` after the follower is ready, or a wrong chain id.
+The two unit checks, on each host (the `no-txpool.conf` drop-in of P3 is the RPC half of "deposits only", next to the settler's `user_transactions: false`):
+
+```
+systemctl show -p ExecStart bloch-l2-mainnet-rpc
+```
+
+```
+systemctl show -p LimitNOFILE bloch-l2-mainnet-rpc
+```
+
+NO-GO: `safe`/`finalized` `null` after the follower is ready, a wrong chain id, `--txpool` present in `ExecStart`, or `LimitNOFILE` below 65536.
 
 Replica refresh on B (K5; after every finalized settlement from P8 on), one command per block:
 
@@ -690,15 +774,26 @@ Reinstall after P8, and repair after `l2_reorg_recover.py --apply`: run the roll
 
 ## P8. Settler live: first settlement (L2 block 1) — **MAINNET WRITE**
 
-Preconditions: P3 to P7 all GO on the same day. G0 re-checked within the last hour. Only one settler
-exists anywhere.
+Preconditions: P3 to P7 all GO on the same day. G0 (`getchaininfo` and `getl2settlement` on all three nodes) re-checked within the last hour. Only one settler exists anywhere.
+
+**Gate R-1 (agent 141): no proof job may still be running.** A remote prover that is busy answers exit 75, and the block then goes to the weak local fallback. An interrupted `dry-run --prove` (SSH drop, Ctrl-C) or a `rollback` followed by `start` can leave the old job running. On A, run both checks right before `start`, and again before any `start` after a `rollback`:
+
+```
+pgrep -af '[r]emote_prover'
+```
+
+```
+sudo docker ps
+```
+
+GO: `pgrep` prints nothing, and no `sp1-gnark` container is listed. NO-GO: wait until both are empty; do not kill a proof by hand. While the settler runs, run no other `dry-run`, with or without `--prove`.
 
 ```
 sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py start --confirm-mainnet
 ```
 
 ```
-journalctl -u bloch-l2-mainnet-settler.service -f -o cat
+sudo journalctl -u bloch-l2-mainnet-settler.service -f -o cat
 ```
 
 Expected, in order: `identity-checked` (mainnet true), `idle-end` with reason `max-idle` (the activation source is far older than 24 h), `l2-block-produced` 1, `proof-generated`,
@@ -727,8 +822,10 @@ stops advancing):
 - `acceptance-timeout` with `l1-not-advancing` for more than 3 cycles;
 - RPC `safe`/`finalized` disagreeing with `getl2settlement`.
 
+If `prover-failed … exit 75` still appears for block 1 (R-1), it is not a NO-GO: block 1 finishes with the local proof (529k instructions, under the 3M local limit). Find the job that held the prover before block 2.
+
 Rollback limits: **an accepted L1 settlement cannot be undone.** Restarting with `start --confirm-mainnet`
-resumes from the accepted head.
+resumes from the accepted head; run gate R-1 again first.
 
 ## P9. Monitor
 

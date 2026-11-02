@@ -314,6 +314,12 @@ sudo -u bloch-l2-mainnet-settler python3 REL/l2_reorg_recover.py --config /etc/b
 
 Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool (and, with `--respool-from OLD_WORK`, those of the pre-restore `work/` above the accepted number; never batches read from L1), and keeps the old database for review.
 
+Since the round-10 kit (agent 152 L2-L4, fixed by agent 198):
+
+- Orphaned blocks are every local block off the accepted chain, found from the common ancestor (the rebuild's blocks, then the follower's finalized settlements); a database that was replaced at the accepted number (`forked`) or left the chain below its head (`ahead` after a deeper reorg) also respools those blocks. The report names `common_ancestor` (with `common_ancestor_assumed` when no canonical hash was known below it).
+- The rebuild gets `--rebuild-timeout SECONDS` (default `foreign_recovery.rebuild_timeout_seconds`, else 3600), not the 300 s of other producer commands. A rebuild that runs out of time is refused cleanly (exit 3); run again with a larger value.
+- The swap is journalled in `<l2_db>.recovery.json`, in the worker's format. If `--apply` is interrupted between its renames, the next `--apply` finishes it (a run without `--apply` refuses and says so), and so does the worker at its next start.
+
 ## Attestor signatures (3-of-5): when and how
 
 **When they are needed.** Only for L2→L1 withdrawal **claims of ≥ 100 BLCH**. They are not
