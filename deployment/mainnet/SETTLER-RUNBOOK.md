@@ -208,14 +208,14 @@ Off by default. `configure --skip-idle-blocks [--max-idle-seconds 86400] [--min-
 
 No consensus rule changes. L1 accepts the next L2 block at any time, against the source it froze right after the last acceptance.
 
-A block is due when L1 holds an unconsumed deposit, the spool holds a transaction, or the source is `max_idle_seconds` old. The last one proves prover, proof and submission while no demand does, and sets how late a broken prover is found.
+A block is due when L1 holds an unconsumed deposit, the spool holds a transaction at its sender's next nonce, or the source is `max_idle_seconds` old. The last one proves prover, proof and submission while no demand does, and sets how late a broken prover is found.
 
 **What changes for users and operators:**
 
 - **A deposit made while idle takes two blocks and two proofs.** The frozen source does not list it, so the first block carries nothing and only the next can mint it.
 - **L2 time stands still while idle.** `latest` shows the last block's time, and the next block carries the time of the old source, up to `max_idle_seconds` behind. Its transactions would run at that time, so a block on a source older than 600 s above the pacing is built without the spool, and the transactions go in the next one. This also costs a block.
 - **Pacing.** `min_block_interval_seconds` delays a due block, measured from the last acceptance. It is the only limit on a depositor forcing blocks. A deposit may then wait two intervals plus two proofs.
-- **Junk in the spool still forces blocks.** A transaction the producer cannot include is demand until it leaves the spool. Set pacing before user transactions are on.
+- **Only an entry the next block may take forces a block.** A spooled transaction is demand when its nonce is its sender's next nonce at the head (the producer's `account`). A nonce gap, which the RPC admits up to 16 ahead and keeps 3 h, is not. Bytes that do not read as a transaction, and a sender whose nonce cannot be read, still count (`spool-demand-unknown` in the log); the producer prunes the first at the next block. Fees are not checked here, because the RPC admits only entries that cover the next base fee and the tip floor. The first check after a restart reads every entry's sender, about 10 ms each (40 s for a full 4,096-entry spool); later checks read only new files. Set pacing before user transactions are on.
 
 **Set with the option, or they raise false alerts:**
 
