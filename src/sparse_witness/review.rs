@@ -1760,13 +1760,14 @@ fn fuzz_rich_blocks_next_rules() {
 // Findings: these fail on the candidate. Run with --ignored.
 // ---------------------------------------------------------------------------
 
-/// FINDING L1 (liveness, not soundness). A deposit cannot be refused, and it runs no
-/// code. Yet the witness must carry the whole code of the recipient, and hydration
-/// analyses and hashes it. So the guest's cost of a deposit depends on what the target
-/// deployed, and a deposit-only block can still be made unprovable: storage griefing is
-/// closed, code griefing is not. See `bloch-evm-sp1-sparse-code-cost` for the cost.
+/// FINDING I1 (cost, not soundness, not a stop). A deposit cannot be refused, and it
+/// runs no code. Yet the witness must carry the whole code of the recipient, and
+/// hydration analyses and hashes it. L1 caps a settlement at 64 deposits
+/// (`MAX_INBOX_PER_SETTLEMENT`), so the forced cost is bounded: about 50M SP1 gas with
+/// 64 recipients of 24,576 bytes, measured by `bloch-evm-sp1-sparse-code-cost`. Inside
+/// the proven class. A lazy code map would remove it.
 #[test]
-#[ignore = "finding L1: fails on the candidate, a forced deposit carries the recipient's code"]
+#[ignore = "finding I1: fails on the candidate, a forced deposit carries the recipient's code"]
 fn a_deposit_does_not_carry_the_code_of_its_recipient() {
     let mut chain = Chain::new(ChainSpec::mainnet_v1());
     // PUSH2 24576 PUSH1 0 RETURN: 24,576 zero bytes of runtime.
