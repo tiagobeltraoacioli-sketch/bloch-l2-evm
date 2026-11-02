@@ -189,6 +189,30 @@ class PaidBatch(Base):
         self.assertEqual(spool, sorted(f'{s.keccak256(raw).hex()}.tx' for raw in s.da_batch_transactions(self.paid)),
                          'the paid transactions are back in the main spool too')
 
+    def test_waits_for_the_follower_to_store_the_paid_block(self):
+        # The follower stores finalized blocks only: a batch recorded at height 3 is not in a 1-block store yet.
+        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
+        state = self.follower_store([b'\x01' * 40])
+        settler = self.user_settler(fake, follower_state=str(state))
+        self.assertFalse(settler.cycle(), 'waits instead of paying a second fee')
+        self.assertEqual((fake.sent, fake.pools), ([], []))
+        for i, frame in ((2, b'\x02' * 40), (3, self.own_frame(1, self.paid))):
+            (state / 'blocks' / f'{i:064x}.bin').write_bytes(frame)
+            with (state / 'index').open('a') as index:
+                index.write(f'{i:064x}\n')
+        self.assertTrue(settler.cycle())
+        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
+
+    def test_gives_up_waiting_after_reuse_wait_seconds(self):
+        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
+        state = self.follower_store([b'\x01' * 40])
+        settler = self.user_settler(fake, follower_state=str(state), da={**self.da_config(), 'reuse_wait_seconds': 1})
+        settler.reuse_waits[1] = -10_000
+        self.assertTrue(settler.cycle())
+        self.assertEqual(fake.pools, [str(self.root / 'txpool')], 'built from the spool after the wait')
+
     def test_foreign_recovery_follower_state_is_used(self):
         fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
         fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 1})

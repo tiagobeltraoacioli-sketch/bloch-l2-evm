@@ -111,7 +111,8 @@ def own_l1_batches(config, settler, view, number, follower_state):
     if not records or not da.get('funding_pubkey'):
         return {}
     own = bytes.fromhex(Path(da['funding_pubkey']).read_text().strip())
-    found = S.recorded_da_batches(follower_state, settler.chain_id, records)
+    offset = getattr(settler, 'native_height_offset', lambda: 0)() or 0
+    found = S.recorded_da_batches(follower_state, settler.chain_id, records, offset)
     return {key: payload for key, (key_bytes, payload) in found.items() if key_bytes == own}
 
 
