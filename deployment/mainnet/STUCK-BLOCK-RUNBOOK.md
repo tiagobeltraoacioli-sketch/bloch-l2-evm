@@ -166,5 +166,7 @@ Keep the quarantined file and the old database until the block is finalized.
 
 ## After any stuck block
 
-The offender can be sent again. If the budget of `settler_v3.py` (`max_block_instructions`, `max_block_sp1_gas`) is not active, enable it before
-reopening the spool. With it, a block over the budget is never committed, so this runbook covers only hardware failure.
+The offender can be sent again. If the budget of `settler_v3.py` (`max_block_sp1_gas`, see `sequencer_policy.py`) is not active, enable it before
+reopening the spool. With it, user transactions over the budget are never committed. One case remains: a block whose deposits alone are over the budget.
+L1 names exactly those deposits, so it commits anyway, alone, and leaves `deposits-over-budget.json` in its work directory. It cannot be replaced: use
+`export-job` and `import-proof`, or set `local_prove_max_sp1_gas` and a remote prover so that it goes there without running this host out of memory.

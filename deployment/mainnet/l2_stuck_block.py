@@ -18,9 +18,14 @@ RPC on this database first: `discard` swaps the database, and `import-proof` wri
   l2_stuck_block.py status       --config settler.json
   l2_stuck_block.py export-job   --config settler.json --out NEW_DIR
   l2_stuck_block.py import-proof --config settler.json --proof FILE
-  l2_stuck_block.py triage       --config settler.json --budget INSTRUCTIONS [--budget-gas SP1_GAS] --follower-state DIR --follower-status FILE [--out FILE]
+  l2_stuck_block.py triage       --config settler.json --budget-gas SP1_GAS [--budget INSTRUCTIONS] --follower-state DIR --follower-status FILE [--out FILE]
   l2_stuck_block.py discard      --config settler.json --follower-state DIR --follower-status FILE
                                  (--exclude HASH ... | --exclude-file FILE | --exclude-all) [--apply]
+
+A block with deposits only cannot be replaced. L1 names exactly the deposits of the next settlement, in order, up to 64
+(`MAX_INBOX_PER_SETTLEMENT`), so a replacement would be the same block. `status` and a refused `triage` say what it costs
+and that the only exit is a proof from elsewhere: `export-job`, then `import-proof`. Removing the user transactions of a
+block whose deposits alone are too heavy does not help either: `triage` says so with `deposits_alone_fit: false`.
 
 Exit codes: 0 done or planned, 75 not possible yet (run again later), 3 refused.
 """
@@ -46,7 +51,9 @@ S.log = lambda event, **fields: print(json.dumps({'event': event, **fields}), fi
 
 
 class Refuse(Exception):
-    pass
+    def __init__(self, text, **fields):
+        super().__init__(text)
+        self.fields = fields
 
 
 class NotYet(Exception):
@@ -122,6 +129,9 @@ class Stuck:
             'da_recorded_on_l1': records,
             'settlement_submitted': (d / 'submitted.json').exists(),
             'source_anchor': self.view['source']['block'],
+            'deposit_only': self.block.get('transactions') == 0,
+            'exit': 'prove elsewhere: export-job, then import-proof' if self.block.get('transactions') == 0
+                    else 'prove elsewhere, or triage and discard',
         }
 
     def raws(self):
@@ -243,22 +253,33 @@ def measure(stuck, base, kept, workspace, tag):
     return int(found[-1]), int(gas[-1]) if gas else None, block
 
 
+def fits_budget(instructions, gas, budget, budget_gas):
+    """Against SP1 gas first: a guest that reports none cannot pass that budget. Instructions only when a budget names them."""
+    if budget_gas is not None and (gas is None or gas > budget_gas):
+        return False
+    return budget is None or instructions <= budget
+
+
 def triage(stuck, budget, budget_gas, follower_state, follower_status, out=None):
     """Greedy, in block order: keep a transaction when the block with it still fits the budget."""
     raws = stuck.raws()
     if not raws:
-        raise Refuse('this block has no user transactions: replacing it cannot make it smaller; prove it elsewhere')
+        facts = stuck.facts()
+        raise Refuse('this block has no user transactions: replacing it cannot make it smaller; prove it elsewhere',
+                     sp1_gas=facts['sp1_gas'], instructions=facts['instructions'], deposits=facts['deposits'],
+                     next_step='export-job, prove on a bigger machine, import-proof')
     workspace = Path(tempfile.mkdtemp(prefix='.triage-', dir=stuck.db.parent))
     base = stuck.rebuild(follower_state, follower_status)
     try:
         kept, quarantine, steps = [], [], []
         current, gas, _ = measure(stuck, base, [], workspace, 'base')
         steps.append({'hash': None, 'instructions': current, 'sp1_gas': gas})
+        deposits_fit = fits_budget(current, gas, budget, budget_gas)
         for raw in raws:
             name = S.keccak256(raw).hex()
             instructions, gas, block = measure(stuck, base, kept + [raw], workspace, 'step')
             taken = name in block.get('included', [])
-            fits = instructions <= budget and (budget_gas is None or gas is None or gas <= budget_gas)
+            fits = fits_budget(instructions, gas, budget, budget_gas)
             steps.append({'hash': name, 'instructions': instructions, 'sp1_gas': gas, 'delta': instructions - current, 'included': taken, 'fits': fits})
             if fits:
                 kept.append(raw)
@@ -268,7 +289,7 @@ def triage(stuck, budget, budget_gas, follower_state, follower_status, out=None)
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
         shutil.rmtree(base, ignore_errors=True)
-    report = {'number': stuck.number, 'budget': budget, 'kept': len(kept), 'exclude': quarantine, 'instructions_after': current, 'steps': steps}
+    report = {'number': stuck.number, 'budget': budget, 'budget_gas': budget_gas, 'deposits_alone_fit': deposits_fit, 'kept': len(kept), 'exclude': quarantine, 'instructions_after': current, 'steps': steps}
     if out:
         atomic_write(Path(out), json.dumps(report, indent=1) + '\n', mode=0o644)
     return report
@@ -339,6 +360,8 @@ def main():
             if not o.follower_state or not o.follower_status:
                 parser.error('--follower-state and --follower-status are required')
             if o.command == 'triage':
+                if o.budget is None and o.budget_gas is None:
+                    parser.error('triage needs --budget-gas (or --budget)')
                 check_replaceable(stuck.facts())
                 result = triage(stuck, o.budget, o.budget_gas, o.follower_state, o.follower_status, o.out)
             else:
@@ -351,7 +374,7 @@ def main():
         print(json.dumps({'not_yet': str(why)}))
         sys.exit(75)
     except (Refuse, S.Halt, S.ProducerError) as why:
-        print(json.dumps({'refused': str(why)}))
+        print(json.dumps({'refused': str(why), **getattr(why, 'fields', {})}))
         sys.exit(3)
 
 

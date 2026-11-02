@@ -103,6 +103,27 @@ class Discard(unittest.TestCase):
             t.discard(self.stuck, [], True, 'f', 's', apply=True)
 
 
+class Budget(unittest.TestCase):
+    def test_sp1_gas_decides_and_instructions_are_optional(self):
+        self.assertTrue(t.fits_budget(500, 100, None, 100))
+        self.assertFalse(t.fits_budget(500, 101, None, 100))
+        self.assertFalse(t.fits_budget(500, None, None, 100))
+        self.assertFalse(t.fits_budget(500, 100, 400, 100))
+        self.assertTrue(t.fits_budget(400, None, 400, None))
+
+    def test_triage_of_a_deposit_only_block_gives_its_cost_and_the_exit(self):
+        class Fake:
+            def raws(self):
+                return []
+
+            def facts(self):
+                return {'sp1_gas': 432_000_000, 'instructions': 300_000_000, 'deposits': 5}
+        with self.assertRaises(t.Refuse) as caught:
+            t.triage(Fake(), None, 150_000_000, 'f', 's')
+        self.assertEqual(caught.exception.fields['sp1_gas'], 432_000_000)
+        self.assertIn('export-job', caught.exception.fields['next_step'])
+
+
 class Files(unittest.TestCase):
     def test_import_refuses_a_second_proof(self):
         class Fake:
