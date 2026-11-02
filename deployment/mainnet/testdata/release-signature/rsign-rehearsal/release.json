@@ -1,0 +1,10 @@
+{
+  "release": "bloch-l2-rehearsal-dummy",
+  "chain_id": 1,
+  "l2_commit": "0000000000000000000000000000000000000000",
+  "native_commit": "1111111111111111111111111111111111111111",
+  "platform": "linux-x86_64",
+  "checksum_manifest": "SHA256SUMS",
+  "checksum_signature": "SHA256SUMS.minisig",
+  "signed": false
+}
