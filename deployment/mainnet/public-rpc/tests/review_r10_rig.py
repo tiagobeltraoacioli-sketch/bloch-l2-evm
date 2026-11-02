@@ -168,11 +168,11 @@ def call(i, method='eth_call', params=None):
     return {'jsonrpc': '2.0', 'id': i, 'method': method, 'params': params}
 
 
-def r1_abort(pair, A, B):
+def r1_abort(pair, A, B, sims):
     """G3: a client that closes its connection while its simulations run."""
     ip = '203.0.113.31'
     A.call_delay = B.call_delay = 3
-    body = json.dumps([call(i) for i in range(16)]).encode()
+    body = json.dumps([call(i) for i in range(sims)]).encode()
     port = int(pair.a.rsplit(':', 1)[1])
     s = socket.create_connection(('127.0.0.1', port))
     s.sendall(b'POST / HTTP/1.1\r\nHost: l2rpc.test\r\nContent-Type: application/json\r\nCF-Connecting-IP: ' + ip.encode()
@@ -181,8 +181,8 @@ def r1_abort(pair, A, B):
     s.close()
     time.sleep(5)
     A.call_delay = B.call_delay = 0
-    status, answer = post(pair.a, [call(i) for i in range(16)], ip)
-    check('R1/G3: 16 eth_call after an aborted batch of 16 from the same client are served (slots released)', status == 200,
+    status, answer = post(pair.a, [call(i) for i in range(sims)], ip)
+    check(f'R1/G3: {sims} eth_call after an aborted batch of {sims} from the same client are served (slots released)', status == 200,
           {'status': status, 'answer': answer if status != 200 else 'ok'})
     status, answer = post(pair.a, call(1), ip)
     check('R1/G3: one eth_call after the aborted batch is served', status == 200, {'status': status, 'answer': answer if status != 200 else 'ok'})
@@ -199,6 +199,14 @@ def r1_abort(pair, A, B):
     status, answer = post(pair.a, call(1), ip2)
     check('R1/G3: half-close then close (a browser tab closed): one eth_call afterwards is served', status == 200,
           {'status': status, 'answer': answer if status != 200 else 'ok'})
+    # A client that keeps calling (one eth_call every 30 s): is it served again within 330 s?
+    statuses, ends = [], time.time() + 330
+    while time.time() < ends:
+        statuses.append(post(pair.a, call(1), ip)[0])
+        if statuses[-1] == 200:
+            break
+        time.sleep(30)
+    check('R1/G3: a client that keeps calling every 30 s is served again within 330 s of the abort', statuses[-1] == 200, statuses)
 
 
 def r2_ipv6(pair):
@@ -265,6 +273,7 @@ def main():
     p.add_argument('--work', required=True)
     p.add_argument('--port-base', type=int, default=35400)
     p.add_argument('--only', default='R1,R2,R3,R4')
+    p.add_argument('--sims', type=int, default=16, help="the rendered --sim-per-ip (16 at f1c8033, 2 at 8d1c873)")
     a = p.parse_args()
     work = Path(a.work).resolve()
     work.mkdir(parents=True, exist_ok=False)
@@ -276,7 +285,7 @@ def main():
         status, answer = post(pair.a, call(1, 'eth_blockNumber'), '192.0.2.1')
         check('baseline: the rig answers', status == 200 and answer.get('result') == '0x3e8', answer)
         if 'R1' in only:
-            r1_abort(pair, A, B)
+            r1_abort(pair, A, B, a.sims)
         if 'R2' in only:
             time.sleep(2)
             r2_ipv6(pair)
