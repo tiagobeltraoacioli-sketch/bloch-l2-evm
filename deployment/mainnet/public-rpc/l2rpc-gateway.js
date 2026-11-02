@@ -8,7 +8,8 @@
 //
 //   read     to the fresher of the local settled RPC and the peer host's
 //            (nginx upstream with the other one as backup)
-//   seqread  the sequencer first (it counts the spool), then the other
+//   seqread  the sequencer first (it counts the spool and knows the required tip), then the other:
+//            eth_getTransactionCount at pending, eth_gasPrice, eth_maxPriorityFeePerGas, eth_feeHistory
 //   finality a call at `safe` or `finalized`, bloch_finality, bloch_settlement or
 //            bloch_getWithdrawalProof: to a backend whose follower status is valid
 //            and younger than cfg.maxStatusAgeS and, among those, the one with the
@@ -23,6 +24,9 @@
 import cfg from 'l2rpc-config.js';
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+// Fee suggestions: answered by the sequencer first (route seqread).
+const FEE_METHODS = { eth_gasPrice: true, eth_maxPriorityFeePerGas: true, eth_feeHistory: true };
 
 // route per method; block: index of the block parameter (for "pending").
 const METHODS = {
@@ -280,6 +284,8 @@ function classify(call) {
   if (m === 'eth_getTransactionCount' && Array.isArray(call.params) && call.params[1] === 'pending') {
     return { route: 'seqread' };
   }
+  // Only the sequencer's RPC knows the sequencer's required tip (--required-tip-file); a replica suggests the floor.
+  if (FEE_METHODS[m] === true && !namesFinalityLevel(m, call.params)) return { route: 'seqread' };
   if (route === 'read' && (FINALITY_METHODS[m] === true || namesFinalityLevel(m, call.params))) return { route: 'finality' };
   return { route: route };
 }
