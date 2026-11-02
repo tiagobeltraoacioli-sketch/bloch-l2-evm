@@ -225,16 +225,18 @@ MAINNET_NEXT = {
 }
 
 # CANDIDATE, not scheduled: the same next rules proved by the sparse-witness guest
-# (`settlement_v3_mainnet_sparse`, bloch-l2-evm codex/sparse-witness-r4-20261101), the program
-# agent 89's native branch names in `PROGRAM_NEXT`. Same configuration; ELF and keys differ.
+# (`settlement_v3_mainnet_sparse` 78c533fa, the pinned container build of bloch-l2-evm
+# codex/sparse-audit-r7-20261102 b772f2d, code-by-hash witness, artifact format SPARSE:2).
+# Agent 89's native `PROGRAM_NEXT` still names the earlier 75b9c635 and must move with this
+# pin. Same configuration; ELF and keys differ.
 # A `next_program` with `"witness": "sparse"` must match this pin, exports the sparse artifact
 # (`produce export --witness sparse`) and runs the prover with `--mainnet --sparse`.
 MAINNET_NEXT_SPARSE = {
     'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
-    'elf_keccak': '54d264b8969845b82b3c8d0cec54562567ab7ee6f59dae7e2678c7d9e848c011',
-    'vkey_koalabear': '5f802b085c7520f54383ee604e867d4d327a0d554388ca79254748973cf6c126',
-    'vkey_bn254': '00bf00561171d483d61c1f7304e867d4d64f41aab0e2329e52a3a44bbcf6c126',
-    'guest_sha256': '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e',
+    'elf_keccak': '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
+    'vkey_koalabear': '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
+    'vkey_bn254': '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910',
+    'guest_sha256': '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
 }
 
 
