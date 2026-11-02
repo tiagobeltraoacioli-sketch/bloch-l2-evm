@@ -35,7 +35,7 @@ use bloch_l2_evm::{
     BlockContext, ChainSpec, DepositMint, DepositProvenance, L2State,
 };
 use k256::ecdsa::SigningKey;
-use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, SP1Stdin};
+use sp1_sdk::{Elf, LightProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Stdin};
 use std::{error::Error, fs, io, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
