@@ -38,7 +38,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256};
 use revm::{context::TxEnv, database::CacheDB, DatabaseRef};
 
 /// Per-block production limits. Each is clamped to the protocol bound
@@ -159,28 +159,11 @@ pub struct DroppedTransaction {
     pub reason: DropReason,
 }
 
-/// What one included transaction did, for a producer's own policy. Reported only:
-/// no block rule reads it, and replay never computes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TxStats {
-    /// Transaction hash.
-    pub hash: B256,
-    /// Recovered sender.
-    pub sender: Address,
-    /// Gas actually used.
-    pub gas_used: u64,
-    /// Priority fee per gas paid at this block's base fee.
-    pub effective_tip: u128,
-    /// Non-zero storage slots this transaction added, per account.
-    pub fresh_slots: Vec<(Address, u64)>,
-    /// Non-zero storage slots this transaction cleared, per account.
-    pub cleared_slots: Vec<(Address, u64)>,
-}
-
 /// Result of [`select_node_transactions`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockSelection {
-    /// One entry per included transaction, in block order.
+    /// One entry per included transaction, in block order (host builds only, see [`TxStats`]).
+    #[cfg(feature = "std")]
     pub stats: Vec<TxStats>,
     /// Included signed envelopes, in block order.
     pub transactions: Vec<Bytes>,
@@ -358,20 +341,23 @@ pub fn select_node_transactions<DB: DatabaseRef>(
             defer(reason, queue, &mut selection.deferred);
             continue;
         }
-        let tip = candidate.effective_tip(base_fee);
-        let before = cached_storage(session.database());
+        #[cfg(feature = "std")]
+        let (tip, before) = (candidate.effective_tip(base_fee), cached_storage(session.database()));
         match session.try_transaction(&candidate.env, |_| true) {
-            Ok(outcome) => {
-                let gas_used = outcome.map_or(0, |outcome| outcome.gas_used);
-                let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
-                selection.stats.push(TxStats {
-                    hash: candidate.hash,
-                    sender,
-                    gas_used,
-                    effective_tip: tip,
-                    fresh_slots,
-                    cleared_slots,
-                });
+            Ok(_outcome) => {
+                #[cfg(feature = "std")]
+                {
+                    let gas_used = _outcome.map_or(0, |outcome| outcome.gas_used);
+                    let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
+                    selection.stats.push(TxStats {
+                        hash: candidate.hash,
+                        sender,
+                        gas_used,
+                        effective_tip: tip,
+                        fresh_slots,
+                        cleared_slots,
+                    });
+                }
                 selection.declared_gas += candidate.env.gas_limit;
                 selection.bytes += candidate.raw.len();
                 selection.hashes.push(candidate.hash);
@@ -395,8 +381,33 @@ pub fn select_node_transactions<DB: DatabaseRef>(
     Ok(selection)
 }
 
-type StorageView = BTreeMap<Address, BTreeMap<U256, U256>>;
+// Selection reports for a producer's policy (sequencer budget, write price). Host builds only (`std`): no block rule
+// reads them, and keeping them out of the no_std guests keeps every settlement guest ELF byte-identical to a tree
+// without them. Kept at the end of the file for the same reason.
 
+/// What one included transaction did, for a producer's own policy. Reported only:
+/// no block rule reads it, and replay never computes it.
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxStats {
+    /// Transaction hash.
+    pub hash: B256,
+    /// Recovered sender.
+    pub sender: Address,
+    /// Gas actually used.
+    pub gas_used: u64,
+    /// Priority fee per gas paid at this block's base fee.
+    pub effective_tip: u128,
+    /// Non-zero storage slots this transaction added, per account.
+    pub fresh_slots: Vec<(Address, u64)>,
+    /// Non-zero storage slots this transaction cleared, per account.
+    pub cleared_slots: Vec<(Address, u64)>,
+}
+
+#[cfg(feature = "std")]
+type StorageView = BTreeMap<Address, BTreeMap<alloy_primitives::U256, alloy_primitives::U256>>;
+
+#[cfg(feature = "std")]
 fn cached_storage<DB>(db: &CacheDB<DB>) -> StorageView {
     db.cache
         .accounts
@@ -407,6 +418,7 @@ fn cached_storage<DB>(db: &CacheDB<DB>) -> StorageView {
 
 /// Slots added and cleared since `before`, per account. A slot the block had not touched
 /// yet has its value in the parent state.
+#[cfg(feature = "std")]
 #[allow(clippy::type_complexity)]
 fn storage_growth<DB: DatabaseRef>(
     db: &CacheDB<DB>,

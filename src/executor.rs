@@ -2623,8 +2623,9 @@ mod tests {
 }
 
 // Kept at the end of the file: code above keeps its line numbers, which the guest's panic locations include.
+#[cfg(feature = "std")]
 impl<DB> BlockSession<DB> {
-    /// The session's database, for reports of a producer's selection.
+    /// The session's database, for reports of a producer's selection (host builds only).
     pub(crate) fn database(&self) -> &CacheDB<DB> {
         &self.db
     }
