@@ -24,7 +24,7 @@ GO: empty output. **Never build a release from 9645efc or from this branch**: it
 - `safe` follows an L1 reorg down and never below `finalized`; by-hash reads check the canonical hash;
 - the follower can write status schema v3, but **defaults to v2** (unit `BLOCH_L2_STATUS_SCHEMA=v2`);
 - `--min-tip-wei` (0.1 gwei by default) in the RPC and the producer;
-- the settler's idle-block option (agent 92, 503757d; **not** 724bf4c, which wedges deposits), DA re-sign on a fee move and the database-behind-the-accepted-head recovery (agent 118, 738399f);
+- the settler's idle-block option (agent 92, 503757d; **not** 724bf4c, which wedges deposits), DA re-sign on a fee move and the database-behind-the-accepted-head recovery (agent 118, 738399f), **without** agent 118's paid-batch reuse (removed after agents/145 F1-F3, branch `codex/settler-reuse-revert-r8-20261102`);
 - `LimitNOFILE=65536` in the RPC unit.
 
 The guest (`203114bf…`, the dense guest), the program identity, the proof policy and the activation do not change. The sparse witness guest (agents 81, 89) is **not** in this build.
@@ -132,15 +132,15 @@ To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.pat
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `1bc1da0cc8bda03e380a7ced923d2177ced105314ca5fd91e9047cb6209f3996` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `d8e6dd9100f497c9322e92c92b387b9e87b3840c4f4e25e60a57e5c96c4cae90` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `65715d136c401eec751cbf1677a6691ffca281b5d47667b7c8f4885aa607c91d` |
 | `deployment/mainnet/install-shadow.sh` | `1ec041afb7d0c1463680252bdb2e3e420f1ff9881d1f851170c6f3780eb937f3` |
 | `deployment/mainnet/l2_monitor.py` | `71f14a645601a07054822021574c1ce557bfb0beeda9ee0f4f71d8c2a58b3820` |
-| `deployment/mainnet/install-settler-mainnet.py` | `57de4dfca34b6aea45826ba159762666a399d9e7d40c85336aed5f52f76add40` |
-| `deployment/mainnet/l2_reorg_recover.py` | `d1a91c46688bb4d37fc12d54f96df04727f105dffbf336dddc896524e548623a` (the settler installer pins it) |
+| `deployment/mainnet/install-settler-mainnet.py` | `33e1d9ff4fb4abbe98c1fbad3a1dfcf60ef80037d6edca7f10b069eb80b340b3` |
+| `deployment/mainnet/l2_reorg_recover.py` | `2a0cfabd0ab9f30d4ef78838c96daa1ff086c87c42ff7e7b501d4e7951c6b5b1` (the settler installer pins it) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `f342deab986b419dccd89070bb1ac0088729c90258cc57a646b83e9a31787e39` |
 | `deployment/devnet/remote_prover.py` | `183bd65509780ed7e222d0aadd2b0be8550c91428cada948c468ffb3b592cdab` (the prover installer pins it; **not** `3c11d9be…` as the PINS-NEXT kit table implies, agent 124 D1) |
-| `deployment/devnet/settler_v3.py` | `2be2651c884db041d076ec80f67b1da747aa0fe63a8fc540875398ff3a832546` |
+| `deployment/devnet/settler_v3.py` | `8e2c67f54efff1f3fe69de1361b8cdbdcc622ee187b29dffd64c3c3f58edf1d8` |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `d1229ca15a3ae6921726631356eff9ed67d417228b23f08de7fac16493090d49` (9645efc; `00f6c6a5…` at 583d8ec) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `24aa5cb8d76e5fc8ff926bd49a21497635959c032783fbfdeee38dd2917aac48` (`LimitNOFILE=65536`) |
@@ -166,7 +166,7 @@ As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd
 | K12 | `spool-step-restart` residual (report 62) | After a restart under a wrong clock, held spool entries expire; users resend. No funds move | Accept; keep host clocks on NTP |
 | K13 | F5 (agent 121): held nonce-gap entries count as demand, so every cycle is due (5 of 5 on 17383fe) | Needs both `skip_idle_blocks` and user transactions. Junk in the spool forces blocks | **The deposit-only launch keeps idle blocks on and user transactions off. User transactions stay off until F5 is fixed**; turning idle blocks off instead gives up the height protection of D15 |
 | K14 | Agent 118's required-tip file | `--required-tip-file` is inert: nothing writes it, no unit passes it. The gateway commits 3de3a3e and 51cbda1 are in this kit | None at launch |
-| K15 | Two low findings of agent 124 on DA re-sign and paid-batch reuse | Worst case one extra DA fee | Only with D10 |
+| K15 | No paid-batch reuse (removed: agents/145 F1 let a third party choose block contents). A settler database restored at the accepted head may pay one more DA fee, and its unsettled transactions return only with `l2_reorg_recover.py --respool-from OLD_WORK` | About 2,200 sat once per such restore | Only with D10; never back up or restore `canonical/` or `work/` |
 | R1 | First real crossing of HF1–HF3 by this follower | Any halt in P3 is an absolute NO-GO | P3 |
 | R2 | DA signature after HF2 | Untested; inferred from code | Rehearse one 0x15 on a private net before D10 |
 | R3 | Gas-heavy 15M blocks unmeasured; stuck-block recovery not rehearsed | A proof that OOMs makes the settler retry the same committed block forever | Before D10 |
@@ -284,7 +284,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `442beec339f88574af4245ec1733bc84ba10256c561aa5ca3f63fdc847d0de52`, `artifacts/SHA256SUMS` to `116bfaba…`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `d8e6dd9100f497c9322e92c92b387b9e87b3840c4f4e25e60a57e5c96c4cae90`, `artifacts/SHA256SUMS` to `116bfaba…`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
@@ -1059,6 +1059,6 @@ If the refilled node is a follower's only L1 source, the follower may have halte
 | --- | --- | --- |
 | Follower host | Reinstall (P3) and replay from L1 | 57 min to e6596, about 75 min today |
 | Settled RPC view | Restart; it rebuilds the view | 0.8 s (small L2) |
-| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This build's `l2_reorg_recover.py` `d1a91c46…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118). | 0.16 s rebuild (3 blocks) |
+| Settler database | **Never back up or restore `canonical/` or `work/`.** Rebuild from L1 with `produce-dev reconstruct --l1-follower`, then re-spool from the pre-restore `work/` (`docs/L2-OPERATOR-RUNBOOK.md` entry 13 on `codex/recovery-r6-20261102`). An old backup halts the worker at once (`L2 head N cannot extend accepted settlement M`); no double spend and no fork, but user transactions of the unsettled block are dropped and one DA fee is lost. This build's `l2_reorg_recover.py` `2a0cfabd…` can rebuild a database behind the accepted head once the follower has finalized that settlement (agent 118); it re-spools only from `--respool-from OLD_WORK`, never from batches read on L1 (agents/145 F1). | 0.16 s rebuild (3 blocks) |
 | DA fee key | New key, fund it, restart with the same paths; the old key's balance is lost. Hence the separate backups in P6 | 6 s funding |
 | Prover host | Reinstall P5 and prove the next block | 11–28 min plus install (not run) |

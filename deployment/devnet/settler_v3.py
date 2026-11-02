@@ -268,10 +268,6 @@ class RpcError(RuntimeError):
     """The endpoint answered with a JSON-RPC error."""
 
 
-class FollowerBehind(Exception):
-    """A DA batch for the next block is on L1, but the follower has not stored (finalized) its block yet."""
-
-
 class ForeignSettlement(Exception):
     """L1 accepted a settlement the local database does not hold: recoverable with `foreign_recovery`."""
 
@@ -592,70 +588,6 @@ def da_frame_fields(tx):
     chain, number = int.from_bytes(take(at, 8), 'little'), int.from_bytes(take(at + 8, 8), 'little')
     size = int.from_bytes(take(at + 16, 4), 'little')
     return chain, number, take(at + 20, size)
-
-
-def da_frame_key(tx):
-    """The funding public key of a native 0x15 wire frame (the spend authority that paid its fee)."""
-    if len(tx) < 37 or tx[0] != DA_TAG:
-        raise Halt('not a DA transaction')
-    size = int.from_bytes(tx[33:37], 'little')
-    if 37 + size > len(tx):
-        raise Halt('malformed DA transaction')
-    return tx[37:37 + size]
-
-
-def follower_block_files(state_dir):
-    """The follower's verified native blocks, in index order: [Path]."""
-    state = Path(state_dir)
-    lines = (state / 'index').read_text().split()
-    return [state / 'blocks' / f'{line.strip().lower()}.bin' for line in lines if line.strip()]
-
-
-def scan_da_frames(data, chain_id, wanted):
-    """{(number, commitment hex): (funding key, payload)} of the 0x15 frames inside raw block bytes whose
-    (l2 number, commitment) is in `wanted`. Candidate offsets are only a search: a hit is the frame whose payload
-    hashes to a recorded commitment, so a false match is impossible."""
-    found, at = {}, data.find(bytes([DA_TAG]))
-    numbers = {number for number, _ in wanted}
-    while at >= 0 and len(found) < len(wanted):
-        try:
-            frame = data[at:]
-            chain, number, payload = da_frame_fields(frame)
-            if chain == chain_id and number in numbers and da_batch_count(payload) is not None:
-                key = (number, da_commitment(number, payload, chain_id).hex())
-                if key in wanted and key not in found:
-                    found[key] = (da_frame_key(frame), payload)
-        except Halt:
-            pass
-        at = data.find(bytes([DA_TAG]), at + 1)
-    return found
-
-
-def recorded_da_batches(state_dir, chain_id, records, offset=0, window=8, scan=4096):
-    """{(number, commitment hex): (funding key, payload)} for DA `records` (getl2settlement entries with
-    l2_number, commitment, height), read from the follower's verified (finalized) L1 blocks. A record's `height` is
-    the L2 state's native height, which trails the chain height by a constant `offset` (the flag-day offset, 64 on
-    the rehearsal nets): the block is searched near index height + offset - 1, then forward over `scan` blocks.
-    Records whose block is not (yet) in the follower store are left out."""
-    wanted = {(int(r['l2_number']), r['commitment']) for r in records}
-    if not wanted:
-        return {}
-    files = follower_block_files(state_dir)
-    heights = sorted({int(r['height']) for r in records})
-    seen, found = set(), {}
-    # The index lists blocks from height 1 in order.
-    candidates = [i for h in heights for i in range(max(0, h + offset - 1 - window), min(len(files), h + offset + window))]
-    candidates += [i for h in heights for i in range(max(0, h - 1 - window), min(len(files), h + scan))]
-    for index in candidates:
-        if index in seen or len(found) == len(wanted):
-            continue
-        seen.add(index)
-        try:
-            data = files[index].read_bytes()
-        except OSError:
-            continue
-        found.update(scan_da_frames(data, chain_id, wanted - set(found)))
-    return found
 
 
 def da_batch_transactions(payload):
@@ -1047,7 +979,6 @@ class Settler:
         self.c = {**DEFAULTS, **(MAINNET_DEFAULTS if self.mainnet else {}), **config}
         self.rpc, self.run, self.sleep, self.clock = rpc, run, sleep, clock
         self.wall = time.time  # wall time persisted in DA attempt records (clock is monotonic)
-        self.reuse_waits = {}  # L2 number -> clock when the worker started waiting for the follower
         self.chain_id = MAINNET['chain_id'] if self.mainnet_path else CHAIN_ID
         self.network_args = list(MAINNET_PRODUCE_ARGS) if self.mainnet_path else []
         self.prover_args = ['--mainnet'] if self.mainnet_path else []
@@ -1176,11 +1107,11 @@ class Settler:
         except ValueError:
             raise ProducerError(f'producer printed no JSON for {args[0]}') from None
 
-    def extend(self, parent, anchor, deposits, anchor_slot, number, spool=True):
+    def extend(self, parent, anchor, deposits, anchor_slot, number):
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=spool))
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
             if not self.c['user_transactions']:
                 raise
@@ -1196,8 +1127,7 @@ class Settler:
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
         if self.c['user_transactions'] and spool and self.spool_open:
-            pool = spool if isinstance(spool, (str, Path)) else self.c['txpool_dir']
-            args += ['--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
+            args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
             if self.c.get('min_tip_wei'):
                 args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
@@ -1298,135 +1228,6 @@ class Settler:
         self.holding_since = None
         return False
 
-    def follower_state_dir(self):
-        """The native follower's verified block store, when configured (`follower_state`, or the one of
-        `foreign_recovery`)."""
-        recovery = self.c.get('foreign_recovery') or {}
-        return self.c.get('follower_state') or recovery.get('follower_state')
-
-    def paid_batch_spool(self, number, view, directory):
-        """A spool holding exactly the batch this worker's DA key already paid for L2 block `number`, or None.
-
-        A database restored to the accepted head (an old backup, a rebuild from L1) no longer holds the unsettled
-        block whose batch is on L1, and the spool may no longer hold its transactions. Building the block from
-        whatever the spool holds now would publish another batch for the same number and pay a second DA fee,
-        while the paid transactions are dropped. Built from exactly the paid batch, the block carries the recorded
-        commitment and publish_da finds it already on L1. Only batches signed by this worker's own funding key are
-        reused: anyone can publish a DA record for any number, and a block must never be filled with a third
-        party's choice of transactions. The transactions also go back to the main spool, so none is lost if the
-        rebuilt block differs."""
-        if not self.c['user_transactions']:
-            return None
-        records = [r for r in view.get('data_availability', []) if r.get('l2_number') == number]
-        if not records:
-            return None
-        local = {}
-        for other in sorted(self.work.glob(f'{number:08d}-*')):
-            payload_file = other / 'da-payload.hex'
-            if payload_file.exists():
-                payload = bytes.fromhex(payload_file.read_text().strip())
-                local[da_commitment(number, payload, self.chain_id).hex()] = payload
-        own = bytes.fromhex(Path(self.c['da']['funding_pubkey']).read_text().strip())
-        batches = {}
-        state = self.follower_state_dir()
-        offset = self.native_height_offset() if state else None
-        if state:
-            try:
-                batches = recorded_da_batches(state, self.chain_id, records, offset or 0)
-            except (OSError, ValueError) as error:
-                log('da-batch-unrecoverable', number=number, reason=f'follower store: {error}'[:300])
-        missing = [r for r in records if (number, r['commitment']) not in batches and r['commitment'] not in local]
-        if missing:
-            # The follower stores finalized blocks only; a batch paid minutes ago is read from the native nodes
-            # (a quorum must return identical block bytes; the payload is checked against the recorded commitment).
-            batches.update(self.node_da_batches(missing, offset if offset is not None else self.native_height_offset()))
-        if state and not any((number, r['commitment']) in batches or r['commitment'] in local for r in records):
-            try:
-                stored = len(follower_block_files(state))
-            except OSError:
-                stored = 0
-            need = max(int(r['height']) for r in records) + (offset or 0)
-            started = self.reuse_waits.setdefault(number, self.clock())
-            # Off by default: anyone can post a DA record for any number, so waiting on records that are not
-            # ours would let a third party delay every block by the finality lag.
-            limit = int(self.c['da'].get('reuse_wait_seconds', 0))
-            if stored < need and self.clock() - started < limit:
-                raise FollowerBehind(f'L1 records a DA batch for L2 block {number} at native height {need}; '
-                                     f'the follower has stored {stored} blocks')
-        payload = None
-        for record in sorted(records, key=lambda r: (int(r['height']), r['commitment'])):
-            key = (number, record['commitment'])
-            if key in batches and batches[key][0] == own:
-                payload, source = batches[key][1], 'follower'
-                break
-            if record['commitment'] in local:
-                payload, source = local[record['commitment']], 'work'
-                break
-        if payload is None:
-            log('da-batch-unrecoverable', number=number, records=[r['commitment'] for r in records],
-                follower_state=bool(state), reason='no recorded batch of this DA key found')
-            return None
-        transactions = da_batch_transactions(payload)
-        pool = directory / 'da-reuse-spool'
-        shutil.rmtree(pool, ignore_errors=True)
-        pool.mkdir()
-        main = Path(self.c['txpool_dir'])
-        returned = 0
-        for raw in transactions:
-            name = f'{keccak256(raw).hex()}.tx'
-            atomic_write(pool / name, raw.hex() + '\n')
-            if not (main / name).exists():
-                atomic_write(main / name, raw.hex() + '\n')
-                returned += 1
-        log('da-batch-reused', number=number, commitment=da_commitment(number, payload, self.chain_id).hex(),
-            transactions=len(transactions), returned_to_spool=returned, source=source)
-        return pool
-
-    def node_da_batches(self, records, offset, max_blocks=64):
-        """{(number, commitment hex): (funding key, payload)} for DA records, from native blocks read by quorum
-        (getblockbyslot near each record's chain height, then getblockraw). Each block is read once and searched for
-        every wanted batch; at most `max_blocks` distinct heights, newest first (third parties can add records)."""
-        found = {}
-        if offset is None:
-            return found
-        wanted = {(int(r['l2_number']), r['commitment']) for r in records}
-        targets = sorted({int(r['height']) + offset for r in records}, reverse=True)[:max_blocks]
-        delta = 0  # slot - height, learned from the first block read
-        for target in targets:
-            if len(found) == len(wanted):
-                break
-            slot = max(0, target + delta - 2)
-            for _ in range(64):
-                try:
-                    block, _ = self.native.agreed('getblockbyslot', [slot])
-                except Exception:  # noqa: BLE001 - an empty slot or a failed read
-                    block = None
-                slot += 1
-                if not isinstance(block, dict) or 'block_id' not in block:
-                    continue
-                height = int(block['height'])
-                delta = int(block['slot']) - height if 'slot' in block else slot - 1 - height
-                if height < target - 1:
-                    continue
-                if height > target + 1:
-                    break
-                try:
-                    raw, _ = self.native.agreed('getblockraw', [block['block_id']])
-                    raw = raw.get('hex', '') if isinstance(raw, dict) else raw
-                    found.update(scan_da_frames(bytes.fromhex(raw), self.chain_id, wanted - set(found)))
-                except Exception:  # noqa: BLE001 - unreadable block: the batch stays unrecovered
-                    continue
-        return found
-
-    def native_height_offset(self):
-        """Chain height minus the L2 state's native height (a search hint for DA records), or None."""
-        try:
-            port = self.native.usable()[0]
-            view, info = self.rpc(port, 'getl2settlement'), self.rpc(port, 'getchaininfo')
-            return max(0, int(info['height']) - int(view['native_height']))
-        except Exception:  # noqa: BLE001 - only narrows the search
-            return None
-
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
         accepted = view.get('accepted')
@@ -1454,13 +1255,9 @@ class Settler:
                 raise ForeignSettlement(f'L2 head {head["hash"]} is not the accepted parent {parent} '
                                         f'of block {number} (another settler?)')
             anchor_slot = int(source['request'].splitlines()[3])
-            reuse = self.paid_batch_spool(number, view, directory)
-            block = self.extend(parent, anchor, deposits, anchor_slot, number, spool=reuse or True)
+            block = self.extend(parent, anchor, deposits, anchor_slot, number)
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
-            if reuse:
-                atomic_write(directory / 'da-reuse.json', json.dumps({'transactions': block.get('transactions', 0),
-                                                                       'hash': block.get('hash')}) + '\n')
             atomic_write(produced, json.dumps(block, sort_keys=True) + '\n')
             log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
                                                                'withdrawal_count') if k in block},
@@ -1969,9 +1766,6 @@ class Settler:
                     not self.publish_da(number, directory, values):
                 return False
             return self.submit_and_wait(number, directory, tx, view)
-        except FollowerBehind as behind:
-            log('da-reuse-waiting-follower', reason=str(behind)[:300])
-            return False
         except ForeignSettlement as foreign:
             return self.recover_foreign(str(foreign))
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""settler_v3: re-signing a DA batch when the fee moves, and never paying a second DA fee for an L2 number whose batch
-this worker's DA key already paid (a database restored to the accepted head).
+"""settler_v3: re-signing a DA batch when the fee moves; and no reuse of a DA batch recorded on L1 (removed after
+agents/145 F1-F3: L1 does not show who paid for a batch).
 
 Run: python3 deployment/devnet/test_settler_r7.py
 Same fakes as test_settler_v3.py: no network, no prover, no Docker.
@@ -154,7 +154,7 @@ class Restored(t.Fake):
         return super().run(argv, **kwargs)
 
 
-class PaidBatch(Base):
+class NoPaidBatchReuse(Base):
     def follower_store(self, frames, junk=b'\x15\x00\x15' * 50):
         state = self.root / 'follower'
         (state / 'blocks').mkdir(parents=True)
@@ -177,97 +177,24 @@ class PaidBatch(Base):
         (self.root / 'da.pub').write_text('5a' * 3749)
         self.paid, self.other = t.batch(2), t.batch(3)
 
-    def test_restored_head_rebuilds_the_paid_batch_and_pays_no_second_fee(self):
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+    def test_a_recorded_batch_never_chooses_our_block(self):
+        # No paid-batch reuse in this build (agents/145 F1-F3): a DA record for the next number, even one whose frame
+        # names this settler's key, never replaces the spool and never writes into it. The block is built from the
+        # main spool; a restore at the accepted head may pay one more DA fee, as before agent 118's part 3.
+        fake = Restored(self.root, t.statement(user_txs=3), self.paid, self.other)
         fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 2})
         state = self.follower_store([b'\x01' * 40, self.own_frame(1, self.paid)])
-        settler = self.user_settler(fake, follower_state=str(state))
-        self.assertTrue(settler.cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG], 'no DA transaction: no second fee')
-        self.assertTrue(fake.pools[0].endswith('da-reuse-spool'))
-        spool = sorted(p.name for p in (self.root / 'txpool').iterdir())
-        self.assertEqual(spool, sorted(f'{s.keccak256(raw).hex()}.tx' for raw in s.da_batch_transactions(self.paid)),
-                         'the paid transactions are back in the main spool too')
-
-    def test_can_wait_for_the_follower_to_store_the_paid_block(self):
-        # The follower stores finalized blocks only: a batch recorded at height 3 is not in a 1-block store yet.
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
-        state = self.follower_store([b'\x01' * 40])
-        settler = self.user_settler(fake, follower_state=str(state), da={**self.da_config(), 'reuse_wait_seconds': 3600})
-        self.assertFalse(settler.cycle(), 'waits instead of paying a second fee')
-        self.assertEqual((fake.sent, fake.pools), ([], []))
-        for i, frame in ((2, b'\x02' * 40), (3, self.own_frame(1, self.paid))):
-            (state / 'blocks' / f'{i:064x}.bin').write_bytes(frame)
-            with (state / 'index').open('a') as index:
-                index.write(f'{i:064x}\n')
-        self.assertTrue(settler.cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
-
-    def test_gives_up_waiting_after_reuse_wait_seconds(self):
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
-        state = self.follower_store([b'\x01' * 40])
-        settler = self.user_settler(fake, follower_state=str(state), da={**self.da_config(), 'reuse_wait_seconds': 1})
-        settler.reuse_waits[1] = -10_000
-        self.assertTrue(settler.cycle())
-        self.assertEqual(fake.pools, [str(self.root / 'txpool')], 'built from the spool after the wait')
-
-    def test_a_batch_not_yet_finalized_is_read_from_the_native_nodes(self):
-        # The follower has not stored the block yet; a quorum of native RPCs serves it (chain height = native + 64).
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 3})
-        block = b'\x02' * 50 + self.own_frame(1, self.paid) + b'\x15' * 9
-        rpc = fake.rpc
-
-        def node(port, method, params=()):
-            if method == 'getl2settlement':
-                return {**rpc(port, method, params), 'native_height': 100}
-            if method == 'getchaininfo':
-                return {'height': 164, 'next_base_fee_millisat_per_gas': '10', 'epoch': fake.epoch}
-            if method == 'getblockbyslot':
-                return {'block_id': f'{params[0]:064x}', 'height': params[0] - 1}
-            if method == 'getblockraw':
-                return block.hex() if int(params[0], 16) - 1 == 3 + 64 else (b'\x01' * 20).hex()
-            return rpc(port, method, params)
-        fake.rpc = node
-        state = self.follower_store([b'\x01' * 40])
-        settler = self.user_settler(fake, follower_state=str(state))
-        self.assertTrue(settler.cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG], 'no second fee')
-        self.assertTrue(fake.pools[0].endswith('da-reuse-spool'))
-
-    def test_foreign_recovery_follower_state_is_used(self):
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 1})
-        state = self.follower_store([self.own_frame(1, self.paid)])
-        settler = self.user_settler(fake, foreign_recovery={'follower_state': str(state),
-                                                            'follower_status': str(self.root / 'status.json')})
-        self.assertTrue(settler.cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
-
-    def test_a_batch_paid_by_another_key_is_never_reused(self):
-        # Anyone can publish a DA record for any number: reusing it would let a third party fill the block.
-        fake = Restored(self.root, t.statement(user_txs=3),
-                        self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 1})
-        state = self.follower_store([self.own_frame(1, self.paid, key=b'\x77' * 3749)])
-        settler = self.user_settler(fake, follower_state=str(state))
+        settler = self.user_settler(fake, follower_state=str(state),
+                                    foreign_recovery={'follower_state': str(state),
+                                                      'follower_status': str(self.root / 'status.json')})
         self.assertTrue(settler.cycle())
         self.assertEqual(fake.pools, [str(self.root / 'txpool')])
+        self.assertEqual(list((self.root / 'txpool').iterdir()), [], 'nothing written into the main spool')
         self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
-
-    def test_scan_matches_only_the_recorded_commitment(self):
-        payload = t.batch(2)
-        frame = self.own_frame(4, payload)
-        wanted = {(4, s.da_commitment(4, payload).hex())}
-        data = b'\x15' * 7 + self.own_frame(4, t.batch(1)) + frame + b'\x15\x01'
-        found = s.scan_da_frames(data, s.CHAIN_ID, wanted)
-        self.assertEqual(list(found), list(wanted))
-        self.assertEqual(found[next(iter(wanted))][1], payload)
-        self.assertEqual(s.scan_da_frames(data, s.CHAIN_ID + 1, wanted), {})
-        self.assertEqual(s.scan_da_frames(data, s.CHAIN_ID, {(4, '00' * 32)}), {})
-
+        for name in ('paid_batch_spool', 'node_da_batches'):
+            self.assertFalse(hasattr(s.Settler, name), name)
+        for name in ('scan_da_frames', 'recorded_da_batches', 'da_frame_key'):
+            self.assertFalse(hasattr(s, name), name)
 
 if __name__ == '__main__':
     unittest.main()
