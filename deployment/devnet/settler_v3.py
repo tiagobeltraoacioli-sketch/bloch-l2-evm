@@ -253,6 +253,12 @@ MAINNET_NEXT_SPARSE = {
     'guest_sha256': '75b9c635196a56e886460daab66dac80b02fa47fa4973bbced3a25f97905418e',
 }
 
+# CANDIDATE, not scheduled: native `PROGRAM_FALLBACK`, which `L2_PROGRAM_ROLLBACK_EPOCH` (inert) installs
+# in place of the sparse `PROGRAM_NEXT`: the same next rules proved by the complete-witness guest, so its
+# pins are those of MAINNET_NEXT. A `fallback_program` must match them; it needs a sparse `next_program`.
+# At a rollback the rules do not change: no block is rewound, the block in flight is only proved again.
+MAINNET_FALLBACK = MAINNET_NEXT
+
 
 # ---- L1 fee estimate for the DA (0x15) transaction (bloch-pos-committee fee_market, l2_da) ----
 GAS_PER_BYTE, TX_FLAT_GAS, HYBRID_VERIFY_GAS = 16, 5_000, 72_748
@@ -606,6 +612,21 @@ def check_next_program(c):
         raise Halt('next_program prover_args must select the next rules and its witness')
     if list(c.get('prover_args', ['--mainnet'])) not in (['--mainnet'], ['--mainnet-v1']):
         raise Halt('prover_args must select the activated rules')
+    fallback = c.get('fallback_program')
+    if fallback is None:
+        return
+    if not isinstance(fallback, dict):
+        raise Halt('fallback_program must be an object')
+    if witness != 'sparse':
+        raise Halt('fallback_program needs a sparse next_program: the rollback replaces the sparse guest')
+    if fallback.get('witness', 'complete') != 'complete':
+        raise Halt('fallback_program is proved by the complete-witness guest')
+    if Path(fallback['l2_config']).read_bytes() != mainnet_l2_config(MAINNET_FALLBACK):
+        raise Halt('fallback_program l2_config differs from the pinned fallback program')
+    if fallback.get('guest_sha256') != MAINNET_FALLBACK['guest_sha256']:
+        raise Halt('fallback_program guest must be the pinned complete-witness settlement_v3_mainnet ELF')
+    if list(fallback.get('prover_args', ['--mainnet'])) != ['--mainnet']:
+        raise Halt('fallback_program prover_args must select the next rules')
 
 
 def check_chain_overrides(c, chain_id, network_args):
@@ -868,10 +889,10 @@ class Settler:
             check_mainnet_config(self.c)
         elif self.rehearsal:
             check_rehearsal_config(self.c)
-        self.base_program = {'name': 'base', 'prover': self.c['prover'], 'guest': self.c['guest'],
+        self.base_program = {'name': 'base', 'rules': 'base', 'prover': self.c['prover'], 'guest': self.c['guest'],
                              'l2_config': self.c['l2_config'], 'prover_args': self.prover_args,
                              'remote_prover': self.c.get('remote_prover'), 'witness': 'complete'}
-        self.next_program = None
+        self.next_program = self.fallback_program = None
         if self.c.get('next_program') is not None:
             if not self.mainnet_path:
                 raise Halt('next_program applies only to the mainnet program path')
@@ -882,9 +903,17 @@ class Settler:
                     raise Halt(f'next_program {key} differs from its pin')
             witness = n.get('witness', 'complete')
             default_args = ['--mainnet', '--sparse'] if witness == 'sparse' else ['--mainnet']
-            self.next_program = {'name': 'next', 'prover': n['prover'], 'guest': n['guest'], 'l2_config': n['l2_config'],
-                                 'prover_args': list(n.get('prover_args', default_args)),
+            self.next_program = {'name': 'next', 'rules': 'next', 'prover': n['prover'], 'guest': n['guest'],
+                                 'l2_config': n['l2_config'], 'prover_args': list(n.get('prover_args', default_args)),
                                  'remote_prover': n.get('remote_prover'), 'witness': witness}
+            f = self.c.get('fallback_program')
+            if f is not None:
+                for key in ('prover', 'guest', 'l2_config'):
+                    if digest(f[key]) != f[key + '_sha256']:
+                        raise Halt(f'fallback_program {key} differs from its pin')
+                self.fallback_program = {'name': 'fallback', 'rules': 'next', 'prover': f['prover'], 'guest': f['guest'],
+                                         'l2_config': f['l2_config'], 'prover_args': list(f.get('prover_args', ['--mainnet'])),
+                                         'remote_prover': f.get('remote_prover'), 'witness': 'complete'}
         self.program = self.base_program
         if self.c['user_transactions']:
             # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
@@ -1003,8 +1032,8 @@ class Settler:
             return self.base_program
         fields = ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254', 'proof_policy')
         identity = b''.join(bytes.fromhex(reported[k]) for k in fields)
-        for program in (self.base_program, self.next_program):
-            if Path(program['l2_config']).read_bytes()[32:192] == identity:
+        for program in (self.base_program, self.next_program, self.fallback_program):
+            if program is not None and Path(program['l2_config']).read_bytes()[32:192] == identity:
                 return program
         raise Halt(f'L1 reports a program this worker is not configured for: {reported}')
 
@@ -1157,7 +1186,7 @@ class Settler:
             if self.c.get('min_tip_wei'):
                 args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
         if self.next_program is not None:
-            args += ['--rule-set', self.program['name']]
+            args += ['--rule-set', self.program['rules']]
         return args
 
     def source_age(self, view):
@@ -1244,6 +1273,11 @@ class Settler:
             self.supersede(directory)
         elif directory.exists() and not produced.exists() and (directory / 'proved.json').exists():
             self.supersede(directory)
+        elif (directory / 'program.json').exists() and \
+                json.loads((directory / 'program.json').read_text()).get('name') != self.program['name']:
+            # Same rules, other guest (the rollback): the block stays, its artifact and proof are made again.
+            log('l2-block-reproved-for-program', number=number, program=self.program['name'])
+            self.supersede(directory)
 
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
@@ -1302,6 +1336,8 @@ class Settler:
         if not artifact.exists():
             self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact),
                          *self.export_witness())
+            if self.next_program is not None:
+                atomic_write(directory / 'program.json', json.dumps({'name': self.program['name']}) + '\n')
         request = directory / 'native-request.txt'
         text = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
         if 'inbox_count' in source:

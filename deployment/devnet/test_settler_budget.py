@@ -28,6 +28,8 @@ class Budget(unittest.TestCase):
         self.settler.work = root
         self.settler.clock = lambda: 0
         self.settler.preflight_source = 'request'
+        self.settler.next_program = None  # no program swap configured (merged with the program-swap settler)
+        self.settler.spool_open = True
         self.cost = {}
         self.deposit_cost = 10
         self.committed = None

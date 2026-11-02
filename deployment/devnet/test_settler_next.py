@@ -259,6 +259,73 @@ class ProgramSwapTest(unittest.TestCase):
         for call in (c for c in fake.calls if c[1] == 'export'):
             self.assertNotIn('--witness', call)
 
+    def rollback_config(self):
+        sparse = s.MAINNET_NEXT_SPARSE
+        for name, data in (('next-settlement-v3', b'next prover'), ('settlement_v3_mainnet_sparse', b'sparse guest'),
+                           ('settlement_v3_mainnet.fallback', b'complete guest')):
+            (self.root / name).write_bytes(data)
+        (self.root / 'l2-config.next.bin').write_bytes(s.mainnet_l2_config(sparse))
+        (self.root / 'l2-config.fallback.bin').write_bytes(s.mainnet_l2_config(s.MAINNET_FALLBACK))
+        programs = {}
+        for key, guest, config, extra in (('next_program', 'settlement_v3_mainnet_sparse', 'l2-config.next.bin', {'witness': 'sparse'}),
+                                          ('fallback_program', 'settlement_v3_mainnet.fallback', 'l2-config.fallback.bin', {})):
+            program = {'prover': str(self.root / 'next-settlement-v3'), 'guest': str(self.root / guest),
+                       'l2_config': str(self.root / config), 'guest_sha256': s.digest(self.root / guest), **extra}
+            for part in ('prover', 'l2_config'):
+                program[part + '_sha256'] = s.digest(program[part])
+            programs[key] = program
+        for pin, key in ((s.MAINNET_NEXT_SPARSE, 'next_program'), (s.MAINNET_FALLBACK, 'fallback_program')):
+            patch = mock.patch.dict(pin, guest_sha256=programs[key]['guest_sha256'])
+            patch.start()
+            self.addCleanup(patch.stop)
+        return self.base_config(**programs)
+
+    def test_a_rollback_reproves_the_block_in_flight_with_the_fallback_guest_and_rewinds_nothing(self):
+        sparse = s.MAINNET_NEXT_SPARSE
+        sparse_report = {**{k: sparse[k] for k in ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254')},
+                         'proof_policy': M['proof_policy']}
+        config = self.rollback_config()
+        fake = SwapFake(self.root, mn.mainnet_statement(**{'64': s.mainnet_l2_config(sparse)[:160]}))
+        fake.live['program'] = dict(sparse_report)
+        fake.next_values = next_statement()  # the fallback proves the same rules: MAINNET_NEXT's pins
+        fake.swap_during_prove = True  # swap() moves L1 to NEXT_REPORT, which is the fallback's identity
+        clock = iter(range(0, 1_000_000, 5))
+        settler = s.Settler(config, rpc=fake.rpc, run=fake.run, sleep=lambda _: None, clock=lambda: next(clock))
+        events = []
+        with mock.patch.object(s, 'log', lambda event, **f: events.append(event)):
+            self.assertFalse(settler.cycle())
+            self.assertIn('program-moved-before-submit', events)
+            self.assertTrue(settler.cycle())
+        self.assertEqual(settler.program['name'], 'fallback')
+        self.assertEqual(fake.rewound, [])
+        self.assertIn('l2-block-reproved-for-program', events)
+        self.assertEqual([c[c.index('--rule-set') + 1] for c in fake.calls if c[1] == 'extend'], ['next'])
+        exports = [c for c in fake.calls if c[1] == 'export']
+        self.assertIn('--witness', exports[0])
+        self.assertNotIn('--witness', exports[-1])
+        last = self.prover_calls(fake)[-1]
+        self.assertEqual(last[1], '--mainnet')
+        self.assertNotIn('--sparse', last)
+        self.assertIn(str(self.root / 'settlement_v3_mainnet.fallback'), last)
+        [tx] = fake.sent
+        self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
+
+    def test_the_fallback_program_is_pinned_and_needs_a_sparse_next_program(self):
+        config = self.rollback_config()
+        fake = SwapFake(self.root, mn.mainnet_statement())
+        bad = json.loads(json.dumps(config))
+        bad['fallback_program']['prover_args'] = ['--mainnet', '--sparse']
+        with self.assertRaisesRegex(s.Halt, 'fallback_program prover_args'):
+            s.Settler(bad, rpc=fake.rpc, run=fake.run)
+        bad = json.loads(json.dumps(config))
+        bad['fallback_program']['guest_sha256'] = '00' * 32
+        with self.assertRaisesRegex(s.Halt, 'pinned complete-witness'):
+            s.Settler(bad, rpc=fake.rpc, run=fake.run)
+        bad = json.loads(json.dumps(config))
+        del bad['next_program']['witness']
+        with self.assertRaisesRegex(s.Halt, 'needs a sparse next_program|pinned next'):
+            s.Settler(bad, rpc=fake.rpc, run=fake.run)
+
     def config_with_stale_config(self, config):
         config['next_program']['l2_config_sha256'] = s.digest(self.root / 'l2-config.next.bin')
         return config
