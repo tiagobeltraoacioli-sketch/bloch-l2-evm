@@ -1077,7 +1077,7 @@ class StuckNode(unittest.TestCase):
         self.assertIsNone(m.stuck_metric(text, 'absent'))
         self.assertIsNone(m.stuck_metric(None, 'absent'))
 
-    def monitor(self, tmp, epochs, stuck=True):
+    def monitor(self, tmp, epochs, stuck=True, side_block=False):
         args = m.parse(['--phase', 'prelaunch', '--l1-rpc', 'http://ref', '--l1-stuck-node', 'n9=http://n9,http://n9/metrics',
                         '--l1-stuck-state', os.path.join(tmp, 's.json')])
         calls, levels = [], []
@@ -1089,6 +1089,8 @@ class StuckNode(unittest.TestCase):
                     return {'height': 1000, 'epoch': 22 + e, 'slot': 1, 'finalized_height': 900,
                             'finalized': {'epoch': fin, 'root': 'aa'}, 'block_id': 'bb'}
                 if method == 'getblockbyid':
+                    if stuck and side_block:
+                        return {'id': 'bb', 'finality': 'not_canonical'}
                     if stuck:
                         raise m.RpcError("{'code': -32000, 'message': 'no block bb is known to this node'}")
                     return {'id': 'bb'}
@@ -1102,6 +1104,13 @@ class StuckNode(unittest.TestCase):
             calls, levels = self.monitor(tmp, 4)
         self.assertEqual(levels, [m.OK, m.OK, m.OK, m.CRIT])
         self.assertTrue({c for _, c in calls} <= m.READ_ONLY_METHODS)
+
+    def test_monitor_stored_side_block_is_not_the_reference_head(self):
+        """Agent 187 F1: a stuck node that stored the reference head on a branch it does not follow answers it with
+        `finality: not_canonical`; that must not stop the missing clock."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, levels = self.monitor(tmp, 4, side_block=True)
+        self.assertEqual(levels, [m.OK, m.OK, m.OK, m.CRIT])
 
     def test_monitor_healthy_node_quiet(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1288,7 +1297,8 @@ class MonitorGapTests(unittest.TestCase):
                 'prover-stages-done', 'prover-shm-removed', 'l2-block-produced', 'l2-block-reused', 'idle-hold', 'idle-end',
                 'da-submitted', 'da-included', 'da-wait-ended-block-settled', 'da-batch-reused', 'da-reuse-waiting-follower',
                 'da-fee-moved', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
-                'foreign-settlement-recovered', 'foreign-settlement-waiting-finality'}
+                'foreign-settlement-recovered', 'foreign-settlement-waiting-finality',
+                'stopped'}
         graded = m.CRIT_EVENTS | m.WARN_EVENTS | m.PROGRESS_EVENTS | info
         self.assertGreater(len(names), 40)
         self.assertEqual(sorted(names - graded), [])

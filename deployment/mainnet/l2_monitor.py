@@ -120,7 +120,11 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'rpc-quorum-view-behind',
                          # Gaps closed by agent 157 (round 10): each was logged by the settler and graded by nobody.
                          'local-proof-refused', 'da-resign-limited', 'da-batch-unrecoverable',
-                         'foreign-rebuild-behind-view', 'idle-check-failed', 'spool-demand-unknown'})
+                         'foreign-rebuild-behind-view', 'idle-check-failed', 'spool-demand-unknown',
+                         # Agent 193 (M2): some RPCs refused a broadcast; held bytes not included while L1 advances.
+                         'submit-partial', 'settlement-not-included',
+                         # Agent 198 (152 L1): a partial quorum stays behind the accepted floor.
+                         'rpc-quorum-behind-floor'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 
@@ -497,7 +501,11 @@ def check_l1_stuck(client: Client, specs: List[str], state_path: Optional[str], 
                      peers=stuck_metric(text, 'bloch_pos_peer_count'), has_ref_head=None)
             if ref:
                 try:
-                    s['has_ref_head'] = bool(client.call(url, 'getblockbyid', [ref['block_id']]))
+                    block = client.call(url, 'getblockbyid', [ref['block_id']])
+                    # A stored block of a branch the node does not follow answers `finality: not_canonical`
+                    # (engine.rs block_reply); it does not count as "reference head known" (agent 187 F1).
+                    s['has_ref_head'] = bool(block) and not (isinstance(block, dict)
+                                                             and block.get('finality') == 'not_canonical')
                 except RpcError as e:
                     s['has_ref_head'] = False if 'no block' in str(e) else None
         state[name], level, message = stuck_step(state.get(name), s, p)

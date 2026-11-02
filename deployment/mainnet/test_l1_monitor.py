@@ -312,12 +312,11 @@ class Synthetic(unittest.TestCase):
 
 
 class StoredSideBlocks(unittest.TestCase):
-    """Finding for l1_stuck_check.py and l2_monitor --l1-stuck-node (agent 70): `has_ref_head` is bool(getblockbyid),
-    so a stuck node that has stored the reference head as a block it does not follow (`finality: not_canonical`,
-    engine.rs block_reply) counts as having it, the `missing` clock stops, and the node never reaches CRIT.
-    Synthetic: no recording kept the `finality` field."""
+    """Agent 187 F1, fixed by agent 198 in l1_stuck_check.py and l2_monitor --l1-stuck-node: a stuck node that has stored
+    the reference head as a block it does not follow (`finality: not_canonical`, engine.rs block_reply) must not count
+    as having it, or its `missing` clock stops and it never reaches CRIT. Synthetic: no recording kept the field."""
 
-    def test_l1_stuck_check_counts_a_stored_side_block_as_known(self):
+    def test_l1_stuck_check_does_not_count_a_stored_side_block_as_known(self):
         rd = next(r for r in fixture('p1noq')['rounds'] if r['tag'] == 'e37')
 
         def rpc(u, method, params, timeout):
@@ -330,7 +329,22 @@ class StoredSideBlocks(unittest.TestCase):
             s = l1_stuck_check.sample({'name': 'n9', 'rpc': url('n9'), 'metrics': None}, [url('n0')], 1.0)
         finally:
             l1_stuck_check.rpc = original
-        self.assertIs(s['has_ref_head'], True)  # agent 70's script: "reference head known"
+        self.assertIs(s['has_ref_head'], False)
+
+    def test_l1_stuck_check_still_counts_a_canonical_block_as_known(self):
+        rd = next(r for r in fixture('p1noq')['rounds'] if r['tag'] == 'e37')
+
+        def rpc(u, method, params, timeout):
+            if method == 'getchaininfo':
+                return rd['getchaininfo'][name_of(u)]
+            return {'block_id': params[0], 'finality': 'finalized'}
+        original = l1_stuck_check.rpc
+        l1_stuck_check.rpc = rpc
+        try:
+            s = l1_stuck_check.sample({'name': 'n9', 'rpc': url('n9'), 'metrics': None}, [url('n0')], 1.0)
+        finally:
+            l1_stuck_check.rpc = original
+        self.assertIs(s['has_ref_head'], True)
 
     def test_l1_monitor_does_not(self):
         rd = next(r for r in fixture('p1noq')['rounds'] if r['tag'] == 'e37')
