@@ -115,7 +115,11 @@ Each is tested; the test names are in `src/sparse_witness/tests.rs` (T) and
    path's.
 7. **Statement equivalence.** For the same block, the sparse statement equals the
    complete witness's statement byte for byte. Measured on 538 real blocks by
-   agent 88 and again on the new ELF (see the report of agent 115).
+   agent 88, and on the programs below over 505 stored real blocks of 17 private
+   chains: 0 differences, and the statement equals the real proof's public
+   values on 491 of 491 blocks that kept their proof. In the same run, the ELF
+   refused every witness the native path refused after removing one trie node
+   (290), and every witness with one code entry removed (505).
 8. **Malleability is harmless.** Reordered lists, extra trie nodes, extra
    accounts, extra absent addresses and extra code entries change only the
    program input, never the statement.
@@ -131,6 +135,8 @@ Each is tested; the test names are in `src/sparse_witness/tests.rs` (T) and
 | I3: unreachable `NotExisting` arm in `derive_post_root`, misleading comment | The arm now refuses (`UnknownAccount`) instead of deriving a leaf; the comment names `ensure_system_account` and `credit_balance` |
 | I2: the ELF depended on the build host | `container/Dockerfile` and `build-container.sh`: one pinned image, sources at `/bloch-l2-evm`, registry at `/cargo` |
 | Artifact | The sparse artifact format moves to `BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:2`; version 1 files no longer decode |
+| Pins | The settler's `MAINNET_NEXT_SPARSE` and the sparse crossing harness name the programs below. The native `PROGRAM_NEXT` (L1 side, out of scope) must move with them |
+| Review tool | `bloch-evm-sp1-sparse-diff` also removes one code entry per block and requires the native path and the guest to refuse |
 
 ## Known limits
 
