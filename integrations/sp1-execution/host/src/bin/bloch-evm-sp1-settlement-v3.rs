@@ -64,13 +64,58 @@ fn domain() -> B256 {
 }
 
 fn program_name() -> &'static str {
-    if sparse() {
-        "settlement_v3_mainnet_sparse"
-    } else if mainnet() {
-        "settlement_v3_mainnet"
-    } else {
-        "settlement_v3"
+    program_name_for(MAINNET.get().and_then(Option::as_ref), sparse())
+}
+
+/// The guest program a rules flag and a witness flag select (agent 163, B-3):
+/// `--mainnet-v1 --sparse` is `settlement_v3_mainnet_v1_sparse`, not the
+/// next-rules sparse guest. `--mainnet-v1` alone names the activated complete
+/// program, which was built as `settlement_v3_mainnet`.
+fn program_name_for(rules: Option<&ChainSpec>, sparse: bool) -> &'static str {
+    let next = rules.is_some_and(|rules| rules.fee_vault_sweep.is_some());
+    match (rules.is_some(), next, sparse) {
+        (true, true, true) => "settlement_v3_mainnet_sparse",
+        (true, false, true) => "settlement_v3_mainnet_v1_sparse",
+        (true, _, false) => "settlement_v3_mainnet",
+        (false, _, _) => "settlement_v3",
     }
+}
+
+/// The empty-block qualification under the selected rules and witness: what an
+/// ELF built for them must commit.
+fn empty_qualification(identity: ProgramIdentity) -> Result<Qualification> {
+    let execution = fixture::fixture_empty_in(&spec(), domain())?;
+    let context = synthetic_context(identity, 0);
+    if !sparse() {
+        return expect(execution, context);
+    }
+    use bloch_l2_evm::sparse_witness::{generate_sparse_node_witness, BlockHashes};
+    let mut pre = bloch_l2_evm::node_execution::genesis_v2(&spec(), 0)?;
+    pre.commit_root();
+    let (witness, _) =
+        generate_sparse_node_witness(&pre, &spec(), domain(), &execution.context, &execution.body, BlockHashes::Lazy)
+            .map_err(|error| io::Error::other(format!("sparse witness of the empty block: {error:?}")))?;
+    expect_sparse(execution, witness, context)
+}
+
+/// B-3: refuse an ELF that does not compute the rules the flags name. The ELF
+/// is executed (SP1 execute, no proof) on an empty block under those rules, and
+/// its committed statement must equal the host's, configuration commitment
+/// included. A next-rules ELF under `--mainnet-v1`, a v1 ELF under `--mainnet`,
+/// a sparse ELF without `--sparse` or the reverse all fail here.
+async fn check_elf_computes_the_selected_rules(elf: Elf, identity: ProgramIdentity) -> Result<()> {
+    let refuse = |why: String| -> Box<dyn Error> {
+        io::Error::other(format!("the ELF is not {} under the selected rules: {why}", program_name())).into()
+    };
+    let qualification = empty_qualification(identity)?;
+    let executor = LightProver::new().await;
+    let (public, report) =
+        executor.execute(elf, stdin(&qualification)).await.map_err(|error| refuse(format!("execution failed: {error}")))?;
+    if report.exit_code != 0 {
+        return Err(refuse(format!("guest exit code {}", report.exit_code)));
+    }
+    qualification.expected.check_expected(public.as_slice()).map_err(|error| refuse(format!("{error:?}")))?;
+    Ok(())
 }
 const QUALIFICATION_GNARK_IMAGE: &str =
     "ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d";
@@ -310,7 +355,11 @@ async fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1 [--sparse]] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
     let selected = match args.first().map(String::as_str) {
-        Some("--mainnet") => Some(ChainSpec::mainnet()),
+        // The release gate (agent 163, B-1): no next rules without the owner's
+        // fee-sweep recipient.
+        Some("--mainnet") => Some(ChainSpec::mainnet_next().ok_or(
+            "--mainnet: the next mainnet rules need the owner's fee-sweep recipient (MAINNET_FEE_SWEEP_RECIPIENT is unset)",
+        )?),
         Some("--mainnet-v1") => Some(ChainSpec::mainnet_v1()),
         _ => None,
     };
@@ -439,8 +488,9 @@ async fn main() -> Result<()> {
 /// No proof is generated; deriving the keys runs the SP1 setup only.
 async fn print_identity(elf_path: &str) -> Result<()> {
     let bytes = fs::read(elf_path)?;
-    let trusted = TrustedProgram::from_trusted_elf(Elf::from(bytes)).await?;
+    let trusted = TrustedProgram::from_trusted_elf(Elf::from(bytes.clone())).await?;
     let identity = trusted.identity();
+    check_elf_computes_the_selected_rules(Elf::from(bytes), identity).await?;
     let spec = spec();
     #[cfg(feature = "source-settlement")]
     let policy = {
@@ -503,9 +553,9 @@ mod tests {
         use bloch_l2_evm::chainspec::MAINNET_DOMAIN;
         let program = [B256::repeat_byte(9), B256::repeat_byte(10), B256::repeat_byte(11)];
         let main = expect_in(
-            &ChainSpec::mainnet(),
+            &ChainSpec::mainnet_next_or_rehearsal(),
             MAINNET_DOMAIN,
-            fixture::fixture_empty_in(&ChainSpec::mainnet(), MAINNET_DOMAIN).unwrap(),
+            fixture::fixture_empty_in(&ChainSpec::mainnet_next_or_rehearsal(), MAINNET_DOMAIN).unwrap(),
             synthetic_context_for(program, 0),
         )
         .unwrap();
@@ -519,13 +569,24 @@ mod tests {
         let (m, d) = (main.expected.encode(), dev.expected.encode());
         assert_eq!(m.len(), d.len());
         assert_ne!(m, d);
-        let configuration = bloch_l2_evm::proof_statement::configuration_commitment(&ChainSpec::mainnet()).unwrap();
+        let configuration = bloch_l2_evm::proof_statement::configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap();
         assert!(m.windows(32).any(|w| w == configuration.as_slice()));
         assert!(m.windows(32).any(|w| w == MAINNET_DOMAIN.as_slice()));
         assert!(!m.windows(32).any(|w| w == B256::repeat_byte(0xd3).as_slice()));
         // The devnet harness keeps the devnet program parameters.
         assert!(!mainnet());
         assert_eq!((spec(), domain(), program_name()), (ChainSpec::testnet_v3(), B256::repeat_byte(0xd3), "settlement_v3"));
+    }
+
+    /// B-3: the printed program follows both flags.
+    #[test]
+    fn the_program_name_follows_the_rules_and_the_witness() {
+        let (v1, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
+        assert_eq!(program_name_for(Some(&next), true), "settlement_v3_mainnet_sparse");
+        assert_eq!(program_name_for(Some(&v1), true), "settlement_v3_mainnet_v1_sparse");
+        assert_eq!(program_name_for(Some(&next), false), "settlement_v3_mainnet");
+        assert_eq!(program_name_for(Some(&v1), false), "settlement_v3_mainnet");
+        assert_eq!(program_name_for(None, false), "settlement_v3");
     }
 
     /// The V3 harness accepts the user-transaction fixture that V2's

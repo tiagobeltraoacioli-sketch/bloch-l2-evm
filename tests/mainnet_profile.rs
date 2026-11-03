@@ -52,7 +52,7 @@ fn next(spec: &ChainSpec, parent: &NodeHeaderV2) -> BlockContext {
 
 #[test]
 fn chain_ids_do_not_cross_between_mainnet_and_devnets() {
-    let mainnet = ChainSpec::mainnet();
+    let mainnet = ChainSpec::mainnet_next_or_rehearsal();
     let devnet = ChainSpec::testnet_v3();
     assert_eq!(mainnet.chain_id, MAINNET_CHAIN_ID);
     assert_eq!(devnet.chain_id, TESTNET_CHAIN_ID);
@@ -89,7 +89,7 @@ fn heavy_init() -> Bytes {
 
 #[test]
 fn blockhash_serves_exactly_the_last_256_blocks_and_a_router_sized_create_fits() {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let sender = Address::from_public_key(key().verifying_key());
     let mut state = genesis_v2(&spec, 1_760_000_000).unwrap();
     let mut parent = node_head(&spec, domain(), &state).unwrap();

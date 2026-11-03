@@ -54,7 +54,24 @@ impl L2Network {
     /// The mainnet profile: [`ChainSpec::mainnet_v1`] switching to
     /// [`ChainSpec::mainnet`] (chain id 700770, see [`RuleSchedule`]) with the
     /// ceremony's domain and a wall-clock genesis timestamp.
+    ///
+    /// The next rules are [`ChainSpec::mainnet_next`]: none while the owner has
+    /// not set the fee-sweep recipient (the release gate, agent 163 B-1), so a
+    /// node built before that follows the activated rules only.
     pub fn mainnet(domain: B256, genesis_timestamp: u64) -> Result<Self, String> {
+        Self::mainnet_with_next(domain, genesis_timestamp, ChainSpec::mainnet_next())
+    }
+
+    /// REHEARSAL ONLY (`--rules mainnet-rehearsal`): [`Self::mainnet`] switching
+    /// to [`ChainSpec::mainnet_rehearsal`], whose sweep goes to the placeholder
+    /// recipient. L1 never pins that configuration, so nothing this network
+    /// produces can settle on mainnet; it exists for private rehearsals and the
+    /// native tests of the rule switch.
+    pub fn mainnet_rehearsal(domain: B256, genesis_timestamp: u64) -> Result<Self, String> {
+        Self::mainnet_with_next(domain, genesis_timestamp, Some(ChainSpec::mainnet_rehearsal()))
+    }
+
+    fn mainnet_with_next(domain: B256, genesis_timestamp: u64, next_rules: Option<ChainSpec>) -> Result<Self, String> {
         if domain.is_zero() || domain == DEVNET_DOMAIN {
             return Err("the mainnet domain must be the ceremony's, not zero or the devnet domain".into());
         }
@@ -65,7 +82,7 @@ impl L2Network {
         }
         Ok(Self {
             rules: ChainSpec::mainnet_v1(),
-            next_rules: Some(ChainSpec::mainnet()),
+            next_rules,
             domain,
             genesis_timestamp,
             mainnet: true,
@@ -87,7 +104,7 @@ impl L2Network {
                     Self::devnet_v2()
                 })
             }
-            "mainnet" => {
+            "mainnet" | "mainnet-rehearsal" => {
                 let domain = domain.ok_or("--rules mainnet requires --domain HEX")?;
                 let domain = domain.strip_prefix("0x").unwrap_or(domain);
                 if domain.len() != 64 || !domain.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -98,9 +115,13 @@ impl L2Network {
                     .ok_or("--rules mainnet requires --genesis-time SECS")?
                     .parse::<u64>()
                     .map_err(|_| "--genesis-time must be decimal unix seconds")?;
-                Self::mainnet(domain, genesis_time)
+                if rules == "mainnet" {
+                    Self::mainnet(domain, genesis_time)
+                } else {
+                    Self::mainnet_rehearsal(domain, genesis_time)
+                }
             }
-            other => Err(format!("--rules must be v3, v2 or mainnet, not {other}")),
+            other => Err(format!("--rules must be v3, v2, mainnet or mainnet-rehearsal, not {other}")),
         }
     }
 
@@ -186,7 +207,11 @@ mod tests {
         let mainnet = L2Network::parse("mainnet", Some(DOMAIN), Some("1800000000")).unwrap();
         assert!(mainnet.mainnet);
         assert_eq!(mainnet.rules, ChainSpec::mainnet_v1());
-        assert_eq!(mainnet.next_rules, Some(ChainSpec::mainnet()));
+        assert_eq!(mainnet.next_rules, ChainSpec::mainnet_next());
+        let rehearsal = L2Network::parse("mainnet-rehearsal", Some(DOMAIN), Some("1800000000")).unwrap();
+        assert!(rehearsal.mainnet);
+        assert_eq!(rehearsal.next_rules, Some(ChainSpec::mainnet_rehearsal()));
+        rehearsal.chain_spec().unwrap();
         assert_eq!(mainnet.rules.chain_id, MAINNET_CHAIN_ID);
         let spec = mainnet.chain_spec().unwrap();
         assert_eq!(spec.chain().id(), 700_770);

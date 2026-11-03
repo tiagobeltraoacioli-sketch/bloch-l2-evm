@@ -47,7 +47,7 @@ fn load(dir: &Path) -> Result<Stored> {
     let mut last = None;
     for (spec, domain) in [
         (ChainSpec::mainnet_v1(), MAINNET_DOMAIN),
-        (ChainSpec::mainnet(), MAINNET_DOMAIN),
+        (ChainSpec::mainnet_next_or_rehearsal(), MAINNET_DOMAIN),
         (ChainSpec::testnet_v3(), B256::repeat_byte(0xd3)),
     ] {
         match ExecutionArtifact::decode(&bytes, &spec, domain) {
@@ -277,7 +277,7 @@ async fn main() -> Result<ExitCode> {
                                         // The guest must refuse what the native path refuses.
                                         let sparse_elf = if spec == ChainSpec::mainnet_v1() {
                                             Some("settlement_v3_mainnet_v1_sparse")
-                                        } else if spec == ChainSpec::mainnet() {
+                                        } else if spec == ChainSpec::mainnet_next_or_rehearsal() {
                                             Some("settlement_v3_mainnet_sparse")
                                         } else {
                                             None
@@ -305,7 +305,7 @@ async fn main() -> Result<ExitCode> {
                                         code_refused += 1;
                                         let sparse_elf = if spec == ChainSpec::mainnet_v1() {
                                             Some("settlement_v3_mainnet_v1_sparse")
-                                        } else if spec == ChainSpec::mainnet() {
+                                        } else if spec == ChainSpec::mainnet_next_or_rehearsal() {
                                             Some("settlement_v3_mainnet_sparse")
                                         } else {
                                             None
@@ -323,7 +323,7 @@ async fn main() -> Result<ExitCode> {
                             if use_elf {
                                 let (complete_elf, sparse_elf) = if spec == ChainSpec::mainnet_v1() {
                                     ("complete_v1", "settlement_v3_mainnet_v1_sparse")
-                                } else if spec == ChainSpec::mainnet() {
+                                } else if spec == ChainSpec::mainnet_next_or_rehearsal() {
                                     ("complete_next", "settlement_v3_mainnet_sparse")
                                 } else {
                                     ("", "")
@@ -371,7 +371,7 @@ async fn main() -> Result<ExitCode> {
             println!(
                 "{{\"height\":{height},\"dir\":{:?},\"rules\":\"{}\",\"txs\":{},\"deposits\":{},\"gas\":{},\"complete_bytes\":{},\"sparse_bytes\":{},\"instr_complete\":{},\"instr_sparse\":{},\"sp1gas_complete\":{},\"sp1gas_sparse\":{},\"real_proof\":{},\"request\":{},\"differ\":{:?}}}",
                 stored.dir.file_name().unwrap(),
-                if spec == ChainSpec::mainnet_v1() { "v1" } else if spec == ChainSpec::mainnet() { "next" } else { "testnet_v3" },
+                if spec == ChainSpec::mainnet_v1() { "v1" } else if spec == ChainSpec::mainnet_next_or_rehearsal() { "next" } else { "testnet_v3" },
                 body.transactions.len(),
                 body.deposits.len(),
                 header.gas_used,

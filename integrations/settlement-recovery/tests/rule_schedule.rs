@@ -8,7 +8,7 @@
 use alloy_consensus::{private::alloy_eips::eip2718::Encodable2718, SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use bloch_l2_evm::{
-    chainspec::{MAINNET_DOMAIN, MAINNET_GENESIS_TIMESTAMP},
+    chainspec::{MAINNET_DOMAIN, MAINNET_GENESIS_TIMESTAMP, MAINNET_NEXT_RULES_RELEASABLE},
     data_availability::{da_commitment, decode_da_payload},
     deposits_hash,
     node_primitives::NodeBodyV2,
@@ -32,12 +32,16 @@ fn domain() -> String {
     hex::encode(MAINNET_DOMAIN)
 }
 
+/// The release rules once the owner has set the fee-sweep recipient; until then
+/// the rehearsal network, whose next rules sweep to the placeholder (agent 163 B-1).
+const RULES: &str = if MAINNET_NEXT_RULES_RELEASABLE { "mainnet" } else { "mainnet-rehearsal" };
+
 fn produce(args: &[&str]) -> Result<Value, String> {
     let genesis = MAINNET_GENESIS_TIMESTAMP.to_string();
     let domain = domain();
     let out = Command::new(BIN)
         .args(args)
-        .args(["--rules", "mainnet", "--domain", &domain, "--genesis-time", &genesis])
+        .args(["--rules", RULES, "--domain", &domain, "--genesis-time", &genesis])
         .output()
         .unwrap();
     if out.status.success() {
@@ -212,7 +216,7 @@ impl Chain {
         assert_eq!(block["number"], number);
         let next = rule_set == Some("next") || block["rules"] == "next";
         assert_eq!(block["rules"], if next { "next" } else { "base" });
-        let spec = if next { ChainSpec::mainnet() } else { ChainSpec::mainnet_v1() };
+        let spec = if next { ChainSpec::mainnet_next_or_rehearsal() } else { ChainSpec::mainnet_v1() };
         let payload = (!txs.is_empty()).then(|| {
             let out = self.root.path().join(format!("da-{number}-{}.hex", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             produce(&["da", "--target", &self.db, "--number", &number.to_string(), "--out", out.to_str().unwrap()]).unwrap();
@@ -354,7 +358,7 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
 
     // The next rule set's vaults hold the sweep code from the switch on.
     assert_eq!(in_flight.configuration, configuration_commitment(&ChainSpec::mainnet_v1()).unwrap());
-    assert_eq!(b3.configuration, configuration_commitment(&ChainSpec::mainnet()).unwrap());
+    assert_eq!(b3.configuration, configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap());
 }
 
 #[test]

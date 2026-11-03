@@ -203,12 +203,12 @@ fn assert_not_covered(result: Result<NodeExecutionOutcome, SparseNodeError>) {
 }
 
 fn both_rules() -> [ChainSpec; 2] {
-    [ChainSpec::mainnet_v1(), ChainSpec::mainnet()]
+    [ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal()]
 }
 
 #[test]
 fn the_contract_does_what_the_benchmark_says() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 8);
     assert_eq!(chain.slot(contract, 3), U256::from(4));
     let tx = chain.call(contract, ops(OP_UPDATE, 3, 1));
@@ -251,7 +251,7 @@ fn honest_witness_matches_the_canonical_path_and_stays_sparse() {
 
 #[test]
 fn omitted_nonzero_slot_never_reads_as_zero() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     assert_eq!(chain.slot(contract, 42), U256::from(43));
     let tx = chain.call(contract, ops(OP_READ, 42, 1));
@@ -263,7 +263,7 @@ fn omitted_nonzero_slot_never_reads_as_zero() {
 
 #[test]
 fn omitted_exclusion_proof_does_not_prove_zero() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     // Slot 900 was never written: the honest witness proves its exclusion.
     assert_eq!(chain.slot(contract, 900), U256::ZERO);
@@ -277,7 +277,7 @@ fn omitted_exclusion_proof_does_not_prove_zero() {
 
 #[test]
 fn an_empty_storage_proof_opens_only_the_empty_root() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     let tx = chain.call(contract, ops(OP_READ, 42, 1));
     let body = chain.body(vec![tx]);
@@ -322,7 +322,7 @@ fn catcher_runtime(target: Address) -> Vec<u8> {
 
 #[test]
 fn an_uncovered_read_in_an_inner_call_fails_the_block_and_cannot_be_caught() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     let catcher = chain.deploy(&catcher_runtime(contract));
     let tx = chain.call(catcher, ops(OP_READ, 42, 1));
@@ -335,7 +335,7 @@ fn an_uncovered_read_in_an_inner_call_fails_the_block_and_cannot_be_caught() {
 
 #[test]
 fn a_read_in_a_reverted_transaction_is_still_covered_and_still_required() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     // Runtime: sload(calldata[0]) then revert. Its storage is the one under test.
     let reverter = chain.deploy(&[0x60, 0x00, 0x35, 0x54, 0x50, 0x60, 0x00, 0x60, 0x00, 0xfd]);
@@ -348,7 +348,7 @@ fn a_read_in_a_reverted_transaction_is_still_covered_and_still_required() {
 
     // Out of gas in an inner frame is the same: omitting the read fails the block.
     let catcher = {
-        let mut chain_b = Chain::new(ChainSpec::mainnet());
+        let mut chain_b = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
         let target = big_contract(&mut chain_b, 500);
         let catcher = chain_b.deploy(&catcher_runtime(target));
         let tx = chain_b.tx(TxKind::Call(catcher), U256::ZERO, ops(OP_READ, 0, 500), 120_000);
@@ -365,7 +365,7 @@ fn a_read_in_a_reverted_transaction_is_still_covered_and_still_required() {
 
 #[test]
 fn a_forged_slot_value_is_refused_at_every_level_of_the_chain_of_trust() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     let tx = chain.call(contract, ops(OP_UPDATE, 42, 1));
     let body = chain.body(vec![tx]);
@@ -441,7 +441,7 @@ fn a_forged_slot_value_is_refused_at_every_level_of_the_chain_of_trust() {
 
 #[test]
 fn a_forged_exclusion_is_refused() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     let tx = chain.call(contract, ops(OP_READ, 42, 1));
     let body = chain.body(vec![tx]);
@@ -485,7 +485,7 @@ fn a_forged_exclusion_is_refused() {
 
 #[test]
 fn accounts_cannot_be_omitted_or_claimed_absent() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     let tx = chain.call(contract, ops(OP_READ, 42, 1));
     let body = chain.body(vec![tx]);
@@ -523,7 +523,7 @@ fn accounts_cannot_be_omitted_or_claimed_absent() {
 
 #[test]
 fn a_blind_write_under_an_opaque_subtree_is_an_error_even_when_it_is_zero() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 500);
     let tx = chain.call(contract, ops(OP_READ, 42, 1));
     let body = chain.body(vec![tx]);
@@ -558,7 +558,7 @@ fn a_blind_write_under_an_opaque_subtree_is_an_error_even_when_it_is_zero() {
 
 #[test]
 fn a_deletion_that_needs_an_opaque_sibling_is_an_error() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 2);
     let tx = chain.call(contract, ops(OP_ZERO, 0, 1));
     let body = chain.body(vec![tx]);
@@ -614,7 +614,7 @@ fn blockhash_runtime() -> Vec<u8> {
 
 #[test]
 fn lazy_blockhash_serves_the_canonical_value_and_refuses_an_uncovered_entry() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = chain.deploy(&blockhash_runtime());
     for _ in 0..300 {
         let body = chain.body(vec![]);
@@ -672,7 +672,7 @@ fn no_single_node_removed_or_corrupted_changes_the_outcome() {
         (BlockHashes::Eager, false),
         (BlockHashes::Lazy, true),
     ] {
-        let mut chain = Chain::new(ChainSpec::mainnet());
+        let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
         let contract = big_contract(&mut chain, 300);
         let catcher = chain.deploy(&catcher_runtime(contract));
         let block_hash = chain.deploy(&blockhash_runtime());
@@ -756,7 +756,7 @@ fn no_single_node_removed_or_corrupted_changes_the_outcome() {
 
 #[test]
 fn extra_unreachable_nodes_change_nothing() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 100);
     let tx = chain.call(contract, ops(OP_UPDATE, 42, 1));
     let body = chain.body(vec![tx]);
@@ -775,7 +775,7 @@ fn extra_unreachable_nodes_change_nothing() {
 /// itself fails on any difference from the canonical outcome.
 #[test]
 fn random_blocks_match_the_canonical_path() {
-    for (seed, spec) in [(1u8, ChainSpec::mainnet()), (2, ChainSpec::mainnet_v1()), (3, ChainSpec::mainnet())] {
+    for (seed, spec) in [(1u8, ChainSpec::mainnet_next_or_rehearsal()), (2, ChainSpec::mainnet_v1()), (3, ChainSpec::mainnet_next_or_rehearsal())] {
         let mut chain = Chain::new(spec);
         let contract = chain.deploy(&storage_ops_runtime());
         let catcher = chain.deploy(&catcher_runtime(contract));
@@ -820,7 +820,7 @@ fn random_blocks_match_the_canonical_path() {
 /// Deletion of most of a trie and rebuilding it, where collapses are many.
 #[test]
 fn draining_and_refilling_a_contract_matches_the_canonical_path() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 64);
     for (op, start, count) in [
         (OP_ZERO, 0, 10),
@@ -845,7 +845,7 @@ fn draining_and_refilling_a_contract_matches_the_canonical_path() {
 /// transaction: revm's commit sets the wipe marker, and the root is from the cache.
 #[test]
 fn created_and_destroyed_accounts_match_the_canonical_path() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     // Initcode: sstore(1, 5), then return no code.
     let plain = vec![0x60, 0x05, 0x60, 0x01, 0x55, 0x60, 0x00, 0x60, 0x00, 0xf3];
     // Initcode: sstore(1, 5), then selfdestruct to address 0x77 (EIP-6780: same transaction).
@@ -910,7 +910,7 @@ fn indexed_lookup_and_apply_agree_with_the_plain_view() {
 #[cfg(feature = "serde")]
 #[test]
 fn the_witness_round_trips_and_a_huge_node_is_refused() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let contract = big_contract(&mut chain, 20);
     let tx = chain.call(contract, ops(OP_UPDATE, 3, 1));
     let body = chain.body(vec![tx]);

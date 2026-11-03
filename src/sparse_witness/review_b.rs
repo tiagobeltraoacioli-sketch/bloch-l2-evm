@@ -7,7 +7,7 @@
 //! is expected to pass.
 
 use super::*;
-use crate::chainspec::{fee_vault_sweep_code, MAINNET_FEE_SWEEP_RECIPIENT};
+use crate::chainspec::fee_vault_sweep_code;
 
 /// Fund `count` throwaway blocks so that the vaults and the system accounts exist.
 fn warm(chain: &mut Chain, count: usize) {
@@ -166,7 +166,7 @@ fn b_two_account_removals_cascade_onto_an_untouched_account() {
 #[test]
 fn b_a_deletion_block_cannot_claim_another_root() {
     let pair = &mined_slots(3, 1)[0];
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let factory = chain.deploy_script();
     let target = chain.deploy_script();
     let fill = vec![(SSTORE, u(pair[0]), u(1)), (SSTORE, u(pair[1]), u(2)), (SSTORE, u(77), u(3))];
@@ -223,7 +223,7 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
         }
     }
 
-    chain.spec = ChainSpec::mainnet();
+    chain.spec = ChainSpec::mainnet_next_or_rehearsal();
     // The first next-rules block: a deposit, a sweep of each vault, and a payment to one.
     let a = chain.call(base, Bytes::new());
     let b = chain.call(sequencer, Bytes::new());
@@ -232,7 +232,7 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
     let (witness, canonical, _) = chain.differential(&body, "first next-rules block");
     assert!(canonical.transactions.iter().all(|tx| tx.success), "every sweep succeeds in the install block");
     // The vault code is installed by the protocol, not loaded from the witness.
-    let sweep_hash = keccak256(fee_vault_sweep_code(MAINNET_FEE_SWEEP_RECIPIENT));
+    let sweep_hash = keccak256(fee_vault_sweep_code(chain.spec.fee_vault_sweep.expect("the next rules sweep")));
     assert!(
         witness.codes.iter().all(|code| keccak256(code) != sweep_hash),
         "the install block needs no sweep code in the witness"
@@ -243,7 +243,7 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
         assert_eq!(account.code_hash, sweep_hash);
         assert_eq!(account.nonce, 1);
     }
-    assert!(!chain.state.balance_of(&MAINNET_FEE_SWEEP_RECIPIENT).is_zero());
+    assert!(!chain.state.balance_of(&chain.spec.fee_vault_sweep.unwrap()).is_zero());
 
     // The second block loads the installed code from the witness's code list.
     let a = chain.call(base, Bytes::new());
@@ -385,11 +385,11 @@ fn account(witness: &SparseBatchWitness, address: Address) -> usize {
 fn b_sweep_failure_paths_agree() {
     let reverting = [0x5f, 0x5f, 0xfd];
     // The first contract the harness sender deploys: its nonce is 0 after genesis.
-    let probe = Chain::new(ChainSpec::mainnet());
+    let probe = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let recipient = probe.sender.create(0);
     let spec = ChainSpec {
         fee_vault_sweep: Some(recipient),
-        ..ChainSpec::mainnet()
+        ..ChainSpec::mainnet_next_or_rehearsal()
     };
     spec.validate().unwrap();
     let mut chain = Chain::new(spec);

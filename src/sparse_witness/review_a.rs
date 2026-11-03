@@ -421,7 +421,7 @@ fn world(spec: &ChainSpec, number: u64) -> World {
 
 #[test]
 fn the_guest_database_answers_every_read_truly_or_refuses() {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let number = 1_000u64;
     let mut world = world(&spec, number);
     let exposed: Vec<U256> = vec![U256::from(1), U256::from(77), U256::from(5_000)];
@@ -501,7 +501,7 @@ fn the_guest_database_answers_every_read_truly_or_refuses() {
 /// directly, refuses with the precise error and never panics.
 #[test]
 fn hydration_refuses_every_account_lie() {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let number = 1_000u64;
     let mut world = world(&spec, number);
     let honest = world
@@ -625,7 +625,7 @@ fn hydration_refuses_every_account_lie() {
 /// dev-dependency, so the guest's own wire format is not exercised here.
 #[test]
 fn the_guest_decoder_refuses_malformed_witnesses_without_panicking() {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let mut world = world(&spec, 300);
     let honest = world.witness(&[(CONTRACT, vec![U256::from(1)])], &[NOBODY], vec![runtime()]).witness;
     let json = serde_json::to_value(&honest).unwrap();
@@ -745,7 +745,7 @@ impl WireWitness {
 /// allocation driven by a declared length the input does not back.
 #[test]
 fn the_guest_wire_format_refuses_malformed_witnesses_without_panicking() {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let mut world = world(&spec, 300);
     let honest = world.witness(&[(CONTRACT, vec![U256::from(1), U256::from(2)])], &[NOBODY], vec![runtime()]).witness;
     assert!(!honest.pre_accounts.is_empty() && !honest.codes.is_empty());
