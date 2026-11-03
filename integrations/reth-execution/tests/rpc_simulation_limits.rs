@@ -5,7 +5,7 @@
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    build_eth_api, build_eth_api_capped, prepare_genesis, BlochChainSpec, BlochEvmConfig, BlochNodeTypes, BlochTables,
+    build_eth_api, prepare_genesis, BlochChainSpec, BlochEvmConfig, BlochNodeTypes, BlochTables,
     PendingPolicy,
 };
 use reth_db::{
@@ -22,6 +22,10 @@ use reth_rpc_eth_api::{helpers::call::set_simulation_time_limit, node::RpcNodeCo
 use reth_transaction_pool::noop::NoopTransactionPool;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
+
+#[path = "../src/bin/settled_rpc/capped_api.rs"]
+mod capped_api;
+use capped_api::build_eth_api_capped;
 
 type Factory = ProviderFactory<NodeTypesWithDBAdapter<BlochNodeTypes, Arc<DatabaseEnv>>>;
 
