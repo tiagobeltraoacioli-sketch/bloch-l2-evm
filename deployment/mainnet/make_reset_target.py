@@ -53,10 +53,12 @@ TRANSACTION_V3_BYTES = 1 + 32 + STATEMENT_V3_BYTES + PROOF_BYTES  # 1155
 COMMIT_D1 = b'BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-COMMITMENT:1'
 COMMIT_D2 = b'BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-TX:1'
 
-# V3 field offsets after the tag (l2_settlement.rs, mirrored here).
+# V3 field offsets after the tag (l2_settlement.rs, mirrored here). The seven
+# identities sit at S + i*32: 0 admission domain, 1 native genesis, 2 L2 domain,
+# 3 configuration, 4 ELF keccak, 5 KoalaBear key, 6 BN254 key.
 OFF_L2_NUMBER = 264     # u64 BE
-OFF_CONFIG = 64         # identities[3] (configuration), 32 bytes
-OFF_ELF = 96            # identities[4] (ELF keccak), 32 bytes
+OFF_CONFIG = 96         # identities[3] (configuration), 32 bytes
+OFF_ELF = 128           # identities[4] (ELF keccak), 32 bytes
 
 
 def die(msg):
