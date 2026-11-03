@@ -163,13 +163,24 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
 - The settler refuses to start with a budget configured when an empty-block probe gives no cost
   (`check_cost_line`). A prover without the cost line can then never starve users silently (r7 F2).
 
-**Try order** (`Policy.try_order`):
-1. **Tier.** Senders with standing (a transaction included within 7 days) and exempt senders come first, then the rest.
-   Standing costs a paid, included transaction; a quarantine removes it.
-2. **Tip.** Within a tier, by effective tip, highest first: a higher tip buys room in a full block (r8 N2). Gas used
-   only breaks ties.
-3. **Nonce.** Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1).
-4. The producer's native selection (`dry`) runs without the block's transaction cap, and the planner applies
+**Try order** (`Policy.try_order`; agents/223 F223-4 and agents/243 A243-1..3):
+1. **Small first, by tip, all senders together.** A transaction is small when its gas used is below `large_gas`
+   (state, initially `max_tx_gas`). Small transactions and exempt senders are ordered by effective tip, highest first,
+   whatever the sender's standing: a higher tip buys room in a full block and a place under the transaction cap
+   (r8 N2). Standing only breaks ties. (In 166's first order the tier came before the tip, so senders with standing
+   at the capped tip could keep every new sender out for about 0.07 BLCH a day: A243-1, A243-2.)
+2. **Large after small.** Senders with standing first, then the rest (r9 U1). By tip until a quarantine or a run
+   without cost in this block, then by ascending gas used (F223-4).
+3. **`large_gas`** is half the gas used of the smallest offender that counted as small, set on a measured verdict
+   (over the cycle limit, or over the budget alone) and persisted. An offender must use at least some G* gas, fixed by
+   the guest's worst instructions per gas, so `large_gas` never falls below G*/2, and each offender small enough to go
+   before small honest transactions halves it: about log2(5M / G*) of them in the life of the chain. A run without
+   cost lowers it for its block only, never for good.
+4. **After an offender in a block** the rest is re-ordered and searched from the front without a full run, since the
+   full run would only hit the offenders at the end again (35-40 s per verdict inside the settler, agents/223 F223-3).
+5. **Nonce.** Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1); a
+   sender's place follows its next transaction.
+6. The producer's native selection (`dry`) runs without the block's transaction cap, and the planner applies
    `max_block_txs` to the try order. Otherwise the producer's tip order alone would drop a sender with standing behind
    64 high-tip entries before the tiers apply. The first reference test run found this.
 
@@ -334,7 +345,7 @@ it fail (section 9.1). "Integration" means a requirement on the settler, produce
 | R3 | Foreign settlers are not bound | Their own blocks only, on the sparse guest | Consensus repricing only (agent 90): not proposed |
 | R4 | A mandatory-only block above the budget (deposits plus forced, about 114M by addition) | Commits alone with its record; `mandatory-heavy` profile unmeasured | Test P3; operator exit |
 | R5 | The cycle limit is checked per gas chunk, so a run overshoots by up to one chunk | Time not measured | Test H1 |
-| R6 | Standing is cheap (one paid transaction) | It only moves a sender ahead of fresh ones; a quarantine removes it and bans the sender | Accepted |
+| R6 | Standing is cheap (one paid transaction) | It only moves a sender ahead of fresh ones among large transactions and breaks tip ties among small ones (A243-1, A243-2); a quarantine removes it and bans the sender | Accepted |
 | R7 | Spool flooding at the RPC (4,096 entries, 16 per sender, eviction by fee) | Pre-existing; the planner reads at most 16,384 | RPC refusal of banned senders (R1); admission at `max_tx_gas` (3.2) |
 | R8 | The budget's memory margin rests on two 2c points and on load-noisy times | | Tests P1, P2 |
 | R9 | The sparse guest's empty-block cost at height 8191 is not measured | Complete guest: +37k SP1 gas per block of height (agent 82) | Test H3 |

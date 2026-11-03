@@ -139,7 +139,7 @@ class Policy:
 
     def _fresh_state(self):
         return {'tip': self.c['min_tip_wei'], 'last_block_time': None, 'empty_base': 0, 'bans': {}, 'waits': {},
-                'failures': {}, 'writes': {}, 'standing': {}}
+                'failures': {}, 'writes': {}, 'standing': {}, 'large_gas': int(self.c['max_tx_gas'])}
 
     # Bounds
 
@@ -283,43 +283,37 @@ class Policy:
         self.log('gate-did-not-settle')
         return {}, []
 
-    def degraded_order(self, names, info, now):
-        """The try order after a quarantine or a run without cost in this block (agents/223 F223-4, 135's r9 suggestion):
-        tier 0 as before, then tier 1 by ascending gas used, each sender's transactions still in nonce order. An offender
-        is large (a 150k-gas modexp is 7.7M SP1 gas and fits the budget), so once one has spent measuring time, fresh
-        senders at the top tip can no longer keep every small honest transaction behind them. The tip still decides
-        until then, and decides between equal gas."""
+    def large_gas(self):
+        """Gas used from which a transaction counts as large: half the gas of the smallest transaction ever found over
+        the budget alone (a measured verdict), and never above `max_tx_gas` (agents/243 A243-3). A transaction can only be
+        over the cycle limit alone if its gas used is at least some G* fixed by the guest's worst instructions per gas,
+        so this threshold never falls below G*/2 and each offender that is small enough to count as small halves it:
+        about log2(5M / G*) such offenders in the life of the chain, not per block."""
+        return max(min(int(self.state.get('large_gas', self.c['max_tx_gas'])), int(self.c['max_tx_gas'])), 1)
+
+    def try_order(self, stats, now, large_gas=None, degraded=False):
+        """The order candidates are tried in (3.4; agents/243 A243-1..3 on top of agents/223 F223-4).
+
+        - Small transactions (gas used below `large_gas()`) and exempt senders first, all senders together, by
+          effective tip: a higher tip buys room and a place under the transaction cap whoever sends it (r8 N2), so a
+          sender with standing cannot keep a new sender out by tipping less (A243-1, A243-2). Standing breaks ties.
+        - Then large transactions: senders with standing first (r9 U1: a pool of fresh, funded senders cannot spend the
+          measuring time of established users), then the rest. By tip until a quarantine or a run without cost in this
+          block; after one, by ascending gas used (F223-4), so further heavy attackers are measured last.
+        - Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1); a sender's
+          place follows its next transaction."""
         exempt = set(self.c['write_limit_exempt_senders'])
         horizon = now - self.c['standing_seconds']
+        large = self.large_gas() if large_gas is None else large_gas
 
         def tier(sender):
             return 0 if sender in exempt or self.state['standing'].get(sender, -math.inf) > horizon else 1
 
-        first = [h for h in names if tier(info[h]['sender']) == 0]
-        queues = {}
-        for h in names:
-            if tier(info[h]['sender']) == 1:
-                queues.setdefault(info[h]['sender'], []).append(h)
-        rest = []
-        while any(queues.values()):
-            sender = min((s for s in queues if queues[s]),
-                         key=lambda s: (int(info[queues[s][0]]['gas_used']), -int(info[queues[s][0]]['effective_tip'])))
-            rest.append(queues[sender].pop(0))
-        return first + rest
-
-    def try_order(self, stats, now):
-        """The order candidates are tried in (3.4).
-
-        - Senders with standing (a transaction included within `standing_seconds`) and exempt senders first. Standing
-          costs a paid, included transaction; a quarantine takes it away. A pool of fresh senders funded once therefore
-          cannot spend the measuring time of established users (review r9 U1).
-        - Within a tier, by effective tip, so a higher tip buys room in a full block (r8 N2); gas used breaks ties.
-        - Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1)."""
-        exempt = set(self.c['write_limit_exempt_senders'])
-        horizon = now - self.c['standing_seconds']
-
-        def tier(sender):
-            return 0 if sender in exempt or self.state['standing'].get(sender, -math.inf) > horizon else 1
+        def key(sender, index, tx):
+            gas, tip = int(tx['gas_used']), int(tx['effective_tip'])
+            if sender in exempt or gas < large:
+                return (0, -tip, tier(sender), gas, index)
+            return (1, tier(sender), gas, -tip, index) if degraded else (1, tier(sender), -tip, gas, index)
 
         queues = {}
         for index, tx in enumerate(stats):
@@ -328,11 +322,13 @@ class Policy:
             queue.sort(key=lambda item: (item[1].get('nonce') if item[1].get('nonce') is not None else item[0], item[0]))
         order = []
         while any(queues.values()):
-            sender = min((s for s in queues if queues[s]),
-                         key=lambda s: (tier(s), -int(queues[s][0][1]['effective_tip']), int(queues[s][0][1]['gas_used']),
-                                        queues[s][0][0]))
+            sender = min((s for s in queues if queues[s]), key=lambda s: key(s, *queues[s][0]))
             order.append(queues[sender].pop(0)[1]['hash'])
         return order
+
+    def degraded_order(self, names, info, now, large_gas=None):
+        """The try order of `names` after a quarantine or a run without cost in this block (F223-4, A243-3)."""
+        return self.try_order([info[h] for h in names], now, large_gas, degraded=True)
 
     # One block
 
@@ -392,24 +388,35 @@ class Policy:
         info = {t['hash']: t for t in stats}
         # `dry` runs without the block's transaction cap, so that the producer's tip order cannot push a sender with
         # standing out of the candidates before the tiers apply; the cap applies here, to the try order.
-        remaining = self.try_order(stats, now)
+        large = self.large_gas()  # this block's threshold: also lowered by runs without cost, which persist nothing
+        remaining = self.try_order(stats, now, large)
         plan.held.extend((name, 'block-limits') for name in remaining[self.c['max_block_txs']:])
         remaining = remaining[:self.c['max_block_txs']]
         best = []
+        degraded = False
         while remaining and not out_of_work():
-            result, report = run([by_hash[h] for h in best + remaining])
-            plan.finished.extend(d['hash'] for d in report.get('dropped', []) if d.get('hash'))
-            if self.fits(result):
-                kept = set(report.get('included', best + remaining))
-                best = [h for h in best + remaining if h in kept]
-                plan.held.extend((h, 'block-limits') for h in remaining if h not in kept)
-                plan.cost = result
-                remaining = []
-                break
-            found = self._first_misfit(best, remaining, by_hash, run, out_of_work, result)
+            if degraded:
+                # A quarantine or a run without cost in this block: the full run would only hit the offenders at the
+                # end of the order again (one cycle-limit verdict, 35-40 s inside the settler, agents/223). Search from
+                # the front, measuring the whole rest only if every shorter prefix fits.
+                found = self._first_misfit(best, remaining, by_hash, run, out_of_work, None, full_known=False)
+            else:
+                result, report = run([by_hash[h] for h in best + remaining])
+                plan.finished.extend(d['hash'] for d in report.get('dropped', []) if d.get('hash'))
+                if self.fits(result):
+                    kept = set(report.get('included', best + remaining))
+                    best = [h for h in best + remaining if h in kept]
+                    plan.held.extend((h, 'block-limits') for h in remaining if h not in kept)
+                    plan.cost = result
+                    remaining = []
+                    break
+                found = self._first_misfit(best, remaining, by_hash, run, out_of_work, result)
             if found is None:
                 break  # out of work inside the search: keep what is known to fit
             lo, lo_cost, misfit = found
+            if lo == len(remaining):
+                best, plan.cost, remaining = best + remaining, lo_cost, []
+                break
             if lo:
                 best, plan.cost = best + remaining[:lo], lo_cost
             offender = remaining[lo]
@@ -428,26 +435,37 @@ class Policy:
             if not self._classify(plan, tx, alone, now, has_mandatory, host_ok):
                 break  # the host stopped measuring: keep what is known to fit, decide nothing about the rest
             if (len(plan.quarantine), sum(1 for _, r in plan.held if r == 'unmeasured')) != spent:
-                remaining = self.degraded_order(remaining, info, now)  # F223-4
+                # F223-4, A243-3: an offender in this block. A measured verdict lowered `large_gas` in the state; a run
+                # without cost lowers it for this block only (a failing host must not move it for good).
+                if int(tx['gas_used']) < large:
+                    large = min(self.large_gas(), max(int(tx['gas_used']) // 2, 1))
+                degraded = True
+                remaining = self.degraded_order(remaining, info, now, large)
         plan.held.extend((h, 'not-reached') for h in remaining)
         plan.chosen = best
         plan.raws = [by_hash[h] for h in best]
         plan.profile = self.profile_for(plan.cost.sp1_gas if measured(plan.cost) else None)
         return plan
 
-    def _first_misfit(self, best, remaining, by_hash, run, out_of_work, full_result):
+    def _first_misfit(self, best, remaining, by_hash, run, out_of_work, full_result, full_known=True):
         """The shortest prefix of `remaining` that, on top of `best`, does not fit. Exponential then binary search from
         the front, so an offender at position p costs about 2·log2(p+1) runs and one at the front costs one: tip order
         puts an unpaid high tip at the front, where it is now cheapest to find (r9 U1). Returns (lo, cost of best +
-        remaining[:lo] or None, result of the run of best + remaining[:lo + 1] or None), or None if out of work."""
+        remaining[:lo] or None, result of the run of best + remaining[:lo + 1] or None), or None if out of work.
+        With `full_known` False the whole of `remaining` was not run: the search measures it last, and lo ==
+        len(remaining) means all of it fits."""
         lo, lo_cost, hi, hi_result = 0, None, len(remaining), full_result
         size = 1
-        while size < hi:
+        while size < hi or (not full_known and lo < hi and size >= hi):
+            size = min(size, hi)
             if out_of_work():
                 return None
             result, _ = run([by_hash[h] for h in best + remaining[:size]])
             if self.fits(result):
-                lo, lo_cost, size = size, result, size * 2
+                lo, lo_cost = size, result
+                if size == hi:
+                    return lo, lo_cost, None
+                size *= 2
             else:
                 hi, hi_result = size, result
                 break
@@ -472,6 +490,7 @@ class Policy:
             # The run hit the cycle limit, at least twice the instruction budget, on top of a mandatory base that fits
             # the budget: the transaction's own share is over the budget in any block. A measured fact: quarantine.
             self._quarantine(plan, tx, 'over-cycle-limit', now)
+            self._lower_large_gas(tx)
             return True
         if measured(alone):
             share_sp1 = alone.sp1_gas - plan.base.sp1_gas + int(self.state['empty_base'])
@@ -482,6 +501,7 @@ class Policy:
                 plan.held.append((name, 'mandatory-fills-the-block'))
                 return True
             self._quarantine(plan, tx, 'over-budget-alone', now)
+            self._lower_large_gas(tx)
             return True
         # No cost and no cycle-limit verdict.
         if not host_ok():
@@ -499,6 +519,14 @@ class Policy:
         self.state['waits'][key] = {'until': now + delays[min(count - 1, len(delays) - 1)], 'kind': 'unmeasured'}
         plan.held.append((name, 'unmeasured'))
         return True
+
+    def _lower_large_gas(self, tx):
+        """A measured verdict (over the cycle limit, or over the budget alone): from now on, transactions of at least
+        half this one's gas used are tried after the small ones (A243-3). Persisted with the state. Only an offender
+        that counted as small moves it: a large one was already behind every small transaction."""
+        gas = int(tx['gas_used'])
+        if gas < self.large_gas():
+            self.state['large_gas'] = max(gas // 2, 1)
 
     def _quarantine(self, plan, tx, reason, now):
         """Quarantine binds the sender, not the bytes: the sender is banned for `sender_ban_seconds` and loses standing,

@@ -208,5 +208,56 @@ class A243_6RestartKeepsTheTipDecay(RealTime):
         self.assertEqual(json.loads(self.state_path.read_text())['required_tip_wei'], CAP // 2)
 
 
+class A243_7LargeGasThreshold(RealTime):
+    """The fix for A243-1..3: small transactions by tip across tiers, large ones after them. Its threshold only moves on
+    measured verdicts, is persisted, and halves at most once per offender."""
+
+    def test_a_measured_verdict_halves_the_threshold_and_it_survives_a_restart(self):
+        self.add('evil', 'mallory', 0, 1_500_000, OVER, tip=100 * GWEI)
+        self.block()
+        self.assertEqual(self.policy.large_gas(), 750_000)
+        self.assertEqual(self.make_policy().large_gas(), 750_000)
+
+    def test_a_run_without_cost_does_not_move_the_threshold_for_good(self):
+        self.add('slow', 'sid', 0, 300_000, 1, fail_first=100)
+        self.add('newcomer', 'nina', 0, 21_000, 1)
+        self.block()
+        self.assertEqual(self.held()['slow'], 'unmeasured')
+        self.assertEqual(self.make_policy().large_gas(), sp.DEFAULTS['max_tx_gas'])
+
+    def test_offenders_at_or_above_half_the_smallest_verdict_never_go_before_small_honest_transactions(self):
+        self.add('evil-first', 'm-first', 0, 600_000, OVER, tip=100 * GWEI)
+        self.block()
+        for number in range(4):
+            for i in range(6):
+                self.add(f'evil{number}-{i}', f'pool{number}-{i}', 0, 300_000 + i * 1000, OVER, tip=100 * GWEI)
+            self.add(f'new{number}', f'nina{number}', 0, 120_000, 1, tip=GWEI)
+            self.assertIn(f'new{number}', self.block(), f'block {number}: {self.held()}')
+        self.assertEqual(self.policy.large_gas(), 300_000)
+
+    def test_an_exempt_large_transaction_keeps_its_place_by_tip(self):
+        self.policy.c['write_limit_exempt_senders'] = ['op']
+        self.policy.state['large_gas'] = 100_000
+        stats = [{'hash': 'deploy', 'sender': 'op', 'nonce': 0, 'gas_used': 9_000_000, 'effective_tip': str(2 * GWEI)},
+                 {'hash': 'x', 'sender': 'x', 'nonce': 0, 'gas_used': 21_000, 'effective_tip': str(GWEI)},
+                 {'hash': 'big', 'sender': 'b', 'nonce': 0, 'gas_used': 400_000, 'effective_tip': str(9 * GWEI)}]
+        self.assertEqual(self.policy.try_order(stats, self.now), ['deploy', 'x', 'big'])
+
+    def test_nonce_order_holds_when_a_large_nonce_precedes_a_small_one(self):
+        self.policy.state['large_gas'] = 100_000
+        stats = [{'hash': 'a1', 'sender': 'a', 'nonce': 1, 'gas_used': 21_000, 'effective_tip': str(9 * GWEI)},
+                 {'hash': 'a0', 'sender': 'a', 'nonce': 0, 'gas_used': 400_000, 'effective_tip': str(GWEI)},
+                 {'hash': 'b', 'sender': 'b', 'nonce': 0, 'gas_used': 50_000, 'effective_tip': str(2 * GWEI)}]
+        self.assertEqual(self.policy.try_order(stats, self.now), ['b', 'a0', 'a1'])
+
+    def test_after_a_verdict_a_large_honest_transaction_goes_before_larger_offenders(self):
+        self.policy.state['large_gas'] = 300_000
+        self.add('evil-small', 'm0', 0, 250_000, OVER, tip=100 * GWEI)  # small enough to count as small: one verdict
+        for i in range(4):
+            self.add(f'evil{i}', f'pool{i}', 0, 1_500_000, OVER, tip=100 * GWEI)
+        self.add('deploy', 'dana', 0, 400_000, 10, tip=GWEI)
+        self.assertIn('deploy', self.block(), f'held: {self.held()}')
+
+
 if __name__ == '__main__':
     unittest.main()
