@@ -74,6 +74,17 @@ def artifact(values, version=s.SP1_CIRCUIT_VERSION, trailing=b''):
             + vec(values) + vec(version) + b'\0' + trailing)
 
 
+def broadcasts(sent, endpoints=3):
+    """One entry per broadcast. Since review r10 M2 the worker sends the same bytes to every endpoint, and the endpoints
+    of these tests share one fake world, which therefore receives each broadcast `endpoints` times in a row."""
+    out = []
+    for i in range(0, len(sent), endpoints):
+        run = sent[i:i + endpoints]
+        assert len(run) == endpoints and all(t == run[0] for t in run), 'a broadcast did not reach every endpoint'
+        out.append(run[0])
+    return out
+
+
 class Fake:
     """Native RPC + producer + prover stubs sharing one scripted world."""
 
@@ -107,8 +118,9 @@ class Fake:
             self.sent.append(tx)
             if self.include_da:
                 _, number, payload = s.da_frame_fields(tx)
-                self.da_records.append({'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(),
-                                        'height': 9})
+                record = {'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(), 'height': 9}
+                if record not in self.da_records:  # native keeps one record per (number, commitment): Duplicate
+                    self.da_records.append(record)
             return {'status': 'accepted', 'tx_hash': '01' * 32}
         if method == 'sendrawtransaction':
             self.sent.append(bytes.fromhex(params[0]))
@@ -287,7 +299,7 @@ class SettlerV3Test(unittest.TestCase):
         self.assertTrue(settler.cycle())
         self.assertNotIn('--txs', self.extend_call(fake))
         self.assertIn('--deposits', self.extend_call(fake))
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual((len(tx), tx[0]), (1155, 0x13))
         self.assertEqual(tx[1:33], CONFIG_BYTES[160:192])
         self.assertEqual(tx[33:33 + 766], fake.values)
@@ -312,9 +324,10 @@ class SettlerV3Test(unittest.TestCase):
         for flag, value in (('--txs', pool), ('--max-gas', '1000000'), ('--max-bytes', '65536'), ('--max-txs', '50')):
             self.assertEqual(call[call.index(flag) + 1], value)
         # DA first (0x15, carrying the batch), then the settlement (0x13).
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
-        self.assertEqual(s.da_frame_fields(fake.sent[0]), (s.CHAIN_ID, 1, batch(3)))
-        self.assertEqual(int.from_bytes(fake.sent[1][33 + s.T + s.USER_TX_COUNT:33 + s.T + s.USER_TX_COUNT + 8], 'big'), 3)
+        sent = broadcasts(fake.sent)
+        self.assertEqual([tx[0] for tx in sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual(s.da_frame_fields(sent[0]), (s.CHAIN_ID, 1, batch(3)))
+        self.assertEqual(int.from_bytes(sent[1][33 + s.T + s.USER_TX_COUNT:33 + s.T + s.USER_TX_COUNT + 8], 'big'), 3)
         mismatch = Fake(self.root, statement(user_txs=2), produced_txs=3)
         self.tearDown(), self.setUp()
         with self.assertRaisesRegex(s.Halt, 'producer included 3'):
@@ -427,20 +440,21 @@ class SettlerV3Test(unittest.TestCase):
         fake = Fake(self.root, statement(user_txs=2), produced_txs=2)
         fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, batch(2)).hex(), 'height': 3})
         self.assertTrue(self.user_settler(fake).cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in broadcasts(fake.sent)], [s.ASYNC_SETTLEMENT_TAG])
         self.assertFalse(any(Path(c[0]).name == 'bloch-pos' for c in fake.calls))
 
     def test_settlement_waits_for_da_inclusion(self):
         fake = Fake(self.root, statement(user_txs=2), produced_txs=2)
         fake.include_da = False
         self.assertFalse(self.user_settler(fake).cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG], 'no settlement before the DA record')
+        self.assertEqual([tx[0] for tx in broadcasts(fake.sent)], [s.DA_TAG], 'no settlement before the DA record')
         # Next cycle, same base fee and inputs unspent: the same signed bytes are rebroadcast
         # (no second DA spending the same outputs); once included, it settles.
         fake.include_da = True
         self.assertTrue(self.user_settler(fake).cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
-        self.assertEqual(fake.sent[0], fake.sent[1])
+        sent = broadcasts(fake.sent)
+        self.assertEqual([tx[0] for tx in sent], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual(sent[0], sent[1])
         prepares = [c for c in fake.calls if Path(c[0]).name == 'bloch-pos' and c[2] == 'prepare']
         self.assertEqual(len(prepares), 1)
         self.assertTrue(prepares[0][-1].endswith('da-unsigned-0.hex'))
@@ -530,7 +544,7 @@ class SettlerV3Test(unittest.TestCase):
         self.assertEqual((request, data), ((work / 'native-request.txt').read_bytes(), b'artifact'))
         proved = json.loads((work / 'proved.json').read_text())
         self.assertEqual([x['where'] for x in proved['steps']], ['local', 'remote', 'local'])
-        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual(len(broadcasts(fake.sent)), 1)
 
     def test_remote_failure_retries_or_falls_back_to_a_local_proof(self):
         fake = Fake(self.root, statement())
@@ -738,8 +752,8 @@ class SettlerV3Test(unittest.TestCase):
         self.assertFalse([e for e in self.events(logged) if e.startswith('rpc-')])
         self.assertEqual(ports.count(1), ports.count(2))
         self.assertEqual(ports.count(1), ports.count(3))
-        self.assertEqual([p for p, m in ports.calls if m == 'sendrawtransaction'], [1])
-        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual([p for p, m in ports.calls if m == 'sendrawtransaction'], [1, 2, 3], 'every endpoint (M2)')
+        self.assertEqual(len(broadcasts(fake.sent)), 1)
 
     def test_quorum_one_endpoint_down_settles_through_the_others(self):
         for mode in ('down', 'erroring'):
@@ -749,8 +763,9 @@ class SettlerV3Test(unittest.TestCase):
                 ports = Ports(fake, p1=mode)
                 with mock.patch.object(s, 'log') as logged:
                     self.assertTrue(self.quorum_settler(ports).cycle())
-                self.assertEqual(len(fake.sent), 1)
-                self.assertEqual([p for p, m in ports.calls if m == 'sendrawtransaction'], [2])
+                self.assertEqual(len(broadcasts(fake.sent, endpoints=2)), 1)
+                self.assertEqual([p for p, m in ports.calls if m == 'sendrawtransaction'], [1, 2, 3],
+                                 'a failed endpoint is still sent the bytes (M2)')
                 self.assertIn('rpc-endpoint-failed', self.events(logged))
                 self.assertLess(ports.count(1), ports.count(2), 'the failed endpoint is backed off')
 
@@ -762,7 +777,8 @@ class SettlerV3Test(unittest.TestCase):
             self.assertTrue(settler.cycle())
             for _ in range(3):
                 settler.native_view()
-        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual(len(broadcasts(fake.sent, endpoints=2)), 1)
+        self.assertEqual(ports.count(3, 'sendrawtransaction'), 1, 'a lagging endpoint is sent the bytes too (M2)')
         self.assertIn('rpc-endpoint-diverged', self.events(logged))
         self.assertEqual(ports.count(3), ports.count(1), 'a lagging endpoint is still queried')
         request = next((self.root / 'work').glob('*/native-request.txt')).read_text()
@@ -822,7 +838,7 @@ class SettlerV3Test(unittest.TestCase):
         self.assertEqual(prepare[prepare.index('--input') + 1], '33' * 32 + ':0:9000000')
         self.assertNotIn('77' * 32 + ':0:99000000', prepare, 'an output only one endpoint reports is not spent')
         self.assertEqual(prepare[prepare.index('--base-fee') + 1], '10', 'an inflated fee from one endpoint is ignored')
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in broadcasts(fake.sent, endpoints=2)], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
         # With three answers the base fee is the median.
         endpoints = s.Endpoints([1, 2, 3], 2, Ports(fake).rpc, lambda: 0)
         endpoints.rpc.__self__.chaininfo = {1: 7, 2: 12, 3: 10 ** 9}
@@ -834,7 +850,8 @@ class SettlerV3Test(unittest.TestCase):
         ports.reject = {1}
         with mock.patch.object(s, 'log'):
             self.assertTrue(self.quorum_settler(ports).cycle())
-        self.assertEqual([p for p, m in ports.calls if m == 'sendrawtransaction'], [1, 2])
+        self.assertEqual([p for p, m in ports.calls if m == 'sendrawtransaction'], [1, 2, 3])
+        self.assertEqual(len(broadcasts(fake.sent, endpoints=2)), 1, 'one refusal: the other two hold the bytes')
 
     def test_quorum_endpoint_backoff_and_recovery(self):
         now = [0]
@@ -892,7 +909,7 @@ class SettlerV3Test(unittest.TestCase):
                 with mock.patch.object(s, 'log') as logged:
                     self.assertTrue(self.quorum_settler(ports).cycle())
                 self.assertNotIn('rpc-no-quorum', self.events(logged))
-                self.assertEqual(len(fake.sent), 1)
+                self.assertEqual(len(broadcasts(fake.sent, endpoints=3 - len(modes))), 1)
 
     def test_quorum_split_by_a_new_source_is_reread_before_no_quorum(self):
         # 18940 down; 18942 already saw the next source, 18941 catches up one read later.

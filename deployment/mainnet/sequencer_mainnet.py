@@ -17,7 +17,7 @@ block. So the producer makes exactly one unsettled L2 block at a time:
       -> write `job.json`: the handoff to the prover / settler.
 
 It never proves, signs, submits or publishes anything, never reads a key and
-only issues read-only `getl2settlement` calls.
+only issues read-only `getl2settlement` and `getchaininfo` calls.
 
 ONE WRITER. On mainnet the producer is the settler (`settler_v3.py`,
 `network_kind: "mainnet"`, branch codex/l2-mainnet-settler-20261018): it
@@ -34,6 +34,18 @@ This script therefore runs in one of two modes:
   the parent of every statement the native chain accepts. It catches a
   non-deterministic, mis-pinned or mis-configured producer before the proof,
   and needs no access to the settler's database (read-only on its work dir).
+* program schedule (fork candidate; `next_elf_keccak`, optional `fallback_elf_keccak`): the
+  rule set follows the program a settlement started now would land under, as in the settler
+  (`program_schedule`, `program_switch_lead_seconds` default 1800, `slots_per_epoch` 32). The
+  next and the fallback program run the same next rules, so a rollback changes no rule set.
+  The shadow takes the rule set of the settler's block only when L1 justifies it: the program
+  L1 holds now, or the one its schedule names for the landing epoch. A block the settler built
+  under the next rules ahead of the gate is therefore rebuilt under the next rules, not halted
+  on; a block that is merely stale (built before the window or the gate, which the settler
+  rebuilds in its next cycle) is waited for (`shadow-rules-wait`); any other rule set halts.
+  When the settler rebuilds a block the shadow already matched (the rewind at the swap), the
+  shadow rewinds its own copy and verifies the new block. Without `next_elf_keccak` there is
+  one rule set and the schedule is ignored.
 * producer (`settler_workdir` absent): the stage on its own, for tests and
   rehearsals, writing the settler_v3 job layout (`deposits.json`,
   `block.json`, `block.artifact`, `native-request.txt`, `da-payload.hex`)
@@ -78,10 +90,11 @@ MAX_INBOX_PER_SETTLEMENT = 64
 DA_DOMAIN = b'BLOCH:L2:DA:1'
 DA_MAX_PAYLOAD_BYTES = 114_688
 # The getl2settlement fields that decide the next block (others move every native block).
-VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'profile', 'accepted', 'source', 'program')
+VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'profile', 'accepted', 'source', 'program',
+               'program_schedule')
 DEFAULTS = {'poll_seconds': 15, 'user_transactions': False, 'max_block_gas': 15_000_000,
             'max_block_bytes': DA_MAX_PAYLOAD_BYTES, 'max_block_txs': 256, 'rpc_timeout_seconds': 15,
-            'max_clock_skew_seconds': 120}
+            'max_clock_skew_seconds': 120, 'program_switch_lead_seconds': 1800, 'slots_per_epoch': 32}
 
 
 class Halt(Exception):
@@ -90,6 +103,10 @@ class Halt(Exception):
 
 class RetryLater(Exception):
     """An input another process is still writing; the next step retries."""
+
+
+def is_hash(value):
+    return isinstance(value, str) and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
 
 
 def log(event, **fields):
@@ -221,18 +238,45 @@ class Sequencer:
                 raise Halt('shadow mode takes the transactions from the settler DA batch: leave user_transactions false')
             if Path(self.c['settler_workdir']).resolve() == Path(self.c['workdir']).resolve():
                 raise Halt('settler_workdir must not be the shadow workdir')
+        nxt, fallback = self.c.get('next_elf_keccak'), self.c.get('fallback_elf_keccak')
+        for key, value in (('next_elf_keccak', nxt), ('fallback_elf_keccak', fallback)):
+            if value is not None and not is_hash(value):
+                raise Halt(f'{key} must be 32 bytes of lowercase hex')
+        if fallback is not None and (nxt is None or fallback == nxt):
+            raise Halt('fallback_elf_keccak needs a different next_elf_keccak')
+        # Programs that run the next rules: the next one and, after a rollback, the fallback one.
+        self.next_elves = {e for e in (nxt, fallback) if e}
+        for key in ('program_switch_lead_seconds', 'slots_per_epoch'):
+            value = self.c[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise Halt(f'{key} must be a positive integer')
+        self.schedule_problem = None
+        self.rule_set = 'base'
         self.work = Path(self.c['workdir'])
 
     # ---- shadow mode: the settler (settler_v3.py) is the producer; this rebuilds and compares ----
     def settler_block(self, number, source):
-        path = Path(self.c['settler_workdir']) / f'{number:08d}-{source["block"][:16]}' / 'block.json'
-        if not path.is_file():
-            return None
-        return json.loads(path.read_text())
+        """(block.json, its directory) of the settler's block `number` on this source, or (None, None).
 
-    def settler_transactions(self, number, source, settler_block):
+        A block the settler reuses (its database already holds it: the re-proof at a rollback, a crash) gets a new work
+        directory without block.json; the block is the one its superseded directory of the same name describes."""
+        directory = Path(self.c['settler_workdir']) / f'{number:08d}-{source["block"][:16]}'
+        if (directory / 'block.json').is_file():
+            return json.loads((directory / 'block.json').read_text()), directory
+        if directory.is_dir():
+            def stamp(path):
+                try:
+                    return int(path.parent.name.rsplit('-', 1)[1])
+                except ValueError:
+                    return -1
+            older = sorted(directory.parent.glob(f'{directory.name}.superseded-*/block.json'), key=stamp)
+            if older:
+                return json.loads(older[-1].read_text()), older[-1].parent
+        return None, None
+
+    def settler_transactions(self, number, directory, settler_block):
         """The signed transactions of the settler's block, from its canonical DA batch."""
-        path = Path(self.c['settler_workdir']) / f'{number:08d}-{source["block"][:16]}' / 'da-payload.hex'
+        path = directory / 'da-payload.hex'
         if not path.is_file():
             raise RetryLater(f'settler block {number} has transactions but no da-payload.hex yet')
         payload = bytes.fromhex(path.read_text().strip())
@@ -322,23 +366,117 @@ class Sequencer:
         tmp.write_text(text)
         os.replace(tmp, path)
 
-    def next_program_active(self, view):
-        """Whether L1 holds the next program (`next_elf_keccak`, candidate; absent keeps one rule set)."""
-        elf = self.c.get('next_elf_keccak')
-        return bool(elf) and (view.get('program') or {}).get('elf_keccak') == elf
+    # ---- the rule set (program swap and rollback; same selection as settler_v3.scheduled_program) ----
+    def rules_held(self, view):
+        """The rule set of the program L1 holds now: `next` for the next and the fallback program."""
+        return 'next' if (view.get('program') or {}).get('elf_keccak') in self.next_elves else 'base'
 
-    def follow_program(self, number, source, active):
-        """An unsettled head under the old rules cannot settle once L1 moved the program: same rule as the settler."""
-        if not active:
-            return
+    def l1_slot(self):
+        """The L1 head slot no larger than an honest node's: the (faults + 1)-th largest of at least a quorum of answers."""
+        values = []
+        for url in self.c['rpc_urls']:
+            try:
+                slot = self.rpc(url, 'getchaininfo', (), self.c['rpc_timeout_seconds'])['slot']
+            except Exception:  # noqa: BLE001 - counted below
+                continue
+            if isinstance(slot, int) and not isinstance(slot, bool) and slot >= 0:
+                values.append(slot)
+        if len(values) < self.quorum:
+            raise ValueError(f'{len(values)} of {len(self.c["rpc_urls"])} nodes reported an L1 slot')
+        values.sort()
+        return values[max(0, len(values) - 1 - (len(self.c['rpc_urls']) - self.quorum))]
+
+    def schedule_unusable(self, reason):
+        """Fail safe: no change is anticipated (the rule set of the program L1 holds). Logged once per reason."""
+        if self.schedule_problem != reason:
+            log('program-schedule-unusable', reason=reason[:300])
+        self.schedule_problem = reason
+
+    def scheduled_rules(self, view):
+        """(rules, gate_ahead): `next` when `program_schedule` names a next-rules program at or before the epoch in which a
+        settlement started now would land, else None (also when the schedule cannot be used); gate_ahead tells whether
+        the schedule names one at all."""
+        if not self.next_elves:
+            return None, False
+        schedule = view.get('program_schedule')
+        if not isinstance(schedule, list):
+            self.schedule_unusable('getl2settlement has no program_schedule list')
+            return None, False
+        epochs, last = [], -1
+        try:
+            for entry in schedule:
+                epoch = entry['epoch']
+                if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch <= last:
+                    raise ValueError(f'epochs must be increasing integers: {epoch!r}')
+                if entry['elf_keccak'] not in self.next_elves:
+                    raise ValueError(f'a scheduled program this shadow is not configured for at epoch {epoch}')
+                epochs.append(epoch)
+                last = epoch
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            self.schedule_unusable(f'program_schedule: {error}')
+            return None, False
+        if not epochs:
+            self.schedule_problem = None
+            return None, False
+        try:
+            slot = self.l1_slot()
+        except Exception as error:  # noqa: BLE001 - fail safe: no anticipation without a clock
+            self.schedule_unusable(f'L1 head slot unreadable: {type(error).__name__}: {error}')
+            return None, True
+        self.schedule_problem = None
+        lead_slots = -(-self.c['program_switch_lead_seconds'] * 1000 // L1_SLOT_MILLIS)
+        landing_epoch = (slot + lead_slots) // self.c['slots_per_epoch']
+        return ('next' if epochs[0] <= landing_epoch else None), True
+
+    def producer_rules(self, view):
+        """Producer mode: the rule set the settler would choose (scheduled inside the window, else held)."""
+        scheduled, _ = self.scheduled_rules(view)
+        return scheduled or self.rules_held(view)
+
+    def shadow_rules(self, view, number, settler_block):
+        """The rule set of the settler's block when L1 justifies it. RetryLater for a block the settler is about to
+        rebuild (or an L1 window the shadow sees a few seconds late); Halt for any other rule set."""
+        rules = settler_block.get('rules', 'base')
+        held = self.rules_held(view)
+        scheduled, gate_ahead = self.scheduled_rules(view)
+        if rules in {held, scheduled}:
+            return rules
+        if rules == 'next' and gate_ahead:
+            why = 'built for a scheduled gate whose window this shadow does not see yet'
+        elif rules == 'base' and held == 'next':
+            why = 'built before L1 moved the program; the settler rebuilds it under the next rules'
+        else:
+            raise Halt(f'settler block {number} runs the {rules} rules, which L1 does not justify '
+                       f'(L1 holds the {held} rules; schedule: {scheduled or "none due"})')
+        log('shadow-rules-wait', number=number, rules=rules, held=held, scheduled=scheduled, reason=why)
+        raise RetryLater(f'settler block {number} under the {rules} rules: {why}')
+
+    def supersede(self, directory):
+        if directory.exists():
+            directory.rename(directory.with_name(f'{directory.name}.superseded-{int(time.time())}'))
+
+    def follow_rules(self, number, source, rules):
+        """Make the database head and the job directory of block `number` fit `rules`, as the settler does: an
+        unsettled base-rules head is rewound once the next rules apply (it cannot settle under them)."""
         head = self.produce('head', '--target', self.c['l2_db'])
-        if head['number'] == number and head.get('rules') != 'next':
+        if head['number'] == number and head.get('rules', 'base') != rules:
+            if rules != 'next':
+                raise Halt(f'L2 head {number} runs the next rules but block {number} must run the base rules')
             self.produce('rewind', '--target', self.c['l2_db'], '--number', str(number), '--hash', head['hash'])
             log('l2-block-rewound-at-swap', number=number, hash=head['hash'])
-        directory = self.job_dir(number, source)
-        produced = directory / 'block.json'
-        if produced.exists() and json.loads(produced.read_text()).get('rules') != 'next':
-            directory.rename(directory.with_name(f'{directory.name}.superseded-{int(time.time())}'))
+        produced = self.job_dir(number, source) / 'block.json'
+        if produced.exists() and json.loads(produced.read_text()).get('rules', 'base') != rules:
+            self.supersede(produced.parent)
+
+    def reverify(self, number, source, job, settler_block):
+        """The settler rebuilt a block this shadow already matched (the rewind at a swap, or a crash-left rebuild):
+        drop the shadow's copy and verify the new one from scratch."""
+        log('shadow-reverify', number=number, matched=job['hash'], settler=settler_block.get('hash'),
+            rules=settler_block.get('rules', 'base'))
+        head = self.produce('head', '--target', self.c['l2_db'])
+        if head['number'] == number:
+            self.produce('rewind', '--target', self.c['l2_db'], '--number', str(number), '--hash', head['hash'])
+        self.supersede(self.job_dir(number, source))
 
     def extend_args(self, parent, anchor, deposits, anchor_slot, shadow_txs=None):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor,
@@ -375,28 +513,39 @@ class Sequencer:
 
     def produce_job(self, view, number, parent, source, pending, anchor_slot):
         anchor = source['block']
-        active = self.next_program_active(view)
-        self.rule_set = 'next' if active else 'base'
-        self.follow_program(number, source, active)
         directory = self.job_dir(number, source)
         job_path = directory / 'job.json'
-        if job_path.exists():
-            job = json.loads(job_path.read_text())
-            head = self.produce('head', '--target', self.c['l2_db'])
-            if head['number'] != number or head['hash'] != job['hash']:
-                raise Halt(f'job {number} exists but the L2 head is {head["number"]} {head["hash"]}')
-            return job
         settler_block, shadow_txs = None, None
         if self.shadow:
-            settler_block = self.settler_block(number, source)
+            settler_block, settler_dir = self.settler_block(number, source)
             if settler_block is None:
+                if job_path.exists():
+                    return json.loads(job_path.read_text())  # the settler is rebuilding it; its new block is checked next
                 return None  # the settler has not produced this block yet
+        if self.next_elves:
+            self.rule_set = self.shadow_rules(view, number, settler_block) if self.shadow else self.producer_rules(view)
+        if job_path.exists():
+            job = json.loads(job_path.read_text())
+            produced = directory / 'block.json'
+            job_rules = json.loads(produced.read_text()).get('rules', 'base') if produced.exists() else 'base'
+            if settler_block is not None and (settler_block.get('hash') != job['hash']
+                                              or settler_block.get('rules', 'base') != job_rules):
+                self.reverify(number, source, job, settler_block)
+            elif self.next_elves and job_rules != self.rule_set:
+                self.follow_rules(number, source, self.rule_set)  # producer mode: the program moved
+            else:
+                head = self.produce('head', '--target', self.c['l2_db'])
+                if head['number'] != number or head['hash'] != job['hash']:
+                    raise Halt(f'job {number} exists but the L2 head is {head["number"]} {head["hash"]}')
+                return job
+        if self.next_elves:
+            self.follow_rules(number, source, self.rule_set)
         directory.mkdir(parents=True, exist_ok=True)
         deposits = directory / 'deposits.json'
         self.write_once(deposits, json.dumps(pending, sort_keys=True))
         if settler_block is not None and settler_block.get('transactions', 0):
             shadow_txs = directory / 'settler-transactions.json'
-            self.write_once(shadow_txs, json.dumps(self.settler_transactions(number, source, settler_block)))
+            self.write_once(shadow_txs, json.dumps(self.settler_transactions(number, settler_dir, settler_block)))
         head = self.produce('head', '--target', self.c['l2_db'])
         produced = directory / 'block.json'
         if head['number'] == number - 1:
@@ -454,17 +603,19 @@ class Sequencer:
             fields = ('number', 'hash', 'state_root', 'parent', 'anchor', 'timestamp', 'deposits', 'transactions',
                       'withdrawal_root', 'withdrawal_count')
             differ = [k for k in fields if block.get(k) != settler_block.get(k, 0 if k == 'transactions' else None)]
+            if block.get('rules', 'base') != settler_block.get('rules', 'base'):
+                differ.append('rules')
             if differ:
                 raise Halt(f'settler block {number} differs from the independent rebuild in {differ}: '
                            f'settler {settler_block.get("hash")}, shadow {block["hash"]}')
             log('shadow-match', number=number, hash=block['hash'], state_root=block['state_root'],
-                transactions=block.get('transactions', 0))
+                transactions=block.get('transactions', 0), rules=block.get('rules', 'base'))
         job = {'status': 'shadow-matched' if self.shadow else 'ready-for-prover', 'chain_id': CHAIN_ID, 'number': number, 'hash': block['hash'],
                'parent': parent, 'state_root': block['state_root'], 'timestamp': block['timestamp'],
                'anchor': anchor, 'anchor_slot': anchor_slot, 'anchor_height': source['height'],
                'deposits': block['deposits'], 'transactions': block.get('transactions', 0),
                'withdrawal_root': block.get('withdrawal_root'), 'withdrawal_count': block.get('withdrawal_count'),
-               'da': da, 'artifact_sha256': digest(artifact),
+               'rules': block.get('rules', 'base'), 'da': da, 'artifact_sha256': digest(artifact),
                'native_request_sha256': digest(directory / 'native-request.txt'),
                'produce_sha256': self.c['produce_sha256'], 'directory': str(directory)}
         self.write_once(job_path, json.dumps(job, indent=2, sort_keys=True) + '\n')
@@ -495,9 +646,13 @@ class Sequencer:
         number, parent, source, pending, slot = planned
         action = ('extend' if head['number'] == number - 1 and head['hash'] == parent else
                   'verify-produced' if head['number'] == number else 'HALT')
+        rules = {}
+        if self.next_elves:
+            scheduled, gate_ahead = self.scheduled_rules(view)
+            rules = {'rules_held': self.rules_held(view), 'rules_scheduled': scheduled, 'gate_ahead': gate_ahead}
         log('check', head_number=head['number'], head_hash=head['hash'], next_number=number, parent=parent,
             anchor=source['block'], anchor_slot=slot, anchor_time=l1_slot_time(slot), pending=len(pending),
-            action=action)
+            action=action, **rules)
         return 0 if action != 'HALT' else 3
 
 

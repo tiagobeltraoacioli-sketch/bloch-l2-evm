@@ -40,6 +40,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -142,7 +143,18 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'rpc-no-quorum', 'rpc-endpoint-diverged', 'rpc-endpoint-failed', 'da-funding-low',
                          'da-inclusion-timeout', 'da-paused-signature-fork', 'producer-refused-spool',
                          'native-no-quorum', 'publish-failed', 'alert-failed', 'held', 'check-not-ready',
-                         'rpc-quorum-view-behind'})
+                         'rpc-quorum-view-behind',
+                         # Gaps closed by agent 157 (round 10): each was logged by the settler and graded by nobody.
+                         'local-proof-refused', 'da-resign-limited', 'da-batch-unrecoverable',
+                         'foreign-rebuild-behind-view', 'idle-check-failed', 'spool-demand-unknown',
+                         # Agent 193 (M2): some RPCs refused a broadcast; held bytes not included while L1 advances.
+                         'submit-partial', 'settlement-not-included',
+                         # Agent 198 (152 L1): a partial quorum stays behind the accepted floor.
+                         'rpc-quorum-behind-floor',
+                         # Fork candidate (agent 218): a proof wasted at a program gate, the schedule unusable (fail-safe
+                         # path), an L1 reorganization across the gate; the shadow waiting on a rule set L1 does not justify.
+                         'program-moved-before-submit', 'program-moved-after-submit', 'program-schedule-unusable',
+                         'waiting-for-program', 'shadow-rules-wait'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 
@@ -188,6 +200,16 @@ _COMMON: Dict[str, Any] = {
     'disk_free_pct_warn': 15.0, 'disk_free_pct_crit': 5.0, 'disk_free_gib_warn': 20.0, 'disk_free_gib_crit': 5.0,
     # --l1-stuck-node: docs/L1-STUCK-NODE-RUNBOOK.md. Epochs are finalized epochs gained by the reference.
     'stuck_sustain_epochs': 3, 'stuck_parked_min': 32, 'stuck_min_samples': 3, 'stuck_max_gap_epochs': 2,
+    # Finalized epochs between the --l1-rpc nodes. Nodes a slot apart differ by at most 1 at an epoch boundary; a node
+    # whose head is current but whose finality is frozen sits on a branch of its own (reports 79, 86, 94; L1-6b).
+    'l1_finality_spread_warn': 2, 'l1_finality_spread_crit': 4,
+    # Acknowledged L2 transactions the settled RPC evicted as `expired` in the event window (L2-20, reports 55, 133).
+    'spool_expired_warn': 1, 'spool_expired_crit': 5,
+    # --shm: an SP1 run maps a 3.4-4.7 GiB segment; with less free the next execute or proof dies with SIGBUS (F8 of
+    # report 121, report 94). A segment older than any proof stage (3600 s timeout, plus queueing) is a leak.
+    'shm_free_gib_warn': 12.0, 'shm_free_gib_crit': 6.0, 'shm_stale_seconds': 10800.0,
+    # Failed prove cycles of one block (every prover in the order failed or refused) before CRIT (R-1 of report 141).
+    'prover_no_path_crit': 2,
 }
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
@@ -370,7 +392,31 @@ def check_l1(client: Client, urls: List[str], p: Dict[str, Any], r: Report) -> L
     lag = best['epoch'] - best['finalized_epoch']
     r.graded('l1_finality_lag', lag, p['l1_finality_epochs_warn'], p['l1_finality_epochs_crit'],
              f'L1 epoch {best["epoch"]}, finalized epoch {best["finalized_epoch"]} ({lag} epochs; 2 is normal)')
+    check_l1_finality_spread(up, p, r)
     return up
+
+
+def check_l1_finality_spread(up: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+    """Finality that stalls everywhere is l1_finality_lag. Finality that goes on for some nodes and not for others is
+    a split: nodes whose head is current but whose finalized epoch stays behind are on a branch of their own, and an
+    L2 settler or follower whose L1 quorum sits there settles on a dead fork (report 94: L2 blocks 6-8). Name them, so
+    they can be removed from every L2 reader's endpoint list."""
+    if len(up) < 2:
+        return
+    top = max(n['finalized_epoch'] for n in up)
+    best_height = max(n['height'] for n in up)
+    spread = top - min(n['finalized_epoch'] for n in up)
+    behind = [n for n in up if top - n['finalized_epoch'] >= p['l1_finality_spread_warn']]
+    if not behind:
+        r.add('l1_finality_spread', OK, f'L1 nodes finalized within {spread} epoch(s) of each other', value=spread)
+        return
+    current = [n for n in behind if best_height - n['height'] < p['l1_height_spread_crit']]
+    detail = ', '.join(f'{n["url"]} finalized e{n["finalized_epoch"]} at height {n["height"]}' for n in behind)
+    why = ('head current but finality frozen: a branch of its own or a split without finality (L1-6b). Take it out of '
+           'the settler, follower and attestor L1 endpoint lists and see docs/L1-STUCK-NODE-RUNBOOK.md'
+           if current else 'head and finality both behind: syncing or stuck; see l1_height_spread')
+    r.graded('l1_finality_spread', spread, p['l1_finality_spread_warn'], p['l1_finality_spread_crit'],
+             f'best finalized e{top}; behind: {detail} ({why})', behind=[n['url'] for n in behind])
 
 
 # ------------------------------------------------------------------------------- L1 node on its own branch
@@ -485,7 +531,11 @@ def check_l1_stuck(client: Client, specs: List[str], state_path: Optional[str], 
                      peers=stuck_metric(text, 'bloch_pos_peer_count'), has_ref_head=None)
             if ref:
                 try:
-                    s['has_ref_head'] = bool(client.call(url, 'getblockbyid', [ref['block_id']]))
+                    block = client.call(url, 'getblockbyid', [ref['block_id']])
+                    # A stored block of a branch the node does not follow answers `finality: not_canonical`
+                    # (engine.rs block_reply); it does not count as "reference head known" (agent 187 F1).
+                    s['has_ref_head'] = bool(block) and not (isinstance(block, dict)
+                                                             and block.get('finality') == 'not_canonical')
                 except RpcError as e:
                     s['has_ref_head'] = False if 'no block' in str(e) else None
         state[name], level, message = stuck_step(state.get(name), s, p)
@@ -546,6 +596,48 @@ def statement_l2_number(accepted: Any) -> Optional[int]:
         return int.from_bytes(raw[22 + 264:22 + 272], 'big') if len(raw) >= 22 + 272 else None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def statement_l2_hash(accepted: Any) -> Optional[str]:
+    """The L2 block hash of an accepted statement (settler_v3.statement_fields: bytes T+336..T+368, T = 22)."""
+    try:
+        raw = bytes.fromhex(accepted['statement'])
+        return raw[22 + 336:22 + 368].hex() if len(raw) >= 22 + 368 else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def check_rpc_vs_accepted(client: Client, views: List[Dict[str, Any]], with_l2: List[Dict[str, Any]], r: Report) -> None:
+    """Each L2 backend's block at the L1-accepted number must be the accepted block. After an accepted settlement is
+    reorged out (L2-12, report 35) or a settler settled on a dead L1 fork (report 94), the RPC keeps serving `latest` and
+    `safe` blocks that L1 no longer has; nothing else in this monitor compares the two hashes."""
+    if not views or not with_l2:
+        return
+    head = max(with_l2, key=lambda n: n['height'])['l2']
+    accepted = head.get('accepted')
+    number, want = statement_l2_number(accepted), statement_l2_hash(accepted)
+    if not isinstance(number, int) or not want or number < 1:
+        return
+    for v in views:
+        tag = f'l2_rpc_vs_l1[{v["name"]}]'
+        if v['num']['latest'] < number:
+            continue  # behind: l2_backends_agree, follower and age checks cover it
+        try:
+            got = strip0x((client.call(v['url'], 'eth_getBlockByNumber', [hex(number), False]) or {}).get('hash'))
+        except (RpcError, AttributeError) as e:
+            r.add(tag, WARN, f'block {number} unreadable: {e}')
+            continue
+        if got != want:
+            r.add(tag, CRIT, f'{v["url"]} serves L2 block {number} {got[:16]}..., L1 accepted {want[:16]}...: its latest and '
+                             'safe are on a settlement L1 no longer has (a reorged settlement, or a settler on a dead L1 '
+                             'fork). Stop the settler and run l2_reorg_recover.py (SETTLER-RUNBOOK)', number=number)
+            continue
+        safe = v['num']['safe']
+        if isinstance(safe, int) and safe > number:
+            r.add(tag, WARN, f'{v["url"]} safe {safe} is above the L1-accepted L2 block {number}: its L1 view is ahead of '
+                             'or apart from the monitor\'s L1 nodes', number=number)
+        else:
+            r.add(tag, OK, f'L2 block {number} = L1 accepted {want[:16]}...', number=number)
 
 
 PROOF_BASE_INSTRUCTIONS = 2_000_000
@@ -1195,7 +1287,54 @@ def check_proof_time(p: Dict[str, Any], r: Report) -> None:
              proof_seconds=worst, block_interval_seconds=interval)
 
 
+PROVER_EXIT_MEANING = {75: 'busy or refused (75: another job holds the remote prover lock, or the block is above the local '
+                             'limit)', 137: 'killed (137: OOM or timeout)'}
+
+
+def grade_prover_path(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+    """R-1 of report 141: the remote prover answers exit 75 while a second job holds its lock (a dry run beside the
+    worker, a restart before the old job stopped), and the settler proves the block locally at once: 6 threads, the unit's
+    memory cap and `local_prove_max_instructions`. Above that limit the local prover refuses (`local-proof-refused`) and
+    the block has no prover at all. `prover-failed` alone is a WARN counted by name; this says which of the two it was.
+    Silent when no prover failed in the window."""
+    blocks: Dict[str, Dict[str, Any]] = {}
+    for ev in events:
+        if ev['event'] not in ('prover-failed', 'local-proof-refused', 'proof-generated'):
+            continue
+        b = blocks.setdefault(str(ev.get('directory')), {'remote': [], 'local': [], 'refused': 0, 'after': 0,
+                                                          'fell_back': False})
+        if ev['event'] == 'proof-generated':
+            b['fell_back'] = b['fell_back'] or bool(b['remote'])
+            b['after'] = 0  # proved: failures before this proof no longer block the block
+        elif ev['event'] == 'local-proof-refused':
+            b['refused'] += 1
+        elif ev.get('where') == 'remote':
+            b['remote'].append(ev.get('exit_code'))
+        else:  # the last prover in the order failed (a refusal is logged as a local exit 75 too): one failed cycle
+            b['local'].append(ev.get('exit_code'))
+            b['after'] += 1
+    failed = {d: b for d, b in blocks.items() if b['remote'] or b['local'] or b['refused']}
+    if not failed:
+        return
+    codes = sorted({c for b in failed.values() for c in b['remote'] + b['local'] if c is not None})
+    meaning = '; '.join(PROVER_EXIT_MEANING.get(c, f'exit {c}') for c in codes)
+    fallback = [d for d, b in failed.items() if b['fell_back']]
+    stuck = [d for d, b in failed.items() if b['after'] >= p['prover_no_path_crit']]
+    if stuck:
+        r.add(f'prover_path[{name}]', CRIT, f'{len(stuck)} block(s) with no working prover in the window (remote failed, '
+                                            f'local failed or refused): {meaning}. Check the remote prover host and its lock; '
+                                            'never run a dry run beside the worker', blocks=[Path(d).name for d in stuck])
+    elif fallback:
+        r.add(f'prover_path[{name}]', WARN, f'{len(fallback)} block(s) proved after the remote prover failed ({meaning}), '
+                                            'i.e. on the local fallback: slower, and refused above local_prove_max_instructions',
+              blocks=[Path(d).name for d in fallback])
+    else:
+        r.add(f'prover_path[{name}]', WARN, f'prover failures in the window, no proof since: {meaning}',
+              blocks=[Path(d).name for d in failed])
+
+
 def grade_events(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], window: float, r: Report) -> None:
+    grade_prover_path(name, events, p, r)
     for ev in events:
         if ev['event'] == 'proof-generated' and isinstance(ev.get('seconds'), (int, float)):
             r.facts.setdefault('proof_seconds', []).append(float(ev['seconds']))
@@ -1259,10 +1398,91 @@ def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner
                              '--since', f'@{int(now - window)}'])
         if code == 0:
             grade_events(name, parse_events(out, now - window), p, window, r)
+            grade_spool_expired(name, out, p, window, r)
         day = p['foreign_window_seconds']
         code, out = run_cmd(['journalctl', '-u', unit, '-o', 'cat', '--no-pager', '-q', '--since', f'@{int(now - day)}'])
         if code == 0:
             grade_foreign(name, parse_events(out, now - day), p, r)
+
+
+def grade_spool_expired(name: str, text: str, p: Dict[str, Any], window: float, r: Report) -> None:
+    """bloch-l2-settled-rpc prints `evicted tx file=... (expired)` when it drops an acknowledged transaction for age. The
+    user holds a hash that never lands (L2-20; reports 55, 133). Plain text in the journal, so the JSON event parser
+    never saw it. Silent when there is none."""
+    expired = [line for line in text.splitlines() if line.startswith('evicted tx file=') and line.rstrip().endswith('(expired)')]
+    if expired:
+        r.graded(f'spool_expired[{name}]', len(expired), p['spool_expired_warn'], p['spool_expired_crit'],
+                 f'{len(expired)} acknowledged L2 transaction(s) evicted as expired in the last {window / 60:.0f} min: their '
+                 'senders hold hashes that will never be included; settlement is slower than the spool lifetime',
+                 last=expired[-1][:200])
+
+
+def check_shm(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
+    """--shm [NAME=]PATH (normally /dev/shm on the settler and prover hosts). SP1 maps 3.4-4.7 GiB segments there; a
+    killed runner never unlinks its own (F8 of report 121), the leak outlives the settler, and once tmpfs is full every
+    SP1 execute and proof on the host dies with SIGBUS (report 94: 23 failed executes). Free space, plus `sp1_*` segments
+    older than any proof (a leak this run cannot remove: the monitor only reads)."""
+    for spec in specs:
+        name, path = named(spec, 'shm')
+        try:
+            st = os.statvfs(path)
+            entries = []
+            with os.scandir(path) as it:
+                for e in it:
+                    if e.name.startswith('sp1_'):
+                        try:
+                            info = e.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        entries.append((e.name, info.st_size, now - info.st_mtime))
+        except OSError as e:
+            r.add(f'shm[{name}]', UNKNOWN, f'{path}: {e}')
+            continue
+        free = st.f_bavail * st.f_frsize / 2 ** 30
+        total = st.f_blocks * st.f_frsize / 2 ** 30
+        stale = [x for x in entries if x[2] >= p['shm_stale_seconds']]
+        stale_gib = sum(x[1] for x in stale) / 2 ** 30
+        level = CRIT if free < p['shm_free_gib_crit'] else WARN if free < p['shm_free_gib_warn'] or stale else OK
+        msg = f'{path}: {free:.1f} of {total:.1f} GiB free, {len(entries)} sp1 segment(s)'
+        if stale:
+            msg += (f', {len(stale)} older than {p["shm_stale_seconds"] / 3600:.0f} h ({stale_gib:.1f} GiB, leaked by a killed '
+                    'SP1 runner: remove only those no process maps)')
+        if free < p['shm_free_gib_warn']:
+            msg += '; the next SP1 run needs about 5 GiB here or dies with SIGBUS'
+        r.add(f'shm[{name}]', level, msg, value=round(free, 2), stale=len(stale))
+
+
+def http_probe(timeout: float) -> Callable[[str], Tuple[int, bytes]]:
+    def probe(url: str) -> Tuple[int, bytes]:
+        if not url.startswith(('http://', 'https://')):
+            raise ValueError('only http(s) GET')
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={'user-agent': 'bloch-l2-monitor'}),
+                                        timeout=timeout) as resp:
+                return resp.status, resp.read(65536)
+        except urllib.error.HTTPError as e:
+            return e.code, b''
+    return probe
+
+
+def check_http(specs: List[str], probe: Callable[[str], Tuple[int, bytes]], r: Report) -> None:
+    """--http NAME=URL[|TEXT]: a GET that must answer 2xx (and contain TEXT when given). For services with a health route
+    and no other alert path: bridge signer `/healthz` (sigfeed; the gap of report 105), the L1 indexer `/health` (it
+    halts at the first L2 settlement if not 70ecff0f, L1-2; report 48), the public gateway and explorer."""
+    for spec in specs:
+        name, _, rest = spec.partition('=')
+        url, _, want = rest.partition('|')
+        try:
+            code, body = probe(url)
+        except Exception as e:  # noqa: BLE001 - unreachable is the finding
+            r.add(f'http[{name}]', CRIT, f'{url}: {type(e).__name__}: {e}')
+            continue
+        if not 200 <= code < 300:
+            r.add(f'http[{name}]', CRIT, f'{url}: HTTP {code}', value=code)
+        elif want and want.encode() not in body:
+            r.add(f'http[{name}]', CRIT, f'{url}: HTTP {code} without {want!r}', value=code)
+        else:
+            r.add(f'http[{name}]', OK, f'{url}: HTTP {code}', value=code)
 
 
 def check_event_logs(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> None:
@@ -1606,7 +1826,8 @@ def check_deposit_wait(backlog: int, consumed: int, path: str, p: Dict[str, Any]
 
 
 def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = None,
-        run_cmd: Runner = subprocess_runner, fetch: Optional[Fetcher] = None) -> Report:
+        run_cmd: Runner = subprocess_runner, fetch: Optional[Fetcher] = None,
+        probe: Optional[Callable[[str], Tuple[int, bytes]]] = None) -> Report:
     now = time.time() if now is None else now
     p = thresholds(args)
     if args.max_idle_seconds:
@@ -1622,6 +1843,7 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_l1_stuck(client, args.l1_stuck_node or [], args.l1_stuck_state, l1_up, p, fetch or http_fetcher(args.timeout), r)
     with_l2 = check_settlement(l1_up, p, args.phase, now, r)
     check_height_runway(r.facts.get('l2_settled_number'), l1_up, p, r)
+    check_rpc_vs_accepted(client, views, with_l2, r)
     check_escrow_and_backlog(with_l2, p, r, now, args.backlog_state if args.max_idle_seconds else None)
     check_followers(client, views, args.follower_status or [], l1_up, p, now, r)
     check_da_balance(client, args.da_script or [], l1_up, p, r)
@@ -1634,6 +1856,8 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     check_files(args.file or [], p, now, r)
     check_reports(args.report or [], p, now, r)
     check_memory(args.memory, p, r)
+    check_shm(args.shm or [], p, now, r)
+    check_http(args.http or [], probe or http_probe(args.timeout), r)
     check_l1_progress(args.l1_progress_state, p, now, r)
     check_guardian_health(args.guardian_health or [], p, now, r)
     check_binaries(args.binary or [], r)
@@ -1661,6 +1885,8 @@ def parse(argv: List[str]) -> argparse.Namespace:
                    help='NAME=PATH[:MAX_AGE_S] --json report of another monitor (dex-monitor.mjs) to alert on and age-check')
     a.add_argument('--l1-progress-state', help='state file: alert when the best L1 height stops moving')
     a.add_argument('--memory', action='store_true', help='check MemAvailable and swap of this host (/proc/meminfo)')
+    a.add_argument('--shm', action='append', help='[NAME=]PATH of the SP1 shared-memory tmpfs (/dev/shm): free space, leaked segments')
+    a.add_argument('--http', action='append', help='NAME=URL[|TEXT] health route that must answer 2xx (signer /healthz, indexer /health)')
     a.add_argument('--guardian-health', action='append',
                    help='NAME=PATH[:MAX_AGE_S] health_file of a bridge guardian (WARN above MAX_AGE_S, CRIT above 3x)')
     a.add_argument('--binary', action='append', help='PATH of an installed binary to compare with the v2 pins')

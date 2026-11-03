@@ -9,9 +9,11 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       DIR holds: settler_v3.py, bloch-evm-sp1-settlement-v3, bloch-l2-produce-dev,
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
-      l2_reorg_recover.py (SHA-256 7c918bb7...) and, for the program swap (CANDIDATE, native
+      l2_reorg_recover.py (SHA-256 2a648b31...) and, for the program swap (CANDIDATE, native
       L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 bc35e838...) and, for the
-      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...).
+      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...),
+      plus sequencer_policy.py; every file is pinned in PINS below and is hashed after it is copied
+      into /opt (the copies run, not the source).
       The host of this kit serves both programs: the activated one with --mainnet-v1, the
       next one with --mainnet --sparse (see "Program swap" in SETTLER-RUNBOOK.md).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
@@ -21,6 +23,10 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
   sudo python3 install-settler-mainnet.py configure [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
         [--max-block-sp1-gas N]
+        [--follower-state DIR --follower-status FILE | --no-foreign-recovery]
+      Foreign settlement recovery is ON by default (owner decision D17, 2026-11-02): it reads the
+      local native follower at FOLLOWER_STATE / FOLLOWER_STATUS, which must exist and be readable
+      by the settler user. --no-foreign-recovery leaves it off (any foreign settlement then halts).
       Runs, as the settler user, `--check-rpc` and the read-only `--dry-run` (SP1
       execute of the next L2 block against the live request) on a pending config, and
       only then writes config.json (user transactions OFF unless asked). A failed check
@@ -61,6 +67,8 @@ UNIT = Path('/etc/systemd/system') / UNIT_NAME
 # Absolute: as_settler runs with PATH=/usr/bin:/bin, and on Ubuntu 24.04 runuser is only in /usr/sbin.
 RUNUSER = '/usr/sbin/runuser'
 RPC_URLS = ['http://80.240.16.185:8080', 'http://199.247.22.8:8080', 'http://45.77.67.251:8080']
+# Not a SHA-256: no file matches it, so `prepare` refuses until the December host is pinned.
+CANDIDATE_HOST_PIN = 'unpinned-december-sp1-host'
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 PINS = {
     'settlement_v3_mainnet': '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473',
@@ -69,7 +77,16 @@ PINS = {
     'bloch-pos': '700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e',
     'mainnet.manifest': '7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd',
     # The operator's repair after a reorg of an accepted settlement. It finds settler_v3.py beside itself.
-    'l2_reorg_recover.py': '7c918bb719edf7dd844d50575b1736932993b22c8c230327ee16f1fa02ab9a57',
+    'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
+    # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
+    # is pinned here: the worker runs with the DA key, so none is trusted on first use.
+    'settler_v3.py': 'd890eff4b604ee770227f7587eb2d51ef2de5ea682e5e3ed35b5b0f117fb969e',
+    'sequencer_policy.py': '980e1dbd7230fab61c726bf805e74050a81df0d3b9960c7ed03a169abb2ea4f7',
+    # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
+    # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
+    'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,
+    # CANDIDATE: fork candidate v2 out/ (agent 143, reproduced on two hosts) against the unreleased native f12b4113.
+    'bloch-l2-produce-dev': '425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (TBD-owner) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048',
@@ -84,6 +101,9 @@ ACTIVATED_PROVER_ARGS = ['--mainnet-v1']
 FILES = ('settler_v3.py', 'sequencer_policy.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
          'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py', 'settlement_v3_mainnet_sparse',
          'settlement_v3_mainnet_fallback')
+# Foreign settlement recovery (D17: on at launch) reads follower A on this host (go-live plan P3).
+FOLLOWER_STATE = '/var/lib/bloch-l2-mainnet-follower/native'
+FOLLOWER_STATUS = '/var/lib/bloch-l2-mainnet-follower/status.json'
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
@@ -111,6 +131,7 @@ def release():
 
 
 def settler_module(directory):
+    sys.dont_write_bytecode = True  # no __pycache__ written as root into the release directory
     sys.path.insert(0, str(directory))
     import settler_v3  # noqa: E402
     return settler_v3
@@ -126,29 +147,33 @@ def prepare(args):
     source = Path(option(args, '--release', ''))
     assert source.is_dir(), 'prepare --release DIR'
     assert not any(p.exists() for p in (STATE, DA_DIR, ETC, OPT, UNIT)), 'already prepared (see rollback)'
+    assert set(PINS) == set(FILES), 'every installed file has a pin'
     for name in FILES:
         assert (source / name).is_file(), f'{source / name} is missing'
-    for name, pin in PINS.items():
-        assert digest(source / name) == pin, f'{name} differs from its pin {pin}'
-    settler = settler_module(source)
-    assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
-    assert settler.MAINNET_NEXT_SPARSE['guest_sha256'] == PINS['settlement_v3_mainnet_sparse']
-    assert settler.MAINNET_FALLBACK['guest_sha256'] == PINS['settlement_v3_mainnet_fallback']
-    build = run([source / 'bloch-pos', '--version']) + run([source / 'bloch-pos', 'buildinfo'])
-    assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+    # Copy first, then hash the root-owned copies: the source (often under /home/ubuntu) may change after any
+    # check of it, and only the bytes that were hashed may run. Nothing here executes or imports from source.
+    target = OPT / PINS['settler_v3.py'][:16]
+    try:
+        target.mkdir(parents=True, mode=0o755)
+        for name in FILES:
+            shutil.copyfile(source / name, target / name)
+            (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name.startswith('settlement_v3_mainnet')
+                                  else 0o755)
+        for name, pin in PINS.items():
+            assert digest(target / name) == pin, f'{name} differs from its pin {pin}'
+        settler = settler_module(target)
+        assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
+        assert settler.MAINNET_NEXT_SPARSE['guest_sha256'] == PINS['settlement_v3_mainnet_sparse']
+        assert settler.MAINNET_FALLBACK['guest_sha256'] == PINS['settlement_v3_mainnet_fallback']
+        build = run([target / 'bloch-pos', '--version']) + run([target / 'bloch-pos', 'buildinfo'])
+        assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+    except BaseException:
+        # Nothing but these copies exists yet (no user, no state, no key): remove them so prepare can simply re-run.
+        shutil.rmtree(OPT, ignore_errors=True)
+        raise
     run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', STATE,
          '--shell', '/usr/sbin/nologin', '--groups', 'docker', USER])
     owner = pwd.getpwnam(USER)
-    target = OPT / digest(source / 'settler_v3.py')[:16]
-    target.mkdir(parents=True, mode=0o755)
-    for name in FILES:
-        shutil.copyfile(source / name, target / name)
-        (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name.startswith('settlement_v3_mainnet')
-                              else 0o755)
-    # The operator's repair after a reorg of an accepted settlement. Kit file next to this installer, not a pin:
-    # it finds settler_v3.py beside itself, so it always matches the installed worker.
-    shutil.copyfile(Path(__file__).resolve().parent / 'l2_reorg_recover.py', target / 'l2_reorg_recover.py')
-    (target / 'l2_reorg_recover.py').chmod(0o644)
     for path in (ETC, PUBLIC):
         path.mkdir(mode=0o755)
     (PUBLIC / 'l2-config.bin').write_bytes(settler.mainnet_l2_config())
@@ -162,9 +187,9 @@ def prepare(args):
     # The DA fee key: a sealed hybrid keystore that holds only DA fee money. Its passphrase is
     # generated here, readable by the settler alone, and never printed.
     passphrase = STATE / 'da.passphrase'
-    with passphrase.open('x') as out:
+    # Created 0400 in one step (O_EXCL: never over an existing file), not created then narrowed.
+    with os.fdopen(os.open(passphrase, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400), 'w') as out:
         out.write(secrets.token_hex(48) + '\n')
-    passphrase.chmod(0o400)
     env = {'PATH': '/usr/bin:/bin', 'BLOCH_KEYSTORE_PASSPHRASE_FILE': str(passphrase)}
     run([target / 'bloch-pos', 'keygen', '--dir', DA_DIR, '--index', '0'], env=env)
     pubkey = run([target / 'bloch-pos', 'keygen-public', '--dir', DA_DIR], env=env).split('\t')[1].strip()
@@ -228,8 +253,18 @@ def configure(args):
     }
     state, status = option(args, '--follower-state'), option(args, '--follower-status')
     assert bool(state) == bool(status), 'foreign settlement recovery takes both --follower-state and --follower-status'
-    if state:
-        # Outside /home (ProtectHome=true) and readable by the settler user. See SETTLER-RUNBOOK.md.
+    if '--no-foreign-recovery' in args:
+        assert not state, '--no-foreign-recovery takes no follower paths'
+    else:
+        # D17: on by default. Outside /home (ProtectHome=true) and readable by the settler user, checked here
+        # rather than at the first foreign settlement. See SETTLER-RUNBOOK.md, "Foreign settlements".
+        state, status = state or FOLLOWER_STATE, status or FOLLOWER_STATUS
+        assert state.startswith('/') and status.startswith('/') and not state.startswith('/home') \
+            and not status.startswith('/home'), 'the follower paths must be absolute and outside /home'
+        readable = as_settler(['/usr/bin/test', '-d', state, '-a', '-r', state, '-a', '-x', state, '-a',
+                               '-r', status])
+        assert readable.returncode == 0, (f'the settler user cannot read the follower state {state} and status '
+                                          f'{status}: start follower A first (P3), or pass --no-foreign-recovery')
         config['foreign_recovery'] = {'follower_state': state, 'follower_status': status}
     target = option(args, '--remote-prover')
     if target:
@@ -309,6 +344,13 @@ Environment=TMPDIR={STATE}/tmp
 ExecStart=/usr/bin/python3 -u {rel}/settler_v3.py
 Restart=on-failure
 RestartSec=60
+# Stop: SIGTERM to the worker only; it kills its prover group, removes the SP1 segments the group mapped and
+# kills a Gnark container the group left (review r10 M1), then systemd SIGKILLs anything left. The cleanup
+# needs at most about 80 s (30 s group wait, three 15 s docker calls).
+KillMode=mixed
+TimeoutStopSec=120
+# Backstop: POSIX shared memory and semaphores of the settler user (SP1 segments) go when the unit stops.
+RemoveIPC=yes
 # exit 3 = halt for operator review (divergence, off-rule foreign settlement, refused proof): never auto-restart.
 RestartPreventExitStatus=3
 UMask=0077
@@ -318,6 +360,16 @@ PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths={STATE} {DA_DIR}
+# Kernel, cgroup and privilege surfaces the worker never uses (it runs Docker through the socket, not here).
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 LimitCORE=0
 Nice=5
 CPUQuota=1200%

@@ -1,0 +1,457 @@
+{
+ "about": "5 validators, each isolated e14-e76; after the heal every node on its own head, finality stalled at e12",
+ "case": "ju",
+ "genesis_time": 0,
+ "note": "getchaininfo views are the recorded fields only; `derived` nodes are reconstructed (see make_fixtures.py)",
+ "rounds": [
+  {
+   "derived": [],
+   "epoch": 77,
+   "getblockbyid": {
+    "n0": {
+     "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb": true,
+     "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0": "getblockbyid: rpc error -32000: no block 235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0 is known to th"
+    },
+    "n1": {
+     "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb": true,
+     "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0": "getblockbyid: rpc error -32000: no block 235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0 is known to th"
+    },
+    "n2": {
+     "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb": "getblockbyid: rpc error -32000: no block 10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb is known to th",
+     "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0": true
+    },
+    "n3": {
+     "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb": "getblockbyid: rpc error -32000: no block 10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb is known to th",
+     "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0": true
+    },
+    "n4": {
+     "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb": "getblockbyid: rpc error -32000: no block 10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb is known to th",
+     "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0": true
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 833,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2469
+    },
+    "n1": {
+     "block_id": "10c945359f5c8afc19c5e2dea4c306b4a1b1f6dcc593fa5ab3c6e0947c0895eb",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 833,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2469
+    },
+    "n2": {
+     "block_id": "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1360,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2469
+    },
+    "n3": {
+     "block_id": "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1360,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2469
+    },
+    "n4": {
+     "block_id": "235d6259032150a16a6f42579ebeb02a868a4eaa6d7d8c5fa813db0ce4499ab0",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1360,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2469
+    }
+   },
+   "membership": "args",
+   "metrics": {
+    "n0": null,
+    "n1": null,
+    "n2": null,
+    "n3": null,
+    "n4": null
+   },
+   "now": 2469,
+   "tag": "back"
+  },
+  {
+   "derived": [
+    "n1",
+    "n3",
+    "n4"
+   ],
+   "epoch": 79,
+   "getblockbyid": {
+    "n0": {
+     "0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07": "getblockbyid: rpc error -32000: no block 0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07 is known to th",
+     "48ea3f5153000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 48ea3f5153000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "ccae0b3d0c000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ccae0b3d0c000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f": true,
+     "e2f37583e3000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e2f37583e3000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n1": {
+     "0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07": "getblockbyid: rpc error -32000: no block 0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07 (derived: assumed)",
+     "48ea3f5153000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 48ea3f5153000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "ccae0b3d0c000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ccae0b3d0c000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f": "getblockbyid: rpc error -32000: no block d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f (derived: assumed)",
+     "e2f37583e3000000000000000000000000000000000000000000000000000000": true
+    },
+    "n2": {
+     "0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07": true,
+     "48ea3f5153000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 48ea3f5153000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "ccae0b3d0c000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ccae0b3d0c000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f": "getblockbyid: rpc error -32000: no block d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f is known to th",
+     "e2f37583e3000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e2f37583e3000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n3": {
+     "0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07": "getblockbyid: rpc error -32000: no block 0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07 (derived: assumed)",
+     "48ea3f5153000000000000000000000000000000000000000000000000000000": true,
+     "ccae0b3d0c000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ccae0b3d0c000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f": "getblockbyid: rpc error -32000: no block d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f (derived: assumed)",
+     "e2f37583e3000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e2f37583e3000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n4": {
+     "0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07": "getblockbyid: rpc error -32000: no block 0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07 (derived: assumed)",
+     "48ea3f5153000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 48ea3f5153000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "ccae0b3d0c000000000000000000000000000000000000000000000000000000": true,
+     "d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f": "getblockbyid: rpc error -32000: no block d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f (derived: assumed)",
+     "e2f37583e3000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e2f37583e3000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "d1b03a7cae335d4707e8ad797b189c18d7a1691b68e108aebb6a61f36bacfd2f",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 856,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2527
+    },
+    "n1": {
+     "block_id": "e2f37583e3000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 2527
+    },
+    "n2": {
+     "block_id": "0501c9043784d96baaa86660b8f3cc7b8896caf8233fd8ef316cc38c15df4f07",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1392,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2527
+    },
+    "n3": {
+     "block_id": "48ea3f5153000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 2527
+    },
+    "n4": {
+     "block_id": "ccae0b3d0c000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 2527
+    }
+   },
+   "membership": "phase",
+   "metrics": {
+    "n0": "bloch_pos_peer_count 10\nbloch_pos_peer_count_devnet 10\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n1": null,
+    "n2": "bloch_pos_peer_count 10\nbloch_pos_peer_count_devnet 10\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n3": null,
+    "n4": null
+   },
+   "now": 2527,
+   "tag": "e79"
+  },
+  {
+   "derived": [
+    "n1",
+    "n3",
+    "n4"
+   ],
+   "epoch": 82,
+   "getblockbyid": {
+    "n0": {
+     "0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435": true,
+     "2e835bac6b000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 2e835bac6b000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "3c751b2c63000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 3c751b2c63000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca": "getblockbyid: rpc error -32000: no block bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca is known to th",
+     "e79706d0b2000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e79706d0b2000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n1": {
+     "0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435": "getblockbyid: rpc error -32000: no block 0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435 (derived: assumed)",
+     "2e835bac6b000000000000000000000000000000000000000000000000000000": true,
+     "3c751b2c63000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 3c751b2c63000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca": "getblockbyid: rpc error -32000: no block bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca (derived: assumed)",
+     "e79706d0b2000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e79706d0b2000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n2": {
+     "0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435": "getblockbyid: rpc error -32000: no block 0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435 is known to th",
+     "2e835bac6b000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 2e835bac6b000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "3c751b2c63000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 3c751b2c63000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca": true,
+     "e79706d0b2000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e79706d0b2000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n3": {
+     "0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435": "getblockbyid: rpc error -32000: no block 0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435 (derived: assumed)",
+     "2e835bac6b000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 2e835bac6b000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "3c751b2c63000000000000000000000000000000000000000000000000000000": true,
+     "bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca": "getblockbyid: rpc error -32000: no block bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca (derived: assumed)",
+     "e79706d0b2000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block e79706d0b2000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n4": {
+     "0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435": "getblockbyid: rpc error -32000: no block 0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435 (derived: assumed)",
+     "2e835bac6b000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 2e835bac6b000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "3c751b2c63000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 3c751b2c63000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca": "getblockbyid: rpc error -32000: no block bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca (derived: assumed)",
+     "e79706d0b2000000000000000000000000000000000000000000000000000000": true
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "0b3d24b2bf2773b074f8b7996afcf1479915614980b089ec033a21906d24c435",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 896,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2622
+    },
+    "n1": {
+     "block_id": "2e835bac6b000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 2622
+    },
+    "n2": {
+     "block_id": "bb8666e1566c0593f1c998d5c6f51771a02b399c8f18d44c3103a7ad7c4b9fca",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1458,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 2621
+    },
+    "n3": {
+     "block_id": "3c751b2c63000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 2622
+    },
+    "n4": {
+     "block_id": "e79706d0b2000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 2622
+    }
+   },
+   "membership": "phase",
+   "metrics": {
+    "n0": "bloch_pos_peer_count 10\nbloch_pos_peer_count_devnet 10\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n1": null,
+    "n2": "bloch_pos_peer_count 10\nbloch_pos_peer_count_devnet 10\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n3": null,
+    "n4": null
+   },
+   "now": 2622,
+   "tag": "e82"
+  },
+  {
+   "derived": [
+    "n1",
+    "n3",
+    "n4"
+   ],
+   "epoch": 99,
+   "getblockbyid": {
+    "n0": {
+     "0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d": "getblockbyid: rpc error -32000: no block 0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d is known to th",
+     "17b598cfce000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 17b598cfce000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "66b7581900000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 66b7581900000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a": true,
+     "ac5b3c72cd000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ac5b3c72cd000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n1": {
+     "0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d": "getblockbyid: rpc error -32000: no block 0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d (derived: assumed)",
+     "17b598cfce000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 17b598cfce000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "66b7581900000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 66b7581900000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a": "getblockbyid: rpc error -32000: no block 9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a (derived: assumed)",
+     "ac5b3c72cd000000000000000000000000000000000000000000000000000000": true
+    },
+    "n2": {
+     "0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d": true,
+     "17b598cfce000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 17b598cfce000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "66b7581900000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 66b7581900000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a": "getblockbyid: rpc error -32000: no block 9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a is known to th",
+     "ac5b3c72cd000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ac5b3c72cd000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n3": {
+     "0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d": "getblockbyid: rpc error -32000: no block 0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d (derived: assumed)",
+     "17b598cfce000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 17b598cfce000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "66b7581900000000000000000000000000000000000000000000000000000000": true,
+     "9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a": "getblockbyid: rpc error -32000: no block 9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a (derived: assumed)",
+     "ac5b3c72cd000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ac5b3c72cd000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    },
+    "n4": {
+     "0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d": "getblockbyid: rpc error -32000: no block 0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d (derived: assumed)",
+     "17b598cfce000000000000000000000000000000000000000000000000000000": true,
+     "66b7581900000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 66b7581900000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a": "getblockbyid: rpc error -32000: no block 9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a (derived: assumed)",
+     "ac5b3c72cd000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block ac5b3c72cd000000000000000000000000000000000000000000000000000000 (derived: assumed)"
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "9244d069befd39aaa830a1b4f43b206bc201af980e7a8a1e14a309b0200e206a",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1107,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 3167
+    },
+    "n1": {
+     "block_id": "ac5b3c72cd000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 3167
+    },
+    "n2": {
+     "block_id": "0d7ea444c39d57fa0bcc5a643fea8a489dd0c0d4471f8c406fa4d7c05fc6791d",
+     "finalized": {
+      "epoch": 12,
+      "root": "074b41e13529baeff5101cee5494b117fd6aa3e0637f119912b4c40769bbe85f"
+     },
+     "height": 1833,
+     "justified": {
+      "epoch": 13,
+      "root": "ee48d7e139d36975aea54dcc24d6b02d70fd0ea65fbb1a5a611f6f5297043288"
+     },
+     "slot": 3167
+    },
+    "n3": {
+     "block_id": "66b7581900000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 3167
+    },
+    "n4": {
+     "block_id": "17b598cfce000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 12,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 3167
+    }
+   },
+   "membership": "phase",
+   "metrics": {
+    "n0": "bloch_pos_peer_count 10\nbloch_pos_peer_count_devnet 10\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n1": null,
+    "n2": "bloch_pos_peer_count 10\nbloch_pos_peer_count_devnet 10\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n3": null,
+    "n4": null
+   },
+   "now": 3167,
+   "tag": "e99"
+  }
+ ],
+ "slot_seconds": 1,
+ "slots_per_epoch": 32,
+ "source": [
+  "agents/79-orphan-review-evidence/verdicts/ju-probes.jsonl",
+  "agents/79-orphan-review-evidence/verdicts/ju.json"
+ ],
+ "verdict": "REJOINED"
+}

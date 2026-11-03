@@ -14,6 +14,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import settler_v3 as s  # noqa: E402
+from test_settler_v3 import broadcasts  # noqa: E402  (review r10 M2: one entry per endpoint)
 import test_settler_mainnet as mn  # noqa: E402
 
 M = s.MAINNET
@@ -127,7 +128,7 @@ class ProgramSwapTest(unittest.TestCase):
             self.assertTrue(settler.cycle())
         self.assertEqual(fake.rewound, [1])
         self.assertEqual([e for e, _ in events].count('l2-block-rewound-at-swap'), 1)
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
         extends = [c for c in fake.calls if c[1] == 'extend']
         self.assertEqual([c[c.index('--rule-set') + 1] for c in extends], ['base', 'next'])
@@ -307,7 +308,7 @@ class ProgramSwapTest(unittest.TestCase):
         self.assertEqual(last[1], '--mainnet')
         self.assertNotIn('--sparse', last)
         self.assertIn(str(self.root / 'settlement_v3_mainnet.fallback'), last)
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
 
     def test_the_fallback_program_is_pinned_and_needs_a_sparse_next_program(self):

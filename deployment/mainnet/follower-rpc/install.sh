@@ -6,21 +6,25 @@
 #
 #   sudo ./install.sh --artifacts DIR --l1-rpc-url http://HOST:PORT \
 #        --canonical /var/lib/bloch-l2-mainnet/canonical --canonical-user bloch-l2-mainnet \
-#        --txpool /var/lib/bloch-l2-mainnet/txpool [--dry-run]
+#        --txpool /var/lib/bloch-l2-mainnet/txpool [--dry-run] [--allow-unsigned]
+#
+# DIR must hold the owner's SHA256SUMS.minisig and release.json: the release signature is checked
+# against the pinned release key (../verify_release_signature.py) before anything else.
+# --allow-unsigned skips that check, for private rehearsals only.
 #
 # Refuses to overwrite an existing installation. Prints the start commands.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0
+ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0
 while [ $# -gt 0 ]; do
   case $1 in
     --artifacts) ART=$2; shift 2;; --l1-rpc-url) L1=$2; shift 2;;
     --canonical) CANONICAL=$2; shift 2;; --canonical-user) CANON_USER=$2; shift 2;;
-    --txpool) TXPOOL=$2; shift 2;; --dry-run) DRY=1; shift;;
+    --txpool) TXPOOL=$2; shift 2;; --dry-run) DRY=1; shift;; --allow-unsigned) UNSIGNED=1; shift;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
-[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,12p "$0"; exit 2; }
+[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,16p "$0"; exit 2; }
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 die() { echo "install.sh: $*" >&2; exit 1; }
 
@@ -36,6 +40,14 @@ for unit in bloch-l2-mainnet-follower bloch-l2-mainnet-rpc; do
   [ ! -e /etc/systemd/system/$unit.service ] || die "/etc/systemd/system/$unit.service exists; refusing to overwrite"
 done
 [ ! -e /opt/bloch/l2-mainnet/bloch-l2-native-follower ] || die "/opt/bloch/l2-mainnet already populated"
+
+# 0. Release signature (owner's key, pinned in verify_release_signature.py) and every SHA256SUMS line.
+if [ $UNSIGNED = 1 ]; then
+  echo "WARNING: --allow-unsigned: the release signature is NOT checked (private rehearsals only)" >&2
+else
+  python3 -I "$HERE/../verify_release_signature.py" --release-dir "$ART" \
+    || die "release signature check failed: $ART needs the owner's SHA256SUMS.minisig (docs/RELEASE-SIGNING.md)"
+fi
 
 # 1. Artifacts and public inputs, by hash.
 (cd "$ART" && sha256sum -c --strict SHA256SUMS) || die "binary hashes do not match SHA256SUMS"

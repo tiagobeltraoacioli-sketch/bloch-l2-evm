@@ -283,7 +283,8 @@ class ForeignTest(unittest.TestCase):
         return json.loads((self.root / name / 'chain.json').read_text())
 
     def da_sent(self, world):
-        return [t for t in world.sent if t[0] == s.DA_TAG]
+        """DA transactions, one per broadcast (since review r10 M2 each goes to all three endpoints)."""
+        return [t for t in base.broadcasts(world.sent) if t[0] == s.DA_TAG]
 
     def lost_race(self, world, foreign=block('b1')):
         """The local block 1 was proved while a foreign block 1 was accepted."""

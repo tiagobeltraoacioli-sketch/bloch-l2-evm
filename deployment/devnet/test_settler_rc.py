@@ -66,7 +66,7 @@ class RehearsalProfileTest(unittest.TestCase):
         self.assertEqual(extend[extend.index('--timestamp-rule') + 1], '1:1791841117:2000')
         provers = [c for c in fake.calls if 'settlement-v3' in Path(c[0]).name]
         self.assertTrue(provers and all(c[1] == '--mainnet' for c in provers))
-        [tx] = fake.sent
+        [tx] = base.broadcasts(fake.sent)
         self.assertEqual((len(tx), tx[0], tx[1:33].hex()), (1155, 0x13, M['proof_policy']))
 
     def test_rehearsal_prover_path_reaches_the_prover_environment(self):
@@ -150,7 +150,7 @@ class ProducerFailureTest(unittest.TestCase):
         self.assertEqual(['--txs' in c for c in extends], [True, False])
         self.assertIn('--deposits', extends[1])
         self.assertIn('producer-refused-spool', [c.args[0] for c in log.call_args_list])
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in base.broadcasts(fake.sent)], [s.ASYNC_SETTLEMENT_TAG])
 
     def test_no_fallback_when_the_block_was_committed_before_the_failure(self):
         fake = base.Fake(self.root, base.statement())

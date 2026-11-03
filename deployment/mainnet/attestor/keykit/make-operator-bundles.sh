@@ -124,7 +124,7 @@ check_not_synced "$KEYS"
 # ---- the set: pinned, and each .pk is its key I (public parts only) ----
 need_bin() {
   [ -x "$BIN" ] || die "$BIN is not executable (cargo build --release in the attestor-keystore worktree)"
-  "$BIN" l2-claim --help | grep -q 'seal-key' || die "$BIN has no l2-claim seal-key"
+  "$BIN" l2-claim --help | grep 'seal-key' >/dev/null || die "$BIN has no l2-claim seal-key"
 }
 check_set() {
   if [ "$EXPECT" = "$PINNED_SET_HASH" ]; then
@@ -165,7 +165,7 @@ post_shred_check() {
   local left; left=$(cd "$KEYS" && ls -1 2>/dev/null | grep -E '\.sk$' || true)
   if [ -n "$left" ]; then echo "STILL PRESENT: $(echo $left)"; else echo "ok: no .sk file in $KEYS"; fi
   if [ -d "$HOME/.Trash" ]; then
-    if ls -1 "$HOME/.Trash" 2>/dev/null | grep -qE '(attestor-[0-9]\.sk|L2-MAINNET-ATESTADORES)'; then
+    if ls -1 "$HOME/.Trash" 2>/dev/null | grep -E '(attestor-[0-9]\.sk|L2-MAINNET-ATESTADORES)' >/dev/null; then
       echo "FOUND in the Trash: a copy of a key or the keys folder. Empty the Trash (Finder > Empty Trash)."
     else echo "ok: nothing named attestor-I.sk in the Trash"; fi
   fi
@@ -193,18 +193,18 @@ preflight)
   fail=0
   ok() { echo "PASS  $*"; }; warn() { echo "WARN  $*"; }; bad() { echo "FAIL  $*"; fail=1; }
   if [ "$(uname)" = Darwin ]; then
-    if fdesetup status 2>/dev/null | grep -q 'FileVault is On'; then ok "FileVault is on"; else bad "FileVault is not on (System Settings > Privacy & Security > FileVault)"; fi
+    if fdesetup status 2>/dev/null | grep 'FileVault is On' >/dev/null; then ok "FileVault is on"; else bad "FileVault is not on (System Settings > Privacy & Security > FileVault)"; fi
     if [ "$(defaults read com.apple.finder FXICloudDriveDesktop 2>/dev/null || echo 0)" = 1 ]; then
       warn "iCloud syncs Desktop & Documents: the keys folder on the Desktop may already be in iCloud"
     else ok "iCloud Desktop & Documents sync is off"; fi
-    if tmutil destinationinfo 2>/dev/null | grep -q 'No destinations configured'; then ok "Time Machine has no destination"
+    if tmutil destinationinfo 2>/dev/null | grep 'No destinations configured' >/dev/null; then ok "Time Machine has no destination"
     else warn "Time Machine has a destination: exclude $KEYS and $OUT, or past backups may hold the .sk files"; fi
     snaps=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c com.apple || true)
     if [ "${snaps:-0}" -gt 0 ]; then warn "$snaps local APFS snapshot(s) exist"; else ok "no local APFS snapshots"; fi
   else
     warn "not macOS: check full-disk encryption, sync clients and backups by hand"
   fi
-  if route -n get default >/dev/null 2>&1 || ip route show default 2>/dev/null | grep -q default; then
+  if route -n get default >/dev/null 2>&1 || ip route show default 2>/dev/null | grep default >/dev/null; then
     warn "this machine has a default route (online). Turn Wi-Fi off for seal, verify, package and shred if you can"
   else ok "offline (no default route)"; fi
   if [ -e "$OUT" ]; then warn "$OUT already exists (seal refuses to overwrite a bundle; status shows where you are)"
@@ -265,6 +265,7 @@ PY
   pin() { awk -v n="$1" '$2==n {print $1}' "$PINS"; }
   # A package fixes what the operator installs for good, so it must come from the tree it claims to be.
   grep -q '^7c1cc62b' "$PINS" && die "$PINS pins the old producer 7c1cc62b…: it halts on the first settled deposit. Package from the current kit"
+  grep -qE '^(fb0d5313|c18752fd)' "$PINS" && die "$PINS pins v2.1's producer fb0d5313… or follower c18752fd…: superseded by the next build. Package from the current kit"
   [ "$(sha256 "$KIT/sigfeed.py")" = "$(cut -d' ' -f1 "$KIT/sigfeed.sha256")" ] || die "$KIT/sigfeed.py does not match sigfeed.sha256"
   if [ "$EXPECT" = "$PINNED_SET_HASH" ]; then
     for pair in bloch-pos:V2_BLOCH_POS_SHA256 bloch-l2-native-follower:V2_FOLLOWER_SHA256 bloch-l2-produce-dev:V2_PRODUCE_SHA256; do

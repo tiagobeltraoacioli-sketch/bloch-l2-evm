@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""settler_v3: re-signing a DA batch when the fee moves, and never paying a second DA fee for an L2 number whose batch
-this worker's DA key already paid (a database restored to the accepted head).
+"""settler_v3: re-signing a DA batch when the fee moves; and no reuse of a DA batch recorded on L1 (removed after
+agents/145 F1-F3: L1 does not show who paid for a batch).
 
 Run: python3 deployment/devnet/test_settler_r7.py
 Same fakes as test_settler_v3.py: no network, no prover, no Docker.
@@ -58,8 +58,9 @@ class FeeMarket(t.Fake):
             self.da_sends += 1
             if self.include_da and self.signed_fee.get(tx) == self.fee():
                 _, number, payload = s.da_frame_fields(tx)
-                self.da_records.append({'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(),
-                                        'height': 9})
+                record = {'l2_number': number, 'commitment': s.da_commitment(number, payload).hex(), 'height': 9}
+                if record not in self.da_records:  # native keeps one record per (number, commitment): Duplicate
+                    self.da_records.append(record)
             return {'status': 'accepted', 'tx_hash': '01' * 32}
         return super().rpc(port, method, params)
 
@@ -87,7 +88,7 @@ class FeeMoves(Base):
         self.assertTrue(settler.cycle(), 'settled in the same cycle, no inclusion timeout')
         calls = prepares(fake)
         self.assertEqual([c[c.index('--base-fee') + 1] for c in calls], ['10', '11'])
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in t.broadcasts(fake.sent)], [s.DA_TAG, s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
         self.assertEqual(len(fake.da_records), 1, 'one record: one fee')
         self.assertLess(next(clock), 200, 'well inside one inclusion timeout')
 
@@ -133,7 +134,7 @@ class FeeMoves(Base):
         settler = self.user_settler(fake, da={**self.da_config(), 'inclusion_timeout_seconds': 60})
         self.assertFalse(settler.cycle())
         self.assertEqual(len(prepares(fake)), 1)
-        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual(len(t.broadcasts(fake.sent)), 1)
 
 
 class Restored(t.Fake):
@@ -154,7 +155,7 @@ class Restored(t.Fake):
         return super().run(argv, **kwargs)
 
 
-class PaidBatch(Base):
+class NoPaidBatchReuse(Base):
     def follower_store(self, frames, junk=b'\x15\x00\x15' * 50):
         state = self.root / 'follower'
         (state / 'blocks').mkdir(parents=True)
@@ -177,49 +178,24 @@ class PaidBatch(Base):
         (self.root / 'da.pub').write_text('5a' * 3749)
         self.paid, self.other = t.batch(2), t.batch(3)
 
-    def test_restored_head_rebuilds_the_paid_batch_and_pays_no_second_fee(self):
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
+    def test_a_recorded_batch_never_chooses_our_block(self):
+        # No paid-batch reuse in this build (agents/145 F1-F3): a DA record for the next number, even one whose frame
+        # names this settler's key, never replaces the spool and never writes into it. The block is built from the
+        # main spool; a restore at the accepted head may pay one more DA fee, as before agent 118's part 3.
+        fake = Restored(self.root, t.statement(user_txs=3), self.paid, self.other)
         fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 2})
         state = self.follower_store([b'\x01' * 40, self.own_frame(1, self.paid)])
-        settler = self.user_settler(fake, follower_state=str(state))
-        self.assertTrue(settler.cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG], 'no DA transaction: no second fee')
-        self.assertTrue(fake.pools[0].endswith('da-reuse-spool'))
-        spool = sorted(p.name for p in (self.root / 'txpool').iterdir())
-        self.assertEqual(spool, sorted(f'{s.keccak256(raw).hex()}.tx' for raw in s.da_batch_transactions(self.paid)),
-                         'the paid transactions are back in the main spool too')
-
-    def test_foreign_recovery_follower_state_is_used(self):
-        fake = Restored(self.root, t.statement(user_txs=2), self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 1})
-        state = self.follower_store([self.own_frame(1, self.paid)])
-        settler = self.user_settler(fake, foreign_recovery={'follower_state': str(state),
-                                                            'follower_status': str(self.root / 'status.json')})
-        self.assertTrue(settler.cycle())
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
-
-    def test_a_batch_paid_by_another_key_is_never_reused(self):
-        # Anyone can publish a DA record for any number: reusing it would let a third party fill the block.
-        fake = Restored(self.root, t.statement(user_txs=3),
-                        self.paid, self.other)
-        fake.da_records.append({'l2_number': 1, 'commitment': s.da_commitment(1, self.paid).hex(), 'height': 1})
-        state = self.follower_store([self.own_frame(1, self.paid, key=b'\x77' * 3749)])
-        settler = self.user_settler(fake, follower_state=str(state))
+        settler = self.user_settler(fake, follower_state=str(state),
+                                    foreign_recovery={'follower_state': str(state),
+                                                      'follower_status': str(self.root / 'status.json')})
         self.assertTrue(settler.cycle())
         self.assertEqual(fake.pools, [str(self.root / 'txpool')])
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
-
-    def test_scan_matches_only_the_recorded_commitment(self):
-        payload = t.batch(2)
-        frame = self.own_frame(4, payload)
-        wanted = {(4, s.da_commitment(4, payload).hex())}
-        data = b'\x15' * 7 + self.own_frame(4, t.batch(1)) + frame + b'\x15\x01'
-        found = s.scan_da_frames(data, s.CHAIN_ID, wanted)
-        self.assertEqual(list(found), list(wanted))
-        self.assertEqual(found[next(iter(wanted))][1], payload)
-        self.assertEqual(s.scan_da_frames(data, s.CHAIN_ID + 1, wanted), {})
-        self.assertEqual(s.scan_da_frames(data, s.CHAIN_ID, {(4, '00' * 32)}), {})
-
+        self.assertEqual(list((self.root / 'txpool').iterdir()), [], 'nothing written into the main spool')
+        self.assertEqual([tx[0] for tx in t.broadcasts(fake.sent)], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        for name in ('paid_batch_spool', 'node_da_batches'):
+            self.assertFalse(hasattr(s.Settler, name), name)
+        for name in ('scan_da_frames', 'recorded_da_batches', 'da_frame_key'):
+            self.assertFalse(hasattr(s, name), name)
 
 if __name__ == '__main__':
     unittest.main()

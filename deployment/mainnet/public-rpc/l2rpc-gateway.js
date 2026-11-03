@@ -93,6 +93,8 @@ const EXPLAINED = {
 // cfg.simPerIp of them in flight (a batch counts each one); they go through
 // njs subrequests so the slot is released when the backend answers.
 const SIMULATIONS = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true };
+// Longer than a split request can last: two upstream attempts of 30 s, then the finality retry.
+const SLOT_WINDOW_MS = 150000;
 
 // Position of the block parameter of each method that takes a tag.
 const TAG_POSITION = {
@@ -292,8 +294,26 @@ function classify(call) {
 
 // --------------------------------------------------------------------- budgets
 
+// The budget key of a client: its IPv4 address, or the /64 of its IPv6 address (one subscriber line holds a
+// whole /64, so a per-address key would let it multiply every budget). IPv4-mapped IPv6 counts as IPv4.
+function clientKey(addr) {
+  if (typeof addr !== 'string' || addr.indexOf(':') < 0) return addr;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(addr);
+  if (mapped) return mapped[1];
+  const halves = addr.toLowerCase().split('::');
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
+  const groups = halves.length > 1 ? head.concat(Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), tail) : head;
+  return groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':') + '::/64';
+}
+
+// js_set $l2_client: the key of nginx's limit_req and limit_conn zones.
+function client(r) {
+  return clientKey(r.variables.remote_addr);
+}
+
 function charge(r, calls, txs) {
-  const ip = r.variables.remote_addr;
+  const ip = clientKey(r.variables.remote_addr);
   const minute = Math.floor(Date.now() / 60000);
   const d = ngx.shared.l2rate;
   const c = d.incr('c ' + ip + ' ' + minute, calls, 0);
@@ -327,15 +347,25 @@ function location(route) {
 }
 
 // One upstream round trip for `calls`; the answers by id, empty on any failure.
+// Calls go out with their batch index as id (client ids may repeat, or lose precision as numbers), and their
+// answers are keyed by that index.
+function outgoing(x) {
+  if (x.call.id === undefined) return x.call;
+  const copy = {};
+  Object.keys(x.call).forEach((k) => { copy[k] = x.call[k]; });
+  copy.id = x.index;
+  return copy;
+}
+
 async function roundTrip(r, where, calls) {
-  const reply = await r.subrequest(where, { method: 'POST', body: JSON.stringify(calls.map((x) => x.call)) });
+  const reply = await r.subrequest(where, { method: 'POST', body: JSON.stringify(calls.map(outgoing)) });
   const byId = {};
   if (reply.status === 200) {
     try {
       const parsed = JSON.parse(reply.responseText);
       if (Array.isArray(parsed)) {
         parsed.forEach((item) => {
-          if (item && typeof item === 'object') byId[JSON.stringify(item.id)] = item;
+          if (item && typeof item === 'object' && typeof item.id === 'number') byId[item.id] = item;
         });
       }
     } catch (e) {
@@ -348,12 +378,12 @@ async function roundTrip(r, where, calls) {
 // Finality calls the first backend could not answer because it closed its levels (or did not answer
 // at all) go once to the other one. Its answer replaces the first only if it is not closed too.
 async function retryFinality(r, first, calls, byId) {
-  const again = calls.filter((c) => c.call.id !== undefined && (!byId[JSON.stringify(c.call.id)] || closedAnswer(byId[JSON.stringify(c.call.id)])));
+  const again = calls.filter((c) => c.call.id !== undefined && (!byId[c.index] || closedAnswer(byId[c.index])));
   if (!again.length || !cfg.peerProbeUrl) return;
   const other = first === BACKEND.local ? BACKEND.peer : BACKEND.local;
   const second = await roundTrip(r, other, again);
   again.forEach((c) => {
-    const key = JSON.stringify(c.call.id);
+    const key = c.index;
     if (second[key] && !closedAnswer(second[key])) byId[key] = second[key];
     else if (!byId[key] && second[key]) byId[key] = second[key];
   });
@@ -373,7 +403,8 @@ async function forwardParts(r, parts) {
   results.forEach((x) => {
     x.p.calls.forEach((c) => {
       if (c.call.id === undefined) return;
-      const hit = x.byId[JSON.stringify(c.call.id)];
+      const hit = x.byId[c.index];
+      if (hit) hit.id = c.call.id;
       out.push({ index: c.index, reply: hit || unavailable(c.call.id, x.p.route), unanswered: !hit });
     });
   });
@@ -451,15 +482,28 @@ async function handle(r) {
     return;
   }
 
-  // Simulation slots per client IP (released when the subrequests return).
+  // Simulation slots per client and in total (released when the subrequests return). A slot is counted in the
+  // window its request started in and read over that window and the one before, so a slot whose release never
+  // runs (njs does not resume a handler whose client connection failed) is gone after two windows.
   const slots = ngx.shared.l2rate;
-  const slotKey = 's ' + r.variables.remote_addr;
-  if (sims > 0 && slots.incr(slotKey, sims, 0) > cfg.simPerIp) {
-    slots.incr(slotKey, -sims, 0);
-    r.headersOut['Retry-After'] = '1';
-    const msg = 'Rate limited: at most ' + cfg.simPerIp + ' eth_call/eth_estimateGas/eth_createAccessList in flight per client.';
-    const ids = calls.map((c) => (c && typeof c === 'object' ? c.id : null));
-    return send(r, 429, batch ? ids.map((id) => err(id, -32005, msg)) : err(ids[0], -32005, msg));
+  const window = Math.floor(Date.now() / SLOT_WINDOW_MS);
+  const slotKey = 's ' + clientKey(r.variables.remote_addr) + ' ';
+  const inFlight = (key) => (slots.get(key + window) || 0) + (slots.get(key + (window - 1)) || 0);
+  if (sims > 0) {
+    slots.incr(slotKey + window, sims, 0);
+    slots.incr('S ' + window, sims, 0);
+    const mine = inFlight(slotKey);
+    const all = inFlight('S ');
+    if (mine > cfg.simPerIp || all > cfg.simTotal) {
+      slots.incr(slotKey + window, -sims, 0);
+      slots.incr('S ' + window, -sims, 0);
+      r.headersOut['Retry-After'] = '1';
+      const msg = mine > cfg.simPerIp
+        ? 'Rate limited: at most ' + cfg.simPerIp + ' eth_call/eth_estimateGas/eth_createAccessList in flight per client.'
+        : 'Busy: too many eth_call/eth_estimateGas/eth_createAccessList in flight; retry shortly.';
+      const ids = calls.map((c) => (c && typeof c === 'object' ? c.id : null));
+      return send(r, 429, batch ? ids.map((id) => err(id, -32005, msg)) : err(ids[0], -32005, msg));
+    }
   }
 
   // Split per route, merge in request order.
@@ -468,7 +512,10 @@ async function handle(r) {
   try {
     forwarded = await forwardParts(r, parts);
   } finally {
-    if (sims > 0) slots.incr(slotKey, -sims, 0);
+    if (sims > 0) {
+      slots.incr(slotKey + window, -sims, 0);
+      slots.incr('S ' + window, -sims, 0);
+    }
   }
   const merged = replies.concat(forwarded).sort((a, b) => a.index - b.index).map((x) => x.reply);
   // No backend answered any part: 503, as the single-route path answers (a batch mixing read and seqread calls).
@@ -558,4 +605,4 @@ function health(r) {
   r.return(out.ok ? 200 : 503, JSON.stringify(out));
 }
 
-export default { handle, failure, probe, health };
+export default { handle, failure, probe, health, client };

@@ -9,6 +9,8 @@ js_shared_dict_zone zone=l2state:1m;
 js_var $l2_failure;
 js_var $l2_methods "-";
 js_set $l2_failure_body l2rpc.failure;
+# Budget key: the IPv4 address, or the /64 of an IPv6 address (l2rpc.client).
+js_set $l2_client l2rpc.client;
 
 # 1 when the TCP peer is a Cloudflare edge (checked before realip rewrites it).
 geo $realip_remote_addr $l2_from_edge {
@@ -21,8 +23,8 @@ map $http_origin $l2_cors_origin {
 @CORS_MAP@
 }
 
-limit_req_zone $binary_remote_addr zone=l2req:32m rate=@REQ_RATE@r/s;
-limit_conn_zone $binary_remote_addr zone=l2conn:16m;
+limit_req_zone $l2_client zone=l2req:32m rate=@REQ_RATE@r/s;
+limit_conn_zone $l2_client zone=l2conn:16m;
 
 log_format l2rpc escape=json '{"t":"$time_iso8601","ip":"$remote_addr","edge":"$realip_remote_addr",'
     '"st":$status,"rt":$request_time,"bytes":$body_bytes_sent,"req":$request_length,'
