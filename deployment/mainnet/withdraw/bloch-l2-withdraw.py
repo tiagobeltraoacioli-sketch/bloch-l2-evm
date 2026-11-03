@@ -58,6 +58,29 @@ RETRYABLE = {-32041: 'not finalized yet', -32045: 'RPC index catching up', -3204
 
 OK, REFUSED, NOT_READY, CLAIMED, DROPPED = 0, 1, 3, 4, 5
 
+# L2 protocol fee on claims (native crate `l2_revenue`, candidate, inert until getchaininfo hard_forks.l2_revenue is
+# armed): the release pays sats less clamp(sats * 5 / 10,000, 5,000, 100,000,000); the escrow still frees `sats`.
+PROTOCOL_FEE_BPS = 5
+PROTOCOL_FEE_FLOOR_SAT = 5_000
+PROTOCOL_FEE_CAP_SAT = 100_000_000
+
+
+def claim_fee(sats):
+    return min(max(sats * PROTOCOL_FEE_BPS // 10_000, PROTOCOL_FEE_FLOOR_SAT), PROTOCOL_FEE_CAP_SAT)
+
+
+def revenue_gate(url):
+    """The L1's L2 protocol-fee gate: (activation epoch or None, active now). None when the node does not say."""
+    try:
+        info = rpc(url, 'getchaininfo', [])
+    except (RpcError, NotReady, Refused):
+        return None
+    gate = (info.get('hard_forks') or {}).get('l2_revenue') if isinstance(info, dict) else None
+    if not isinstance(gate, dict):
+        return None
+    epoch = gate.get('activation_epoch')
+    return (None if epoch is None else unsigned(epoch, 'l2_revenue activation_epoch'), gate.get('active') is True)
+
 
 class Refused(Exception):
     """The proof or the RPC answer must not be used."""
@@ -479,8 +502,15 @@ def cmd_fetch(args):
     if remaining is not None and fields['sats'] > int(remaining):
         print(f'  the current release window has {remaining} sats left: this claim is dropped now. It fits only as the FIRST claim of a later window, so send it right after a window opens (windows are {view.get("release_window", {}).get("blocks")} L1 blocks); any other claim sent first takes the window')
     attest = ' --attestors attestors.set --attestation PARTIAL_1 --attestation PARTIAL_2 --attestation PARTIAL_3' if large else ''
+    gate = revenue_gate(args.l1_rpc[0])
+    epoch = ''
+    if gate is not None and gate[0] is not None:
+        fee = claim_fee(fields['sats'])
+        when = 'now' if gate[1] else f'from L1 epoch {gate[0]}'
+        print(f'  L2 protocol fee {when}: {fee} sats to the protocol treasury; the recipient then receives {fields["sats"] - fee} sats (the withdrawal itself stays {fields["sats"]})')
+        epoch = ' --epoch EPOCH'
     print('Nothing has been paid yet. Next, with base fee (getchaininfo next_base_fee_millisat_per_gas) and funding input from your L1 node, and without delay, because a claim built with an old base fee is dropped:')
-    print(f'  bloch-pos l2-claim prepare --genesis genesis.bin --funding-pubkey relayer.pubkey.hex --input TXID:VOUT:SAT --proof {args.out} --base-fee NEXT_BASE_FEE --tip 0{attest} --out claim-unsigned.hex')
+    print(f'  bloch-pos l2-claim prepare --genesis genesis.bin --funding-pubkey relayer.pubkey.hex --input TXID:VOUT:SAT --proof {args.out} --base-fee NEXT_BASE_FEE --tip 0{attest}{epoch} --out claim-unsigned.hex')
     print('  bloch-pos l2-claim sign --genesis genesis.bin --tx claim-unsigned.hex --dir RELAYER_KEYSTORE_DIR --out claim.hex')
     print('  bloch-pos l2-claim inspect --tx claim.hex prints the txid. Send claim.hex with sendrawtransaction. Its reply `accepted` is not a confirmation and its tx_hash is not a txid. Then:')
     print(f'  bloch-l2-withdraw.py status --proof {args.out} --l1-rpc URL --tx TXID')
@@ -511,7 +541,8 @@ UTXO_PAGE = 1024
 
 
 def paying_outputs(url, recipient, sats):
-    """Outputs of exactly `sats` locked to the recipient. Their txids are the only consensus ids a sender can learn:
+    """Outputs of exactly `sats`, or `sats` less the L2 protocol fee (a claim included after the fee gate), locked
+    to the recipient. Their txids are the only consensus ids a sender can learn:
     sendrawtransaction returns none (its tx_hash is a local handle that gettxstatus does not know)."""
     try:
         page = rpc(url, 'getutxos', [recipient, UTXO_PAGE])
@@ -519,7 +550,8 @@ def paying_outputs(url, recipient, sats):
         raise Refused(f'{url}: getutxos: {error}') from None
     if not isinstance(page, dict) or not isinstance(page.get('utxos'), list):
         raise Refused(f'{url}: not a getutxos answer')
-    return [u for u in page['utxos'] if str(u.get('value_sat')) == str(sats)], bool(page.get('truncated'))
+    amounts = {str(sats), str(sats - claim_fee(sats))}
+    return [u for u in page['utxos'] if str(u.get('value_sat')) in amounts], bool(page.get('truncated'))
 
 
 def cmd_status(args):
