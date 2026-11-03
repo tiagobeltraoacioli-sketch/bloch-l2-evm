@@ -38,7 +38,7 @@ is a second forced command on the same user, slice and work directory (one proof
   sudo python3 install-prover-mainnet.py rollback --program next
 
 It needs the activated program installed first, a second settler key (an SSH key selects one forced
-command), and settlement_v3_mainnet_sparse (SHA-256 78c533fa...7bea, CANDIDATE) beside this file.
+command), and settlement_v3_mainnet_sparse (SHA-256 bc35e838...b048, CANDIDATE) beside this file.
 
 The fallback program (native PROGRAM_FALLBACK, installed by the inert L2_PROGRAM_ROLLBACK_EPOCH: the same next
 rules under the complete witness, `--mainnet`) is a third forced command in the same way, with a third settler key
@@ -85,14 +85,14 @@ REMOTE_PROVER_SHA256 = '0d239251d7366d24b816336eb59ab88b993b6cb3fc54d6e214d1d441
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
 # codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
 # recipient is a placeholder (TBD-owner), so the configuration and every value below move with it.
-NEXT_GUEST_SHA256 = '78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea'
+NEXT_GUEST_SHA256 = 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048'
 PINNED_NEXT = {
     'chain_id': 700770,
     'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
-    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
-    'elf_keccak': '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
-    'vkey_koalabear': '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
-    'vkey_bn254': '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910',
+    'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
+    'elf_keccak': '1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18',
+    'vkey_koalabear': '6a140f117b84dd524b3681b9447422e5281451295144b5747197d0df5db6afc9',
+    'vkey_bn254': '00d4281e23ee13754a59b40dcc47422e55028a2534512d5d38cbe86fddb6afc9',
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
 }

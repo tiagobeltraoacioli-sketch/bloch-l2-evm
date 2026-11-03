@@ -141,7 +141,8 @@ impl ExecutionArtifact {
     }
 }
 
-const SPARSE_FORMAT: &str = "BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:2";
+// SPARSE:3: the witness carries the forced records (forced inclusion, candidate).
+const SPARSE_FORMAT: &str = "BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:3";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

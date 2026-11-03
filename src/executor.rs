@@ -1109,6 +1109,35 @@ impl<DB: DatabaseRef> BlockSession<DB> {
         Ok(self.run.tx_outcomes.last())
     }
 
+    /// CANDIDATE (forced inclusion): whether revm accepts `tx` for execution on
+    /// the session state, without changing it. `Ok(false)` is a refusal before
+    /// execution (static validity, block gas, nonce, funds, fee cap), with
+    /// the reason: the forced envelope is skipped. `Ok(None)`: it would execute. A database failure is an error, never a
+    /// refusal, so a witness that leaves out the sender cannot turn a valid
+    /// forced transaction into a skip.
+    #[cfg(feature = "forced-inclusion")]
+    pub(crate) fn forced_admissible(&self, tx: &TxEnv) -> Result<Option<String>, BlockExecutionError> {
+        use revm::context::result::EVMError;
+        let i = self.run.tx_outcomes.len();
+        if let Err(error) = validate_transaction(&self.spec, tx, i) {
+            return Ok(Some(format!("{error}")));
+        }
+        if self.run.gas_used.saturating_add(tx.gas_limit) > self.spec.gas_limit {
+            return Ok(Some(String::from("block gas limit")));
+        }
+        let mut evm = block_context(&self.spec, &self.context, CacheDB::new(&self.db)).build_mainnet();
+        match evm.transact(tx.clone()) {
+            Ok(_) => Ok(None),
+            Err(EVMError::Transaction(error)) => Ok(Some(format!("{error:?}"))),
+            Err(EVMError::Header(error)) => Ok(Some(format!("{error:?}"))),
+            Err(EVMError::Database(error)) => Err(db_error(error)),
+            Err(other) => Err(BlockExecutionError::Evm {
+                tx_index: i,
+                detail: format!("{other:?}"),
+            }),
+        }
+    }
+
     /// Nonce of `address` in the session state (after deposits and every
     /// accepted transaction). Used by block selection to classify candidates.
     pub(crate) fn account_nonce(&self, address: alloy_primitives::Address) -> Result<u64, BlockExecutionError> {

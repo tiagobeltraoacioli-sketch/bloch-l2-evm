@@ -24,6 +24,7 @@ use bloch_l2_evm::{
     withdrawal::WithdrawalCommitment,
     DepositMint, DepositProvenance,
 };
+use bloch_l2_evm::forced_inclusion::{inbox_hash, ForcedRecord, ForcedTransaction, MAX_GAS_PER_SETTLEMENT, MAX_PER_SETTLEMENT};
 use bloch_pos_committee::{l2_settlement::InboxRecord, transition::PosTransaction};
 use std::collections::BTreeMap;
 
@@ -64,6 +65,11 @@ pub struct SettledBlockInputs {
     pub da_commitment: B256,
     /// V3 only: the outbox root and count after the block.
     pub withdrawals: Option<WithdrawalCommitment>,
+    /// Forced inclusion (candidate): the forced records this settlement
+    /// consumed, in queue order, each with the envelope its 0x1C transaction
+    /// carried. The rebuilder runs them by the forced rule before
+    /// `transactions` (the DA batch holds the sequencer's part only).
+    pub forced: Vec<ForcedTransaction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +191,8 @@ pub fn derive_settled_blocks_with_reset(
     let mut out: Vec<SettledBlockInputs> = Vec::new();
     let (mut head_hash, mut head_root, mut head_number) = (genesis_hash, genesis_state_root, 0u64);
     let mut head_withdrawals = WithdrawalCommitment::empty();
+    // Forced inclusion: the native queue's pending records, oldest first.
+    let mut forced_pending: std::collections::VecDeque<ForcedTransaction> = std::collections::VecDeque::new();
     let mut last_height = 0u64;
     for block in blocks {
         if block.height <= last_height {
@@ -208,6 +216,18 @@ pub fn derive_settled_blocks_with_reset(
                         recipient: deposit.recipient,
                     });
                     deposit_index += 1;
+                }
+                PosTransaction::L2ForcedTransaction(forced) if forced.l2_chain_id == chain_id => {
+                    // A finalized block applied it, so the native queue holds it (refusals are not applied).
+                    forced_pending.push_back(ForcedTransaction {
+                        record: ForcedRecord {
+                            l1_height: block.height,
+                            l1_txid: tx.txid(),
+                            envelope_hash: alloy_primitives::keccak256(&forced.envelope),
+                            gas_limit: forced.gas_limit,
+                        },
+                        envelope: forced.envelope.clone().into(),
+                    });
                 }
                 PosTransaction::L2DataAvailability(batch) if batch.l2_chain_id == chain_id => {
                     let key = (batch.l2_block_number, B256::from(batch.commitment()));
@@ -239,6 +259,13 @@ pub fn derive_settled_blocks_with_reset(
                             None => return Err(ReconstructError::Successor { height: block.height, number }),
                         };
                         if base.l2_parent_hash == hash && base.l2_previous_state_root == root {
+                            // The native head reset puts records consumed above the kept block back at
+                            // the front of the queue, in their order.
+                            let dropped: Vec<ForcedTransaction> =
+                                out[target.unwrap_or_default()..].iter().flat_map(|b| b.forced.iter().cloned()).collect();
+                            for f in dropped.into_iter().rev() {
+                                forced_pending.push_front(f);
+                            }
                             out.truncate(target.unwrap_or_default());
                             (head_hash, head_root, head_number) = (hash, root, kept);
                             head_withdrawals = withdrawals;
@@ -257,6 +284,7 @@ pub fn derive_settled_blocks_with_reset(
                         .ok_or(ReconstructError::Inbox { height: block.height, number })?;
                     let deposits: Vec<DepositMint> = records.iter().map(mint).collect();
                     let mut transactions = Vec::new();
+                    let mut consumed_forced = Vec::new();
                     if let Some(v3) = &v3 {
                         let next = WithdrawalCommitment { root: v3.withdrawal_root, count: v3.withdrawal_count };
                         if next.count < head_withdrawals.count
@@ -265,8 +293,26 @@ pub fn derive_settled_blocks_with_reset(
                             return Err(ReconstructError::Withdrawals { number });
                         }
                         head_withdrawals = next;
-                        if deposits_hash(&deposits) != v3.deposits_hash {
-                            return Err(ReconstructError::Deposits { number });
+                        // The slot is the deposits hash, or the inbox hash over it and the forced records
+                        // consumed: a prefix of the queue within the per-settlement bounds.
+                        let plain = deposits_hash(&deposits);
+                        if plain != v3.deposits_hash {
+                            let mut records: Vec<ForcedRecord> = Vec::new();
+                            let mut gas = 0u64;
+                            let mut found = None;
+                            for (n, f) in forced_pending.iter().enumerate().take(MAX_PER_SETTLEMENT) {
+                                gas = gas.saturating_add(f.record.gas_limit);
+                                if gas > MAX_GAS_PER_SETTLEMENT {
+                                    break;
+                                }
+                                records.push(f.record);
+                                if inbox_hash(plain, &records) == v3.deposits_hash {
+                                    found = Some(n + 1);
+                                    break;
+                                }
+                            }
+                            let n = found.ok_or(ReconstructError::Deposits { number })?;
+                            consumed_forced = forced_pending.drain(..n).collect();
                         }
                         if v3.user_tx_count > 0 {
                             let payload = batches.get(&(number, v3.da_commitment)).ok_or(
@@ -298,6 +344,7 @@ pub fn derive_settled_blocks_with_reset(
                         transactions_root: v3.map(|v| v.transactions_root),
                         da_commitment: v3.map_or(B256::ZERO, |v| v.da_commitment),
                         withdrawals: v3.map(|v| WithdrawalCommitment { root: v.withdrawal_root, count: v.withdrawal_count }),
+                        forced: consumed_forced,
                     });
                     (head_hash, head_root, head_number) = (base.l2_header_hash, base.l2_state_root, number);
                     // Batches for settled blocks are never needed again.

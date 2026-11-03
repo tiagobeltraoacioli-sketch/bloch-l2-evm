@@ -33,6 +33,9 @@ def gates(source):
     out = {}
     for name, raw in CONST.findall(source):
         v = value(raw)
+        # `pub const L2_FORCED_INCLUSION_EPOCH: u64 = L2_NEXT_PROGRAM_EPOCH;`: the value of a gate defined above.
+        if isinstance(v, str) and v.startswith('?') and v[1:] in out:
+            v = out[v[1:]]
         # The same name under two cfgs (mainnet / devnet): keep every distinct value.
         if name in out and out[name] != v:
             out[name] = sorted({json.dumps(out[name]), json.dumps(v)})

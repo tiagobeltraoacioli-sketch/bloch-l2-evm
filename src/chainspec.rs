@@ -222,6 +222,14 @@ pub struct ChainSpec {
     /// rule set installs [`fee_vault_sweep_code`] at both vault addresses if it
     /// is not there yet, keeping their balances. `None` on every earlier rule set.
     pub fee_vault_sweep: Option<Address>,
+    /// L1 forced inclusion (CANDIDATE, `forced-inclusion` feature only): every
+    /// block runs the forced envelopes L1 names for its settlement right after
+    /// the deposits ([`crate::forced_inclusion`]), and the V3 statement binds
+    /// them. Only on the next mainnet rules; `false` on every other rule set.
+    /// Without the feature the field does not exist, so no program built
+    /// without it changes.
+    #[cfg(feature = "forced-inclusion")]
+    pub forced_inclusion: bool,
 }
 
 /// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
@@ -299,6 +307,8 @@ impl ChainSpec {
             withdrawal_outbox: None,
             block_derivation: None,
             fee_vault_sweep: None,
+            #[cfg(feature = "forced-inclusion")]
+            forced_inclusion: false,
         }
     }
 
@@ -343,6 +353,10 @@ impl ChainSpec {
                 prevrandao: L2_BLOCK_PREVRANDAO,
             }),
             fee_vault_sweep: Some(MAINNET_FEE_SWEEP_RECIPIENT),
+            // CANDIDATE: with the `forced-inclusion` feature the next rules
+            // include L1 forced inclusion (configuration tag 4).
+            #[cfg(feature = "forced-inclusion")]
+            forced_inclusion: true,
             ..Self::mainnet_v1()
         }
     }
@@ -401,6 +415,10 @@ impl ChainSpec {
             if system[..i].contains(&Some(*a)) {
                 return Err(ChainSpecError::SystemAddressCollision(*a));
             }
+        }
+        #[cfg(feature = "forced-inclusion")]
+        if self.forced_inclusion && (self.block_derivation.is_none() || self.fee_vault_sweep.is_none()) {
+            return Err(ChainSpecError::PartialNextRules);
         }
         Ok(())
     }
@@ -597,9 +615,18 @@ mod tests {
         next.validate().expect("the next mainnet spec is valid");
         assert!(next.block_derivation.is_some() && next.fee_vault_sweep.is_some());
         assert_eq!(
-            ChainSpec { block_derivation: None, fee_vault_sweep: None, ..next.clone() },
+            ChainSpec {
+                block_derivation: None,
+                fee_vault_sweep: None,
+                // CANDIDATE: with the feature the next rules also carry forced inclusion.
+                #[cfg(feature = "forced-inclusion")]
+                forced_inclusion: false,
+                ..next.clone()
+            },
             ChainSpec::mainnet_v1()
         );
+        #[cfg(feature = "forced-inclusion")]
+        assert!(next.forced_inclusion && !ChainSpec::mainnet_v1().forced_inclusion);
     }
 
     #[test]

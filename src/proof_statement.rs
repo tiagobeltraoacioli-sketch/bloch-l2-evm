@@ -488,6 +488,49 @@ impl SettlementStatementV3 {
         })
     }
 
+    /// CANDIDATE (forced inclusion): [`Self::from_executed`] for a block whose
+    /// first `included_forced` transactions are the forced envelopes of
+    /// `consumed` that were not skipped. The `deposits_hash` slot is
+    /// [`crate::forced_inclusion::inbox_hash`] over the deposits hash and every
+    /// consumed record (skipped ones too), and `user_tx_count` and
+    /// `da_commitment` cover only the sequencer's transactions, after the
+    /// forced prefix: forced envelopes are already published on L1. With
+    /// nothing consumed the statement is exactly [`Self::from_executed`].
+    #[cfg(feature = "forced-inclusion")]
+    pub fn from_executed_forced(
+        configuration: B256,
+        header: &crate::node_primitives::NodeHeaderV2,
+        body: &NodeBodyV2,
+        context: SettlementContextV2,
+        withdrawals: WithdrawalCommitment,
+        consumed: &[crate::forced_inclusion::ForcedRecord],
+        included_forced: usize,
+    ) -> Result<Self, SettlementStatementV2Error> {
+        if included_forced > consumed.len() || included_forced > body.transactions.len() {
+            return Err(SettlementStatementV2Error::Context);
+        }
+        let base = SettlementStatementV2::from_executed(configuration, header, body, context)?;
+        let deposits_hash = body.deposits_hash();
+        if header.deposits_hash != deposits_hash
+            || header.transactions_root != body.transactions_root()
+            || header.receipts_root == B256::ZERO
+        {
+            return Err(SettlementStatementV2Error::Context);
+        }
+        let sequencer = &body.transactions[included_forced..];
+        Ok(Self {
+            base,
+            deposits_hash: crate::forced_inclusion::inbox_hash(deposits_hash, consumed),
+            transactions_root: header.transactions_root,
+            receipts_root: header.receipts_root,
+            user_tx_count: u64::try_from(sequencer.len()).map_err(|_| SettlementStatementV2Error::Context)?,
+            withdrawal_root: withdrawals.root,
+            withdrawal_count: withdrawals.count,
+            da_commitment: crate::data_availability::block_da_commitment(base.chain_id, base.l2_number, sequencer)
+                .map_err(SettlementStatementV2Error::DataAvailability)?,
+        })
+    }
+
     /// Encode the exact fixed-width, version-tagged statement.
     pub fn encode(&self) -> [u8; SETTLEMENT_STATEMENT_V3_LEN] {
         let mut bytes = [0u8; SETTLEMENT_STATEMENT_V3_LEN];
@@ -610,6 +653,12 @@ pub fn execute_settlement_statement_v3(
 /// genesis time and slot duration (two u64s), the prevrandao (32 bytes) and the
 /// sweep recipient (raw 20 bytes). The two rules ship together: other
 /// combinations are refused.
+///
+/// CANDIDATE (`forced-inclusion` feature): the next rules with L1 forced
+/// inclusion use the tag `BLOCH:EVM:CONFIG:4:CANCUN`, the version 3 fields,
+/// then the forced-inclusion bounds of [`crate::forced_inclusion`]: records
+/// per settlement, minimum and maximum declared gas, declared gas per
+/// settlement and envelope bytes (five u64s).
 pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError> {
     spec.validate()?;
     // Exhaustive destructuring makes new configuration fields a compile error.
@@ -631,13 +680,21 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         withdrawal_outbox,
         block_derivation,
         fee_vault_sweep,
+        #[cfg(feature = "forced-inclusion")]
+        forced_inclusion,
     } = spec;
     let version_3 = match (block_derivation, fee_vault_sweep, withdrawal_outbox) {
         (Some(derivation), Some(recipient), Some(_)) => Some((derivation, recipient)),
         (None, None, _) => None,
         _ => return Err(ChainSpecError::PartialNextRules),
     };
-    let tag: &[u8] = if version_3.is_some() {
+    #[cfg(feature = "forced-inclusion")]
+    let version_4 = *forced_inclusion && version_3.is_some();
+    #[cfg(not(feature = "forced-inclusion"))]
+    let version_4 = false;
+    let tag: &[u8] = if version_4 {
+        b"BLOCH:EVM:CONFIG:4:CANCUN"
+    } else if version_3.is_some() {
         b"BLOCH:EVM:CONFIG:3:CANCUN"
     } else if withdrawal_outbox.is_some() {
         b"BLOCH:EVM:CONFIG:2:CANCUN"
@@ -671,6 +728,19 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         bytes.extend_from_slice(&derivation.l1_slot_millis.to_be_bytes());
         bytes.extend_from_slice(derivation.prevrandao.as_slice());
         bytes.extend_from_slice(recipient.as_slice());
+    }
+    #[cfg(feature = "forced-inclusion")]
+    if version_4 {
+        use crate::forced_inclusion as forced;
+        for value in [
+            forced::MAX_PER_SETTLEMENT as u64,
+            forced::MIN_GAS,
+            forced::MAX_GAS,
+            forced::MAX_GAS_PER_SETTLEMENT,
+            forced::MAX_ENVELOPE_BYTES as u64,
+        ] {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
     }
     Ok(keccak256(bytes))
 }
@@ -1210,5 +1280,27 @@ mod settlement_v3_tests {
             alloc::format!("{:x}", keccak256(bytes)),
             "66469230128b9e871eb65c938c300ce51b4e42136468145f7e54c211ade696d4"
         );
+    }
+}
+
+#[cfg(all(test, feature = "forced-inclusion"))]
+mod forced_configuration_tests {
+    use super::*;
+
+    /// The next mainnet rules with L1 forced inclusion: tag 4, a new configuration.
+    /// Native `PROGRAM_NEXT` (identity 3) and `FORCED_INCLUSION_CONFIGURATIONS` name this value.
+    #[test]
+    fn the_forced_next_rules_have_their_own_configuration() {
+        let next = ChainSpec::mainnet();
+        assert!(next.forced_inclusion);
+        let forced = configuration_commitment(&next).unwrap();
+        let plain = configuration_commitment(&ChainSpec { forced_inclusion: false, ..next.clone() }).unwrap();
+        assert_eq!(format!("{forced:x}"), "b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d");
+        // Without forced inclusion the next rules keep agent 115's configuration.
+        assert_eq!(format!("{plain:x}"), "975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878");
+        assert_ne!(forced, plain);
+        assert_eq!(ChainSpec::mainnet_rules_for(forced), Some(next));
+        // Forced inclusion needs the next rules.
+        assert!(configuration_commitment(&ChainSpec { forced_inclusion: true, ..ChainSpec::mainnet_v1() }).is_err());
     }
 }

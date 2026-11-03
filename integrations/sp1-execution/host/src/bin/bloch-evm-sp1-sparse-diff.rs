@@ -42,11 +42,37 @@ struct Stored {
     domain: B256,
 }
 
+/// The next rules as agent 115 pinned them (configuration 975ec258): what the stored complete-witness next
+/// artifacts and the complete next guest `44d4c9d7` run.
+fn next_without_forced() -> ChainSpec {
+    ChainSpec { forced_inclusion: false, ..ChainSpec::mainnet() }
+}
+
+/// The rules the sparse guest runs for a block stored under `spec`: the next rules gain forced inclusion, which
+/// with no forced record executes the same block and changes only the statement's configuration.
+fn sparse_rules(spec: &ChainSpec) -> ChainSpec {
+    if *spec == next_without_forced() { ChainSpec::mainnet() } else { spec.clone() }
+}
+
+/// Offset of the configuration in the encoded statement (tag, network, genesis, domain).
+const CONFIGURATION_AT: usize = 22 + 96;
+
+/// `public` with the configuration of `like`: the statements of the two next programs differ only there.
+fn with_configuration_of(public: &[u8], like: &[u8]) -> Vec<u8> {
+    let mut out = public.to_vec();
+    if out.len() >= CONFIGURATION_AT + 32 && like.len() >= CONFIGURATION_AT + 32 {
+        out[CONFIGURATION_AT..CONFIGURATION_AT + 32].copy_from_slice(&like[CONFIGURATION_AT..CONFIGURATION_AT + 32]);
+    }
+    out
+}
+
 fn load(dir: &Path) -> Result<Stored> {
     let bytes = fs::read(dir.join("block.artifact"))?;
     let mut last = None;
     for (spec, domain) in [
         (ChainSpec::mainnet_v1(), MAINNET_DOMAIN),
+        // Stored next-rule artifacts were made before forced inclusion (agent 137): the next rules without it.
+        (next_without_forced(), MAINNET_DOMAIN),
         (ChainSpec::mainnet(), MAINNET_DOMAIN),
         (ChainSpec::testnet_v3(), B256::repeat_byte(0xd3)),
     ] {
@@ -232,22 +258,26 @@ async fn main() -> Result<ExitCode> {
             let mut size_lazy = None;
             let mut cycles = (0u64, 0u64, 0u64, 0u64);
             for mode in [BlockHashes::Lazy, BlockHashes::Eager] {
-                match generate_sparse_node_witness(&current, &spec, domain, &context, &body, mode) {
+                let sparse_spec = sparse_rules(&spec);
+                match generate_sparse_node_witness(&current, &sparse_spec, domain, &context, &body, mode) {
                     Err(error) => problems.push(format!("sparse generation {mode:?}: {error}")),
                     Ok((witness, canonical)) => {
                         if canonical.header != header {
                             problems.push(format!("canonical header differs from the artifact, {mode:?}"));
                         }
-                        match execute_settlement_statement_v3_sparse(&spec, domain, &witness, &context, &body, settlement_context, mode) {
+                        match execute_settlement_statement_v3_sparse(&sparse_spec, domain, &witness, &context, &body, settlement_context, mode) {
                             Err(error) => problems.push(format!("sparse statement {mode:?}: {error}")),
                             Ok(statement) => {
+                                if statement.base.configuration != bloch_l2_evm::proof_statement::configuration_commitment(&sparse_spec)? {
+                                    problems.push(format!("sparse statement names another configuration, {mode:?}"));
+                                }
                                 if let Some(expected) = &expected {
-                                    if statement.encode() != expected.encode() {
+                                    if with_configuration_of(&statement.encode(), &expected.encode()) != expected.encode() {
                                         problems.push(format!("sparse statement differs from complete, {mode:?}"));
                                     }
                                 }
                                 if let Some((bytes, _)) = &real {
-                                    if statement.encode().as_slice() != bytes.as_slice() {
+                                    if with_configuration_of(&statement.encode(), bytes).as_slice() != bytes.as_slice() {
                                         problems.push(format!("sparse statement differs from the real proof, {mode:?}"));
                                     }
                                 }
@@ -266,7 +296,7 @@ async fn main() -> Result<ExitCode> {
                                 let key = keys[((pick >> 16) % keys.len() as u64) as usize];
                                 account.storage_proof.remove(&key);
                                 tampered += 1;
-                                match verify_node_batch_sparse(&spec, domain, &changed, &context, &body, mode) {
+                                match verify_node_batch_sparse(&sparse_spec, domain, &changed, &context, &body, mode) {
                                     Ok(outcome) => {
                                         tamper_survived += 1;
                                         if outcome.header != header {
@@ -277,7 +307,7 @@ async fn main() -> Result<ExitCode> {
                                         // The guest must refuse what the native path refuses.
                                         let sparse_elf = if spec == ChainSpec::mainnet_v1() {
                                             Some("settlement_v3_mainnet_v1_sparse")
-                                        } else if spec == ChainSpec::mainnet() {
+                                        } else if sparse_spec == ChainSpec::mainnet() {
                                             Some("settlement_v3_mainnet_sparse")
                                         } else {
                                             None
@@ -299,13 +329,13 @@ async fn main() -> Result<ExitCode> {
                                 let mut changed = witness.clone();
                                 changed.codes.remove(((pick >> 32) % changed.codes.len() as u64) as usize);
                                 code_tampered += 1;
-                                match verify_node_batch_sparse(&spec, domain, &changed, &context, &body, mode) {
+                                match verify_node_batch_sparse(&sparse_spec, domain, &changed, &context, &body, mode) {
                                     Ok(_) => problems.push("a witness without a loaded code was accepted".into()),
                                     Err(_) => {
                                         code_refused += 1;
                                         let sparse_elf = if spec == ChainSpec::mainnet_v1() {
                                             Some("settlement_v3_mainnet_v1_sparse")
-                                        } else if spec == ChainSpec::mainnet() {
+                                        } else if sparse_spec == ChainSpec::mainnet() {
                                             Some("settlement_v3_mainnet_sparse")
                                         } else {
                                             None
@@ -323,7 +353,7 @@ async fn main() -> Result<ExitCode> {
                             if use_elf {
                                 let (complete_elf, sparse_elf) = if spec == ChainSpec::mainnet_v1() {
                                     ("complete_v1", "settlement_v3_mainnet_v1_sparse")
-                                } else if spec == ChainSpec::mainnet() {
+                                } else if sparse_spec == ChainSpec::mainnet() {
                                     ("complete_next", "settlement_v3_mainnet_sparse")
                                 } else {
                                     ("", "")
@@ -341,7 +371,7 @@ async fn main() -> Result<ExitCode> {
                                         (Ok(a), Ok(b)) => {
                                             elf_runs += 1;
                                             cycles = (a.1, b.1, a.2, b.2);
-                                            if a.0 != b.0 {
+                                            if with_configuration_of(&b.0, &a.0) != a.0 {
                                                 problems.push("the guests committed different public values".into());
                                             }
                                             if let Some((bytes, _)) = &real {
@@ -371,7 +401,7 @@ async fn main() -> Result<ExitCode> {
             println!(
                 "{{\"height\":{height},\"dir\":{:?},\"rules\":\"{}\",\"txs\":{},\"deposits\":{},\"gas\":{},\"complete_bytes\":{},\"sparse_bytes\":{},\"instr_complete\":{},\"instr_sparse\":{},\"sp1gas_complete\":{},\"sp1gas_sparse\":{},\"real_proof\":{},\"request\":{},\"differ\":{:?}}}",
                 stored.dir.file_name().unwrap(),
-                if spec == ChainSpec::mainnet_v1() { "v1" } else if spec == ChainSpec::mainnet() { "next" } else { "testnet_v3" },
+                if spec == ChainSpec::mainnet_v1() { "v1" } else if sparse_rules(&spec) == ChainSpec::mainnet() { "next" } else { "testnet_v3" },
                 body.transactions.len(),
                 body.deposits.len(),
                 header.gas_used,

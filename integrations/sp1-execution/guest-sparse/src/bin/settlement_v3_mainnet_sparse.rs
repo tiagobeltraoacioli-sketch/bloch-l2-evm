@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! CANDIDATE, inert: settlement V3 with a sparse witness, under the next mainnet rules, lazy BLOCKHASH.
 //! No release builds or selects this program, and no L1 configuration names it.
-//! The state transition and the 766-byte statement are those of the complete
-//! witness. Only the witness and therefore the program identity differ.
+//! With L1 forced inclusion (configuration tag 4): the forced records L1 names
+//! for the settlement travel in the witness, run right after the deposits, and
+//! bind the statement's deposits_hash slot (agent 137, candidate).
 #![no_main]
 
 use alloy_rlp::Decodable;

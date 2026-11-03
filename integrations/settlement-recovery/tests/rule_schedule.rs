@@ -461,3 +461,88 @@ fn a_head_reset_drops_the_discarded_tail_from_a_rebuild() {
     let blocks = vec![native(1, vec![settlement(&k, 0)]), native(2, vec![settlement(&new, 0)])];
     assert_eq!(derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)).unwrap().len(), 2);
 }
+
+// ── Forced inclusion (candidate): the rebuild mirrors the native forced queue ──
+
+fn forced_tx(seed: u8, envelope: Vec<u8>) -> PosTransaction {
+    PosTransaction::L2ForcedTransaction(bloch_pos_committee::transition::L2ForcedTransaction {
+        network_domain: [0x91; 32],
+        funding_pubkey: vec![0x5a; ADMISSION_PQ_KEY_BYTES],
+        inputs: vec![FundingInput { txid: [seed; 32], vout: 0 }],
+        l2_chain_id: CHAIN_ID,
+        gas_limit: 21_000,
+        envelope,
+        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        tx_bytes: 9_000,
+        tip_millisat_per_gas: 0,
+        signature: vec![1; 64],
+    })
+}
+
+/// `settlement` with the deposits slot bound to these consumed forced records.
+fn settlement_forced(block: &Produced, records: &[bloch_l2_evm::forced_inclusion::ForcedRecord]) -> PosTransaction {
+    let PosTransaction::L2SettlementAsync(mut tx) = settlement(block, 0) else { unreachable!() };
+    let mut statement = SettlementStatementV3::decode(&tx.statement).unwrap();
+    statement.deposits_hash = bloch_l2_evm::forced_inclusion::inbox_hash(statement.deposits_hash, records);
+    tx.statement = statement.encode().to_vec();
+    PosTransaction::L2SettlementAsync(tx)
+}
+
+fn record_of(height: u64, tx: &PosTransaction) -> bloch_l2_evm::forced_inclusion::ForcedRecord {
+    let PosTransaction::L2ForcedTransaction(forced) = tx else { unreachable!() };
+    bloch_l2_evm::forced_inclusion::ForcedRecord {
+        l1_height: height,
+        l1_txid: tx.txid(),
+        envelope_hash: alloy_primitives::keccak256(&forced.envelope),
+        gas_limit: forced.gas_limit,
+    }
+}
+
+#[test]
+fn a_rebuild_finds_the_forced_records_each_settlement_consumed() {
+    let (g_hash, g_root) = (B256::repeat_byte(0x10), B256::repeat_byte(0x20));
+    let (a, b) = (forced_tx(1, vec![0x02, 0xaa]), forced_tx(2, vec![0x02, 0xbb]));
+    let (ra, rb) = (record_of(1, &a), record_of(1, &b));
+    let one = bare(1, g_hash, g_root, 0x31);
+    let two = bare(2, one.hash, one.state_root, 0x32);
+    let three = bare(3, two.hash, two.state_root, 0x33);
+    // Both queued at height 1; the first settlement anchored before them consumes none, the second
+    // consumes only the first record, the third the second.
+    let blocks = vec![
+        native(1, vec![a.clone(), b.clone(), settlement(&one, 0)]),
+        native(2, vec![settlement_forced(&two, &[ra])]),
+        native(3, vec![settlement_forced(&three, &[rb])]),
+    ];
+    let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None).unwrap();
+    let consumed: Vec<Vec<_>> = derived.iter().map(|d| d.forced.iter().map(|f| f.record).collect()).collect();
+    assert_eq!(consumed, vec![vec![], vec![ra], vec![rb]]);
+    assert_eq!(derived[1].forced[0].envelope.as_ref(), &[0x02, 0xaa]);
+    // Both at once.
+    let blocks = vec![native(1, vec![a.clone(), b.clone(), settlement_forced(&one, &[ra, rb])])];
+    let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None).unwrap();
+    assert_eq!(derived[0].forced.len(), 2);
+    // Out of queue order, or a record that was never queued: refused.
+    let blocks = vec![native(1, vec![a.clone(), b.clone(), settlement_forced(&one, &[rb])])];
+    assert!(matches!(derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None), Err(ReconstructError::Deposits { number: 1 })));
+    let blocks = vec![native(1, vec![settlement_forced(&one, &[ra])])];
+    assert!(matches!(derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None), Err(ReconstructError::Deposits { number: 1 })));
+}
+
+#[test]
+fn a_head_reset_queues_again_the_forced_records_of_the_dropped_blocks() {
+    let (g_hash, g_root) = (B256::repeat_byte(0x10), B256::repeat_byte(0x20));
+    let a = forced_tx(1, vec![0x02, 0xaa]);
+    let ra = record_of(1, &a);
+    let k = bare(1, g_hash, g_root, 0x31);
+    let bad = bare(2, k.hash, k.state_root, 0x32);
+    let new = bare(2, k.hash, k.state_root, 0x42);
+    // The dropped block 2 consumed the record; after the reset to block 1 the new block 2 must consume it again.
+    let blocks = vec![
+        native(1, vec![a.clone(), settlement(&k, 0)]),
+        native(2, vec![settlement_forced(&bad, &[ra])]),
+        native(3, vec![settlement_forced(&new, &[ra])]),
+    ];
+    let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)).unwrap();
+    assert_eq!(derived.iter().map(|b| b.header_hash).collect::<Vec<_>>(), [k.hash, new.hash]);
+    assert_eq!(derived[1].forced.iter().map(|f| f.record).collect::<Vec<_>>(), vec![ra]);
+}
