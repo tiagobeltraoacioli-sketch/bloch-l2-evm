@@ -743,7 +743,8 @@ def check_policy_config(c):
     """The sequencer policy v2 limits this settler accepts (sequencer_policy_v2.DEFAULTS; docs/SEQUENCER-POLICY-V2.md)."""
     for key in ('max_tx_gas', 'exempt_max_tx_gas', 'fresh_slot_price_wei', 'min_tip_wei', 'congestion_max_tip_wei',
                 'preflight_execute_seconds', 'preflight_max_runs', 'preflight_max_seconds', 'sender_ban_seconds',
-                'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib'):
+                'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib', 'large_gas_floor',
+                'large_gas_recovery_seconds', 'gate_dependent_wait_seconds'):
         if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
             raise Halt(f'{key} must be a positive integer')
     if c.get('max_block_txs', 1) > 64 and c.get('user_transactions'):

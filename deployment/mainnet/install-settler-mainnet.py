@@ -97,6 +97,8 @@ POLICY_V2 = {
     'preflight_cycle_limit_factor': 2, 'preflight_execute_seconds': 90, 'preflight_max_runs': 24,
     'preflight_max_seconds': 180, 'sender_ban_seconds': 86400, 'standing_seconds': 7 * 86400,
     'band_max_wait_seconds': 7200,
+    # Try order and gate (agents/243): small/large split floor and weekly recovery, wait for dependent gate refusals.
+    'large_gas_floor': 120_000, 'large_gas_recovery_seconds': 7 * 86400, 'gate_dependent_wait_seconds': 3600,
     # Congestion tip ON, capped at 3 gwei (owner, middle ground). Tips go where the L2 fee recipient sends them.
     'congestion_max_tip_wei': 3 * 10**9,
     # Operator and signer addresses only: TBD-owner (40 lowercase hex characters each, no 0x).

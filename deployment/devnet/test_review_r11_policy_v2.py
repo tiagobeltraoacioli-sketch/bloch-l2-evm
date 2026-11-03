@@ -33,6 +33,7 @@ class RealTime(World):
         return dict(super().config(), congestion_max_tip_wei=CAP)
 
     def setUp(self):
+        sp.set_hash(lambda data: hashlib.sha256(data).digest())  # the settler suites set keccak256 in the same process
         super().setUp()
         self.verdict_seconds = 37
 
