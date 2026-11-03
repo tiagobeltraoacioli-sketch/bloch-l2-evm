@@ -317,6 +317,88 @@ class A243_10ExemptKeepsItsPlaceAfterAVerdict(RealTime):
         self.assertIn('deploy', self.block(), f'held: {self.held()}')
 
 
+class SlotWorld(RealTime):
+    """RealTime with storage: a transaction may list `writes` (slot names). Its `fresh_slots` follow the producer's
+    `storage_growth`: a slot is new when neither the chain state nor an earlier transaction of the same block wrote it."""
+
+    def setUp(self):
+        super().setUp()
+        self.slots = set()
+
+    def add_writer(self, name, sender, nonce, gas, cost, writes, tip):
+        raw = self.add(name, sender, nonce, gas, cost, tip=tip)
+        self.tx[raw]['writes'] = list(writes)
+        return raw
+
+    def report(self, raws):
+        report = super().report(raws)
+        written = set()
+        by_hash = {stat['hash']: stat for stat in report['tx_stats']}
+        for raw in self.select(raws)[0]:
+            writes = self.tx[raw].get('writes', [])
+            fresh = [slot for slot in writes if slot not in self.slots and slot not in written]
+            written.update(writes)
+            by_hash[sp_hash(raw)]['fresh_slots'] = [['c0ffee', len(fresh)]] if fresh else []
+        return report
+
+    def block(self, deposits=False, advance=None):
+        names = super().block(deposits, advance)
+        for raw, tx in self.tx.items():
+            if tx['name'] in names:
+                self.slots.update(tx.get('writes', []))
+        return names
+
+
+def sp_hash(raw):
+    return hashlib.sha256(bytes.fromhex(raw)).hexdigest()
+
+
+class A243_12GateCascadeEmptiesTheBlock(SlotWorld):
+    """A243-12 (High). The gate repeats the native selection until it refuses nothing, at most `gate_passes` (6)
+    times, and a block whose gate did not settle takes no user transaction at all. New-slot counts depend on the
+    transactions before (storage_growth): seven senders that write the same slot, at descending tips, each below the
+    write price for one new slot, are peeled one per pass (the first is refused, so the second now creates the slot and
+    is refused, and so on). Seven funded senders that never pay anything then empty every block of every user."""
+
+    def chain(self, k, tag='', top=39):
+        for i in range(k):
+            self.add_writer(f'chain{tag}{i}', f'c{tag}{i}', 0, 50_000, 1, ['s0'], tip=(top - i) * GWEI // 10)
+
+    def test_an_honest_transfer_is_served_while_a_slot_chain_is_spooled(self):
+        self.chain(7)
+        self.add('honest', 'alice', 0, 21_000, 1, tip=50 * GWEI)
+        served = []
+        for _ in range(3):
+            served += self.block()
+        self.assertIn('honest', served, f'held: {self.held()}')
+
+    def test_a_dependent_refusal_waits_so_the_next_block_needs_one_pass(self):
+        self.chain(7)
+        self.block()
+        self.add('honest', 'alice', 0, 21_000, 1, tip=GWEI)
+        self.assertIn('honest', self.block())
+        self.assertNotIn('gate-did-not-settle', [event for event, _ in self.logged[-5:]])
+
+
+class A243_11WritePriceAtTheSuggestedTip(SlotWorld):
+    """A243-11 (High, outside this module). The write price is met from the tip: gas_used x tip >= 200 uBLCH per new
+    slot. The RPC suggests the required tip (+25 % headroom, at most 3 gwei x 1.25) through eth_maxPriorityFeePerGas
+    and refuses nothing at admission for new slots. A new user's first exact approve (about 46k gas, one new slot)
+    needs a 4.35 gwei tip, above the 3 gwei cap; a first swap that creates the output-token balance (about 120k gas)
+    needs 1.67 gwei, 13x the floor. At the suggested tip both are held as `below-write-price` in every block until the
+    RPC evicts them after 3 h, with no error to the wallet. Fixed in the RPC (admission check with a clear error, or
+    a write-aware fee suggestion) and in the DEX and bridge frontends, not here: expected to fail."""
+
+    @unittest.expectedFailure
+    def test_a_first_approve_at_the_rpc_suggested_tip_is_served(self):
+        suggested = self.policy.required_tip(self.now) * 125 // 100
+        self.add_writer('approve', 'nina', 0, 46_000, 1, ['allowance:nina'], tip=suggested)
+        served = []
+        for _ in range(4):
+            served += self.block()
+        self.assertIn('approve', served)
+
+
 class A243_8PlanStateSurvivesAFailedExtend(SettlerHarness):
     """A243-8 (Low). The plan's verdicts (quarantine ban, failure counts, waits) lived only in memory until
     `committed`. When the final `extend` is refused, the settler retries the block with deposits only and never calls
