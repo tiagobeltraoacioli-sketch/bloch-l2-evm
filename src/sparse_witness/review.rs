@@ -670,7 +670,7 @@ impl Chain {
 }
 
 fn both_rules() -> [ChainSpec; 2] {
-    [ChainSpec::mainnet_v1(), ChainSpec::mainnet()]
+    [ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal()]
 }
 
 /// Slots whose keccak keys share at least `bytes` leading bytes, in groups.
@@ -1362,7 +1362,7 @@ fn withdrawals_frontier_root_and_count_agree() {
 /// block; a contract paying a vault by SELFDESTRUCT in its constructor.
 #[test]
 fn fee_vault_sweeps_agree() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let script_address = chain.deploy_script();
     let (base, sequencer) = (chain.spec.base_fee_vault, chain.spec.sequencer_fee_vault);
     for _ in 0..3 {
@@ -1373,7 +1373,7 @@ fn fee_vault_sweeps_agree() {
         let outcome = chain.check(&body, "sweep");
         assert!(outcome.transactions.iter().all(|tx| tx.success));
     }
-    let recipient = crate::chainspec::MAINNET_FEE_SWEEP_RECIPIENT;
+    let recipient = chain.spec.fee_vault_sweep.expect("the next rules sweep");
     assert_ne!(chain.state.balance_of(&recipient), u(0));
     let initcode = vec![0x73]
         .into_iter()
@@ -1756,7 +1756,7 @@ fn fuzz_rich_blocks_v1_rules() {
 #[test]
 fn fuzz_rich_blocks_next_rules() {
     for round in 0..2 * scale() {
-        fuzz_chain(alloc::format!("n{round}").as_bytes(), ChainSpec::mainnet(), 250);
+        fuzz_chain(alloc::format!("n{round}").as_bytes(), ChainSpec::mainnet_next_or_rehearsal(), 250);
     }
 }
 
@@ -1970,3 +1970,6 @@ fn witness_malleability_does_not_reach_the_statement() {
         execute_settlement_statement_v3_sparse(&chain.spec, MAINNET_DOMAIN, &changed, &context, &body, settlement, BlockHashes::Lazy).unwrap();
     assert_eq!(got.encode(), expected.encode());
 }
+#[cfg(test)]
+#[path = "review_b.rs"]
+mod review_b;

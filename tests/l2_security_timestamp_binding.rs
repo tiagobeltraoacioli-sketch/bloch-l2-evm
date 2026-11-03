@@ -42,7 +42,7 @@ fn statement_accepts(timestamp: u64) -> bool {
 }
 
 fn statement_accepts_with(timestamp: u64, prevrandao: B256) -> bool {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let pre = genesis_v2(&spec, MAINNET_GENESIS_TIMESTAMP).unwrap();
     let context = BlockContext {
         number: 1,

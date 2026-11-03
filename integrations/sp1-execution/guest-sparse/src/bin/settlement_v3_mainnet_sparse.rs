@@ -17,6 +17,15 @@ use bloch_l2_evm::{
 
 sp1_zkvm::entrypoint!(main);
 
+// RELEASE GATE (agent 163, B-1): this program compiles the next mainnet rules,
+// whose fee-vault sweep sends every L2 fee to `MAINNET_FEE_SWEEP_RECIPIENT`.
+// It does not build while that recipient is unset, the rehearsal placeholder
+// 0x…000fee01, or any address the release check refuses.
+const _: () = assert!(
+    bloch_l2_evm::chainspec::MAINNET_NEXT_RULES_RELEASABLE,
+    "next-rules guest: set the owner's fee-sweep recipient first (deployment/mainnet/set-sweep-recipient.py apply)"
+);
+
 pub fn main() {
     // Compiled program parameters, never prover-selected.
     let spec = ChainSpec::mainnet();

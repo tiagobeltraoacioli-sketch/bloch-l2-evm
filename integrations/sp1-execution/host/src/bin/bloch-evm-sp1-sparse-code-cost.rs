@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
         return Err(usage.into());
     }
     let spec = match args[0].as_str() {
-        "mainnet" => ChainSpec::mainnet(),
+        "mainnet" => ChainSpec::mainnet_next_or_rehearsal(),
         "mainnet-v1" => ChainSpec::mainnet_v1(),
         _ => return Err(usage.into()),
     };

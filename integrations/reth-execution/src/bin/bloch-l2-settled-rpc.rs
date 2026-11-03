@@ -2012,7 +2012,7 @@ mod tests {
 
     #[test]
     fn pending_nonce_counts_only_the_senders_consecutive_spool_entries() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let index = std::sync::Mutex::new(SpoolIndex::new());
         let next = |sender, latest| spooled_next_nonce(&spec, dir.path(), &index, sender, latest).unwrap();
@@ -2067,7 +2067,7 @@ mod tests {
 
     #[test]
     fn a_forward_clock_step_does_not_expire_an_entry_seen_while_young() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let mut young = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         let mut account = |_| (0, alloy_primitives::U256::MAX);
         // The wall clock now reads 4 h later, though this process saw the entry a moment ago.
@@ -2086,7 +2086,7 @@ mod tests {
     /// clock after the clock came back.
     #[test]
     fn review_r4_a_backward_clock_step_does_not_hold_an_entry_past_the_ttl() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let ttl = SPOOL_LIMITS.ttl;
         let mut held = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         held.modified = std::time::SystemTime::now() + Duration::from_secs(30 * 24 * 3_600);
@@ -2149,7 +2149,7 @@ mod tests {
 
     #[test]
     fn admission_checks_balance_nonce_window_and_base_fee_at_the_head() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let new = meta(&spec, 1, 5, 2 * GWEI);
         assert_eq!(new.cost, alloy_primitives::U256::from(21_000u128 * 2 * GWEI));
         assert_eq!(plan(&[], &new, &[(1, 5, 21_000 * 2 * GWEI)], GWEI), Ok(vec![]));
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[test]
     fn a_sender_is_capped_and_replaces_only_with_a_fee_bump() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let mine: Vec<_> = (0..3).map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
         let cap = plan(&mine, &meta(&spec, 1, 3, 2 * GWEI), &[], GWEI).unwrap_err();
         assert!(cap.starts_with("too many pending transactions"), "{cap}");
@@ -2184,7 +2184,7 @@ mod tests {
 
     #[test]
     fn a_full_spool_evicts_stale_then_deferred_cheap_entries_or_refuses() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         // Eight entries from eight senders (cap 8): key k at nonce 0, fee (k + 1) gwei.
         let mut full: Vec<_> = (10..18u8).map(|k| entry(&spec, &format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI)).collect();
         // Full and nothing stale: a transaction paying no more than the cheapest is refused.
@@ -2215,7 +2215,7 @@ mod tests {
 
     #[test]
     fn scan_skips_vanished_files_and_tracks_fees() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let mut index = SpoolIndex::new();
         std::fs::write(dir.path().join("a.tx"), format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
@@ -2263,7 +2263,7 @@ mod tests {
 
     #[test]
     fn transactions_the_worker_can_never_include_are_refused() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let call = TxKind::Call(Address::repeat_byte(9));
         let check = |gas, max_fee, priority, to, input: Vec<u8>| {
             never_includable(&spec, &authenticated(&spec, 1, 0, gas, max_fee, priority, to, input), SPOOL_LIMITS)
@@ -2296,7 +2296,7 @@ mod tests {
 
     #[test]
     fn a_sender_must_cover_all_its_spooled_entries_together() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let one = 21_000 * 2 * GWEI;
         let mine: Vec<_> = (0..2).map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
         assert_eq!(plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 0, 3 * one)], GWEI), Ok(vec![]));
@@ -2310,7 +2310,7 @@ mod tests {
 
     #[test]
     fn scan_stats_a_file_once_and_keeps_its_original_time() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let mut index = SpoolIndex::new();
         let path = dir.path().join("old.tx");

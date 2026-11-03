@@ -56,13 +56,13 @@ async fn main() -> Result<()> {
     let spec = match args.get(3).map_or("testnet-v3", String::as_str) {
         "testnet-v3" => ChainSpec::testnet_v3(),
         "mainnet-v1" => ChainSpec::mainnet_v1(),
-        "mainnet" => ChainSpec::mainnet(),
+        "mainnet" => ChainSpec::mainnet_next_or_rehearsal(),
         _ => return Err(usage.into()),
     };
     match args.get(4).map(String::as_str) {
         None => {}
         Some("after-mainnet-v1") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet_v1()).map_err(|_| usage)?,
-        Some("after-mainnet") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet()).map_err(|_| usage)?,
+        Some("after-mainnet") => fixture::FIRST_BLOCK_RULES.set(ChainSpec::mainnet_next_or_rehearsal()).map_err(|_| usage)?,
         _ => return Err(usage.into()),
     }
     let domain = if spec.chain_id == bloch_l2_evm::chainspec::MAINNET_CHAIN_ID {

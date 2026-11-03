@@ -47,11 +47,13 @@ impl RuleSchedule {
     /// derivation and the fee-vault sweep.
     pub fn new(base: ChainSpec, next: ChainSpec) -> Result<Self, BlockExecutionError> {
         // Forced inclusion (candidate) is part of the next rules when the core
-        // crate is built with it; the base rules never have it.
+        // crate is built with it; the base rules never have it. The base-fee
+        // floor (agent 197) is also a next-rules addition.
         let comparable = ChainSpec {
             block_derivation: base.block_derivation,
             fee_vault_sweep: base.fee_vault_sweep,
             forced_inclusion: base.forced_inclusion,
+            min_base_fee: base.min_base_fee,
             ..next.clone()
         };
         if comparable != base || next.fee_vault_sweep.is_none() || base.fee_vault_sweep.is_some() {
@@ -160,7 +162,7 @@ mod tests {
     use super::*;
 
     fn schedule() -> RuleSchedule {
-        RuleSchedule::new(ChainSpec::mainnet_v1(), ChainSpec::mainnet()).unwrap()
+        RuleSchedule::new(ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal()).unwrap()
     }
 
     #[test]
@@ -172,8 +174,8 @@ mod tests {
         rules.switch_at(7).unwrap();
         assert_eq!(rules.at(6), &ChainSpec::mainnet_v1());
         assert!(!rules.is_next(6));
-        assert_eq!(rules.at(7), &ChainSpec::mainnet());
-        assert_eq!(rules.at(8), &ChainSpec::mainnet());
+        assert_eq!(rules.at(7), &ChainSpec::mainnet_next_or_rehearsal());
+        assert_eq!(rules.at(8), &ChainSpec::mainnet_next_or_rehearsal());
         assert!(rules.is_next(7));
     }
 
@@ -206,13 +208,21 @@ mod tests {
 
     #[test]
     fn a_next_rule_set_may_change_nothing_else() {
-        let mut other = ChainSpec::mainnet();
+        let mut other = ChainSpec::mainnet_next_or_rehearsal();
         other.deposit_gas += 1;
         assert!(RuleSchedule::new(ChainSpec::mainnet_v1(), other).is_err());
-        let mut no_sweep = ChainSpec::mainnet();
+        let mut no_sweep = ChainSpec::mainnet_next_or_rehearsal();
         no_sweep.fee_vault_sweep = None;
         assert!(RuleSchedule::new(ChainSpec::mainnet_v1(), no_sweep).is_err());
-        assert!(RuleSchedule::new(ChainSpec::mainnet(), ChainSpec::mainnet()).is_err());
-        assert!(RuleSchedule::new(ChainSpec::testnet_v3(), ChainSpec::mainnet()).is_err());
+        assert!(RuleSchedule::new(ChainSpec::mainnet_next_or_rehearsal(), ChainSpec::mainnet_next_or_rehearsal()).is_err());
+        assert!(RuleSchedule::new(ChainSpec::testnet_v3(), ChainSpec::mainnet_next_or_rehearsal()).is_err());
+    }
+
+    /// The release gate (agent 163, B-1): without the owner's recipient there is
+    /// no next rule set to schedule.
+    #[test]
+    fn no_next_rules_without_the_release_recipient() {
+        let scheduled = RuleSchedule::new(ChainSpec::mainnet_v1(), ChainSpec::mainnet());
+        assert_eq!(scheduled.is_ok(), bloch_l2_evm::chainspec::MAINNET_FEE_SWEEP_RECIPIENT.is_some());
     }
 }

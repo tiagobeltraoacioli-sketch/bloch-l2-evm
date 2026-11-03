@@ -152,7 +152,7 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     assert!(chain.spec.forced_inclusion);
     let censored = key(0x33);
     let censored_address = Address::from_public_key(censored.verifying_key());
@@ -275,7 +275,7 @@ fn a_witness_without_a_skipped_or_included_sender_fails_the_block() {
 
 #[test]
 fn a_funded_skipped_sender_is_witnessed_and_cannot_be_left_out() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let other = key(0x77);
     let other_address = Address::from_public_key(other.verifying_key());
     let fund = chain.tx(TxKind::Call(other_address), U256::from(10u128.pow(18)), 21_000);
@@ -348,7 +348,7 @@ fn forced_records_are_refused_under_rules_without_forced_inclusion_and_none_is_t
 
 #[test]
 fn with_nothing_due_the_next_rules_statement_is_the_plain_one() {
-    let mut chain = Chain::new(ChainSpec::mainnet());
+    let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let tx = chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), 21_000);
     let body = chain.body(vec![tx]);
     let context = chain.context();

@@ -89,9 +89,19 @@ mod tests {
     #[test]
     fn native_next_program_pins_the_next_configuration() {
         let next = bloch_pos_committee::l2_settlement::mainnet::PROGRAM_NEXT;
-        let configuration =
-            bloch_l2_evm::proof_statement::configuration_commitment(&bloch_l2_evm::ChainSpec::mainnet()).unwrap();
-        assert_eq!(next.identities[0], configuration.0);
+        // Release gate (agent 163, B-1): the native pins can match the L2 rules
+        // only once the owner's fee-sweep recipient is set. Before that they are
+        // examples, and the native side must not call them final.
+        match bloch_l2_evm::ChainSpec::mainnet_next() {
+            Some(rules) => {
+                let configuration = bloch_l2_evm::proof_statement::configuration_commitment(&rules).unwrap();
+                assert_eq!(next.identities[0], configuration.0);
+            }
+            None => assert!(
+                !bloch_pos_committee::l2_settlement::mainnet::PROGRAM_NEXT_FINAL,
+                "the native next program is final while the L2 has no release fee-sweep recipient"
+            ),
+        }
         assert_eq!(bloch_pos_committee::params::L2_NEXT_PROGRAM_EPOCH, u64::MAX);
     }
 

@@ -119,11 +119,90 @@ pub const GENESIS4_SLOT_MS: u64 = 30_000;
 /// rebuilder could derive a varying value from.
 pub const L2_BLOCK_PREVRANDAO: B256 = B256::repeat_byte(0x07);
 
-/// CANDIDATE PLACEHOLDER, `TBD-owner`: the immutable recipient of the fee-vault
-/// sweep, the Bloch Inc Safe's L2 address once the owner fixes it. This value
-/// enters the configuration commitment, so the configuration, ELF and verifying
-/// keys built with it are examples and change when it is set.
-pub const MAINNET_FEE_SWEEP_RECIPIENT: Address = Address::new(hex!("00000000000000000000000000000000000fee01"));
+/// Base-fee floor of the next mainnet rules: 0.1 gwei (agent 197; the middle,
+/// in log terms, of the 0.0089 gwei DA break-even and the 1 gwei initial base
+/// fee of report 34, and the sequencer policy's tip floor).
+pub const MAINNET_MIN_BASE_FEE: u64 = 100_000_000;
+
+/// UNSET, `TBD-owner`: the immutable recipient of the fee-vault sweep under the
+/// next mainnet rules, the Bloch Inc Safe's L2 address once the owner fixes it
+/// (`deployment/mainnet/set-sweep-recipient.py apply`). It enters the
+/// configuration commitment, so the configuration, ELF and verifying keys of
+/// the next rules exist only once it is set.
+///
+/// RELEASE GATE (agent 163, B-1). While this is `None`, or holds a value
+/// [`is_release_fee_sweep_recipient`] refuses, the next mainnet rules do not
+/// exist: [`ChainSpec::mainnet`] fails [`ChainSpec::validate`] and the
+/// configuration commitment, [`ChainSpec::mainnet_next`] is `None`, the
+/// next-rules guests fail to compile ([`MAINNET_NEXT_RULES_RELEASABLE`]) and
+/// `deployment/mainnet/build-release.sh` refuses the fork-candidate build.
+pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = None;
+
+/// REHEARSAL ONLY, never a release value: the former candidate placeholder
+/// `0x…000fee01`, an address no one holds a key or code for. Native tests,
+/// benchmarks and private rehearsals use it through
+/// [`ChainSpec::mainnet_rehearsal`]; [`is_release_fee_sweep_recipient`] refuses
+/// it, so no next-rules release can carry it.
+pub const REHEARSAL_FEE_SWEEP_RECIPIENT: Address = Address::new(hex!("00000000000000000000000000000000000fee01"));
+
+/// Whether a sweep recipient burns what the sweep sends (agent 163, B-2): the
+/// zero address and the Cancun precompiles `0x01` to `0x0a`. No one can ever
+/// spend a balance there, and `0x09` (blake2f) reverts on the sweep's empty
+/// call. [`ChainSpec::validate`] refuses these for every rule set.
+pub const fn is_burning_fee_sweep_recipient(recipient: Address) -> bool {
+    let bytes = recipient.0 .0;
+    let mut i = 0;
+    while i < 19 {
+        if bytes[i] != 0 {
+            return false;
+        }
+        i += 1;
+    }
+    bytes[19] <= 0x0a
+}
+
+const fn same_address(a: Address, b: Address) -> bool {
+    let (a, b) = (a.0 .0, b.0 .0);
+    let mut i = 0;
+    while i < 20 {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whether `recipient` may be compiled into a next-rules release: not burning
+/// ([`is_burning_fee_sweep_recipient`]), not the rehearsal placeholder, not in
+/// the `0x4200…` predeploy range (both fee vaults, the ledger, block info and the
+/// outbox live there) and not the EIP-4788 contract. A stricter check (burn
+/// addresses, the whole `0x00…00ff` range, an EIP-55 checksum and on-chain code)
+/// runs in `deployment/mainnet/set-sweep-recipient.py`.
+pub const fn is_release_fee_sweep_recipient(recipient: Address) -> bool {
+    let bytes = recipient.0 .0;
+    let mut predeploy = bytes[0] == 0x42;
+    let mut i = 1;
+    while i < 18 {
+        if bytes[i] != 0 {
+            predeploy = false;
+        }
+        i += 1;
+    }
+    !is_burning_fee_sweep_recipient(recipient)
+        && !same_address(recipient, REHEARSAL_FEE_SWEEP_RECIPIENT)
+        && !same_address(recipient, BEACON_ROOTS_ADDRESS)
+        && !predeploy
+}
+
+/// The release gate of the next mainnet rules: `true` only when the owner has
+/// set [`MAINNET_FEE_SWEEP_RECIPIENT`] to a value
+/// [`is_release_fee_sweep_recipient`] accepts. Every next-rules guest asserts it
+/// at compile time, so no next-rules ELF can be built without it.
+pub const MAINNET_NEXT_RULES_RELEASABLE: bool = match MAINNET_FEE_SWEEP_RECIPIENT {
+    Some(recipient) => is_release_fee_sweep_recipient(recipient),
+    None => false,
+};
 
 /// How a settled block's timestamp and prevrandao follow from public L1 data.
 ///
@@ -230,6 +309,10 @@ pub struct ChainSpec {
     /// without it changes.
     #[cfg(feature = "forced-inclusion")]
     pub forced_inclusion: bool,
+    /// Lowest base fee (wei per gas) [`Self::next_base_fee`] may return: the
+    /// protocol revenue floor of an idle chain (agent 197, L1-12). Zero on every
+    /// earlier rule set, where integer rounding alone stops the decay (249 wei).
+    pub min_base_fee: u64,
 }
 
 /// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
@@ -262,6 +345,9 @@ pub enum ChainSpecError {
     /// Block derivation and the fee-vault sweep ship together, on a chain with
     /// the withdrawal outbox.
     PartialNextRules,
+    /// The fee-vault sweep recipient burns what it receives: the zero address
+    /// or a Cancun precompile `0x01`..`0x0a` ([`is_burning_fee_sweep_recipient`]).
+    BurningSweepRecipient(Address),
 }
 
 impl core::fmt::Display for ChainSpecError {
@@ -279,6 +365,9 @@ impl core::fmt::Display for ChainSpecError {
             ChainSpecError::SystemAddressCollision(a) => write!(f, "system address {a} is used twice"),
             ChainSpecError::PartialNextRules => {
                 write!(f, "block derivation and the fee-vault sweep ship together, with the outbox")
+            }
+            ChainSpecError::BurningSweepRecipient(a) => {
+                write!(f, "fee-vault sweep recipient {a} is the zero address or a precompile: the fees would burn")
             }
         }
     }
@@ -309,6 +398,7 @@ impl ChainSpec {
             fee_vault_sweep: None,
             #[cfg(feature = "forced-inclusion")]
             forced_inclusion: false,
+            min_base_fee: 0,
         }
     }
 
@@ -343,16 +433,46 @@ impl ChainSpec {
     }
 
     /// The rules of the next mainnet program (candidate, not scheduled):
-    /// [`Self::mainnet_v1`] plus the settlement-bound [`BlockDerivation`] and the
-    /// fee-vault sweep. The genesis is unchanged, because neither rule touches it.
+    /// [`Self::mainnet_v1`] plus the settlement-bound [`BlockDerivation`], the
+    /// fee-vault sweep to [`MAINNET_FEE_SWEEP_RECIPIENT`] and the base-fee floor.
+    /// The genesis is unchanged, because none of these rules touches it.
+    ///
+    /// While the recipient is unset this spec carries the block derivation
+    /// without the sweep, which [`Self::validate`] refuses
+    /// ([`ChainSpecError::PartialNextRules`]): no block executes and no
+    /// configuration commitment exists under it. Callers that may run before
+    /// the owner sets the recipient use [`Self::mainnet_next`].
     pub fn mainnet() -> Self {
+        Self::mainnet_with_fee_sweep(MAINNET_FEE_SWEEP_RECIPIENT)
+    }
+
+    /// [`Self::mainnet`] when its recipient is set to a release value, else `None`.
+    pub fn mainnet_next() -> Option<Self> {
+        MAINNET_NEXT_RULES_RELEASABLE.then(Self::mainnet)
+    }
+
+    /// REHEARSAL ONLY: the next mainnet rules with the sweep to
+    /// [`REHEARSAL_FEE_SWEEP_RECIPIENT`]. For native tests, benchmarks and
+    /// private-net rehearsals; never compiled into a guest or a release.
+    pub fn mainnet_rehearsal() -> Self {
+        Self::mainnet_with_fee_sweep(Some(REHEARSAL_FEE_SWEEP_RECIPIENT))
+    }
+
+    /// The next mainnet rules as tests should exercise them: [`Self::mainnet`]
+    /// once the owner has set the recipient, [`Self::mainnet_rehearsal`] before.
+    pub fn mainnet_next_or_rehearsal() -> Self {
+        Self::mainnet_next().unwrap_or_else(Self::mainnet_rehearsal)
+    }
+
+    fn mainnet_with_fee_sweep(recipient: Option<Address>) -> Self {
         Self {
             block_derivation: Some(BlockDerivation {
                 l1_genesis_time: MAINNET_GENESIS_TIMESTAMP,
                 l1_slot_millis: GENESIS4_SLOT_MS,
                 prevrandao: L2_BLOCK_PREVRANDAO,
             }),
-            fee_vault_sweep: Some(MAINNET_FEE_SWEEP_RECIPIENT),
+            fee_vault_sweep: recipient,
+            min_base_fee: MAINNET_MIN_BASE_FEE,
             // CANDIDATE: with the `forced-inclusion` feature the next rules
             // include L1 forced inclusion (configuration tag 4).
             #[cfg(feature = "forced-inclusion")]
@@ -416,6 +536,17 @@ impl ChainSpec {
                 return Err(ChainSpecError::SystemAddressCollision(*a));
             }
         }
+        if let Some(recipient) = self.fee_vault_sweep {
+            if is_burning_fee_sweep_recipient(recipient) {
+                return Err(ChainSpecError::BurningSweepRecipient(recipient));
+            }
+        }
+        // The same pairing the configuration commitment requires, checked before
+        // any block runs: block derivation, the sweep and the outbox together.
+        match (self.block_derivation, self.fee_vault_sweep, self.withdrawal_outbox) {
+            (Some(_), Some(_), Some(_)) | (None, None, _) => {}
+            _ => return Err(ChainSpecError::PartialNextRules),
+        }
         #[cfg(feature = "forced-inclusion")]
         if self.forced_inclusion && (self.block_derivation.is_none() || self.fee_vault_sweep.is_none()) {
             return Err(ChainSpecError::PartialNextRules);
@@ -449,6 +580,11 @@ impl ChainSpec {
     /// invalid spec, see [`Self::validate`]) the base fee is left unchanged
     /// rather than dividing by zero.
     pub fn next_base_fee(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
+        core::cmp::max(self.min_base_fee, self.next_base_fee_unfloored(parent_base_fee, parent_gas_used))
+    }
+
+    /// The EIP-1559 step alone, before [`Self::min_base_fee`].
+    fn next_base_fee_unfloored(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
         let target = self.gas_target();
         if target == 0 || self.base_fee_denominator == 0 {
             return parent_base_fee;
@@ -610,14 +746,16 @@ mod tests {
     }
 
     #[test]
-    fn next_mainnet_rules_add_only_block_derivation_and_the_sweep() {
-        let next = ChainSpec::mainnet();
+    fn next_mainnet_rules_add_only_block_derivation_the_sweep_and_the_floor() {
+        let next = ChainSpec::mainnet_next_or_rehearsal();
         next.validate().expect("the next mainnet spec is valid");
         assert!(next.block_derivation.is_some() && next.fee_vault_sweep.is_some());
+        assert_eq!(next.min_base_fee, MAINNET_MIN_BASE_FEE);
         assert_eq!(
             ChainSpec {
                 block_derivation: None,
                 fee_vault_sweep: None,
+                min_base_fee: 0,
                 // CANDIDATE: with the feature the next rules also carry forced inclusion.
                 #[cfg(feature = "forced-inclusion")]
                 forced_inclusion: false,
@@ -627,6 +765,39 @@ mod tests {
         );
         #[cfg(feature = "forced-inclusion")]
         assert!(next.forced_inclusion && !ChainSpec::mainnet_v1().forced_inclusion);
+    }
+
+    /// Agent 197 (L1-12): the floor holds an idle chain at 0.1 gwei, where the
+    /// current rules decay to the 249 wei rounding fixed point; above the floor
+    /// the EIP-1559 step is unchanged; earlier rule sets have no floor.
+    #[test]
+    fn base_fee_floor_holds_an_idle_chain_and_leaves_the_step_unchanged() {
+        let v1 = ChainSpec::mainnet_v1();
+        let next = ChainSpec::mainnet_next_or_rehearsal();
+        assert_eq!(v1.min_base_fee, 0);
+        let (mut old, mut new) = (v1.initial_base_fee, next.initial_base_fee);
+        for _ in 0..5_000 {
+            old = v1.next_base_fee(old, 0);
+            new = next.next_base_fee(new, 0);
+        }
+        assert_eq!(old, 249, "today's rules: the rounding fixed point of report 34");
+        assert_eq!(new, MAINNET_MIN_BASE_FEE, "next rules: the floor");
+        assert_eq!(next.next_base_fee(1, 0), MAINNET_MIN_BASE_FEE, "a parent below the floor is lifted at once");
+        let target = next.gas_target();
+        for (parent, used) in [(1_000_000_000, 0), (1_000_000_000, target), (1_000_000_000, 2 * target), (MAINNET_MIN_BASE_FEE, 2 * target)] {
+            let step = v1.next_base_fee(parent, used);
+            assert_eq!(next.next_base_fee(parent, used), step.max(MAINNET_MIN_BASE_FEE));
+        }
+        assert!(next.next_base_fee(MAINNET_MIN_BASE_FEE, 2 * target) > MAINNET_MIN_BASE_FEE, "congestion still raises it");
+    }
+
+    #[test]
+    fn a_floor_outside_the_next_rules_is_refused_by_the_commitment() {
+        let floored_v1 = ChainSpec { min_base_fee: 1, ..ChainSpec::mainnet_v1() };
+        assert!(crate::proof_statement::configuration_commitment(&floored_v1).is_err());
+        let a = crate::proof_statement::configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap();
+        let b = crate::proof_statement::configuration_commitment(&ChainSpec { min_base_fee: 1, ..ChainSpec::mainnet_next_or_rehearsal() }).unwrap();
+        assert_ne!(a, b, "the floor is committed");
     }
 
     #[test]
@@ -687,5 +858,125 @@ mod tests {
         // clamps the increase to at least 1 wei.
         let next = spec.next_base_fee(1, spec.gas_limit);
         assert_eq!(next, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Release gate on the fee-sweep recipient (agent 163, B-1 and B-2)
+    // -----------------------------------------------------------------------
+
+    /// B-1: the next mainnet rules exist only with a release recipient. While
+    /// the owner has not set it, `mainnet()` cannot execute a block or produce a
+    /// configuration, `mainnet_next()` is `None`, and the guests' compile-time
+    /// gate is false. Once it is set, all three agree the other way.
+    #[test]
+    fn gate_the_next_rules_exist_only_with_a_release_recipient() {
+        let next = ChainSpec::mainnet();
+        let commitment = crate::proof_statement::configuration_commitment(&next);
+        match MAINNET_FEE_SWEEP_RECIPIENT {
+            Some(recipient) if is_release_fee_sweep_recipient(recipient) => {
+                assert!(MAINNET_NEXT_RULES_RELEASABLE);
+                next.validate().expect("the release rules are valid");
+                assert!(commitment.is_ok());
+                assert_eq!(ChainSpec::mainnet_next(), Some(next.clone()));
+                assert_eq!(ChainSpec::mainnet_next_or_rehearsal(), next);
+            }
+            _ => {
+                assert!(!MAINNET_NEXT_RULES_RELEASABLE);
+                assert!(next.fee_vault_sweep.is_none() || !is_release_fee_sweep_recipient(next.fee_vault_sweep.unwrap()));
+                assert_eq!(ChainSpec::mainnet_next(), None);
+                assert_eq!(ChainSpec::mainnet_next_or_rehearsal(), ChainSpec::mainnet_rehearsal());
+                if next.fee_vault_sweep.is_none() {
+                    assert_eq!(next.validate(), Err(ChainSpecError::PartialNextRules));
+                    assert_eq!(commitment, Err(ChainSpecError::PartialNextRules));
+                }
+            }
+        }
+        // The rehearsal rules are the release rules but for the recipient.
+        let rehearsal = ChainSpec::mainnet_rehearsal();
+        rehearsal.validate().expect("the rehearsal rules are valid");
+        assert_eq!(ChainSpec { fee_vault_sweep: next.fee_vault_sweep, ..rehearsal.clone() }, next);
+        assert!(!is_release_fee_sweep_recipient(REHEARSAL_FEE_SWEEP_RECIPIENT));
+        // L1 never selects the rehearsal rules from a configuration.
+        let rehearsal_configuration = crate::proof_statement::configuration_commitment(&rehearsal).unwrap();
+        assert_eq!(ChainSpec::mainnet_rules_for(rehearsal_configuration), None);
+    }
+
+    /// B-1: the placeholder, burning addresses, the predeploy range and the
+    /// EIP-4788 contract are never release recipients; ordinary addresses are.
+    #[test]
+    fn gate_release_recipients_refuse_placeholder_burn_and_system_addresses() {
+        let refused = [
+            REHEARSAL_FEE_SWEEP_RECIPIENT,
+            Address::ZERO,
+            Address::with_last_byte(1),
+            Address::with_last_byte(9),
+            Address::with_last_byte(0x0a),
+            BASE_FEE_VAULT,
+            SEQUENCER_FEE_VAULT,
+            SUPPLY_LEDGER,
+            BLOCK_INFO,
+            crate::withdrawal::L2_TO_L1_MESSAGE_PASSER,
+            address!("42000000000000000000000000000000000000ff"),
+            BEACON_ROOTS_ADDRESS,
+        ];
+        for recipient in refused {
+            assert!(!is_release_fee_sweep_recipient(recipient), "{recipient} accepted as a release recipient");
+        }
+        for recipient in [
+            Address::with_last_byte(0x0b),
+            address!("14c0aEb5497A4E506b6c12556718bE957302D96D"),
+            address!("4200000000000000000000000000000000010000"),
+            Address::repeat_byte(0xff),
+        ] {
+            assert!(is_release_fee_sweep_recipient(recipient), "{recipient} refused");
+            ChainSpec { fee_vault_sweep: Some(recipient), ..ChainSpec::mainnet_rehearsal() }.validate().unwrap();
+        }
+    }
+
+    /// B-2: `validate` refuses a sweep recipient that burns, in every rule set
+    /// that sweeps, and so does the configuration commitment.
+    #[test]
+    fn gate_validate_refuses_burning_sweep_recipients() {
+        for last in 0u8..=0x0a {
+            let recipient = Address::with_last_byte(last);
+            assert!(is_burning_fee_sweep_recipient(recipient));
+            let spec = ChainSpec { fee_vault_sweep: Some(recipient), ..ChainSpec::mainnet_rehearsal() };
+            assert_eq!(spec.validate(), Err(ChainSpecError::BurningSweepRecipient(recipient)));
+            assert_eq!(
+                crate::proof_statement::configuration_commitment(&spec),
+                Err(ChainSpecError::BurningSweepRecipient(recipient))
+            );
+        }
+        assert!(!is_burning_fee_sweep_recipient(Address::with_last_byte(0x0b)));
+        assert!(!is_burning_fee_sweep_recipient(address!("0100000000000000000000000000000000000000")));
+    }
+
+    /// The configuration layout `deployment/mainnet/set-sweep-recipient.py`
+    /// reimplements (with the 0.1 gwei floor): the rehearsal rules and agent
+    /// 165's throwaway recipient give the script's values.
+    #[test]
+    fn rehearsal_configuration_matches_the_sweep_script() {
+        const REHEARSAL_CONFIGURATION: B256 = B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));
+        let configuration = |spec: &ChainSpec| crate::proof_statement::configuration_commitment(spec).unwrap();
+        assert_eq!(configuration(&ChainSpec::mainnet_rehearsal()), REHEARSAL_CONFIGURATION);
+        let throwaway = ChainSpec {
+            fee_vault_sweep: Some(address!("14c0aEb5497A4E506b6c12556718bE957302D96D")),
+            ..ChainSpec::mainnet_rehearsal()
+        };
+        assert_eq!(configuration(&throwaway), B256::new(hex!("7df770a35ce805982f12f552490337a77e842788ed3ab444fe42e35e6b3c1618")));
+    }
+
+    /// Block derivation without the sweep, or either without the outbox, is
+    /// refused before any block runs, not only by the commitment.
+    #[test]
+    fn validate_refuses_partial_next_rules() {
+        let next = ChainSpec::mainnet_rehearsal();
+        for spec in [
+            ChainSpec { fee_vault_sweep: None, ..next.clone() },
+            ChainSpec { block_derivation: None, ..next.clone() },
+            ChainSpec { withdrawal_outbox: None, ..next.clone() },
+        ] {
+            assert_eq!(spec.validate(), Err(ChainSpecError::PartialNextRules));
+        }
     }
 }

@@ -115,7 +115,11 @@ Each is tested; the test names are in `src/sparse_witness/tests.rs` (T) and
    path's.
 7. **Statement equivalence.** For the same block, the sparse statement equals the
    complete witness's statement byte for byte. Measured on 538 real blocks by
-   agent 88 and again on the new ELF (see the report of agent 115).
+   agent 88, and on the programs below over 505 stored real blocks of 17 private
+   chains: 0 differences, and the statement equals the real proof's public
+   values on 491 of 491 blocks that kept their proof. In the same run, the ELF
+   refused every witness the native path refused after removing one trie node
+   (290), and every witness with one code entry removed (505).
 8. **Malleability is harmless.** Reordered lists, extra trie nodes, extra
    accounts, extra absent addresses and extra code entries change only the
    program input, never the statement.
@@ -131,6 +135,8 @@ Each is tested; the test names are in `src/sparse_witness/tests.rs` (T) and
 | I3: unreachable `NotExisting` arm in `derive_post_root`, misleading comment | The arm now refuses (`UnknownAccount`) instead of deriving a leaf; the comment names `ensure_system_account` and `credit_balance` |
 | I2: the ELF depended on the build host | `container/Dockerfile` and `build-container.sh`: one pinned image, sources at `/bloch-l2-evm`, registry at `/cargo` |
 | Artifact | The sparse artifact format moves to `BLOCH:EVM:EXECUTION-ARTIFACT:SPARSE:2`; version 1 files no longer decode |
+| Pins | The settler's `MAINNET_NEXT_SPARSE` and the sparse crossing harness name the programs below. The native `PROGRAM_NEXT` (L1 side, out of scope) must move with them |
+| Review tool | `bloch-evm-sp1-sparse-diff` also removes one code entry per block and requires the native path and the guest to refuse |
 
 ## Known limits
 
@@ -166,6 +172,11 @@ output:
 | `settlement_v3_mainnet_sparse` | `78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea` | `1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0` | `7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910` | `00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910` |
 | `settlement_v3_mainnet_v1_sparse` | `b1b09c1f5b98b744493f4fb9ee4b15e05792e28cfe6cddf4a8a4eddfdf0d246c` | `195e6f361989cb4334d24d3646ba05b8e36955691e33cb4f5495548f35991fea` | `13f4866d5bd744237d732bd85f6a0fd62980231c69ff67690d84c57e14a73510` | `0027e90cdb6f5d108feb995ec5f6a0fd653004639a7fd9da46c262bf14a73510` |
 | `settlement_v3_mainnet_sparse_eager` (measurement only) | `f3c68511ea70b1bd6044266fb1088eb4a2ceb39c280ddc2a4fb85322468dfc64` | | | |
+
+One real block proved with `settlement_v3_mainnet_sparse`: block 6 of a private
+crossing run (next rules, 2 user transactions, 2 withdrawals), through the
+settler's `--mainnet --sparse prove-groth16 native-artifact`: 371 s, 29.2 GiB
+peak, Groth16 proof reverified offline.
 
 Configuration commitment (next rules) `975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878`,
 proof policy V3 `154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d`.

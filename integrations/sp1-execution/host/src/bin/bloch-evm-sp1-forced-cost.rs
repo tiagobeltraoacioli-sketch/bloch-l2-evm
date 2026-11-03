@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     let usage = "usage: bloch-evm-sp1-forced-cost transfers|modexp|skipped --sparse ELF";
     let mode = args.first().ok_or(usage)?.clone();
     let elf = args.iter().position(|a| a == "--sparse").and_then(|i| args.get(i + 1)).ok_or(usage)?.clone();
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     if !spec.forced_inclusion {
         return Err("this build has no forced inclusion".into());
     }

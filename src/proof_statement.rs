@@ -682,6 +682,7 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         fee_vault_sweep,
         #[cfg(feature = "forced-inclusion")]
         forced_inclusion,
+        min_base_fee,
     } = spec;
     let version_3 = match (block_derivation, fee_vault_sweep, withdrawal_outbox) {
         (Some(derivation), Some(recipient), Some(_)) => Some((derivation, recipient)),
@@ -728,6 +729,9 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         bytes.extend_from_slice(&derivation.l1_slot_millis.to_be_bytes());
         bytes.extend_from_slice(derivation.prevrandao.as_slice());
         bytes.extend_from_slice(recipient.as_slice());
+        bytes.extend_from_slice(&min_base_fee.to_be_bytes());
+    } else if *min_base_fee != 0 {
+        return Err(ChainSpecError::PartialNextRules);
     }
     #[cfg(feature = "forced-inclusion")]
     if version_4 {
@@ -1291,7 +1295,7 @@ mod forced_configuration_tests {
     /// Native `PROGRAM_NEXT` (identity 3) and `FORCED_INCLUSION_CONFIGURATIONS` name this value.
     #[test]
     fn the_forced_next_rules_have_their_own_configuration() {
-        let next = ChainSpec::mainnet();
+        let next = ChainSpec::mainnet_next_or_rehearsal();
         assert!(next.forced_inclusion);
         let forced = configuration_commitment(&next).unwrap();
         let plain = configuration_commitment(&ChainSpec { forced_inclusion: false, ..next.clone() }).unwrap();

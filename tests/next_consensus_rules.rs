@@ -8,7 +8,7 @@ use alloy_primitives::{b256, Address, Bytes, Signature, TxKind, B256, U256};
 use bloch_l2_evm::{
     chainspec::{
         fee_vault_sweep_code, BASE_FEE_VAULT, GENESIS4_SLOT_MS, L2_BLOCK_PREVRANDAO, MAINNET_DOMAIN,
-        MAINNET_FEE_SWEEP_RECIPIENT, MAINNET_GENESIS_TIMESTAMP, SEQUENCER_FEE_VAULT,
+        MAINNET_GENESIS_TIMESTAMP, MAINNET_NEXT_RULES_RELEASABLE, SEQUENCER_FEE_VAULT,
     },
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
     node_primitives::NodeBodyV2,
@@ -112,24 +112,30 @@ fn supply(state: &L2State, who: &[Address]) -> U256 {
 #[test]
 fn the_activated_configuration_and_genesis_are_untouched() {
     assert_eq!(configuration_commitment(&ChainSpec::mainnet_v1()).unwrap(), V1_CONFIGURATION);
-    let next = configuration_commitment(&ChainSpec::mainnet()).unwrap();
+    let next = configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap();
     assert_ne!(next, V1_CONFIGURATION);
     assert_eq!(ChainSpec::mainnet_rules_for(V1_CONFIGURATION), Some(ChainSpec::mainnet_v1()));
-    assert_eq!(ChainSpec::mainnet_rules_for(next), Some(ChainSpec::mainnet()));
+    // Only the release rules are ever looked up from an L1 configuration: the
+    // rehearsal recipient's configuration is not a mainnet rule set.
+    if MAINNET_NEXT_RULES_RELEASABLE {
+        assert_eq!(ChainSpec::mainnet_rules_for(next), Some(ChainSpec::mainnet()));
+    } else {
+        assert_eq!(ChainSpec::mainnet_rules_for(next), None);
+    }
     assert_eq!(ChainSpec::mainnet_rules_for(B256::ZERO), None);
 
     let mut old = genesis_v2(&ChainSpec::mainnet_v1(), MAINNET_GENESIS_TIMESTAMP).unwrap();
-    let mut new = genesis_v2(&ChainSpec::mainnet(), MAINNET_GENESIS_TIMESTAMP).unwrap();
+    let mut new = genesis_v2(&ChainSpec::mainnet_next_or_rehearsal(), MAINNET_GENESIS_TIMESTAMP).unwrap();
     assert_eq!(old.commit_root(), new.commit_root());
     assert_eq!(
         node_head(&ChainSpec::mainnet_v1(), MAINNET_DOMAIN, &old).unwrap().hash(),
-        node_head(&ChainSpec::mainnet(), MAINNET_DOMAIN, &new).unwrap().hash()
+        node_head(&ChainSpec::mainnet_next_or_rehearsal(), MAINNET_DOMAIN, &new).unwrap().hash()
     );
 }
 
 #[test]
 fn only_the_derived_values_settle_and_parent_plus_one_still_applies() {
-    let spec = ChainSpec::mainnet();
+    let spec = ChainSpec::mainnet_next_or_rehearsal();
     let mut state = genesis_v2(&spec, MAINNET_GENESIS_TIMESTAMP).unwrap();
     let body = NodeBodyV2::default();
     let rule = slot_time(FIRST_SLOT);
@@ -156,7 +162,7 @@ fn only_the_derived_values_settle_and_parent_plus_one_still_applies() {
 
 #[test]
 fn settlements_cross_the_boundary_and_recover_the_fees() {
-    let (old, new) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet());
+    let (old, new) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
     let mut state = genesis_v2(&old, MAINNET_GENESIS_TIMESTAMP).unwrap();
     let friend = Address::repeat_byte(0x55);
     let deposit = DepositMint {
@@ -169,7 +175,8 @@ fn settlements_cross_the_boundary_and_recover_the_fees() {
             l1_sats: 500_000_000,
         },
     };
-    let accounts = [sender(), friend, BASE_FEE_VAULT, SEQUENCER_FEE_VAULT, MAINNET_FEE_SWEEP_RECIPIENT];
+    let recipient = new.fee_vault_sweep.expect("the next rules sweep");
+    let accounts = [sender(), friend, BASE_FEE_VAULT, SEQUENCER_FEE_VAULT, recipient];
 
     // Under the activated rules, a far-future timestamp and a foreign prevrandao
     // still settle: this is the exposure, and old history must replay as it was.
@@ -194,7 +201,7 @@ fn settlements_cross_the_boundary_and_recover_the_fees() {
     let head = node_head(&new, MAINNET_DOMAIN, &state).unwrap();
     assert_eq!(head.parent_hash, v1_head.hash());
     for vault in [BASE_FEE_VAULT, SEQUENCER_FEE_VAULT] {
-        assert_eq!(code_len(&state, vault), fee_vault_sweep_code(MAINNET_FEE_SWEEP_RECIPIENT).len());
+        assert_eq!(code_len(&state, vault), fee_vault_sweep_code(recipient).len());
     }
     assert_eq!((balance(&state, BASE_FEE_VAULT), balance(&state, SEQUENCER_FEE_VAULT)), (base_fees, tips));
     assert_eq!(supply(&state, &accounts), total);
@@ -209,7 +216,7 @@ fn settlements_cross_the_boundary_and_recover_the_fees() {
         ],
     };
     settle(&new, &mut state, &ctx, &body, FIRST_SLOT + 2).unwrap();
-    let swept = balance(&state, MAINNET_FEE_SWEEP_RECIPIENT);
+    let swept = balance(&state, recipient);
     assert!(swept >= base_fees + tips, "recipient holds the fees accumulated under the old rules");
     assert_eq!(supply(&state, &accounts), total, "supply is conserved across the sweep");
     // The sweep block's own fees reach the vaults after its calls and stay there.
