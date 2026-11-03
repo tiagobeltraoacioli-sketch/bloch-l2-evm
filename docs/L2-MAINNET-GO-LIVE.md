@@ -189,9 +189,9 @@ No other kit file names the release. `verify_release_signature.py` reads the rel
 | `deployment/mainnet/l1_monitor.py` | `1632d18a63ef2b14505f5f805e06f438d977aaff507b28b432346638b3f1f744` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `b773201f82fa46150be4a704aacd731651e56a08e0616e6de3ea163a9d32f11d` (agent 154 8d1c873) |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `d6548948451b93cc9a64e11c57c3c2a5e2ac5f4a456a42f5ced7669a05f5696d` (agent 154 8d1c873) |
-| `deployment/mainnet/public-rpc/render.py` | `f7d588456785aaa329df79b83de5c08bdd71da073e57350a5d9a7d77bf352777` (agent 154 8d1c873) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `6b5782fcd4288ff11ef53bf889a3bdec8f14ee8f77c34e6da0e51b21f49d509f` (agent 154 8d1c873) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `2dbbedf4edbaf48d6d397076aef13488560d046e38acafe84e59b4bf82d13495` (agent 154 8d1c873) |
+| `deployment/mainnet/public-rpc/render.py` | `4c80de91d53fc65900543c317e4490be250d12db21ef15049fc21441d8881446` (agent 154 8d1c873) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `02a11a0ac516d4c67c5e9f9a500c841c6d00565bb30aeccd3ff7260eba532c74` (agent 156 texts; agent 198 pipefail fix; was `ab24bda0…`) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `208d7a0d54e8fa870c979c8761125546d9a0ef47db2f58fe9cf58c738d88943a` |

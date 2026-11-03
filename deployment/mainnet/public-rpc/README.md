@@ -20,13 +20,13 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 |---|---|
 | `l2rpc-gateway.conf.in` | nginx `http{}` template: TLS, real IP from Cloudflare, CORS map, `limit_req`/`limit_conn`, upstreams, internal locations, probe server |
 | `l2rpc-gateway.js` | njs: JSON-RPC validation, method allowlist, per-IP call/tx/simulation budgets, routing, failover errors, backend probe, `/health` |
-| `l2rpc-proxy.inc` | proxy settings shared by every hop to a settled RPC |
+| `l2rpc-proxy.inc` | proxy settings shared by every hop to a settled RPC (the subrequest locations `/_l2s/*` set their own bounded buffer) |
 | `render.py` | renders the above for one host (`--role sequencer|replica`, peer, limits, CORS origins) |
 | `setup-gateway.sh` | owner script: `peer-cert`, `plan`, `apply`, `rollback` (root, on each host) |
 | `cloudflare-ips-v4.txt`, `-v6.txt` | Cloudflare edge ranges (realip, edge check, firewall); refresh from cloudflare.com/ips before apply |
 | `tests/pair.sh` | private two-gateway rig (unprivileged nginx, loopback, throwaway certificates) |
 | `tests/test_render_r10.py` | render checks without nginx: unix-socket peer hop, fixed peer probe, owner AOP CA (refuses the shared CA) |
-| `tests/review_r10_gateway.mjs`, `tests/review_r10_rig.py` | review 154: node model of the njs budgets (per /64, simulation caps, slot windows, split-batch ids) and the real-nginx rig R1-R4 |
+| `tests/review_r10_gateway.mjs`, `tests/review_r10_rig.py` | review 154: node model of the njs budgets (per /64, simulation caps, slot windows, split-batch ids) and the real-nginx rig R1-R5 (R5: split answers above 2 MiB get a prompt -32005) |
 | `tests/test_gateway.py` | integration checks (protocol, allowlist, limits, CORS, routing, failover, follower status with `--status-files`) |
 | `tests/rig-*.sh` | private settled-RPC copies, private block producer, ab load test |
 | `compat/` | ethers v6 / viem / MetaMask call sequence (`compat.mjs`, `write.mjs`), Foundry (`foundry.sh`, `foundry-write.sh`) |
@@ -42,6 +42,7 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 | Methods | `eth_*` reads, `net_*`, `web3_*`, `bloch_finality`, `bloch_settlement`, `bloch_chainIdentity`, `bloch_chainStatus`, `eth_sendRawTransaction`. Everything else gets -32601. Filters, subscriptions and node signing get an explanation |
 | Local answers | `eth_chainId`, `net_version` |
 | Body / batch | 512 KiB (the settled RPC's own cap), at most 100 calls per batch (ethers v6 batches up to 100), and an empty batch is refused |
+| Answer size (split requests) | A request that the gateway splits through njs subrequests (any request with `eth_call`, `eth_estimateGas` or `eth_createAccessList`, a finality read, or a batch mixing routes) gets at most **2 MiB** of backend answer per route (`--sub-answer-max`, bytes). Above that, every call of that part gets JSON-RPC **-32005** `Response too large` with `data.limitBytes` (2097152), at once, and its simulation slots are freed. The guard is a unix-socket hop in the hop dir (`guard.sock`) whose header/body filters replace the oversized answer with a marker; the subrequest buffer is 2 MiB + 64 KiB, so nginx never waits on or aborts for a body it cannot hold. A request that is not split (one route, no simulation, e.g. a single `eth_getBlockByNumber` with full transactions) is proxied unchanged, without this limit. Before this, a split answer above the 2 MiB proxy buffers held the request open until the client gave up (agent 201, rig R4/R5) |
 | Withdrawal proofs | `bloch_getWithdrawalProof` takes the read route and the per-IP call budget. It needs a settled RPC with the method. Clients verify every answer against L1 (`deployment/mainnet/withdraw/`) |
 | eth_getLogs | at most 2,000 blocks per call (tags resolved against the probed head) and 256 addresses |
 | Per IP | 20 HTTP req/s, burst 100 (`limit_req`), 32 connections (`limit_conn`), 1,200 calls/min (a batch counts each call), 30 `eth_sendRawTransaction`/min, 2 simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`) in flight, and 8 in flight for all clients together (the 2 x 4 permits of the settled RPCs; each simulation runs with at most 15M gas, and the settled RPC answers within 5 s of taking its permit, so a simulation never reaches the 30 s upstream timeout). A client is an IPv4 address or an IPv6 /64 (`l2rpc.client`, also the `limit_req`/`limit_conn` key). Over a limit: HTTP 429 and JSON-RPC -32005 with `Retry-After` |

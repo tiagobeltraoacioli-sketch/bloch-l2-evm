@@ -8,6 +8,8 @@ js_shared_dict_zone zone=l2rate:16m timeout=120s type=number evict;
 js_shared_dict_zone zone=l2state:1m;
 js_var $l2_failure;
 js_var $l2_methods "-";
+js_var $l2_guard;
+js_var $l2_guard_n;
 js_set $l2_failure_body l2rpc.failure;
 # Budget key: the IPv4 address, or the /64 of an IPv6 address (l2rpc.client).
 js_set $l2_client l2rpc.client;
@@ -181,6 +183,26 @@ server {
         proxy_next_upstream off;
     }
 
+    # The same four backends for njs subrequests, through the size guard below. A subrequest answer is
+    # held in memory: it is never larger than @SUB_MAX@ bytes plus the guard's marker (l2rpc-gateway.js
+    # SUB_ANSWER_MAX), so unbuffered reading into @SUB_BUF@ never waits on or aborts for a body it
+    # cannot hold. The guard's own upstream timeout (30 s) ends first.
+    location ~ ^/_l2s/(local|peer|seqread|seq)$ {
+        internal;
+        proxy_pass http://unix:@HOP_DIR@/guard.sock:/$1;
+        proxy_http_version 1.1;
+        proxy_method POST;
+        proxy_pass_request_headers off;
+        proxy_set_header Connection "";
+        proxy_set_header Host localhost;
+        proxy_set_header Content-Type application/json;
+        proxy_connect_timeout 2s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 40s;
+        proxy_buffering off;
+        subrequest_output_buffer_size @SUB_BUF@;
+    }
+
     location @l2_unavailable {
         default_type application/json;
         add_header Cache-Control no-store always;
@@ -208,6 +230,56 @@ server {
         return 405 '{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Use POST with a JSON-RPC 2.0 body."}}';
     }
 
+    location / {
+        return 404;
+    }
+}
+
+# ------------------- size guard for subrequests (unix socket in @HOP_DIR@, nginx workers only)
+# The backend locations of the public server, as seen by njs subrequests: same upstreams, retries and
+# timeouts, except that a read timeout is not retried on the other backend: an eth_call that outlived
+# 30 s is not run a second time (G4; the in-memory subrequests of the public server never retried it either).
+# The filters replace an answer above @SUB_MAX@ bytes with {"l2_too_large": @SUB_MAX@}.
+server {
+    listen unix:@HOP_DIR@/guard.sock;
+    access_log off;
+    client_max_body_size @MAX_BODY@;
+    client_body_buffer_size @MAX_BODY@;
+    location = /local {
+        proxy_pass http://l2_read_local/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_next_upstream error http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream_tries 2;
+        proxy_read_timeout 30s;
+        js_header_filter l2rpc.guardHeader;
+        js_body_filter l2rpc.guardBody buffer_type=buffer;
+    }
+    location = /peer {
+        proxy_pass http://l2_read_peer/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_next_upstream error http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream_tries 2;
+        proxy_read_timeout 30s;
+        js_header_filter l2rpc.guardHeader;
+        js_body_filter l2rpc.guardBody buffer_type=buffer;
+    }
+    location = /seqread {
+        proxy_pass http://l2_seqread/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_next_upstream error http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream_tries 2;
+        proxy_read_timeout 30s;
+        js_header_filter l2rpc.guardHeader;
+        js_body_filter l2rpc.guardBody buffer_type=buffer;
+    }
+    location = /seq {
+        proxy_pass http://l2_seq/;
+        include @CONF_DIR@/l2rpc-proxy.inc;
+        proxy_read_timeout 15s;
+        proxy_next_upstream off;
+        js_header_filter l2rpc.guardHeader;
+        js_body_filter l2rpc.guardBody buffer_type=buffer;
+    }
     location / {
         return 404;
     }

@@ -132,7 +132,10 @@ class Pair:
     def workers_rss_kib(self):
         total = 0
         for conf in self.confs:
-            master = int((conf / 'nginx.pid').read_text())
+            try:
+                master = int((conf / 'nginx.pid').read_text())
+            except (OSError, ValueError):
+                continue  # stopping
             for pid in os.listdir('/proc'):
                 if not pid.isdigit():
                     continue
@@ -140,7 +143,8 @@ class Pair:
                     status = Path(f'/proc/{pid}/status').read_text()
                 except OSError:
                     continue
-                if f'PPid:\t{master}\n' in status:
+                # A worker that is exiting has no VmRSS line any more.
+                if f'PPid:\t{master}\n' in status and 'VmRSS:' in status:
                     total += int(status.split('VmRSS:')[1].split()[0])
         return total
 
@@ -263,9 +267,43 @@ def r4_memory(pair, A, B):
     stop.set()
     t.join()
     grew_mib = (peak[0] - base) / 1024
-    check('R4/G5: 32 concurrent split batches with a 15 MB answer from two clients add under 512 MiB to the nginx workers',
-          grew_mib < 512, {'workers_rss_base_mib': round(base / 1024), 'peak_growth_mib': round(grew_mib),
+    check('R4/G5: 32 concurrent split batches with a 15 MB answer from two clients add under 512 MiB to the nginx workers '
+          'and every admitted one is answered (200, -32005 "response too large")',
+          grew_mib < 512 and set(statuses) <= {200, 429} and 200 in statuses, {'workers_rss_base_mib': round(base / 1024), 'peak_growth_mib': round(grew_mib),
                            'statuses': {str(s): statuses.count(s) for s in set(statuses)}})
+    A.big = B.big = 64
+
+
+def r5_large_answers(pair, A, B):
+    """A split batch whose backend answer is above the subrequest bound (2 MiB) gets a prompt -32005 for each
+    call, frees its simulation slots, and the client is served at once afterwards; below the bound it passes."""
+    ip = '203.0.113.51'
+    batch = [call(1), call(2, 'eth_getCode', ['0x' + '11' * 20, 'latest'])]
+    for size, label in ((int(1.9 * 1024 * 1024), '1.9 MiB'), (3 * 1024 * 1024, '3 MiB'), (15 * 1024 * 1024, '15 MiB')):
+        A.big = B.big = size
+        t0 = time.time()
+        status, answer = post(pair.a, batch, ip, timeout=60)
+        took = time.time() - t0
+        A.big = B.big = 64
+        if size < 2 * 1024 * 1024:
+            ok = status == 200 and isinstance(answer, list) and len(answer[1].get('result', '')) == 2 + 2 * (size // 2)
+            check(f'R5: a split batch with a {label} answer is served whole', ok and took < 20,
+                  {'status': status, 'seconds': round(took, 1), 'answer_bytes': len(json.dumps(answer))})
+        else:
+            codes = [x.get('error', {}).get('code') for x in answer] if isinstance(answer, list) else answer
+            limits = [x.get('error', {}).get('data', {}).get('limitBytes') for x in answer] if isinstance(answer, list) else None
+            check(f'R5: a split batch with a {label} answer gets -32005 "response too large" for every call, promptly',
+                  status == 200 and codes == [-32005, -32005] and limits == [2097152, 2097152] and took < 20,
+                  {'status': status, 'seconds': round(took, 1), 'codes': codes, 'limits': limits})
+        # Slots freed: as many eth_call as the client may hold are served right away.
+        status, again = post(pair.a, [call(i) for i in range(2)], ip, timeout=20)
+        check(f'R5: after the {label} answer the same client is served at once (slots released)',
+              status == 200 and isinstance(again, list) and all('result' in x for x in again), {'status': status})
+    # A single (non-batch) eth_call above the bound also goes through a subrequest: same error.
+    A.big = B.big = 3 * 1024 * 1024
+    status, answer = post(pair.a, call(7, 'eth_getCode', ['0x' + '11' * 20, 'latest']), ip, timeout=60)
+    check('R5: a single eth_getCode of 3 MiB (no simulation: proxied, not split) is served whole',
+          status == 200 and isinstance(answer, dict) and len(answer.get('result', '')) == 2 + 3 * 1024 * 1024, {'status': status})
     A.big = B.big = 64
 
 
@@ -273,7 +311,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--work', required=True)
     p.add_argument('--port-base', type=int, default=35400)
-    p.add_argument('--only', default='R1,R2,R3,R4')
+    p.add_argument('--only', default='R1,R2,R3,R4,R5')
     p.add_argument('--sims', type=int, default=16, help="the rendered --sim-per-ip (16 at f1c8033, 2 at 8d1c873)")
     a = p.parse_args()
     work = Path(a.work).resolve()
@@ -294,6 +332,9 @@ def main():
             r3_timeout(pair, A, B)
         if 'R4' in only:
             r4_memory(pair, A, B)
+        if 'R5' in only:
+            time.sleep(2)
+            r5_large_answers(pair, A, B)
     finally:
         pair.stop()
     failed = [n for n, ok in results if not ok]
