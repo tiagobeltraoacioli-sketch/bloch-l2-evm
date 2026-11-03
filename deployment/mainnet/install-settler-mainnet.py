@@ -17,10 +17,12 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       script hash to send the DA fee budget to.
   sudo python3 install-settler-mainnet.py configure [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
-        [--follower-state DIR --follower-status FILE | --no-foreign-recovery]
+        [--follower-state DIR --follower-status FILE | --no-foreign-recovery] [--reorg-recovery]
       Foreign settlement recovery is ON by default (owner decision D17, 2026-11-02): it reads the
       local native follower at FOLLOWER_STATE / FOLLOWER_STATUS, which must exist and be readable
       by the settler user. --no-foreign-recovery leaves it off (any foreign settlement then halts).
+      --reorg-recovery turns on the automatic recovery after an L1 reorg of an own settlement
+      (SETTLER-RUNBOOK.md "Automatic reorg recovery"); OFF unless given, never with --no-foreign-recovery.
       Runs, as the settler user, `--check-rpc` and the read-only `--dry-run` (SP1
       execute of the next L2 block against the live request) on a pending config, and
       only then writes config.json (user transactions OFF unless asked). A failed check
@@ -72,7 +74,7 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': '9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007',
+    'settler_v3.py': 'd98718425e48d45283b382c6a1d2893e2c7721e6fc0ce94ea2fbc0052a7c7adc',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
 }
@@ -220,6 +222,11 @@ def configure(args):
         assert readable.returncode == 0, (f'the settler user cannot read the follower state {state} and status '
                                           f'{status}: start follower A first (P3), or pass --no-foreign-recovery')
         config['foreign_recovery'] = {'follower_state': state, 'follower_status': status}
+    if '--reorg-recovery' in args:
+        # Off unless asked for. It reads the same follower store, and a restore or a second divergence ends on the
+        # foreign path, so it needs foreign_recovery.
+        assert '--no-foreign-recovery' not in args, '--reorg-recovery needs foreign recovery (drop --no-foreign-recovery)'
+        config['reorg_recovery'] = {'follower_state': state, 'follower_status': status}
     target = option(args, '--remote-prover')
     if target:
         host_key = Path(option(args, '--prover-host-key', '')).read_text().strip()

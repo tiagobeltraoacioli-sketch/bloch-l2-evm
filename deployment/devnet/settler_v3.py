@@ -132,6 +132,25 @@ Differences, all deliberate:
   the database must reopen it after a swap: the worker rewrites `<workdir>/../l2-db-generation.json`,
   which a systemd path unit watches to restart the settled RPC.
 
+* reorgs of this worker's own settlements (drills 2026-10-31 and 2026-11-02, "L2 head N cannot extend accepted
+  settlement M"; optional `reorg_recovery`, off by default): an L1 reorg can remove an accepted settlement of this
+  worker while the next block is already built. The database then holds the accepted block M and unsettled blocks
+  above it that no request can use. Without `reorg_recovery` this halts (exit 3) for `l2_reorg_recover.py`, as
+  before. With it the worker does what that tool does, unattended: it waits until the same accepted settlement and
+  the same local head were seen for `stable_seconds` (a flapping view never triggers a rebuild), and, unless
+  `wait_for_finality` is false, until the native follower has finalized M (a finalized settlement cannot be
+  reorged away, so a rebuild can never be undone by L1); it rebuilds a NEW database from verified L1 blocks
+  (`produce reconstruct`), requires block M to be the accepted hash, returns the user transactions of the orphaned
+  blocks to the spool, moves their work directories aside, swaps the databases (the journalled swap of
+  `foreign_recovery`, which also restarts the settled RPC through `l2-db-generation.json`) and continues. While the
+  native request of M+1 is unchanged, the worker's own proved settlement of M+1 is rebroadcast first
+  (`resubmit_window_seconds`), and a database kept aside is swapped back if those bytes land after a rebuild
+  (agent 206, review 153 M2). A partial quorum below the highest accepted settlement seen reaches these gates too
+  (153 M1), but never builds, proves or pays DA. No paid DA batch is ever read from L1 (kit 4b7f4f7). More than `max_recoveries` within `window_seconds` (kept on disk across restarts) halts
+  for the operator. Every step is an alert: a `reorg-*` log line, a JSON line in `alert_file` (default
+  `<workdir>/../l2-reorg-alerts.jsonl`) and, when set, `alert_command` with the alert on its standard input.
+  A database whose block M is not the accepted hash is a foreign settlement, never this case.
+
 * `--dry-run [--prove]`: builds the next settlement against the live network
   in a scratch copy of the L2 database and validates it (identity, request,
   producer, SP1 execute; with --prove also Groth16 + every pre-submit check)
@@ -197,6 +216,14 @@ SETTLEMENT_VIEW_FIELDS = ('network', 'genesis', 'chain_id', 'asynchronous', 'acc
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
             'poll_seconds': 6, 'resubmit_seconds': 120}
+# reorg_recovery (off unless configured). stable_seconds: how long the same accepted settlement and local head must be
+# seen before a rebuild; max_recoveries per window_seconds: past that the worker halts for the operator.
+# resubmit_window_seconds: while the native request of M+1 is unchanged, the worker's own proved settlement of M+1 is
+# still valid on L1; it is rebroadcast for this long (from first sight) before a rebuild may start (0: never).
+# max_finality_lag: with wait_for_finality false (never on the mainnet path), no rebuild while L1 finality lags the
+# head by more than this many blocks (a fork whose finality is stalled).
+REORG_DEFAULTS = {'wait_for_finality': True, 'stable_seconds': 120, 'max_recoveries': 3, 'window_seconds': 6 * 3600,
+                  'keep': 2, 'rebuild_timeout_seconds': 3600, 'resubmit_window_seconds': 1800, 'max_finality_lag': 256}
 NETWORK_KINDS = ('devnet', 'mainnet', 'mainnet-rehearsal')
 # Kinds that run the mainnet L2 program path (chain 700770, --rules mainnet, prover --mainnet).
 MAINNET_PATH_KINDS = ('mainnet', 'mainnet-rehearsal')
@@ -283,6 +310,16 @@ def follower_finals(status_path):
 
 
 TIMEOUT_EXIT = 124  # exit code recorded for a prover attempt that ran out of time (as timeout(1) reports it)
+
+
+class LocalAhead(Exception):
+    """The local database holds the accepted settlement but has unsettled blocks above it that cannot be used: an
+    L1 reorg removed a later settlement of this worker (or the request it was anchored to) while the next block was
+    already built. Recoverable with `reorg_recovery`; without it this halts with the same reason as before."""
+
+    def __init__(self, reason, accepted, head, kind):
+        super().__init__(reason)
+        self.accepted, self.head, self.kind = accepted, head, kind
 
 
 class QuorumFloorStall(RuntimeError):
@@ -1194,6 +1231,31 @@ class Settler:
                 raise Halt('foreign_recovery needs follower_state and follower_status')
             if not isinstance(recovery.get('keep', 2), int) or recovery.get('keep', 2) < 1:
                 raise Halt('foreign_recovery.keep must be a positive integer')
+        reorg = self.c.get('reorg_recovery')
+        if reorg is not None:
+            if not isinstance(reorg, dict):
+                raise Halt('reorg_recovery must be an object')
+            reorg = self.c['reorg_recovery'] = {**REORG_DEFAULTS, **reorg}
+            for key in ('follower_state', 'follower_status'):
+                reorg[key] = reorg.get(key) or (recovery or {}).get(key) or self.c.get(key)
+                if not reorg[key]:
+                    raise Halt(f'reorg_recovery needs {key} (here, in foreign_recovery or at the top level)')
+            for key in ('stable_seconds', 'max_recoveries', 'window_seconds', 'keep', 'rebuild_timeout_seconds',
+                        'resubmit_window_seconds', 'max_finality_lag'):
+                value = reorg[key]
+                zero = key in ('stable_seconds', 'resubmit_window_seconds')
+                if not isinstance(value, int) or isinstance(value, bool) or value < (0 if zero else 1):
+                    raise Halt(f'reorg_recovery.{key} must be a {"non-negative" if zero else "positive"} integer')
+            if not isinstance(reorg['wait_for_finality'], bool):
+                raise Halt('reorg_recovery.wait_for_finality must be true or false')
+            if self.mainnet_path and not reorg['wait_for_finality']:
+                # Without the finality wait a 2-of-3 view on a fork whose finality has stopped is rebuilt onto
+                # (report 94's dead fork): never on the mainnet program path.
+                raise Halt('reorg_recovery.wait_for_finality false is refused on the mainnet path')
+            command = reorg.get('alert_command')
+            if command is not None and (not isinstance(command, list) or not command
+                                        or not all(isinstance(a, str) for a in command)):
+                raise Halt('reorg_recovery.alert_command must be a non-empty list of strings')
         if not isinstance(self.c.get('skip_idle_blocks', False), bool):
             raise Halt('skip_idle_blocks must be true or false')
         if self.c.get('skip_idle_blocks'):
@@ -1211,6 +1273,13 @@ class Settler:
         self.work = Path(self.c['workdir'])
         self.rebuild_discarded_at = None
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
+        self.reorg_seen = None  # (accepted number, hash, local head, head hash) of a reorg case being watched
+        self.reorg_since = None  # monotonic time that case was first seen
+        self.reorg_l1_height = None  # L1 chain height when that case was first seen
+        self.reorg_resubmit = None  # {'case', 'number', 'last', 'state'}: rebroadcast of a still-valid own settlement
+        self.view_behind = False  # the last native_view was a partial quorum below accepted_floor (reorg_recovery)
+        self.view_support = []  # ports that formed the last native_view
+        self.reorg_reported = set()  # (alert kind, case) already alerted, so each alert fires once per case
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
         self.floor_stall = None  # (number, first seen, reads) while a partial quorum stays behind the floor
@@ -1248,8 +1317,14 @@ class Settler:
         log('identity-checked', network=view['network'], chain_id=view['chain_id'], mainnet=self.mainnet)
         return True
 
-    def native_view(self):
-        """The settlement view a quorum of validator RPCs reports identically, or None."""
+    def native_view(self, allow_behind=False):
+        """The settlement view a quorum of validator RPCs reports identically, or None.
+
+        A partial quorum below `accepted_floor` is None, except with `allow_behind` (reorg detection only): then it
+        is returned and `view_behind` is set. Such a view never builds, proves or pays DA; it can only reach
+        `recover_reorg`, whose gates decide whether the reorg is real (153 M1: one endpoint stuck on the losing
+        fork must not hide a real reorg). The floor-stall restart is then not needed and not used."""
+        self.view_behind = False
         view, support = self.native.agreed('getl2settlement', project=settlement_view)
         if view is None:
             return None  # validators momentarily disagree; retry later
@@ -1258,10 +1333,14 @@ class Settler:
         accepted = view.get('accepted')
         number = statement_fields(accepted['statement'])['l2_number'] if accepted else 0
         unanimous = len(support) == len(self.native.ports)
+        self.view_support = support
         if not unanimous and number < self.accepted_floor:
             # A partial quorum must not move the accepted head backwards (two stale
             # endpoints); a unanimous view is trusted as before.
             log('rpc-quorum-view-behind', accepted=number, seen=self.accepted_floor, ports=support)
+            if allow_behind:
+                self.view_behind = True
+                return view
             self.floor_stall_check(number, support)
             return None
         self.floor_stall = None
@@ -1461,21 +1540,37 @@ class Settler:
             info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(probe))
             probe.unlink()
             if info['anchor'] != anchor:
-                raise Halt(f'unsettled L2 block {number} has anchor {info["anchor"]}, native now requests {anchor}')
+                reason = f'unsettled L2 block {number} has anchor {info["anchor"]}, native now requests {anchor}'
+                if self.c.get('reorg_recovery'):
+                    raise LocalAhead(reason, number - 1, head, 'anchor')
+                raise Halt(reason)
             log('l2-block-reused', number=number, hash=info['hash'])
         else:
-            raise Halt(f'L2 head {head["number"]} cannot extend accepted settlement {number - 1}')
+            reason = f'L2 head {head["number"]} cannot extend accepted settlement {number - 1}'
+            if self.c.get('reorg_recovery'):
+                if self.local_hash(number - 1) != parent:
+                    raise ForeignSettlement(f'{reason}: local block {number - 1} is not the accepted {parent} '
+                                            '(another settler?)')
+                raise LocalAhead(reason, number - 1, head, 'ahead')
+            raise Halt(reason)
         artifact = directory / 'block.artifact'
         if not artifact.exists():
             self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact))
         request = directory / 'native-request.txt'
-        text = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
-        if 'inbox_count' in source:
-            text += f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n"
+        text = self.request_text(view)
         if request.exists() and request.read_text() != text:
             raise Halt(f'{request} already holds a different request')
         atomic_write(request, text)
         return number, directory
+
+    @staticmethod
+    def request_text(view):
+        """The native request of the next block as `native-request.txt` holds it (what the proof binds to)."""
+        accepted, source = view.get('accepted'), view['source']
+        text = source['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
+        if 'inbox_count' in source:
+            text += f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n"
+        return text
 
     def local_hash(self, number):
         """The hash of block `number` in the local database."""
@@ -1989,13 +2084,22 @@ class Settler:
         self.finish_swap()
         if not self.check_identity():
             return False
-        view = self.native_view()
+        view = self.native_view(allow_behind=bool(self.c.get('reorg_recovery')))
         if view is None or view.get('source') is None:
             return False
         try:
+            if self.view_behind:
+                return self.behind_floor_case(view)
             if self.c.get('skip_idle_blocks') and self.hold_block(view):
                 return False
             number, directory = self.prepare_block(view)
+            if self.reorg_seen is not None:
+                # The reorg case being watched went away without a rebuild (L1 flipped back, the own settlement was
+                # resubmitted and landed, or a new settlement): nothing was changed. A return alerts again.
+                self.reorg_alert('resolved', accepted=self.reorg_seen[0], database_head=self.reorg_seen[2],
+                                 next_block=number, resubmitted=bool(self.reorg_resubmit and self.reorg_resubmit['last']))
+                self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+                self.reorg_reported.clear()
             proof = self.prove(directory, view=view)
             # A proof takes many minutes: never pay DA for a block another settlement made stale meanwhile.
             if proof is None:
@@ -2011,11 +2115,343 @@ class Settler:
             return self.submit_and_wait(number, directory, tx, view)
         except ForeignSettlement as foreign:
             return self.recover_foreign(str(foreign))
+        except LocalAhead as ahead:
+            return self.recover_reorg(ahead)
+
+    # ---- reorgs of this worker's own settlements: rebuild from L1 and continue ----
+    def reorg_alert(self, kind, case=None, **fields):
+        """One operator alert: a `reorg-<kind>` log line, a line in the alert file, and the alert command. With
+        `case`, an alert fires once per (kind, case). Alert delivery never stops the worker."""
+        if case is not None:
+            if (kind, case) in self.reorg_reported:
+                return
+            self.reorg_reported.add((kind, case))
+        reorg = self.c['reorg_recovery']
+        alert = {'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'event': f'reorg-{kind}', **fields}
+        log(f'reorg-{kind}', **fields)
+        path = Path(reorg.get('alert_file') or self.work.parent / 'l2-reorg-alerts.jsonl')
+        try:
+            with path.open('a') as f:
+                f.write(json.dumps(alert, sort_keys=True) + '\n')
+        except OSError as error:
+            log('reorg-alert-failed', target=str(path), reason=str(error)[:200])
+        if reorg.get('alert_command'):
+            try:
+                done = self.run(reorg['alert_command'], input=json.dumps(alert, sort_keys=True) + '\n',
+                                capture_output=True, text=True, timeout=30)
+                if done.returncode:
+                    log('reorg-alert-failed', target='alert_command', code=done.returncode,
+                        reason=(done.stderr or '').strip()[:200])
+            except Exception as error:  # noqa: BLE001 - an alert hook must never stop settlement
+                log('reorg-alert-failed', target='alert_command', reason=f'{type(error).__name__}: {error}'[:200])
+
+    def reorg_history(self):
+        return Path(self.c['l2_db']).with_name(Path(self.c['l2_db']).name + '.reorg-recoveries.json')
+
+    def read_reorg_history(self):
+        """The persisted recovery history (the loop guard). Unreadable or malformed: halt for the operator, never a
+        retry (a retry would end in a restart loop that re-alerts on every start; 153 L4)."""
+        path = self.reorg_history()
+        if not path.exists():
+            return []
+        try:
+            history = json.loads(path.read_text())
+            if not isinstance(history, list) or not all(isinstance(h, dict) and isinstance(h.get('unix'), int)
+                                                        for h in history):
+                raise ValueError('not a list of records with an integer "unix"')
+        except (OSError, ValueError) as error:
+            raise Halt(f'reorg recovery history {path} is unreadable ({type(error).__name__}: {str(error)[:200]}): '
+                       'operator review (l2_reorg_recover.py), then repair or remove the file') from None
+        return history
+
+    def recent_recoveries(self, reorg, case=None, brief=None, reason=''):
+        """The recoveries within the window; halts (alert `reorg-limit`) when the limit is reached."""
+        recent = [h for h in self.read_reorg_history() if h['unix'] > time.time() - reorg['window_seconds']]
+        if len(recent) >= reorg['max_recoveries']:
+            self.reorg_alert('limit', case, recoveries=len(recent), window_seconds=reorg['window_seconds'], **(brief or {}))
+            raise Halt(f'{reason}: {len(recent)} automatic reorg recoveries within {reorg["window_seconds"]} s, the '
+                       'limit: operator review (l2_reorg_recover.py)')
+        return recent
+
+    def first_sight_height(self):
+        """The L1 height at which the current view was seen: the (faults + 1)-th largest height reported by the
+        endpoints that formed the view (153 L2: one endpoint, inside or outside the view, cannot push it out of
+        reach). None without an answer from the view's endpoints."""
+        answers = self.native.gather('getchaininfo')
+        heights = sorted(int(a['height']) for port, a in answers.items() if port in self.view_support)
+        if not heights:
+            return None
+        return heights[max(0, len(heights) - 1 - self.native.faults)]
+
+    def behind_floor_case(self, view):
+        """A partial quorum shows an accepted settlement below the highest one seen (`accepted_floor`): two stale
+        endpoints, or a real reorg while one endpoint stays on the losing fork (153 M1). Nothing is built, proved or
+        paid on such a view. When the database holds the view's accepted block and unsettled blocks above it, the
+        case goes to `recover_reorg`, whose gates (stable time, follower finality, L1 finality past first sight,
+        exact rebuild) tell a stale pair from a reorg. Anything else waits, as before."""
+        accepted = view.get('accepted')
+        if not accepted:
+            log('reorg-behind-floor-waiting', reason='the partial quorum shows no accepted settlement',
+                floor=self.accepted_floor)
+            return False
+        fields = statement_fields(accepted['statement'])
+        number, parent = fields['l2_number'], fields['l2_hash']
+        head = self.produce('head', '--target', self.c['l2_db'])
+        if head['number'] <= number or self.local_hash(number) != parent:
+            log('reorg-behind-floor-waiting', accepted=number, floor=self.accepted_floor, database_head=head['number'])
+            return False
+        kind = 'ahead'
+        if head['number'] == number + 1:
+            probe = self.work / f'.probe-{number + 1}.artifact'
+            probe.unlink(missing_ok=True)
+            info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number + 1), '--out', str(probe))
+            probe.unlink(missing_ok=True)
+            kind = 'anchor' if info['anchor'] != view['source']['block'] else 'reuse'
+        raise LocalAhead(f'partial quorum {self.view_support} accepts L2 block {number}, below the accepted '
+                         f'{self.accepted_floor} seen before; L2 head {head["number"]}', number, head, kind)
+
+    def still_valid_settlement(self, view, number):
+        """(directory, transaction bytes) of this worker's own proved settlement of block number + 1 when it is still
+        valid against the current native request (153 M2): the request it was proved for equals the request now,
+        and it settles the local block number + 1. A reorg that removed the acceptance of M+1 but kept the block
+        that accepted M leaves that request byte-identical. Else None."""
+        directory = self.work / f'{number + 1:08d}-{view["source"]["block"][:16]}'
+        tx_path, request = directory / 'transaction.bin', directory / 'native-request.txt'
+        if not tx_path.is_file() or not request.is_file() or request.read_text() != self.request_text(view):
+            return None
+        tx = tx_path.read_bytes()
+        values = tx[33:33 + VALUES_BYTES]
+        if len(values) != VALUES_BYTES:
+            return None
+        fields = statement_fields(values.hex())
+        if fields['l2_number'] != number + 1 or fields['l2_hash'] != self.local_hash(number + 1):
+            return None
+        submitted = directory / 'submitted.json'
+        if submitted.exists() and json.loads(submitted.read_text()).get('tx_sha256') not in (
+                None, hashlib.sha256(tx).hexdigest()):
+            return None
+        return directory, tx
+
+    def resubmit_own_settlement(self, view, case, number, brief):
+        """Rebroadcast the still-valid settlement of number + 1 (no finality wait: it can only land the block the
+        database already holds). True while that is under way, which holds back any rebuild; False when there is
+        nothing to resubmit, the window has passed, or the nodes refuse the bytes for good."""
+        reorg = self.c['reorg_recovery']
+        window, now = reorg['resubmit_window_seconds'], self.clock()
+        state = self.reorg_resubmit
+        if state is None or state['case'] != case:
+            found = self.still_valid_settlement(view, number) if window else None
+            state = self.reorg_resubmit = {'case': case, 'found': found, 'since': now, 'last': None,
+                                           'state': 'open' if found else 'none'}
+            if found:
+                self.reorg_alert('resubmitting', case, next_block=number + 1, directory=found[0].name,
+                                 window_seconds=window, **brief)
+        if state['state'] != 'open':
+            return False
+        if now - state['since'] >= window:
+            state['state'] = 'expired'
+            self.reorg_alert('resubmit-expired', case, next_block=number + 1, window_seconds=window, **brief)
+            return False
+        if state['last'] is not None and now - state['last'] < self.c['resubmit_seconds']:
+            return True
+        directory, tx = state['found']
+        values = tx[33:33 + VALUES_BYTES]
+        if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big'):
+            commitment = values[T + DA_COMMITMENT:T + DA_COMMITMENT + 32].hex()
+            if not any(r.get('l2_number') == number + 1 and r.get('commitment') == commitment
+                       for r in view.get('data_availability', [])):
+                if self.view_behind:
+                    # publish_da reads the full-quorum view; on a partial view below the floor it could pay again.
+                    state['state'] = 'da-missing'
+                    self.reorg_alert('resubmit-expired', case, next_block=number + 1, reason='DA record missing on '
+                                     'a partial view', **brief)
+                    return False
+                self.da_payload(number + 1, directory)
+                if not self.publish_da(number + 1, directory, values):
+                    state['last'] = self.clock()
+                    return True
+        path = directory / 'submitted.json'
+        record = json.loads(path.read_text()) if path.exists() else {}
+        record['tx_sha256'] = hashlib.sha256(tx).hexdigest()
+        sent = self.broadcast(number + 1, directory, tx, record)
+        state['last'] = self.clock()
+        if sent == 'terminal':
+            state['state'] = 'refused'
+            self.reorg_alert('resubmit-refused', case, next_block=number + 1, **brief)
+            return False
+        return True
+
+    def same_case(self, case):
+        """Re-read the view (153 L1): the case still holds, else forget it (alert `reorg-resolved`)."""
+        view = self.native_view(allow_behind=True)
+        accepted = view and view.get('accepted')
+        if accepted:
+            fields = statement_fields(accepted['statement'])
+            if (fields['l2_number'], fields['l2_hash']) == case[:2]:
+                return True
+        if self.reorg_seen is not None:
+            self.reorg_alert('resolved', accepted=self.reorg_seen[0], database_head=self.reorg_seen[2])
+        self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+        self.reorg_reported.clear()
+        return False
+
+    def recover_reorg(self, ahead):
+        """The database holds the accepted settlement M and unusable unsettled blocks above it. False while waiting
+        (own settlement of M+1 being resubmitted, view not stable yet, M not finalized yet, follower behind); True
+        once the rebuilt database is swapped in. Halts when disabled (the reason of old), when the recovery limit is
+        reached, or when L1 data cannot rebuild M."""
+        reorg = self.c.get('reorg_recovery')
+        if not reorg or self.dry_run:
+            raise Halt(str(ahead))
+        if ahead.accepted == 0:
+            raise Halt(f'{ahead}: L1 holds no accepted settlement any more; rebuild the initial database by hand')
+        view = self.native_view(allow_behind=True)
+        accepted = view and view.get('accepted')
+        if not accepted or statement_fields(accepted['statement'])['l2_number'] != ahead.accepted:
+            # The view moved since the cycle read it: forget the case (a return alerts and waits again).
+            if self.reorg_seen is not None:
+                self.reorg_alert('resolved', accepted=self.reorg_seen[0], database_head=self.reorg_seen[2])
+            self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+            self.reorg_reported.clear()
+            return False
+        fields = statement_fields(accepted['statement'])
+        number, l2_hash = fields['l2_number'], fields['l2_hash']
+        case = (number, l2_hash, ahead.head['number'], ahead.head['hash'])
+        brief = {'accepted': number, 'accepted_hash': l2_hash, 'database_head': ahead.head['number'],
+                 'database_head_hash': ahead.head['hash'], 'shape': ahead.kind}
+        if self.view_behind:
+            brief.update(behind_floor=self.accepted_floor, view_ports=self.view_support)
+        now = self.clock()
+        if self.reorg_seen != case:
+            # The L1 height at first sight: the reorg that removed M+1 is final once L1 finality passes it.
+            try:
+                height = self.first_sight_height()
+            except Exception:  # noqa: BLE001 - no quorum: look again next cycle
+                return False
+            if height is None:
+                return False
+            self.reorg_l1_height = height
+            self.reorg_seen, self.reorg_since, self.reorg_resubmit = case, now, None
+            self.reorg_alert('detected', case, reason=str(ahead)[:300], stable_seconds=reorg['stable_seconds'],
+                             l1_height=self.reorg_l1_height, **brief)
+        if ahead.kind in ('ahead', 'reuse') and self.resubmit_own_settlement(view, case, number, brief):
+            return False
+        if now - self.reorg_since < reorg['stable_seconds']:
+            return False
+        finals = follower_finals(reorg['follower_status'])
+        if number in finals and finals[number] != l2_hash:
+            raise Halt(f'reorg recovery: the follower finalized L2 block {number} as {finals[number]}, the native '
+                       f'quorum accepts {l2_hash}: operator review')
+        if max(finals, default=0) > number:
+            # The follower finalized more than the quorum view shows: a stale view. Wait, never rebuild on it.
+            self.reorg_alert('waiting-follower', case, follower_finalized=max(finals), **brief)
+            return False
+        try:
+            l1_final = self.native.bounded_value('getchaininfo', 'finalized_height')
+            l1_head = None if reorg['wait_for_finality'] else self.native.bounded_value('getchaininfo', 'height')
+        except Exception:  # noqa: BLE001 - no quorum: wait
+            return False
+        if reorg['wait_for_finality']:
+            # Finality of M alone is not enough: the reorg that removed M+1 can itself be undone until L1 finality
+            # passes the height at which it was seen. Then the rebuild can never be reversed by L1.
+            if finals.get(number) != l2_hash or l1_final < self.reorg_l1_height:
+                self.reorg_alert('waiting-finality', case, finalized_prefix=max(finals, default=0),
+                                 l1_finalized_height=l1_final, l1_height_seen=self.reorg_l1_height, **brief)
+                return False
+        elif l1_head - l1_final > reorg['max_finality_lag']:
+            # Off the mainnet path only: still never rebuild onto a fork whose finality has stopped (153 L3).
+            self.reorg_alert('waiting-finality', case, reason='L1 finality stalled', l1_height=l1_head,
+                             l1_finalized_height=l1_final, max_finality_lag=reorg['max_finality_lag'], **brief)
+            return False
+        recent = self.recent_recoveries(reorg, case, brief, str(ahead))
+        if not self.same_case(case):
+            return False
+        entry = {'unix': int(time.time()), 'accepted': number, 'accepted_hash': l2_hash,
+                 'database_head': ahead.head['number']}
+
+        def count(outcome):
+            # Written before the swap (153 L5): a crash between the two can only over-count.
+            atomic_write(self.reorg_history(), json.dumps([*recent, {**entry, 'rebuilt_head': outcome['number']}],
+                                                          indent=1) + '\n')
+        outcome = self.rebuild_from_l1(number, l2_hash, fields['l2_state_root'], reorg, 'reorg', exact=True,
+                                       finals=finals, before_swap=count)
+        if outcome is None:
+            self.reorg_alert('waiting-follower', case, **brief)
+            return False
+        self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+        self.accepted_floor = number  # acted on: the view at M is the chain now
+        self.reorg_alert('recovered', recoveries_in_window=len(recent) + 1, max_recoveries=reorg['max_recoveries'],
+                         finalized=finals.get(number) == l2_hash, **brief, **outcome)
+        return True
+
+    def restore_own_settlement(self):
+        """After a rebuild, this worker's old settlement of M+1 can still land (its bytes are public and the request
+        was unchanged; 153 M2). Then a database kept aside by an earlier swap holds the accepted block: swap it back
+        (journalled, with its work directories) instead of a second reconstruct. None when no kept database holds the
+        accepted block; True once swapped. Counts against the recovery limit."""
+        reorg = self.c['reorg_recovery']
+        view = self.native_view()
+        accepted = view and view.get('accepted')
+        if not accepted:
+            return None
+        fields = statement_fields(accepted['statement'])
+        number, l2_hash = fields['l2_number'], fields['l2_hash']
+        db = Path(self.c['l2_db'])
+        prefix = f'{db.name}.orphaned-'
+        kept = sorted((p for p in db.parent.iterdir() if p.name.startswith(prefix) and p.name[len(prefix):].isdigit()),
+                      key=lambda p: int(p.name[len(prefix):]), reverse=True)
+        for candidate in kept:
+            try:
+                head = self.produce('head', '--target', str(candidate))
+                if head['number'] < number or self.produce('hash', '--target', str(candidate), '--number',
+                                                           str(number))['hash'] != l2_hash:
+                    continue
+            except (ProducerError, KeyError, ValueError):
+                continue
+            break
+        else:
+            return None
+        brief = {'accepted': number, 'accepted_hash': l2_hash, 'restored': candidate.name,
+                 'restored_head': head['number']}
+        recent = self.recent_recoveries(reorg, None, brief, f'own settlement {number} landed after a rebuild')
+        current = self.produce('head', '--target', str(db))['number'] if db.exists() else 0
+        common = 0
+        for n in range(min(current, head['number']), 0, -1):
+            if self.local_hash(n) == self.produce('hash', '--target', str(candidate), '--number', str(n))['hash']:
+                common = n
+                break
+        orphans = list(range(common + 1, current + 1))
+        respooled = self.respool_orphans(orphans)
+        source = self.work.parent / f'{self.work.name}-orphaned-{candidate.name[len(prefix):]}'
+        names = sorted(p.name for p in source.iterdir() if p.is_dir() and p.name[:8].isdigit()
+                       and common < int(p.name[:8]) <= head['number']) if source.is_dir() else []
+        stale = {d.name for d in self.stale_directories(common, current, number)}
+        stale |= {n for n in names if (self.work / n).exists()}
+        stamp = time.time_ns()
+        atomic_write(self.reorg_history(), json.dumps([*recent, {'unix': int(time.time()), 'accepted': number,
+                                                                 'accepted_hash': l2_hash, 'restored': candidate.name,
+                                                                 'rebuilt_head': head['number']}], indent=1) + '\n')
+        journal = {'rebuilt': str(candidate), 'kept': str(db.with_name(f'{db.name}.orphaned-{stamp}')),
+                   'work_aside': str(self.work.parent / f'{self.work.name}-orphaned-{stamp}'),
+                   'stale': sorted(stale), 'number': head['number'], 'l2_hash': head['hash'],
+                   'restore_work': {'from': str(source), 'names': names}}
+        atomic_write(self.recovery_journal(), json.dumps(journal, indent=2) + '\n')
+        self.finish_swap()
+        self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+        self.reorg_reported.clear()
+        self.reorg_alert('restored', recoveries_in_window=len(recent) + 1, max_recoveries=reorg['max_recoveries'],
+                         common_ancestor=common, orphaned_blocks=orphans, respooled=respooled,
+                         restored_work=names, **brief)
+        return True
 
     # ---- foreign settlements: rebuild from L1 and continue ----
     def recover_foreign(self, reason):
         """Replace a database that does not hold the accepted settlement with one rebuilt from finalized L1
         blocks. False while waiting; True once swapped. Halts when L1 data cannot reproduce the block."""
+        if self.c.get('reorg_recovery') and not self.dry_run:
+            restored = self.restore_own_settlement()
+            if restored is not None:
+                return restored
         recovery = self.c.get('foreign_recovery')
         if not recovery or self.dry_run:
             raise Halt(reason)
@@ -2038,10 +2474,27 @@ class Settler:
             if not prefix or self.holds_block(prefix, finals[prefix]):
                 return False
             number, l2_hash, expected_root = prefix, finals[prefix], None
+        outcome = self.rebuild_from_l1(number, l2_hash, expected_root, recovery, 'foreign', finals=finals)
+        if outcome is None:
+            return False
+        self.waiting_for = None
+        log('foreign-settlement-recovered', **outcome)
+        return True
+
+    def rebuild_from_l1(self, number, l2_hash, expected_root, recovery, label, exact=False, finals=None,
+                        before_swap=None):
+        """Rebuild a NEW database from the follower's verified L1 blocks, require block `number` to be `l2_hash`
+        (and `expected_root` unless None), return orphaned user transactions to the spool, move stale work aside and
+        swap the databases through the journal. None when the rebuild does not reach the target yet (the follower is
+        behind the view); then a dict describing the swap. Halts when L1 data cannot be rebuilt or contradicts the
+        follower's finalized settlements. Shared by `foreign_recovery` and `reorg_recovery`. With `exact`, the
+        rebuild must also end at `number`: a follower still on the losing fork holds settlements above it that L1
+        no longer has, and a database rebuilt from them would only be reorged again."""
+        finals = follower_finals(recovery['follower_status']) if finals is None else finals
         # One rebuild per input: a rebuild that did not hold the target is not repeated until the follower has more.
         tip = follower_verified_tip(recovery['follower_status'])
         if self.rebuild_discarded_at is not None and self.rebuild_discarded_at == tip:
-            return False
+            return None
         db = Path(self.c['l2_db'])
         rebuilding = db.with_name(db.name + '.rebuilding')
         shutil.rmtree(rebuilding, ignore_errors=True)
@@ -2053,7 +2506,8 @@ class Settler:
                           timeout=recovery.get('rebuild_timeout_seconds', 3600))
         if result.returncode:
             shutil.rmtree(rebuilding, ignore_errors=True)
-            raise Halt(f'rebuild from L1 refused while recovering from a foreign settlement of L2 block {number}: the '
+            what = 'a foreign settlement' if label == 'foreign' else 'a reorg of the accepted settlement'
+            raise Halt(f'rebuild from L1 refused while recovering from {what} of L2 block {number}: the '
                        f'block is off-rule, or the follower store is damaged: {result.stderr.strip()[:400]}')
         document = json.loads(result.stdout)
         blocks = {b['number']: b for b in document.get('blocks', [])}
@@ -2061,11 +2515,12 @@ class Settler:
         # `reconstruct` replays everything the follower verified, so the head can lie above the target. The target
         # must be there; the worker then holds the newest settled block and competes from it. A later reorg of that
         # unfinalized tail on L1 is one more divergence, recovered the same way.
-        if rebuilt is None or rebuilt['hash'] != l2_hash or expected_root not in (None, rebuilt['state_root']):
+        if rebuilt is None or rebuilt['hash'] != l2_hash or expected_root not in (None, rebuilt['state_root']) \
+                or (exact and max(blocks) != number):
             shutil.rmtree(rebuilding, ignore_errors=True)
             self.rebuild_discarded_at = tip
-            log('foreign-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
-            return False
+            log(f'{label}-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
+            return None
         self.rebuild_discarded_at = None
         number, l2_hash = max(blocks), blocks[max(blocks)]['hash']
         wrong = [n for n, h in finals.items() if n in blocks and blocks[n]['hash'] != h]
@@ -2078,6 +2533,8 @@ class Settler:
         stale = self.stale_directories(common, old_head, number)
         proofs = sum((d / 'proved.json').exists() for d in stale)
         da_paid = sum(len(list(d.glob('da-signed-*.hex'))) for d in stale)
+        if before_swap is not None:
+            before_swap({'number': number, 'l2_hash': l2_hash})
         stamp = time.time_ns()
         ready = db.with_name(f'{db.name}.rebuilt-{stamp}')
         rebuilding.rename(ready)
@@ -2086,11 +2543,9 @@ class Settler:
                    'stale': [d.name for d in stale], 'number': number, 'l2_hash': l2_hash}
         atomic_write(self.recovery_journal(), json.dumps(journal, indent=2) + '\n')
         self.finish_swap()
-        self.waiting_for = None
-        log('foreign-settlement-recovered', number=number, l2_hash=l2_hash, common_ancestor=common,
-            orphaned_blocks=orphans, respooled=respooled, wasted_proofs=proofs, wasted_da_signed=da_paid,
-            rebuild_seconds=round(self.clock() - start, 1), native_blocks=document.get('native_blocks'))
-        return True
+        return {'number': number, 'l2_hash': l2_hash, 'common_ancestor': common, 'orphaned_blocks': orphans,
+                'respooled': respooled, 'wasted_proofs': proofs, 'wasted_da_signed': da_paid,
+                'rebuild_seconds': round(self.clock() - start, 1), 'native_blocks': document.get('native_blocks')}
 
     def holds_block(self, number, l2_hash):
         """Whether the local database has this hash at this number."""
@@ -2164,7 +2619,14 @@ class Settler:
         for name in state['stale']:
             if (self.work / name).exists():
                 (self.work / name).rename(aside / name)
-        keep = self.c['foreign_recovery'].get('keep', 2) if self.c.get('foreign_recovery') else 2
+        restore = state.get('restore_work')  # a kept database swapped back: its work directories come back too
+        if restore:
+            source = Path(restore['from'])
+            for name in restore['names']:
+                if (source / name).exists() and not (self.work / name).exists():
+                    (source / name).rename(self.work / name)
+        keeps = [self.c[k].get('keep', 2) for k in ('foreign_recovery', 'reorg_recovery') if self.c.get(k)]
+        keep = max(keeps) if keeps else 2
         for prefix, parent in ((f'{db.name}.orphaned-', db.parent), (f'{self.work.name}-orphaned-', self.work.parent)):
             old = sorted((p for p in parent.iterdir() if p.name.startswith(prefix)), key=lambda p: int(p.name[len(prefix):]))
             for path in old[:-keep]:
@@ -2277,7 +2739,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
                     transaction={'tag': hex(tx[0]), 'bytes': len(tx), 'sha256': hashlib.sha256(tx).hexdigest(),
                                  'proof_policy': tx[1:33].hex(), 'user_transactions': users,
                                  'file': str(base / 'settlement-tx.hex')}, **fee)
-    except (Halt, ProducerError, ForeignSettlement) as error:
+    except (Halt, ProducerError, ForeignSettlement, LocalAhead) as error:
         return done(False, reason=str(error))
 
 
