@@ -995,3 +995,9 @@ mod tests {
         }
     }
 }
+
+/// REHEARSAL ONLY: [`ChainSpec::mainnet_rehearsal`] without forced inclusion
+/// (tag 3, floor included). Kept at the end of the file so that no line of the
+/// guests' code moves.
+#[rustfmt::skip]
+pub const REHEARSAL_CONFIGURATION_PLAIN: B256 = B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));

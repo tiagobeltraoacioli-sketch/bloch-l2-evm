@@ -188,7 +188,9 @@ CHAINSPEC = 'src/chainspec.rs'
 SETTLER = 'deployment/devnet/settler_v3.py'
 BUILD_RELEASE = 'deployment/mainnet/build-release.sh'
 CROSSINGS = ('deployment/mainnet/rehearsal/next-consensus/crossing.py',
-             'deployment/mainnet/rehearsal/next-consensus/sparse/crossing.py')
+             'deployment/mainnet/rehearsal/next-consensus/sparse/crossing.py',
+             # agent 137's forced-inclusion crossing (fork candidate v3)
+             'deployment/mainnet/rehearsal/forced-inclusion/crossing.py')
 NATIVE_PINS = 'crates/bloch-pos-committee/src/l2_settlement.rs'
 SELF_FILES = {'set-sweep-recipient.py', 'test_set_sweep_recipient.py', 'SWEEP-RECIPIENT-PROCEDURE.md',
               # agent 221's real rehearsal data (a statement of a past private run), never a pin

@@ -181,7 +181,8 @@ class Steps(unittest.TestCase):
         if TREE_FORCED:
             # Forced next rules: every file that pinned agent 137's forced placeholder configuration now pins the
             # throwaway's (the Rust tests pin the rehearsal values, never the placeholder candidate pins).
-            self.assertEqual(sorted(self.grep(new_cfg)), before)
+            # chainspec.rs also holds it: its Rust test pins this throwaway's tag 4 value as the cross-check.
+            self.assertEqual(sorted(self.grep(new_cfg)), sorted(before + [str(self.l2 / m.CHAINSPEC)]))
         else:
             self.assertEqual(len(self.grep(new_cfg)), 8)
         self.assertIn(m.eip55(THROWAWAY), (self.native / m.NATIVE_PINS).read_text())
