@@ -173,17 +173,18 @@ No other kit file names the release. `verify_release_signature.py` reads the rel
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `26645e6632b44dc5d3cad6755afa81bf865b37fd8552d54576971ab959b1c98c` |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b4c08e7f0fda112cdab824c6aa5adc76dc8e79189ae779322e0b71be468f4913` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `3fb071dba31da5fa5636fe6d9a20e319ae925480723a5e674dec5e5404d4bc9e` |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` |
 | `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `a5fab5ae2a7eb8fbc050ddc6be7d85fa0db94fc696203e14b31b506a27b45bbc` (agents 155 M-1/L-3, 193 D17/M1) |
+| `deployment/mainnet/install-settler-mainnet.py` | `2caf9d4d3a449f556444a2449829e054aa2997cbf4fa3984731e38be063caf14` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
-| `deployment/mainnet/prover/install-prover-mainnet.py` | `a1033ce4e4eca3ad6cbdc7303c66099722963541686571ddcebd3e3d55442cee` (agent 155 M-2: pins the SP1 host too) |
-| `deployment/mainnet/install-shadow.sh` | `f40a8c97a7553462994040731f1dedce883221193de274d127b4048e1ffab5cf` (agent 155 H-1/L-1; agent 235: L1 RPCs from the settler config) |
-| `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `0ceed773548f0899d9f6b0b82c7c62dcfaedf01b2c40022dca78795e949d9d77` (agent 155 H-1 `InaccessiblePaths`) |
-| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `70d565a9d88a30ae192aa2d45738fb7132a2c4939374eedfe538fff8ed490493` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`) |
-| `deployment/mainnet/follower-rpc/install.sh` | `b30c55dd361a6b56a701a8fe8b72b80e286cfa22871141e145bfbaa6eb24f63a` (agent 159: refuses an unsigned release; agent 201: fresh-host fix for 202 F-1, loud failure, resume) |
+| `deployment/mainnet/prover/install-prover-mainnet.py` | `75ce214fbf931e5973b3a6c99d33b5a5257a98a595dc16eecd6448b39b4872fe` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
+| `deployment/mainnet/install-shadow.sh` | `89389a6eb61f9545cdba4f78c97b311a69a86981c4c2685be90df19dbc9230c4` (agent 155 H-1/L-1; 204: own user `bloch-l2-mainnet-shadow`) |
+| `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `5956d4e15d3f721e720027a55e1e5ee249c61cdfddf4c0e9091a9458bdc30886` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
+| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `91e7ee56f874e44ed7d252c79697397e168028af6a0322941b015f137fa38e6f` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: `--rpc-user` template) |
+| `deployment/mainnet/follower-rpc/install.sh` | `30a36c5c5687a578962329a239810fd742a1fddc393c19b2f60c282281d6874e` (agent 159: refuses an unsigned release; 204: first-install fix, `--rpc-user`) |
+| `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
 | `deployment/mainnet/l2_monitor.py` | `2cc61e393100529cff874f7c864dbf738798ff2fdd2116e0e6aa312219c5ccff` (agents 157, 187 F1, 198) |
 | `deployment/mainnet/l1_monitor.py` | `1632d18a63ef2b14505f5f805e06f438d977aaff507b28b432346638b3f1f744` (agent 187) |
@@ -387,7 +388,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `26645e6632b44dc5d3cad6755afa81bf865b37fd8552d54576971ab959b1c98c` (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `3fb071dba31da5fa5636fe6d9a20e319ae925480723a5e674dec5e5404d4bc9e` (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
@@ -425,7 +426,7 @@ sudo runuser -u bloch-l2-mainnet-settler -- /opt/bloch/l2-mainnet-tools/bloch-l2
 3. Install the units: dry-run first, then the same command without `--dry-run`.
 
 ```
-sudo bash /home/ubuntu/l2-golive-next/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-next/artifacts --l1-rpc-url http://80.240.16.185:8080 --canonical /var/lib/bloch-l2-mainnet-settler/canonical --canonical-user bloch-l2-mainnet-settler --txpool /var/lib/bloch-l2-mainnet-settler/txpool --dry-run
+sudo bash /home/ubuntu/l2-golive-next/kit/follower-rpc/install.sh --artifacts /home/ubuntu/l2-golive-next/artifacts --l1-rpc-url http://80.240.16.185:8080 --canonical /var/lib/bloch-l2-mainnet-settler/canonical --canonical-user bloch-l2-mainnet-settler --txpool /var/lib/bloch-l2-mainnet-settler/txpool --rpc-user bloch-l2-mainnet-rpc --read-group bloch-l2-mainnet-l2read --dry-run
 ```
 
 4. Keep RPC A without the txpool until D10. Create the drop-in:
@@ -550,6 +551,7 @@ GO when:
 - `bloch_finality` shows `l2_genesis.finalized: true` with activation `618c9b80…` at slot 187200, and `status.state: ok` with a small `age_s`;
 - `systemctl show -p ExecStart bloch-l2-mainnet-rpc` has no `--txpool`;
 - `systemctl show -p LimitNOFILE bloch-l2-mainnet-rpc` is `65536` (at 1024, about 1,000 idle connections close finality, agent 65);
+- on A, `systemctl show -p User -p SupplementaryGroups bloch-l2-mainnet-rpc` is `bloch-l2-mainnet-rpc` in `bloch-l2-mainnet-l2read` (its own user, review r10 decision 4), and the journal shows `l2_read_access: … mdbx.lck group bloch-l2-mainnet-l2read read-write`;
 - `bloch_finality.status.schema` is `v2`;
 - `bloch_getWithdrawalProof` answers (an error about the missing withdrawal, not -32601).
 
@@ -563,7 +565,13 @@ systemctl show -p ExecStart bloch-l2-mainnet-rpc
 systemctl show -p LimitNOFILE bloch-l2-mainnet-rpc
 ```
 
-NO-GO: `safe`/`finalized` `null` after the follower is ready, a wrong chain id, `--txpool` present in `ExecStart`, or `LimitNOFILE` below 65536.
+On A only:
+
+```
+systemctl show -p User -p SupplementaryGroups bloch-l2-mainnet-rpc
+```
+
+NO-GO: `safe`/`finalized` `null` after the follower is ready, a wrong chain id, `--txpool` present in `ExecStart`, `LimitNOFILE` below 65536, or on A an RPC `User` that is `bloch-l2-mainnet-settler`.
 
 Replica refresh on B (K5; after every finalized settlement from P8 on), one command per block:
 
@@ -649,7 +657,7 @@ sudo tar czf - -C /var/lib bloch-l2-mainnet-da | gpg --symmetric --pinentry-mode
 ```
 
 ```
-sudo cat /var/lib/bloch-l2-mainnet-settler/da.passphrase | gpg --symmetric --pinentry-mode loopback -o /home/ubuntu/da-passphrase.gpg
+sudo cat /etc/bloch-l2-mainnet-settler/da.passphrase | gpg --symmetric --pinentry-mode loopback -o /home/ubuntu/da-passphrase.gpg
 ```
 
    Copy the SP1 circuits for the local fallback:
