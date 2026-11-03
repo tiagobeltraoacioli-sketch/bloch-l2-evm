@@ -652,3 +652,209 @@ fn the_guest_decoder_refuses_malformed_witnesses_without_panicking() {
     value["codes"].as_array_mut().unwrap().push(serde_json::Value::String(big));
     assert!(decode(value, "big code"));
 }
+
+// ---------------------------------------------------------------------------
+// The guest's own wire format (bincode 1.3.3, as `sp1_zkvm::io::read`)
+// ---------------------------------------------------------------------------
+
+/// bincode 1.x with default options, exactly what `sp1_lib::io::read` calls.
+fn guest_decode(bytes: &[u8]) -> Result<SparseBatchWitness, bincode::Error> {
+    bincode::deserialize::<SparseBatchWitness>(bytes)
+}
+
+/// bincode 1.x default framing, written by hand so a test can state shapes the
+/// typed encoder cannot: a 65-nibble path, a duplicate key, a declared length with
+/// nothing behind it.
+fn wire_len(out: &mut Vec<u8>, len: u64) {
+    out.extend_from_slice(&len.to_le_bytes());
+}
+fn wire_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    wire_len(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+fn wire_proof(out: &mut Vec<u8>, pairs: &[(String, Vec<u8>)]) {
+    wire_len(out, pairs.len() as u64);
+    for (path, node) in pairs {
+        wire_bytes(out, path.as_bytes());
+        wire_bytes(out, node);
+    }
+}
+fn proof_pairs(proof: &BTreeMap<Nibbles, Bytes>) -> Vec<(String, Vec<u8>)> {
+    proof
+        .iter()
+        .map(|(path, node)| {
+            let text = serde_json::to_value(path).unwrap().as_str().unwrap().to_owned();
+            (text, node.to_vec())
+        })
+        .collect()
+}
+
+struct WireWitness {
+    head: Vec<u8>,
+    proof: Vec<(String, Vec<u8>)>,
+    accounts: Vec<(Vec<u8>, Vec<(String, Vec<u8>)>)>,
+    absent: Vec<u8>,
+    codes: Vec<Vec<u8>>,
+}
+
+impl WireWitness {
+    fn of(witness: &SparseBatchWitness) -> Self {
+        let mut head = bincode::serialize(&witness.prev_state_root).unwrap();
+        head.extend(bincode::serialize(&witness.new_state_root).unwrap());
+        let accounts = witness
+            .pre_accounts
+            .iter()
+            .map(|account| {
+                let mut fixed = bincode::serialize(&account.address).unwrap();
+                fixed.extend(bincode::serialize(&account.balance).unwrap());
+                fixed.extend(bincode::serialize(&account.nonce).unwrap());
+                fixed.extend(bincode::serialize(&account.code_hash).unwrap());
+                fixed.extend(bincode::serialize(&account.storage_root).unwrap());
+                (fixed, proof_pairs(&account.storage_proof))
+            })
+            .collect();
+        Self {
+            head,
+            proof: proof_pairs(&witness.proof),
+            accounts,
+            absent: bincode::serialize(&witness.absent_accounts).unwrap(),
+            codes: witness.codes.iter().map(|code| code.to_vec()).collect(),
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = self.head.clone();
+        wire_proof(&mut out, &self.proof);
+        wire_len(&mut out, self.accounts.len() as u64);
+        for (fixed, storage) in &self.accounts {
+            out.extend_from_slice(fixed);
+            wire_proof(&mut out, storage);
+        }
+        out.extend_from_slice(&self.absent);
+        wire_len(&mut out, self.codes.len() as u64);
+        for code in &self.codes {
+            wire_bytes(&mut out, code);
+        }
+        out
+    }
+}
+
+/// Agent 162's finding L1: the bounded decoders branch on `is_human_readable()`, and
+/// every other test decodes JSON, while the guest decodes bincode. This repeats the
+/// decoder test on the guest's wire format: the same refusals, no panic, and no
+/// allocation driven by a declared length the input does not back.
+#[test]
+fn the_guest_wire_format_refuses_malformed_witnesses_without_panicking() {
+    let spec = ChainSpec::mainnet();
+    let mut world = world(&spec, 300);
+    let honest = world.witness(&[(CONTRACT, vec![U256::from(1), U256::from(2)])], &[NOBODY], vec![runtime()]).witness;
+    assert!(!honest.pre_accounts.is_empty() && !honest.codes.is_empty());
+
+    // The hand-written framing is the guest's framing: byte-identical to bincode's
+    // own encoding of the honest witness, and decoded back to it.
+    let typed = bincode::serialize(&honest).unwrap();
+    let wire = WireWitness::of(&honest);
+    assert_eq!(wire.encode(), typed, "hand-written framing differs from bincode");
+    assert_eq!(guest_decode(&typed).unwrap(), honest);
+
+    let refused = |bytes: &[u8], what: &str| no_panic(what, || guest_decode(bytes)).is_err();
+
+    // Paths: 65 nibbles, non-hex, no 0x prefix, a duplicate; in the account trie
+    // proof and in a storage proof.
+    let long_path = format!("0x{}", "0".repeat(65));
+    for bad in [long_path.as_str(), "0xzz", "00"] {
+        let mut w = WireWitness::of(&honest);
+        w.proof.push((bad.into(), vec![0x80]));
+        assert!(refused(&w.encode(), bad), "account proof path {bad} accepted");
+        let mut w = WireWitness::of(&honest);
+        w.accounts[0].1.push((bad.into(), vec![0x80]));
+        assert!(refused(&w.encode(), bad), "storage proof path {bad} accepted");
+    }
+    let mut w = WireWitness::of(&honest);
+    let first = w.proof[0].clone();
+    w.proof.push(first);
+    assert!(refused(&w.encode(), "duplicate path"), "duplicate account proof path accepted");
+
+    // Node bytes: 1,024 is the limit, 1,025 is refused (both tries).
+    let mut w = WireWitness::of(&honest);
+    w.proof.push(("0x1".into(), vec![0u8; 1024]));
+    assert!(no_panic("node at limit", || guest_decode(&w.encode())).is_ok(), "a 1,024-byte node was refused");
+    let mut w = WireWitness::of(&honest);
+    w.proof.push(("0x1".into(), vec![0u8; 1025]));
+    assert!(refused(&w.encode(), "big node"), "a 1,025-byte node accepted");
+    let mut w = WireWitness::of(&honest);
+    w.accounts[0].1.push(("0x1".into(), vec![0u8; 1025]));
+    assert!(refused(&w.encode(), "big storage node"), "a 1,025-byte storage node accepted");
+
+    // Code: EIP-170 is the limit.
+    let mut w = WireWitness::of(&honest);
+    w.codes.push(vec![0u8; revm::primitives::eip170::MAX_CODE_SIZE]);
+    assert!(no_panic("code at limit", || guest_decode(&w.encode())).is_ok(), "an EIP-170-size code was refused");
+    let mut w = WireWitness::of(&honest);
+    w.codes.push(vec![0u8; revm::primitives::eip170::MAX_CODE_SIZE + 1]);
+    assert!(refused(&w.encode(), "big code"), "a code over EIP-170 accepted");
+
+    // Declared lengths the input does not back: every length prefix in turn set to
+    // u64::MAX and to 2^32, with the input cut right after it. Each must be refused
+    // without a panic (an attempt to reserve 2^64 elements or bytes aborts the
+    // process, which `catch_unwind` would not survive either).
+    let w = WireWitness::of(&honest);
+    let mut prefixes: Vec<(String, Vec<u8>)> = Vec::new();
+    {
+        let mut out = w.head.clone();
+        prefixes.push(("proof count".into(), out.clone()));
+        wire_len(&mut out, w.proof.len() as u64);
+        prefixes.push(("proof path length".into(), out.clone()));
+        wire_bytes(&mut out, w.proof[0].0.as_bytes());
+        prefixes.push(("proof node length".into(), out.clone()));
+        let mut out = w.head.clone();
+        wire_proof(&mut out, &w.proof);
+        prefixes.push(("account count".into(), out.clone()));
+        wire_len(&mut out, w.accounts.len() as u64);
+        out.extend_from_slice(&w.accounts[0].0);
+        prefixes.push(("storage proof count".into(), out.clone()));
+        let mut out = w.head.clone();
+        wire_proof(&mut out, &w.proof);
+        wire_len(&mut out, w.accounts.len() as u64);
+        for (fixed, storage) in &w.accounts {
+            out.extend_from_slice(fixed);
+            wire_proof(&mut out, storage);
+        }
+        prefixes.push(("absent count".into(), out.clone()));
+        out.extend_from_slice(&w.absent);
+        prefixes.push(("code count".into(), out.clone()));
+        wire_len(&mut out, 1);
+        prefixes.push(("code length".into(), out));
+    }
+    for (what, prefix) in &prefixes {
+        for declared in [u64::MAX, 1u64 << 32, (1u64 << 16) + 1] {
+            let mut bytes = prefix.clone();
+            wire_len(&mut bytes, declared);
+            assert!(refused(&bytes, what), "{what} = {declared} with no data accepted");
+        }
+    }
+
+    // Every truncation of the honest encoding is refused.
+    for cut in 0..typed.len() {
+        assert!(refused(&typed[..cut], "truncation"), "truncation at {cut} of {} accepted", typed.len());
+    }
+
+    // Random byte corruption: never a panic. A corrupted witness that still decodes
+    // is only a different (unauthenticated) witness, which hydration then checks.
+    let mut rng = Rng::new(b"review-a bincode corruption");
+    for _ in 0..4_000 {
+        let mut bytes = typed.clone();
+        for _ in 0..1 + rng.next(3) {
+            let at = rng.next(bytes.len() as u64) as usize;
+            bytes[at] = rng.next(256) as u8;
+        }
+        let _ = no_panic("corruption", || guest_decode(&bytes));
+    }
+
+    // bincode::deserialize ignores trailing bytes. The guest reads each input as its
+    // own length-framed buffer, and the witness is never committed, so this is
+    // recorded rather than refused.
+    let mut trailing = typed.clone();
+    trailing.extend_from_slice(&[0xde, 0xad]);
+    assert_eq!(guest_decode(&trailing).unwrap(), honest);
+}

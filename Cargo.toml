@@ -71,6 +71,10 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 # Round-trip tests of the serde wire format (already in the lockfile via revm).
 serde_json = "=1.0.151"
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+# The guest reads its inputs with `sp1_zkvm::io::read`, i.e. `bincode::deserialize`
+# (bincode 1.3.3 in both guest lockfiles). Tests decode witnesses the same way.
+# Dev-dependency only: it is not in the guest workspaces and cannot reach an ELF.
+bincode = "=1.3.3"
 
 [features]
 # CANDIDATE, inert: the sparse settlement witness (`src/sparse_witness.rs`). No release
