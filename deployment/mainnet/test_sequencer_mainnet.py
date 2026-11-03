@@ -364,8 +364,8 @@ class SequencerTest(unittest.TestCase):
 
 
 # ---- program schedule: the shadow across the swap and the rollback (agent 218) ----
-NEXT_ELF = '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0'      # sparse PROGRAM_NEXT
-FALLBACK_ELF = 'c9f8cd40b703b47c1fdfb183c223da9977ac9839e3d1c436c28c9b7f331aacf8'  # complete PROGRAM_FALLBACK
+NEXT_ELF = '1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18'      # sparse PROGRAM_NEXT (forced, bc35e838)
+FALLBACK_ELF = 'd95185a60668b0d4e1da49be00d85b9c550b412f13c5155be454e72889f90bf1'  # complete PROGRAM_FALLBACK (forced, 7fd7f3c0)
 ACTIVATED_ELF = '6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073'
 GATE = 6000                      # swap epoch; gate slot 192000
 ROLLBACK = 6100
