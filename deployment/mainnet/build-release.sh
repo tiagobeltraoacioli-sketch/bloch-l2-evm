@@ -78,11 +78,15 @@ fi
 if [ "$NATIVE_COMMIT" = "$CANDIDATE_NATIVE_COMMIT" ]; then
   [ "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" = "$CANDIDATE_LOCK_SHA256" ] \
     || die "$NATIVE_LOCK is not the pinned lock $CANDIDATE_LOCK_SHA256 of native $CANDIDATE_NATIVE_COMMIT"
-  grep -q 'pub const L2_NEXT_PROGRAM_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
-    && grep -q 'pub const L2_PROGRAM_ROLLBACK_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
-    && grep -q 'pub const L2_DA_RESERVED_SLOT_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
-    && grep -q 'pub const L2_FORCED_INCLUSION_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
-    || die "the candidate native tree must keep the program, DA-slot and forced-inclusion gates inert"
+  # Every L2 gate of the candidate is inert: u64::MAX, or an alias of an inert gate (L2_FORCED_INCLUSION_EPOCH and
+  # L2_REVENUE_EPOCH ride with L2_NEXT_PROGRAM_EPOCH; agents 215, 233, fork candidate v3). l1_gates.py resolves aliases.
+  python3 "$HERE/l1_gates.py" "$N/crates/bloch-pos-committee/src/params.rs" | python3 -c '
+import json, sys
+g = json.load(sys.stdin)
+names = ("L2_NEXT_PROGRAM_EPOCH", "L2_PROGRAM_ROLLBACK_EPOCH", "L2_DA_RESERVED_SLOT_EPOCH", "L2_FORCED_INCLUSION_EPOCH",
+         "L2_REVENUE_EPOCH")
+sys.exit(0 if all(g.get(n) == "inert" for n in names) else 1)' \
+    || die "the candidate native tree must keep the program, rollback, DA-slot, forced-inclusion and L2-revenue gates inert"
   # Release gate (agents 163 B-1, 217): this native commit is the next-rules (program swap) release, and its
   # follower, producer and RPC compile ChainSpec::mainnet(). Refuse it until the owner's fee-sweep recipient is set.
   python3 "$HERE/set-sweep-recipient.py" gate --l2 "$L2" >/dev/null \
