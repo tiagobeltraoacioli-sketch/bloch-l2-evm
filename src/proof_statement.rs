@@ -631,6 +631,7 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         withdrawal_outbox,
         block_derivation,
         fee_vault_sweep,
+        min_base_fee,
     } = spec;
     let version_3 = match (block_derivation, fee_vault_sweep, withdrawal_outbox) {
         (Some(derivation), Some(recipient), Some(_)) => Some((derivation, recipient)),
@@ -671,6 +672,9 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         bytes.extend_from_slice(&derivation.l1_slot_millis.to_be_bytes());
         bytes.extend_from_slice(derivation.prevrandao.as_slice());
         bytes.extend_from_slice(recipient.as_slice());
+        bytes.extend_from_slice(&min_base_fee.to_be_bytes());
+    } else if *min_base_fee != 0 {
+        return Err(ChainSpecError::PartialNextRules);
     }
     Ok(keccak256(bytes))
 }
