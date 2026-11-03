@@ -11,7 +11,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
       l2_reorg_recover.py (SHA-256 7c918bb7...) and, for the program swap (CANDIDATE, native
       L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 bc35e838...) and, for the
-      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...).
+      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 7fd7f3c0...).
       The host of this kit serves both programs: the activated one with --mainnet-v1, the
       next one with --mainnet --sparse (see "Program swap" in SETTLER-RUNBOOK.md).
       Creates the system user, /opt + /var/lib + /etc directories, the pinned
@@ -74,10 +74,9 @@ PINS = {
     # fee-sweep recipient (TBD-owner) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048',
     # CANDIDATE, not scheduled: the complete-witness guest that native PROGRAM_FALLBACK names (the next rules
-    # WITHOUT forced inclusion, configuration 975ec258; installed by the inert rollback gate). Pinned container
-    # build of the fork candidate e8feb2b. Native refuses an armed rollback under armed forced inclusion until a
-    # complete guest with the forced rule replaces it (hard_forks::l2_forced_rollback_may_arm).
-    'settlement_v3_mainnet_fallback': '3ad3a4f02b6f03768674de8804934064cc9f8f0b47fedbe0456dce79ddaa53b3',
+    # WITH forced inclusion, configuration b4663ab8; installed by the inert rollback gate). Pinned container
+    # build of guest-fallback, bloch-l2-evm codex/fallback-forced-r11-20261103 (agent 216).
+    'settlement_v3_mainnet_fallback': '7fd7f3c0fb572ca1d9cfc1caa70ba4be09f306bb6d7274782ae517b59b1b5303',
 }
 # This kit's host takes --mainnet for the NEXT rules; the activated program is --mainnet-v1.
 ACTIVATED_PROVER_ARGS = ['--mainnet-v1']

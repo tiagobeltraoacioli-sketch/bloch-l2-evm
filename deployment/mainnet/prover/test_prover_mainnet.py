@@ -227,14 +227,11 @@ class InstallPlan(unittest.TestCase):
         self.assertEqual(fallback['guest_sha256'], install.FALLBACK_GUEST_SHA256)
         for key in ('configuration', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254'):
             self.assertEqual(fallback[key], install.PINNED_FALLBACK[key])
-        # Without forced inclusion the fallback runs the next configuration. With it (agent 137), the next
-        # configuration is the forced one (b4663ab8) and the fallback stays on the plain next rules (975ec258)
-        # until a complete guest with the forced rule replaces it; native refuses an armed rollback under armed
-        # forced inclusion meanwhile (hard_forks::l2_forced_rollback_may_arm), as its configuration assert allows.
-        pair = (install.PINNED_FALLBACK['configuration'], install.PINNED_NEXT['configuration'])
-        plain = '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878'
-        forced = 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d'
-        self.assertIn(pair, {(install.PINNED_NEXT['configuration'],) * 2, (plain, forced)})
+        # The fallback runs the next configuration, forced inclusion included (agent 216's guest-fallback), as
+        # native requires (PROGRAM_FALLBACK.identities[0] == PROGRAM_NEXT.identities[0]).
+        self.assertEqual(install.PINNED_FALLBACK['configuration'], install.PINNED_NEXT['configuration'])
+        self.assertEqual(install.PINNED_FALLBACK['configuration'],
+                         'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d')
 
     def test_remote_prover_pin_is_the_file_in_this_tree(self):
         self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)
