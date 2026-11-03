@@ -58,7 +58,7 @@ So one anonymous request could run the EVM for hours, holding one of the
 settled RPC's 4 simulation permits; four requests stopped every simulation of
 that backend until a restart. The patch caps all three at `call_gas_limit()`
 (`gas_within_cap`). The settled RPC builds its API with a cap of 15,000,000,
-the spool's `max_tx_gas` (`build_eth_api_capped`); `build_eth_api` and
+the spool's `max_tx_gas` (`build_eth_api_capped` in `src/bin/settled_rpc/capped_api.rs`: inside the binary, because any change to the library, even an unused item, changed `bloch-l2-produce-dev`); `build_eth_api` and
 `build_eth_api_with` keep the block gas limit.
 
 It also adds a process-wide wall-clock budget for a request that runs the EVM
