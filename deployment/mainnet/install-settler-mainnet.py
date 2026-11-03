@@ -75,12 +75,12 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': 'fe0b467216d8028d5470b787e07a67d4e4cc45b23ad0bb0336ba4617577fbec8',
+    'settler_v3.py': '5cf99928df36a6c56af7526281dd1f73277691c3fec98a34cfe83ad463ea49a6',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
     # Sequencer policy v2 (agents 166, 223); the producer with `select` and the host with the cycle limit move the two
     # binary pins above once the user-transaction candidate is built at the release path (agent 236).
-    'sequencer_policy_v2.py': 'd2f5c3e3eb4c0e0e8ccf5193eb6d584cb718b631098d4603c2f25cbd27ebb4cc',
+    'sequencer_policy_v2.py': 'fe98b4b774e317a546af71ac2dccd0f84191fed9c338fe32f9675cae7bf21baa',
 }
 FILES = ('settler_v3.py', 'sequencer_policy_v2.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev',
          'settlement_v3_mainnet', 'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
@@ -94,7 +94,7 @@ POLICY_V2 = {
     'max_tx_gas': 5_000_000, 'exempt_max_tx_gas': 15_000_000,
     'fresh_slot_price_wei': 200 * 10**12, 'fresh_slots_per_block': 128, 'fresh_slots_per_sender': 256,
     'fresh_sender_window_seconds': 48 * 3600,
-    'preflight_cycle_limit_factor': 2, 'preflight_execute_seconds': 60, 'preflight_max_runs': 24,
+    'preflight_cycle_limit_factor': 2, 'preflight_execute_seconds': 90, 'preflight_max_runs': 24,
     'preflight_max_seconds': 180, 'sender_ban_seconds': 86400, 'standing_seconds': 7 * 86400,
     'band_max_wait_seconds': 7200,
     # Congestion tip ON, capped at 3 gwei (owner, middle ground). Tips go where the L2 fee recipient sends them.

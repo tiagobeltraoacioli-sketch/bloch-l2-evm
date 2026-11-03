@@ -47,7 +47,7 @@ DEFAULTS = {
     'fresh_sender_window_seconds': 48 * 3600,
     # Metering (3.4). The cycle limit is set on the host; the planner only needs to know it is at least twice the budget.
     'preflight_cycle_limit_factor': 2,
-    'preflight_execute_seconds': 60,  # wall-clock backstop only; the cycle limit ends heavy runs first
+    'preflight_execute_seconds': 90,  # wall-clock backstop only; the cycle limit ends heavy runs first (agent 223 H1: 90 s on a loaded host)
     'preflight_max_runs': 24,
     'preflight_max_seconds': 180,
     'unmeasured_retry_seconds': [600, 1800],  # tries at t, t+10 min, t+40 min, then quarantine (inside the RPC's 3 h)

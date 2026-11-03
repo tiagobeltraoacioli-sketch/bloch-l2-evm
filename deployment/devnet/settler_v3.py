@@ -1503,7 +1503,7 @@ class Settler:
                 with (scratch / 'execute.log').open('w') as out:
                     # In its own process group, killed with its SP1 segments on a timeout (F8, as the proof stages).
                     result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT,
-                                              timeout=self.c.get('preflight_execute_seconds', 60))
+                                              timeout=self.c.get('preflight_execute_seconds', 90))
             except subprocess.TimeoutExpired:
                 return None, block
             text = (scratch / 'execute.log').read_text(errors='replace')

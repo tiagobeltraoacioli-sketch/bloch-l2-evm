@@ -131,7 +131,7 @@ The 48 h window replaces "96 blocks", which agent 90 calibrated at about 30 min 
 | Setting | Value | Was |
 |---|---|---|
 | Host cycle limit for preflight | 2 × `max_block_instructions` = **180M instructions** | none |
-| `preflight_execute_seconds` | 60 (wall-clock backstop only) | 30 recommended, 120 installer |
+| `preflight_execute_seconds` | 90 (wall-clock backstop only; agent 223 measured over-limit verdicts at 35-47 s under load 30-45, so 60 s left a 1.3x margin) | 30 recommended, 120 installer |
 | `preflight_max_runs`, `preflight_max_seconds` | 24 runs, 180 s per block | 16, 180 s |
 | Control run | an empty block without mandatory items, once per block, only when needed | `measure_empty` probe (r8 N6 only) |
 | `unmeasured_retry_seconds` | retry after 10 min, then 30 min; quarantine at the 3rd failure | after 1, then 2 blocks |
