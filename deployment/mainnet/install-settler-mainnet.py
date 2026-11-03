@@ -15,7 +15,7 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
       whose passphrase is generated here and never printed. Prints the funding
       script hash to send the DA fee budget to.
-  sudo python3 install-settler-mainnet.py configure [--user-transactions]
+  sudo python3 install-settler-mainnet.py configure [--user-transactions [--sequencer-policy-v2]]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
         [--follower-state DIR --follower-status FILE | --no-foreign-recovery] [--reorg-recovery]
       Foreign settlement recovery is ON by default (owner decision D17, 2026-11-02): it reads the
@@ -25,7 +25,8 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       (SETTLER-RUNBOOK.md "Automatic reorg recovery"); OFF unless given, never with --no-foreign-recovery.
       Runs, as the settler user, `--check-rpc` and the read-only `--dry-run` (SP1
       execute of the next L2 block against the live request) on a pending config, and
-      only then writes config.json (user transactions OFF unless asked). A failed check
+      only then writes config.json (user transactions OFF unless asked). --sequencer-policy-v2
+      adds the block budget and limits of docs/SEQUENCER-POLICY-V2.md (POLICY_V2 below). A failed check
       leaves no config.json, so `start` stays refused and configure can simply be re-run.
       Never broadcasts.
   sudo python3 install-settler-mainnet.py dry-run [--prove]
@@ -74,15 +75,33 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': 'b60ef758be5c748ca9036808856806e9f7649eeff7d58e52b27c016b7d810021',
+    'settler_v3.py': 'fe0b467216d8028d5470b787e07a67d4e4cc45b23ad0bb0336ba4617577fbec8',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
+    # Sequencer policy v2 (agents 166, 223); the producer with `select` and the host with the cycle limit move the two
+    # binary pins above once the user-transaction candidate is built at the release path (agent 236).
+    'sequencer_policy_v2.py': '81d25c8dbeff894f99ef524000b4d2bb4bc82680aa63d22b3d0dc1109fa5841a',
 }
-FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
-         'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
+FILES = ('settler_v3.py', 'sequencer_policy_v2.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev',
+         'settlement_v3_mainnet', 'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
 # Foreign settlement recovery (D17: on at launch) reads follower A on this host (go-live plan P3).
 FOLLOWER_STATE = '/var/lib/bloch-l2-mainnet-follower/native'
 FOLLOWER_STATUS = '/var/lib/bloch-l2-mainnet-follower/status.json'
+# Sequencer policy v2 (docs/SEQUENCER-POLICY-V2.md; owner decisions agents/OWNER-DECISIONS-R10.md, 2026-11-02): only with
+# user transactions. Needs a prover with the cost line and BLOCH_PREFLIGHT_CYCLE_LIMIT, and a producer with `select`.
+POLICY_V2 = {
+    'max_block_sp1_gas': 90_000_000, 'max_block_instructions': 90_000_000, 'max_block_txs': 64,
+    'max_tx_gas': 5_000_000, 'exempt_max_tx_gas': 15_000_000,
+    'fresh_slot_price_wei': 200 * 10**12, 'fresh_slots_per_block': 128, 'fresh_slots_per_sender': 256,
+    'fresh_sender_window_seconds': 48 * 3600,
+    'preflight_cycle_limit_factor': 2, 'preflight_execute_seconds': 60, 'preflight_max_runs': 24,
+    'preflight_max_seconds': 180, 'sender_ban_seconds': 86400, 'standing_seconds': 7 * 86400,
+    'band_max_wait_seconds': 7200,
+    # Congestion tip ON, capped at 3 gwei (owner, middle ground). Tips go where the L2 fee recipient sends them.
+    'congestion_max_tip_wei': 3 * 10**9,
+    # Operator and signer addresses only: TBD-owner (40 lowercase hex characters each, no 0x).
+    'write_limit_exempt_senders': [],
+}
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
@@ -185,6 +204,8 @@ def configure(args):
     rel = release()
     settler = settler_module(rel)
     threads = int(option(args, '--prover-threads', '6'))
+    assert '--sequencer-policy-v2' not in args or '--user-transactions' in args, \
+        '--sequencer-policy-v2 needs --user-transactions'
     config = {
         'network_kind': 'mainnet', 'network': settler.MAINNET['network'], 'l2_genesis': settler.MAINNET['l2_genesis'],
         'rpc_urls': RPC_URLS, 'rpc_quorum': 2,
@@ -198,6 +219,7 @@ def configure(args):
         'idle_seconds': 30, 'max_consecutive_failures': 8,
         'user_transactions': '--user-transactions' in args, 'txpool_dir': str(STATE / 'txpool'),
         'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128, 'min_tip_wei': 100_000_000,
+        **(POLICY_V2 if '--sequencer-policy-v2' in args else {}),
         **({'skip_idle_blocks': True, 'max_idle_seconds': int(option(args, '--max-idle-seconds', '86400')),
             'min_block_interval_seconds': int(option(args, '--min-block-interval', '0'))}
            if '--skip-idle-blocks' in args else {}),

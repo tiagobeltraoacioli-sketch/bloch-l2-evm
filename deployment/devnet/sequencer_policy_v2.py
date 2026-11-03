@@ -128,7 +128,11 @@ class Policy:
                 if not isinstance(loaded, dict):
                     raise ValueError('not an object')
                 fresh = self._fresh_state()
-                fresh.update({k: v for k, v in loaded.items() if k in fresh and isinstance(v, type(fresh[k]))})
+                # `last_block_time` starts as None and is a number once a block was committed: keep it across restarts,
+                # or the idle decay of the tip stops until the next block (review r9 U5 after a restart).
+                kinds = {k: ((int, float) if k == 'last_block_time' else type(v)) for k, v in fresh.items()}
+                fresh.update({k: v for k, v in loaded.items() if k in fresh and isinstance(v, kinds[k])
+                              and not isinstance(v, bool)})
                 self.state = fresh
             except (OSError, ValueError) as error:
                 self.log('policy-state-unreadable', path=str(self.path), reason=str(error)[:200])
@@ -150,8 +154,8 @@ class Policy:
 
     def profile_for(self, sp1_gas):
         """Which prover settings prove a block of this preflight SP1 gas inside the planned prover's memory."""
-        if sp1_gas is None:
-            return 'mandatory-heavy'
+        if sp1_gas is None or sp1_gas > self.c['max_block_sp1_gas']:
+            return 'mandatory-heavy'  # over the budget: only a mandatory-only block can be, whatever the fast threshold
         if sp1_gas <= self.c['fast_profile_max_sp1_gas']:
             return 'fast'
         if sp1_gas <= self.c['max_block_sp1_gas']:
@@ -387,8 +391,10 @@ class Policy:
             offender = remaining[lo]
             tx = info[offender]
             remaining = [h for h in remaining[lo + 1:] if info[h]['sender'] != tx['sender']]
-            if not best and misfit is not None:
-                alone = misfit  # the misfit run was the offender alone on the mandatory base
+            if not best:
+                # The misfit run was the offender alone on the mandatory base, with or without a cost: running it again
+                # would only repeat a run without cost (review r8 N4; the retries come 10 and 40 minutes later).
+                alone = misfit
             else:
                 if out_of_work():
                     plan.held.append((offender, 'not-reached'))

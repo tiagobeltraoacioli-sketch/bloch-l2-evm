@@ -1331,7 +1331,7 @@ class MonitorGapTests(unittest.TestCase):
                 'da-submitted', 'da-included', 'da-wait-ended-block-settled', 'da-batch-reused', 'da-reuse-waiting-follower',
                 'da-fee-moved', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
                 'foreign-settlement-recovered', 'foreign-settlement-waiting-finality',
-                'stopped'}
+                'stopped', 'block-plan', 'txs-held'}  # agent 223: per-block policy summary and held entries
         graded = m.CRIT_EVENTS | m.WARN_EVENTS | m.PROGRESS_EVENTS | info
         self.assertGreater(len(names), 40)
         self.assertEqual(sorted(names - graded), [])

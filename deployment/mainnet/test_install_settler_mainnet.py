@@ -172,6 +172,19 @@ class Installer(unittest.TestCase):
         self.assertEqual(config['reorg_recovery'], {'follower_state': '/var/lib/f/native',
                                                     'follower_status': '/var/lib/f/status.json'})
 
+    def test_sequencer_policy_v2_is_shipped_and_configured_only_with_user_transactions(self):
+        self.assertIn('sequencer_policy_v2.py', m.FILES)
+        with self.assertRaisesRegex(AssertionError, 'needs --user-transactions'):
+            m.configure(['--sequencer-policy-v2'])
+        with mock.patch.object(m.subprocess, 'run', return_value=Done()):
+            m.configure(['--user-transactions', '--sequencer-policy-v2', '--no-foreign-recovery'])
+        config = json.loads((self.etc / 'config.json').read_text())
+        self.assertEqual((config['max_block_sp1_gas'], config['max_block_txs'], config['congestion_max_tip_wei']),
+                         (90_000_000, 64, 3 * 10**9))
+        sys.path.insert(0, str(HERE.parent / 'devnet'))
+        import settler_v3
+        settler_v3.check_policy_config(config)
+
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)
         self.assertEqual(hashlib.sha256((HERE / 'l2_reorg_recover.py').read_bytes()).hexdigest(),

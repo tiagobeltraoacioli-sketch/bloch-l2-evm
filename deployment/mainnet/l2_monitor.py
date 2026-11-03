@@ -130,7 +130,11 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'block-over-budget', 'tx-quarantined',
                          # Agent 206 (reorg_recovery): a hook that could not deliver a reorg alert; a partial quorum
                          # below the floor with nothing to recover; a rebuild that did not reach the target.
-                         'reorg-alert-failed', 'reorg-behind-floor-waiting', 'reorg-rebuild-behind-view'})
+                         'reorg-alert-failed', 'reorg-behind-floor-waiting', 'reorg-rebuild-behind-view',
+                         # Agent 223 (sequencer policy v2, logged by sequencer_policy_v2.py through the settler's log):
+                         # a mandatory-only block over the budget (deposits-over-budget.json), a host that measured
+                         # nothing, an unreadable policy state, a gate that did not settle.
+                         'mandatory-over-budget', 'budget-unavailable', 'policy-state-unreadable', 'gate-did-not-settle'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

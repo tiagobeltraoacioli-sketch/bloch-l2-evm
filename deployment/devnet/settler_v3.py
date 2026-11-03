@@ -739,6 +739,24 @@ def check_mainnet_config(c):
             raise Halt(f'{key} must be a positive integer')
 
 
+def check_policy_config(c):
+    """The sequencer policy v2 limits this settler accepts (sequencer_policy_v2.DEFAULTS; docs/SEQUENCER-POLICY-V2.md)."""
+    for key in ('max_tx_gas', 'exempt_max_tx_gas', 'fresh_slot_price_wei', 'min_tip_wei', 'congestion_max_tip_wei',
+                'preflight_execute_seconds', 'preflight_max_runs', 'preflight_max_seconds', 'sender_ban_seconds',
+                'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib'):
+        if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
+            raise Halt(f'{key} must be a positive integer')
+    if c.get('max_block_txs', 1) > 64 and c.get('user_transactions'):
+        raise Halt('with the policy budget, max_block_txs is at most 64 (docs/SEQUENCER-POLICY-V2.md 3.1)')
+    if c.get('preflight_cycle_limit_factor', 2) < 2:
+        raise Halt('preflight_cycle_limit_factor must be at least 2: a cycle-limit verdict proves a transaction over budget')
+    if c.get('min_tip_wei') and c.get('congestion_max_tip_wei') and c['congestion_max_tip_wei'] < c['min_tip_wei']:
+        raise Halt('congestion_max_tip_wei is below min_tip_wei')
+    exempt = c.get('write_limit_exempt_senders', [])
+    if not isinstance(exempt, list) or not all(isinstance(a, str) and re.fullmatch(r'[0-9a-f]{40}', a) for a in exempt):
+        raise Halt('write_limit_exempt_senders must be a list of 40-character lowercase hex addresses without 0x')
+
+
 def check_rehearsal_config(c):
     """mainnet-rehearsal: the mainnet program and L2 genesis on a private network, never Genesis-4."""
     if c.get('network') == MAINNET['network']:
@@ -1283,6 +1301,9 @@ class Settler:
         budgets = [self.c.get(key) for key in ('max_block_instructions', 'max_block_sp1_gas')]
         if budgets != [None, None] and not all(isinstance(b, int) and not isinstance(b, bool) and b > 0 for b in budgets):
             raise Halt('max_block_instructions and max_block_sp1_gas go together, as positive integers')
+        self.policy_clock = time.time  # the policy's windows are wall seconds, persisted across restarts
+        if budgets != [None, None]:
+            check_policy_config(self.c)
         self.work = Path(self.c['workdir'])
         self.rebuild_discarded_at = None
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
@@ -1392,7 +1413,7 @@ class Settler:
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            if self.c['user_transactions'] and self.c.get('max_block_instructions'):
+            if self.budget_on():
                 return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
@@ -1416,9 +1437,49 @@ class Settler:
             entries.append((path, raw))
         return entries
 
+    def budget_on(self):
+        """Sequencer policy v2 (sequencer_policy_v2.py, docs/SEQUENCER-POLICY-V2.md) decides the user transactions of
+        each block: user transactions on and a block budget in SP1 gas configured."""
+        return bool(self.c.get('user_transactions') and self.c.get('max_block_sp1_gas'))
+
+    def policy(self):
+        """The v2 planner with this settler's limits. Its state (bans, waits, standing, congestion tip) lives in
+        `<workdir>/sequencer-policy.json`, which the settled RPC reads with `--required-tip-file`. Windows are wall
+        seconds, persisted across restarts."""
+        import sequencer_policy_v2 as policy_v2
+        policy_v2.set_hash(keccak256)
+        config = {key: self.c[key] for key in policy_v2.DEFAULTS if key in self.c}
+        work = getattr(self, 'work', None)
+        clock = getattr(self, 'policy_clock', None) or getattr(self, 'clock', time.time)
+        return policy_v2.Policy(config, work / 'sequencer-policy.json' if work else None, clock, log)
+
+    def pool_arguments(self, pool, selecting=False):
+        """The producer's limits for the spool, a preflight list or the selected list. `select` (the policy's native
+        report) runs without the per-block transaction cap: the policy applies `max_block_txs` to its own try order, so the
+        producer's tip order cannot drop a sender with standing before the tiers apply (agents/166 §1.5)."""
+        args = ['--txs', str(pool), '--max-gas', str(self.c['max_block_gas']), '--max-bytes', str(self.c['max_block_bytes'])]
+        if not selecting:
+            args += ['--max-txs', str(self.c['max_block_txs'])]
+        if self.c.get('min_tip_wei'):
+            args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
+        return args
+
+    def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):
+        """What the producer's selection would do with these transactions on this parent and these deposits, per
+        transaction (`produce-dev select`): native execution, nothing committed or pruned."""
+        pool = directory / 'dry.json'
+        pool.write_text(json.dumps(raws))
+        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+        args[0] = 'select'
+        return self.produce(*args, *self.pool_arguments(pool, selecting=True))
+
     def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
-        """Build the block from exactly these transactions on a throwaway copy of the database and run the guest in
-        execute mode. Returns (cost, where 1.0 is the budget, or None when the time limit was hit, producer report). No proof, no lock."""
+        """Build the block from exactly these transactions, with these deposits, on a throwaway copy of the database and
+        run the guest in execute mode under the host's cycle limit. Returns (result, producer report): result is a
+        `Cost`, `OVER_LIMIT` when the guest execution hit `BLOCH_PREFLIGHT_CYCLE_LIMIT` (the host prints
+        `Settlement V3 over cycle limit` and exits 3), or None when the run gave no cost (wall-clock backstop, crash,
+        OOM, missing cost line). No proof, no lock."""
+        import sequencer_policy_v2 as policy_v2
         scratch = deposits.parent / f'preflight-{tag}'
         shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True)
@@ -1429,80 +1490,114 @@ class Settler:
             pool.write_text(json.dumps(raws))
             args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
             args[args.index('--target') + 1] = str(db)
-            block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
-                                 '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
+            block = self.produce(*args, *self.pool_arguments(pool))
             self.produce('export', '--target', str(db), '--number', str(number), '--out', str(scratch / 'block.artifact'))
             request = scratch / 'native-request.txt'
             request.write_text(self.preflight_request)
             env = {'PATH': self.c.get('prover_path', '/usr/bin:/bin'), 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
                    'SP1_CIRCUIT_MODE': 'release', 'BLOCH_NATIVE_L2_REQUEST': str(request),
-                   'BLOCH_NATIVE_L2_ARTIFACT': str(scratch / 'block.artifact')}
+                   'BLOCH_NATIVE_L2_ARTIFACT': str(scratch / 'block.artifact'),
+                   'BLOCH_PREFLIGHT_CYCLE_LIMIT': str(self.policy().cycle_limit())}
             argv = [self.c['prover'], *self.prover_args, 'execute', 'native-artifact', self.c['guest']]
             try:
                 with (scratch / 'execute.log').open('w') as out:
                     # In its own process group, killed with its SP1 segments on a timeout (F8, as the proof stages).
                     result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT,
-                                              timeout=self.c.get('preflight_execute_seconds', 120))
+                                              timeout=self.c.get('preflight_execute_seconds', 60))
             except subprocess.TimeoutExpired:
                 return None, block
             text = (scratch / 'execute.log').read_text(errors='replace')
+            if result.returncode == 3 and re.search(r'Settlement V3 over cycle limit: limit=\d+', text):
+                return policy_v2.OVER_LIMIT, block
             gas = re.findall(r'Settlement V3 cost: gas=(\d+)', text)
             instructions = re.findall(r'(\d+) instructions', text)
             if result.returncode or not gas or not instructions:
-                return None, block  # no cost from this guest and host: treat the block as over any budget
-            # Memory follows instructions, time follows SP1 gas: 1.0 is the budget.
-            return max(int(instructions[-1]) / self.c['max_block_instructions'], int(gas[-1]) / self.c['max_block_sp1_gas']), block
+                return None, block  # no cost: a host failure for the policy, never a verdict on a transaction
+            return policy_v2.Cost(int(gas[-1]), int(instructions[-1])), block
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
-    def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
-        """Commit only a block whose guest execution fits `max_block_instructions` and `max_block_sp1_gas`.
+    def measure_empty(self, parent, anchor, deposits, anchor_slot, number, tag):
+        """The control: the same block without deposits or transactions, so the request names no consumed deposit. A
+        cost here and none for the block tells a heavy block from a failing host."""
+        empty = deposits.parent / f'.empty-deposits-{tag}.json'
+        empty.write_text('[]')
+        request = getattr(self, 'preflight_request', None)
+        try:
+            if request:
+                lines = request.split('\n')
+                if len(lines) >= 4 and lines[-1] == '':
+                    lines[-2] = lines[-3]  # consumed_end = consumed_start: no deposit consumed
+                self.preflight_request = '\n'.join(lines)
+            return self.measure_block(parent, anchor, empty, anchor_slot, number, [], tag)[0]
+        finally:
+            self.preflight_request = request
+            empty.unlink(missing_ok=True)
 
-        Declared EVM gas does not bound proving cost: a 15M-gas block ranges from about 7M to 6.9G zkVM instructions.
-        Measured on the 100 GiB prover: peak memory follows the instruction count, proving time follows SP1 gas, which
-        also counts precompiles. So the block is first built on a copy of the database and measured. An over-budget block
-        is cut to its longest fitting prefix. The transaction that broke the budget stays in the spool for a later block,
-        unless it does not fit even alone: then it can never be settled and moves to the quarantine directory."""
-        # hold_block closes the spool for a block on a stale source; this path reads the spool itself, so it must too.
+    def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
+        """Commit only the block sequencer policy v2 chose (sequencer_policy_v2.py, docs/SEQUENCER-POLICY-V2.md).
+
+        Declared EVM gas does not bound proving cost, so candidate blocks are built on a copy of the database and run in
+        execute mode under the host's cycle limit (twice the instruction budget). A block whose mandatory items (deposits)
+        alone are over the budget still commits, because L1 names exactly those deposits; it carries nothing else and
+        writes `deposits-over-budget.json` for the operator's exit (STUCK-BLOCK-RUNBOOK.md). Only what the committed
+        block's own report included, or what the producer dropped for good, leaves the spool (review r8 N1)."""
+        # hold_block closes the spool for a block on a stale source: this path reads the spool itself, so it must too.
         entries = self.spool_entries() if getattr(self, 'spool_open', True) else []
-        if not entries:
-            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
-        fits = lambda cost: cost is not None and cost <= 1  # noqa: E731
+        pending = json.loads(deposits.read_text())
         self.preflight_request = self.preflight_source
-        measure = lambda raws, tag: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, tag)  # noqa: E731
+        tags = iter(range(1 << 30))
+        policy = self.policy()
+        if not getattr(self, 'cost_line_checked', False):
+            # With a budget, the prover must give a cost for an empty block, or users would be starved silently (r7 F2).
+            probe = self.measure_empty(parent, anchor, deposits, anchor_slot, number, 'probe')
+            try:
+                import sequencer_policy_v2 as policy_v2
+                policy_v2.check_cost_line(probe)
+            except RuntimeError as error:
+                raise Halt(f'{error} (max_block_sp1_gas is set: the prover must print the Settlement V3 cost line)') from None
+            self.cost_line_checked = True
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
-        cost, full = measure([raw for _, raw in entries], 'full')
-        included = list(full.get('included', []))
-        finished = [e['hash'] for e in full.get('dropped', []) if e.get('hash')]
-        keep = len(included)
-        if not fits(cost):
-            low, high = 0, len(included)  # fits(low) by assumption, not fits(high) as measured
-            while high - low > 1:
-                middle = (low + high) // 2
-                if fits(measure([by_hash[h][1] for h in included[:middle]], 'cut')[0]):
-                    low = middle
-                else:
-                    high = middle
-            keep = low
-            offender = included[keep] if included else None
-            log('block-over-budget', number=number, cost=cost, keep=keep, of=len(included), offender=offender)
-            if offender and not fits(measure([by_hash[offender][1]], 'alone')[0]):
-                quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
+        plan = policy.plan(
+            [raw for _, raw in entries],
+            lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
+            lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
+            lambda: self.measure_empty(parent, anchor, deposits, anchor_slot, number, next(tags)),
+            has_mandatory=bool(pending))
+        base = plan.base if hasattr(plan.base, 'sp1_gas') else None
+        if plan.mandatory_over_budget:
+            atomic_write(deposits.parent / 'deposits-over-budget.json', json.dumps(
+                {'number': number, 'sp1_gas': base.sp1_gas if base else None,
+                 'instructions': base.instructions if base else None, 'over_cycle_limit': plan.base == 'over-limit',
+                 'budget_sp1_gas': policy.c['max_block_sp1_gas'], 'budget_instructions': policy.c['max_block_instructions'],
+                 'deposits': len(pending), 'profile': plan.profile}, sort_keys=True) + '\n')
+        quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
+        for name, reason in plan.quarantine:
+            if name in by_hash:
                 quarantine.mkdir(exist_ok=True, mode=0o700)
                 try:
-                    by_hash[offender][0].replace(quarantine / by_hash[offender][0].name)
+                    by_hash[name][0].replace(quarantine / by_hash[name][0].name)
                 except FileNotFoundError:
                     pass
-                log('tx-quarantined', number=number, hash=offender)
-        chosen = included[:keep]
+                log('tx-quarantined', number=number, hash=name, reason=reason)
+        if plan.held:
+            log('txs-held', number=number, held=[{'hash': h, 'reason': r} for h, r in plan.held[:32]], count=len(plan.held))
         pool = deposits.parent / 'selected.json'
-        atomic_write(pool, json.dumps([by_hash[h][1] for h in chosen]))
+        atomic_write(pool, json.dumps(plan.raws))
         args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
-        block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
-                             '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
-        for name in chosen + finished:  # committed: what the producer does for a spool directory
+        block = self.produce(*args, *self.pool_arguments(pool))
+        for name in policy.committed(plan, block):  # committed: only what this block's own report names
             if name in by_hash:
                 by_hash[name][0].unlink(missing_ok=True)
+        cost = plan.cost if hasattr(plan.cost, 'sp1_gas') else None
+        atomic_write(deposits.parent / 'prover-profile.json', json.dumps(
+            {'number': number, 'profile': plan.profile, 'sp1_gas': cost.sp1_gas if cost else None,
+             'instructions': cost.instructions if cost else None}, sort_keys=True) + '\n')
+        log('block-plan', number=number, runs=plan.runs, seconds=round(plan.seconds, 1), exhausted=plan.exhausted,
+            transactions=len(plan.chosen), sp1_gas=cost.sp1_gas if cost else None,
+            base_sp1_gas=base.sp1_gas if base else None, profile=plan.profile,
+            mandatory_over_budget=plan.mandatory_over_budget, host_unavailable=plan.host_unavailable,
+            required_tip=policy.required_tip())
         return block
 
     def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
@@ -1511,10 +1606,7 @@ class Settler:
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
         if self.c['user_transactions'] and spool and self.spool_open:
-            args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
-                     '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
-            if self.c.get('min_tip_wei'):
-                args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
+            args += self.pool_arguments(self.c['txpool_dir'])
         return args
 
     def source_age(self, view):
@@ -1533,7 +1625,7 @@ class Settler:
                         for a in self.native.gather('getl2settlement').values())
         return values[max(0, len(values) - 1 - self.native.faults)]
 
-    def spool_demand(self, head):
+    def spool_demand(self, head, view=None):
         """Whether a spooled transaction may go into the next block on `head`. A file alone is not demand: the RPC admits
         nonces up to 16 ahead and keeps them 3 hours, and the producer defers a nonce gap without dropping it, so one such
         entry would make every cycle due (review r7 F5). Demand is an entry whose nonce is its sender's next nonce at the
@@ -1545,6 +1637,8 @@ class Settler:
         files = sorted(Path(self.c['txpool_dir']).glob('*.tx'))
         if not files:
             return False
+        if self.budget_on() and view is not None:
+            return self.policy_demand(head, view)
         known = getattr(self, 'spool_senders', {})
         self.spool_senders = {}
         nonces = getattr(self, 'spool_nonces', (None, {}))
@@ -1574,6 +1668,29 @@ class Settler:
                 return True
         return False
 
+    def policy_demand(self, head, view):
+        """Demand under sequencer policy v2: the producer's native selection of the spool on `head` (`select`, nothing
+        committed), then the policy's own gate at the current time, with the decayed tip and with no mandatory item, since
+        a block with deposits is due anyway (review r8 N8, r9 U4, U5). The policy state is saved, so the tip the RPC
+        publishes decays while the chain is idle. If this cannot be answered, the spool counts as demand."""
+        directory = self.work / '.demand'
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            deposits = directory / 'deposits.json'
+            deposits.write_text('[]')
+            request = view['source'].get('request')
+            slot = int(request.splitlines()[3]) if request else None
+            args = self.extend_arguments(head, view['source']['block'], deposits, slot, spool=False)
+            args[0] = 'select'
+            report = self.produce(*args, *self.pool_arguments(self.c['txpool_dir'], selecting=True))
+            policy = self.policy()
+            due = policy.demand(report.get('tx_stats') or [], policy.clock(), False)
+            policy.save()
+            return due
+        except Exception as error:  # noqa: BLE001
+            log('spool-demand-unknown', reason=f'{type(error).__name__}: {error}'[:300])
+            return True
+
     def hold_block(self, view):
         """With `skip_idle_blocks`: whether to build no block in this cycle. Not a block rule: L1, the guest, the follower
         and every rebuild only see fewer blocks, each with an older anchor. See SETTLER-RUNBOOK.md, "Idle blocks".
@@ -1594,7 +1711,7 @@ class Settler:
             log('idle-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
             return True
         pace = self.c.get('min_block_interval_seconds', 0)
-        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if self.spool_demand(expected)
+        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if self.spool_demand(expected, view)
                   else 'max-idle' if age >= self.c['max_idle_seconds'] else None)
         if reason is None or age < pace:
             now = self.clock()
@@ -1713,6 +1830,9 @@ class Settler:
                'SP1_GNARK_IMAGE': self.c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(directory / 'native-request.txt'),
                'BLOCH_NATIVE_L2_ARTIFACT': str(directory / 'block.artifact')}
+        profile = self.prover_profile(directory)
+        if profile:
+            env.update(profile['env'])
         steps = []
         for name, args in (('execute', ['execute']), ('prove', ['prove-groth16']), ('verify', ['verify-groth16'])):
             if name not in stages:
@@ -1730,7 +1850,8 @@ class Settler:
                 try:
                     if where == 'remote':
                         result = self.prove_remote(directory, proof)
-                    elif name == 'prove' and not self.local_proof_fits(directory):
+                    elif name == 'prove' and not (self.local_proof_fits(directory)
+                                                  and self.local_profile_fits(directory, profile)):
                         result = types.SimpleNamespace(returncode=75)
                     else:
                         with (directory / f'{name}.log').open('w') as out:
@@ -1757,6 +1878,30 @@ class Settler:
         atomic_write(directory / 'proved.json', json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
+
+    def prover_profile(self, directory):
+        """The prover settings sequencer policy v2 chose for this block by its preflight SP1 gas (`prover-profile.json`,
+        written when the block was built): `fast`, `lowmem-2c` or `mandatory-heavy` (sequencer_policy_v2.PROFILES). None
+        without a budget or for a block built without the policy."""
+        if not self.budget_on():
+            return None
+        try:
+            name = json.loads((directory / 'prover-profile.json').read_text())['profile']
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        import sequencer_policy_v2 as policy_v2
+        profile = policy_v2.PROFILES.get(name)
+        return dict(profile, name=name) if profile else None
+
+    def local_profile_fits(self, directory, profile):
+        """`local_prove_max_memory_gib` (optional): the local prover is not tried for a block whose profile needs a larger
+        memory scope than this unit has; the remote prover, if configured, takes it."""
+        limit = self.c.get('local_prove_max_memory_gib')
+        if limit is None or profile is None or profile['memory_max_gib'] <= limit:
+            return True
+        log('local-proof-refused', directory=str(directory), profile=profile['name'],
+            memory_max_gib=profile['memory_max_gib'], limit=limit)
+        return False
 
     def local_proof_fits(self, directory):
         """Whether the local prover may try this block: `local_prove_max_instructions`
