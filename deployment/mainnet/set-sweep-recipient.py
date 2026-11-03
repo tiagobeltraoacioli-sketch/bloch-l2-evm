@@ -560,6 +560,11 @@ def cmd_native_commit(args):
         raise SystemExit(f'native lock inputs changed ({", ".join(lock_inputs)}): resolve and pin a new lock first')
     ed = Editor(args.dry_run)
     ed.write(p, t, t.replace(f'CANDIDATE_NATIVE_COMMIT={old}', f'CANDIDATE_NATIVE_COMMIT={head}'), 'CANDIDATE_NATIVE_COMMIT')
+    # The shadow sequencer's installer pins the same native commit (agent 218, install-shadow.sh).
+    shadow = l2 / 'deployment/mainnet/install-shadow.sh'
+    if shadow.is_file():
+        st = shadow.read_text()
+        ed.write(shadow, st, re.sub(r'(?m)^NATIVE_COMMIT=[0-9a-f]{40}$', f'NATIVE_COMMIT={head}', st), 'install-shadow NATIVE_COMMIT')
     ed.report()
     print(json.dumps({'old_native': old, 'native': head, 'changed_native_files': diff,
                       'lock': 'unchanged (CANDIDATE_LOCK_SHA256 stays)'}, indent=2))
