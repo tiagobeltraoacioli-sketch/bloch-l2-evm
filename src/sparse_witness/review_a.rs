@@ -696,6 +696,8 @@ struct WireWitness {
     accounts: Vec<(Vec<u8>, Vec<(String, Vec<u8>)>)>,
     absent: Vec<u8>,
     codes: Vec<Vec<u8>>,
+    /// Agent 137's forced records (fork candidate v3): bincode of the list, empty here.
+    forced: Vec<u8>,
 }
 
 impl WireWitness {
@@ -720,6 +722,7 @@ impl WireWitness {
             accounts,
             absent: bincode::serialize(&witness.absent_accounts).unwrap(),
             codes: witness.codes.iter().map(|code| code.to_vec()).collect(),
+            forced: bincode::serialize(&witness.forced).unwrap(),
         }
     }
 
@@ -736,6 +739,7 @@ impl WireWitness {
         for code in &self.codes {
             wire_bytes(&mut out, code);
         }
+        out.extend_from_slice(&self.forced);
         out
     }
 }

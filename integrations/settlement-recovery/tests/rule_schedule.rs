@@ -475,6 +475,7 @@ fn forced_tx(seed: u8, envelope: Vec<u8>) -> PosTransaction {
         inputs: vec![FundingInput { txid: [seed; 32], vout: 0 }],
         l2_chain_id: CHAIN_ID,
         gas_limit: 21_000,
+        max_surcharge_sat: 0,
         envelope,
         change: TransferOutput { value: 0, script_hash: [0; 32] },
         tx_bytes: 9_000,

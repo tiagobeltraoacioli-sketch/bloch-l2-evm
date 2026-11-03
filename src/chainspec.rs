@@ -963,14 +963,22 @@ mod tests {
     /// 165's throwaway recipient give the script's values.
     #[test]
     fn rehearsal_configuration_matches_the_sweep_script() {
+        // Built with the `forced-inclusion` feature the next rules carry forced inclusion (tag 4, the forced
+        // bounds after the floor); the script computes both layouts (fork candidate v3).
+        #[cfg(not(feature = "forced-inclusion"))]
         const REHEARSAL_CONFIGURATION: B256 = B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));
+        #[cfg(feature = "forced-inclusion")]
+        const REHEARSAL_CONFIGURATION: B256 = REHEARSAL_CONFIGURATION_FORCED;
         let configuration = |spec: &ChainSpec| crate::proof_statement::configuration_commitment(spec).unwrap();
         assert_eq!(configuration(&ChainSpec::mainnet_rehearsal()), REHEARSAL_CONFIGURATION);
         let throwaway = ChainSpec {
             fee_vault_sweep: Some(address!("14c0aEb5497A4E506b6c12556718bE957302D96D")),
             ..ChainSpec::mainnet_rehearsal()
         };
+        #[cfg(not(feature = "forced-inclusion"))]
         assert_eq!(configuration(&throwaway), B256::new(hex!("7df770a35ce805982f12f552490337a77e842788ed3ab444fe42e35e6b3c1618")));
+        #[cfg(feature = "forced-inclusion")]
+        assert_eq!(configuration(&throwaway), B256::new(hex!("aa153f4ba3a4d1a60809b9701bf3e0ebec0046cbfd6882397442426d2227ae2e")));
     }
 
     /// Block derivation without the sweep, or either without the outbox, is
