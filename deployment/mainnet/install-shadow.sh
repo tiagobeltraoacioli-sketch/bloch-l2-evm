@@ -42,7 +42,7 @@ set -euo pipefail
 PRODUCE_SHA256=425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78
 # deployment/mainnet/sequencer_mainnet.py of this tree (schedule-aware shadow, agent 218).
 SEQUENCER_SHA256=e148306b18944a0d798e1de3c376d97d1fec1770540e641250712c3f29ec1915
-NATIVE_COMMIT=ee9f153a700522ba3de3fb1f7614298082d756ca
+NATIVE_COMMIT=77057a48fe72c545d402160f32a095547e92c8a3
 NATIVE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 # The programs that run the next rules: native PROGRAM_NEXT (forced sparse guest bc35e838...) and PROGRAM_FALLBACK
 # (forced complete guest 7fd7f3c0...), i.e. settler_v3.py MAINNET_NEXT_SPARSE and MAINNET_FALLBACK. CANDIDATE: they move with
