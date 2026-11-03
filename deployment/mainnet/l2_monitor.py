@@ -210,6 +210,9 @@ _COMMON: Dict[str, Any] = {
     'shm_free_gib_warn': 12.0, 'shm_free_gib_crit': 6.0, 'shm_stale_seconds': 10800.0,
     # Failed prove cycles of one block (every prover in the order failed or refused) before CRIT (R-1 of report 141).
     'prover_no_path_crit': 2,
+    # Sats that forged claims released before a FORFEIT head reset forgot them (native HeadReset.forfeit, agent
+    # 222). They stay counted in released_sat but match no L2 withdrawal of the rebuilt chain. 0: no forfeit.
+    'forfeit_sat': 0,
 }
 PROFILES: Dict[str, Dict[str, Any]] = {
     'mainnet': {**_COMMON,
@@ -758,10 +761,17 @@ def check_escrow_and_backlog(nodes: List[Dict[str, Any]], p: Dict[str, Any], r: 
             r.add('escrow_backing', OK, f'escrow {escrow / 1e8:.8f} + released {released / 1e8:.8f} BLCH covers L2 '
                                         f'minted - burned {need / 1e18:.8f} BLCH (L2 outstanding '
                                         f'{outstanding / 1e18:.8f})')
-        if released * ATOM_SCALE > ledger['withdrawn_wei']:
-            r.add('claims_vs_withdrawn', CRIT, f'L1 released {released} sat > L2 withdrawn {ledger["withdrawn_wei"]} wei')
+        forfeit = int(p.get('forfeit_sat', 0))
+        honest = released - forfeit
+        if forfeit:
+            r.facts['forfeit_sat'] = forfeit
+            r.add('forfeit', WARN, f'a forfeit reset forgot claims that released {forfeit / 1e8:.8f} BLCH: the escrow is '
+                                   f'short by that until the owner covers it (reserve_ratio {r.facts["reserve_ratio"]})')
+        if honest < 0 or honest * ATOM_SCALE > ledger['withdrawn_wei']:
+            r.add('claims_vs_withdrawn', CRIT, f'L1 released {released} sat (forfeit {forfeit}) > L2 withdrawn '
+                                               f'{ledger["withdrawn_wei"]} wei')
         else:
-            r.add('claims_vs_withdrawn', OK, 'L1 released <= L2 withdrawn')
+            r.add('claims_vs_withdrawn', OK, 'L1 released <= L2 withdrawn' + (f' (less forfeit {forfeit} sat)' if forfeit else ''))
     escrows = {str((n['l2'].get('inbox') or {}).get('escrow_sat')) for n in nodes}
     if len(escrows) > 1:
         r.add('escrow_agreement', WARN, f'L1 nodes report different escrow: {sorted(escrows)}')

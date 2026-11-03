@@ -501,6 +501,26 @@ class MonitorTests(unittest.TestCase):
             b['ledger']['0x3'] = 100 * BLCH_WEI
         self.assertEqual(level(run(w)[0], 'claims_vs_withdrawn'), 'CRIT')
 
+    def test_forfeit_reset_is_subtracted_once_recorded(self):
+        # After a forfeit reset, L1 released includes what forged claims took: CRIT until the owner records it.
+        w = healthy()
+        for b in w['l2'].values():
+            b['ledger']['0x3'] = 100 * BLCH_WEI
+        released = int(w['l1'][L1[0]]['l2']['withdrawals']['released_sat'])
+        forfeit = released - 100 * 10 ** 8
+        self.assertGreater(forfeit, 0)
+        self.assertEqual(level(run(w)[0], 'claims_vs_withdrawn'), 'CRIT')
+        r, _ = run(w, '--set', f'forfeit_sat={forfeit}')
+        self.assertEqual(level(r, 'claims_vs_withdrawn'), 'OK')
+        self.assertEqual(level(r, 'forfeit'), 'WARN')
+        self.assertEqual(r.facts['forfeit_sat'], forfeit)
+        # Recording more than was released is itself wrong.
+        r, _ = run(healthy(), '--set', f'forfeit_sat={released + 1}')
+        self.assertEqual(level(r, 'claims_vs_withdrawn'), 'CRIT')
+        # No forfeit: no line.
+        r, _ = run(healthy())
+        self.assertNotIn('forfeit', [c['check'] for c in r.checks])
+
     def test_reserve_ratio_fact(self):
         r, _ = run(healthy())
         self.assertEqual(r.facts['l2_outstanding_wei'], 124 * BLCH_WEI)
