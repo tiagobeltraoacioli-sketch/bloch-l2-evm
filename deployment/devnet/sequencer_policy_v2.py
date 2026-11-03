@@ -289,7 +289,7 @@ class Policy:
             info = {t['hash']: t for t in stats}
             for name, (reason, permanent) in refused.items():
                 (plan.quarantine if permanent else plan.held).append((name, reason))
-                if number and not permanent and reason != 'behind-held-nonce':
+                if number and reason in ('below-write-price', 'sender-write-limit'):  # its own payment, not capacity
                     self.state['waits'][self.key(info[name])] = {
                         'until': now + self.c['gate_dependent_wait_seconds'], 'kind': 'gate-dependent'}
             raws = [by_hash[name] for name in passing]
