@@ -125,6 +125,8 @@ class Steps(unittest.TestCase):
         (self.native / 'Cargo.lock').write_text('lock\n')
         for tree in (self.l2, self.native):
             git(tree, 'init', '-q')
+            git(tree, 'config', 'user.name', 't')  # `set` commits; hosts may have no global identity
+            git(tree, 'config', 'user.email', 't@t')
             git(tree, 'add', '-A')
             git(tree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base')
         head = subprocess.run(['git', '-C', str(self.native), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
