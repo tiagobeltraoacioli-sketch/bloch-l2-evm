@@ -532,8 +532,14 @@ class Policy:
         """Quarantine binds the sender, not the bytes: the sender is banned for `sender_ban_seconds` and loses standing,
         so sending the same nonce again or a replacement buys nothing (r9 U1, U3). Gas used plays no part (r9 U2)."""
         plan.quarantine.append((tx['hash'], reason))
-        self.state['bans'][tx['sender']] = now + self.c['sender_ban_seconds']
-        self.state['standing'].pop(tx['sender'], None)
+        if tx['sender'] in set(self.c['write_limit_exempt_senders']):
+            # An exempt sender (operator, bridge signers and relayers; TBD-owner) loses only this transaction: a ban
+            # would stop its bridge mints for a day after one over-budget deployment or three runs without cost
+            # (agents/243 A243-5). It stays inside the budget and the measurement.
+            self.log('exempt-sender-not-banned', sender=tx['sender'], hash=tx['hash'], reason=reason)
+        else:
+            self.state['bans'][tx['sender']] = now + self.c['sender_ban_seconds']
+            self.state['standing'].pop(tx['sender'], None)
         self.state['waits'].pop(self.key(tx), None)
         self.log('tx-quarantined', hash=tx['hash'], sender=tx['sender'], reason=reason)
 

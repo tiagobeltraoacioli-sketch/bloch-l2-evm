@@ -257,8 +257,12 @@ on commits.
 `write_limit_exempt_senders`: the operator's deployer and the bridge mint signers or relayers. **Addresses: TBD-owner.**
 
 - Exempt from: the write price, the write rates, and the per-transaction gas cap, which becomes the block gas limit.
-  Always tried in the first tier.
-- Not exempt from: the SP1-gas budget, the measurement, quarantine, the congestion tip, or the producer's own rules.
+  Always tried among the small transactions, by tip.
+- Exempt from the 24 h sender ban (agents/243 A243-5): a quarantine moves only the transaction, and the sender keeps
+  its standing. Otherwise one over-budget deployment, or three runs without cost of a 15M-gas transaction (the 60 s
+  backstop, agents/223 F223-3), would stop that address's bridge mints for a day.
+- Not exempt from: the SP1-gas budget, the measurement, quarantine of the transaction, the congestion tip, or the
+  producer's own rules. A compromised exempt key can make the planner measure one offender per block; rotation as below.
 - Sender identity is the recovered signature, so the exemption cannot be claimed by another key. A compromised exempt
   key can grow state without the write price, still within 64 transactions per block and the SP1 budget. Rotation
   means changing the settler config, with no consensus change.
