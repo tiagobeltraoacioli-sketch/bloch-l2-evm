@@ -229,8 +229,51 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
     }
 }
 
+/// The settler's preflight ran into `BLOCH_PREFLIGHT_CYCLE_LIMIT`: a measured verdict, not a failure of the host.
+#[derive(Debug)]
+struct OverCycleLimit(u64);
+
+impl std::fmt::Display for OverCycleLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guest execution exceeded the preflight cycle limit of {} instructions", self.0)
+    }
+}
+
+impl Error for OverCycleLimit {}
+
+/// Exit status of an `execute` run that hit `BLOCH_PREFLIGHT_CYCLE_LIMIT` (sequencer policy v2).
+const EXIT_OVER_CYCLE_LIMIT: i32 = 3;
+
+/// `BLOCH_PREFLIGHT_CYCLE_LIMIT`: an instruction limit for `execute` only (the settler's preflight, sequencer policy
+/// v2, at least twice the block instruction budget). Unset: no limit, as before. Proving never reads it.
+fn preflight_cycle_limit(value: Option<&OsStr>) -> Result<Option<u64>> {
+    let Some(value) = value else { return Ok(None) };
+    let text = value.to_str().ok_or("BLOCH_PREFLIGHT_CYCLE_LIMIT must be decimal")?;
+    match text.parse::<u64>() {
+        Ok(limit) if limit > 0 && text.bytes().all(|b| b.is_ascii_digit()) => Ok(Some(limit)),
+        _ => Err("BLOCH_PREFLIGHT_CYCLE_LIMIT must be a positive decimal integer".into()),
+    }
+}
+
+fn main() -> Result<()> {
+    // The runtime of `run` is dropped before the exit, so the executor's tasks end first (SP1 stops a run at the cycle
+    // limit at its next trace chunk) and release what they hold.
+    match run() {
+        Err(error) => match error.downcast_ref::<OverCycleLimit>() {
+            Some(OverCycleLimit(limit)) => {
+                use std::io::Write;
+                println!("Settlement V3 over cycle limit: limit={limit}");
+                let _ = io::stdout().flush();
+                std::process::exit(EXIT_OVER_CYCLE_LIMIT);
+            }
+            None => Err(error),
+        },
+        done => done,
+    }
+}
+
 #[tokio::main(worker_threads = 2)]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
     let selected = args.first().map(String::as_str) == Some("--mainnet");
@@ -276,9 +319,26 @@ async fn main() -> Result<()> {
     );
 
     if mode == "execute" {
+        let limit = preflight_cycle_limit(std::env::var_os("BLOCH_PREFLIGHT_CYCLE_LIMIT").as_deref())?;
         let executor = LightProver::new().await;
         let started = Instant::now();
-        let (public, report) = executor.execute(elf, stdin(fixture, context)).calculate_gas(true).await?;
+        let mut request = executor.execute(elf, stdin(fixture, context)).calculate_gas(true);
+        if let Some(limit) = limit {
+            request = request.cycle_limit(limit);
+        }
+        let (public, report) = match request.await {
+            Ok(done) => done,
+            // SP1 6.8 (sp1-prover worker/prover/execute.rs) returns ExecutionError::ExceededCycleLimit, which the SDK
+            // passes on as text: "exceeded cycle limit of N".
+            Err(error) if limit.is_some() && error.to_string().contains("exceeded cycle limit") => {
+                eprintln!("{error}");
+                return Err(Box::new(OverCycleLimit(limit.unwrap_or_default())));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(limit) = limit.filter(|limit| report.total_instruction_count() >= *limit) {
+            return Err(Box::new(OverCycleLimit(limit)));
+        }
         if report.exit_code != 0 {
             return Err(io::Error::other("settlement V3 guest execution failed").into());
         }
@@ -399,6 +459,15 @@ fn require_release_gnark_environment(circuit_mode: Option<&OsStr>, image: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_cycle_limit_is_a_positive_decimal_or_unset() {
+        assert_eq!(preflight_cycle_limit(None).unwrap(), None);
+        assert_eq!(preflight_cycle_limit(Some(OsStr::new("180000000"))).unwrap(), Some(180_000_000));
+        for bad in ["0", "", "-1", "+5", "1e9", "0x10", " 5", "18446744073709551616"] {
+            assert!(preflight_cycle_limit(Some(OsStr::new(bad))).is_err(), "{bad:?} accepted");
+        }
+    }
 
     #[test]
     fn proving_environment_is_release_only_and_digest_pinned() {
