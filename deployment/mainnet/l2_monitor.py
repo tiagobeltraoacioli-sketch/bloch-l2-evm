@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only health monitor for the Bloch L2 mainnet (chain id 700770; devnet4 700771).
 
-Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the next L2 build, provisional and unsigned (L2 17383feb, native
-78d4921c, follower cdf5da5c, produce-dev e3f1a290, settled-rpc e5754d05).
+Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the next L2 build, provisional and unsigned (L2 926d2cf5, native
+78d4921c, follower cdf5da5c, produce-dev e3f1a290, settled-rpc 53e88565).
 
 What it reads (it never writes to a chain, holds no key and opens no keystore):
   * every L2 settled-RPC backend (`--l2-rpc NAME=URL`, repeat): eth_chainId, the `latest`, `safe` and
@@ -72,14 +72,14 @@ MAINNET_PINS = {
 
 # ---- The v2.1 L2 build (bloch-l2-2026-10-30-v21-native-78d4921c: SHA256SUMS and build.json) ----
 V2_BUILD = {
-    'l2_commit': '17383feb88602926c26559802b95dee273484cd5',
+    'l2_commit': '926d2cf50af11f389ad1ffa91c0b7720178b3472',
     'native': '78d4921c3ec6ba41829f3878eed47f8d3bb96230',
     'native_lock_sha256': 'a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9',
 }
 V2_SHA256 = {
     'bloch-l2-native-follower': 'cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2',
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
-    'bloch-l2-settled-rpc': 'e5754d05a1d6b217374a652d6959acf1fcd9323703d82226e07aa1d77a1754e8',
+    'bloch-l2-settled-rpc': '53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d',
     'sequencer_mainnet.py': '15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2',
 }
 # getchaininfo.hard_forks name -> the params.rs constant the v2 follower/producer were compiled with,
