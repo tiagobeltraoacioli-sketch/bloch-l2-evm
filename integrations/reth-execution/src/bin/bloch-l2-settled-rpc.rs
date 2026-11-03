@@ -68,13 +68,16 @@
 mod withdrawal_proofs;
 #[path = "settled_rpc/settlement_log.rs"]
 mod settlement_log;
+#[path = "settled_rpc/capped_api.rs"]
+mod capped_api;
 
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    build_eth_api_capped, chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc,
+    chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc,
     BlochBlockchainProvider, BlochEvmConfig, BlochProviderFactory, L2Network, PendingPolicy,
 };
+use capped_api::build_eth_api_capped;
 use eyre::{bail, ensure, Result};
 use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
