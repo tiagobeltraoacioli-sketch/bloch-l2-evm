@@ -196,12 +196,12 @@ The keystore or its passphrase is gone, or the key is suspected compromised. Bat
 ```
 systemctl stop bloch-l2-mainnet-settler
 mv /var/lib/bloch-l2-mainnet-da /var/lib/bloch-l2-mainnet-da.lost-$(date +%s)
-mv /var/lib/bloch-l2-mainnet-settler/da.passphrase /var/lib/bloch-l2-mainnet-settler/da.passphrase.lost-$(date +%s)
-install -d -m 0700 -o bloch-l2-mainnet-settler -g bloch-l2-mainnet-settler /var/lib/bloch-l2-mainnet-da
-(umask 377; openssl rand -hex 48 > /var/lib/bloch-l2-mainnet-settler/da.passphrase)
-chown bloch-l2-mainnet-settler: /var/lib/bloch-l2-mainnet-settler/da.passphrase
-sudo -u bloch-l2-mainnet-settler env BLOCH_KEYSTORE_PASSPHRASE_FILE=/var/lib/bloch-l2-mainnet-settler/da.passphrase REL/bloch-pos keygen --dir /var/lib/bloch-l2-mainnet-da --index 0
-sudo -u bloch-l2-mainnet-settler REL/bloch-pos keygen-public --dir /var/lib/bloch-l2-mainnet-da | cut -f2 > /etc/bloch-l2-mainnet-settler/public/da.pubkey.hex
+mv /etc/bloch-l2-mainnet-settler/da.passphrase /etc/bloch-l2-mainnet-settler/da.passphrase.lost-$(date +%s)
+install -d -m 0700 /var/lib/bloch-l2-mainnet-da
+(umask 377; openssl rand -hex 48 > /etc/bloch-l2-mainnet-settler/da.passphrase)
+env BLOCH_KEYSTORE_PASSPHRASE_FILE=/etc/bloch-l2-mainnet-settler/da.passphrase REL/bloch-pos keygen --dir /var/lib/bloch-l2-mainnet-da --index 0
+env BLOCH_KEYSTORE_PASSPHRASE_FILE=/etc/bloch-l2-mainnet-settler/da.passphrase REL/bloch-pos keygen-public --dir /var/lib/bloch-l2-mainnet-da | cut -f2 > /etc/bloch-l2-mainnet-settler/public/da.pubkey.hex
+chown -R bloch-l2-mainnet-settler:bloch-l2-mainnet-settler /var/lib/bloch-l2-mainnet-da
 python3 -c "import hashlib; print(hashlib.sha3_256(bytes.fromhex(open('/etc/bloch-l2-mainnet-settler/public/da.pubkey.hex').read().strip())).hexdigest())"
 ```
 
@@ -265,7 +265,7 @@ What to keep, what is rebuilt, and how long it takes. Measured 2026-11-02 in age
 | Item | Path | Why |
 |---|---|---|
 | DA fee keystore | `/var/lib/bloch-l2-mainnet-da/validator.key` | Holds the DA fee money. `LOCK` is not needed |
-| DA passphrase | `/var/lib/bloch-l2-mainnet-settler/da.passphrase` | Without it the keystore does not open. Store apart from the keystore |
+| DA passphrase | `/etc/bloch-l2-mainnet-settler/da.passphrase` (`root:root` 0400; the unit copies it into `/run/bloch-l2-mainnet-settler/` at start) | Without it the keystore does not open. Store apart from the keystore |
 | Settler config and release | `/etc/bloch-l2-mainnet-settler/config.json`, the signed release directory | Reinstall |
 | SSH identity to the remote prover | `/var/lib/bloch-l2-mainnet-settler/ssh/id_ed25519` | Or make a new one and authorize it on the prover |
 

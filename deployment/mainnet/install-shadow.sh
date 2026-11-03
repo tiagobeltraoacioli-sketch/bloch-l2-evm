@@ -4,13 +4,16 @@
 # user bloch-l2-mainnet-settler): it writes the canonical L2 database. This unit rebuilds every
 # block the settler produced on its OWN database from the native view (+ the settler's DA batch)
 # and stops (exit 3) on any difference, before the proof reaches L1. Install after the settler's
-# `prepare` (it needs the settler user and /var/lib/bloch-l2-mainnet-settler/work).
+# `prepare` (it needs the read group bloch-l2-mainnet-l2read and /var/lib/bloch-l2-mainnet-settler/work).
+# It runs as its own system user bloch-l2-mainnet-shadow (created here, in the read group: review r10 decision 4),
+# never as the settler user, which holds the DA fee key and the prover SSH key.
 #
 #   install-shadow.sh --verify OUT_DIR     (no root: pin + build.json checks only, changes nothing)
+#   install-shadow.sh --print-l1-rpcs      (no root: prints the L1 RPCs the install would use)
 #   install-shadow.sh OUT_DIR [--start]
 #   install-shadow.sh --rollback
 #
-# OUT_DIR is build-release.sh's OUT of the next L2 build (L2 17383feb, provisional and unsigned; native 78d4921c
+# OUT_DIR is build-release.sh's OUT of the next L2 build (L2 926d2cf5, provisional and unsigned; native 78d4921c
 # = the armed L1 release with HF1 e7180/7186, HF2 e7270, HF3 e7360, KES enforce e8620; settlement-
 # recovery lock a3c38a46...): bloch-l2-produce-dev e3f1a290..., sequencer_mainnet.py 15daa26f...
 # (unchanged since the RC), SHA256SUMS and build.json.
@@ -18,9 +21,9 @@
 # 192eda33..., native 78b7343a) halts at HF1. Install the v2 build before epoch 7178.
 # What it does: verifies both files against the pins below and build.json against the v2 build
 # (commit, native, lock, compiled L1 gates), requires the settler's producer (if configured) to be
-# the same v2 build, creates /var/lib/bloch-l2-mainnet-shadow/{work,tmp} owned by the settler user,
+# the same v2 build, creates /var/lib/bloch-l2-mainnet-shadow/{work,tmp} owned by the shadow user,
 # writes the config, creates the shadow L2 database at the pinned mainnet genesis (refuses any other
-# hash), runs a read-only `check` against the three mainnet nodes and installs the unit. It starts the
+# hash), runs a read-only `check` against the L1 RPCs and installs the unit. It starts the
 # unit only with --start. The shadow never signs, proves or submits and never opens the settler's
 # database: starting it sends nothing to Bloch L1. It reads getl2settlement only.
 #
@@ -36,7 +39,7 @@ set -euo pipefail
 # v2.1 build bloch-l2-2026-10-30-v21-native-78d4921c (out/SHA256SUMS). v2 was 7c1cc62b... (no flag-day rebuild fix). The RC pin was 192eda33... (native 78b7343a, pre-HF).
 PRODUCE_SHA256=e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69
 SEQUENCER_SHA256=15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2
-L2_COMMIT=17383feb88602926c26559802b95dee273484cd5
+L2_COMMIT=926d2cf50af11f389ad1ffa91c0b7720178b3472
 NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
 NATIVE_LOCK_SHA256=a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9
 SETTLER_CONFIG=/etc/bloch-l2-mainnet-settler/config.json
@@ -44,7 +47,8 @@ UNIT=bloch-l2-mainnet-shadow.service
 OPT=/opt/bloch/l2-mainnet-shadow
 ETC=/etc/bloch-l2-mainnet-shadow
 VAR=/var/lib/bloch-l2-mainnet-shadow
-USER_=bloch-l2-mainnet-settler
+USER_=bloch-l2-mainnet-shadow
+READ_GROUP=bloch-l2-mainnet-l2read
 SETTLER_WORK=/var/lib/bloch-l2-mainnet-settler/work
 FOLLOWER_NATIVE=/var/lib/bloch-l2-mainnet-follower/native
 DOMAIN=1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733
@@ -52,7 +56,49 @@ GENESIS_TIME=1786656679
 TIMESTAMP_RULE=1:1786656679:30000
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-# Prints the accepted commitment when a quorum (2 of 3) of the mainnet nodes report the same accepted settlement,
+# L1 RPCs are configuration, not code. Source, in order: $L1_RPC_URLS (URLs separated by spaces or
+# commas), else "rpc_urls" of the settler config, so the shadow reads the same L1 view as the settler.
+# Needs at least 3 distinct http(s)://IPv4:port URLs (the quorum is 2) whose hosts are all listed in the
+# unit's IPAddressAllow (the unit denies every other address). Prints them space-separated.
+resolve_l1_rpcs() {
+  python3 -I - "$SETTLER_CONFIG" "$HERE/$UNIT" "${L1_RPC_URLS:-}" <<'PY'
+import ipaddress, json, os, re, sys
+settler_config, unit, env = sys.argv[1:]
+if env.strip():
+    urls, source = [u for u in re.split(r'[\s,]+', env.strip()) if u], 'L1_RPC_URLS'
+elif os.path.exists(settler_config):
+    urls, source = list(json.load(open(settler_config)).get('rpc_urls') or []), settler_config
+else:
+    sys.exit(f'no L1 RPCs: set L1_RPC_URLS or install the settler first ({settler_config} has rpc_urls)')
+allow = set()
+if os.path.exists(unit):
+    for line in open(unit):
+        if line.strip().startswith('IPAddressAllow='):
+            allow.update(line.strip().split('=', 1)[1].split())
+seen, errors = [], []
+for url in urls:
+    m = re.fullmatch(r'https?://([0-9.]+):([0-9]{1,5})/?', url)
+    if not m:
+        errors.append(f'{url}: not http(s)://IPv4:port')
+        continue
+    try:
+        ipaddress.IPv4Address(m.group(1))
+    except ValueError:
+        errors.append(f'{url}: bad IPv4 address')
+        continue
+    if allow and m.group(1) not in allow:
+        errors.append(f'{url}: host not in {os.path.basename(unit)} IPAddressAllow (add it with a drop-in first)')
+    if url not in seen:
+        seen.append(url)
+if len(seen) < 3:
+    errors.append(f'{len(seen)} distinct L1 RPCs from {source}; need at least 3 for the quorum of 2')
+if errors:
+    sys.exit('L1 RPC configuration refused: ' + '; '.join(errors))
+print(' '.join(seen))
+PY
+}
+
+# Prints the accepted commitment when a quorum (2) of the L1 RPCs report the same accepted settlement,
 # "none" when a quorum reports none, and fails otherwise.
 accepted_number() {
   python3 -I - "$@" <<'PY'
@@ -110,6 +156,11 @@ if [ "${1:-}" = "--verify" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--print-l1-rpcs" ]; then
+  resolve_l1_rpcs
+  exit 0
+fi
+
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 
 if [ "${1:-}" = "--rollback" ]; then
@@ -139,8 +190,15 @@ fi
 if systemctl is-active --quiet "$UNIT"; then echo "$UNIT is running; roll back first"; exit 1; fi
 [ ! -e "$VAR/canonical" ] || { echo "$VAR/canonical exists; roll back first (it is moved aside, not deleted)"; exit 1; }
 
-id "$USER_" >/dev/null 2>&1 || { echo "user $USER_ missing: run install-settler-mainnet.py prepare first"; exit 1; }
+getent group "$READ_GROUP" >/dev/null || { echo "group $READ_GROUP missing: run install-settler-mainnet.py prepare first"; exit 1; }
 [ -d "$SETTLER_WORK" ] || { echo "$SETTLER_WORK missing: run install-settler-mainnet.py prepare first"; exit 1; }
+id "$USER_" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$VAR" --shell /usr/sbin/nologin --groups "$READ_GROUP" "$USER_"
+runuser -u "$USER_" -- test -r "$SETTLER_WORK" -a -x "$SETTLER_WORK" || {
+  echo "$USER_ cannot read $SETTLER_WORK through group $READ_GROUP (a prepare by an older installer?)"; exit 1; }
+L1_RPCS=$(resolve_l1_rpcs) || { echo "unit NOT installed"; exit 1; }
+read -r -a L1_RPC_LIST <<< "$L1_RPCS"
+L1_RPCS_JSON=$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${L1_RPC_LIST[@]}")
+echo "L1 RPCs: $L1_RPCS"
 install -d -m 0755 "$OPT"
 install -m 0755 "$OUT/bloch-l2-produce-dev" "$OPT/bloch-l2-produce-dev"
 install -m 0644 "$OUT/sequencer_mainnet.py" "$OPT/sequencer_mainnet.py"
@@ -155,7 +213,7 @@ cat > "$ETC/config.json" <<JSON
   "produce_sha256": "$PRODUCE_SHA256",
   "l2_db": "$VAR/canonical",
   "workdir": "$VAR/work",
-  "rpc_urls": ["http://80.240.16.185:8080", "http://199.247.22.8:8080", "http://45.77.67.251:8080"],
+  "rpc_urls": $L1_RPCS_JSON,
   "rpc_quorum": 2,
   "poll_seconds": 15,
   "settler_workdir": "$SETTLER_WORK"
@@ -164,7 +222,7 @@ JSON
 chmod 0644 "$ETC/config.json"
 
 S="runuser -u $USER_ -- env BLOCH_SEQUENCER_CONFIG=$ETC/config.json TMPDIR=$VAR/tmp /usr/bin/python3 -u $OPT/sequencer_mainnet.py"
-ACCEPTED=$(accepted_number http://80.240.16.185:8080 http://199.247.22.8:8080 http://45.77.67.251:8080) || {
+ACCEPTED=$(accepted_number "${L1_RPC_LIST[@]}") || {
   echo "cannot read the accepted settlement; unit NOT installed"; exit 1; }
 if [ "$ACCEPTED" = none ]; then
   $S init      # shadow database; refuses unless the genesis is 632e45ae...f468 / 2ad7e807...c05d

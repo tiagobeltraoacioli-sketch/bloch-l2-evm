@@ -55,7 +55,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | --- | --- | --- |
 | `settler_v3.py` | this branch, `deployment/devnet/` | `9c592bd4…3007` (enforced since agent 155; also recorded in the `/opt` path) |
 | `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | `3a24c36d…973a` (enforced since agent 155), and its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
-| `bloch-l2-produce-dev` | the next build 17383fe against native 78d4921c: `e3f1a290…` (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
+| `bloch-l2-produce-dev` | the next build against native 78d4921c: `e3f1a290…` (the same bytes at build commits 17383fe and 926d2cf) (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
@@ -67,11 +67,22 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 sudo python3 install-settler-mainnet.py prepare --release DIR
 ```
 
-This creates the user `bloch-l2-mainnet-settler`, the directories and the pinned `l2-config.bin`.
-It also generates a **new DA fee key**:
+This creates the user `bloch-l2-mainnet-settler`, the read group `bloch-l2-mainnet-l2read`, the directories and the
+pinned `l2-config.bin`. It also generates a **new DA fee key**:
 
 - a sealed hybrid keystore in `/var/lib/bloch-l2-mainnet-da` (0700, owned by the settler);
-- a random passphrase in `/var/lib/bloch-l2-mainnet-settler/da.passphrase` (0400), never printed.
+- a random passphrase in `/etc/bloch-l2-mainnet-settler/da.passphrase` (`root:root` 0400), never printed. The settler
+  user cannot read, change or delete it. At every start the unit copies it into its private runtime directory
+  `/run/bloch-l2-mainnet-settler/da.passphrase` (0700 directory, 0400 file of the settler, removed when the unit
+  stops), and `da.passphrase_file` points there (review r10 M-4). Not `LoadCredential`: systemd 255 hands a
+  credential to a `User=` service as mode 0440, and `bloch-pos` refuses any passphrase file with a group or other bit
+  (agents/204-installers-systemd.md).
+
+State layout (review r10 decision 4): `/var/lib/bloch-l2-mainnet-settler` is `settler:bloch-l2-mainnet-l2read` 2710,
+`work` 2750, `txpool` 2770, `tmp` 2700 (setgid, so what the worker writes with its `UMask=0027` belongs to the read
+group), `ssh` 0700. The settled RPC (`bloch-l2-mainnet-rpc`) and the shadow (`bloch-l2-mainnet-shadow`) run as their
+own users in the read group: they read the canonical database and the work directory, and nothing else of the
+settler (not its DA key, passphrase, SSH key or the Docker socket).
 
 The output includes `da_funding_script_hash`.
 
@@ -202,7 +213,9 @@ Stopping the unit (rollback, `systemctl stop` or `restart`) during a proof is sa
 unit sends SIGTERM to the worker only (`KillMode=mixed`), the worker kills its prover group, removes the SP1
 segments it mapped and kills its Gnark container, then exits by the signal; systemd then kills anything left
 (`TimeoutStopSec=120`). `RemoveIPC=yes` removes any POSIX shared memory of the settler user when the unit stops,
-so do not run `dry-run --prove` while stopping the unit. To confirm after a stop (no output expected):
+so do not run `dry-run --prove` while stopping the unit. systemd does this only when no other unit of the same user
+runs: the RPC and the shadow run as their own users (decision 4) for this reason too; measured under systemd in
+agents/204-installers-systemd.md. To confirm after a stop (no output expected):
 
 ```
 ls -l /dev/shm | grep bloch-l2-mainnet-settler
@@ -211,6 +224,31 @@ ls -l /dev/shm | grep bloch-l2-mainnet-settler
 An accepted L1 settlement cannot be undone. The L2 simply stops advancing until a settler runs
 again. Restart with `start --confirm-mainnet` (the unit file is recreated). The worker resumes
 from the accepted head; it reuses a block left by a crash if its anchor is unchanged.
+
+## 6. Upgrade the worker (review r10 M-3)
+
+A new worker release (a new `settler_v3.py`, producer, SP1 host or `bloch-pos`) comes with a new installer whose
+`PINS` name it. Stage the release directory as in section 0, then, with the new installer:
+
+```
+sudo python3 install-settler-mainnet.py upgrade --release DIR --confirm-mainnet
+```
+
+It copies the files into `/opt/bloch/l2-mainnet-settler/<new digest>` beside the running release and checks every
+pin on the copies, writes a pending config with only the release fields changed (`produce`, `prover`,
+`prover_sha256`, `guest`, `guest_sha256`, `da.signer`, `da.signer_sha256`, `da.genesis`), stops the unit, runs
+`--check-rpc` and the dry run of the new release on that pending config, and only then keeps the old config as
+`config.json.<old digest>`, switches `config.json` and the unit's `ExecStart`, records `upgrade.json` and starts the
+unit again (if it was running). Any failed check leaves the old release, config and unit as they were, removes the
+new copy and starts the old worker again. To go back:
+
+```
+sudo python3 install-settler-mainnet.py upgrade --rollback --confirm-mainnet
+```
+
+The rollback re-hashes the kept release against its kept config before switching. Both commands ran under a real
+systemd 255 (agents/204-installers-systemd.md); the success path there replaced the dry run with a no-op, because
+the private stub has no native source to build a block from.
 
 ## Operations
 

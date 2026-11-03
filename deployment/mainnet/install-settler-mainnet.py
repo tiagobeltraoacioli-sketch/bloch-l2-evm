@@ -11,10 +11,12 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
       l2_reorg_recover.py (SHA-256 2a648b31...); every file is pinned in PINS below and is
       hashed after it is copied into /opt (the copies run, not the source).
-      Creates the system user, /opt + /var/lib + /etc directories, the pinned
-      l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024)
-      whose passphrase is generated here and never printed. Prints the funding
-      script hash to send the DA fee budget to.
+      Creates the system user, the read group bloch-l2-mainnet-l2read (the RPC and shadow users join it to
+      read the canonical database and the work directory, nothing else), /opt + /var/lib + /etc directories,
+      the pinned l2-config.bin, and a NEW sealed DA fee keystore (hybrid ML-DSA-65 + Falcon-1024) whose
+      passphrase is generated here, kept root-only in /etc/bloch-l2-mainnet-settler/da.passphrase and never
+      printed: the worker reads only the copy its unit puts in its private runtime directory (review r10 M-4).
+      Prints the funding script hash to send the DA fee budget to.
   sudo python3 install-settler-mainnet.py configure [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
         [--follower-state DIR --follower-status FILE | --no-foreign-recovery]
@@ -32,12 +34,21 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
   sudo python3 install-settler-mainnet.py start --confirm-mainnet
       Writes and starts the systemd unit. From here the worker submits 0x13 (and,
       with user transactions, 0x15) transactions to Bloch L1 mainnet.
+  sudo python3 install-settler-mainnet.py upgrade --release DIR --confirm-mainnet
+      Installs a newer worker release (the PINS of this installer) beside the running one: stages and hashes
+      it like prepare, rewrites the release fields of a pending config (old config kept as
+      config.json.<old release>), stops the unit, runs --check-rpc and the dry run on the pending config with
+      the new release, and only then switches config.json and the unit's ExecStart and starts it again.
+      A failed check leaves the old release, config and unit running as before (review r10 M-3).
+  sudo python3 install-settler-mainnet.py upgrade --rollback --confirm-mainnet
+      Switches back to the release the last upgrade replaced (its kept config and directory).
   sudo python3 install-settler-mainnet.py rollback
       Stops and disables the unit and removes the unit file. Keeps the L2 database,
       the work directory, the DA keystore and its passphrase (never deleted here).
 
 Dependency-free Python 3.9+.
 """
+import grp
 import hashlib
 import json
 import os
@@ -47,8 +58,12 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 
 USER = 'bloch-l2-mainnet-settler'
+# The RPC and shadow users join this group: it reads the canonical database and the work directory only (the
+# state directory is 2710, so group members cannot list it). The settler joins it to read the RPC's txpool spool.
+READ_GROUP = 'bloch-l2-mainnet-l2read'
 STATE = Path('/var/lib/bloch-l2-mainnet-settler')
 DA_DIR = Path('/var/lib/bloch-l2-mainnet-da')
 ETC = Path('/etc/bloch-l2-mainnet-settler')
@@ -58,6 +73,15 @@ PENDING = ETC / 'config.json.pending'
 OPT = Path('/opt/bloch/l2-mainnet-settler')
 UNIT_NAME = 'bloch-l2-mainnet-settler.service'
 UNIT = Path('/etc/systemd/system') / UNIT_NAME
+UPGRADE = ETC / 'upgrade.json'
+# Review r10 M-4: root:root 0400 in /etc, outside the worker's writable state. The unit copies it at every start
+# into its private RuntimeDirectory as a 0400 file of the settler user (gone when the unit stops). Not
+# LoadCredential: systemd 255 hands a credential to a User= service as mode 0440 (root:root plus a user ACL), and
+# bloch-pos refuses any passphrase file with a group or other bit (keys::read_passphrase_file), measured under a
+# real systemd in agents/204-installers-systemd.md.
+DA_PASSPHRASE = ETC / 'da.passphrase'
+RUNTIME = Path('/run/bloch-l2-mainnet-settler')
+DA_RUNTIME_PASSPHRASE = RUNTIME / 'da.passphrase'
 # Absolute: as_settler runs with PATH=/usr/bin:/bin, and on Ubuntu 24.04 runuser is only in /usr/sbin.
 RUNUSER = '/usr/sbin/runuser'
 RPC_URLS = ['http://80.240.16.185:8080', 'http://199.247.22.8:8080', 'http://45.77.67.251:8080']
@@ -100,16 +124,44 @@ def option(args, name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
 
-def release():
-    """The installed release directory (one per settler_v3.py digest)."""
+def release(config=None):
+    """The release directory a config runs (its prover's directory); before configure, the only one installed."""
+    config = Path(config or CONFIG)
+    if config.exists():
+        rel = Path(json.loads(config.read_text())['prover']).parent
+        assert rel.parent == OPT and (rel / 'settler_v3.py').is_file(), f'{config} names no release under {OPT}'
+        return rel
     found = sorted(OPT.glob('*/settler_v3.py'))
     assert len(found) == 1, f'expected one release under {OPT}, found {len(found)}'
     return found[0].parent
 
 
+def install_release(source, target):
+    """Copy the release files into `target` (root-owned) and check the COPIES: the source (often under /home/ubuntu)
+    may change after any check of it, and only the bytes that were hashed may run. Nothing here executes or imports
+    from source. A `target` that already exists (an upgrade back to a kept release) is re-checked, not copied."""
+    assert set(PINS) == set(FILES), 'every installed file has a pin'
+    if not target.exists():
+        for name in FILES:
+            assert (source / name).is_file(), f'{source / name} is missing'
+        target.mkdir(parents=True, mode=0o755)
+        for name in FILES:
+            shutil.copyfile(source / name, target / name)
+            (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name == 'settlement_v3_mainnet'
+                                  else 0o755)
+    for name, pin in PINS.items():
+        assert digest(target / name) == pin, f'{name} differs from its pin {pin}'
+    settler = settler_module(target)
+    assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
+    build = run([target / 'bloch-pos', '--version']) + run([target / 'bloch-pos', 'buildinfo'])
+    assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+    return settler
+
+
 def settler_module(directory):
     sys.dont_write_bytecode = True  # no __pycache__ written as root into the release directory
     sys.path.insert(0, str(directory))
+    sys.modules.pop('settler_v3', None)  # an upgrade imports the new release, not a cached old one
     import settler_v3  # noqa: E402
     return settler_v3
 
@@ -124,53 +176,44 @@ def prepare(args):
     source = Path(option(args, '--release', ''))
     assert source.is_dir(), 'prepare --release DIR'
     assert not any(p.exists() for p in (STATE, DA_DIR, ETC, OPT, UNIT)), 'already prepared (see rollback)'
-    assert set(PINS) == set(FILES), 'every installed file has a pin'
-    for name in FILES:
-        assert (source / name).is_file(), f'{source / name} is missing'
-    # Copy first, then hash the root-owned copies: the source (often under /home/ubuntu) may change after any
-    # check of it, and only the bytes that were hashed may run. Nothing here executes or imports from source.
     target = OPT / PINS['settler_v3.py'][:16]
     try:
-        target.mkdir(parents=True, mode=0o755)
-        for name in FILES:
-            shutil.copyfile(source / name, target / name)
-            (target / name).chmod(0o644 if name.endswith(('.py', '.manifest')) or name == 'settlement_v3_mainnet'
-                                  else 0o755)
-        for name, pin in PINS.items():
-            assert digest(target / name) == pin, f'{name} differs from its pin {pin}'
-        settler = settler_module(target)
-        assert settler.MAINNET['guest_sha256'] == PINS['settlement_v3_mainnet']
-        build = run([target / 'bloch-pos', '--version']) + run([target / 'bloch-pos', 'buildinfo'])
-        assert '78d4921c' in build and '+devnet' not in build and 'rehearsal' not in build, 'not the mainnet release'
+        settler = install_release(source, target)
     except BaseException:
         # Nothing but these copies exists yet (no user, no state, no key): remove them so prepare can simply re-run.
         shutil.rmtree(OPT, ignore_errors=True)
         raise
+    run(['groupadd', '--system', '-f', READ_GROUP])
     run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', STATE,
-         '--shell', '/usr/sbin/nologin', '--groups', 'docker', USER])
-    owner = pwd.getpwnam(USER)
+         '--shell', '/usr/sbin/nologin', '--groups', f'docker,{READ_GROUP}', USER])
+    owner, readers = pwd.getpwnam(USER), grp.getgrnam(READ_GROUP).gr_gid
     for path in (ETC, PUBLIC):
         path.mkdir(mode=0o755)
     (PUBLIC / 'l2-config.bin').write_bytes(settler.mainnet_l2_config())
     assert digest(PUBLIC / 'l2-config.bin') == settler.MAINNET_L2_CONFIG_SHA256
-    STATE.mkdir(mode=0o700)
-    for sub in ('work', 'tmp', 'txpool', 'ssh'):
-        (STATE / sub).mkdir(mode=0o700)
     DA_DIR.mkdir(mode=0o700)
-    # The DA fee key: a sealed hybrid keystore that holds only DA fee money. Its passphrase is
-    # generated here, readable by the settler alone, and never printed.
-    passphrase = STATE / 'da.passphrase'
+    # The DA fee key: a sealed hybrid keystore that holds only DA fee money. Its passphrase is generated here,
+    # root-only, and never printed; the worker reads only the unit's runtime copy DA_RUNTIME_PASSPHRASE (M-4).
     # Created 0400 in one step (O_EXCL: never over an existing file), not created then narrowed.
-    with os.fdopen(os.open(passphrase, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400), 'w') as out:
+    with os.fdopen(os.open(DA_PASSPHRASE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400), 'w') as out:
         out.write(secrets.token_hex(48) + '\n')
-    env = {'PATH': '/usr/bin:/bin', 'BLOCH_KEYSTORE_PASSPHRASE_FILE': str(passphrase)}
+    env = {'PATH': '/usr/bin:/bin', 'BLOCH_KEYSTORE_PASSPHRASE_FILE': str(DA_PASSPHRASE)}
     run([target / 'bloch-pos', 'keygen', '--dir', DA_DIR, '--index', '0'], env=env)
     pubkey = run([target / 'bloch-pos', 'keygen-public', '--dir', DA_DIR], env=env).split('\t')[1].strip()
     assert len(bytes.fromhex(pubkey)) == 3749
     assert 'sealed' in run([target / 'bloch-pos', 'keys', 'inspect', '--dir', DA_DIR])
     (PUBLIC / 'da.pubkey.hex').write_text(pubkey + '\n')
-    for path in [STATE, DA_DIR, *STATE.iterdir(), *DA_DIR.iterdir()]:
+    for path in [DA_DIR, *DA_DIR.iterdir()]:
         os.chown(path, owner.pw_uid, owner.pw_gid)
+    # State: group READ_GROUP with setgid, so every file and database the worker creates later (UMask=0027) is
+    # readable by the RPC and shadow users, while the state directory itself only lets them through (2710).
+    # ssh/ and the DA keystore stay the settler's alone.
+    layout = {STATE: 0o2710, STATE / 'work': 0o2750, STATE / 'txpool': 0o2770, STATE / 'tmp': 0o2700,
+              STATE / 'ssh': 0o700}
+    for path, mode in layout.items():
+        path.mkdir(mode=0o700)
+        os.chown(path, owner.pw_uid, owner.pw_gid if path.name == 'ssh' else readers)
+        path.chmod(mode)  # after chown, which may clear the setgid bit
     script = hashlib.sha3_256(bytes.fromhex(pubkey)).hexdigest()
     print(json.dumps({'prepared': str(target), 'user': USER, 'l2_config_sha256': digest(PUBLIC / 'l2-config.bin'),
                       'da_keystore': str(DA_DIR), 'da_funding_script_hash': script,
@@ -202,7 +245,7 @@ def configure(args):
         'local_prove_max_instructions': LOCAL_PROVE_MAX_INSTRUCTIONS,
         'da': {'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
                'genesis': str(rel / 'mainnet.manifest'), 'funding_pubkey': str(PUBLIC / 'da.pubkey.hex'),
-               'keystore_dir': str(DA_DIR), 'passphrase_file': str(STATE / 'da.passphrase'),
+               'keystore_dir': str(DA_DIR), 'passphrase_file': str(DA_RUNTIME_PASSPHRASE),
                'tip_millisat_per_gas': 0, 'inclusion_timeout_seconds': 1800, 'low_balance_sat': LOW_BALANCE_SAT},
     }
     state, status = option(args, '--follower-state'), option(args, '--follower-status')
@@ -251,18 +294,15 @@ def configure(args):
 
 def dry_run(args, config=CONFIG):
     assert Path(config).exists(), 'run configure first'
-    rel = release()
+    rel = release(config)
     argv = ['/usr/bin/python3', '-u', rel / 'settler_v3.py', '--dry-run'] + (['--prove'] if '--prove' in args else [])
     done = as_settler(argv, {'TMPDIR': str(STATE / 'tmp')}, config=config)
     print(done.stdout[-6000:] + done.stderr[-2000:])
     assert done.returncode == 0, 'dry run failed: see the output above (a run that stopped early writes no dry-run-report.json)'
 
 
-def start(args):
-    assert '--confirm-mainnet' in args, 'start submits to Bloch L1 mainnet: pass --confirm-mainnet'
-    assert CONFIG.exists() and not UNIT.exists(), 'configure first; start once'
-    rel = release()
-    UNIT.write_text(f'''[Unit]
+def unit_text(rel):
+    return f'''[Unit]
 Description=Bloch L2 MAINNET settlement worker (chain 700770; 0x13 settlements, 0x15 DA)
 After=network-online.target docker.service
 Wants=network-online.target
@@ -275,8 +315,13 @@ StartLimitIntervalSec=0
 Type=simple
 User={USER}
 Group={USER}
-SupplementaryGroups=docker
+SupplementaryGroups=docker {READ_GROUP}
 Environment=BLOCH_SETTLER_CONFIG={ETC}/config.json
+# The DA passphrase (root:root 0400 in {ETC}) reaches the worker only as this copy in its private runtime
+# directory (0700, removed at stop): a 0400 file of {USER}, as bloch-pos requires (review r10 M-4).
+RuntimeDirectory={RUNTIME.name}
+RuntimeDirectoryMode=0700
+ExecStartPre=+/usr/bin/install -m 0400 -o {USER} -g {USER} {DA_PASSPHRASE} {DA_RUNTIME_PASSPHRASE}
 Environment=HOME={STATE}
 Environment=TMPDIR={STATE}/tmp
 ExecStart=/usr/bin/python3 -u {rel}/settler_v3.py
@@ -291,7 +336,9 @@ TimeoutStopSec=120
 RemoveIPC=yes
 # exit 3 = halt for operator review (divergence, off-rule foreign settlement, refused proof): never auto-restart.
 RestartPreventExitStatus=3
-UMask=0077
+# 0027: what the worker writes under the setgid state directory is readable by {READ_GROUP} (the RPC reads the
+# canonical database, the shadow the work directory); ssh/ and the DA keystore are 0700 and stay private.
+UMask=0027
 NoNewPrivileges=true
 # No PrivateTmp: the Docker daemon must see the prover's temporary files.
 PrivateTmp=false
@@ -317,12 +364,119 @@ MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target
-''')
+'''
+
+
+def write_unit(rel):
+    # The unit's ExecStartPre copies this file at every start: refuse a unit that could never start.
+    assert DA_PASSPHRASE.is_file(), f'{DA_PASSPHRASE} is missing (a prepare by an older installer): see SETTLER-RUNBOOK.md'
+    UNIT.write_text(unit_text(rel))
     UNIT.chmod(0o644)
     run(['systemd-analyze', 'verify', UNIT])
     run(['systemctl', 'daemon-reload'])
+
+
+def start(args):
+    assert '--confirm-mainnet' in args, 'start submits to Bloch L1 mainnet: pass --confirm-mainnet'
+    assert CONFIG.exists() and not UNIT.exists(), 'configure first; start once'
+    write_unit(release())
     run(['systemctl', 'enable', '--now', UNIT_NAME])
     print(json.dumps({'started': UNIT_NAME, 'logs': f'journalctl -u {UNIT_NAME} -f -o cat'}, indent=2))
+
+
+def unit_active():
+    return subprocess.run(['systemctl', 'is-active', '--quiet', UNIT_NAME]).returncode == 0
+
+
+def release_config(config, rel):
+    """`config` with every field that names a release file pointed at `rel` (and its pins recomputed)."""
+    new = {**config, 'produce': str(rel / 'bloch-l2-produce-dev'),
+           'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),
+           'guest': str(rel / 'settlement_v3_mainnet'), 'guest_sha256': digest(rel / 'settlement_v3_mainnet')}
+    new['da'] = {**config['da'], 'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
+                 'genesis': str(rel / 'mainnet.manifest')}
+    return new
+
+
+def switch(rel, config, record):
+    """Make `config` (already checked) the live one for release `rel`: the old config.json is kept beside it as
+    config.json.<old release>, the unit runs `rel`. The caller has stopped the unit."""
+    old = release()
+    shutil.copy2(CONFIG, ETC / f'config.json.{old.name}')
+    PENDING.write_text(json.dumps(config, indent=2) + '\n')
+    PENDING.chmod(0o644)
+    os.replace(PENDING, CONFIG)
+    write_unit(rel)
+    UPGRADE.write_text(json.dumps({**record, 'previous': old.name, 'current': rel.name,
+                                   'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, indent=2) + '\n')
+
+
+def upgrade(args):
+    """Review r10 M-3: a pinned worker upgrade beside the running release, checked before the switch."""
+    assert '--confirm-mainnet' in args, 'upgrade restarts the mainnet worker: pass --confirm-mainnet'
+    assert CONFIG.exists() and UNIT.exists(), 'upgrade a started settler (prepare, configure, start first)'
+    if '--rollback' in args:
+        return upgrade_rollback()
+    source = Path(option(args, '--release', ''))
+    current = release()
+    target = OPT / PINS['settler_v3.py'][:16]
+    assert target != current, f'{target.name} is already the running release'
+    assert source.is_dir() or target.exists(), 'upgrade --release DIR --confirm-mainnet'
+    created = not target.exists()
+    try:
+        settler = install_release(source, target)
+        config = release_config(json.loads(CONFIG.read_text()), target)
+        settler.Settler(config)  # every pin of the new release, offline
+    except BaseException:
+        if created:
+            shutil.rmtree(target, ignore_errors=True)
+        raise
+    PENDING.write_text(json.dumps(config, indent=2) + '\n')
+    PENDING.chmod(0o644)
+    was_active = unit_active()
+    # The dry run copies the live database once a settlement is accepted: the worker must not write it meanwhile.
+    run(['systemctl', 'stop', UNIT_NAME])
+    try:
+        check = as_settler(['/usr/bin/python3', '-u', target / 'settler_v3.py', '--check-rpc'], config=PENDING)
+        print(check.stdout + check.stderr)
+        assert check.returncode == 0, 'the mainnet RPC quorum check failed with the new release'
+        dry_run([], config=PENDING)
+    except BaseException:
+        PENDING.unlink(missing_ok=True)
+        if created:
+            shutil.rmtree(target, ignore_errors=True)
+        if was_active:
+            run(['systemctl', 'start', UNIT_NAME])
+        print(json.dumps({'upgrade': 'refused', 'running': current.name, 'unit_restarted': was_active}))
+        raise
+    switch(target, config, {'upgraded': True})
+    if was_active:
+        run(['systemctl', 'start', UNIT_NAME])
+    print(json.dumps({'upgraded': target.name, 'previous': current.name, 'started': was_active,
+                      'rollback': 'install-settler-mainnet.py upgrade --rollback --confirm-mainnet'}, indent=2))
+
+
+def upgrade_rollback():
+    assert UPGRADE.exists(), f'{UPGRADE} missing: no upgrade to roll back'
+    record = json.loads(UPGRADE.read_text())
+    current, previous = release(), OPT / record['previous']
+    assert current.name == record['current'], f'running {current.name}, but the last upgrade installed {record["current"]}'
+    kept = ETC / f'config.json.{previous.name}'
+    assert kept.exists() and (previous / 'settler_v3.py').is_file(), f'{kept} or {previous} is missing'
+    config = json.loads(kept.read_text())
+    assert Path(config['prover']).parent == previous, f'{kept} does not run {previous}'
+    # The kept release must still be the bytes it ran: its directory is named by its worker's digest, and the
+    # kept config pins its prover, guest and DA signer.
+    assert digest(previous / 'settler_v3.py').startswith(previous.name), 'kept settler_v3.py changed'
+    for key, name in (('prover_sha256', 'bloch-evm-sp1-settlement-v3'), ('guest_sha256', 'settlement_v3_mainnet')):
+        assert digest(previous / name) == config[key], f'kept {name} changed'
+    assert digest(previous / 'bloch-pos') == config['da']['signer_sha256'], 'kept bloch-pos changed'
+    was_active = unit_active()
+    run(['systemctl', 'stop', UNIT_NAME])
+    switch(previous, config, {'rolled_back': True})
+    if was_active:
+        run(['systemctl', 'start', UNIT_NAME])
+    print(json.dumps({'rolled_back_to': previous.name, 'from': current.name, 'started': was_active}, indent=2))
 
 
 def rollback(_args):
@@ -337,7 +491,8 @@ def rollback(_args):
 
 if __name__ == '__main__':
     assert os.geteuid() == 0, 'run as root'
-    commands = {'prepare': prepare, 'configure': configure, 'dry-run': dry_run, 'start': start, 'rollback': rollback}
+    commands = {'prepare': prepare, 'configure': configure, 'dry-run': dry_run, 'start': start, 'upgrade': upgrade,
+                'rollback': rollback}
     command = sys.argv[1] if len(sys.argv) > 1 else ''
     if command not in commands:
         raise SystemExit(__doc__)

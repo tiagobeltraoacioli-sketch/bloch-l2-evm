@@ -9,6 +9,13 @@ main config for a private test instance run as an unprivileged user).
 Production (Cloudflare in front, two hosts; see README.md):
   render.py --role sequencer --name l2rpc-136 --peer 45.77.142.123:18956 --peer-allow 45.77.142.123 \
             --out /etc/nginx/bloch-l2rpc
+
+The outbound hop to the peer's mTLS listener is a unix socket in --hop-dir, a
+directory only root and the nginx workers' group can enter (setup-gateway.sh
+creates it, mode 0750): no other local user can use this host's peer
+certificate to reach the other host's settled RPC (review 154, G6).
+Authenticated Origin Pulls trust the owner's own client CA for this hostname,
+never Cloudflare's shared CA (review 154, G8; README.md).
 """
 import argparse
 import ipaddress
@@ -28,6 +35,18 @@ OFFICIAL_ORIGINS = [
     'https://www.blochbridge.com',
 ]
 CHAIN_ID = 700770
+# The probe batch (the same calls as PROBE_BODY in l2rpc-gateway.js, which parses
+# the answers by id). The peer is probed through a loopback location that always
+# sends exactly this body, so the probe server opens no general path to the peer.
+PEER_PROBE_BODY = json.dumps([
+    {'jsonrpc': '2.0', 'id': 1, 'method': 'eth_chainId', 'params': []},
+    {'jsonrpc': '2.0', 'id': 2, 'method': 'eth_blockNumber', 'params': []},
+    {'jsonrpc': '2.0', 'id': 3, 'method': 'eth_getBlockByNumber', 'params': ['finalized', False]},
+    {'jsonrpc': '2.0', 'id': 4, 'method': 'bloch_finality', 'params': []},
+], separators=(',', ':'))
+# Cloudflare's zone-level (shared) Authenticated Origin Pulls CA names this host in
+# its subject; every Cloudflare customer's pulls present a certificate under it.
+SHARED_AOP_MARKER = b'origin-pull.cloudflare.net'
 
 
 def hostport(value):
@@ -41,6 +60,16 @@ def origin(value):
     if not (value.startswith('https://') or value.startswith('http://')) or value.count('/') != 2 or value.endswith('/'):
         raise argparse.ArgumentTypeError(f'expected a scheme://host[:port] origin, got {value!r}')
     return value
+
+
+def pem_certificates(path):
+    """DER bytes of every certificate in a PEM file."""
+    import base64
+    text = Path(path).read_text()
+    out = []
+    for block in re.findall(r'-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----', text, re.S):
+        out.append(base64.b64decode(''.join(block.split())))
+    return out
 
 
 def ranges(paths):
@@ -63,7 +92,10 @@ def main():
     a.add_argument('--peer', type=hostport, help="the other host's mTLS peer listener HOST:PORT")
     a.add_argument('--peer-allow', help='source address allowed on this host\'s peer listener')
     a.add_argument('--peer-listen', default='0.0.0.0:18956')
-    a.add_argument('--peer-out-port', type=int, default=18957)
+    a.add_argument('--hop-dir', default='/run/bloch-l2rpc',
+                   help='directory of the unix socket of the outbound peer hop; must be enterable only by root and the '
+                        'nginx workers (setup-gateway.sh: 0750 root:www-data)')
+    a.add_argument('--peer-out-port', help=argparse.SUPPRESS)
     a.add_argument('--probe-port', type=int, default=18958)
     a.add_argument('--peer-dir', default='/etc/nginx/bloch-l2rpc/peer',
                    help='self.crt, self.key and peer.crt (the other host\'s self.crt)')
@@ -73,8 +105,11 @@ def main():
                    help='TESTS ONLY: extra plaintext listen spec on loopback (clients that cannot trust a test certificate)')
     a.add_argument('--tls-cert', default='/etc/ssl/bloch-l2rpc/origin.pem', help='Cloudflare Origin CA certificate')
     a.add_argument('--tls-key', default='/etc/ssl/bloch-l2rpc/origin.key')
-    a.add_argument('--client-ca', default='/etc/ssl/bloch-l2rpc/cloudflare-aop-ca.pem',
-                   help="Cloudflare Authenticated Origin Pulls CA; 'none' disables client verification (tests only)")
+    a.add_argument('--client-ca', default='/etc/ssl/bloch-l2rpc/aop-client-ca.pem',
+                   help="the owner's own Authenticated Origin Pulls CA (per-hostname AOP; README.md); "
+                        "'none' disables client verification (tests only)")
+    a.add_argument('--allow-shared-aop-ca', action='store_true',
+                   help="accept Cloudflare's shared AOP CA in --client-ca (any Cloudflare zone could then reach the origin)")
     a.add_argument('--edge-ranges', action='append',
                    help='files with the edge (Cloudflare) source ranges (default: the bundled v4 and v6 lists)')
     a.add_argument('--cors-origin', action='append', type=origin, help='allowed browser origin (default: the official frontends)')
@@ -91,6 +126,8 @@ def main():
     a.add_argument('--backend-conns', type=int, default=48,
                    help='active connections from this gateway to the local settled RPC for reads (sequencer/peer paths get a quarter each)')
     a.add_argument('--max-batch', type=int, default=100, help='calls per batch (ethers v6 batches up to 100)')
+    a.add_argument('--sub-answer-max', type=int, default=2 * 1024 * 1024,
+                   help='largest backend answer of a split request (njs subrequest), bytes; larger ones get -32005')
     a.add_argument('--max-body', default='512k', help='request body cap (the settled RPC refuses more than 512 KiB)')
     a.add_argument('--max-log-range', type=int, default=2000)
     a.add_argument('--max-lag', type=int, default=0,
@@ -106,6 +143,15 @@ def main():
         if not x.startswith('127.'):
             a.error('--test-plain-listen is for loopback test instances only')
 
+    if o.peer_out_port is not None:
+        a.error('--peer-out-port is gone: the outbound peer hop is a unix socket in --hop-dir (review 154, G6)')
+    if o.client_ca != 'none' and Path(o.client_ca).exists():
+        certs = pem_certificates(o.client_ca)
+        if not certs:
+            a.error(f'--client-ca {o.client_ca} holds no PEM certificate')
+        if any(SHARED_AOP_MARKER in der for der in certs) and not o.allow_shared_aop_ca:
+            a.error(f"--client-ca {o.client_ca} contains Cloudflare's shared AOP CA: any Cloudflare zone could reach this "
+                    'origin. Use your own per-hostname AOP CA (README.md), or --allow-shared-aop-ca during a switch-over')
     if o.peer and not o.peer_allow:
         a.error('--peer needs --peer-allow')
     if o.role == 'replica' and not o.peer:
@@ -113,7 +159,12 @@ def main():
     out = Path(o.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    peer_out = f'127.0.0.1:{o.peer_out_port}'
+    hop = Path(o.hop_dir)
+    if not hop.is_absolute():
+        a.error('--hop-dir must be absolute')
+    if not 65536 <= o.sub_answer_max <= 16 * 1024 * 1024:
+        a.error('--sub-answer-max must be between 64 KiB and 16 MiB')
+    peer_out = f'unix:{hop}/peer-out.sock'
     local = o.local_rpc
     seq = local if o.role == 'sequencer' else peer_out
     other = (peer_out if o.role == 'sequencer' else local) if o.peer else None
@@ -127,7 +178,9 @@ def main():
     tls = [f'    ssl_certificate {o.tls_cert};', f'    ssl_certificate_key {o.tls_key};',
            '    ssl_protocols TLSv1.2 TLSv1.3;', '    ssl_session_cache shared:l2rpc_tls:10m;', '    ssl_session_timeout 1h;']
     if o.client_ca != 'none':
-        tls += [f'    ssl_client_certificate {o.client_ca};', '    ssl_verify_client on;']
+        # The owner's own AOP CA signs one client certificate, the one Cloudflare presents
+        # for this hostname: a chain longer than CA -> leaf is not expected.
+        tls += [f'    ssl_client_certificate {o.client_ca};', '    ssl_verify_client on;', '    ssl_verify_depth 1;']
 
     peer_servers = ''
     if o.peer:
@@ -165,7 +218,9 @@ server {{
     }}
 }}
 
-# ------------------------------- outbound hop to the peer (loopback -> mTLS)
+# ------------------------- outbound hop to the peer (unix socket -> mTLS)
+# Only root and the nginx workers can enter {hop}, so no other local user can
+# send requests to the other host with this host's peer certificate (G6).
 upstream l2_peer_tls {{
     server {o.peer};
     keepalive 4;
@@ -217,8 +272,20 @@ server {{
         'PUBLIC_LISTEN': '\n'.join([f'    listen {x} ssl http2;' for x in listens] + [f'    listen {x};' for x in o.test_plain_listen]),
         'PUBLIC_TLS': '\n'.join(tls),
         'PROBE_PORT': str(o.probe_port),
+        'HOP_DIR': str(hop),
+        'SUB_MAX': str(o.sub_answer_max),
+        'SUB_BUF': str(o.sub_answer_max + 65536),
         'PROBE_INTERVAL': o.probe_interval,
         'PEER_SERVERS': peer_servers,
+        'PEER_PROBE': f'''    # The peer probe: always this fixed read-only batch, whatever the local caller sends.
+    location = /_peer_probe {{
+        allow 127.0.0.1;
+        deny all;
+        proxy_pass http://{peer_out}:/;
+        include {out}/l2rpc-proxy.inc;
+        proxy_set_body '{PEER_PROBE_BODY}';
+        proxy_read_timeout 5s;
+    }}''' if o.peer else '',
     }
     conf = (HERE / 'l2rpc-gateway.conf.in').read_text()
     for k, v in values.items():
@@ -239,13 +306,14 @@ server {{
         'txPerMinute': o.tx_per_minute,
         'simPerIp': o.sim_per_ip,
         'simTotal': o.sim_total,
+        'subAnswerMaxBytes': o.sub_answer_max,
         'maxLogBlockRange': o.max_log_range,
         'maxLogAddresses': 256,
         'maxLagBlocks': o.max_lag,
         'stateMaxAgeMs': 15000,
         'maxStatusAgeS': o.max_status_age,
         'localProbeUrl': f'http://{local}/',
-        'peerProbeUrl': f'http://{peer_out}/' if o.peer else None,
+        'peerProbeUrl': f'http://127.0.0.1:{o.probe_port}/_peer_probe' if o.peer else None,
     }
     (out / 'l2rpc-config.js').write_text('// Rendered by render.py.\nexport default ' + json.dumps(config, indent=2) + ';\n')
     if o.standalone:
