@@ -49,6 +49,11 @@ S=$N/crates/bloch-pos-committee/src/l2_settlement.rs
 if grep -Eq 'FORCED_INCLUSION_CONFIGURATIONS: &\[\[u8; 32\]\] = &\[\];' "$S"; then
   echo "native FORCED_INCLUSION_CONFIGURATIONS is empty: the queue would never be enabled" >&2; exit 2
 fi
+# The queue is never enabled without a treasury (TBD-owner on mainnet): a throwaway script hash for the rehearsal only.
+if grep -q 'pub const FORCED_INCLUSION_TREASURY: Option<\[u8; 32\]> = None;' "$S"; then
+  sed -i 's/pub const FORCED_INCLUSION_TREASURY: Option<\[u8; 32\]> = None;/pub const FORCED_INCLUSION_TREASURY: Option<[u8; 32]> = Some([0x7e; 32]);/' "$S"
+  grep -q 'FORCED_INCLUSION_TREASURY: Option<\[u8; 32\]> = Some(\[0x7e; 32\]);' "$S"
+fi
 cp "$ATTESTORS_SET" "$N/crates/bloch-pos-committee/l2-mainnet/attestors.set"
 if [ "$V" = B ]; then
   sed -i 's/pub const HEAD_RESET: Option<HeadReset> = None;/pub const HEAD_RESET: Option<HeadReset> = Some(HeadReset { number: 0, commitment: [0; 32], statement: None });/' "$S"
