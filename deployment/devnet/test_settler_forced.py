@@ -157,7 +157,7 @@ class ForcedSettlerTest(unittest.TestCase):
         self.assertEqual(json.loads(Path(extend[extend.index('--forced') + 1]).read_text()), DUE)
         self.assertEqual((self.directory() / 'forced.json').read_text(), json.dumps(DUE, sort_keys=True))
         # A forced-only block: no user transaction, no DA batch, only the 0x13 settlement.
-        self.assertEqual([tx[0] for tx in fake.sent], [s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in base.broadcasts(fake.sent)], [s.ASYNC_SETTLEMENT_TAG])
         self.assertFalse([c for c in fake.calls if c[1:2] == ['da']])
 
     def test_the_plain_deposits_hash_is_refused_while_records_are_due(self):
@@ -181,7 +181,7 @@ class ForcedSettlerTest(unittest.TestCase):
         values = base.statement(user_txs=2, **{str(s.DEPOSITS_HASH): inbox_slot(DUE)})
         fake = ForcedFake(self.root, values, DUE, produced_txs=2)
         self.assertTrue(self.cycle(fake))
-        self.assertEqual([tx[0] for tx in fake.sent], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
+        self.assertEqual([tx[0] for tx in base.broadcasts(fake.sent)], [s.DA_TAG, s.ASYNC_SETTLEMENT_TAG])
         self.assertEqual(s.da_frame_fields(fake.sent[0]), (s.CHAIN_ID, 1, base.batch(2)))
         block = json.loads((self.directory() / 'block.json').read_text())
         self.assertEqual((block['transactions'], block['user_transactions']), (3, 2))

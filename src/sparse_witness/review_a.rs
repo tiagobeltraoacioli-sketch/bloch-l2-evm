@@ -390,6 +390,7 @@ impl World {
                 pre_accounts,
                 absent_accounts: absent.to_vec(),
                 codes,
+                forced: Vec::new(),
             },
         }
     }
