@@ -1204,6 +1204,7 @@ class MonitorGapTests(unittest.TestCase):
         w = healthy()
         w['l1'][L1[1]]['info']['finalized']['epoch'] = EPOCH - 40
         w['l1'][L1[1]]['info']['height'] = 150000
+        w['l1'][L1[1]]['info']['slot'] -= 36000 * 2  # a syncing node's head is an old block
         c = next(c for c in run(w)[0].checks if c['check'] == 'l1_finality_spread')
         self.assertEqual(c['level'], 'CRIT')
         self.assertIn('syncing or stuck', c['message'])
@@ -1381,6 +1382,101 @@ class MonitorGapTests(unittest.TestCase):
         self.assertEqual(m.decide_alert(r, state, NOW, 3600, m.WARN), 'raise')
         state.update({'bad': {c['check']: c['level'] for c in r.checks if c['code'] != m.OK}, 'sent_at': NOW})
         self.assertIsNone(m.decide_alert(r, state, NOW + 60, 3600, m.WARN))
+
+
+
+class DrillFindings(unittest.TestCase):
+    """Agent 205, round 11: monitor defects found by the drills on real binaries (agents/205-monitor-drills.md)."""
+
+    def test_one_busy_remote_prover_counts_once(self):
+        """Drill d: the settler logs `remote-proof` exit 75 and then `prover-failed` where=remote for the same attempt."""
+        d = '/w/00000004-8da1e0a826a9200b'
+        attempt = [{'time': stamp(300), 'event': 'remote-proof', 'target': 'p', 'exit_code': 75, 'bytes': 0},
+                   {'time': stamp(300), 'event': 'prover-failed', 'directory': d, 'where': 'remote', 'exit_code': 75}]
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': attempt}))
+        msg = next(c['message'] for c in r.checks if c['check'] == 'events[settler]')
+        self.assertIn('prover-failed x1', msg)
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': attempt * 3}))
+        self.assertEqual(level(r, 'events[settler]'), 'WARN', 'three busy answers are three failures, not six')
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': attempt * 5}))
+        self.assertEqual(level(r, 'events[settler]'), 'CRIT')
+
+    def test_remote_proof_alone_still_counts_for_older_settlers(self):
+        lines = [{'time': stamp(300), 'event': 'remote-proof', 'target': 'p', 'exit_code': 137, 'bytes': 0}]
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': lines}))
+        self.assertIn('prover-failed x1', next(c['message'] for c in r.checks if c['check'] == 'events[settler]'))
+
+    def test_shm_leak_size_is_the_memory_in_use_not_the_sparse_size(self):
+        """Drill e: a killed execute left `sp1_*_m` (2 TiB sparse, 0 bytes in use) and `sp1_*_t` (4.5 GiB, 4 KiB in
+        use). The WARN said "2052.4 GiB" leaked."""
+        gib = 2 ** 30
+        with tempfile.TemporaryDirectory() as d:
+            for name, size in (('sp1_x_m', 2 * 1024 * gib), ('sp1_x_t', 4775215104)):
+                with open(Path(d, name), 'wb') as f:
+                    f.truncate(size)  # sparse, like the SP1 segments
+                    f.write(b'x' * 4096)
+                os.utime(Path(d, name), (NOW - 4 * 3600, NOW - 4 * 3600))
+            fake = os.statvfs_result((4096, 4096, 63 * gib // 4096, 0, 60 * gib // 4096, 0, 0, 0, 0, 255))
+            with mock.patch.object(m.os, 'statvfs', return_value=fake):
+                r, _ = run(healthy(), '--shm', f'sp1={d}')
+        c = next(c for c in r.checks if c['check'] == 'shm[sp1]')
+        self.assertEqual(c['level'], 'WARN')
+        self.assertEqual(c['stale'], 2)
+        self.assertIn('older than 3 h (0.0 GiB in use', c['message'])
+
+    def test_shm_short_stale_threshold_reads_in_minutes(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'sp1_y_t').write_bytes(b'x' * 4096)
+            os.utime(Path(d, 'sp1_y_t'), (NOW - 900, NOW - 900))
+            r, _ = run(healthy(), '--shm', f'sp1={d}', '--set', 'shm_stale_seconds=600')
+        self.assertIn('older than 10 min', next(c['message'] for c in r.checks if c['check'] == 'shm[sp1]'))
+
+    def test_split_minority_far_behind_in_height_is_still_a_branch_of_its_own(self):
+        """Drill a: after 15 min of a 2|3 split the minority was 70 blocks behind (fewer proposers) with a current head
+        slot. Height alone classed it as syncing."""
+        w = healthy()
+        for u in L1[:2]:
+            w['l1'][u]['info']['finalized']['epoch'] = EPOCH - 15
+            w['l1'][u]['info']['height'] -= 70
+        c = next(c for c in run(w)[0].checks if c['check'] == 'l1_finality_spread')
+        self.assertEqual(c['level'], 'CRIT')
+        self.assertIn('branch of its own', c['message'])
+
+    def test_conflicting_finalized_roots_at_one_epoch_are_crit(self):
+        """Drill a: both sides of a 2|3 split finalized e68 with different roots once the leak had run; no other check
+        named it."""
+        w = healthy()
+        self.assertEqual(level(run(w)[0], 'l1_finalized_agreement'), 'OK')
+        for u in L1[:1]:
+            w['l1'][u]['info']['finalized']['root'] = 'bb' * 32
+        r, _ = run(w)
+        c = next(c for c in r.checks if c['check'] == 'l1_finalized_agreement')
+        self.assertEqual(c['level'], 'CRIT')
+        self.assertIn('CONFLICTING FINALITY', c['message'])
+        self.assertIn(L1[0], c['message'])
+        self.assertEqual(level(r, 'l1_finality_spread'), 'OK', 'the case the spread check cannot see')
+
+    def test_a_held_settlement_raises_its_own_alert_while_events_is_already_warn(self):
+        """Drill f: `settlement-not-included` arrived while events[settler] was WARN for a busy prover, so no alert left
+        until realert_seconds."""
+        d = '/w/00000004-8da1e0a826a9200b'
+        busy = [{'time': stamp(1800), 'event': 'remote-proof', 'target': 'p', 'exit_code': 75, 'bytes': 0},
+                {'time': stamp(1800), 'event': 'prover-failed', 'directory': d, 'where': 'remote', 'exit_code': 75}]
+        held = [{'time': stamp(120), 'event': 'settlement-not-included', 'number': 4, 'held_by': [1, 2, 3], 'windows': 1,
+                 'halt_after': 4}]
+        r1, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': busy}))
+        self.assertNotIn('settlement_inclusion[settler]', [c['check'] for c in r1.checks])
+        state = {'bad': {c['check']: c['level'] for c in r1.checks if c['code'] != m.OK}, 'sent_at': NOW}
+        r2, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': busy + held}))
+        self.assertEqual(level(r2, 'events[settler]'), 'WARN')
+        self.assertEqual(level(r2, 'settlement_inclusion[settler]'), 'WARN')
+        self.assertEqual(m.decide_alert(r2, state, NOW + 60, 3600, m.WARN), 'raise')
+        near = [dict(held[0], windows=3)]
+        r3, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': near}))
+        self.assertEqual(level(r3, 'settlement_inclusion[settler]'), 'CRIT', 'one window before the halt')
+        done = held + [{'time': stamp(30), 'event': 'accepted', 'number': 4, 'commitment': 'cc' * 32}]
+        r4, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': done}))
+        self.assertEqual(level(r4, 'settlement_inclusion[settler]'), 'OK')
 
 
 if __name__ == '__main__':

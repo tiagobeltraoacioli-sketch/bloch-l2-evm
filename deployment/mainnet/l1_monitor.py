@@ -19,6 +19,7 @@ Checks:
   l1_parked[NAME]          bloch_pos_blocks_parked held at >= 32 over the same window, on a node not already CRIT
   l1_peers[NAME]           bloch_pos_peer_count at or below a floor, or collapsed against its recent maximum
   l1_metrics[NAME]         a configured metrics URL that does not answer (stuck detection then stops at WARN)
+  l1_finality_conflict     nodes at one finalized epoch with different roots (both sides of a split final)
   l1_split                 nodes on a branch apart from the one finalizing furthest
   l1_settler_sources       the settler's rpc_urls against that branch: a quorum of them apart is CRIT (report 94:
                            the settler settled L2 blocks on a dead fork because its quorum was on it)
@@ -302,6 +303,7 @@ class Probe:
                 just = info.get('justified')
                 self.views[n['name']] = {
                     'finalized': int(fin['epoch'] if isinstance(fin, dict) else info['finalized_epoch']),
+                    'finalized_root': str(fin.get('root') or '') if isinstance(fin, dict) else '',
                     'justified': int(just['epoch']) if isinstance(just, dict) and just.get('epoch') is not None else -1,
                     'head': str(info['block_id']), 'height': info.get('height'),
                     'slot': int(info['slot']) if info.get('slot') is not None else None,
@@ -400,6 +402,26 @@ def check_finality(cfg: Dict[str, Any], probe: Probe, now: float, r: Report) -> 
     r.add('l1_finality', level, f'epoch {epoch}, best finalized e{best["finalized"]} (justified e{best["justified"]}): '
           f'{lag} epochs behind; 2 is normal' + ('. FINALITY STALLED on every node read' if level == CRIT else ''),
           value=lag, warn=p['finality_lag_warn'], crit=p['finality_lag_crit'])
+
+
+def check_finality_conflict(probe: Probe, r: Report) -> None:
+    """Nodes at one finalized epoch with different roots: two branches are final at once. After a long partition the
+    inactivity leak lets each side finalize its own branch (agent 205, drill a: a 2|3 split, both sides final at e68
+    with different roots). l1_split then sees a tie on (finalized, justified) and only says WARN "undecided"."""
+    by_epoch: Dict[int, Dict[str, List[str]]] = {}
+    for name, v in probe.views.items():
+        if v.get('finalized_root'):
+            by_epoch.setdefault(v['finalized'], {}).setdefault(v['finalized_root'], []).append(name)
+    conflicts = {e: roots for e, roots in by_epoch.items() if len(roots) > 1}
+    if not conflicts:
+        if by_epoch:
+            r.add('l1_finality_conflict', OK, 'nodes at the same finalized epoch agree on its root')
+        return
+    epoch = max(conflicts)
+    detail = '; '.join(f'{root[:16]}... at {", ".join(sorted(names))}' for root, names in sorted(conflicts[epoch].items()))
+    r.add('l1_finality_conflict', CRIT, f'CONFLICTING FINALITY at e{epoch}: {detail}. Two branches are final at once: '
+          'stop the L2 settler, keep every L2 reader on one named branch, see docs/L1-STUCK-NODE-RUNBOOK.md',
+          epochs=sorted(conflicts))
 
 
 def check_node(cfg: Dict[str, Any], probe: Probe, n: Dict[str, Any], st: Dict[str, Any], r: Report) -> None:
@@ -541,6 +563,7 @@ def run_once(cfg: Dict[str, Any], transport: Transport, fetch: Fetcher, state: D
     probe = Probe(cfg, transport, fetch)
     check_nodes(cfg, probe, r)
     check_finality(cfg, probe, now, r)
+    check_finality_conflict(probe, r)
     nodes_state = state.setdefault('nodes', {})
     for n in cfg['nodes']:
         check_node(cfg, probe, n, nodes_state.setdefault(n['name'], {}), r)
