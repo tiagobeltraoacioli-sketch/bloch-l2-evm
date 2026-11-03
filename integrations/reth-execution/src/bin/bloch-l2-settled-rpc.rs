@@ -48,9 +48,16 @@
 //! least its intrinsic gas, a priority fee not above its fee cap, initcode
 //! within EIP-3860), so a funded sender cannot hold spool slots for free with
 //! entries the producer defers forever or drops without charging a fee;
-//! when full, stale entries (used nonce, gap, unfunded, underpriced, older than
-//! 3 h, undecodable) are evicted, then the cheapest deferred one if the new
-//! transaction pays more. Stale entries are also swept every minute. It writes
+//! when full, stale entries (used nonce, gap, unfunded, underpriced, expired,
+//! undecodable) are evicted, then the cheapest deferred one if the new
+//! transaction pays more. Stale entries are also swept every minute. An entry
+//! expires by settlement progress, not by the clock alone: older than 3 h and
+//! passed over by 4 blocks of the canonical database, or 24 h old with no
+//! block at all for 24 h (settlement stopped or idle); an entry behind a nonce
+//! gap expires at 3 h. A slow but live settler (one block per proof, 30 min to
+//! hours) never evicts an acknowledged transaction it has not yet had the
+//! chance to include. First-seen heads and the no-block clock persist in the
+//! spool (`.<hash>.head`, `.spool-progress`), so restarts never extend a lifetime. It writes
 //! one `<hash>.tx` spool entry (hex) atomically into the pool the settlement
 //! worker selects from; the producer still decides inclusion and drops invalid
 //! entries with a reason. Without `--txpool`, transactions are refused.
@@ -133,8 +140,16 @@ struct SpoolLimits {
     max_per_sender: usize,
     /// Highest nonce accepted above the sender's head nonce.
     max_nonce_gap: u64,
-    /// Age after which an entry the producer never took is evicted.
+    /// Age after which an entry the producer never took may be evicted, once it was also passed over by
+    /// `expire_after_blocks` blocks (settlement progress, not the clock: a block can take hours to prove).
     ttl: Duration,
+    /// Blocks the canonical database must have gained since this process first saw an entry before the entry can
+    /// expire: the settler took that many chances to include it and did not (deferred by fee, gap or block budget).
+    expire_after_blocks: u64,
+    /// With no block at all for this long (and the entry as old), entries expire anyway: settlement stopped, or the
+    /// settler idles (an entry behind a nonce gap is no demand, so an idle settler builds only its heartbeat). The
+    /// clock survives restarts (`.spool-progress`), so a dead sequencer sheds its spool whatever the RPC's uptime.
+    stuck_after: Duration,
     /// Fee bump (percent) a same-nonce replacement must offer.
     replace_bump_percent: u128,
     /// Highest declared gas: the settlement worker's per-block gas budget
@@ -151,6 +166,8 @@ const SPOOL_LIMITS: SpoolLimits = SpoolLimits {
     max_per_sender: 16,
     max_nonce_gap: 16,
     ttl: Duration::from_secs(3 * 3_600),
+    expire_after_blocks: 4,
+    stuck_after: Duration::from_secs(24 * 3_600),
     replace_bump_percent: 10,
     max_tx_gas: 15_000_000,
     min_tip: DEFAULT_MIN_TIP_WEI,
@@ -395,26 +412,65 @@ struct SpoolEntry {
     /// Monotonic time this process first saw the entry, and its wall-clock age then.
     seen: std::time::Instant,
     age_when_seen: Duration,
+    /// The canonical database head when this process first saw the entry.
+    head_when_seen: u64,
 }
 
 /// Sender and fee fields and modification time of each spool entry, cached by
 /// file name (entries are immutable: written once by rename, removed by the
 /// producer or by eviction), so a scan of a full spool costs one directory
 /// read rather than a stat and a decode per entry.
-type SpoolIndex = std::collections::HashMap<std::ffi::OsString, (Option<SpoolMeta>, std::time::SystemTime, std::time::Instant, Duration)>;
+/// The value: decoded fields, file time, first sight (monotonic), age then, database head then.
+type SpoolIndex = std::collections::HashMap<std::ffi::OsString, SpoolSighting>;
+type SpoolSighting = (Option<SpoolMeta>, std::time::SystemTime, std::time::Instant, Duration, u64);
+
+/// The sidecar of spool entry `<hash>.tx`: `.<hash>.head`, holding the canonical database head at the entry's
+/// first sighting by any RPC process (agents/146 R1: a restart must not count its blocks again from zero). The
+/// producer reads only `*.tx`; the RPC removes a sidecar with its entry, or when it finds the entry gone.
+fn sidecar_name(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    Some(format!(".{}.head", name.strip_suffix(".tx")?))
+}
+
+/// The first-seen head recorded for entry `name`, or record `head` now (best effort: a lost sidecar only means
+/// the blocks count from this sighting, as before).
+fn first_seen_head(pool: &Path, name: &std::ffi::OsStr, head: u64) -> u64 {
+    let Some(sidecar) = sidecar_name(name).map(|n| pool.join(n)) else { return head };
+    if let Some(recorded) = std::fs::read_to_string(&sidecar).ok().and_then(|t| t.trim().parse::<u64>().ok()) {
+        return recorded;
+    }
+    write_sidecar(&sidecar, head);
+    head
+}
+
+fn write_sidecar(path: &Path, head: u64) {
+    use std::os::unix::fs::PermissionsExt;
+    let written = std::fs::write(path, format!("{head}\n"))
+        .and_then(|()| std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)));
+    if let Err(error) = written {
+        println!("spool sidecar {} not written: {error}", path.display());
+    }
+}
 
 /// Read the spool directory, decoding only names not yet in `index`; the index
-/// forgets names that disappeared. Entries removed while scanning are skipped.
-fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io::Result<Vec<SpoolEntry>> {
+/// forgets names that disappeared. Entries removed while scanning are skipped. A new name takes its first-seen
+/// head from its sidecar, or is recorded as seen at canonical database head `head`. Sidecars whose entry is gone
+/// (pruned by the producer) are removed.
+fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex, head: u64) -> std::io::Result<Vec<SpoolEntry>> {
     let mut entries = Vec::new();
+    let mut sidecars = Vec::new();
     for entry in std::fs::read_dir(pool)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_none_or(|x| x != "tx") {
+            let name = entry.file_name();
+            if let Some(stem) = name.to_str().and_then(|n| n.strip_prefix('.')).and_then(|n| n.strip_suffix(".head")) {
+                sidecars.push((path.clone(), std::ffi::OsString::from(format!("{stem}.tx"))));
+            }
             continue;
         }
         let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
-        let (meta, modified, seen, age_when_seen) = match index.get(&name) {
+        let (meta, modified, seen, age_when_seen, head_when_seen) = match index.get(&name) {
             Some(known) => *known,
             None => {
                 let modified = match entry.metadata().and_then(|m| m.modified()) {
@@ -429,15 +485,64 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io:
                     .map(|tx| SpoolMeta::of(&tx));
                 let seen = std::time::Instant::now();
                 let age = std::time::SystemTime::now().duration_since(modified).unwrap_or_default();
-                index.insert(name.clone(), (meta, modified, seen, age));
-                (meta, modified, seen, age)
+                let first = first_seen_head(pool, &name, head);
+                index.insert(name.clone(), (meta, modified, seen, age, first));
+                (meta, modified, seen, age, first)
             }
         };
-        entries.push(SpoolEntry { name, meta, modified, seen, age_when_seen });
+        entries.push(SpoolEntry { name, meta, modified, seen, age_when_seen, head_when_seen });
     }
     let present: std::collections::HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
     index.retain(|name, _| present.contains(name));
+    for (sidecar, name) in sidecars {
+        if !present.contains(&name) && !pool.join(&name).exists() {
+            let _ = std::fs::remove_file(sidecar);
+        }
+    }
     Ok(entries)
+}
+
+/// Settlement progress: the canonical database head, when this process first saw it, and how long it had already
+/// stood still before that (from `.spool-progress`, written whenever the head changes; agents/146 R2).
+#[derive(Clone, Copy, Debug)]
+struct Progress {
+    head: u64,
+    since: std::time::Instant,
+    carried: Duration,
+}
+
+const PROGRESS_FILE: &str = ".spool-progress";
+
+/// Advance `progress` to database head `best` and return how long that head has stood still. On the first call
+/// of a process the record in `pool` supplies the time the head was first seen, if it names the same head; the
+/// wall clock is all a restart has to go by (a time in the future counts as now).
+fn advance_progress(progress: &mut Option<Progress>, pool: &Path, best: u64) -> Duration {
+    let now = std::time::Instant::now();
+    match *progress {
+        Some(p) if p.head == best => return p.carried + now.saturating_duration_since(p.since),
+        Some(_) => {}
+        None => {
+            let recorded = std::fs::read_to_string(pool.join(PROGRESS_FILE)).ok().and_then(|text| {
+                let mut words = text.split_whitespace().map(|w| w.parse::<u64>().ok());
+                Some((words.next()??, words.next()??))
+            });
+            if let Some((head, unix)) = recorded.filter(|(head, _)| *head == best) {
+                let then = std::time::UNIX_EPOCH + Duration::from_secs(unix);
+                let carried = std::time::SystemTime::now().duration_since(then).unwrap_or_default();
+                *progress = Some(Progress { head, since: now, carried });
+                return carried;
+            }
+        }
+    }
+    *progress = Some(Progress { head: best, since: now, carried: Duration::ZERO });
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let partial = pool.join(format!("{PROGRESS_FILE}.partial"));
+    let written = std::fs::write(&partial, format!("{best} {unix}\n"))
+        .and_then(|()| std::fs::rename(&partial, pool.join(PROGRESS_FILE)));
+    if let Err(error) = written {
+        println!("spool progress not recorded: {error}");
+    }
+    Duration::ZERO
 }
 
 /// The head facts admission is decided against: per-sender `(nonce, balance)`
@@ -445,16 +550,61 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex) -> std::io:
 struct SpoolHead<'a> {
     account: &'a mut dyn FnMut(alloy_primitives::Address) -> (u64, alloy_primitives::U256),
     next_base_fee: u128,
-    now: std::time::SystemTime,
+    /// Monotonic now, against which `SpoolEntry::seen` is measured.
+    instant: std::time::Instant,
+    /// The canonical database head number.
+    number: u64,
+    /// How long that head has stood still (across restarts, see [`advance_progress`]).
+    stalled_for: Duration,
+    /// Entries behind a nonce gap of their sender (see [`SpoolHead::mark_gaps`]): no block can include them,
+    /// so blocks passing them over prove nothing and they expire on the plain TTL (agents/146 R3).
+    gapped: std::collections::HashSet<std::ffi::OsString>,
 }
 
 impl SpoolHead<'_> {
-    /// Past the TTL by the monotonic clock, for an entry this process saw while it was young: a forward
-    /// clock step must not evict acknowledged transactions, and a backward step must not keep them. An
-    /// entry already past the TTL when first seen (after a restart) has only the wall clock to go by.
-    fn expired(&self, entry: &SpoolEntry, ttl: Duration) -> bool {
-        entry.seen.elapsed() > ttl
-            || (entry.age_when_seen > ttl && self.now.duration_since(entry.modified).is_ok_and(|age| age > ttl))
+    /// Mark the entries no next block can include: a nonce above the sender's head nonce plus its consecutive
+    /// spooled nonces.
+    fn mark_gaps(&mut self, entries: &[SpoolEntry]) {
+        let mut nonces: std::collections::HashMap<alloy_primitives::Address, std::collections::BTreeSet<u64>> =
+            std::collections::HashMap::new();
+        for meta in entries.iter().filter_map(|e| e.meta) {
+            nonces.entry(meta.sender).or_default().insert(meta.nonce);
+        }
+        let mut reach = std::collections::HashMap::new();
+        for (sender, set) in &nonces {
+            let mut next = (self.account)(*sender).0;
+            while set.contains(&next) {
+                next += 1;
+            }
+            reach.insert(*sender, next);
+        }
+        self.gapped = entries
+            .iter()
+            .filter(|e| e.meta.is_some_and(|m| m.nonce >= reach[&m.sender]))
+            .map(|e| e.name.clone())
+            .collect();
+    }
+
+    /// Expired by settlement progress (agents/55 finding 3: a block that took 3 h to prove evicted acknowledged
+    /// transactions by age alone). An entry expires when it is past the TTL and the database gained at least
+    /// `expire_after_blocks` blocks since its first sighting, so the settler had that many chances to include it;
+    /// or when it is `stuck_after` old and no block came for as long (settlement stopped or idle). An entry behind
+    /// a nonce gap expires on the plain TTL: no block could include it.
+    ///
+    /// Age is the wall-clock age when this process first saw the entry (zero for one it admitted, and for a file
+    /// time in the future) plus monotonic time since: a clock step while the process runs neither evicts nor keeps
+    /// an entry. The first-seen head and the stall survive restarts (sidecar, `.spool-progress`), so a restart
+    /// never extends a lifetime (agents/146 R1, R2).
+    fn expired(&self, entry: &SpoolEntry, limits: SpoolLimits) -> bool {
+        let age = entry.age_when_seen.saturating_add(self.instant.saturating_duration_since(entry.seen));
+        let old = age > limits.ttl;
+        if self.gapped.contains(&entry.name) {
+            return old;
+        }
+        let passed_over = self.number.saturating_sub(entry.head_when_seen) >= limits.expire_after_blocks;
+        let stuck_after = limits.stuck_after.max(limits.ttl);
+        let stopped = age >= stuck_after && self.stalled_for >= stuck_after;
+        (old && passed_over) || stopped
     }
 
     /// Why `entry` can no longer be included and may be evicted, if it cannot.
@@ -471,7 +621,7 @@ impl SpoolHead<'_> {
             Some("underpriced")
         } else if meta.priority < limits.min_tip {
             Some("below the minimum tip")
-        } else if self.expired(entry, limits.ttl) {
+        } else if self.expired(entry, limits) {
             Some("expired")
         } else {
             None
@@ -498,6 +648,7 @@ fn plan_admission(
     head: &mut SpoolHead<'_>,
     limits: SpoolLimits,
 ) -> Result<Vec<std::ffi::OsString>, String> {
+    head.mark_gaps(entries);
     let (nonce, balance) = (head.account)(new.sender);
     if new.nonce < nonce {
         return Err(format!("nonce too low: next nonce is {nonce}"));
@@ -629,7 +780,12 @@ fn remove_leftover_partials(pool: &Path) {
 fn evict_spool(pool: &Path, names: &[std::ffi::OsString], reason: &str) {
     for name in names {
         match std::fs::remove_file(pool.join(name)) {
-            Ok(()) => println!("evicted tx file={} ({reason})", Path::new(name).display()),
+            Ok(()) => {
+                println!("evicted tx file={} ({reason})", Path::new(name).display());
+                if let Some(sidecar) = sidecar_name(name) {
+                    let _ = std::fs::remove_file(pool.join(sidecar));
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => println!("evict {} failed: {e}", Path::new(name).display()),
         }
@@ -643,11 +799,20 @@ struct Spool {
     dir: PathBuf,
     index: std::sync::Mutex<SpoolIndex>,
     limits: SpoolLimits,
+    /// The canonical database head last seen and the monotonic time it was first seen (settlement progress).
+    progress: std::sync::Mutex<Option<Progress>>,
 }
 
 impl Spool {
     fn lock(&self) -> std::sync::MutexGuard<'_, SpoolIndex> {
         self.index.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The canonical database head number, recorded as settlement progress: the time it last changed.
+    fn database_head(&self, provider: &BlochProviderFactory) -> Result<(u64, Duration), String> {
+        let best = provider.best_block_number().map_err(|e| format!("state unavailable: {e}"))?;
+        let mut progress = self.progress.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok((best, advance_progress(&mut progress, &self.dir, best)))
     }
 
     /// Head facts of the database tip. The tip is read from the database, not
@@ -659,7 +824,7 @@ impl Spool {
         provider: &BlochProviderFactory,
         f: impl FnOnce(&mut SpoolHead<'_>) -> T,
     ) -> Result<T, String> {
-        let best = provider.best_block_number().map_err(|e| format!("state unavailable: {e}"))?;
+        let (best, stalled_for) = self.database_head(provider)?;
         let header = provider
             .sealed_header(best)
             .map_err(|e| format!("state unavailable: {e}"))?
@@ -676,7 +841,14 @@ impl Spool {
                     .map_or((0, alloy_primitives::U256::ZERO), |a| (a.nonce, a.balance))
             })
         };
-        Ok(f(&mut SpoolHead { account: &mut account, next_base_fee, now: std::time::SystemTime::now() }))
+        Ok(f(&mut SpoolHead {
+            account: &mut account,
+            next_base_fee,
+            instant: std::time::Instant::now(),
+            number: best,
+            stalled_for,
+            gapped: Default::default(),
+        }))
     }
 
     /// Admit authenticated `raw` bytes, or say why not.
@@ -691,10 +863,15 @@ impl Spool {
         if self.dir.join(&name).exists() {
             return Ok(hash); // already known, not yet consumed
         }
-        let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
+        let (number, _) = self.database_head(provider)?;
+        let entries =
+            scan_spool(&self.spec, &self.dir, &mut index, number).map_err(|e| format!("txpool unavailable: {e}"))?;
         let meta = SpoolMeta::of(&tx);
         let evict = self.with_head(provider, |head| plan_admission(&entries, &meta, head, self.limits))??;
         evict_spool(&self.dir, &evict, "displaced at admission");
+        if let Some(sidecar) = sidecar_name(std::ffi::OsStr::new(&name)) {
+            write_sidecar(&self.dir.join(sidecar), number);
+        }
         // Write beside, then rename: the producer only reads complete *.tx files.
         let partial = self.dir.join(format!(".{}.partial", alloy_primitives::hex::encode(hash)));
         let written = std::fs::write(&partial, format!("{}\n", alloy_primitives::hex::encode(tx.raw())))
@@ -707,7 +884,8 @@ impl Spool {
             let _ = std::fs::remove_file(&partial);
             return Err(format!("txpool write failed: {error}"));
         }
-        index.insert(name.into(), (Some(meta), std::time::SystemTime::now(), std::time::Instant::now(), Duration::ZERO));
+        let sighting = (Some(meta), std::time::SystemTime::now(), std::time::Instant::now(), Duration::ZERO, number);
+        index.insert(name.into(), sighting);
         println!("spooled tx={hash} from={} nonce={}", meta.sender, meta.nonce);
         Ok(hash)
     }
@@ -716,8 +894,11 @@ impl Spool {
     fn sweep(&self, provider: &BlochProviderFactory) -> Result<usize, String> {
         let mut index = self.lock();
         remove_leftover_partials(&self.dir);
-        let entries = scan_spool(&self.spec, &self.dir, &mut index).map_err(|e| format!("txpool unavailable: {e}"))?;
+        let (number, _) = self.database_head(provider)?;
+        let entries =
+            scan_spool(&self.spec, &self.dir, &mut index, number).map_err(|e| format!("txpool unavailable: {e}"))?;
         let stale = self.with_head(provider, |head| {
+            head.mark_gaps(&entries);
             entries.iter().filter_map(|e| head.stale(e, self.limits).map(|why| (e.name.clone(), why))).collect::<Vec<_>>()
         })?;
         for (name, why) in &stale {
@@ -740,16 +921,17 @@ fn sequencer_rpc(spool: Arc<Spool>, provider: BlochProviderFactory) -> jsonrpsee
 }
 
 /// The sender's next nonce in the sequencer's view: `latest` plus every
-/// consecutive nonce already waiting in the spool.
+/// consecutive nonce already waiting in the spool (new names are recorded as seen at database head `head`).
 fn spooled_next_nonce(
     spec: &ChainSpec,
     pool: &Path,
     index: &std::sync::Mutex<SpoolIndex>,
     sender: alloy_primitives::Address,
     latest: u64,
+    head: u64,
 ) -> std::io::Result<u64> {
     let mut index = index.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let nonces: std::collections::BTreeSet<u64> = scan_spool(spec, pool, &mut index)?
+    let nonces: std::collections::BTreeSet<u64> = scan_spool(spec, pool, &mut index, head)?
         .into_iter()
         .filter_map(|e| e.meta)
         .filter(|m| m.sender == sender)
@@ -799,7 +981,8 @@ fn spool_pending_nonce(
                 .map_err(|e| jsonrpsee::types::ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
             tokio::task::spawn_blocking(move || {
                 let latest = tip_nonce(&factory, sender)?.max(count.to());
-                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, latest)
+                let (head, _) = spool.database_head(&factory)?;
+                spooled_next_nonce(&spool.spec, &spool.dir, &spool.index, sender, latest, head)
                     .map_err(|e| format!("txpool unavailable: {e}"))
             })
             .await
@@ -1543,6 +1726,7 @@ async fn main() -> Result<()> {
                 dir: pool.clone(),
                 index: std::sync::Mutex::new(SpoolIndex::new()),
                 limits: SpoolLimits { min_tip: options.min_tip, ..SPOOL_LIMITS },
+                progress: std::sync::Mutex::new(None),
             });
             // Replace the no-pool method of the read-only API with the spooling one.
             ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
@@ -2017,7 +2201,14 @@ mod tests {
             cost: alloy_primitives::U256::ZERO,
         };
         let mut account = |_| (0, alloy_primitives::U256::MAX);
-        let mut head = SpoolHead { account: &mut account, next_base_fee: 1_000, now: std::time::SystemTime::now() };
+        let mut head = SpoolHead {
+            account: &mut account,
+            next_base_fee: 1_000,
+            instant: std::time::Instant::now(),
+            number: 0,
+            stalled_for: Duration::ZERO,
+            gapped: Default::default(),
+        };
         let plan = |head: &mut SpoolHead<'_>, new: SpoolMeta| plan_admission(&[], &new, head, limits);
         // Zero tip, the tip one wei short, and a fee cap that leaves too little over the base fee.
         assert!(plan(&mut head, meta(GWEI, 0)).unwrap_err().contains("underpriced"));
@@ -2036,6 +2227,7 @@ mod tests {
             modified: now,
             seen: std::time::Instant::now(),
             age_when_seen: Duration::ZERO,
+            head_when_seen: 0,
         };
         assert_eq!(head.stale(&old, limits), Some("below the minimum tip"));
     }
@@ -2045,7 +2237,7 @@ mod tests {
         let spec = ChainSpec::mainnet();
         let dir = tempfile::tempdir().unwrap();
         let index = std::sync::Mutex::new(SpoolIndex::new());
-        let next = |sender, latest| spooled_next_nonce(&spec, dir.path(), &index, sender, latest).unwrap();
+        let next = |sender, latest| spooled_next_nonce(&spec, dir.path(), &index, sender, latest, 0).unwrap();
         assert_eq!(next(address(1), 5), 5);
         for nonce in [5, 6, 8] {
             spool(dir.path(), &spec, 1, nonce);
@@ -2095,21 +2287,28 @@ mod tests {
         SpoolMeta::of(&bloch_l2_evm::decode_signed_transaction(spec, &signed(spec, key, nonce, max_fee, 0)).unwrap())
     }
 
+    /// Head facts at monotonic `instant`, database head `number`, stalled for `stalled_for`.
+    fn facts<'a>(
+        account: &'a mut dyn FnMut(Address) -> (u64, alloy_primitives::U256),
+        instant: std::time::Instant,
+        number: u64,
+        stalled_for: Duration,
+    ) -> SpoolHead<'a> {
+        SpoolHead { account, next_base_fee: GWEI, instant, number, stalled_for, gapped: Default::default() }
+    }
+
     #[test]
     fn a_forward_clock_step_does_not_expire_an_entry_seen_while_young() {
         let spec = ChainSpec::mainnet();
-        let mut young = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
+        let young = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         let mut account = |_| (0, alloy_primitives::U256::MAX);
-        // The wall clock now reads 4 h later, though this process saw the entry a moment ago.
-        let later = std::time::SystemTime::now() + Duration::from_secs(4 * 3_600);
-        let mut head = SpoolHead { account: &mut account, next_base_fee: GWEI, now: later };
+        let blocks = SPOOL_LIMITS.expire_after_blocks;
+        // A wall clock step does not enter: the age is the first-seen age plus monotonic time (blocks went by).
+        let mut head = facts(&mut account, std::time::Instant::now(), blocks, Duration::ZERO);
         assert_eq!(head.stale(&young, SPOOL_LIMITS), None);
-        // Really held past the TTL by the monotonic clock: it expires.
-        let ttl = SPOOL_LIMITS.ttl;
-        if let Some(earlier) = std::time::Instant::now().checked_sub(ttl + Duration::from_secs(1)) {
-            young.seen = earlier;
-            assert_eq!(head.stale(&young, SPOOL_LIMITS), Some("expired"));
-        }
+        // Really held past the TTL by the monotonic clock, on a live chain: it expires.
+        head.instant = young.seen + SPOOL_LIMITS.ttl + Duration::from_secs(1);
+        assert_eq!(head.stale(&young, SPOOL_LIMITS), Some("expired"));
     }
 
     /// Review round 4 (C10). An entry written under a clock that was ahead, held past the TTL by the monotonic
@@ -2120,11 +2319,119 @@ mod tests {
         let ttl = SPOOL_LIMITS.ttl;
         let mut held = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         held.modified = std::time::SystemTime::now() + Duration::from_secs(30 * 24 * 3_600);
-        let Some(earlier) = std::time::Instant::now().checked_sub(ttl + Duration::from_secs(1)) else { return };
-        held.seen = earlier;
         let mut account = |_| (0, alloy_primitives::U256::MAX);
-        let mut head = SpoolHead { account: &mut account, next_base_fee: GWEI, now: std::time::SystemTime::now() };
-        assert_eq!(head.stale(&held, SPOOL_LIMITS), Some("expired"), "seen {:?} ago, TTL {ttl:?}", held.seen.elapsed());
+        let instant = held.seen + ttl + Duration::from_secs(1);
+        let blocks = SPOOL_LIMITS.expire_after_blocks;
+        let mut head = facts(&mut account, instant, blocks, Duration::ZERO);
+        assert_eq!(head.stale(&held, SPOOL_LIMITS), Some("expired"), "TTL {ttl:?}");
+    }
+
+    /// agents/55 finding 3: one block took over 3 h to prove (block 64 at 02:07, block 65 at 05:13), and the
+    /// spool evicted the acknowledged transactions waiting for the next block as `expired`. With 30 to 60 min
+    /// proofs this is the normal case, not an outage: an entry expires only once the settler passed it over.
+    #[test]
+    fn agent55_a_slow_but_live_chain_keeps_acknowledged_entries_past_the_ttl() {
+        let spec = ChainSpec::mainnet();
+        let mut waiting = entry(&spec, "a.tx", 1, 11, 2 * GWEI);
+        waiting.head_when_seen = 64;
+        let mut account = |_| (11, alloy_primitives::U256::MAX);
+        let three_hours_later = waiting.seen + Duration::from_secs(3 * 3_600 + 6 * 60);
+        // Still proving block 64's successor after 3 h 6 min: no new block yet.
+        let mut head = facts(&mut account, three_hours_later, 64, Duration::from_secs(3 * 3_600 + 6 * 60));
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None, "no block since it was spooled");
+        // Blocks 65 to 67 (it was deferred three times, say by fee): still kept.
+        for number in 65..64 + SPOOL_LIMITS.expire_after_blocks {
+            head.number = number;
+            head.stalled_for = Duration::ZERO;
+            assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None, "head {number}");
+        }
+        // Passed over by four blocks and older than the TTL: it is one the settler keeps deferring.
+        head.number = 64 + SPOOL_LIMITS.expire_after_blocks;
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), Some("expired"));
+        // Four blocks in less than the TTL do not expire it either.
+        head.instant = waiting.seen + Duration::from_secs(3_600);
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None);
+    }
+
+    /// The same slow block with a restart of this RPC: every entry is then first seen past the TTL by the wall
+    /// clock. Its blocks count from that sighting, so the restart does not evict them all at once.
+    #[test]
+    fn a_restart_during_a_slow_block_does_not_expire_acknowledged_entries() {
+        let spec = ChainSpec::mainnet();
+        let mut waiting = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
+        let now = std::time::SystemTime::now();
+        waiting.modified = now - Duration::from_secs(4 * 3_600);
+        waiting.age_when_seen = Duration::from_secs(4 * 3_600);
+        waiting.head_when_seen = 64;
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let mut head = facts(&mut account, std::time::Instant::now(), 64, Duration::ZERO);
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None);
+        head.number = 64 + SPOOL_LIMITS.expire_after_blocks;
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), Some("expired"));
+    }
+
+    /// A settler that stopped (no block for `stuck_after`) still sheds its spool: past the TTL and waiting as long.
+    #[test]
+    fn a_stopped_settler_still_sheds_its_spool() {
+        let spec = ChainSpec::mainnet();
+        let mut waiting = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
+        waiting.head_when_seen = 64;
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let stuck = SPOOL_LIMITS.stuck_after;
+        let mut head = facts(&mut account, waiting.seen + stuck, 64, stuck);
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), Some("expired"));
+        // A block an hour ago (the settler lives, slowly): kept.
+        head.number = 65;
+        head.stalled_for = stuck - Duration::from_secs(3_600);
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None);
+        // No block for a day, but the entry arrived an hour ago: kept until it has waited as long.
+        head.number = 64;
+        head.stalled_for = stuck;
+        head.instant = waiting.seen + stuck - Duration::from_secs(3_600);
+        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None);
+    }
+
+    /// The bounds of agents 13 and 71 do not rest on expiry: a full spool of a slow chain, whose entries are all
+    /// past the TTL but not passed over, is still capped. A newcomer displaces only a cheaper entry or one behind
+    /// a nonce gap, and is refused otherwise.
+    #[test]
+    fn a_full_spool_of_a_slow_chain_still_displaces_by_fee_or_refuses() {
+        let spec = ChainSpec::mainnet();
+        let at_64 = |name: &str, key: u8, nonce: u64, fee: u128| SpoolEntry {
+            head_when_seen: 64,
+            ..entry(&spec, name, key, nonce, fee)
+        };
+        let full: Vec<_> = (10..18u8).map(|k| at_64(&format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI)).collect();
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let instant = full[0].seen + Duration::from_secs(1_000);
+        let mut head = facts(&mut account, instant, 65, Duration::ZERO);
+        // LIMITS' TTL is 600 s: by age alone all of them would be gone.
+        let mut plan = |new: SpoolMeta, entries: &[SpoolEntry]| {
+            plan_admission(entries, &new, &mut head, LIMITS)
+                .map(|names| names.into_iter().map(|n| n.into_string().unwrap()).collect::<Vec<_>>())
+        };
+        assert_eq!(plan(meta(&spec, 1, 0, 2 * GWEI), &full), Err("txpool full".into()));
+        assert_eq!(plan(meta(&spec, 1, 0, 3 * GWEI), &full), Ok(vec!["k10.tx".into()]));
+        // The same sender is still capped at max_per_sender.
+        let mine: Vec<_> = (0..3).map(|n| at_64(&format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
+        assert!(plan(meta(&spec, 1, 3, 2 * GWEI), &mine).unwrap_err().starts_with("too many"));
+    }
+
+    #[test]
+    fn scan_records_the_head_an_entry_was_first_seen_at() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = SpoolIndex::new();
+        let write = |name: &str, nonce: u64| {
+            let raw = alloy_primitives::hex::encode(signed(&spec, 1, nonce, 2 * GWEI, 0));
+            std::fs::write(dir.path().join(name), format!("{raw}\n")).unwrap();
+        };
+        write("a.tx", 0);
+        assert_eq!(scan_spool(&spec, dir.path(), &mut index, 7).unwrap()[0].head_when_seen, 7);
+        write("b.tx", 1);
+        let mut entries = scan_spool(&spec, dir.path(), &mut index, 9).unwrap();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!((entries[0].head_when_seen, entries[1].head_when_seen), (7, 9));
     }
 
     #[test]
@@ -2146,6 +2453,7 @@ mod tests {
             modified: std::time::SystemTime::now(),
             seen: std::time::Instant::now(),
             age_when_seen: Duration::ZERO,
+            head_when_seen: 0,
         }
     }
 
@@ -2155,6 +2463,8 @@ mod tests {
         max_per_sender: 3,
         max_nonce_gap: 4,
         ttl: Duration::from_secs(600),
+        expire_after_blocks: 4,
+        stuck_after: Duration::from_secs(3_600),
         replace_bump_percent: 10,
         max_tx_gas: 15_000_000,
         min_tip: 0,
@@ -2172,7 +2482,15 @@ mod tests {
             .map(|(key, nonce, balance)| (address(*key), (*nonce, alloy_primitives::U256::from(*balance))))
             .collect();
         let mut account = |a: Address| table.get(&a).copied().unwrap_or((0, alloy_primitives::U256::from(u128::MAX)));
-        let mut head = SpoolHead { account: &mut account, next_base_fee: base_fee, now: std::time::SystemTime::now() };
+        // Test entries were seen at block 0; the head is far past them, so age alone decides expiry here.
+        let mut head = SpoolHead {
+            account: &mut account,
+            next_base_fee: base_fee,
+            instant: std::time::Instant::now(),
+            number: 100,
+            stalled_for: Duration::ZERO,
+            gapped: Default::default(),
+        };
         plan_admission(entries, new, &mut head, LIMITS)
             .map(|names| names.into_iter().map(|n| n.into_string().unwrap()).collect())
     }
@@ -2235,6 +2553,7 @@ mod tests {
             modified: std::time::SystemTime::now(),
             seen: std::time::Instant::now(),
             age_when_seen: Duration::ZERO,
+            head_when_seen: 0,
         };
         let evicted = plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[(10, 1, u128::MAX), (11, 0, 1)], GWEI).unwrap();
         assert_eq!(evicted, vec!["used.tx", "poor.tx", "k12.tx", "junk.tx"]);
@@ -2251,18 +2570,18 @@ mod tests {
         std::fs::write(dir.path().join("a.tx"), format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
         std::fs::write(dir.path().join("b.tx"), "zz\n").unwrap();
         std::fs::write(dir.path().join(".c.partial"), "00\n").unwrap();
-        let mut entries = scan_spool(&spec, dir.path(), &mut index).unwrap();
+        let mut entries = scan_spool(&spec, dir.path(), &mut index, 0).unwrap();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].meta.unwrap().max_fee, 2 * GWEI);
         assert_eq!(entries[0].meta.unwrap().priority, GWEI);
         assert!(entries[1].meta.is_none());
         std::fs::remove_file(dir.path().join("a.tx")).unwrap();
-        assert_eq!(scan_spool(&spec, dir.path(), &mut index).unwrap().len(), 1);
+        assert_eq!(scan_spool(&spec, dir.path(), &mut index, 0).unwrap().len(), 1);
         assert_eq!(index.len(), 1);
         // Evicting a file the producer already removed is not an error.
         evict_spool(dir.path(), &["a.tx".into(), "b.tx".into()], "test");
-        assert!(scan_spool(&spec, dir.path(), &mut index).unwrap().is_empty());
+        assert!(scan_spool(&spec, dir.path(), &mut index, 0).unwrap().is_empty());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2347,13 +2666,15 @@ mod tests {
         std::fs::write(&path, format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
         let old = std::time::SystemTime::now() - Duration::from_secs(4 * 3_600);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
-        let entries = scan_spool(&spec, dir.path(), &mut index).unwrap();
+        let entries = scan_spool(&spec, dir.path(), &mut index, 0).unwrap();
         assert_eq!(entries[0].modified, old);
         // Later scans take the time from the index (an expired entry stays expired).
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
-        assert_eq!(scan_spool(&spec, dir.path(), &mut index).unwrap()[0].modified, old);
+        assert_eq!(scan_spool(&spec, dir.path(), &mut index, 0).unwrap()[0].modified, old);
         let mut account = |_| (0, alloy_primitives::U256::MAX);
-        let mut head = SpoolHead { account: &mut account, next_base_fee: GWEI, now: std::time::SystemTime::now() };
+        // Seen at block 0; four blocks went by without it.
+        let number = SPOOL_LIMITS.expire_after_blocks;
+        let mut head = facts(&mut account, std::time::Instant::now(), number, Duration::ZERO);
         assert_eq!(head.stale(&entries[0], SPOOL_LIMITS), Some("expired"));
     }
 
@@ -2467,4 +2788,127 @@ mod tests {
         // simulation, so it never replays one on the other backend (review 154, G4).
         assert!(SIMULATION_WAIT + SIMULATION_TIME_LIMIT < Duration::from_secs(30));
     }
+
+    // ---- agent 146's review tests, rewritten by agent 133 to assert the fixed behaviour ----
+    const H: u64 = 3_600;
+
+    /// R1: the first-seen head survives restarts (sidecar `.<hash>.head`), so an RPC restarted every 3 blocks
+    /// still expires an entry the settler keeps passing over.
+    #[test]
+    fn r146_restarts_every_three_blocks_keep_an_entry_forever() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let raw = alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0));
+        std::fs::write(dir.path().join("a.tx"), format!("{raw}\n")).unwrap();
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let mut head_number = 64;
+        for restart in 0..40u64 {
+            let mut index = SpoolIndex::new(); // fresh process
+            let mut e = scan_spool(&spec, dir.path(), &mut index, head_number).unwrap().into_iter().next().unwrap();
+            assert_eq!(e.head_when_seen, 64, "restart {restart}: first sighting kept");
+            e.age_when_seen = Duration::from_secs((restart + 4) * H);
+            let instant = e.seen + Duration::from_secs(3 * H);
+            let mut head = facts(&mut account, instant, head_number + 3, Duration::ZERO);
+            let expected = if restart == 0 { None } else { Some("expired") };
+            assert_eq!(head.stale(&e, SPOOL_LIMITS), expected, "restart {restart}");
+            head_number += 3;
+        }
+        // The sidecar goes with its entry, and an orphaned one (entry pruned by the producer) at the next scan.
+        assert!(dir.path().join(".a.head").exists());
+        evict_spool(dir.path(), &["a.tx".into()], "test");
+        assert!(!dir.path().join(".a.head").exists());
+        std::fs::write(dir.path().join(".b.head"), "7\n").unwrap();
+        scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 0).unwrap();
+        assert!(!dir.path().join(".b.head").exists());
+    }
+
+    /// R2: the no-block clock survives restarts (`.spool-progress`), so a dead settler sheds its spool whatever
+    /// the RPC's uptime.
+    #[test]
+    fn r146_restart_resets_the_stopped_settler_clock() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let ten_days = Duration::from_secs(10 * 24 * H);
+        let unix = (std::time::SystemTime::now() - ten_days).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        std::fs::write(dir.path().join(PROGRESS_FILE), format!("64 {unix}\n")).unwrap();
+        // A restarted process: head 64 has stood still for 10 days.
+        let mut progress = None;
+        let stalled = advance_progress(&mut progress, dir.path(), 64);
+        assert!(stalled >= ten_days - Duration::from_secs(60), "{stalled:?}");
+        let mut e = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
+        e.head_when_seen = 64;
+        e.modified = std::time::SystemTime::now() - ten_days;
+        e.age_when_seen = ten_days;
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let instant = e.seen + Duration::from_secs(23 * H);
+        let stalled = stalled + Duration::from_secs(23 * H);
+        let mut head = facts(&mut account, instant, 64, stalled);
+        assert_eq!(head.stale(&e, SPOOL_LIMITS), Some("expired"), "10 days stuck, shed after a restart");
+        // A new head resets the clock and is recorded for the next process.
+        assert_eq!(advance_progress(&mut progress, dir.path(), 65), Duration::ZERO);
+        assert!(advance_progress(&mut None, dir.path(), 65) < Duration::from_secs(60));
+        // A record of another head is not this head's stall.
+        assert_eq!(advance_progress(&mut None, dir.path(), 66), Duration::ZERO);
+    }
+
+    /// R3: an entry behind a nonce gap is no demand; on an idle chain it expires on the plain TTL, not after
+    /// four heartbeats. Its consecutive siblings keep the progress rule.
+    #[test]
+    fn r146_idle_heartbeat_keeps_a_gap_entry_about_four_days() {
+        let spec = ChainSpec::mainnet();
+        let mut gap = entry(&spec, "g.tx", 1, 1, 2 * GWEI); // nonce 1, head nonce 0, no nonce 0 spooled
+        gap.head_when_seen = 64;
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let instant = gap.seen + Duration::from_secs(2 * H);
+        let mut head = facts(&mut account, instant, 64, Duration::ZERO);
+        head.mark_gaps(std::slice::from_ref(&gap));
+        assert_eq!(head.stale(&gap, SPOOL_LIMITS), None, "inside the TTL");
+        head.instant = gap.seen + SPOOL_LIMITS.ttl + Duration::from_secs(1);
+        assert_eq!(head.stale(&gap, SPOOL_LIMITS), Some("expired"), "plain TTL, no heartbeat needed");
+        // With nonce 0 spooled too, nonce 1 is not behind a gap: a slow block does not expire either.
+        let mut first = entry(&spec, "f.tx", 1, 0, 2 * GWEI);
+        first.head_when_seen = 64;
+        head.mark_gaps(&[first.clone(), gap.clone()]);
+        assert_eq!(head.stale(&gap, SPOOL_LIMITS), None);
+        assert_eq!(head.stale(&first, SPOOL_LIMITS), None);
+    }
+
+    /// R4: a full spool of gap entries past the TTL is stale: every one goes, for free, and the newcomer is admitted.
+    #[test]
+    fn r146_full_spool_of_unexpired_gap_entries_still_admits() {
+        let spec = ChainSpec::mainnet();
+        let full: Vec<_> = (10..18u8)
+            .map(|k| SpoolEntry { head_when_seen: 64, ..entry(&spec, &format!("k{k}.tx"), k, 1, 9 * GWEI) })
+            .collect();
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let instant = full[0].seen + Duration::from_secs(1_000);
+        let mut head = facts(&mut account, instant, 65, Duration::ZERO);
+        let got = plan_admission(&full, &meta(&spec, 1, 0, GWEI), &mut head, LIMITS).unwrap();
+        assert_eq!(got.len(), 8, "{got:?}");
+        // Inside the TTL they are not stale: one is displaced (gapped first), as before.
+        head.instant = full[0].seen + Duration::from_secs(100);
+        assert_eq!(plan_admission(&full, &meta(&spec, 1, 0, GWEI), &mut head, LIMITS).unwrap().len(), 1);
+    }
+
+    /// R5 (holds): a file time in the future (a backward step before a restart) gives a first-seen age of zero,
+    /// so monotonic time applies, and nothing expires without blocks or the TTL.
+    #[test]
+    fn r146_clock_steps_need_blocks_too() {
+        let spec = ChainSpec::mainnet();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.tx");
+        std::fs::write(&path, format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
+        let future = std::time::SystemTime::now() + Duration::from_secs(5 * H);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(future).unwrap();
+        let e = scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 64).unwrap().remove(0);
+        assert_eq!((e.age_when_seen, e.head_when_seen), (Duration::ZERO, 64));
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let mut head = facts(&mut account, e.seen, 64, Duration::ZERO);
+        assert_eq!(head.stale(&e, SPOOL_LIMITS), None, "forward step, no blocks");
+        head.number = 68;
+        assert_eq!(head.stale(&e, SPOOL_LIMITS), None, "young by the monotonic clock");
+        head.instant = e.seen + SPOOL_LIMITS.ttl + Duration::from_secs(1);
+        assert_eq!(head.stale(&e, SPOOL_LIMITS), Some("expired"));
+    }
+
 }

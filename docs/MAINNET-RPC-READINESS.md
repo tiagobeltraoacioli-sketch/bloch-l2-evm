@@ -236,7 +236,25 @@ spool only if the worker could include it and the sender could pay for it:
   least the intrinsic gas; the priority fee is not above the fee cap; CREATE
   initcode is at most 49,152 bytes (EIP-3860);
 - unchanged: nonce window 16, 16 entries per sender, 10% replacement bump,
-  4,096 entries, 3 h TTL, stale sweep every 60 s.
+  4,096 entries, stale sweep every 60 s.
+
+Expiry follows settlement progress, not the clock alone (agents/55 finding 3,
+agents/133, review agents/146): an entry expires when it is older than 3 h
+**and** the canonical database gained 4 blocks since its first sighting (the
+settler passed it over 4 times: fee or block budget), or when it is 24 h old and
+no block came for 24 h. An entry behind a nonce gap of its sender expires at
+3 h, blocks or not: no block can include it, and it is no demand for one, so an
+idle settler (`skip_idle_blocks`) would otherwise build only its 24 h heartbeat
+and keep it for days. A block that takes hours to prove no longer evicts the
+acknowledged transactions waiting for the next one.
+
+Restarts never extend a lifetime. The RPC keeps each entry's first-seen head in
+a sidecar `.<hash>.head` beside it, and the head with the wall time it was first
+seen in `.spool-progress`. Both live in the spool directory, which the producer
+reads only as `*.tx`. An entry's age after a restart comes from its file time.
+While the process runs, ages and the stall use the monotonic clock. The caps
+above do not rest on expiry: a full spool still displaces the cheapest entry, or
+one behind a nonce gap, only for a better-paying newcomer.
 
 Before this, a funded sender could fill the whole spool with entries whose
 gas was above the worker's 15M block budget. Every block deferred them, so
