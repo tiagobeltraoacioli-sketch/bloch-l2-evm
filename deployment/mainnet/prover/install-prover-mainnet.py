@@ -42,7 +42,7 @@ command), and settlement_v3_mainnet_sparse (SHA-256 bc35e838...b048, CANDIDATE) 
 
 The fallback program (native PROGRAM_FALLBACK, installed by the inert L2_PROGRAM_ROLLBACK_EPOCH: the same next
 rules under the complete witness, `--mainnet`) is a third forced command in the same way, with a third settler key
-and settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...53b3, CANDIDATE) beside this file:
+and settlement_v3_mainnet_fallback (SHA-256 7fd7f3c0...5303, CANDIDATE) beside this file:
 
   sudo python3 install-prover-mainnet.py install --program fallback --settler-pubkey FILE3 --settler-host IP
   sudo python3 install-prover-mainnet.py rollback --program fallback
@@ -105,18 +105,18 @@ PINNED_NEXT = {
 }
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_FALLBACK` (bloch-sis-pow
 # codex/fallback-repin-native-r8-20261102), which the inert L2_PROGRAM_ROLLBACK_EPOCH installs in place of the sparse
-# guest: the same next rules proved by the complete-witness guest `settlement_v3_mainnet` of bloch-l2-evm
-# codex/fork-candidate-l2-r7-20261102 e8feb2b, pinned container build (integrations/sp1-execution/guest/
-# build-container.sh). The kit ships it as settlement_v3_mainnet_fallback (the activated guest keeps the plain
+# guest: the same next rules, L1 forced inclusion included, proved by the complete-witness guest
+# `settlement_v3_mainnet` of integrations/sp1-execution/guest-fallback, bloch-l2-evm
+# codex/fallback-forced-r11-20261103 (agent 216), pinned container build (guest-fallback/build-container.sh). The kit ships it as settlement_v3_mainnet_fallback (the activated guest keeps the plain
 # name). It moves with the fee-sweep recipient (TBD-owner) like PINNED_NEXT.
-FALLBACK_GUEST_SHA256 = '3ad3a4f02b6f03768674de8804934064cc9f8f0b47fedbe0456dce79ddaa53b3'
+FALLBACK_GUEST_SHA256 = '7fd7f3c0fb572ca1d9cfc1caa70ba4be09f306bb6d7274782ae517b59b1b5303'
 PINNED_FALLBACK = {
     'chain_id': 700770,
     'domain': '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
-    'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
-    'elf_keccak': 'c9f8cd40b703b47c1fdfb183c223da9977ac9839e3d1c436c28c9b7f331aacf8',
-    'vkey_koalabear': '792452aa47ddaef1523907c03c39d3917df21180585eec804b27841626027d60',
-    'vkey_bn254': '00f248a5551f76bbc691c83e03c39d391fbe42301617bb202593c20b26027d60',
+    'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
+    'elf_keccak': 'd95185a60668b0d4e1da49be00d85b9c550b412f13c5155be454e72889f90bf1',
+    'vkey_koalabear': '432fa77548114c6431d3d64a09c851e8178e83b4744681fb73c3e2d368b11546',
+    'vkey_bn254': '00865f4eeb204531918e9eb2509c851e82f1d0769d11a07ef9e1f169e8b11546',
     'sp1_circuit_version': 'v6.1.0',
     'proof_policy_v3': '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d',
 }
