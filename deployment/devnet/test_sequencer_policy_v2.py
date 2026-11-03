@@ -42,6 +42,11 @@ class World(unittest.TestCase):
                 'min_tip_wei': GWEI // 10}
 
     def setUp(self):
+        # The hash is process-wide: a Settler built by another test module (settler_v3 sets keccak256) must not leak
+        # into this module's sha256 world when unittest discovery runs both in one process (agent 236, Linux run).
+        previous = sp._hash
+        sp.set_hash(lambda data: hashlib.sha256(data).digest())
+        self.addCleanup(sp.set_hash, previous)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state_path = Path(self.tmp.name) / 'sequencer-policy.json'
