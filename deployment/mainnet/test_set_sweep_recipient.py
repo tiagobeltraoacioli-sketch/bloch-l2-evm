@@ -147,6 +147,15 @@ class Steps(unittest.TestCase):
                              capture_output=True, text=True).stdout.split()
         return out
 
+    def settler_sha(self):
+        import hashlib
+        return hashlib.sha256((self.l2 / m.SETTLER).read_bytes()).hexdigest()
+
+    def installer_pin(self):
+        import re as _re
+        text = (self.l2 / m.INSTALLER).read_text()
+        return _re.search(r"'settler_v3.py': '([0-9a-f]{64})'", text).group(1)
+
     def gate(self):
         try:
             run('gate', '--l2', self.l2)
@@ -164,6 +173,7 @@ class Steps(unittest.TestCase):
         run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native)
         self.assertEqual(self.gate(), 0)
         self.assertEqual(self.grep(PLACEHOLDER_CFG), [])
+        self.assertEqual(self.installer_pin(), self.settler_sha(), 'apply keeps the installer pin of settler_v3.py')
         self.assertEqual([p for p in self.grep(PLACEHOLDER) if not p.endswith('chainspec.rs')], [])
         self.assertIn(f'Option<Address> = Some(Address::new(hex!("{THROWAWAY}")));', (self.l2 / m.CHAINSPEC).read_text())
         # settler, prover, 2 crossings, make_native test, audit scope, native, and chainspec.rs (its Rust test pins
@@ -205,6 +215,7 @@ class Steps(unittest.TestCase):
         self.assertIn('(8 000 bytes)', native)
         self.assertEqual(m.native_program(self.native, 'PROGRAM_NEXT')[1], ids['sparse']['elf_keccak'])
         self.assertEqual(m.native_program(self.native, 'PROGRAM_FALLBACK')[3], ids['complete']['vkey_bn254'])
+        self.assertEqual(self.installer_pin(), self.settler_sha(), 'pins keeps the installer pin of settler_v3.py')
 
         # phase 3: commit native, move build-release.sh
         git(self.native, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'recipient')

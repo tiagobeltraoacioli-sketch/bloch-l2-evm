@@ -406,6 +406,27 @@ class Editor:
             print('nothing to change')
 
 
+# Files the settler installer pins by SHA-256 (install-settler-mainnet.py PINS) that apply/pins edit. Their pins must
+# follow, or the installer refuses the kit (fork candidate v3: apply rewrites settler_v3.py's MAINNET_NEXT pins).
+INSTALLER = 'deployment/mainnet/install-settler-mainnet.py'
+INSTALLER_PINNED = (('settler_v3.py', SETTLER),)
+
+
+def refresh_installer_pins(l2, ed):
+    p = l2 / INSTALLER
+    if not p.is_file():
+        return
+    t = p.read_text()
+    t2 = t
+    for name, rel in INSTALLER_PINNED:
+        if ed.dry_run and str(l2 / rel) in ed.changed:
+            print(f'would refresh {INSTALLER} PINS[{name!r}] after the edit of {rel}')
+            continue
+        digest = hashlib.sha256((l2 / rel).read_bytes()).hexdigest()
+        t2 = re.sub(rf"('{re.escape(name)}': ')[0-9a-f]{{64}}(')", lambda m: m.group(1) + digest + m.group(2), t2)
+    ed.write(p, t, t2, 'installer pin of an edited file')
+
+
 # -------------------------------------------------------------------------------------------------- steps
 def cmd_check(args):
     r = parse_address(args.address, args.allow_burn)
@@ -443,6 +464,7 @@ def cmd_apply(args):
             if p.is_file():
                 t = p.read_text()
                 ed.write(p, t, t.replace(before, after.format(a=eip55(r))), 'placeholder comment')
+    refresh_installer_pins(l2, ed)
     ed.report()
     print(json.dumps({'old_recipient': eip55(old), 'recipient': eip55(r), 'old_configuration': old_cfg,
                       'min_base_fee': current_floor(l2),
@@ -511,6 +533,7 @@ def cmd_pins(args):
                 t2 = re.sub(rf'(`{n[:8]}…{n[-4:]}`\s*(?:///\s*)?\()[\d ]+( bytes\))', lambda m: m.group(1) + size_text + m.group(2), t)
                 ed.write(p, t, t2, f'{kind} ELF size')
         out[const] = {'configuration': cfg, **new, 'elf_bytes': size}
+    refresh_installer_pins(l2, ed)
     ed.report()
     print(json.dumps(out, indent=2))
     print('PROGRAM_NEXT_FINAL stays false: flip it (and hard_forks.rs test `assert!(!PROGRAM_NEXT_FINAL)`) only when '
