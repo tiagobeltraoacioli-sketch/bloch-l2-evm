@@ -58,6 +58,7 @@ class World(unittest.TestCase):
         self.timeouts = 0
         self.host_down = False
         self.mandatory_cost = None  # override of DEPOSIT_BASE
+        self.verdict_seconds = 10  # wall time of a run that ends at the cycle limit
 
     def make_policy(self):
         return sp.Policy(self.config(), self.state_path, clock=lambda: self.now,
@@ -117,7 +118,7 @@ class World(unittest.TestCase):
                 self.timeouts += 1
                 return None, self.report(raws)
             if any(c == OVER for c in costs) or base == OVER:
-                self.now += 10
+                self.now += self.verdict_seconds
                 return sp.OVER_LIMIT, self.report(raws)
             total = base + sum(costs)
             self.now += 2
@@ -406,8 +407,9 @@ class U1UnpaidTipDoesNotBuyMeasuringTime(World):
             self.add(f'evil{i}', f'm{i}', 0, 4_900_000, OVER, tip=100 * GWEI)
         self.add('honest', 'alice', 0, 21_000, 1)
         self.assertEqual(self.block(), ['honest'])
-        # base + 3 x (full + alone) + the final full run
-        self.assertLessEqual(self.plans[-1].runs, 1 + 3 * 2 + 1)
+        # base + 3 x (full + alone) + the final full run; agent 223 (F223-4): after the first quarantine the newcomer is
+        # tried first (gas order), which costs one probe more
+        self.assertLessEqual(self.plans[-1].runs, 1 + 3 * 2 + 2)
 
 
 class U1ResidualNewSenderBound(World):
@@ -420,19 +422,32 @@ class U1ResidualNewSenderBound(World):
         for i in range(k):
             self.add(f'evil{tag}-{i}', f'pool{tag}-{i}', 0, 4_900_000, OVER, tip=100 * GWEI)
 
+    # Agent 223 (F223-4): with real verdict times (35-40 s per run inside the settler) the old order let 3 fresh attackers
+    # exhaust the allowance. After the first quarantine of a block, tier 1 is tried in ascending gas used.
+
     def test_eight_fresh_attackers_per_block_leave_a_new_sender_served(self):
         self.add('newcomer', 'nina', 0, 21_000, 1)
         self.attack(8, 'a')
         self.assertIn('newcomer', self.block())
-        self.assertFalse(self.plans[-1].exhausted)
 
-    def test_nine_delay_a_new_sender_by_one_block(self):
+    def test_nine_fresh_attackers_per_block_leave_a_new_sender_served(self):
         self.add('newcomer', 'nina', 0, 21_000, 1)
         self.attack(9, 'a')
-        self.assertNotIn('newcomer', self.block())
-        self.assertTrue(self.plans[-1].exhausted)
-        self.assertEqual(self.held()['newcomer'], 'not-reached')
         self.assertIn('newcomer', self.block())
+
+    def test_twenty_fresh_attackers_at_real_verdict_times_leave_a_new_sender_served(self):
+        self.policy.c['preflight_max_seconds'] = 180
+        self.verdict_seconds = 37  # 223-evidence: 34.8-40.1 s per over-limit run inside the settler
+        self.add('newcomer', 'nina', 0, 21_000, 1)
+        self.attack(20, 'b')
+        self.assertIn('newcomer', self.block())
+
+    def test_the_tip_still_orders_tier_one_until_a_quarantine(self):
+        self.add('low', 'lena', 0, 21_000, 1, tip=GWEI)
+        self.add('high', 'hugo', 0, 400_000, 1, tip=50 * GWEI)
+        self.policy.state['tip'] = 10**8
+        order = self.policy.try_order(self.report(list(self.spool))['tx_stats'], self.now)
+        self.assertEqual(self.names(order), ['high', 'low'])
 
 
 class U3QuarantinedNonceSentAgain(World):

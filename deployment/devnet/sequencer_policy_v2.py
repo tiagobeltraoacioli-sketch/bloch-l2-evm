@@ -283,6 +283,30 @@ class Policy:
         self.log('gate-did-not-settle')
         return {}, []
 
+    def degraded_order(self, names, info, now):
+        """The try order after a quarantine or a run without cost in this block (agents/223 F223-4, 135's r9 suggestion):
+        tier 0 as before, then tier 1 by ascending gas used, each sender's transactions still in nonce order. An offender
+        is large (a 150k-gas modexp is 7.7M SP1 gas and fits the budget), so once one has spent measuring time, fresh
+        senders at the top tip can no longer keep every small honest transaction behind them. The tip still decides
+        until then, and decides between equal gas."""
+        exempt = set(self.c['write_limit_exempt_senders'])
+        horizon = now - self.c['standing_seconds']
+
+        def tier(sender):
+            return 0 if sender in exempt or self.state['standing'].get(sender, -math.inf) > horizon else 1
+
+        first = [h for h in names if tier(info[h]['sender']) == 0]
+        queues = {}
+        for h in names:
+            if tier(info[h]['sender']) == 1:
+                queues.setdefault(info[h]['sender'], []).append(h)
+        rest = []
+        while any(queues.values()):
+            sender = min((s for s in queues if queues[s]),
+                         key=lambda s: (int(info[queues[s][0]]['gas_used']), -int(info[queues[s][0]]['effective_tip'])))
+            rest.append(queues[sender].pop(0))
+        return first + rest
+
     def try_order(self, stats, now):
         """The order candidates are tried in (3.4).
 
@@ -400,8 +424,11 @@ class Policy:
                     plan.held.append((offender, 'not-reached'))
                     break
                 alone, _ = run([by_hash[offender]])
+            spent = len(plan.quarantine), sum(1 for _, r in plan.held if r == 'unmeasured')
             if not self._classify(plan, tx, alone, now, has_mandatory, host_ok):
                 break  # the host stopped measuring: keep what is known to fit, decide nothing about the rest
+            if (len(plan.quarantine), sum(1 for _, r in plan.held if r == 'unmeasured')) != spent:
+                remaining = self.degraded_order(remaining, info, now)  # F223-4
         plan.held.extend((h, 'not-reached') for h in remaining)
         plan.chosen = best
         plan.raws = [by_hash[h] for h in best]

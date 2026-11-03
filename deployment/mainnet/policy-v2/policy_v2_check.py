@@ -362,12 +362,12 @@ def s6():
                preflight_max_seconds=180)
     alice = (1 << 206) | 1
     A6 = g.address(alice)
-    m6 = [(1 << 207) | (i + 3) for i in range(3)]
+    m6 = [(1 << 207) | (i + 3) for i in range(int(os.environ.get('S6_ATTACKERS', 3)))]  # ADAPTED (a223)
     block([dep(A6, 100_000_000_000)] + [dep(g.address(k), 100_000_000_000) for k in m6])
     block()
     honest_raw = g.tx(alice, CHAIN, 0, 21_000, A6, 1, b'', max_fee=4 * 10**9, tip=10**9)
     (W / 'txpool' / 's6-honest.tx').write_text(honest_raw.hex() + '\n')
-    sends, per_block = {i: 0 for i in range(3)}, []
+    sends, per_block = {i: 0 for i in range(len(m6))}, []
     for n in range(4):
         for i, k in enumerate(m6):
             name = W / 'txpool' / f's6-evil{i}-{sends[i]}.tx'
