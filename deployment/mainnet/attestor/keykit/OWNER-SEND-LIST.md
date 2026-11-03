@@ -2,11 +2,11 @@
 
 Package from the current kit, never from `~/worktrees/attestor-custody-20261030` (commit 922fec4): that tree pins the old
 producer `7c1cc62b…`, which halts on the first settled deposit. `package` here refuses those pins, and also v2.1's follower `c18752fd…` and
-producer `fb0d5313…`: packages for this build pin follower `cdf5da5c…` and producer `e3f1a290…` (build 17383fe).
+producer `fb0d5313…`: packages for this build pin follower `cdf5da5c…` and producer `e3f1a290…` (release `bloch-l2-2026-11-03-next-native-78d4921c`, build 926d2cf).
 
-Package only from a clean checkout of the frozen kit **with this branch merged** (the attestor text
-fixes 9f5c1f6 and the operator-doc corrections after it are not in the kit freeze `4b7f4f7`). The
-`kit_commit` that `package` writes into each `INSTALL.md` and `IDENTITY.txt` must be that merge.
+Package only from a clean checkout of the final launch kit (the commit named in the latest PINS-NEXT
+notice, which carries the attestor text fixes and the runtime-directory passphrase copy of agent 203).
+The `kit_commit` that `package` writes into each `INSTALL.md` and `IDENTITY.txt` must be that commit.
 
 Build each package with the binaries inside (`package --artifacts DIR`, about 70 MB compressed or 90 MB as a tar). A non-expert
 then has nothing to fetch. `DIR` holds the five pinned files plus `carryover.tsv.gz.sha256`.

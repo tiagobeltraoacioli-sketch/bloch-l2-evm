@@ -261,7 +261,7 @@ Installed attestor $INDEX, NOT started. Follow INSTALL.md from step 6. The comma
   sudo journalctl -fu bloch-l2-attestor-follower
   (the first replay takes 60-90 min or more; wait for l2_genesis.finalized=true in $FSTATE/status.json)
   sudo systemd-run --pipe --wait -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \\
-       /usr/bin/python3 -I $OPT/attestor_agent.py check --config $ETC/config.json
+       -p RuntimeDirectory=bloch-l2-attestor-check -p RuntimeDirectoryMode=0700 /usr/bin/python3 -I $OPT/attestor_agent.py check --config $ETC/config.json
  ${FEED_PORT:+ sudo systemctl enable --now bloch-l2-attestor-feed
 } sudo systemctl enable --now bloch-l2-attestor
   sudo journalctl -fu bloch-l2-attestor -o cat
@@ -288,7 +288,7 @@ cmd_rollback() {
     for f in "$ETC/attestor.sealed" "$ETC/keystore.passphrase" "$ETC/publish-token"; do
       [ ! -e "$f" ] || run shred -fu "$f"
     done
-    echo "Host key removed. The offline transport bundle is now the only copy of attestor's key on your side."
+    echo "Host key removed. Your re-sealed offline backup (INSTALL.md step 9, opened only by your own passphrase) is now the only copy of this attestor's key on your side."
   fi
   echo "Rolled back: units removed. Kept: $OPT, $ETC (config$( [ $PURGE = 1 ] || echo ', sealed key, passphrase')), $STATE (state, outbox), $FSTATE."
   echo "Signatures already published stay valid (they sign finalized, rebuilt roots only)."
@@ -303,7 +303,7 @@ print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
 }
 
 # ------------------------------------------------------------------------------------------ upgrade
-# The next RPC build (L2 17383feb against L1 78d4921c, provisional, unsigned). Override only for a later
+# The launch build (release bloch-l2-2026-11-03-next-native-78d4921c, L2 926d2cf5 against L1 78d4921c). Override only for a later
 # corrected build whose hashes the coordinator published.
 V2_FOLLOWER_SHA256=cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2
 V2_PRODUCE_SHA256=e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69
@@ -328,7 +328,7 @@ svc() {  # svc start|stop|is-active follower|agent
 run_check() {
   if [ -n "$CHECK_CMD" ]; then bash -c "$CHECK_CMD"; return; fi
   systemd-run --pipe --wait --quiet -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \
-    /usr/bin/python3 -I "$OPT/attestor_agent.py" check --config "$ETC/config.json"
+    -p RuntimeDirectory=bloch-l2-attestor-check -p RuntimeDirectoryMode=0700 /usr/bin/python3 -I "$OPT/attestor_agent.py" check --config "$ETC/config.json"
 }
 write_state() {  # the resumable record of an upgrade / upgrade-rollback in progress
   printf 'op=%s\ntag=%s\nphase=%s\nmoved_at=%s\n' "$OP" "$TAG" "$1" "$MOVED_AT" > "$ETC/upgrade.state.tmp"

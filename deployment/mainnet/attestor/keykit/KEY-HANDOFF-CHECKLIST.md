@@ -60,11 +60,11 @@ While you still hold three or more bundles:
       Operators use the Linux build pinned in `operator-pins-v2.sha256` (`093909a2…`).
 - [ ] **While still online:** copy the five pinned artifacts and `carryover.tsv.gz.sha256` into one
       local directory `DIR` (follower and produce-dev from the release folder
-      `bloch-l2-2026-11-02-next-native-78d4921c`, `bloch-pos` `093909a2…`, `mainnet.manifest`,
+      `bloch-l2-2026-11-03-next-native-78d4921c`, `bloch-pos` `093909a2…`, `mainnet.manifest`,
       `carryover.tsv.gz`), and check them with `shasum -a 256` against `operator-pins-v2.sha256`.
       `package --artifacts DIR` needs them and the Mac will be offline.
-- [ ] Check out the kit commit you will package from: the frozen kit with
-      `codex/attestor-packages-r7-20261102` and `codex/attestor-docs-r10-20261102` merged. `package`
+- [ ] Check out the kit commit you will package from: the final launch kit named in the latest
+      PINS-NEXT notice (it already holds the attestor branches of agents 128, 156 and 203). `package`
       refuses a dirty tree.
 - [ ] Wi-Fi off. Then run `preflight`: it must show no `FAIL`.
 
@@ -103,7 +103,7 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh package --artifacts 
 
 - [ ] Each index prints `packaged attestor I: …/operator-I.tar (SHA-256)`. `PACKAGES.sha256` is public.
 - [ ] Each package holds the sealed key, the public key, the set, `IDENTITY.txt`,
-      `ARTIFACTS.sha256` (follower `cdf5da5c…`, producer `e3f1a290…` of build 17383fe, `bloch-pos` `093909a2…`,
+      `ARTIFACTS.sha256` (follower `cdf5da5c…`, producer `e3f1a290…` of release `bloch-l2-2026-11-03-next-native-78d4921c`, `bloch-pos` `093909a2…`,
       manifest `7eef82a7…`, carryover `4d1e2738…`), `INSTALL.md`, `ONBOARDING.md`, the kit and
       `check-operator-bundle.sh`, all listed in `CONTENTS.sha256`.
 - [ ] `--artifacts DIR` embeds the Linux binaries after checking them against the pins, so the operator fetches nothing. Without it, `INSTALL.md` step 2 sends the operator to "the place the coordinator gives you", which does not exist yet.

@@ -120,7 +120,7 @@ sudo journalctl -u bloch-l2-attestor-follower -n 5 -o cat
 ## 7. Check
 
 ```
-sudo systemd-run --pipe --wait -p User=bloch-l2-attestor -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
+sudo systemd-run --pipe --wait -p User=bloch-l2-attestor -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase -p RuntimeDirectory=bloch-l2-attestor-check -p RuntimeDirectoryMode=0700 /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
 ```
 
 This command uses the random host passphrase that the installer stored; it asks you for nothing.

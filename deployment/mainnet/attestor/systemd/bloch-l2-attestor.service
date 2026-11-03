@@ -12,9 +12,13 @@ User=bloch-l2-attestor
 Group=bloch-l2-attestor
 UMask=0077
 ExecStart=/usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py run --config /etc/bloch-l2-attestor/config.json
-# The sealed key's passphrase (root-only 0400 file). systemd hands the service a private copy in
-# $CREDENTIALS_DIRECTORY; the key itself is opened only inside bloch-pos, per signature.
+# The sealed key's passphrase (root-only 0400 file). systemd hands the service a copy in
+# $CREDENTIALS_DIRECTORY at mode 0440 (ACL), which bloch-pos refuses; the agent copies it once, at
+# mode 0400, into its own RuntimeDirectory (tmpfs, 0700, removed when the unit stops). The key itself
+# is opened only inside bloch-pos, per signature.
 LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase
+RuntimeDirectory=bloch-l2-attestor
+RuntimeDirectoryMode=0700
 Restart=on-failure
 RestartSec=60
 # Exit 3 = pin/identity halt or a refused rebuild: operator review, no restart loop.

@@ -144,12 +144,46 @@ class Agent:
         return {'signer_index': self.index, 'set_hash': self.pins.set_hash, 'threshold': threshold, 'n': len(keys)}
 
     def passphrase_file(self):
+        """The sealed key's passphrase file, as bloch-pos accepts it (owner-only, no group/other bits).
+
+        systemd 255 hands a `LoadCredential` file to a `User=` service as mode 0440 (read through an
+        ACL), and bloch-pos refuses any passphrase file with group/other bits. So a credential with
+        such bits is copied once per process, at mode 0400, into the unit's own `RuntimeDirectory`
+        (tmpfs under /run, mode 0700, removed when the unit stops); nothing is written anywhere else."""
         if self.c.get('passphrase_file'):
             return self.c['passphrase_file']
+        if getattr(self, '_passphrase_copy', None):
+            return self._passphrase_copy
         directory = os.environ.get('CREDENTIALS_DIRECTORY')
         if not directory:
             raise Halt('no passphrase: run under systemd with LoadCredential=passphrase:… (or set passphrase_file)')
-        return str(Path(directory) / self.c.get('passphrase_credential', 'passphrase'))
+        credential = Path(directory) / self.c.get('passphrase_credential', 'passphrase')
+        try:
+            mode = credential.stat().st_mode
+        except OSError as e:
+            raise Halt(f'no passphrase credential {credential}: {e}')
+        if not mode & 0o077:
+            self._passphrase_copy = str(credential)
+            return self._passphrase_copy
+        runtime = os.environ.get('RUNTIME_DIRECTORY', '').split(':')[0]
+        if not runtime:
+            raise Halt(f'the passphrase credential is mode {mode & 0o777:04o} and bloch-pos refuses group/other bits: '
+                       'run with RuntimeDirectory= and RuntimeDirectoryMode=0700 (as bloch-l2-attestor.service and the printed check do)')
+        rdir = Path(runtime)
+        rmode = rdir.stat().st_mode
+        if rmode & 0o077 or rdir.stat().st_uid != os.geteuid():
+            raise Halt(f'RuntimeDirectory {rdir} is mode {rmode & 0o777:04o} or not ours: it must be RuntimeDirectoryMode=0700')
+        copy = rdir / 'passphrase'
+        tmp = rdir / f'.passphrase.{os.getpid()}'
+        data = credential.read_bytes()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, copy)
+        self._passphrase_copy = str(copy)
+        return self._passphrase_copy
 
     def native(self, *args):
         done = subprocess.run([self.c['bloch_pos'], 'l2-claim', *args], capture_output=True, text=True,
