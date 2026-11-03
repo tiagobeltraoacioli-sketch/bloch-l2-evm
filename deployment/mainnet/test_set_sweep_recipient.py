@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -135,8 +136,7 @@ class Steps(unittest.TestCase):
             git(tree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base')
         head = subprocess.run(['git', '-C', str(self.native), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
         br = self.l2 / m.BUILD_RELEASE
-        br.write_text(br.read_text().replace('CANDIDATE_NATIVE_COMMIT=f12b4113bfcba79ab21181cf5128602fc9550bb4',
-                                             f'CANDIDATE_NATIVE_COMMIT={head}'))
+        br.write_text(re.sub(r'(?m)^CANDIDATE_NATIVE_COMMIT=[0-9a-f]{40}$', f'CANDIDATE_NATIVE_COMMIT={head}', br.read_text()))
         git(self.l2, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'native fixture')
 
     def tearDown(self):
