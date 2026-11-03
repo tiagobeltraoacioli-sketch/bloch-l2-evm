@@ -230,9 +230,31 @@ where
         Provider: ChainSpecProvider<ChainSpec = BlochChainSpec>,
     >,
 {
-    let converter = rpc_converter(components.provider().chain_spec());
     // eth_call may not burn more gas than one block can hold (reth's default cap is 50M).
-    let gas_cap = reth_rpc_eth_types::gas_oracle::GasCap(components.provider().chain_spec().execution().gas_limit);
+    let gas_cap = components.provider().chain_spec().execution().gas_limit;
+    build_eth_api_capped(components, runtime, pending, gas_cap)
+}
+
+/// [`build_eth_api_with`] with an explicit simulation gas cap: `eth_call`, `eth_estimateGas` and
+/// `eth_createAccessList` never run with more gas than `gas_cap`, whatever the request, the
+/// caller's allowance or a block override says (the snapshot patch applies the cap to every
+/// path, see RETH-SNAPSHOT.md). Must be nonzero.
+pub fn build_eth_api_capped<N>(
+    components: N,
+    runtime: Runtime,
+    pending: PendingPolicy,
+    gas_cap: u64,
+) -> EthApi<BlochRpcComponents<N>, BlochRpcConverter>
+where
+    N: RpcNodeCore<
+        Primitives = BlochNodePrimitives,
+        Evm = BlochEvmConfig,
+        Provider: ChainSpecProvider<ChainSpec = BlochChainSpec>,
+    >,
+{
+    assert!(gas_cap > 0, "a zero gas cap means no cap");
+    let converter = rpc_converter(components.provider().chain_spec());
+    let gas_cap = reth_rpc_eth_types::gas_oracle::GasCap(gas_cap);
     let components = BlochRpcComponents {
         evm: components.evm_config().clone().for_rpc(),
         inner: components,

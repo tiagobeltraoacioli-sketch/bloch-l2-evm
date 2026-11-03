@@ -52,7 +52,7 @@ pub use maintenance::{pool_maintenance, MaintenanceConfigError};
 pub use payload::{BlochBuiltPayload, BlochExecutionPayload, BlochPayloadAttributes, BlochPayloadTypes};
 pub use pool::{pooled_from_raw, BlochPoolError, BlochTransactionValidator};
 pub use rpc::{
-    build_eth_api, build_eth_api_with, rpc_converter, serve_pending_blocks_as_latest, BlochRpcComponents, BlochRpcConverter,
+    build_eth_api, build_eth_api_capped, build_eth_api_with, rpc_converter, serve_pending_blocks_as_latest, BlochRpcComponents, BlochRpcConverter,
     LatestDerivedPending, NoDerivedPending, PendingPolicy,
 };
 pub use rpc_identity::{

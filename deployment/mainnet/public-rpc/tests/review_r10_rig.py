@@ -108,6 +108,7 @@ class Pair:
         (certs / 'edge.txt').write_text('127.0.0.1/32\n')
         for x in 'ab':
             (work / x / 'peer').mkdir(parents=True)
+            (work / x / 'hop').mkdir(mode=0o700)
             run('openssl', 'req', '-x509', *common, '-subj', '/CN=l2rpc-peer', '-addext', 'subjectAltName=DNS:l2rpc-peer',
                 '-keyout', work / x / 'peer/self.key', '-out', work / x / 'peer/self.crt')
         for me, other in (('a', 'b'), ('b', 'a')):
@@ -120,7 +121,7 @@ class Pair:
             # setup-gateway.sh's production flags: --cors-any --backend-conns 400; every limit at its default.
             run(sys.executable, RENDER, '--role', role, '--name', f'test-{x}', '--out', conf, '--standalone', '--njs-module', njs,
                 '--local-rpc', f'127.0.0.1:{rpc}', '--peer', f'127.0.0.1:{peer}', '--peer-allow', '127.0.0.1',
-                '--peer-listen', f'127.0.0.1:{listen}', '--peer-out-port', out, '--probe-port', probe, '--peer-dir', work / x / 'peer',
+                '--peer-listen', f'127.0.0.1:{listen}', '--hop-dir', work / x / 'hop', '--probe-port', probe, '--peer-dir', work / x / 'peer',
                 '--server-name', 'l2rpc.test', '--public-listen', f'127.0.0.1:{public}', '--test-plain-listen', f'127.0.0.1:{plain}',
                 '--tls-cert', certs / 'origin.pem', '--tls-key', certs / 'origin.key', '--client-ca', 'none',
                 '--edge-ranges', certs / 'edge.txt', '--log-dir', conf / 'logs', '--probe-interval', '1s',

@@ -44,12 +44,13 @@ certs() {
 }
 
 render_one() {
-  local x=$1 role=$2 rpc=$3 pub=$4 plisten=$5 pout=$6 probe=$7 peer=$8 plain=$9
+  local x=$1 role=$2 rpc=$3 pub=$4 plisten=$5 probe=$6 peer=$7 plain=$8
   local ca=none
+  install -d -m 0700 "$WORK/$x/hop"
   [ "$CLIENT_CA" = 1 ] && ca="$WORK/certs/edge-ca.pem"
   # shellcheck disable=SC2086
   python3 "$HERE/render.py" --role "$role" --name "test-$x" --out "$WORK/$x/conf" --standalone --njs-module "$NJS_SO" \
-    --local-rpc "$rpc" --peer "$peer" --peer-allow 127.0.0.1 --peer-listen "$plisten" --peer-out-port "$pout" \
+    --local-rpc "$rpc" --peer "$peer" --peer-allow 127.0.0.1 --peer-listen "$plisten" --hop-dir "$WORK/$x/hop" \
     --probe-port "$probe" --peer-dir "$WORK/$x/peer" --server-name l2rpc.test --public-listen "$pub" --test-plain-listen "$plain" \
     --tls-cert "$WORK/certs/origin.pem" --tls-key "$WORK/certs/origin.key" --client-ca "$ca" \
     --edge-ranges "$WORK/certs/edge-ranges.txt" --log-dir "$WORK/$x/conf/logs" --probe-interval 2s $EXTRA
@@ -58,8 +59,8 @@ render_one() {
 
 render() {
   certs
-  render_one a sequencer "$A_RPC" 127.0.0.1:19671 127.0.0.1:19681 19691 19601 127.0.0.1:19682 127.0.0.1:19673
-  render_one b replica "$B_RPC" 127.0.0.1:19672 127.0.0.1:19682 19692 19602 127.0.0.1:19681 127.0.0.1:19674
+  render_one a sequencer "$A_RPC" 127.0.0.1:19671 127.0.0.1:19681 19601 127.0.0.1:19682 127.0.0.1:19673
+  render_one b replica "$B_RPC" 127.0.0.1:19672 127.0.0.1:19682 19602 127.0.0.1:19681 127.0.0.1:19674
 }
 
 case "${1:-}" in
