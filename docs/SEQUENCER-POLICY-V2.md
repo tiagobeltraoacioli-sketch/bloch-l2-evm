@@ -164,13 +164,15 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
   (`check_cost_line`). A prover without the cost line can then never starve users silently (r7 F2).
 
 **Try order** (`Policy.try_order`; agents/223 F223-4 and agents/243 A243-1..3):
-1. **Small first, by tip, all senders together.** A transaction is small when its gas used is below `large_gas`
-   (state, initially `max_tx_gas`). Small transactions and exempt senders are ordered by effective tip, highest first,
-   whatever the sender's standing: a higher tip buys room in a full block and a place under the transaction cap
-   (r8 N2). Standing only breaks ties. (In 166's first order the tier came before the tip, so senders with standing
-   at the capped tip could keep every new sender out for about 0.07 BLCH a day: A243-1, A243-2.)
-2. **Large after small.** Senders with standing first, then the rest (r9 U1). By tip until a quarantine or a run
-   without cost in this block, then by ascending gas used (F223-4).
+1. **First group, by tip, all senders together:** small transactions (gas used below `large_gas`, state, initially
+   `max_tx_gas`) of any sender, and every transaction of a sender with standing or an exempt sender. Ordered by
+   effective tip, highest first: a higher tip buys room in a full block and a place under the transaction cap whoever
+   sends it (r8 N2). Standing only breaks ties. (In 166's first order the tier came before the tip, so senders with
+   standing at the capped tip could keep every new sender out for about 0.07 BLCH a day: A243-1, A243-2.)
+2. **Then large transactions of fresh senders**, which cannot be told from offenders before they are measured
+   (r9 U1). By tip until a quarantine or a run without cost in this block, then by ascending gas used (F223-4). A
+   fresh sender whose first transaction is large waits behind the first group; any small paid transaction (an
+   approve) gives it standing.
 3. **`large_gas`** is half the gas used of the smallest offender that counted as small, set on a measured verdict
    (over the cycle limit, or over the budget alone) and persisted. An offender must use at least some G* gas, fixed by
    the guest's worst instructions per gas, so `large_gas` never falls below G*/2, and each offender small enough to go

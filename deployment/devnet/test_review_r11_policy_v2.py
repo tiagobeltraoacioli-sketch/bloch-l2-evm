@@ -8,6 +8,7 @@ ends at the cycle limit about 37 s (34.8-40.1 s measured), and the block allowan
 
 Every class names its finding (agents/243-policy-v2-review.md). Run: python3 -B -m unittest -v test_review_r11_policy_v2
 """
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -260,6 +261,17 @@ class A243_7LargeGasThreshold(RealTime):
         self.add('deploy', 'dana', 0, 400_000, 10, tip=GWEI)
         self.assertIn('deploy', self.block(), f'held: {self.held()}')
 
+    def test_a_large_transaction_with_standing_outbids_small_standing_fillers(self):
+        squatters = [f'sq{i}' for i in range(7)]
+        self.give_standing(squatters + ['dana'])
+        self.policy.state['large_gas'] = 200_000
+        self.add('multi-hop', 'dana', self.next_nonce('dana'), 450_000, 20, tip=10 * CAP)
+        served = []
+        for _ in range(3):
+            self.refill(squatters, 90_000, 15, CAP, 'fill')
+            served += self.block()
+        self.assertIn('multi-hop', served, f'held: {self.held()}')
+
 
 class A243_8PlanStateSurvivesAFailedExtend(SettlerHarness):
     """A243-8 (Low). The plan's verdicts (quarantine ban, failure counts, waits) lived only in memory until
@@ -268,6 +280,8 @@ class A243_8PlanStateSurvivesAFailedExtend(SettlerHarness):
     two cycle-limit verdicts in the next block. The same happens on a crash or a restart between plan and commit."""
 
     def test_the_ban_of_a_quarantined_sender_is_saved_before_the_final_extend(self):
+        # the settler sets keccak256 as the policy's hash; World (same process) uses sha256
+        self.addCleanup(sp.set_hash, lambda data: hashlib.sha256(data).digest())
         self.spool(a=10, b=10_000)
         inner = self.produce
 

@@ -294,12 +294,15 @@ class Policy:
     def try_order(self, stats, now, large_gas=None, degraded=False):
         """The order candidates are tried in (3.4; agents/243 A243-1..3 on top of agents/223 F223-4).
 
-        - Small transactions (gas used below `large_gas()`) and exempt senders first, all senders together, by
-          effective tip: a higher tip buys room and a place under the transaction cap whoever sends it (r8 N2), so a
-          sender with standing cannot keep a new sender out by tipping less (A243-1, A243-2). Standing breaks ties.
-        - Then large transactions: senders with standing first (r9 U1: a pool of fresh, funded senders cannot spend the
-          measuring time of established users), then the rest. By tip until a quarantine or a run without cost in this
-          block; after one, by ascending gas used (F223-4), so further heavy attackers are measured last.
+        - Small transactions (gas used below `large_gas()`) and every transaction of a sender with standing or an
+          exempt sender first, all together, by effective tip: a higher tip buys room and a place under the
+          transaction cap whoever sends it (r8 N2), so a sender with standing cannot keep a new sender out by tipping
+          less (A243-1, A243-2). Standing breaks ties.
+        - Then large transactions of fresh senders, which cannot be told from offenders before they are measured (r9 U1:
+          a pool of fresh, funded senders cannot spend the measuring time of established users). By tip until a
+          quarantine or a run without cost in this block; after one, by ascending gas used (F223-4), so further heavy
+          attackers are measured last. A fresh sender whose first transaction is large is served after the small ones;
+          any small paid transaction (an approve) gives it standing.
         - Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1); a sender's
           place follows its next transaction."""
         exempt = set(self.c['write_limit_exempt_senders'])
@@ -310,10 +313,10 @@ class Policy:
             return 0 if sender in exempt or self.state['standing'].get(sender, -math.inf) > horizon else 1
 
         def key(sender, index, tx):
-            gas, tip = int(tx['gas_used']), int(tx['effective_tip'])
-            if sender in exempt or gas < large:
-                return (0, -tip, tier(sender), gas, index)
-            return (1, tier(sender), gas, -tip, index) if degraded else (1, tier(sender), -tip, gas, index)
+            gas, tip, rank = int(tx['gas_used']), int(tx['effective_tip']), tier(sender)
+            if rank == 0 or gas < large:
+                return (0, -tip, rank, gas, index)
+            return (1, gas, -tip, index) if degraded else (1, -tip, gas, index)
 
         queues = {}
         for index, tx in enumerate(stats):
