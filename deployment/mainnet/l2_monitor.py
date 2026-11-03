@@ -124,7 +124,10 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # Agent 193 (M2): some RPCs refused a broadcast; held bytes not included while L1 advances.
                          'submit-partial', 'settlement-not-included',
                          # Agent 198 (152 L1): a partial quorum stays behind the accepted floor.
-                         'rpc-quorum-behind-floor'})
+                         'rpc-quorum-behind-floor',
+                         # Agent 236 (user-transaction candidate): the plain SP1 budget (off by default) cut a block
+                         # or quarantined a transaction that cannot fit even alone.
+                         'block-over-budget', 'tx-quarantined'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

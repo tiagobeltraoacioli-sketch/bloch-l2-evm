@@ -72,7 +72,7 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': '9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007',
+    'settler_v3.py': '1848c9be59ee50fc1c035bb0db5509a86b19f0723132d2daf2d5f03948827070',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
 }

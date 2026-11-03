@@ -1281,7 +1281,7 @@ class MonitorGapTests(unittest.TestCase):
     # ---- L2-18 and the rest of the settler's silent events
     def test_settler_events_that_were_graded_by_nobody(self):
         for event in ('da-resign-limited', 'da-batch-unrecoverable', 'foreign-rebuild-behind-view', 'idle-check-failed',
-                      'spool-demand-unknown', 'local-proof-refused'):
+                      'spool-demand-unknown', 'local-proof-refused', 'block-over-budget', 'tx-quarantined'):
             r, _ = run(healthy(), '--unit', 'settler=s.service',
                        runner=journal({'s.service': [{'time': stamp(60), 'event': event}]}))
             self.assertEqual(level(r, 'events[settler]'), 'WARN', event)
