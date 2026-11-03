@@ -1,12 +1,12 @@
-# Bloch L2 mainnet (chain 700770): go-live plan for the next build (17383fe)
+# Bloch L2 mainnet (chain 700770): go-live plan for the next build (926d2cf)
 
 Status: **plan only, written 2026-11-02 for the next build.** Nothing in this document has been installed, started or broadcast. Every step that writes to a public chain is marked **MAINNET WRITE**, every publication **PUBLISH**, and every step that installs or starts something on a host is for the owner to run.
 
 The v2.1 plan is kept as `docs/L2-MAINNET-GO-LIVE-V21.md`. Do not mix the two: the kit pins in this tree name the next build and refuse v2.1 artifacts.
 
-**The build.** L2 build commit (`l2_commit`) `17383feb88602926c26559802b95dee273484cd5`, native 78d4921c, settlement-recovery lock `a3c38a46…`. Built reproducibly on three hosts (209 twice, 136, and independently 45.77 by agent 124). **Unsigned.** Release `bloch-l2-2026-11-02-next-native-78d4921c`, assembled independently on 209 and 136 with the same result; its `SHA256SUMS` is the signing target `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (D7). Source of every hash: `agents/PINS-NEXT.md`; if it disagrees with this file, it wins, and this file must be fixed.
+**The build.** L2 build commit (`l2_commit`) `926d2cf50af11f389ad1ffa91c0b7720178b3472` (agent 195: settled RPC with the 15M simulation gas cap and the 5 s time budget, owner decision of 2026-11-02 on report 154 item 2), native 78d4921c, settlement-recovery lock `a3c38a46…`. Built from fresh clones at the reference WORK path on 45.77 and 136, byte-identical. Only `bloch-l2-settled-rpc` moved against the 17383fe build: the follower `cdf5da5c…` and produce-dev `e3f1a290…` are the same bytes. **Unsigned.** Release `bloch-l2-2026-11-03-next-native-78d4921c`, assembled independently on 45.77 and 136 with the same result; its `SHA256SUMS` is the signing target `6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19` (D7). Source of every hash: `agents/PINS-NEXT.md`; if it disagrees with this file, it wins, and this file must be fixed.
 
-**Kit tip moved after this plan was written:** see the newest change notice in `agents/PINS-NEXT.md` for the tip and the kit-file pins (F8 port, prover pins, release target in `GO-LIVE-PINS.sha256`). Binaries and the signing target `116bfaba…` did not move.
+**Kit tip:** the newest change notice in `agents/PINS-NEXT.md` names the tip and the kit-file pins (§3.2). The 17383fe release `bloch-l2-2026-11-02-next-native-78d4921c` (`116bfaba…`, settled RPC `e5754d05…`) is superseded and must not be signed or staged.
 
 **Kit source.** The frozen launch kit is the tip of `codex/kit-integration-r10-20261102` named in the newest change notice of `agents/PINS-NEXT.md` (agent 198's integration of the round-10 kit fixes on top of `4b7f4f7`). Check it out once, detached, at `~/worktrees/l2-launch-kit-20261103`:
 
@@ -28,7 +28,7 @@ git -C ~/worktrees/l2-launch-kit-20261103 merge-base --is-ancestor 4b7f4f7 HEAD
 git -C ~/worktrees/l2-launch-kit-20261103 status --porcelain -- deployment docs
 ```
 
-GO: the full commit PINS-NEXT names, exit 0, and empty output. **Never build a release from the kit tip**: its `build.json` would name another `l2_commit`. Binaries come only from the 17383fe build output.
+GO: the full commit PINS-NEXT names, exit 0, and empty output. **Never build a release from the kit tip**: its `build.json` would name another `l2_commit`. Binaries come only from the 926d2cf release (§3.1).
 
 **What this build changes from v2.1:**
 
@@ -72,7 +72,7 @@ Nothing here may be filled in by an operator or an agent. `TBD-OWNER` means the 
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8. | P3 |
 | **D5** | Attestor operators: five people, five hosts, one index each, feed URLs | `TBD-OWNER`. No operator holds more than one key or shares a host with a validator, the settler or another attestor. | P10 |
 | **D6** | Addresses | The L2 core needs none. Still `TBD-OWNER`: (a) the wallet that funds the DA key (only for D10); (b) the wallet and L2 recipient of the test deposit and withdrawal. | P12 |
-| **D7** | Release signature | Sign release `SHA256SUMS` `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` (`bloch-l2-2026-11-02-next-native-78d4921c`, in `~/l2dexbridge-20261030/next-rpc-r4/release/` on 209 and 136) with the Bloch release key `1A5D96A5C4955EF7` and `rsign` on the owner's Mac (minisign is not installed there), exactly as in `docs/RELEASE-SIGNING.md`, after G0 gates 1-5 and 7 and before P2. The signature completes gate 6. | P2 |
+| **D7** | Release signature | Sign release `SHA256SUMS` `6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19` (`bloch-l2-2026-11-03-next-native-78d4921c`, in `~/l2dexbridge-20261030/rpc-limits-r10/release/` on 45.77 and 136) with the Bloch release key `1A5D96A5C4955EF7` and `rsign` on the owner's Mac (minisign is not installed there), exactly as in `docs/RELEASE-SIGNING.md`, after G0 gates 1-5 and 7 and before P2. The signature completes gate 6. | P2 |
 | **D8** | Retire the 10-18 scratch follower/RPC on 45.77 | As in the v2.1 plan: check `ps -o pid,cmd -p 1452988,1304666` first, then `kill 1452988 1304666`. | none |
 | **D9** | Public gateway | nginx + njs on A and B; do not deploy the Worker. Open: DNS timing and failover (manual switch to B by default). | P11 |
 | **D10** | When to enable user transactions | **Not with this build while F5 is open** (K13): F5 fires only with idle blocks and user transactions together, so the deposit-only launch keeps `skip_idle_blocks` on and user transactions off, and user transactions stay off until F5 is fixed in a later build. Then only after: the P12 deposit test; R2 (DA after HF2) on a private net; the gas-heavy 15M measurement; the stuck-block rehearsal; a dedicated prover (D2); **and with `foreign_recovery` on** (D17). | P12 |
@@ -125,88 +125,67 @@ The 30 `bloch-expansion@` units on 136 are disabled and must stay so.
 
 ## 3. Pins
 
-### 3.1 The next build (build commit 17383fe)
+### 3.1 The next build (build commit 926d2cf)
 
-Build output on 209: `~/l2dexbridge-20261030/next-rpc-r4/rel4/work-a/out/` (identical copy in `work-b/out/`), six files.
+Build output: 45.77 `~/l2dexbridge-20261030/rpc-limits-r10/rel/work-c/out/` and 136 `…/rel/work-d/out/` (fresh clones, fresh targets, `JOBS=6`), byte-identical. Release folder (the signing target and what P2 stages): `~/l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/` on 45.77 and 136, 9 files, byte-identical.
 
-| Artifact | SHA-256 | v2.1 | Used by |
-| --- | --- | --- | --- |
-| `bloch-l2-settled-rpc` | `e5754d05a1d6b217374a652d6959acf1fcd9323703d82226e07aa1d77a1754e8` | `18be911a…` | RPC A, RPC B (P4) |
-| `bloch-l2-native-follower` | `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2` | `c18752fd…` | followers (P3), attestors (P10) |
-| `bloch-l2-produce-dev` | `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69` | `fb0d5313…` | DB init, settler, shadow, replica, attestors |
-| `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | same | shadow (P7) |
-| `build.json` | `c745e7aae828b8213143bc8cc6c15e170d671a878768d6051c3e14d414382b10` | `b12ed2b6…` | check `l2_commit` 17383feb, `l2_tracked_changes: 0`, lock `a3c38a46…`, HF epochs |
-| `out/SHA256SUMS` | `1bad88bad33043200ceabfb0ac4438cf21b464c945167565cfd9ce0a0f58fb08` | | build output only; not in the release dir. `install.sh` checks the release `SHA256SUMS` |
-| Lock `settlement-recovery.native-78d4921c.Cargo.lock` | `a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9` | `26bf4453…` | rebuilds |
-| Release `SHA256SUMS` (signing target, D7) | `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` | `dded10b9…` | owner signature. BUILD-INFO `1aca646b…`, `release.json` `25ce440a…` |
+| Artifact | SHA-256 | 17383fe build | v2.1 | Used by |
+| --- | --- | --- | --- | --- |
+| `bloch-l2-settled-rpc` | `53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d` | `e5754d05…` | `18be911a…` | RPC A, RPC B (P4) |
+| `bloch-l2-native-follower` | `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2` | same | `c18752fd…` | followers (P3), attestors (P10) |
+| `bloch-l2-produce-dev` | `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69` | same | `fb0d5313…` | DB init, settler, shadow, replica, attestors |
+| `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | same | same | shadow (P7) |
+| `build.json` | `6ec47c0c35a9a6051028947c33c235d8364e518c904c7924bf441019303827c6` | `c745e7aa…` | `b12ed2b6…` | check `l2_commit` 926d2cf5, `l2_tracked_changes: 0`, lock `a3c38a46…`, HF epochs |
+| `out/SHA256SUMS` | `05cb459ce0362fe867787226fe31dba44f547b80ac4cf0ee3bf452a19b38f522` | `1bad88ba…` | | build output only; not in the release dir. `install.sh` checks the release `SHA256SUMS` |
+| Lock `settlement-recovery.native-78d4921c.Cargo.lock` | `a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9` | same | `26bf4453…` | rebuilds |
+| Release `BUILD-INFO` | `5f8f1c30a6a49c74e1b32839d3e9e8d100ad384bd58ee4ce5d459f832c3843b5` | `1aca646b…` | | `kit_tip=926d2cf5` (the build commit; the kit tip that pins it is later) |
+| Release `release.json` | `32f3d3c8504070f243a813b6b741f607f1835300760d9c2d7ed495bd93ffceb9` | `25ce440a…` | | read by `verify_release_signature.py` |
+| **Release `SHA256SUMS` (signing target, D7)** | `6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19` | `116bfaba…` (superseded) | `dded10b9…` | owner signature |
 
-To reproduce: L2 17383fe, native 78d4921c, reth 8eb21017 plus `reth-snapshot.patch`, `build-release.sh` at the WORK path `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2`.
+To reproduce: L2 926d2cf, native 78d4921c, reth 8eb21017 plus `integrations/reth-execution/reth-snapshot.patch`, `build-release.sh` at the WORK path `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2`.
 
-### 3.1a PENDING: agent 195's settled-RPC release (the one place its pins go)
+### 3.1a Agent 195's settled-RPC release: delivered
 
-**Status: not delivered.** Owner decision 2026-11-02 22:10 UTC (agent 154 item 2): the settled RPC gets a 15M gas cap on `eth_call`/`eth_estimateGas` and a simulation time limit, which moves `bloch-l2-settled-rpc`, the release `SHA256SUMS` and the signing target. Until agent 195's build is reproduced on two hosts and named in a change notice of `agents/PINS-NEXT.md`, **every value in §3.1, in `GO-LIVE-PINS.sha256` (`artifacts/` lines) and in `docs/RELEASE-SIGNING.md` is the current release `116bfaba…`, and the owner does not sign it.**
-
-| Field | Current release (stays until 195 delivers) | 195 release |
-| --- | --- | --- |
-| Release name | `bloch-l2-2026-11-02-next-native-78d4921c` | PENDING-195 |
-| Build commit (`l2_commit`) | `17383feb88602926c26559802b95dee273484cd5` | PENDING-195 |
-| `bloch-l2-settled-rpc` | `e5754d05a1d6b217374a652d6959acf1fcd9323703d82226e07aa1d77a1754e8` | PENDING-195 |
-| `bloch-l2-native-follower` | `cdf5da5c…` | PENDING-195 (same unless the build moved it) |
-| `bloch-l2-produce-dev` | `e3f1a290…` | PENDING-195 (same unless the build moved it) |
-| `build.json` | `c745e7aa…` | PENDING-195 |
-| Release `SHA256SUMS` (signing target) | `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821` | PENDING-195 |
-
-The follow-up commit (one commit, kit and docs only, on top of the frozen kit tip) replaces the current values with 195's in exactly these places, then recomputes the pins in the order given:
-
-1. `deployment/mainnet/GO-LIVE-PINS.sha256`: the `artifacts/` lines that moved (`bloch-l2-settled-rpc`, `build.json`, `SHA256SUMS`, and `bloch-l2-native-follower`/`bloch-l2-produce-dev`/`release-settler-v2/bloch-l2-produce-dev` if they moved).
-2. `deployment/mainnet/replica/PINS.sha256`: `bloch-l2-settled-rpc` (and follower/produce-dev if moved).
-3. `deployment/mainnet/l2_monitor.py`: `V2_SHA256['bloch-l2-settled-rpc']` and `V2_BUILD['l2_commit']` (and the module docstring's hash list); `test_l2_monitor.py` `test_identity_pins_untouched`.
-4. `deployment/mainnet/install-shadow.sh`: `L2_COMMIT` (and `PRODUCE_SHA256` if moved); `deployment/mainnet/install-settler-mainnet.py` `PINS['bloch-l2-produce-dev']` if produce-dev moved (then the settler installer's own pin in `GO-LIVE-PINS.sha256`).
-5. If the follower or produce-dev moved: `attestor/install-attestor.sh`, `attestor/keykit/operator-pins-v2.sha256`, `attestor/keykit/check-operator-bundle.sh` and the attestor texts (a new operator bundle cut).
-6. Docs: this section and §3.1, every `116bfaba…`/`e5754d05…`/`17383feb…`/release-name occurrence in this plan (D7, §3.1, P2, P4), `docs/RELEASE-SIGNING.md` (fetch path, `--expect-sha256`, trusted comment), `docs/MAINNET-OPS-RUNBOOK.md` and `docs/L2-OPERATOR-RUNBOOK.md` hash mentions.
-7. Recompute and write: `sha256` of `l2_monitor.py` into `GO-LIVE-PINS.sha256`; then `GO-LIVE-PINS.sha256`, `replica/PINS.sha256` and `install-shadow.sh` into the §3.2 table; then a change notice in `agents/PINS-NEXT.md` naming the new kit tip and the new signing target.
-8. Re-run every kit suite (agents/198-kit-integration.md lists them) and `install-shadow.sh --verify` against 195's output on a host.
-
-No other kit file names the release. `verify_release_signature.py` reads the release name, commits and target from `release.json`/`SHA256SUMS` and the operator's `--expect-sha256`, so it does not change.
+Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.md). A first build of `f2f12ad` moved `bloch-l2-produce-dev` (`7764f6a7…`) because the capped `EthApi` builder sat in the `reth-execution` library; at `926d2cf` the builder is in the settled-RPC binary (`src/bin/settled_rpc/capped_api.rs`) and the library equals 17383fe's, so produce-dev and the follower kept their bytes and no attestor package, P6 reference or produce-dev pin moved. Pins moved in the kit: `GO-LIVE-PINS.sha256` (`artifacts/bloch-l2-settled-rpc`, `artifacts/build.json`, `artifacts/SHA256SUMS`, `kit/l2_monitor.py`), `replica/PINS.sha256` (settled RPC), `l2_monitor.py` (`l2_commit`, settled RPC), `install-shadow.sh` (`L2_COMMIT`), `docs/RELEASE-SIGNING.md` (release, path, target, trusted comment). Never stage `7764f6a7…` (f2f12ad) or `85451939…` (a bisect build).
 
 ### 3.2 Kit files at the kit tip named in agents/PINS-NEXT.md
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `3fb071dba31da5fa5636fe6d9a20e319ae925480723a5e674dec5e5404d4bc9e` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `351921830794254ffb3811824de9e2fd6682f95cfe2809e396714fd2c4fef0d5` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` |
 | `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
 | `deployment/mainnet/install-settler-mainnet.py` | `2caf9d4d3a449f556444a2449829e054aa2997cbf4fa3984731e38be063caf14` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `75ce214fbf931e5973b3a6c99d33b5a5257a98a595dc16eecd6448b39b4872fe` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
-| `deployment/mainnet/install-shadow.sh` | `89389a6eb61f9545cdba4f78c97b311a69a86981c4c2685be90df19dbc9230c4` (agent 155 H-1/L-1; 204: own user `bloch-l2-mainnet-shadow`) |
+| `deployment/mainnet/install-shadow.sh` | `a416635c3fa2ee08437295faad72f18399626d35c080b1c75521d0783fd799d1` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
 | `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `5956d4e15d3f721e720027a55e1e5ee249c61cdfddf4c0e9091a9458bdc30886` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
-| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `91e7ee56f874e44ed7d252c79697397e168028af6a0322941b015f137fa38e6f` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: `--rpc-user` template) |
-| `deployment/mainnet/follower-rpc/install.sh` | `30a36c5c5687a578962329a239810fd742a1fddc393c19b2f60c282281d6874e` (agent 159: refuses an unsigned release; 204: first-install fix, `--rpc-user`) |
+| `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `91e7ee56f874e44ed7d252c79697397e168028af6a0322941b015f137fa38e6f` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: own RPC user) |
+| `deployment/mainnet/follower-rpc/install.sh` | `30a36c5c5687a578962329a239810fd742a1fddc393c19b2f60c282281d6874e` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
 | `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/l2_monitor.py` | `2cc61e393100529cff874f7c864dbf738798ff2fdd2116e0e6aa312219c5ccff` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l2_monitor.py` | `67806711844ffafa4fa3429fcefd8cac71d7118948f70330a0c6d25b2fb178bc` (agents 157, 187 F1, 198) |
 | `deployment/mainnet/l1_monitor.py` | `1632d18a63ef2b14505f5f805e06f438d977aaff507b28b432346638b3f1f744` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `6b5782fcd4288ff11ef53bf889a3bdec8f14ee8f77c34e6da0e51b21f49d509f` (agent 154 8d1c873) |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `2dbbedf4edbaf48d6d397076aef13488560d046e38acafe84e59b4bf82d13495` (agent 154 8d1c873) |
-| `deployment/mainnet/public-rpc/render.py` | `4c80de91d53fc65900543c317e4490be250d12db21ef15049fc21441d8881446` (agent 154 8d1c873) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `6b5782fcd4288ff11ef53bf889a3bdec8f14ee8f77c34e6da0e51b21f49d509f` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `2dbbedf4edbaf48d6d397076aef13488560d046e38acafe84e59b4bf82d13495` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/render.py` | `4c80de91d53fc65900543c317e4490be250d12db21ef15049fc21441d8881446` (agent 154 8d1c873; 201: `--sub-answer-max`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `02a11a0ac516d4c67c5e9f9a500c841c6d00565bb30aeccd3ff7260eba532c74` (agent 156 texts; agent 198 pipefail fix; was `ab24bda0…`) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `208d7a0d54e8fa870c979c8761125546d9a0ef47db2f58fe9cf58c738d88943a` |
 | `deployment/mainnet/attestor/attestor_lib.py` | `b996845f0e77b82aea66a7d73d1ad46525ba868fdafefe06380e2a7ac91fcc78` |
 | `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
-| `deployment/mainnet/replica/PINS.sha256` | `bd1855c8bbb04cb76eecb3f1669e69c07188305496ce2e6004a104037c60a20a` |
+| `deployment/mainnet/replica/PINS.sha256` | `392e1d35625009e42088536e8f7b4a2007b94b2086d15719a0b8ed574548ffbc` |
 
-Since kit tip 2087b40, `GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the release `SHA256SUMS` `116bfaba…` (before, it held the build's `out/SHA256SUMS` `1bad88ba…`). P2 still checks that line separately, after the signature check.
+Since kit tip 2087b40, `GO-LIVE-PINS.sha256` lists `artifacts/SHA256SUMS` as the release `SHA256SUMS` (now `6d3bd628…`; before, it held the build's `out/SHA256SUMS` `1bad88ba…`). P2 still checks that line separately, after the signature check.
 
 ### 3.3 Pins that do not change
 
 As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473`; proof policy `154869964f…747d`; SP1 host `bloch-evm-sp1-settlement-v3` `3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a`; settler `bloch-pos` `700631b040a3a4b2299017162dd4a2c5f521bb49d5fa3c9ed677ba285673794e`; `mainnet.manifest` `7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd`; `carryover.tsv.gz` `4d1e2738baec39ec25e2e33968f72a47abb261f271de62fb48a33be55bfc83be`; gnark image `sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d`; SP1 circuits v6.1.0; L2 genesis `632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468`; network pin `f47d3e49…1966`; domain `1c3f8772…0733`; attestor set `1c06adbb…cc4b` (3-of-5); attestor `bloch-pos` `093909a2…` (rehearsal; production hash `TBD-OWNER`).
 
-**Do not use:** any v2.1 binary (`18be911a…`, `c18752fd…`, `fb0d5313…`) with this kit; the superseded next candidates `d49bcb88…` (72ed5bd), `87aa896f…`, `6052d4bb…`; `remote_prover.py` `99bbc1bc…` or `3c11d9be…`; the staging `release-prover/` and its installer `ed9a001d…`; `settler_v3.py` `3ddb260a…`, `8589d5e2…`, `4059d3a6…`, `0ad4900f…`, `8861b0bc…`, `334230e5…`, `2be2651c…` (145 F1 reuse), `8e2c67f5…` (before M1/M2), `4152f5c3…` (agent 193 alone, before 152 L1/L6); `l2_reorg_recover.py` `2a0cfabd…` (before 152 L2-L4); `GO-LIVE-PINS.sha256` `442beec3…` (9645efc), `1bc1da0c…` (f1c8033), `d8e6dd91…` (4b7f4f7), `a7005ec9…` (193 alone); `remote_prover.py` `183bd655…` (before M1); produce-dev `7c1cc62b…`; anything built from 724bf4c; the 10-19 runbooks and staging binaries.
+**Do not use:** the 17383fe release `bloch-l2-2026-11-02-next-native-78d4921c` (`SHA256SUMS` `116bfaba…`, settled RPC `e5754d05…`), the f2f12ad builds (settled RPC `32651e5a…`, produce-dev `7764f6a7…`), `GO-LIVE-PINS.sha256` `dfc3e8b8…` (ebd4a73) and `26645e66…` (15332ef); any v2.1 binary (`18be911a…`, `c18752fd…`, `fb0d5313…`) with this kit; the superseded next candidates `d49bcb88…` (72ed5bd), `87aa896f…`, `6052d4bb…`; `remote_prover.py` `99bbc1bc…` or `3c11d9be…`; the staging `release-prover/` and its installer `ed9a001d…`; `settler_v3.py` `3ddb260a…`, `8589d5e2…`, `4059d3a6…`, `0ad4900f…`, `8861b0bc…`, `334230e5…`, `2be2651c…` (145 F1 reuse), `8e2c67f5…` (before M1/M2), `4152f5c3…` (agent 193 alone, before 152 L1/L6); `l2_reorg_recover.py` `2a0cfabd…` (before 152 L2-L4); `GO-LIVE-PINS.sha256` `442beec3…` (9645efc), `1bc1da0c…` (f1c8033), `d8e6dd91…` (4b7f4f7), `a7005ec9…` (193 alone); `remote_prover.py` `183bd655…` (before M1); produce-dev `7c1cc62b…`; anything built from 724bf4c; the 10-19 runbooks and staging binaries.
 
 ### 3.4 Known gaps and residual risks of this build
 
@@ -264,7 +243,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 5. `getl2settlement`: `accepted` = `null`, source height 1, slot 187200, `profile.activated` true.
    Record `inbox` (expected `count` 0, `consumed` 0, `escrow_sat` "0"). If deposits arrived in the meantime, L2 block 1 will differ from
    `0ff59c11…ab25` and the P6 dry-run reference changes accordingly.
-6. D1, D2, D3, D4, D7, D13, D15, D16 and D17 are decided, and release `SHA256SUMS` `116bfaba…` is signed.
+6. D1, D2, D3, D4, D7, D13, D15, D16 and D17 are decided, and release `SHA256SUMS` `6d3bd628…` is signed.
 7. The items that block go-live in the owner's guide (`GO-LIVE-L2-PT.md` §1) have a result. If one required a binary change, the build and the signing target changed: stop and re-pin first (`agents/PINS-NEXT.md` change notices).
 
 **NO-GO:** any HF1/HF2/HF3 entry other than `hf3_kes_enforce` and `hf3_lattice_emergency` not active (those two
@@ -310,17 +289,17 @@ Rollback: none needed.
 1. The owner signs the release `SHA256SUMS` (D7) following `docs/RELEASE-SIGNING.md`, and puts `SHA256SUMS.minisig` in the release dir on 209 and 136 before the copy below. After the copy, on A and on B (the verifier pins key `1A5D96A5C4955EF7`, checks the canonical trusted comment and every `SHA256SUMS` line; `follower-rpc/install.sh` runs the same check and refuses an unsigned release):
 
 ```
-python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
 ```
 
-2. Stage on A, from the Mac. Each command is one block. The release comes from 209 (identical copy on 136); `manifest` and `carryover` from 45.77 as before.
+2. Stage on A, from the Mac. Each command is one block. The release comes from 45.77 (identical copy on 136); `manifest` and `carryover` from 45.77 as before.
 
 ```
 ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkdir -p l2-golive-next/artifacts l2-golive-next/release-settler-v2
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@209.250.236.240:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-next/artifacts/
 ```
 
 ```
@@ -335,7 +314,7 @@ scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-
 scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-next/release-settler-v2/
 ```
 
-`scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 209 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
+`scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 45.77 and 136 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
 
 Stage B (D3, layout in §2) from the Mac; `IP_OF_B` is the D3 host. Each command is one block:
 
@@ -344,7 +323,7 @@ ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@IP_OF_B mkdir -p l
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@209.250.236.240:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c/*' ubuntu@IP_OF_B:l2-golive-next/artifacts/
+scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/*' ubuntu@IP_OF_B:l2-golive-next/artifacts/
 ```
 
 ```
@@ -361,7 +340,7 @@ Then on B (the signature check of step 1 first):
 cd /home/ubuntu/l2-golive-next && grep ' artifacts/' kit/GO-LIVE-PINS.sha256 | grep -v ' artifacts/SHA256SUMS$' | sha256sum -c && sha256sum artifacts/SHA256SUMS kit/GO-LIVE-PINS.sha256
 ```
 
-GO on B: every line `OK`, `artifacts/SHA256SUMS` = `116bfaba…`, and `kit/GO-LIVE-PINS.sha256` = the §3.2 value.
+GO on B: every line `OK`, `artifacts/SHA256SUMS` = `6d3bd628…`, and `kit/GO-LIVE-PINS.sha256` = the §3.2 value.
 
 3. On A, check the build and assemble the settler release dir. The guest, the SP1 host and the 78d4921c `bloch-pos` still come from the settler-v2 staging on 136.
 
@@ -388,9 +367,9 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `3fb071dba31da5fa5636fe6d9a20e319ae925480723a5e674dec5e5404d4bc9e` (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
-- `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
-- `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
+- `kit/GO-LIVE-PINS.sha256` hashes to `351921830794254ffb3811824de9e2fd6682f95cfe2809e396714fd2c4fef0d5` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
+- `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 
 **NO-GO:** any mismatch. `install-shadow.sh --verify` refuses 72ed5bd's output and every v2.1 artifact by design.
 
@@ -1090,7 +1069,7 @@ python3 /home/ubuntu/l2-golive-next/kit/withdraw/bloch-l2-withdraw.py find --l2-
 python3 /home/ubuntu/l2-golive-next/kit/withdraw/bloch-l2-withdraw.py fetch --l2-rpc http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --index I --recipient-pubkey me.pubkey.hex --sats 50000000 --out /home/ubuntu/claim-0.proof.json --wait 7200
 ```
 
-   Then prepare, sign and send with the commands `fetch` prints (as below), and decide with `status --proof … --tx TXID` (exit 0 = claimed and finalized). Agent 67 ran the tool against a next-build RPC and a forced L1, not against `e5754d05…` on mainnet. Fallback, as on v2.1 (agent 86): build the proof from the settler's database. First read the claimable settlement:
+   Then prepare, sign and send with the commands `fetch` prints (as below), and decide with `status --proof … --tx TXID` (exit 0 = claimed and finalized). Agent 67 ran the tool against a next-build RPC and a forced L1, not against `53e88565…` on mainnet. Fallback, as on v2.1 (agent 86): build the proof from the settler's database. First read the claimable settlement:
 
 ```
 curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://80.240.16.185:8080 | python3 -c 'import json,sys;w=json.load(sys.stdin)["result"]["withdrawals"];print(w["claimable"], w["claimed"])'

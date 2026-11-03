@@ -27,8 +27,8 @@ CRIT at 3; needs `--follower-status`). A settled RPC up to v2.1 keeps `bloch_fin
 lags the file, so read this check, not that age, to know whether finality on a backend is current.
 
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
-dependencies, no keys) for the next L2 build `bloch-l2-2026-11-02-next-native-78d4921c` (follower
-`cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `e5754d05…`; agents/PINS-NEXT.md). It was
+dependencies, no keys) for the next L2 build `bloch-l2-2026-11-03-next-native-78d4921c` (follower
+`cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `53e88565…`; agents/PINS-NEXT.md). It was
 written for v2.1 (`c18752fd…`, `fb0d5313…`, `18be911a…`) and still reads it. Its JSON-RPC
 calls are limited to `eth_chainId`, `eth_blockNumber`,
 `eth_getBlockByNumber`, `eth_getStorageAt`, `bloch_finality`,

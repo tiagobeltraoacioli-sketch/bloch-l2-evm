@@ -55,7 +55,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | --- | --- | --- |
 | `settler_v3.py` | this branch, `deployment/devnet/` | `9c592bd4…3007` (enforced since agent 155; also recorded in the `/opt` path) |
 | `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | `3a24c36d…973a` (enforced since agent 155), and its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
-| `bloch-l2-produce-dev` | the next build 17383fe against native 78d4921c: `e3f1a290…` (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
+| `bloch-l2-produce-dev` | the next build against native 78d4921c: `e3f1a290…` (the same bytes at build commits 17383fe and 926d2cf) (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
