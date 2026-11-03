@@ -273,6 +273,50 @@ class A243_7LargeGasThreshold(RealTime):
         self.assertIn('multi-hop', served, f'held: {self.held()}')
 
 
+class A243_9MeasuredOffenderSizes(RealTime):
+    """Measured on 45.77 with the mainnet guest 203114bf (agents/243-evidence/gstar.out): a KZG point-evaluation loop is
+    the worst instructions per gas found (agents/44): 156k gas = 41.6M SP1 gas, 257k = 80.8M, 407k = 139.7M SP1 gas and
+    164.7M instructions. So a transaction alone over the 90M budget needs about 245-280k gas (measured, no cycle limit),
+    and one over the 180M cycle limit about 440k. Units here: 100 = 90M SP1 gas."""
+
+    def test_kzg_offenders_just_over_the_budget_leave_a_new_swap_served(self):
+        self.add('swap', 'nina', 0, 150_000, 20, tip=GWEI)
+        for i in range(6):
+            self.add(f'kzg{i}', f'pool{i}', 0, 280_000, 101, tip=100 * GWEI)
+        self.assertIn('swap', self.block(), f'held: {self.held()}')
+        self.assertEqual(self.policy.large_gas(), 140_000)
+
+    def test_two_kzg_fillers_fill_a_block_and_a_new_swap_outbids_them(self):
+        squatters = ['k0', 'k1', 'k2']
+        self.give_standing(squatters)
+        self.add('swap', 'nina', 0, 120_000, 20, tip=2 * CAP)
+        self.refill(squatters, 156_000, 46, CAP, 'kzg')
+        self.assertIn('swap', self.block(), f'held: {self.held()}')
+
+    def test_offenders_with_standing_do_not_exhaust_the_block_after_the_first(self):
+        attackers = [f'st{i}' for i in range(5)]
+        self.give_standing(attackers + ['alice'])
+        for sender in attackers:
+            self.add(f'evil-{sender}', sender, self.next_nonce(sender), 1_500_000, OVER, tip=100 * GWEI)
+        self.add('alice-tx', 'alice', self.next_nonce('alice'), 21_000, 1)
+        self.add('nina-tx', 'nina', 0, 21_000, 1)
+        names = self.block()
+        self.assertIn('alice-tx', names, f'held: {self.held()}')
+        self.assertIn('nina-tx', names, f'held: {self.held()}')
+
+
+class A243_10ExemptKeepsItsPlaceAfterAVerdict(RealTime):
+    def config(self):
+        return dict(super().config(), write_limit_exempt_senders=['op'])
+
+    def test_an_exempt_deployment_keeps_its_place_by_tip_in_a_block_with_an_offender(self):
+        self.add('evil', 'mallory', 0, 1_500_000, OVER, tip=100 * GWEI)
+        self.add('deploy', 'op', 0, 9_000_000, 50, tip=2 * GWEI)
+        for i in range(5):
+            self.add(f'small{i}', f's{i}', 0, 60_000, 12, tip=GWEI)
+        self.assertIn('deploy', self.block(), f'held: {self.held()}')
+
+
 class A243_8PlanStateSurvivesAFailedExtend(SettlerHarness):
     """A243-8 (Low). The plan's verdicts (quarantine ban, failure counts, waits) lived only in memory until
     `committed`. When the final `extend` is refused, the settler retries the block with deposits only and never calls

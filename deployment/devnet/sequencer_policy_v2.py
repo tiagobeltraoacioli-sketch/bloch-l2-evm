@@ -303,6 +303,9 @@ class Policy:
           quarantine or a run without cost in this block; after one, by ascending gas used (F223-4), so further heavy
           attackers are measured last. A fresh sender whose first transaction is large is served after the small ones;
           any small paid transaction (an approve) gives it standing.
+        - After a verdict in this block, large transactions of senders with standing join the large group too, ahead of
+          the fresh ones: standing costs one paid transaction, so offenders with standing must not keep the rest of
+          the block behind them either (A243-9).
         - Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1); a sender's
           place follows its next transaction."""
         exempt = set(self.c['write_limit_exempt_senders'])
@@ -314,9 +317,9 @@ class Policy:
 
         def key(sender, index, tx):
             gas, tip, rank = int(tx['gas_used']), int(tx['effective_tip']), tier(sender)
-            if rank == 0 or gas < large:
+            if sender in exempt or gas < large or (rank == 0 and not degraded):
                 return (0, -tip, rank, gas, index)
-            return (1, gas, -tip, index) if degraded else (1, -tip, gas, index)
+            return (1, rank, gas, -tip, index) if degraded else (1, -tip, gas, index)
 
         queues = {}
         for index, tx in enumerate(stats):

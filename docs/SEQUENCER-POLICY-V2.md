@@ -172,7 +172,12 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
 2. **Then large transactions of fresh senders**, which cannot be told from offenders before they are measured
    (r9 U1). By tip until a quarantine or a run without cost in this block, then by ascending gas used (F223-4). A
    fresh sender whose first transaction is large waits behind the first group; any small paid transaction (an
-   approve) gives it standing.
+   approve) gives it standing. After a verdict in the block, large transactions of senders with standing (exempt
+   senders aside) join this group too, ahead of the fresh ones (A243-9).
+   Measured sizes (agents/243-evidence/gstar.out, mainnet guest 203114bf): the worst instructions per gas is a KZG
+   point-evaluation loop, about 460 instructions and 390 SP1 gas per gas. A transaction alone over the 90M budget
+   needs about 245-280k gas used, and one over the 180M cycle limit about 440k. So `large_gas` cannot fall below
+   about 120k: transfers and ordinary swaps stay small.
 3. **`large_gas`** is half the gas used of the smallest offender that counted as small, set on a measured verdict
    (over the cycle limit, or over the budget alone) and persisted. An offender must use at least some G* gas, fixed by
    the guest's worst instructions per gas, so `large_gas` never falls below G*/2, and each offender small enough to go
