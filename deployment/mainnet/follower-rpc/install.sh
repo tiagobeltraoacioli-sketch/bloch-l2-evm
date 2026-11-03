@@ -6,7 +6,12 @@
 #
 #   sudo ./install.sh --artifacts DIR --l1-rpc-url http://HOST:PORT \
 #        --canonical /var/lib/bloch-l2-mainnet/canonical --canonical-user bloch-l2-mainnet \
-#        --txpool /var/lib/bloch-l2-mainnet/txpool [--dry-run] [--allow-unsigned]
+#        --txpool /var/lib/bloch-l2-mainnet/txpool [--rpc-user USER --read-group GROUP] [--dry-run] [--allow-unsigned]
+#
+# --rpc-user/--read-group (review r10 decision 4; the sequencer host uses bloch-l2-mainnet-rpc and
+# bloch-l2-mainnet-l2read, created by install-settler-mainnet.py prepare): the RPC runs as its own system user
+# in GROUP, the read group of the database writer, instead of as --canonical-user. Its unit makes the MDBX lock
+# file group-writable before every start (l2_read_access.py). Without them it runs as --canonical-user.
 #
 # DIR must hold the owner's SHA256SUMS.minisig and release.json: the release signature is checked
 # against the pinned release key (../verify_release_signature.py) before anything else.
@@ -22,16 +27,18 @@
 set -Eeuo pipefail
 trap 'echo "install.sh: FAILED at line $LINENO: $BASH_COMMAND (nothing was started; fix the cause and run it again: it resumes)" >&2' ERR
 HERE=$(cd "$(dirname "$0")" && pwd)
-ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0
+ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0 RPC_USER= READ_GROUP=
 while [ $# -gt 0 ]; do
   case $1 in
     --artifacts) ART=$2; shift 2;; --l1-rpc-url) L1=$2; shift 2;;
     --canonical) CANONICAL=$2; shift 2;; --canonical-user) CANON_USER=$2; shift 2;;
     --txpool) TXPOOL=$2; shift 2;; --dry-run) DRY=1; shift;; --allow-unsigned) UNSIGNED=1; shift;;
+    --rpc-user) RPC_USER=$2; shift 2;; --read-group) READ_GROUP=$2; shift 2;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
-[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,16p "$0"; exit 2; }
+[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,27p "$0"; exit 2; }
+[ -n "$RPC_USER$READ_GROUP" ] && { [ -z "$RPC_USER" ] || [ -z "$READ_GROUP" ]; } && { echo "install.sh: --rpc-user and --read-group go together" >&2; exit 2; }
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 die() { trap - ERR; echo "install.sh: $*" >&2; exit 1; }
 R=${BLOCH_L2_INSTALL_ROOT:-}
@@ -45,6 +52,11 @@ L1_HOST=${BASH_REMATCH[1]}
 id "$CANON_USER" >/dev/null 2>&1 || die "canonical user $CANON_USER does not exist (sequencer installs it)"
 [ -d "$CANONICAL/db" ] && [ -d "$CANONICAL/static" ] && [ -d "$CANONICAL/rocks" ] || die "$CANONICAL is not an initialized L2 database"
 [ -d "$TXPOOL" ] || die "$TXPOOL missing (sequencer spool)"
+if [ -n "$RPC_USER" ]; then
+  [ "$RPC_USER" != "$CANON_USER" ] || die "--rpc-user must differ from --canonical-user"
+  getent group "$READ_GROUP" >/dev/null || die "read group $READ_GROUP missing (install-settler-mainnet.py prepare creates it)"
+  [ -f "$CANONICAL/db/mdbx.lck" ] || die "$CANONICAL/db/mdbx.lck missing (not an initialized L2 database)"
+fi
 for unit in bloch-l2-mainnet-follower bloch-l2-mainnet-rpc; do
   [ ! -e $UNITS/$unit.service ] || die "$UNITS/$unit.service exists; refusing to overwrite"
 done
@@ -79,15 +91,26 @@ echo "$MANIFEST_SHA256  $ART/mainnet.manifest" | sha256sum -c --strict || die "m
 
 # 2. Users, directories, files.
 id bloch-l2-follower-main >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin bloch-l2-follower-main
+if [ -n "$RPC_USER" ]; then
+  id "$RPC_USER" >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin --groups "$READ_GROUP" "$RPC_USER"
+  # The own user must reach the database through the writer's read group alone (and the spool, to write it).
+  if [ $DRY = 0 ]; then
+    runuser -u "$RPC_USER" -- test -r "$CANONICAL/db/mdbx.dat" -a -x "$CANONICAL/rocks" -a -r "$CANONICAL/static" \
+      || die "$RPC_USER cannot read $CANONICAL through group $READ_GROUP (prepare by an older installer?)"
+    runuser -u "$RPC_USER" -- test -w "$TXPOOL" -a -x "$TXPOOL" || die "$RPC_USER cannot write the spool $TXPOOL"
+  fi
+fi
+UNIT_USER=${RPC_USER:-$CANON_USER}
 run install -d -m 0755 $OPT $ETC $ETC/public
 run install -m 0755 "$ART/bloch-l2-native-follower" "$ART/bloch-l2-settled-rpc" $OPT/
+run install -m 0755 "$HERE/l2_read_access.py" $OPT/
 run install -m 0644 "$ART/SHA256SUMS" $OPT/
 run install -m 0644 "$ART/mainnet.manifest" $ETC/public/mainnet.manifest
 if [ $DRY = 1 ]; then echo "+ gunzip -c carryover.tsv.gz > $ETC/public/carryover.tsv"
 else gunzip -c "$ART/carryover.tsv.gz" > $ETC/public/carryover.tsv; chmod 0644 $ETC/public/carryover.tsv; fi
 run install -d -m 0755 -o bloch-l2-follower-main -g bloch-l2-follower-main $R/var/lib/bloch-l2-mainnet-follower
 STATE=/var/lib/bloch-l2-mainnet-rpc
-run install -d -m 0700 -o "$CANON_USER" -g "$CANON_USER" $R$STATE
+run install -d -m 0700 -o "$UNIT_USER" -g "$UNIT_USER" $R$STATE
 
 # 3. Units (not enabled, not started).
 if [ $DRY = 1 ]; then echo "+ write follower.env, units, drop-in"; else
@@ -102,8 +125,9 @@ if [ $DRY = 1 ]; then echo "+ write follower.env, units, drop-in"; else
   install -m 0644 "$HERE/bloch-l2-mainnet-follower.service" $UNITS/
   install -d $UNITS/bloch-l2-mainnet-follower.service.d
   printf '[Service]\nIPAddressAllow=localhost %s\n' "$L1_IP" > $UNITS/bloch-l2-mainnet-follower.service.d/l1-rpc.conf
-  sed -e "s#@CANONICAL_USER@#$CANON_USER#g" -e "s#@CANONICAL@#$CANONICAL#g" -e "s#@STATE@#$STATE#g" -e "s#@TXPOOL@#$TXPOOL#g" \
-    "$HERE/bloch-l2-mainnet-rpc.service" > $UNITS/bloch-l2-mainnet-rpc.service
+  if [ -n "$RPC_USER" ]; then KEEP=(-e "s#@READ_GROUP@#$READ_GROUP#g"); else KEEP=(-e '/@READ_GROUP@/d'); fi
+  sed "${KEEP[@]}" -e "s#@RPC_USER@#$UNIT_USER#g" -e "s#@CANONICAL_USER@#$CANON_USER#g" -e "s#@CANONICAL@#$CANONICAL#g" \
+    -e "s#@STATE@#$STATE#g" -e "s#@TXPOOL@#$TXPOOL#g" "$HERE/bloch-l2-mainnet-rpc.service" > $UNITS/bloch-l2-mainnet-rpc.service
   install -m 0644 "$HERE/bloch-l2-mainnet-rpc-restart.path" "$HERE/bloch-l2-mainnet-rpc-restart.service" $UNITS/
   systemctl daemon-reload
 fi

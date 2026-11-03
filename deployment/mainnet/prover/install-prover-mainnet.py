@@ -202,7 +202,9 @@ def stage(here, staged):
 
 def install(args, here):
     check_sizes(args.memory_gib, args.threads)
-    staged = Path(tempfile.mkdtemp(prefix='bloch-l2-prover-stage-'))  # 0700, owned by the caller
+    # 0700, owned by the caller. Not in /tmp when root: the staged SP1 host is executed (identity), and a hardened
+    # host mounts /tmp noexec (measured under systemd in a container with a noexec /tmp: EACCES).
+    staged = Path(tempfile.mkdtemp(prefix='bloch-l2-prover-stage-', dir='/root' if os.geteuid() == 0 else None))
     try:
         install_staged(args, staged, stage(here, staged))
     finally:
