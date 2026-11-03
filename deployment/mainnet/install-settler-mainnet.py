@@ -80,7 +80,7 @@ PINS = {
     'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
     # Sequencer policy v2 (agents 166, 223); the producer with `select` and the host with the cycle limit move the two
     # binary pins above once the user-transaction candidate is built at the release path (agent 236).
-    'sequencer_policy_v2.py': '81d25c8dbeff894f99ef524000b4d2bb4bc82680aa63d22b3d0dc1109fa5841a',
+    'sequencer_policy_v2.py': 'd2f5c3e3eb4c0e0e8ccf5193eb6d584cb718b631098d4603c2f25cbd27ebb4cc',
 }
 FILES = ('settler_v3.py', 'sequencer_policy_v2.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev',
          'settlement_v3_mainnet', 'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')
