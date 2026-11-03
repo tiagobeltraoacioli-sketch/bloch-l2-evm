@@ -17,6 +17,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sequencer_policy_v2 as sp  # noqa: E402
 from test_sequencer_policy_v2 import GWEI, OVER, World  # noqa: E402
+from test_settler_policy_v2 import Harness as SettlerHarness  # noqa: E402
+import settler_v3 as settler  # noqa: E402
 
 CAP = 3 * GWEI  # owner decision (OWNER-DECISIONS-R10, agent 166 item): congestion tip ceiling 3 gwei
 FLOOR = GWEI // 10
@@ -257,6 +259,29 @@ class A243_7LargeGasThreshold(RealTime):
             self.add(f'evil{i}', f'pool{i}', 0, 1_500_000, OVER, tip=100 * GWEI)
         self.add('deploy', 'dana', 0, 400_000, 10, tip=GWEI)
         self.assertIn('deploy', self.block(), f'held: {self.held()}')
+
+
+class A243_8PlanStateSurvivesAFailedExtend(SettlerHarness):
+    """A243-8 (Low). The plan's verdicts (quarantine ban, failure counts, waits) lived only in memory until
+    `committed`. When the final `extend` is refused, the settler retries the block with deposits only and never calls
+    `committed`: the quarantined file is already moved, but its sender is not banned, so it can send again and cost
+    two cycle-limit verdicts in the next block. The same happens on a crash or a restart between plan and commit."""
+
+    def test_the_ban_of_a_quarantined_sender_is_saved_before_the_final_extend(self):
+        self.spool(a=10, b=10_000)
+        inner = self.produce
+
+        def produce(*args):
+            if args[0] == 'extend' and '--txs' in args and args[args.index('--txs') + 1].endswith('selected.json'):
+                raise settler.ProducerError('refused')
+            if args[0] == 'head':
+                return {'number': 1}
+            return inner(*args)
+        self.settler.produce = produce
+        self.block()
+        self.assertEqual(self.quarantined(), ['b'])
+        state = json.loads((self.settler.work / 'sequencer-policy.json').read_text())
+        self.assertIn('b'.encode().hex()[:4], state['bans'])
 
 
 if __name__ == '__main__':

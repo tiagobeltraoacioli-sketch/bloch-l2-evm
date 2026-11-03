@@ -1571,6 +1571,9 @@ class Settler:
                  'instructions': base.instructions if base else None, 'over_cycle_limit': plan.base == 'over-limit',
                  'budget_sp1_gas': policy.c['max_block_sp1_gas'], 'budget_instructions': policy.c['max_block_instructions'],
                  'deposits': len(pending), 'profile': plan.profile}, sort_keys=True) + '\n')
+        # The plan's verdicts (bans, failure counts, waits) are saved before anything moves: a refused final extend
+        # falls back to a deposit-only block without `committed`, and a crash can come anywhere (agents/243 A243-8).
+        policy.save()
         quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
         for name, reason in plan.quarantine:
             if name in by_hash:
