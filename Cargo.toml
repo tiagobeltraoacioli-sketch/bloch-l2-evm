@@ -80,6 +80,10 @@ sparse-witness = ["serde", "forced-inclusion"]
 # field and configuration tag 4 on the next rules). Without it no program built
 # from this crate changes by a byte.
 forced-inclusion = []
+# CANDIDATE, inert: forced inclusion on the complete-witness path
+# (`src/forced_complete.rs`), for the rollback fallback guest. Without it no
+# program built from this crate changes by a byte.
+forced-complete = ["forced-inclusion"]
 # Local transition kernel only; no mainnet bridge or proof verifier.
 experimental-escrow = []
 default = ["std", "host-kzg"]
