@@ -3,6 +3,41 @@
 Status: candidate procedure. It edits source trees only. Building, qualifying, signing and publishing stay
 with the owner's release process.
 
+## Release gate (agents 163 B-1, 217)
+
+The fork-candidate L2 tree ships with `MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = None` in
+`src/chainspec.rs`. While it is unset, or holds an address the release check refuses:
+
+- the three next-rules guests (`settlement_v3_mainnet_sparse`, `_sparse_eager`, `settlement_v3_mainnet`)
+  fail to compile on a const assert of `MAINNET_NEXT_RULES_RELEASABLE`;
+- both guest `build-container.sh` scripts refuse the commit before any download (`S gate --chainspec -`);
+- `build-release.sh` refuses the next-rules (candidate native) kit build (`S gate --l2`);
+- `ChainSpec::mainnet()` fails `validate` and the configuration commitment, `ChainSpec::mainnet_next()` is
+  `None`, the follower and RPC follow the activated rules only, and the host refuses `--mainnet`.
+
+`ChainSpec::validate` also refuses the zero address and the precompiles `0x01`-`0x0a` as a recipient (B-2),
+for every rule set. The old placeholder `0x…000fee01` survives only as `REHEARSAL_FEE_SWEEP_RECIPIENT`
+(`ChainSpec::mainnet_rehearsal`, `--rules mainnet-rehearsal`) for native tests; no release can carry it.
+A private crossing rehearsal that needs a next-rules ELF runs `set` with a throwaway address on a
+throwaway branch.
+
+## The owner's one command
+
+`S` is `deployment/mainnet/set-sweep-recipient.py` in the L2 tree; `L2` and `N` are clean checkouts of new
+branches from the fork-candidate L2 and native tips.
+
+    python3 S set 0xADDRESS --l2 L2 --native N --dry-run
+    python3 S set 0xADDRESS --l2 L2 --native N
+
+`set` validates the address (as `check`), optionally reads the Safe on L2 first (`--rpc URL`, with
+`--allow-codeless` for the counterfactual plan address), applies phase 1 to both trees (as `apply`),
+re-checks the gate and commits both trees. Steps 4 to 9 below then follow from that commit. The next
+configuration includes the 0.1 gwei base-fee floor (`MAINNET_MIN_BASE_FEE`, agent 197), which the script
+reads from `src/chainspec.rs`; Rust test `rehearsal_configuration_matches_the_sweep_script` pins the
+script's layout.
+
+The individual steps remain available:
+
 ## What the sweep is
 
 - L2 fees never leave the L2 today. Base fees accrue at `0x4200…0019` and priority fees at `0x4200…0011`
@@ -29,8 +64,9 @@ ordinary L2 withdrawal (minimum 0.01 BLCH) followed by an L1 claim.
 - It must not be a system account: either vault, the supply ledger, block info, the outbox or EIP-4788.
 - It must not be in the `0x4200…` predeploy range or the precompile range. Precompile `0x09` reverts on an
   empty call, which would make every sweep fail forever.
-- It must not be the placeholder `0x…0fee01`.
-- A burn address needs `--allow-burn`.
+- It must not be the rehearsal placeholder `0x…0fee01`.
+- A burn address needs `--allow-burn` for `check`/`apply`; `set` and the release gate refuse it always
+  (revenue rule: never a burn address).
 - **It must be an address on L2 700770 that someone can spend from.** A Safe deployed on Ethereum or on
   another chain is not deployed here. A copied address would strand the fees. Run `onchain` against your own
   L2 node, at `finalized`, before `apply`.
@@ -66,9 +102,12 @@ the fork-candidate L2 tip, and `N` is a new branch from the fork-candidate nativ
    - `integrations/sp1-execution/guest/build-container.sh OUT REV` builds `settlement_v3_mainnet`, the
      `PROGRAM_FALLBACK` guest.
 
-   `settlement_v3_mainnet_v1_sparse` runs the activated rules and has no recipient, so it should keep
-   `b1b09c1f`. If it changes, stop and investigate.
-5. Print the identities with the host built from the same commit:
+   `settlement_v3_mainnet_v1_sparse` runs the activated rules and has no recipient. It no longer keeps
+   `b1b09c1f`: the floor (agent 197) and the `validate` hardening (B-2) change shared code. Its identity
+   under `--mainnet-v1 --sparse` must still reproduce the activated configuration `8ec1c804…`.
+5. Print the identities with the host built from the same commit. `identity` now executes the ELF on an
+   empty block under the selected rules and witness (SP1 execute, no proof) and refuses an ELF that commits
+   another statement, so a mismatched flag or ELF stops here (B-3):
    - `bloch-evm-sp1-settlement-v3 --mainnet --sparse identity OUT/settlement_v3_mainnet_sparse > sparse.json`
    - `bloch-evm-sp1-settlement-v3 --mainnet identity OUT/settlement_v3_mainnet > complete.json`
 6. Phase 2 edits. `pins` refuses an identity whose configuration, domain, chain or proof policy differs. It

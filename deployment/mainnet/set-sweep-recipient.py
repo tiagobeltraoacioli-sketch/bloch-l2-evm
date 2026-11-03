@@ -7,8 +7,18 @@ verifying keys, the native `PROGRAM_NEXT` / `PROGRAM_FALLBACK` pins and every ki
 with it. This script edits the two source trees; it never builds, proves, signs or touches a network
 (except `onchain`, which only reads one RPC the operator names).
 
+Release gate (agent 163 B-1, agent 217): the L2 tree ships with `MAINNET_FEE_SWEEP_RECIPIENT = None`. Until it
+holds a release address, no next-rules guest compiles, `ChainSpec::mainnet()` is invalid, and build-release.sh and
+both guest build-container.sh scripts refuse the fork build (they call `gate`).
+
+The owner's one command (phase 1; validates, optionally reads the Safe on L2, edits both trees, re-checks the gate
+and commits both trees so the container builds can take the commit):
+
+  set      ADDRESS --l2 T --native N [--rpc URL [--allow-codeless]] [--no-commit] [--dry-run]
+
 Steps (each refuses to run on a tree it does not recognise, and is idempotent):
 
+  gate     --l2 T | --chainspec FILE    exit 0 only if the tree carries a release recipient (used by the build scripts)
   check    ADDRESS                      validate the address, print the new configuration commitment
   apply    ADDRESS --l2 T --native N    phase 1: the recipient constant, the rehearsal constants and the
                                         configuration commitment in both trees
@@ -21,7 +31,8 @@ Steps (each refuses to run on a tree it does not recognise, and is idempotent):
   audit    --l2 T --native N            list every leftover old value, and the rebuild list
   onchain  ADDRESS --rpc URL            read-only: code, and for a Safe its owners and threshold, at `finalized`
 
-Dependency-free Python 3.9+ (Keccak-256 is implemented here and checked against the two known commitments).
+Dependency-free Python 3.9+ (Keccak-256 is implemented here and checked against the known commitments). The
+next configuration includes the base-fee floor (`MAINNET_MIN_BASE_FEE`, agent 197), read from src/chainspec.rs.
 """
 import argparse
 import hashlib
@@ -103,8 +114,17 @@ BURN = {'0000000000000000000000000000000000000000', '000000000000000000000000000
         'dead000000000000000000000000000000000000', 'deaddeaddeaddeaddeaddeaddeaddeaddeaddead'}
 
 
-def configuration_commitment(recipient=None):
-    """`proof_statement::configuration_commitment` of mainnet_v1 (recipient None) or of mainnet()."""
+# The candidate pins of d462647 / f12b4113 were built before the floor (agent 197) and with the placeholder.
+LEGACY_PLACEHOLDER_CONFIGURATION = '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878'
+PLACEHOLDER = '00000000000000000000000000000000000fee01'
+# configuration_commitment(ChainSpec::mainnet_rehearsal()) with the 0.1 gwei floor; pinned on the Rust side by
+# chainspec::tests::rehearsal_configuration_matches_the_sweep_script.
+REHEARSAL_CONFIGURATION = '9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764'
+
+
+def configuration_commitment(recipient=None, min_base_fee=0):
+    """`proof_statement::configuration_commitment` of mainnet_v1 (recipient None) or of mainnet() with that
+    recipient and floor. A floor of 0 gives the layout before agent 197's floor (the legacy candidate pins)."""
     be = lambda v, n=8: v.to_bytes(n, 'big')  # noqa: E731
     out = (b'BLOCH:EVM:CONFIG:3:CANCUN' if recipient else b'BLOCH:EVM:CONFIG:2:CANCUN')
     out += b''.join(be(v) for v in U64_KNOBS) + be(0, 32)
@@ -112,6 +132,10 @@ def configuration_commitment(recipient=None):
     out += bytes.fromhex(OUTBOX) + be(MIN_WITHDRAWAL_SATS)
     if recipient:
         out += be(GENESIS_TIME) + be(SLOT_MS) + PREVRANDAO + bytes.fromhex(recipient)
+        if min_base_fee:
+            out += be(min_base_fee)
+    elif min_base_fee:
+        raise ValueError('a base-fee floor exists only under the next rules')
     return keccak256(out).hex()
 
 
@@ -139,8 +163,8 @@ def parse_address(text, allow_burn=False):
     if low in BURN and not allow_burn:
         raise SystemExit(f'{eip55(low)} is a burn address: fees sent there are locked forever and stay in the L1 '
                          'escrow. Pass --allow-burn only if that is the decision')
-    if low == '00000000000000000000000000000000000fee01':
-        raise SystemExit('that is the candidate placeholder, not a decision')
+    if low == PLACEHOLDER:
+        raise SystemExit('that is the rehearsal placeholder (REHEARSAL_FEE_SWEEP_RECIPIENT), not a decision')
     return low
 
 
@@ -152,11 +176,18 @@ CROSSINGS = ('deployment/mainnet/rehearsal/next-consensus/crossing.py',
              'deployment/mainnet/rehearsal/next-consensus/sparse/crossing.py')
 NATIVE_PINS = 'crates/bloch-pos-committee/src/l2_settlement.rs'
 SELF_FILES = {'set-sweep-recipient.py', 'test_set_sweep_recipient.py', 'SWEEP-RECIPIENT-PROCEDURE.md'}
-RECIPIENT_RE = re.compile(r'(pub const MAINNET_FEE_SWEEP_RECIPIENT: Address = Address::new\(hex!\(")([0-9a-f]{40})("\)\);)')
-PLACEHOLDER_DOC = ('/// CANDIDATE PLACEHOLDER, `TBD-owner`: the immutable recipient of the fee-vault\n'
-                   "/// sweep, the Bloch Inc Safe's L2 address once the owner fixes it. This value\n"
-                   '/// enters the configuration commitment, so the configuration, ELF and verifying\n'
-                   '/// keys built with it are examples and change when it is set.\n')
+RECIPIENT_RE = re.compile(r'pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = '
+                          r'(?:None|Some\(Address::new\(hex!\("([0-9a-f]{40})"\)\)\));')
+FLOOR_RE = re.compile(r'pub const MAINNET_MIN_BASE_FEE: u64 = ([0-9_]+);')
+PLACEHOLDER_DOC = ('/// UNSET, `TBD-owner`: the immutable recipient of the fee-vault sweep under the\n'
+                   "/// next mainnet rules, the Bloch Inc Safe's L2 address once the owner fixes it\n"
+                   '/// (`deployment/mainnet/set-sweep-recipient.py apply`). It enters the\n'
+                   '/// configuration commitment, so the configuration, ELF and verifying keys of\n'
+                   '/// the next rules exist only once it is set.\n')
+GUEST_GATE = 'bloch_l2_evm::chainspec::MAINNET_NEXT_RULES_RELEASABLE'
+GUESTS = ('integrations/sp1-execution/guest-sparse/src/bin/settlement_v3_mainnet_sparse.rs',
+          'integrations/sp1-execution/guest-sparse/src/bin/settlement_v3_mainnet_sparse_eager.rs',
+          'integrations/sp1-execution/guest/src/bin/settlement_v3_mainnet.rs')
 NATIVE_PLACEHOLDER_DOC = ('    /// The configuration carries a PLACEHOLDER fee-sweep recipient, `TBD-owner`,\n'
                           '    /// and the guest is a candidate, so these values are examples until\n')
 
@@ -181,10 +212,10 @@ COMMENT_EDITS = (
 
 
 def owner_doc(recipient):
-    return ('/// The immutable recipient of the fee-vault sweep, fixed by the owner:\n'
-            f'/// `{eip55(recipient)}`.\n'
-            '/// This value enters the configuration commitment, so the configuration, ELF\n'
-            '/// and verifying keys of the next rules are built with it.\n')
+    return ('/// The immutable recipient of the fee-vault sweep under the next mainnet\n'
+            f'/// rules, fixed by the owner: `{eip55(recipient)}`.\n'
+            '/// It enters the configuration commitment, so the configuration, ELF and\n'
+            '/// verifying keys of the next rules are built with it.\n')
 
 
 def native_owner_doc(recipient):
@@ -211,11 +242,40 @@ def text_files(tree):
             continue
 
 
-def current_recipient(l2):
-    m = RECIPIENT_RE.search((l2 / CHAINSPEC).read_text())
+def recipient_in(text, where):
+    """The recipient a chainspec.rs text carries: 40 lowercase hex, or None while unset."""
+    m = RECIPIENT_RE.search(text)
     if not m:
-        raise SystemExit(f'{l2 / CHAINSPEC}: MAINNET_FEE_SWEEP_RECIPIENT not found; not a fork-candidate L2 tree')
-    return m.group(2)
+        raise SystemExit(f'{where}: `MAINNET_FEE_SWEEP_RECIPIENT: Option<Address>` not found; not a gated fork-candidate '
+                         'L2 tree (agent 217 gate)')
+    return m.group(1)
+
+
+def floor_in(text, where):
+    m = FLOOR_RE.search(text)
+    if not m:
+        raise SystemExit(f'{where}: MAINNET_MIN_BASE_FEE not found; the tree lacks the base-fee floor (agent 197)')
+    return int(m.group(1).replace('_', ''))
+
+
+def current_recipient(l2):
+    return recipient_in((l2 / CHAINSPEC).read_text(), l2 / CHAINSPEC)
+
+
+def current_floor(l2):
+    return floor_in((l2 / CHAINSPEC).read_text(), l2 / CHAINSPEC)
+
+
+def gate_refusal(recipient):
+    """Why this recipient may not be compiled into a release, or None. Stricter than the Rust
+    `is_release_fee_sweep_recipient`: burn addresses and the whole 0x00..00ff range are refused too."""
+    if recipient is None:
+        return 'MAINNET_FEE_SWEEP_RECIPIENT is unset (TBD-owner): run set-sweep-recipient.py set ADDRESS'
+    try:
+        parse_address(recipient)
+    except SystemExit as refusal:
+        return str(refusal)
+    return None
 
 
 def settler_pin(l2, name):
@@ -236,11 +296,26 @@ def native_program(native, const):
 
 
 def self_check(l2, native):
-    """Refuse unless this script's commitment reproduces both pinned configurations of the trees."""
+    """Refuse unless this script's commitment reproduces the activated configuration and the next configuration the
+    trees pin: the one of their own recipient and floor, or (an unset tree) the rehearsal or legacy candidate pins.
+    Returns (old recipient for the rehearsal constants, old configuration)."""
     if configuration_commitment() != ACTIVATED_CONFIGURATION:
         raise SystemExit('internal: the activated configuration does not reproduce')
+    if configuration_commitment(PLACEHOLDER) != LEGACY_PLACEHOLDER_CONFIGURATION:
+        raise SystemExit('internal: the legacy candidate configuration does not reproduce')
+    floor = current_floor(l2)
+    if configuration_commitment(PLACEHOLDER, floor) != REHEARSAL_CONFIGURATION:
+        raise SystemExit('internal: the rehearsal configuration does not reproduce (floor or layout drift)')
     old = current_recipient(l2)
-    want = configuration_commitment(old)
+    if old is None:
+        old = PLACEHOLDER
+        allowed = {REHEARSAL_CONFIGURATION, LEGACY_PLACEHOLDER_CONFIGURATION}
+    else:
+        allowed = {configuration_commitment(old, floor)}
+    pinned_values = {
+        settler_pin(l2, 'MAINNET_NEXT')['configuration'], settler_pin(l2, 'MAINNET_NEXT_SPARSE')['configuration'],
+        native_program(native, 'PROGRAM_NEXT')[0], native_program(native, 'PROGRAM_FALLBACK')[0]}
+    want = next(iter(pinned_values)) if len(pinned_values) == 1 and pinned_values <= allowed else sorted(allowed)[0]
     pinned = {
         f'{SETTLER} MAINNET_NEXT': settler_pin(l2, 'MAINNET_NEXT')['configuration'],
         f'{SETTLER} MAINNET_NEXT_SPARSE': settler_pin(l2, 'MAINNET_NEXT_SPARSE')['configuration'],
@@ -293,13 +368,17 @@ def cmd_apply(args):
     r = parse_address(args.address, args.allow_burn)
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     old, old_cfg = self_check(l2, native)
-    new_cfg = configuration_commitment(r)
+    new_cfg = configuration_commitment(r, current_floor(l2))
     ed = Editor(args.dry_run)
-    if old != r:
+    if current_recipient(l2) != r:
         p = l2 / CHAINSPEC
         t = p.read_text()
-        ed.write(p, t, RECIPIENT_RE.sub(lambda m: m.group(1) + r + m.group(3), t).replace(PLACEHOLDER_DOC, owner_doc(r)),
-                 'MAINNET_FEE_SWEEP_RECIPIENT')
+        const = f'pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = Some(Address::new(hex!("{r}")));'
+        t2 = RECIPIENT_RE.sub(lambda _: const, t).replace(PLACEHOLDER_DOC, owner_doc(r))
+        if PLACEHOLDER_DOC not in t and owner_doc(r) not in t2:
+            t2 = re.sub(r'/// The immutable recipient of the fee-vault sweep under the next mainnet\n'
+                        r'/// rules, fixed by the owner: `0x[0-9a-fA-F]{40}`\.\n', owner_doc(r).split('/// It enters')[0], t2)
+        ed.write(p, t, t2, 'MAINNET_FEE_SWEEP_RECIPIENT')
         for rel in CROSSINGS:
             p = l2 / rel
             t = p.read_text()
@@ -315,6 +394,7 @@ def cmd_apply(args):
                 ed.write(p, t, t.replace(before, after.format(a=eip55(r))), 'placeholder comment')
     ed.report()
     print(json.dumps({'old_recipient': eip55(old), 'recipient': eip55(r), 'old_configuration': old_cfg,
+                      'min_base_fee': current_floor(l2),
                       'configuration': new_cfg, 'next': 'build both guests in the pinned container on two hosts, '
                       'then run `pins` (see `audit` for the full rebuild list)'}, indent=2))
 
@@ -345,7 +425,10 @@ def elf_digest(arg):
 def cmd_pins(args):
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     r = current_recipient(l2)
-    cfg = configuration_commitment(r)
+    refusal = gate_refusal(r)
+    if refusal:
+        raise SystemExit(f'pins: {refusal}')
+    cfg = configuration_commitment(r, current_floor(l2))
     for name in ('MAINNET_NEXT', 'MAINNET_NEXT_SPARSE'):
         if settler_pin(l2, name)['configuration'] != cfg:
             raise SystemExit(f'{SETTLER} {name}: run `apply` first (configuration is not {cfg})')
@@ -432,9 +515,10 @@ def rebuild_list():
 def cmd_audit(args):
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     r = current_recipient(l2)
-    cfg = configuration_commitment(r)
-    stale = {'placeholder recipient': '00000000000000000000000000000000000fee01',
-             'placeholder configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878'}
+    cfg = configuration_commitment(r, current_floor(l2)) if r else None
+    stale = {'placeholder recipient': PLACEHOLDER,
+             'placeholder configuration': LEGACY_PLACEHOLDER_CONFIGURATION,
+             'rehearsal configuration': REHEARSAL_CONFIGURATION}
     for v in args.old or []:
         stale[f'old value {v[:8]}'] = v.lower()
         stale[f'old short {v[:8]}'] = v.lower()[:8]
@@ -443,18 +527,79 @@ def cmd_audit(args):
         for path, text in text_files(tree):
             for n, line in enumerate(text.splitlines(), 1):
                 for name, v in stale.items():
+                    # The rehearsal constant itself and the Rust tests that pin it stay by design.
+                    if path.match('*/src/chainspec.rs') and (
+                            'REHEARSAL_FEE_SWEEP_RECIPIENT' in line or 'REHEARSAL_CONFIGURATION' in line):
+                        continue
                     if v in line and path.name not in SELF_FILES:
                         hits.append(f'{path}:{n}: {name}')
                 if 'TBD-owner' in line and re.search(r'sweep|recipient', line, re.I) and path.name not in SELF_FILES:
                     notes.append(f'{path}:{n}: {line.strip()[:140]}')
     native_cfg = native_program(native, 'PROGRAM_NEXT')[0]
-    result = {'recipient': eip55(r), 'placeholder': r == stale['placeholder recipient'], 'configuration': cfg,
+    gate_problems = [f'{l2 / g}: no compile-time release gate' for g in GUESTS
+                     if (l2 / g).is_file() and GUEST_GATE not in (l2 / g).read_text()]
+    result = {'recipient': eip55(r) if r else None, 'gate': gate_refusal(r) or 'release recipient',
+              'placeholder': gate_refusal(r) is not None, 'configuration': cfg,
               'native_PROGRAM_NEXT_configuration_matches': native_cfg == cfg,
               'native_PROGRAM_NEXT_FINAL': 'pub const PROGRAM_NEXT_FINAL: bool = true;' in (native / NATIVE_PINS).read_text(),
-              'stale_values': hits, 'tbd_owner_sweep_mentions': notes, 'rebuild': rebuild_list()}
+              'stale_values': hits, 'tbd_owner_sweep_mentions': notes, 'gate_problems': gate_problems,
+              'rebuild': rebuild_list()}
     print(json.dumps(result, indent=2))
-    if hits or result['placeholder'] or not result['native_PROGRAM_NEXT_configuration_matches']:
+    if hits or result['placeholder'] or not result['native_PROGRAM_NEXT_configuration_matches'] or result['gate_problems']:
         sys.exit(1)
+
+
+def cmd_gate(args):
+    """The release gate the build scripts call. Exit 0 only for a release recipient; print why not otherwise."""
+    if args.chainspec:
+        text = sys.stdin.read() if args.chainspec == '-' else Path(args.chainspec).read_text()
+        where = args.chainspec
+    else:
+        where = Path(args.l2).resolve() / CHAINSPEC
+        text = where.read_text()
+    r = recipient_in(text, where)
+    refusal = gate_refusal(r)
+    if refusal:
+        print(f'sweep-recipient gate: REFUSED: {refusal}', file=sys.stderr)
+        sys.exit(3)
+    print(json.dumps({'gate': 'release recipient', 'recipient': eip55(r),
+                      'configuration': configuration_commitment(r, floor_in(text, where))}))
+
+
+def cmd_set(args):
+    """The owner's one command: check, optional on-chain read, apply to both trees, gate, commit."""
+    r = parse_address(args.address)
+    if args.rpc:
+        cmd_onchain(argparse.Namespace(address=args.address, rpc=args.rpc, allow_burn=False,
+                                       allow_codeless=args.allow_codeless))
+    l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
+    run = lambda tree, *a: subprocess.run(['git', '-C', str(tree), *a], capture_output=True, text=True)  # noqa: E731
+    if not args.dry_run and not args.no_commit:
+        for tree in (l2, native):
+            if run(tree, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
+                raise SystemExit(f'{tree}: commit or stash local changes first (set commits its own edits)')
+    cmd_apply(argparse.Namespace(address=args.address, allow_burn=False, l2=args.l2, native=args.native,
+                                 dry_run=args.dry_run))
+    if args.dry_run:
+        print('dry run: nothing written, nothing committed')
+        return
+    refusal = gate_refusal(current_recipient(l2))
+    if refusal:
+        raise SystemExit(f'internal: the gate still refuses after apply: {refusal}')
+    if not args.no_commit:
+        message = (f'Next mainnet rules: the owner\'s fee-sweep recipient {eip55(r)}\n\n'
+                   'Written by deployment/mainnet/set-sweep-recipient.py set. The next configuration commitment is '
+                   f'{configuration_commitment(r, current_floor(l2))}; the guest ELF and key pins move after the '
+                   'pinned-container builds (set-sweep-recipient.py pins).\n')
+        for tree in (l2, native):
+            if run(tree, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
+                done = run(tree, 'commit', '-q', '-a', '-m', message)
+                if done.returncode:
+                    raise SystemExit(f'{tree}: git commit failed: {done.stderr.strip()}')
+                print(f'committed {tree} {run(tree, "rev-parse", "--short", "HEAD").stdout.strip()}')
+    print('next: build both guests in the pinned container on two hosts from the L2 commit above, run the host '
+          '`identity` for each (it now executes the ELF under the selected rules), then `pins`, commit native, '
+          '`native-commit`, `audit`')
 
 
 def rpc(url, method, params):
@@ -499,6 +644,20 @@ def main(argv=None):
     c.add_argument('address')
     c.add_argument('--allow-burn', action='store_true')
     c.set_defaults(fn=cmd_check)
+    g = sub.add_parser('gate')
+    where = g.add_mutually_exclusive_group(required=True)
+    where.add_argument('--l2', help='bloch-l2-evm checkout')
+    where.add_argument('--chainspec', help='a src/chainspec.rs file, or - for stdin (e.g. `git show REV:src/chainspec.rs`)')
+    g.set_defaults(fn=cmd_gate)
+    st = sub.add_parser('set')
+    st.add_argument('address')
+    st.add_argument('--l2', required=True, help='bloch-l2-evm checkout (fork candidate)')
+    st.add_argument('--native', required=True, help='bloch-sis-pow checkout (fork candidate)')
+    st.add_argument('--rpc', help='optional L2 RPC: read the Safe at `finalized` first (`onchain`)')
+    st.add_argument('--allow-codeless', action='store_true', help='with --rpc: accept a counterfactual Safe address')
+    st.add_argument('--no-commit', action='store_true')
+    st.add_argument('--dry-run', action='store_true')
+    st.set_defaults(fn=cmd_set)
     for name, fn in (('apply', cmd_apply), ('pins', cmd_pins), ('native-commit', cmd_native_commit), ('audit', cmd_audit)):
         p = sub.add_parser(name)
         if name == 'apply':

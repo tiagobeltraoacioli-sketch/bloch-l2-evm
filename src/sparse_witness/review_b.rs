@@ -265,7 +265,7 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
 /// it. This test fails until the owner sets the real recipient.
 #[test]
 fn gate_next_rules_do_not_carry_the_placeholder_sweep_recipient() {
-    let placeholder = Address::new(alloy_primitives::hex!("00000000000000000000000000000000000fee01"));
+    let placeholder = crate::chainspec::REHEARSAL_FEE_SWEEP_RECIPIENT; // 0x…000fee01
     assert_ne!(
         ChainSpec::mainnet().fee_vault_sweep,
         Some(placeholder),

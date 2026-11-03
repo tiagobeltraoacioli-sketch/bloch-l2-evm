@@ -18,7 +18,9 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 PLACEHOLDER = '00000000000000000000000000000000000fee01'
-PLACEHOLDER_CFG = '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878'
+PLACEHOLDER_CFG = '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878'  # legacy: placeholder, no floor
+REHEARSAL_CFG = '9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764'  # placeholder + 0.1 gwei floor
+FLOOR = 100_000_000
 THROWAWAY = '14c0aeb5497a4e506b6c12556718be957302d96d'
 OLD = {  # the candidate pins of d462647 / f12b4113
     'sparse': ('78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
@@ -75,7 +77,23 @@ class Commitment(unittest.TestCase):
         self.assertEqual(m.keccak256(b'').hex(), 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470')
         self.assertEqual(m.configuration_commitment(), m.ACTIVATED_CONFIGURATION)
         self.assertEqual(m.configuration_commitment(PLACEHOLDER), PLACEHOLDER_CFG)
+        self.assertEqual(m.configuration_commitment(PLACEHOLDER, FLOOR), REHEARSAL_CFG)
+        self.assertEqual(m.REHEARSAL_CONFIGURATION, REHEARSAL_CFG)
+        # Rust: chainspec::tests::rehearsal_configuration_matches_the_sweep_script pins the same value.
+        self.assertEqual(m.configuration_commitment(THROWAWAY, FLOOR),
+                         '7df770a35ce805982f12f552490337a77e842788ed3ab444fe42e35e6b3c1618')
         self.assertNotEqual(m.configuration_commitment(THROWAWAY), PLACEHOLDER_CFG)
+
+    def test_this_tree_is_gated(self):
+        self.assertEqual(m.current_floor(L2), FLOOR)
+        r = m.current_recipient(L2)
+        self.assertEqual(m.gate_refusal(r) is None, r is not None)
+        for guest in m.GUESTS:
+            self.assertIn(m.GUEST_GATE, (L2 / guest).read_text(), guest)
+        for script in ('integrations/sp1-execution/guest/build-container.sh',
+                       'integrations/sp1-execution/guest-sparse/build-container.sh'):
+            self.assertIn('set-sweep-recipient.py" > "$gate_script"', (L2 / script).read_text(), script)
+        self.assertIn('set-sweep-recipient.py" gate --l2', (L2 / m.BUILD_RELEASE).read_text())
 
     def test_eip55_vector(self):
         self.assertEqual(m.eip55('5aaeb6053f3e94c9b9a09f33669435e7ef1beaed'), '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed')
@@ -90,14 +108,14 @@ class Commitment(unittest.TestCase):
         self.assertEqual(m.parse_address('0x000000000000000000000000000000000000dEaD', allow_burn=True), '000000000000000000000000000000000000dead')
 
 
-@unittest.skipUnless(m.current_recipient(L2) == PLACEHOLDER, 'this tree already carries a chosen recipient')
+@unittest.skipUnless(m.current_recipient(L2) is None, 'this tree already carries a chosen recipient')
 class Steps(unittest.TestCase):
     """apply, pins, native-commit and audit on copies of this tree's real files and a native fixture."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.l2, self.native = self.tmp / 'l2', self.tmp / 'native'
-        for rel in (m.CHAINSPEC, m.SETTLER, m.BUILD_RELEASE, *m.CROSSINGS, 'docs/AUDIT-SCOPE-SPARSE.md',
+        for rel in (m.CHAINSPEC, m.SETTLER, m.BUILD_RELEASE, *m.CROSSINGS, *m.GUESTS, 'docs/AUDIT-SCOPE-SPARSE.md',
                     'deployment/mainnet/SETTLER-RUNBOOK.md', 'deployment/mainnet/prover/install-prover-mainnet.py',
                     'deployment/mainnet/install-settler-mainnet.py', 'deployment/mainnet/test_make_native_program.py'):
             (self.l2 / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -123,16 +141,29 @@ class Steps(unittest.TestCase):
                              capture_output=True, text=True).stdout.split()
         return out
 
+    def gate(self):
+        try:
+            run('gate', '--l2', self.l2)
+        except SystemExit as stop:
+            return stop.code
+        return 0
+
     def test_one_pass(self):
-        new_cfg = m.configuration_commitment(THROWAWAY)
+        new_cfg = m.configuration_commitment(THROWAWAY, FLOOR)
+        self.assertEqual(self.gate(), 3, 'an unset tree is refused')
         run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native, '--dry-run')
         self.assertTrue(self.grep(PLACEHOLDER_CFG), 'dry run changes nothing')
+        self.assertEqual(self.gate(), 3)
         run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native)
+        self.assertEqual(self.gate(), 0)
         self.assertEqual(self.grep(PLACEHOLDER_CFG), [])
-        self.assertEqual(self.grep(PLACEHOLDER), [])
-        self.assertEqual(len(self.grep(new_cfg)), 7)  # settler, prover, 2 crossings, make_native test, audit scope, native
+        self.assertEqual([p for p in self.grep(PLACEHOLDER) if not p.endswith('chainspec.rs')], [])
+        self.assertIn(f'Option<Address> = Some(Address::new(hex!("{THROWAWAY}")));', (self.l2 / m.CHAINSPEC).read_text())
+        # settler, prover, 2 crossings, make_native test, audit scope, native, and chainspec.rs (its Rust test pins
+        # the throwaway configuration as the cross-check of this script)
+        self.assertEqual(len(self.grep(new_cfg)), 8)
         self.assertIn(m.eip55(THROWAWAY), (self.native / m.NATIVE_PINS).read_text())
-        self.assertNotIn('PLACEHOLDER', (self.l2 / m.CHAINSPEC).read_text().split('MAINNET_FEE_SWEEP_RECIPIENT: Address')[0][-600:])
+        self.assertNotIn('UNSET', (self.l2 / m.CHAINSPEC).read_text().split('MAINNET_FEE_SWEEP_RECIPIENT: Option')[0][-1400:])
         self.assertIn('nothing to change', run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native))
         with self.assertRaises(SystemExit):  # audit fails until the pins move
             run('audit', '--l2', self.l2, '--native', self.native, *sum((['--old', v] for v in OLD['sparse']), []))
@@ -181,10 +212,39 @@ class Steps(unittest.TestCase):
             run('native-commit', '--l2', self.l2, '--native', self.native)
 
     def test_apply_refuses_a_tree_that_does_not_pin_its_own_recipient(self):
-        p = self.l2 / m.CHAINSPEC
-        p.write_text(p.read_text().replace(PLACEHOLDER, '00000000000000000000000000000000000fee02'))
+        p = self.l2 / m.SETTLER
+        p.write_text(p.read_text().replace(PLACEHOLDER_CFG, '11' * 32, 1))
         with self.assertRaises(SystemExit):
             run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native)
+
+    def test_gate_refuses_placeholder_and_burn_from_a_chainspec_file(self):
+        text = (self.l2 / m.CHAINSPEC).read_text()
+        for value, code in ((PLACEHOLDER, 3), ('000000000000000000000000000000000000dead', 3), ('00' * 19 + '05', 3),
+                            (THROWAWAY, 0)):
+            f = self.tmp / f'{value}.rs'
+            f.write_text(m.RECIPIENT_RE.sub(
+                f'pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = Some(Address::new(hex!("{value}")));', text))
+            try:
+                run('gate', '--chainspec', f)
+                got = 0
+            except SystemExit as stop:
+                got = stop.code
+            self.assertEqual(got, code, value)
+
+    def test_set_is_one_command(self):
+        run('set', '0x' + THROWAWAY, '--l2', self.l2, '--native', self.native)
+        self.assertEqual(self.gate(), 0)
+        for tree in (self.l2, self.native):
+            status = subprocess.run(['git', '-C', str(tree), 'status', '--porcelain', '--untracked-files=no'],
+                                    capture_output=True, text=True).stdout
+            self.assertEqual(status, '', f'{tree} left uncommitted')
+            log = subprocess.run(['git', '-C', str(tree), 'log', '-1', '--format=%s'], capture_output=True, text=True).stdout
+            self.assertIn(m.eip55(THROWAWAY), log)
+        self.assertEqual(m.settler_pin(self.l2, 'MAINNET_NEXT_SPARSE')['configuration'],
+                         m.configuration_commitment(THROWAWAY, FLOOR))
+        self.assertIn('nothing to change', run('set', '0x' + THROWAWAY, '--l2', self.l2, '--native', self.native))
+        with self.assertRaises(SystemExit):
+            run('set', '0x' + PLACEHOLDER, '--l2', self.l2, '--native', self.native)
 
 
 class OnChain(unittest.TestCase):

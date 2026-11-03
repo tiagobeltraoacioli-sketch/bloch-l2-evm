@@ -83,6 +83,10 @@ if [ "$NATIVE_COMMIT" = "$CANDIDATE_NATIVE_COMMIT" ]; then
     && grep -q 'pub const L2_DA_RESERVED_SLOT_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
     && grep -q 'pub const L2_FORCED_INCLUSION_EPOCH: u64 = u64::MAX;' "$N/crates/bloch-pos-committee/src/params.rs" \
     || die "the candidate native tree must keep the program, DA-slot and forced-inclusion gates inert"
+  # Release gate (agents 163 B-1, 217): this native commit is the next-rules (program swap) release, and its
+  # follower, producer and RPC compile ChainSpec::mainnet(). Refuse it until the owner's fee-sweep recipient is set.
+  python3 "$HERE/set-sweep-recipient.py" gate --l2 "$L2" >/dev/null \
+    || die "the next-rules release needs the owner's fee-sweep recipient: set-sweep-recipient.py set ADDRESS --l2 ... --native ..."
 fi
 [ "$(git -C "$N" rev-parse HEAD)" = "$NATIVE_COMMIT" ] || die "native checkout is not $NATIVE_COMMIT"
 [ "$(git -C "$RETH" rev-parse HEAD)" = "$RETH_COMMIT" ] || die "reth snapshot is not $RETH_COMMIT"

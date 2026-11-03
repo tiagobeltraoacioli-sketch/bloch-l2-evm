@@ -25,6 +25,14 @@ out="$1"; rev="${2:-HEAD}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
 commit="$(git -C "$repo" rev-parse --verify "$rev^{commit}")"
+# Release gate (agents 163 B-1, 217): this crate builds next-rules guests, which compile the fee-sweep recipient.
+# Refuse the commit before any download while its recipient is unset or refused (the guests' const assert would
+# stop the build later anyway). Historical commits without the gate build with their own copy of this script.
+gate_script="$(mktemp)"; trap 'rm -f "$gate_script"' EXIT
+git -C "$repo" show "$commit:deployment/mainnet/set-sweep-recipient.py" > "$gate_script" 2>/dev/null \
+  || { echo "build-container: $commit has no set-sweep-recipient.py gate" >&2; exit 2; }
+git -C "$repo" show "$commit:src/chainspec.rs" | python3 "$gate_script" gate --chainspec - >&2 \
+  || { echo "build-container: refused: no next-rules guest without the owner's fee-sweep recipient" >&2; exit 2; }
 docker="${DOCKER:-docker}"
 work="${WORK:-/tmp/bloch-guest-complete-container}"
 downloads="${DOWNLOADS:-$work/downloads}"
