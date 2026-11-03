@@ -181,7 +181,10 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
 3. **`large_gas`** is half the gas used of the smallest offender that counted as small, set on a measured verdict
    (over the cycle limit, or over the budget alone) and persisted. An offender must use at least some G* gas, fixed by
    the guest's worst instructions per gas, so `large_gas` never falls below G*/2, and each offender small enough to go
-   before small honest transactions halves it: about log2(5M / G*) of them in the life of the chain. A run without
+   before small honest transactions halves it. It doubles back once per week without such an offender
+   (`large_gas_recovery_seconds`) and never falls below `large_gas_floor` (120k, half the smallest measured
+   offender), so one odd verdict (the complete fallback guest witnesses whole accounts, so a small transaction can be
+   over there) cannot move every transaction into the large group, where standing comes first again. A run without
    cost lowers it for its block only, never for good.
 4. **After an offender in a block** the rest is re-ordered and searched from the front without a full run, since the
    full run would only hit the offenders at the end again (35-40 s per verdict inside the settler, agents/223 F223-3).

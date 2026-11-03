@@ -71,7 +71,11 @@ DEFAULTS = {
     # Prover profiles (3.1, X17).
     'fast_profile_max_sp1_gas': 10_500_000,
     'gate_passes': 6,
-    'gate_dependent_wait_seconds': 3600,  # a refusal that appeared only after an earlier one was removed (A243-12)
+    'gate_dependent_wait_seconds': 3600,
+    # Small/large split of the try order (A243-3, A243-9). The floor rests on the smallest measured offender: a KZG
+    # point-evaluation loop is over the 90M budget alone from about 245-280k gas (agents/243-evidence/gstar.out).
+    'large_gas_floor': 120_000,
+    'large_gas_recovery_seconds': 7 * 86400,  # the threshold doubles back once per week without a small offender  # a refusal that appeared only after an earlier one was removed (A243-12)
 }
 
 # Prover profiles by the preflight SP1 gas of the block to prove (agent 93's settings, agent 113's measurements).
@@ -131,7 +135,7 @@ class Policy:
                 fresh = self._fresh_state()
                 # `last_block_time` starts as None and is a number once a block was committed: keep it across restarts,
                 # or the idle decay of the tip stops until the next block (review r9 U5 after a restart).
-                kinds = {k: ((int, float) if k == 'last_block_time' else type(v)) for k, v in fresh.items()}
+                kinds = {k: ((int, float) if k in ('last_block_time', 'large_gas_at') else type(v)) for k, v in fresh.items()}
                 fresh.update({k: v for k, v in loaded.items() if k in fresh and isinstance(v, kinds[k])
                               and not isinstance(v, bool)})
                 self.state = fresh
@@ -140,7 +144,8 @@ class Policy:
 
     def _fresh_state(self):
         return {'tip': self.c['min_tip_wei'], 'last_block_time': None, 'empty_base': 0, 'bans': {}, 'waits': {},
-                'failures': {}, 'writes': {}, 'standing': {}, 'large_gas': int(self.c['max_tx_gas'])}
+                'failures': {}, 'writes': {}, 'standing': {}, 'large_gas': int(self.c['max_tx_gas']),
+                'large_gas_at': None}
 
     # Bounds
 
@@ -299,13 +304,21 @@ class Policy:
         self.log('gate-did-not-settle', passes=self.c['gate_passes'], used=len(raws))
         return {t['hash']: raw for t, raw in zip(stats, raws)}, stats
 
-    def large_gas(self):
-        """Gas used from which a transaction counts as large: half the gas of the smallest transaction ever found over
-        the budget alone (a measured verdict), and never above `max_tx_gas` (agents/243 A243-3). A transaction can only be
-        over the cycle limit alone if its gas used is at least some G* fixed by the guest's worst instructions per gas,
-        so this threshold never falls below G*/2 and each offender that is small enough to count as small halves it:
-        about log2(5M / G*) such offenders in the life of the chain, not per block."""
-        return max(min(int(self.state.get('large_gas', self.c['max_tx_gas'])), int(self.c['max_tx_gas'])), 1)
+    def large_gas(self, now=None):
+        """Gas used from which a transaction counts as large: half the gas of the smallest offender that counted as
+        small (a measured verdict), doubling back once per `large_gas_recovery_seconds` without one, between
+        `large_gas_floor` and `max_tx_gas` (agents/243 A243-3). A transaction can only be over the budget alone if its
+        gas used is at least some G* fixed by the guest's worst cost per gas (about 245-280k measured, KZG), so each
+        offender small enough to count as small halves the threshold: a few per week, not per block. The floor keeps one
+        odd verdict (the complete fallback guest witnesses whole accounts, so a small transaction can be over there)
+        from moving every transaction into the large group, where standing comes first again."""
+        now = self.clock() if now is None else now
+        ceiling = int(self.c['max_tx_gas'])
+        value = int(self.state.get('large_gas', ceiling))
+        at = self.state.get('large_gas_at')
+        if isinstance(at, (int, float)) and not isinstance(at, bool) and now > at:
+            value <<= min(int((now - at) // self.c['large_gas_recovery_seconds']), 32)
+        return max(min(value, ceiling), min(int(self.c['large_gas_floor']), ceiling), 1)
 
     def try_order(self, stats, now, large_gas=None, degraded=False):
         """The order candidates are tried in (3.4; agents/243 A243-1..3 on top of agents/223 F223-4).
@@ -326,7 +339,7 @@ class Policy:
           place follows its next transaction."""
         exempt = set(self.c['write_limit_exempt_senders'])
         horizon = now - self.c['standing_seconds']
-        large = self.large_gas() if large_gas is None else large_gas
+        large = self.large_gas(now) if large_gas is None else large_gas
 
         def tier(sender):
             return 0 if sender in exempt or self.state['standing'].get(sender, -math.inf) > horizon else 1
@@ -410,7 +423,7 @@ class Policy:
         info = {t['hash']: t for t in stats}
         # `dry` runs without the block's transaction cap, so that the producer's tip order cannot push a sender with
         # standing out of the candidates before the tiers apply; the cap applies here, to the try order.
-        large = self.large_gas()  # this block's threshold: also lowered by runs without cost, which persist nothing
+        large = self.large_gas(now)  # this block's threshold: also lowered by runs without cost, which persist nothing
         remaining = self.try_order(stats, now, large)
         plan.held.extend((name, 'block-limits') for name in remaining[self.c['max_block_txs']:])
         remaining = remaining[:self.c['max_block_txs']]
@@ -460,7 +473,7 @@ class Policy:
                 # F223-4, A243-3: an offender in this block. A measured verdict lowered `large_gas` in the state; a run
                 # without cost lowers it for this block only (a failing host must not move it for good).
                 if int(tx['gas_used']) < large:
-                    large = min(self.large_gas(), max(int(tx['gas_used']) // 2, 1))
+                    large = min(self.large_gas(now), max(int(tx['gas_used']) // 2, int(self.c['large_gas_floor'])))
                 degraded = True
                 remaining = self.degraded_order(remaining, info, now, large)
         plan.held.extend((h, 'not-reached') for h in remaining)
@@ -512,7 +525,7 @@ class Policy:
             # The run hit the cycle limit, at least twice the instruction budget, on top of a mandatory base that fits
             # the budget: the transaction's own share is over the budget in any block. A measured fact: quarantine.
             self._quarantine(plan, tx, 'over-cycle-limit', now)
-            self._lower_large_gas(tx)
+            self._lower_large_gas(tx, now)
             return True
         if measured(alone):
             share_sp1 = alone.sp1_gas - plan.base.sp1_gas + int(self.state['empty_base'])
@@ -523,7 +536,7 @@ class Policy:
                 plan.held.append((name, 'mandatory-fills-the-block'))
                 return True
             self._quarantine(plan, tx, 'over-budget-alone', now)
-            self._lower_large_gas(tx)
+            self._lower_large_gas(tx, now)
             return True
         # No cost and no cycle-limit verdict.
         if not host_ok():
@@ -542,13 +555,13 @@ class Policy:
         plan.held.append((name, 'unmeasured'))
         return True
 
-    def _lower_large_gas(self, tx):
+    def _lower_large_gas(self, tx, now):
         """A measured verdict (over the cycle limit, or over the budget alone): from now on, transactions of at least
         half this one's gas used are tried after the small ones (A243-3). Persisted with the state. Only an offender
         that counted as small moves it: a large one was already behind every small transaction."""
         gas = int(tx['gas_used'])
-        if gas < self.large_gas():
-            self.state['large_gas'] = max(gas // 2, 1)
+        if gas < self.large_gas(now):
+            self.state['large_gas'], self.state['large_gas_at'] = max(gas // 2, 1), now
 
     def _quarantine(self, plan, tx, reason, now):
         """Quarantine binds the sender, not the bytes: the sender is banned for `sender_ban_seconds` and loses standing,

@@ -403,6 +403,24 @@ class A243_11WritePriceAtTheSuggestedTip(SlotWorld):
         self.assertIn('approve', served)
 
 
+class A243_7bLargeGasFloorAndRecovery(RealTime):
+    def test_one_odd_small_verdict_does_not_move_the_threshold_below_the_floor(self):
+        self.add('odd', 'mallory', 0, 30_000, 101, tip=100 * GWEI)  # over alone (a fallback-guest witness, say)
+        self.block()
+        self.assertEqual(self.policy.large_gas(), sp.DEFAULTS['large_gas_floor'])
+
+    def test_the_threshold_recovers_by_doubling_each_week_across_restarts(self):
+        self.add('kzg', 'mallory', 0, 280_000, 101, tip=100 * GWEI)
+        self.block(advance=0)
+        self.assertEqual(self.policy.large_gas(), 140_000)
+        self.now += 7 * 86400
+        self.assertEqual(self.make_policy().large_gas(), 280_000)
+        self.now += 14 * 86400
+        self.assertEqual(self.make_policy().large_gas(), 1_120_000)
+        self.now += 365 * 86400
+        self.assertEqual(self.make_policy().large_gas(), sp.DEFAULTS['max_tx_gas'])
+
+
 class A243_8PlanStateSurvivesAFailedExtend(SettlerHarness):
     """A243-8 (Low). The plan's verdicts (quarantine ban, failure counts, waits) lived only in memory until
     `committed`. When the final `extend` is refused, the settler retries the block with deposits only and never calls
