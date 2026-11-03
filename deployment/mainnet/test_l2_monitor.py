@@ -678,6 +678,39 @@ class MonitorTests(unittest.TestCase):
         m.check_units(['settler=settler.service'], m.PROFILES['mainnet'], NOW, runner, r)
         self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
 
+    def test_reorg_recoveries_alert_each_time(self):
+        stamp = lambda age: m.datetime.datetime.fromtimestamp(NOW - age, m.datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        ev = lambda age, kind='reorg-recovered': json.dumps({'time': stamp(age), 'event': kind, 'accepted': 5,
+                                                             'database_head': 9})
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d, 'settler.log')
+            log.write_text(ev(90000) + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertNotIn('reorg_recoveries[settler]', [c['check'] for c in r.checks])
+            log.write_text(ev(7200, 'reorg-detected') + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'reorg_recoveries[settler]'), 'WARN')
+            log.write_text(ev(7200, 'reorg-detected') + '\n' + ev(7100) + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'reorg_recoveries[settler]'), 'WARN')
+            self.assertIn('accepted L2 block 5, database head 9', next(c['message'] for c in r.checks
+                                                                       if c['check'] == 'reorg_recoveries[settler]'))
+            self.assertEqual(level(r, 'events[settler]'), 'OK')
+            log.write_text(ev(7100) + '\n' + ev(60) + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'reorg_recoveries[settler]'), 'CRIT')
+            log.write_text(ev(60, 'reorg-limit') + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'reorg_recoveries[settler]'), 'CRIT')
+            self.assertIn('limit reached', next(c['message'] for c in r.checks if c['check'] == 'reorg_recoveries[settler]'))
+            # Agent 206: a resubmission alert waits (WARN); a restore of the kept database counts as a recovery.
+            log.write_text(ev(7200, 'reorg-resubmitting') + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'reorg_recoveries[settler]'), 'WARN')
+            log.write_text(ev(7100) + '\n' + ev(60, 'reorg-restored') + '\n')
+            r, _ = run(healthy(), '--event-log', f'settler={log}')
+            self.assertEqual(level(r, 'reorg_recoveries[settler]'), 'CRIT')
+
     def test_repeated_warn_events_escalate(self):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d, 'settler.log')

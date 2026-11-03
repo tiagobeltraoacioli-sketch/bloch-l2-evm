@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The settler installer's runuser path, its configure retry, its pins and its prepare step. No root, no RPC."""
 import hashlib
+import json
 import importlib.util
 import json
 from pathlib import Path
@@ -154,6 +155,22 @@ class Installer(unittest.TestCase):
             self.assertEqual(unit.read_text(), text)
         self.assertEqual([c.args[0][:2] for c in run.call_args_list][-2:], [['systemctl', 'daemon-reload'],
                                                                             ['systemctl', 'enable']])
+
+    def test_reorg_recovery_is_off_unless_asked_for(self):
+        config, _ = self.configured([])
+        self.assertIn('foreign_recovery', config)
+        self.assertNotIn('reorg_recovery', config)
+
+    def test_reorg_recovery_flag(self):
+        with self.assertRaisesRegex(AssertionError, 'needs foreign recovery'):
+            self.configured(['--reorg-recovery', '--no-foreign-recovery'])
+        config, _ = self.configured(['--reorg-recovery'])
+        self.assertEqual(config['reorg_recovery'], config['foreign_recovery'])
+        (self.etc / 'config.json').unlink()
+        config, _ = self.configured(['--reorg-recovery', '--follower-state', '/var/lib/f/native',
+                                     '--follower-status', '/var/lib/f/status.json'])
+        self.assertEqual(config['reorg_recovery'], {'follower_state': '/var/lib/f/native',
+                                                    'follower_status': '/var/lib/f/status.json'})
 
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)

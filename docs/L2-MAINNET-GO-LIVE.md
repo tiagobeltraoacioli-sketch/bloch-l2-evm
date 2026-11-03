@@ -173,11 +173,11 @@ No other kit file names the release. `verify_release_signature.py` reads the rel
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `dfc3e8b8be1e6d95ed33d50ad69585ca358e33caad8c769dedd948d3fd31c994` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `4a98ad1b4278328e75400b989772af27c2492dfe2cef93bb0fe357a12cb30478` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b4c08e7f0fda112cdab824c6aa5adc76dc8e79189ae779322e0b71be468f4913` |
-| `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/devnet/settler_v3.py` | `d98718425e48d45283b382c6a1d2893e2c7721e6fc0ce94ea2fbc0052a7c7adc` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `a5fab5ae2a7eb8fbc050ddc6be7d85fa0db94fc696203e14b31b506a27b45bbc` (agents 155 M-1/L-3, 193 D17/M1) |
+| `deployment/mainnet/install-settler-mainnet.py` | `c7e948560d0f5713dd3089de4182a98a00b0f58b45c8345807fd79ff822994c7` (agents 155 M-1/L-3, 193 D17/M1) |
 | `deployment/devnet/remote_prover.py` | `601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `a1033ce4e4eca3ad6cbdc7303c66099722963541686571ddcebd3e3d55442cee` (agent 155 M-2: pins the SP1 host too) |
 | `deployment/mainnet/install-shadow.sh` | `5eb5437b7f518a118483a5a3eca1870e6044e457ddf6c78d464e05d9a79242df` (agent 155 H-1/L-1) |
@@ -185,7 +185,7 @@ No other kit file names the release. `verify_release_signature.py` reads the rel
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `70d565a9d88a30ae192aa2d45738fb7132a2c4939374eedfe538fff8ed490493` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`) |
 | `deployment/mainnet/follower-rpc/install.sh` | `45eb83cd52e5356907141a0c8bf8f0dcd9171df156b6b9de6da44bc82a7680de` (agent 159: refuses an unsigned release) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/l2_monitor.py` | `2cc61e393100529cff874f7c864dbf738798ff2fdd2116e0e6aa312219c5ccff` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l2_monitor.py` | `acca13d950dc99d16834d1fd89cc8541b7d583d7b4cba192d5a76aaec60fe2e2` (agents 157, 187 F1, 198) |
 | `deployment/mainnet/l1_monitor.py` | `1632d18a63ef2b14505f5f805e06f438d977aaff507b28b432346638b3f1f744` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
@@ -387,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `dfc3e8b8be1e6d95ed33d50ad69585ca358e33caad8c769dedd948d3fd31c994` (§3.2) (§3.2) (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `4a98ad1b4278328e75400b989772af27c2492dfe2cef93bb0fe357a12cb30478` (§3.2) (§3.2) (§3.2), `artifacts/SHA256SUMS` to `116bfaba…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 17383feb, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 124 ran it on a 45.77 build; agent 65 on both 209 builds);
 - `build.json` shows `l2_commit` 17383feb…, `l2_tracked_changes: 0`.
 
