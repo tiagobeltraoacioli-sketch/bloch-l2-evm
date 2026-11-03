@@ -1970,3 +1970,6 @@ fn witness_malleability_does_not_reach_the_statement() {
         execute_settlement_statement_v3_sparse(&chain.spec, MAINNET_DOMAIN, &changed, &context, &body, settlement, BlockHashes::Lazy).unwrap();
     assert_eq!(got.encode(), expected.encode());
 }
+#[cfg(test)]
+#[path = "review_b.rs"]
+mod review_b;
