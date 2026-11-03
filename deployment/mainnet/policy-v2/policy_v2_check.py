@@ -250,7 +250,8 @@ def s2():
 def s3():
     # S3. mallory's 4.9M-gas modexp call times out (20 s, as settler_check's forced timeout). After every block she replaces
     # it with the same nonce and a 10% higher tip (what the RPC admits), so the 2/4/8 wait never applies.
-    s.c.update(max_block_sp1_gas=30_000_000, max_block_instructions=30_000_000, preflight_execute_seconds=20,
+    s.c.update(max_block_sp1_gas=30_000_000, max_block_instructions=30_000_000,
+               preflight_execute_seconds=int(os.environ.get('S3_PREFLIGHT_SECONDS', 20)),  # ADAPTED (a223): 60 in v2
                preflight_max_seconds=180)  # ADAPTED (a223): cycle limit 60M instructions
     timeouts = []
     real_measure = s.measure_block
@@ -356,7 +357,8 @@ def s5():
 def s6():
     # S6 (agent 135, review_r9_tip.py). ADAPTED (a223): three senders resend a 4.9M-gas modexp at a 100 gwei tip they never
     # pay, against an honest 1 gwei transfer; v2 budget 30M with the cycle limit 60M.
-    s.c.update(max_block_sp1_gas=30_000_000, max_block_instructions=30_000_000, preflight_execute_seconds=30,
+    s.c.update(max_block_sp1_gas=30_000_000, max_block_instructions=30_000_000,
+               preflight_execute_seconds=int(os.environ.get('S6_PREFLIGHT_SECONDS', 30)),
                preflight_max_seconds=180)
     alice = (1 << 206) | 1
     A6 = g.address(alice)
