@@ -578,13 +578,27 @@ class MonitorTests(unittest.TestCase):
     def test_forced_queue_is_reported_once_enabled_and_warns_above_the_doubling(self):
         w = healthy()
         self.assertNotIn('forced_queue', {c['check'] for c in run(w)[0].checks})
-        for weight, expected in ((0, 'OK'), (32, 'OK'), (33, 'WARN'), (256, 'CRIT')):
+        for weight, expected in ((0, 'OK'), (23, 'OK'), (24, 'WARN'), (256, 'CRIT')):
             for node in w['l1'].values():
                 node['l2']['forced'] = {'queued': 5, 'consumed': 4, 'pending': 1, 'pending_weight': weight,
                                         'max_pending_weight': 256, 'due': [], 'next_surcharge_sat': '1000'}
             r, _ = run(w)
             self.assertEqual(level(r, 'forced_queue'), expected, weight)
         self.assertEqual(r.facts['forced_queue']['pending_weight'], 256)
+        self.assertEqual(r.facts['forced_queue']['drain_settlements'], 19)
+
+    # Native bloch-pos-committee `forced_pricing_matches_the_golden_vector` (agent 215): the same rows, byte for byte.
+    FORCED_PRICING_VECTOR = [
+        (0, 1, 1_000), (0, 14, 14_000), (23, 14, 27_000), (100, 3, 48_000), (232, 14, 10_240_000),
+        (242, 14, 14_336_000), (229, 27, 22_016_000), (255, 1, 1_024_000),
+    ]
+
+    def test_forced_pricing_matches_the_native_golden_vector(self):
+        self.assertEqual([(p, u, m.forced_surcharge_sat(p, u)) for p, u, _ in self.FORCED_PRICING_VECTOR],
+                         self.FORCED_PRICING_VECTOR)
+        self.assertIsNone(m.forced_surcharge_sat(256, 1))
+        self.assertIsNone(m.forced_surcharge_sat(0, 0))
+        self.assertEqual((m.FORCED_UNITS_PER_SETTLEMENT, m.FORCED_MAX_PENDING_WEIGHT, m.FORCED_SURCHARGE_DOUBLING), (14, 256, 24))
 
     def test_the_forced_inclusion_gate_is_compared_with_the_l2_build(self):
         self.assertEqual(m.GATE_CONSTANTS['l2_forced_inclusion'], 'L2_FORCED_INCLUSION_EPOCH')

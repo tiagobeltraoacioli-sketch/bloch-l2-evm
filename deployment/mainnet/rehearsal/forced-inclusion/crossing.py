@@ -343,16 +343,18 @@ def forced_view():
 def forced_submit(envelope, label, gas=FORCED_GAS):
     """Wrap a signed L2 envelope in an L1 0x1C forced transaction, paid by the wallet, and wait for its inclusion."""
     before = wallet_input()
-    unit = forced_view()['next_surcharge_sat']
+    queue = forced_view()
+    unit, depth = queue['next_surcharge_sat'], queue['pending_weight']
     unsigned, signed = R / f'forced-{label}-unsigned.hex', R / f'forced-{label}.hex'
     run(BIN, 'l2-forced', 'prepare', '--genesis', R / 'genesis.blg', '--funding-pubkey', R / 'wallet.pubkey.hex',
         '--input', f"{before['txid']}:{before['vout']}:{before['value_sat']}", '--envelope', envelope, '--gas', gas,
-        '--surcharge-unit-sat', unit, '--base-fee', l1('getchaininfo')['next_base_fee_millisat_per_gas'], '--tip', 0,
+        '--pending-weight', depth, '--base-fee', l1('getchaininfo')['next_base_fee_millisat_per_gas'], '--tip', 0,
         '--out', unsigned)
     run(BIN, 'l2-forced', 'sign', '--genesis', R / 'genesis.blg', '--tx', unsigned, '--dir', R / 'wallet', '--out', signed)
     result = l1('sendrawtransaction', signed.read_text().strip())
     until(f'forced transaction {label} included', lambda: wallet_input() != before, 300, 2)
-    note('forced transaction included', label=label, result=result, height=l1('getchaininfo')['height'], surcharge_unit=unit)
+    note('forced transaction included', label=label, result=result, height=l1('getchaininfo')['height'], surcharge_unit=unit,
+         pending_weight=depth)
     return result
 
 
