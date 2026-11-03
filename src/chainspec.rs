@@ -145,6 +145,13 @@ pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = None;
 /// it, so no next-rules release can carry it.
 pub const REHEARSAL_FEE_SWEEP_RECIPIENT: Address = Address::new(hex!("00000000000000000000000000000000000fee01"));
 
+/// REHEARSAL ONLY: the configuration commitment of [`ChainSpec::mainnet_rehearsal`]
+/// built with the `forced-inclusion` feature (tag 4: the 0.1 gwei floor and the
+/// forced bounds). Tests that pin "the next configuration" compare with it while
+/// the owner's recipient is unset; `set-sweep-recipient.py` reproduces it.
+#[rustfmt::skip]
+pub const REHEARSAL_CONFIGURATION_FORCED: B256 = B256::new(hex!("50ccc8c9f20a7396ac9c9c5e44e9f80ffece8a26dc0c2dc0127fcf88d5fe27b4"));
+
 /// Whether a sweep recipient burns what the sweep sends (agent 163, B-2): the
 /// zero address and the Cancun precompiles `0x01` to `0x0a`. No one can ever
 /// spend a balance there, and `0x09` (blake2f) reverts on the sweep's empty

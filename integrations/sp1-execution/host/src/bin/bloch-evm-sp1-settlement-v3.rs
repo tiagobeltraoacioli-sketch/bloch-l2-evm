@@ -654,10 +654,9 @@ mod tests {
         let q = expect_in(&next, MAINNET_DOMAIN, fixture::fixture_empty_in(&next, MAINNET_DOMAIN).unwrap(), synthetic_context_for(program, 0))
             .unwrap();
         assert_eq!(q.forced, Some(Vec::new()));
-        assert_eq!(
-            format!("{:x}", q.expected.base.configuration),
-            "b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d"
-        );
+        if !bloch_l2_evm::chainspec::MAINNET_NEXT_RULES_RELEASABLE {
+            assert_eq!(q.expected.base.configuration, bloch_l2_evm::chainspec::REHEARSAL_CONFIGURATION_FORCED);
+        }
         let v1 = ChainSpec::mainnet_v1();
         assert!(!forced_fallback(&v1));
         let q = expect_in(&v1, MAINNET_DOMAIN, fixture::fixture_empty_in(&v1, MAINNET_DOMAIN).unwrap(), synthetic_context_for(program, 0))

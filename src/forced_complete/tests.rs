@@ -222,11 +222,13 @@ fn forced_records_run_first_bind_the_statement_and_cover_skipped_senders() {
         crate::data_availability::block_da_commitment(f.chain.spec.chain_id, context.number, &body.transactions[2..]).unwrap()
     );
     assert_eq!(configuration_commitment(&f.chain.spec).unwrap(), s.base.configuration);
-    assert_eq!(
-        format!("{:x}", s.base.configuration),
-        "b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d",
-        "the fallback names the forced next configuration (tag 4), the one PROGRAM_NEXT names"
-    );
+    if !crate::chainspec::MAINNET_NEXT_RULES_RELEASABLE {
+        assert_eq!(
+            s.base.configuration,
+            crate::chainspec::REHEARSAL_CONFIGURATION_FORCED,
+            "the fallback names the forced next configuration (tag 4), the one the sparse guest names"
+        );
+    }
     // The plain complete statement of the same block differs: it does not bind the records.
     let plain = execute_settlement_statement_v3(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1)).unwrap();
     assert_ne!(plain.encode(), s.encode());

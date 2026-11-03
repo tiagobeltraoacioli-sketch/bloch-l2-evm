@@ -15,7 +15,7 @@ POLICY = '154869964f89b4a5536f169ad6a4b17d0455ecace0891521356c554e32e5747d'
 DOMAIN = '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733'
 # `bloch-evm-sp1-settlement-v3 --mainnet --sparse identity` of the candidate host on 78c533fa (values of agent 115) (2026-11-02, 45.77).
 SPARSE = {'program': 'settlement_v3_mainnet_sparse', 'chain_id': 700770, 'domain': DOMAIN,
-          'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+          'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
           'elf_keccak': '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
           'vkey_koalabear': '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
           'vkey_bn254': '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910',

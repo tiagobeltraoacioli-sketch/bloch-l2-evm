@@ -154,7 +154,10 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # Fork candidate (agent 218): a proof wasted at a program gate, the schedule unusable (fail-safe
                          # path), an L1 reorganization across the gate; the shadow waiting on a rule set L1 does not justify.
                          'program-moved-before-submit', 'program-moved-after-submit', 'program-schedule-unusable',
-                         'waiting-for-program', 'shadow-rules-wait'})
+                         'waiting-for-program', 'shadow-rules-wait',
+                         # Forced inclusion (agent 137, merged in fork candidate v3): the rehearsal-only censor_senders
+                         # knob moved a spooled transaction aside. Refused on mainnet, so any sighting is a warning.
+                         'tx-censored'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

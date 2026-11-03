@@ -1299,11 +1299,16 @@ mod forced_configuration_tests {
         assert!(next.forced_inclusion);
         let forced = configuration_commitment(&next).unwrap();
         let plain = configuration_commitment(&ChainSpec { forced_inclusion: false, ..next.clone() }).unwrap();
-        assert_eq!(format!("{forced:x}"), "b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d");
-        // Without forced inclusion the next rules keep agent 115's configuration.
-        assert_eq!(format!("{plain:x}"), "975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878");
+        // While the owner's recipient is unset these are the rehearsal rules (placeholder recipient, 0.1 gwei
+        // floor): tag 4 with the forced bounds, and without forced inclusion 217's rehearsal value.
+        if !crate::chainspec::MAINNET_NEXT_RULES_RELEASABLE {
+            assert_eq!(forced, crate::chainspec::REHEARSAL_CONFIGURATION_FORCED);
+            assert_eq!(format!("{plain:x}"), "9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764");
+            assert_eq!(ChainSpec::mainnet_rules_for(forced), None, "the rehearsal rules are not a mainnet rule set");
+        } else {
+            assert_eq!(ChainSpec::mainnet_rules_for(forced), Some(next));
+        }
         assert_ne!(forced, plain);
-        assert_eq!(ChainSpec::mainnet_rules_for(forced), Some(next));
         // Forced inclusion needs the next rules.
         assert!(configuration_commitment(&ChainSpec { forced_inclusion: true, ..ChainSpec::mainnet_v1() }).is_err());
     }

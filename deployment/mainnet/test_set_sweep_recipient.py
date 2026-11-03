@@ -21,19 +21,19 @@ PLACEHOLDER = '00000000000000000000000000000000000fee01'
 PLACEHOLDER_CFG = '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878'  # legacy: placeholder, no floor
 REHEARSAL_CFG = '9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764'  # placeholder + 0.1 gwei floor
 FLOOR = 100_000_000
+THROWAWAY_FORCED_CFG = 'aa153f4ba3a4d1a60809b9701bf3e0ebec0046cbfd6882397442426d2227ae2e'  # throwaway + floor + forced bounds
 THROWAWAY = '14c0aeb5497a4e506b6c12556718be957302d96d'
-OLD = {  # the candidate pins of d462647 / f12b4113
-    'sparse': ('78c533fab3669e491d409f1c0d92e736ee0389e8e6fd7b64da3a7e3f69d37bea',
-               '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
-               '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
-               '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910'),
-    'complete': ('3ad3a4f02b6f03768674de8804934064cc9f8f0b47fedbe0456dce79ddaa53b3',
-                 'c9f8cd40b703b47c1fdfb183c223da9977ac9839e3d1c436c28c9b7f331aacf8',
-                 '792452aa47ddaef1523907c03c39d3917df21180585eec804b27841626027d60',
-                 '00f248a5551f76bbc691c83e03c39d391fbe42301617bb202593c20b26027d60'),
-}
+# Forced inclusion in the next rules (agents 137/215/216): the tree's next configuration is the version 4 value.
+TREE_FORCED = m.current_forced(L2)
+PLACEHOLDER_CFG_V3 = PLACEHOLDER_CFG
+FORCED_PLACEHOLDER_CFG = 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d'  # agent 137's pins
+if TREE_FORCED:
+    PLACEHOLDER_CFG = FORCED_PLACEHOLDER_CFG
+# The tree's own candidate pins (sparse = native PROGRAM_NEXT, complete = PROGRAM_FALLBACK), read from the settler.
+OLD = {kind: tuple(m.settler_pin(L2, pin)[k] for k in ('guest_sha256', 'elf_keccak', 'vkey_koalabear', 'vkey_bn254'))
+       for kind, pin in (('sparse', 'MAINNET_NEXT_SPARSE'), ('complete', 'MAINNET_NEXT'))}
 NATIVE = f'''pub mod mainnet {{
-    /// guest ELF SHA-256 `78c533fa…7bea` (3 218 240 bytes). The state
+    /// guest ELF SHA-256 `{OLD['sparse'][0][:8]}…{OLD['sparse'][0][-4:]}` (3 218 240 bytes). The state
     /// The configuration carries a PLACEHOLDER fee-sweep recipient, `TBD-owner`,
     /// and the guest is a candidate, so these values are examples until
     pub const PROGRAM_NEXT: NextProgram = NextProgram {{
@@ -45,7 +45,7 @@ NATIVE = f'''pub mod mainnet {{
         ],
         proof_policy: h32("{m.PROOF_POLICY}"),
     }};
-    /// witness under the same rules, guest ELF SHA-256 `3ad3a4f0…53b3`
+    /// witness under the same rules, guest ELF SHA-256 `{OLD['complete'][0][:8]}…{OLD['complete'][0][-4:]}`
     /// (3 073 328 bytes). It replaces `44d4c9d7…ce47`.
     pub const PROGRAM_FALLBACK: NextProgram = NextProgram {{
         identities: [
@@ -76,13 +76,17 @@ class Commitment(unittest.TestCase):
     def test_keccak_and_both_known_commitments(self):
         self.assertEqual(m.keccak256(b'').hex(), 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470')
         self.assertEqual(m.configuration_commitment(), m.ACTIVATED_CONFIGURATION)
-        self.assertEqual(m.configuration_commitment(PLACEHOLDER), PLACEHOLDER_CFG)
+        self.assertEqual(m.configuration_commitment(PLACEHOLDER), PLACEHOLDER_CFG_V3)
+        self.assertEqual(m.configuration_commitment(PLACEHOLDER, 0, True), FORCED_PLACEHOLDER_CFG)
+        self.assertEqual(m.configuration_commitment(PLACEHOLDER, FLOOR, True), m.REHEARSAL_CONFIGURATION_FORCED)
+        # Rust: chainspec::tests::rehearsal_configuration_matches_the_sweep_script, forced-inclusion feature.
+        self.assertEqual(m.configuration_commitment(THROWAWAY, FLOOR, True), THROWAWAY_FORCED_CFG)
         self.assertEqual(m.configuration_commitment(PLACEHOLDER, FLOOR), REHEARSAL_CFG)
         self.assertEqual(m.REHEARSAL_CONFIGURATION, REHEARSAL_CFG)
         # Rust: chainspec::tests::rehearsal_configuration_matches_the_sweep_script pins the same value.
         self.assertEqual(m.configuration_commitment(THROWAWAY, FLOOR),
                          '7df770a35ce805982f12f552490337a77e842788ed3ab444fe42e35e6b3c1618')
-        self.assertNotEqual(m.configuration_commitment(THROWAWAY), PLACEHOLDER_CFG)
+        self.assertNotEqual(m.configuration_commitment(THROWAWAY), PLACEHOLDER_CFG_V3)
 
     def test_this_tree_is_gated(self):
         self.assertEqual(m.current_floor(L2), FLOOR)
@@ -115,7 +119,7 @@ class Steps(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.l2, self.native = self.tmp / 'l2', self.tmp / 'native'
-        for rel in (m.CHAINSPEC, m.SETTLER, m.BUILD_RELEASE, *m.CROSSINGS, *m.GUESTS, 'docs/AUDIT-SCOPE-SPARSE.md',
+        for rel in (m.CHAINSPEC, m.FORCED_FILE, m.SETTLER, m.BUILD_RELEASE, *m.CROSSINGS, *m.GUESTS, 'docs/AUDIT-SCOPE-SPARSE.md',
                     'deployment/mainnet/SETTLER-RUNBOOK.md', 'deployment/mainnet/prover/install-prover-mainnet.py',
                     'deployment/mainnet/install-settler-mainnet.py', 'deployment/mainnet/test_make_native_program.py'):
             (self.l2 / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -149,8 +153,9 @@ class Steps(unittest.TestCase):
         return 0
 
     def test_one_pass(self):
-        new_cfg = m.configuration_commitment(THROWAWAY, FLOOR)
+        new_cfg = m.configuration_commitment(THROWAWAY, FLOOR, TREE_FORCED)
         self.assertEqual(self.gate(), 3, 'an unset tree is refused')
+        before = sorted(self.grep(PLACEHOLDER_CFG))
         run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native, '--dry-run')
         self.assertTrue(self.grep(PLACEHOLDER_CFG), 'dry run changes nothing')
         self.assertEqual(self.gate(), 3)
@@ -161,7 +166,12 @@ class Steps(unittest.TestCase):
         self.assertIn(f'Option<Address> = Some(Address::new(hex!("{THROWAWAY}")));', (self.l2 / m.CHAINSPEC).read_text())
         # settler, prover, 2 crossings, make_native test, audit scope, native, and chainspec.rs (its Rust test pins
         # the throwaway configuration as the cross-check of this script)
-        self.assertEqual(len(self.grep(new_cfg)), 8)
+        if TREE_FORCED:
+            # Forced next rules: every file that pinned agent 137's forced placeholder configuration now pins the
+            # throwaway's (the Rust tests pin the rehearsal values, never the placeholder candidate pins).
+            self.assertEqual(sorted(self.grep(new_cfg)), before)
+        else:
+            self.assertEqual(len(self.grep(new_cfg)), 8)
         self.assertIn(m.eip55(THROWAWAY), (self.native / m.NATIVE_PINS).read_text())
         self.assertNotIn('UNSET', (self.l2 / m.CHAINSPEC).read_text().split('MAINNET_FEE_SWEEP_RECIPIENT: Option')[0][-1400:])
         self.assertIn('nothing to change', run('apply', THROWAWAY, '--l2', self.l2, '--native', self.native))
@@ -241,7 +251,7 @@ class Steps(unittest.TestCase):
             log = subprocess.run(['git', '-C', str(tree), 'log', '-1', '--format=%s'], capture_output=True, text=True).stdout
             self.assertIn(m.eip55(THROWAWAY), log)
         self.assertEqual(m.settler_pin(self.l2, 'MAINNET_NEXT_SPARSE')['configuration'],
-                         m.configuration_commitment(THROWAWAY, FLOOR))
+                         m.configuration_commitment(THROWAWAY, FLOOR, TREE_FORCED))
         self.assertIn('nothing to change', run('set', '0x' + THROWAWAY, '--l2', self.l2, '--native', self.native))
         with self.assertRaises(SystemExit):
             run('set', '0x' + PLACEHOLDER, '--l2', self.l2, '--native', self.native)

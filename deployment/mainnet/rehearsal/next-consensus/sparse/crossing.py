@@ -54,7 +54,7 @@ BASE_PROGRAM = {'configuration': '8ec1c804e67190434fdf72b723103d26938797e90e1b65
                 'vkey_bn254': '007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e'}
 # a115: the next program is the sparse-witness guest 78c533fa (pinned container build of b772f2d).
 # Agent 89's native PROGRAM_NEXT still names 75b9c635 and must move with it.
-NEXT_PROGRAM = {'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+NEXT_PROGRAM = {'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
                 'elf_keccak': '1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0',
                 'vkey_koalabear': '7e5b3c3345608ab36aced4db40f7692147a3fca80ace7a285bc335f342ee5910',
                 'vkey_bn254': '00fcb6786715822acf5676a6dc0f769218f47f9502b39e8a2de19af9c2ee5910'}

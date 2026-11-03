@@ -52,7 +52,7 @@ BASE_PROGRAM = {'configuration': '8ec1c804e67190434fdf72b723103d26938797e90e1b65
                 'elf_keccak': '6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073',
                 'vkey_koalabear': '389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e',
                 'vkey_bn254': '007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e'}
-NEXT_PROGRAM = {'configuration': '975ec2585246abeaea86421dd5726918b632dd91a246f635fe74990b68bcd878',
+NEXT_PROGRAM = {'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
                 'elf_keccak': 'f3c20f71b84bb09cbab76a75c83a62c507fbefff4b347f787ef2d89aceb6f2b8',
                 'vkey_koalabear': '50bd69a513f2463e748a8a62277bc25a08df69a4420a660e2a2ee3f957dca9f7',
                 'vkey_bn254': '00a17ad34a4fc918fba454531277bc25a11bed3490829983951771fcd7dca9f7'}

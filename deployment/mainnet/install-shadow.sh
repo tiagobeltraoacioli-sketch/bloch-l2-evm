@@ -44,11 +44,11 @@ PRODUCE_SHA256=425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78
 SEQUENCER_SHA256=e148306b18944a0d798e1de3c376d97d1fec1770540e641250712c3f29ec1915
 NATIVE_COMMIT=f12b4113bfcba79ab21181cf5128602fc9550bb4
 NATIVE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
-# The programs that run the next rules: native PROGRAM_NEXT (sparse guest 78c533fa...) and PROGRAM_FALLBACK
-# (complete guest 3ad3a4f0...), i.e. settler_v3.py MAINNET_NEXT_SPARSE and MAINNET_FALLBACK. CANDIDATE: they move with
+# The programs that run the next rules: native PROGRAM_NEXT (forced sparse guest bc35e838...) and PROGRAM_FALLBACK
+# (forced complete guest 7fd7f3c0...), i.e. settler_v3.py MAINNET_NEXT_SPARSE and MAINNET_FALLBACK. CANDIDATE: they move with
 # the fee-sweep recipient (TBD-owner) and the final ELFs.
-NEXT_ELF_KECCAK=1f755262230baf9f1fded98a698cd3e31aa7f23a146116d4bd7e21e2bee2a5e0
-FALLBACK_ELF_KECCAK=c9f8cd40b703b47c1fdfb183c223da9977ac9839e3d1c436c28c9b7f331aacf8
+NEXT_ELF_KECCAK=1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18
+FALLBACK_ELF_KECCAK=d95185a60668b0d4e1da49be00d85b9c550b412f13c5155be454e72889f90bf1
 SETTLER_CONFIG=/etc/bloch-l2-mainnet-settler/config.json
 UNIT=bloch-l2-mainnet-shadow.service
 OPT=/opt/bloch/l2-mainnet-shadow

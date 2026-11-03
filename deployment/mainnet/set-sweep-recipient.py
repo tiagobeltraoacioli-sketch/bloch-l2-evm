@@ -120,13 +120,26 @@ PLACEHOLDER = '00000000000000000000000000000000000fee01'
 # configuration_commitment(ChainSpec::mainnet_rehearsal()) with the 0.1 gwei floor; pinned on the Rust side by
 # chainspec::tests::rehearsal_configuration_matches_the_sweep_script.
 REHEARSAL_CONFIGURATION = '9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764'
+# With L1 forced inclusion in the next rules (agents 122/137/215/216; `forced_inclusion: true` in
+# ChainSpec::mainnet, core feature `forced-inclusion`) the commitment is `BLOCH:EVM:CONFIG:4:CANCUN`: the version 3
+# fields, the floor, then the forced bounds of src/forced_inclusion.rs. The guests of the next rules (sparse and the
+# 216 fallback) are built with that feature, so their configuration is the version 4 value.
+FORCED_BOUND_NAMES = ('MAX_PER_SETTLEMENT', 'MIN_GAS', 'MAX_GAS', 'MAX_GAS_PER_SETTLEMENT', 'MAX_ENVELOPE_BYTES')
+FORCED_BOUNDS = (16, 21_000, 300_000, 300_000, 8 * 1024)
+FORCED_FILE = 'src/forced_inclusion.rs'
+# The forced candidate pins of agent 137 (placeholder, no floor) and the forced rehearsal value (floor 0.1 gwei).
+LEGACY_PLACEHOLDER_CONFIGURATION_FORCED = 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d'
+REHEARSAL_CONFIGURATION_FORCED = '50ccc8c9f20a7396ac9c9c5e44e9f80ffece8a26dc0c2dc0127fcf88d5fe27b4'
 
 
-def configuration_commitment(recipient=None, min_base_fee=0):
+def configuration_commitment(recipient=None, min_base_fee=0, forced=False):
     """`proof_statement::configuration_commitment` of mainnet_v1 (recipient None) or of mainnet() with that
     recipient and floor. A floor of 0 gives the layout before agent 197's floor (the legacy candidate pins)."""
     be = lambda v, n=8: v.to_bytes(n, 'big')  # noqa: E731
-    out = (b'BLOCH:EVM:CONFIG:3:CANCUN' if recipient else b'BLOCH:EVM:CONFIG:2:CANCUN')
+    if forced and not recipient:
+        raise ValueError('forced inclusion exists only under the next rules')
+    out = (b'BLOCH:EVM:CONFIG:4:CANCUN' if forced else b'BLOCH:EVM:CONFIG:3:CANCUN' if recipient
+           else b'BLOCH:EVM:CONFIG:2:CANCUN')
     out += b''.join(be(v) for v in U64_KNOBS) + be(0, 32)
     out += b''.join(bytes.fromhex(a) for a in VAULTS_ETC) + be(MAX_L1_SATS) + be(DEPOSIT_GAS)
     out += bytes.fromhex(OUTBOX) + be(MIN_WITHDRAWAL_SATS)
@@ -136,6 +149,8 @@ def configuration_commitment(recipient=None, min_base_fee=0):
             out += be(min_base_fee)
     elif min_base_fee:
         raise ValueError('a base-fee floor exists only under the next rules')
+    if forced:
+        out += b''.join(be(v) for v in FORCED_BOUNDS)
     return keccak256(out).hex()
 
 
@@ -175,7 +190,11 @@ BUILD_RELEASE = 'deployment/mainnet/build-release.sh'
 CROSSINGS = ('deployment/mainnet/rehearsal/next-consensus/crossing.py',
              'deployment/mainnet/rehearsal/next-consensus/sparse/crossing.py')
 NATIVE_PINS = 'crates/bloch-pos-committee/src/l2_settlement.rs'
-SELF_FILES = {'set-sweep-recipient.py', 'test_set_sweep_recipient.py', 'SWEEP-RECIPIENT-PROCEDURE.md'}
+SELF_FILES = {'set-sweep-recipient.py', 'test_set_sweep_recipient.py', 'SWEEP-RECIPIENT-PROCEDURE.md',
+              # agent 221's real rehearsal data (a statement of a past private run), never a pin
+              'reset-target-fixture.json',
+              # the audited sparse build f6eb456 (78c533fa, before forced inclusion and the floor): a record, never a pin
+              'AUDIT-SCOPE-SPARSE.md'}
 RECIPIENT_RE = re.compile(r'pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = '
                           r'(?:None|Some\(Address::new\(hex!\("([0-9a-f]{40})"\)\)\));')
 FLOOR_RE = re.compile(r'pub const MAINNET_MIN_BASE_FEE: u64 = ([0-9_]+);')
@@ -266,6 +285,31 @@ def current_floor(l2):
     return floor_in((l2 / CHAINSPEC).read_text(), l2 / CHAINSPEC)
 
 
+FORCED_NEXT_RE = re.compile(r'#\[cfg\(feature = "forced-inclusion"\)\]\s*forced_inclusion: true,')
+
+
+def forced_in(text):
+    """Whether the next mainnet rules of this chainspec.rs carry L1 forced inclusion."""
+    return len(FORCED_NEXT_RE.findall(text)) == 1
+
+
+def current_forced(l2):
+    """Whether the tree's next rules carry forced inclusion; then the forced bounds must be the ones this script
+    hashes."""
+    if not forced_in((l2 / CHAINSPEC).read_text()):
+        return False
+    text = (l2 / FORCED_FILE).read_text()
+    for name, want in zip(FORCED_BOUND_NAMES, FORCED_BOUNDS):
+        m = re.search(rf'pub const {name}: (?:u64|usize) = ([0-9_* ]+);', text)
+        if not m or eval(m.group(1).replace('_', ''), {'__builtins__': {}}) != want:  # noqa: S307 (digits, _ and * only)
+            raise SystemExit(f'{l2 / FORCED_FILE}: {name} is not {want}; update FORCED_BOUNDS with the Rust value')
+    return True
+
+
+def tree_configuration(l2, recipient):
+    return configuration_commitment(recipient, current_floor(l2), current_forced(l2))
+
+
 def gate_refusal(recipient):
     """Why this recipient may not be compiled into a release, or None. Stricter than the Rust
     `is_release_fee_sweep_recipient`: burn addresses and the whole 0x00..00ff range are refused too."""
@@ -303,15 +347,20 @@ def self_check(l2, native):
         raise SystemExit('internal: the activated configuration does not reproduce')
     if configuration_commitment(PLACEHOLDER) != LEGACY_PLACEHOLDER_CONFIGURATION:
         raise SystemExit('internal: the legacy candidate configuration does not reproduce')
-    floor = current_floor(l2)
+    floor, forced = current_floor(l2), current_forced(l2)
     if configuration_commitment(PLACEHOLDER, floor) != REHEARSAL_CONFIGURATION:
         raise SystemExit('internal: the rehearsal configuration does not reproduce (floor or layout drift)')
+    if configuration_commitment(PLACEHOLDER, 0, True) != LEGACY_PLACEHOLDER_CONFIGURATION_FORCED:
+        raise SystemExit('internal: the forced candidate configuration does not reproduce')
+    if configuration_commitment(PLACEHOLDER, floor, True) != REHEARSAL_CONFIGURATION_FORCED:
+        raise SystemExit('internal: the forced rehearsal configuration does not reproduce (floor, bounds or layout drift)')
     old = current_recipient(l2)
     if old is None:
         old = PLACEHOLDER
-        allowed = {REHEARSAL_CONFIGURATION, LEGACY_PLACEHOLDER_CONFIGURATION}
+        allowed = ({REHEARSAL_CONFIGURATION_FORCED, LEGACY_PLACEHOLDER_CONFIGURATION_FORCED} if forced
+                   else {REHEARSAL_CONFIGURATION, LEGACY_PLACEHOLDER_CONFIGURATION})
     else:
-        allowed = {configuration_commitment(old, floor)}
+        allowed = {configuration_commitment(old, floor, forced)}
     pinned_values = {
         settler_pin(l2, 'MAINNET_NEXT')['configuration'], settler_pin(l2, 'MAINNET_NEXT_SPARSE')['configuration'],
         native_program(native, 'PROGRAM_NEXT')[0], native_program(native, 'PROGRAM_FALLBACK')[0]}
@@ -360,7 +409,9 @@ class Editor:
 # -------------------------------------------------------------------------------------------------- steps
 def cmd_check(args):
     r = parse_address(args.address, args.allow_burn)
-    print(json.dumps({'recipient': eip55(r), 'configuration': configuration_commitment(r),
+    print(json.dumps({'recipient': eip55(r), 'configuration (no floor, no forced inclusion)': configuration_commitment(r),
+                      'configuration (0.1 gwei floor, forced inclusion)':
+                          configuration_commitment(r, 100_000_000, True),
                       'burn': r in BURN}, indent=2))
 
 
@@ -368,7 +419,7 @@ def cmd_apply(args):
     r = parse_address(args.address, args.allow_burn)
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     old, old_cfg = self_check(l2, native)
-    new_cfg = configuration_commitment(r, current_floor(l2))
+    new_cfg = tree_configuration(l2, r)
     ed = Editor(args.dry_run)
     if current_recipient(l2) != r:
         p = l2 / CHAINSPEC
@@ -428,7 +479,7 @@ def cmd_pins(args):
     refusal = gate_refusal(r)
     if refusal:
         raise SystemExit(f'pins: {refusal}')
-    cfg = configuration_commitment(r, current_floor(l2))
+    cfg = tree_configuration(l2, r)
     for name in ('MAINNET_NEXT', 'MAINNET_NEXT_SPARSE'):
         if settler_pin(l2, name)['configuration'] != cfg:
             raise SystemExit(f'{SETTLER} {name}: run `apply` first (configuration is not {cfg})')
@@ -515,10 +566,12 @@ def rebuild_list():
 def cmd_audit(args):
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     r = current_recipient(l2)
-    cfg = configuration_commitment(r, current_floor(l2)) if r else None
+    cfg = tree_configuration(l2, r) if r else None
     stale = {'placeholder recipient': PLACEHOLDER,
              'placeholder configuration': LEGACY_PLACEHOLDER_CONFIGURATION,
-             'rehearsal configuration': REHEARSAL_CONFIGURATION}
+             'rehearsal configuration': REHEARSAL_CONFIGURATION,
+             'forced placeholder configuration': LEGACY_PLACEHOLDER_CONFIGURATION_FORCED,
+             'forced rehearsal configuration': REHEARSAL_CONFIGURATION_FORCED}
     for v in args.old or []:
         stale[f'old value {v[:8]}'] = v.lower()
         stale[f'old short {v[:8]}'] = v.lower()[:8]
@@ -529,7 +582,8 @@ def cmd_audit(args):
                 for name, v in stale.items():
                     # The rehearsal constant itself and the Rust tests that pin it stay by design.
                     if path.match('*/src/chainspec.rs') and (
-                            'REHEARSAL_FEE_SWEEP_RECIPIENT' in line or 'REHEARSAL_CONFIGURATION' in line):
+                            'REHEARSAL_FEE_SWEEP_RECIPIENT' in line or 'REHEARSAL_CONFIGURATION' in line
+                            or 'CONFIGURATION_FORCED' in line):
                         continue
                     if v in line and path.name not in SELF_FILES:
                         hits.append(f'{path}:{n}: {name}')
@@ -563,7 +617,7 @@ def cmd_gate(args):
         print(f'sweep-recipient gate: REFUSED: {refusal}', file=sys.stderr)
         sys.exit(3)
     print(json.dumps({'gate': 'release recipient', 'recipient': eip55(r),
-                      'configuration': configuration_commitment(r, floor_in(text, where))}))
+                      'configuration': configuration_commitment(r, floor_in(text, where), forced_in(text))}))
 
 
 def cmd_set(args):
@@ -589,7 +643,7 @@ def cmd_set(args):
     if not args.no_commit:
         message = (f'Next mainnet rules: the owner\'s fee-sweep recipient {eip55(r)}\n\n'
                    'Written by deployment/mainnet/set-sweep-recipient.py set. The next configuration commitment is '
-                   f'{configuration_commitment(r, current_floor(l2))}; the guest ELF and key pins move after the '
+                   f'{tree_configuration(l2, r)}; the guest ELF and key pins move after the '
                    'pinned-container builds (set-sweep-recipient.py pins).\n')
         for tree in (l2, native):
             if run(tree, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
