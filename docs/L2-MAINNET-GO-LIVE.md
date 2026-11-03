@@ -172,9 +172,10 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `6b5782fcd4288ff11ef53bf889a3bdec8f14ee8f77c34e6da0e51b21f49d509f` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `63198f4a42d8c0a0ac4f6088c2e4dcecd19ea3197fb2dd6773829edaff0c6bfb` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/render.py` | `4c80de91d53fc65900543c317e4490be250d12db21ef15049fc21441d8881446` (agent 154 8d1c873; 201: `--sub-answer-max`) |
-| `deployment/mainnet/attestor/install-attestor.sh` | `02a11a0ac516d4c67c5e9f9a500c841c6d00565bb30aeccd3ff7260eba532c74` (agent 156 texts; agent 198 pipefail fix; was `ab24bda0…`) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `9b8a90956ed6d55b4c1a0275868a598e26c205625086feb2e43d4ee1aed3ce4c` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
-| `deployment/mainnet/attestor/attestor_agent.py` | `208d7a0d54e8fa870c979c8761125546d9a0ef47db2f58fe9cf58c738d88943a` |
+| `deployment/mainnet/attestor/attestor_agent.py` | `cad7809f5ff5776587825c330897d62fa6ca269652ad9179bf3a9f9227122fc7` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
+| `deployment/mainnet/attestor/systemd/bloch-l2-attestor.service` | `bbcdf495e3657f6c3e20530edc546b48a56b1a1c78e24ea4ba193cdc503047b2` (agent 203: `RuntimeDirectory=bloch-l2-attestor`, mode 0700) |
 | `deployment/mainnet/attestor/attestor_lib.py` | `b996845f0e77b82aea66a7d73d1ad46525ba868fdafefe06380e2a7ac91fcc78` |
 | `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
 | `deployment/mainnet/replica/PINS.sha256` | `392e1d35625009e42088536e8f7b4a2007b94b2086d15719a0b8ed574548ffbc` |
@@ -898,7 +899,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    (`keykit/KEY-HANDOFF-CHECKLIST.md`). The keys never travel unsealed. The
    originals are now destroyed before the handoff, gated on verified bundles and two read-back media.
 2. Each operator host (§2 spec) gets an `ARTEFATOS` dir with:
-   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `02a11a0a…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
+   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `9b8a9095…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
@@ -914,7 +915,7 @@ sha256sum /opt/bloch/l2-attestor/bloch-l2-native-follower /opt/bloch/l2-attestor
 
    Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Build the operator packages from this kit; `IDENTITY.txt` records the kit commit. Attestor followers stay on status schema v2 (P3).
 4. Start the follower and wait about 65–80 min. Then run `attestor_agent.py check`, then start the
-   agent. The printed `check` command passes the passphrase with systemd `LoadCredential`. It has run only in containers, where systemd 255 does not mount credentials (`/run/credentials/…/passphrase: No such file`); with a stand-in `CREDENTIALS_DIRECTORY` all three operators reported `check-ok` (agent 86). Run it once on a real VM before relying on it, and report a failure there as a kit defect. Fresh installs may run in parallel: there is no existing quorum to protect.
+   agent. The printed `check` command and the agent unit pass the passphrase with systemd `LoadCredential` plus a private `RuntimeDirectory` (mode 0700): systemd 255 hands the credential to the `User=` service at mode 0440, which the attestor `bloch-pos` refuses, so the agent copies it once at 0400 into that tmpfs directory, which systemd removes when the unit stops (agent 204 F204-4, fix by agent 203). Verified as root under a real systemd 255 (container with shared mount propagation, `--network none`, throwaway keys): the unit starts and opens the key, the printed `check` reaches the follower step, and both the same check without `RuntimeDirectory` and the 141844f agent are refused at mode 0440 (agents/203-attestor-final.md).
 
 GO:
 
