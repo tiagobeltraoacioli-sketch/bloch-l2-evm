@@ -71,6 +71,7 @@ DEFAULTS = {
     # Prover profiles (3.1, X17).
     'fast_profile_max_sp1_gas': 10_500_000,
     'gate_passes': 6,
+    'gate_dependent_wait_seconds': 3600,  # a refusal that appeared only after an earlier one was removed (A243-12)
 }
 
 # Prover profiles by the preflight SP1 gas of the block to prove (agent 93's settings, agent 113's measurements).
@@ -262,8 +263,18 @@ class Policy:
         return bool(passing)
 
     def _gated(self, raws, dry, now, plan, has_mandatory):
-        """Repeat the native selection until the gate refuses nothing in it: removing one can change what follows."""
-        for _ in range(self.c['gate_passes']):
+        """Repeat the native selection until the gate refuses nothing in it: removing one can change what follows.
+
+        New-slot counts depend on the transactions before (the producer's storage_growth), so a refusal can uncover
+        another one pass after pass (agents/243 A243-12: senders writing the same slot at descending tips, each below
+        the write price for one new slot). Such a dependent refusal (from the second pass on) also waits
+        `gate_dependent_wait_seconds` by sender and nonce, so the next blocks gate it out before the native selection
+        and need one pass. If the gate still has not settled after `gate_passes`, the last pass's passing set is used
+        as it stands rather than none: an unpaid chain must never empty the block. Its cost is that a transaction
+        behind the last refusal may create a new slot it did not pay for; the measurement still bounds the block, and
+        `committed` books the slots from the block's own report against the sender's 48 h rate."""
+        stats = []
+        for number in range(self.c['gate_passes']):
             report = dry(raws)
             stats = report.get('tx_stats')
             if stats is None:
@@ -275,13 +286,18 @@ class Policy:
             passing, refused = self.gate(stats, now, has_mandatory)
             if not refused:
                 return by_hash, stats
+            info = {t['hash']: t for t in stats}
             for name, (reason, permanent) in refused.items():
                 (plan.quarantine if permanent else plan.held).append((name, reason))
+                if number and not permanent and reason != 'behind-held-nonce':
+                    self.state['waits'][self.key(info[name])] = {
+                        'until': now + self.c['gate_dependent_wait_seconds'], 'kind': 'gate-dependent'}
             raws = [by_hash[name] for name in passing]
             if not raws:
                 return {}, []
-        self.log('gate-did-not-settle')
-        return {}, []
+            stats = [t for t in stats if t['hash'] in set(passing)]
+        self.log('gate-did-not-settle', passes=self.c['gate_passes'], used=len(raws))
+        return {t['hash']: raw for t, raw in zip(stats, raws)}, stats
 
     def large_gas(self):
         """Gas used from which a transaction counts as large: half the gas of the smallest transaction ever found over

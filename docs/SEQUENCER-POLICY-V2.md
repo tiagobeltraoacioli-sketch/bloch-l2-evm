@@ -105,7 +105,7 @@ still measured against the budget.
 
 | Setting | Value | Was |
 |---|---|---|
-| `fresh_slot_price_wei` | 200 µBLCH per new slot | same |
+| `fresh_slot_price_wei` | 200 µBLCH per new slot, met from the tip: `gas_used × tip ≥ new slots × price` (see A243-11: wallets need a write-aware tip) | same |
 | `fresh_slots_per_block` | 128 | same |
 | `fresh_slots_per_sender` per `fresh_sender_window_seconds` | 256 per 48 h | 256 per 96 blocks |
 | `max_account_slots`, `max_deposit_exposure_slots` | none | none on the sparse guest (D6) |
@@ -196,7 +196,11 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
    items only, writes `deposits-over-budget.json` (renamed `mandatory-over-budget` in the plan) and takes the
    `mandatory-heavy` profile. No cost even for the control: no user transaction.
 2. Gate the spool with native facts (section 3.3, 3.5, bans and waits), repeating the native selection until nothing is
-   refused.
+   refused, at most 6 times. New-slot counts depend on the transactions before, so a refusal can uncover another one
+   (A243-12): a refusal from the second pass on also waits 1 h by sender and nonce (`gate-dependent`), and a gate that
+   has not settled after 6 passes uses its last passing set rather than none. The price of that fallback is that one
+   transaction behind the last refusal may create a slot it did not pay for; the measurement bounds the block and the
+   sender's 48 h rate books the slots from the block's own report.
 3. Measure the mandatory block plus every candidate in try order. **If it fits, that is the block: one run.** This is
    the honest common case: two runs per block in all.
 4. Otherwise find the first misfit by **exponential then binary search from the front**: prefixes of 1, 2, 4… on top of

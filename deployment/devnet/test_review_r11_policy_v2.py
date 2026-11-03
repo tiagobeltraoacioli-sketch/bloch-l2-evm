@@ -367,17 +367,21 @@ class A243_12GateCascadeEmptiesTheBlock(SlotWorld):
     def test_an_honest_transfer_is_served_while_a_slot_chain_is_spooled(self):
         self.chain(7)
         self.add('honest', 'alice', 0, 21_000, 1, tip=50 * GWEI)
-        served = []
-        for _ in range(3):
-            served += self.block()
-        self.assertIn('honest', served, f'held: {self.held()}')
+        self.assertIn('honest', self.block(), f'held: {self.held()}')
+
+    def test_a_fresh_chain_every_block_does_not_empty_any_block(self):
+        for number in range(4):
+            self.chain(8, tag=f'b{number}-', top=39)
+            self.add(f'honest{number}', f'alice{number}', 0, 21_000, 1, tip=GWEI)
+            self.assertIn(f'honest{number}', self.block(), f'block {number}: {self.held()}')
 
     def test_a_dependent_refusal_waits_so_the_next_block_needs_one_pass(self):
         self.chain(7)
         self.block()
         self.add('honest', 'alice', 0, 21_000, 1, tip=GWEI)
         self.assertIn('honest', self.block())
-        self.assertNotIn('gate-did-not-settle', [event for event, _ in self.logged[-5:]])
+        self.assertEqual([event for event, _ in self.logged].count('gate-did-not-settle'), 1)
+        self.assertEqual(self.held()['chain1'], 'gate-dependent-wait')
 
 
 class A243_11WritePriceAtTheSuggestedTip(SlotWorld):
