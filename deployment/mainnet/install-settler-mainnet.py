@@ -76,8 +76,8 @@ PINS = {
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
     'settler_v3.py': '5cf99928df36a6c56af7526281dd1f73277691c3fec98a34cfe83ad463ea49a6',
-    'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
-    'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
+    'bloch-evm-sp1-settlement-v3': 'c4daeff7acee05cc72cb42244fba96540c9403b3698a4d65b08bfc31918f10e9',
+    'bloch-l2-produce-dev': 'eb4feb3ce7f355ba4bb883d9702d94701be469752dfb1d4c63ea3d375648d1e1',
     # Sequencer policy v2 (agents 166, 223); the producer with `select` and the host with the cycle limit move the two
     # binary pins above once the user-transaction candidate is built at the release path (agent 236).
     'sequencer_policy_v2.py': 'fe98b4b774e317a546af71ac2dccd0f84191fed9c338fe32f9675cae7bf21baa',

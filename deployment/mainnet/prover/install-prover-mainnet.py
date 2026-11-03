@@ -66,7 +66,7 @@ DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
 REMOTE_PROVER_SHA256 = '601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107'
 # The SP1 host (GO-LIVE-PINS-PROVER.sha256). Pinned so that root never executes an unpinned binary: the
 # `--mainnet identity` check below runs it, and its output is only as honest as the binary.
-PROVER_SHA256 = '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a'
+PROVER_SHA256 = 'c4daeff7acee05cc72cb42244fba96540c9403b3698a4d65b08bfc31918f10e9'
 # bloch-sis-pow l2_settlement::mainnet::PROGRAM (set at 78b7343a, active since epoch 5850; unchanged
 # in the armed release 78d4921c and in fa980367).
 PINNED = {
