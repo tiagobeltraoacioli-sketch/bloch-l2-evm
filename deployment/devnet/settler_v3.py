@@ -100,7 +100,26 @@ Differences, all deliberate:
   (`l1-not-advancing`) and never counts as a worker failure; a terminal
   refusal (policy/source/successor/proof) is re-checked against the quorum
   view and halts unless the request moved; a different statement accepted
-  for the same L2 block halts (another settler).
+  for the same L2 block halts (another settler). Review r10 M2: every
+  broadcast (settlement and DA) goes to every configured endpoint, not only
+  the first that answers, and `accepted` or `duplicate` from any of them
+  counts as held; when an acceptance window ends with the bytes held and the
+  L1 head advancing, `settlement-not-included` is logged, and after
+  `max_unincluded_windows` such windows in a row (default 4, 0 = alert only)
+  the worker halts for the operator. Review r10 L1: a partial quorum that
+  stays below the in-memory accepted floor (one endpoint down for good during
+  a real L1 reorg) is no longer a silent wait: after
+  `quorum_floor_stall_seconds` (default 1200, 0 = off) it logs
+  `rpc-quorum-behind-floor` and raises, so the bounded retry exits 1 and the
+  restart resets the floor. Review r10 L6: a prover timeout is a failed
+  attempt at that location, so the next one in `remote_prover.order` is tried.
+
+* stop signals (review r10 M1): SIGTERM, SIGINT and SIGHUP take the same
+  cleanup path as a prover timeout: the prover's process group is killed,
+  the SP1 segments it mapped are removed from /dev/shm, and a Gnark container
+  it left (found by its bind mounts from the run's private TMPDIR) is killed.
+  A second signal does not interrupt that cleanup. The process then ends by
+  the signal it received.
 
 * foreign settlements (security review 2026-10-30, F3; optional `foreign_recovery`): settling needs no
   authorization, so a third party can settle a rule-conforming block the local database does not hold.
@@ -148,6 +167,7 @@ the worker (exit 3) for operator review. Dependency-free Python 3.9+. The
 worker never reads signing keys itself; with user transactions it invokes the
 pinned DA signer (whose keystore holds only DA fee funds).
 """
+import contextlib
 import itertools
 import hashlib
 import json
@@ -159,6 +179,8 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import types
 import urllib.parse
@@ -330,6 +352,16 @@ def follower_finals(status_path):
     return {x['l2_number']: x['l2_hash'] for x in entries}
 
 
+TIMEOUT_EXIT = 124  # exit code recorded for a prover attempt that ran out of time (as timeout(1) reports it)
+
+
+class QuorumFloorStall(RuntimeError):
+    """Review r10 L1: a partial quorum has reported the same accepted number below the in-memory floor for
+    `quorum_floor_stall_seconds`. Raised every cycle until `max_consecutive_failures` makes the process exit 1;
+    the restart resets the floor, so a real L1 reorg is followed (or halts with its own reason) instead of a
+    silent wait."""
+
+
 class Halt(Exception):
     """Divergence that requires an operator; the unit must not auto-repair it."""
 
@@ -409,6 +441,137 @@ def keccak256(data):
             state[i % 5][i // 5] ^= int.from_bytes(block[8 * i:8 * i + 8], 'little')
         state = _keccak_f(state)
     return b''.join(state[i % 5][i // 5].to_bytes(8, 'little') for i in range(4))
+
+
+# secp256k1, only to read the sender of a spooled transaction (idle-block demand). Never signs, never decides a block.
+SECP_P = 2 ** 256 - 2 ** 32 - 977
+SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+SECP_G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+          0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _jacobian_double(p):
+    x, y, z = p
+    if not y:
+        return 0, 1, 0
+    yy = y * y % SECP_P
+    s = 4 * x * yy % SECP_P
+    m = 3 * x * x % SECP_P
+    nx = (m * m - 2 * s) % SECP_P
+    return nx, (m * (s - nx) - 8 * yy * yy) % SECP_P, 2 * y * z % SECP_P
+
+
+def _jacobian_add(p, q):
+    if not p[2]:
+        return q
+    if not q[2]:
+        return p
+    z1z1, z2z2 = p[2] * p[2] % SECP_P, q[2] * q[2] % SECP_P
+    u1, u2 = p[0] * z2z2 % SECP_P, q[0] * z1z1 % SECP_P
+    s1, s2 = p[1] * z2z2 * q[2] % SECP_P, q[1] * z1z1 * p[2] % SECP_P
+    if u1 == u2:
+        return _jacobian_double(p) if s1 == s2 else (0, 1, 0)
+    h, r = (u2 - u1) % SECP_P, (s2 - s1) % SECP_P
+    hh = h * h % SECP_P
+    hhh, v = h * hh % SECP_P, u1 * hh % SECP_P
+    nx = (r * r - hhh - 2 * v) % SECP_P
+    return nx, (r * (v - nx) - s1 * hhh) % SECP_P, h * p[2] * q[2] % SECP_P
+
+
+def secp_mul(k, point, k2=0, point2=None):
+    """k * point (+ k2 * point2), affine in and out; None is the point at infinity."""
+    pairs = [(k, (point[0], point[1], 1))] + ([(k2, (point2[0], point2[1], 1))] if point2 else [])
+    both = _jacobian_add(pairs[0][1], pairs[1][1]) if point2 else None
+    result = (0, 1, 0)
+    for bit in range(max(k, k2).bit_length() - 1, -1, -1):
+        result = _jacobian_double(result)
+        first, second = k >> bit & 1, point2 is not None and k2 >> bit & 1
+        if first or second:
+            result = _jacobian_add(result, both if first and second else pairs[0][1] if first else pairs[1][1])
+    if not result[2]:
+        return None
+    zi = pow(result[2], -1, SECP_P)
+    return result[0] * zi * zi % SECP_P, result[1] * zi * zi * zi % SECP_P
+
+
+def rlp_items(data):
+    """The top-level RLP list `data` as [(raw encoding, payload)]; ValueError unless `data` is exactly one list."""
+    def header(at):
+        first = data[at]
+        if first < 0x80:
+            return at, at + 1, False
+        if first < 0xb8 or 0xc0 <= first < 0xf8:
+            short = first - (0x80 if first < 0xc0 else 0xc0)
+            return at + 1, at + 1 + short, first >= 0xc0
+        size_len = first - (0xb7 if first < 0xc0 else 0xf7)
+        size = int.from_bytes(data[at + 1:at + 1 + size_len], 'big')
+        start = at + 1 + size_len
+        return start, start + size, first >= 0xc0
+    start, end, is_list = header(0)
+    if not is_list or end != len(data):
+        raise ValueError('not one RLP list')
+    items, at = [], start
+    while at < end:
+        body, stop, _ = header(at)
+        if stop > end:
+            raise ValueError('RLP item overruns its list')
+        items.append((data[at:stop], data[body:stop]))
+        at = stop
+    return items
+
+
+def rlp_list(encoded_items):
+    payload = b''.join(encoded_items)
+    if len(payload) < 56:
+        return bytes([0xc0 + len(payload)]) + payload
+    size = len(payload).to_bytes((len(payload).bit_length() + 7) // 8, 'big')
+    return bytes([0xf7 + len(size)]) + size + payload
+
+
+def rlp_uint(value):
+    raw = value.to_bytes((value.bit_length() + 7) // 8, 'big')
+    return raw if len(raw) == 1 and raw[0] < 0x80 else bytes([0x80 + len(raw)]) + raw
+
+
+def spooled_sender_nonce(raw):
+    """(sender, nonce) of a signed type 0 (EIP-155), 1 or 2 envelope, or None when these bytes do not read as one. Not
+    an authentication: the producer decides inclusion. This only tells a nonce gap from what the next block may take."""
+    try:
+        if raw[0] in (1, 2):
+            items = rlp_items(raw[1:])
+            if len(items) != (11 if raw[0] == 1 else 12):
+                return None
+            signed = items[:-3]
+            digest = keccak256(raw[:1] + rlp_list([item for item, _ in signed]))
+            parity = int.from_bytes(items[-3][1], 'big')
+            nonce = int.from_bytes(items[1][1], 'big')
+        elif raw[0] >= 0xc0:
+            items = rlp_items(raw)
+            if len(items) != 9:
+                return None
+            v = int.from_bytes(items[6][1], 'big')
+            if v < 35:
+                return None  # unprotected: the producer refuses it
+            parity = (v - 35) % 2
+            digest = keccak256(rlp_list([item for item, _ in items[:6]] + [rlp_uint((v - 35) // 2), b'\x80', b'\x80']))
+            nonce = int.from_bytes(items[0][1], 'big')
+        else:
+            return None
+        r, s = (int.from_bytes(items[i][1], 'big') for i in (-2, -1))
+        if parity > 1 or not (0 < r < SECP_N and 0 < s < SECP_N):
+            return None
+        y = pow((r ** 3 + 7) % SECP_P, (SECP_P + 1) // 4, SECP_P)
+        if y * y % SECP_P != (r ** 3 + 7) % SECP_P:
+            return None
+        point = (r, y if y % 2 == parity else SECP_P - y)
+        inverse = pow(r, -1, SECP_N)
+        e = int.from_bytes(digest, 'big')
+        key = secp_mul(s * inverse % SECP_N, point, (-e * inverse) % SECP_N, SECP_G)
+        if key is None:
+            return None
+        return keccak256(key[0].to_bytes(32, 'big') + key[1].to_bytes(32, 'big'))[12:], nonce
+    except (IndexError, ValueError):
+        return None
 
 
 def deposits_hash(records):
@@ -527,68 +690,6 @@ def da_frame_fields(tx):
     chain, number = int.from_bytes(take(at, 8), 'little'), int.from_bytes(take(at + 8, 8), 'little')
     size = int.from_bytes(take(at + 16, 4), 'little')
     return chain, number, take(at + 20, size)
-
-
-def da_frame_key(tx):
-    """The funding public key of a native 0x15 wire frame (the spend authority that paid its fee)."""
-    if len(tx) < 37 or tx[0] != DA_TAG:
-        raise Halt('not a DA transaction')
-    size = int.from_bytes(tx[33:37], 'little')
-    if 37 + size > len(tx):
-        raise Halt('malformed DA transaction')
-    return tx[37:37 + size]
-
-
-def follower_block_files(state_dir):
-    """The follower's verified native blocks, in index order: [Path]."""
-    state = Path(state_dir)
-    lines = (state / 'index').read_text().split()
-    return [state / 'blocks' / f'{line.strip().lower()}.bin' for line in lines if line.strip()]
-
-
-def scan_da_frames(data, chain_id, wanted):
-    """{(number, commitment hex): (funding key, payload)} of the 0x15 frames inside raw block bytes whose
-    (l2 number, commitment) is in `wanted`. Candidate offsets are only a search: a hit is the frame whose payload
-    hashes to a recorded commitment, so a false match is impossible."""
-    found, at = {}, data.find(bytes([DA_TAG]))
-    numbers = {number for number, _ in wanted}
-    while at >= 0 and len(found) < len(wanted):
-        try:
-            frame = data[at:]
-            chain, number, payload = da_frame_fields(frame)
-            if chain == chain_id and number in numbers and da_batch_count(payload) is not None:
-                key = (number, da_commitment(number, payload, chain_id).hex())
-                if key in wanted and key not in found:
-                    found[key] = (da_frame_key(frame), payload)
-        except Halt:
-            pass
-        at = data.find(bytes([DA_TAG]), at + 1)
-    return found
-
-
-def recorded_da_batches(state_dir, chain_id, records, window=8):
-    """{(number, commitment hex): (funding key, payload)} for DA `records` (getl2settlement entries with
-    l2_number, commitment, height), read from the follower's verified L1 blocks near each record's height. Records
-    whose block is not (yet) in the follower store are left out."""
-    wanted = {(int(r['l2_number']), r['commitment']) for r in records}
-    if not wanted:
-        return {}
-    files = follower_block_files(state_dir)
-    heights = sorted({int(r['height']) for r in records})
-    seen, found = set(), {}
-    # The index lists blocks from height 1 in order; a store that started later is covered by the tail scan.
-    candidates = [i for h in heights for i in range(max(0, h - 1 - window), min(len(files), h + window))]
-    candidates += list(range(len(files) - 1, max(-1, len(files) - 1 - 4 * window), -1))
-    for index in candidates:
-        if index in seen or len(found) == len(wanted):
-            continue
-        seen.add(index)
-        try:
-            data = files[index].read_bytes()
-        except OSError:
-            continue
-        found.update(scan_da_frames(data, chain_id, wanted - set(found)))
-    return found
 
 
 def da_batch_transactions(payload):
@@ -860,20 +961,38 @@ class Endpoints:
         return [first[k] for k in seen if seen[k] >= self.quorum]
 
     def submit(self, tx_hex):
-        """sendrawtransaction on the first usable endpoint that accepts it: (port, response).
-        Raises SubmitRefused with every endpoint's reason when none does."""
-        errors = []
-        for port in self.usable():
+        """sendrawtransaction on EVERY configured endpoint, in order: (ports that hold the bytes, first answer).
+
+        Writes are not quorum reads: one endpoint that answers `accepted` but never gets the transaction into a
+        block (a node on a minority fork, partitioned, or stuck with parked blocks) must not be the only one that
+        ever sees it (review r10 M2). Sending the same bytes to all endpoints is harmless: consensus validates them,
+        and a node that already holds or recently included them answers `duplicate`, which counts as held, like
+        `accepted`. Endpoints in backoff are tried too: a write is rare and must reach every node it can.
+        Raises SubmitRefused with every endpoint's reason when none holds them."""
+        held, first, errors = [], None, []
+        for port in self.ports:
             try:
-                return port, self.call(port, 'sendrawtransaction', [tx_hex])
-            except Exception as error:
+                response = self.call(port, 'sendrawtransaction', [tx_hex])
+            except Exception as error:  # logged by call() as rpc-endpoint-failed
                 errors.append((port, f'{type(error).__name__}: {error}'[:300]))
-        raise SubmitRefused(errors)
+                continue
+            if not isinstance(response, dict) or response.get('status') not in SUBMIT_HELD:
+                errors.append((port, f'UnexpectedAnswer: {canonical(response)}'[:300]))
+                continue
+            held.append(port)
+            first = response if first is None else first
+        if not held:
+            raise SubmitRefused(errors)
+        if errors:
+            log('submit-partial', held_by=held, errors=[f'{p}: {e}'[:300] for p, e in errors])
+        return held, first
 
 
 # Native sendrawtransaction refusals (bloch-pos-node rpc.rs / engine.rs, release 78b7343a).
 TX_REFUSED, TX_REFUSED_RETRYABLE, MEMPOOL_FULL, TX_REFUSED_SOURCE_CAP = -32008, -32009, -32003, -32010
 ONE_PROOF_PENDING = 'one L2 proof is already pending'
+# sendrawtransaction answers that mean the node holds the bytes (native rpc.rs Admitted::New / Duplicate).
+SUBMIT_HELD = ('accepted', 'duplicate')
 
 
 class SubmitRefused(RuntimeError):
@@ -1002,6 +1121,116 @@ def remove_leaked_segments(paths, mapped=segment_mapped):
     return removed
 
 
+# ---- stop signals (review r10 M1): the F8 cleanup also runs on systemctl stop/restart, Ctrl-C and hangup ----
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+_STOP = {'signum': None, 'raised': False, 'deferred': 0}
+
+
+class Stopped(SystemExit):
+    """A stop signal turned into an exception. Python's default SIGTERM action ends the process without unwinding,
+    so neither the prover group nor its SP1 segments nor its Gnark container would be cleaned up. As an exception it
+    takes the same path as a timeout; main() then ends the process by the same signal, so systemd sees the stop it
+    asked for. A SystemExit, so `except Exception` never swallows it."""
+
+    def __init__(self, signum):
+        super().__init__(128 + signum)
+        self.signum = signum
+
+
+def _on_stop_signal(signum, _frame):
+    if _STOP['signum'] is not None:
+        return  # already stopping: a second signal must not abort the cleanup the first one started
+    _STOP['signum'] = signum
+    if _STOP['deferred']:
+        return  # inside a cleanup: raised when it ends (deferred_stop)
+    _STOP['raised'] = True
+    raise Stopped(signum)
+
+
+def install_stop_handlers():
+    """Route SIGTERM, SIGINT and SIGHUP to Stopped. Returns the handlers it replaced ({} off the main thread, where
+    Python cannot install handlers, and where they are already installed)."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    previous = {}
+    for number in STOP_SIGNALS:
+        current = signal.getsignal(number)
+        if current is not _on_stop_signal:
+            previous[number] = current
+            signal.signal(number, _on_stop_signal)
+    return previous
+
+
+@contextlib.contextmanager
+def stop_signals():
+    """Stop signals raise Stopped inside the block (a prover run), then the previous handlers come back."""
+    previous = install_stop_handlers()
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            if handler is not None:
+                signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def deferred_stop():
+    """Run a cleanup to its end: a stop signal that arrives inside it is raised once the cleanup is done."""
+    _STOP['deferred'] += 1
+    try:
+        yield
+    finally:
+        _STOP['deferred'] -= 1
+        if not _STOP['deferred'] and _STOP['signum'] is not None and not _STOP['raised']:
+            _STOP['raised'] = True
+            raise Stopped(_STOP['signum'])
+
+
+def exit_by_signal(stop):
+    """End the process by the signal that stopped it (after the cleanup), as the default action would have."""
+    log('stopped', signal=signal.Signals(stop.signum).name)
+    signal.signal(stop.signum, signal.SIG_DFL)
+    os.kill(os.getpid(), stop.signum)
+    sys.exit(stop.code)  # not reached for TERM, INT and HUP
+
+
+def stop_gnark_containers(tmpdir, path='/usr/bin:/bin', run=subprocess.run, report=None):
+    """Kill the Gnark containers that a killed prover left running (review r10 L5). SP1 runs Groth16 wrapping as
+    `docker run --rm` without a name: killing the prover's process group kills the docker CLI only, while the
+    container, a child of containerd, runs on outside every memory cap (~18.5 GB) until its proof ends. Only
+    containers with a bind mount from `tmpdir` are touched: SP1 mounts its witness and output temporary files from
+    TMPDIR, which is private to this prover run. Returns the container ids killed."""
+    report = report or log
+    docker = shutil.which('docker', path=path) if tmpdir else None
+    if not docker:
+        return []
+    prefix = str(tmpdir).rstrip('/') + '/'
+    try:
+        ids = run([docker, 'ps', '-q', '--no-trunc'], capture_output=True, text=True, timeout=15).stdout.split()
+        found = run([docker, 'inspect', '--format', '{{.Id}}\t{{json .Mounts}}', *ids], capture_output=True,
+                    text=True, timeout=15).stdout if ids else ''
+    except (OSError, subprocess.SubprocessError) as error:
+        report('prover-container-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
+        return []
+    ours = []
+    for line in found.splitlines():
+        container, _, mounts = line.partition('\t')
+        try:
+            sources = [str(m.get('Source', '')) for m in json.loads(mounts) or []]
+        except (ValueError, AttributeError):
+            continue
+        if any(source.startswith(prefix) for source in sources):
+            ours.append(container)
+    for container in ours:
+        try:
+            run([docker, 'kill', container], capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if ours:
+        report('prover-container-killed', containers=[c[:12] for c in ours], tmpdir=str(tmpdir))
+    return ours
+
+
 class Settler:
     def __init__(self, config, rpc=rpc, run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
         kind = config.get('network_kind', DEFAULTS['network_kind'])
@@ -1128,6 +1357,14 @@ class Settler:
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
+        self.floor_stall = None  # (number, first seen, reads) while a partial quorum stays behind the floor
+        stall = self.c.get('quorum_floor_stall_seconds', 1200)
+        if not isinstance(stall, int) or isinstance(stall, bool) or stall < 0:
+            raise Halt('quorum_floor_stall_seconds must be a non-negative integer')
+        self.unincluded = {}  # consecutive acceptance windows the same bytes were held but not included
+        limit = self.c.get('max_unincluded_windows', 4)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise Halt('max_unincluded_windows must be a non-negative integer')
         self.identity_checked = False
         self.dry_run = False
 
@@ -1169,7 +1406,9 @@ class Settler:
             # A partial quorum must not move the accepted head backwards (two stale
             # endpoints); a unanimous view is trusted as before.
             log('rpc-quorum-view-behind', accepted=number, seen=self.accepted_floor, ports=support)
+            self.floor_stall_check(number, support)
             return None
+        self.floor_stall = None
         self.accepted_floor = number if unanimous else max(self.accepted_floor, number)
         return view
 
@@ -1251,8 +1490,27 @@ class Settler:
             log('program-scheduled', program=target['name'], gate_epoch=gate, l1_slot=slot, landing_epoch=landing_epoch)
         return target
 
-    def produce(self, *args):
-        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=300)
+    def floor_stall_check(self, number, support):
+        """Review r10 L1. With one endpoint down for good, a real L1 reorg below the floor never reaches a
+        unanimous view. After `quorum_floor_stall_seconds` (default 1200, 0 = off) of the same behind-floor
+        quorum answer, raise so that the bounded retry exits 1 and the restart resets the in-memory floor.
+        Two stale endpoints after that restart meet the database and anchor checks in prepare_block, or the
+        `settlement-not-included` limit; each ends in a logged halt."""
+        limit = self.c.get('quorum_floor_stall_seconds', 1200)
+        now = self.clock()
+        if self.floor_stall is None or self.floor_stall[0] != number:
+            self.floor_stall = (number, now, 1)
+            return
+        _, since, reads = self.floor_stall
+        self.floor_stall = (number, since, reads + 1)
+        if limit and now - since >= limit and reads + 1 >= 3:
+            log('rpc-quorum-behind-floor', accepted=number, seen=self.accepted_floor, ports=support,
+                seconds=round(now - since))
+            raise QuorumFloorStall(f'a partial quorum has reported accepted L2 {number} below the floor '
+                                   f'{self.accepted_floor} for {round(now - since)} s')
+
+    def produce(self, *args, timeout=300):
+        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise ProducerError(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         try:
@@ -1260,14 +1518,13 @@ class Settler:
         except ValueError:
             raise ProducerError(f'producer printed no JSON for {args[0]}') from None
 
-    def extend(self, parent, anchor, deposits, anchor_slot, number, spool=True):
+    def extend(self, parent, anchor, deposits, anchor_slot, number):
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            # A batch this DA key already paid is rebuilt exactly (its spool), never re-chosen by the budget.
-            if self.c.get('max_block_sp1_gas') and spool is True:
+            if self.c.get('max_block_sp1_gas'):
                 return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
-            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=spool))
+            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
             if not self.c['user_transactions']:
                 raise
@@ -1396,8 +1653,7 @@ class Settler:
             # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
             args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
         if self.c['user_transactions'] and spool and self.spool_open:
-            pool = spool if isinstance(spool, (str, Path)) else self.c['txpool_dir']
-            args += ['--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
+            args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
             if self.c.get('min_tip_wei'):
                 args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
@@ -1421,12 +1677,53 @@ class Settler:
                         for a in self.native.gather('getl2settlement').values())
         return values[max(0, len(values) - 1 - self.native.faults)]
 
+    def spool_demand(self, head):
+        """Whether a spooled transaction may go into the next block on `head`. A file alone is not demand: the RPC admits
+        nonces up to 16 ahead and keeps them 3 hours, and the producer defers a nonce gap without dropping it, so one such
+        entry would make every cycle due (review r7 F5). Demand is an entry whose nonce is its sender's next nonce at the
+        head. Bytes that do not read as a transaction, and a sender whose nonce the producer cannot tell, count as demand:
+        the producer drops what it cannot decode, and a block too many costs less than a transaction never served.
+        Fees are not checked: the RPC admits only a fee cap over the next base fee and a tip over the floor."""
+        if not self.c['user_transactions']:
+            return False
+        files = sorted(Path(self.c['txpool_dir']).glob('*.tx'))
+        if not files:
+            return False
+        known = getattr(self, 'spool_senders', {})
+        self.spool_senders = {}
+        nonces = getattr(self, 'spool_nonces', (None, {}))
+        nonces = nonces if nonces[0] == head else (head, {})
+        self.spool_nonces = nonces
+        for path in files:
+            try:
+                stat = path.stat()
+                key = (path.name, stat.st_size, stat.st_mtime_ns)
+                entry = known[key] if key in known else spooled_sender_nonce(bytes.fromhex(path.read_text().strip()))
+            except FileNotFoundError:
+                continue  # included, pruned or evicted meanwhile
+            except (OSError, ValueError):
+                return True
+            self.spool_senders[key] = entry
+            if entry is None:
+                return True
+            sender, nonce = entry
+            if sender not in nonces[1]:
+                try:
+                    nonces[1][sender] = int(self.produce('account', '--target', self.c['l2_db'],
+                                                         '--address', sender.hex())['nonce'])
+                except Exception as error:  # noqa: BLE001
+                    log('spool-demand-unknown', reason=f'{type(error).__name__}: {error}'[:300])
+                    return True
+            if nonce == nonces[1][sender]:
+                return True
+        return False
+
     def hold_block(self, view):
         """With `skip_idle_blocks`: whether to build no block in this cycle. Not a block rule: L1, the guest, the follower
         and every rebuild only see fewer blocks, each with an older anchor. See SETTLER-RUNBOOK.md, "Idle blocks".
 
-        A block is due when L1 holds an unconsumed deposit, the spool holds a transaction, or the source reached
-        `max_idle_seconds`, which proves the whole path while nothing else does. `min_block_interval_seconds` then delays
+        A block is due when L1 holds an unconsumed deposit, the spool holds a transaction the next block may take
+        (`spool_demand`), or the source reached `max_idle_seconds`, which proves the whole path while nothing else does. `min_block_interval_seconds` then delays
         a due block, so that deposits cannot make the height grow faster than that: a deposit costs 0.01 BLCH, and the
         recipient keeps it. A deposit that arrived while idle needs two blocks: L1 keeps the source frozen until the next
         settlement, so the first block is anchored to the old source and cannot mint it."""
@@ -1440,9 +1737,8 @@ class Settler:
         except Exception as error:  # noqa: BLE001 - the quorum view just passed: try again next cycle
             log('idle-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
             return True
-        spooled = bool(self.c['user_transactions'] and any(Path(self.c['txpool_dir']).glob('*.tx')))
         pace = self.c.get('min_block_interval_seconds', 0)
-        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if spooled
+        reason = ('deposits' if backlog or view['source'].get('pending') else 'transactions' if self.spool_demand(expected)
                   else 'max-idle' if age >= self.c['max_idle_seconds'] else None)
         if reason is None or age < pace:
             now = self.clock()
@@ -1498,71 +1794,6 @@ class Settler:
         elif directory.exists() and not produced.exists() and (directory / 'proved.json').exists():
             self.supersede(directory)  # proved before the program was recorded: of the old program
 
-    def follower_state_dir(self):
-        """The native follower's verified block store, when configured (`follower_state`, or the one of
-        `foreign_recovery`)."""
-        recovery = self.c.get('foreign_recovery') or {}
-        return self.c.get('follower_state') or recovery.get('follower_state')
-
-    def paid_batch_spool(self, number, view, directory):
-        """A spool holding exactly the batch this worker's DA key already paid for L2 block `number`, or None.
-
-        A database restored to the accepted head (an old backup, a rebuild from L1) no longer holds the unsettled
-        block whose batch is on L1, and the spool may no longer hold its transactions. Building the block from
-        whatever the spool holds now would publish another batch for the same number and pay a second DA fee,
-        while the paid transactions are dropped. Built from exactly the paid batch, the block carries the recorded
-        commitment and publish_da finds it already on L1. Only batches signed by this worker's own funding key are
-        reused: anyone can publish a DA record for any number, and a block must never be filled with a third
-        party's choice of transactions. The transactions also go back to the main spool, so none is lost if the
-        rebuilt block differs."""
-        if not self.c['user_transactions']:
-            return None
-        records = [r for r in view.get('data_availability', []) if r.get('l2_number') == number]
-        if not records:
-            return None
-        local = {}
-        for other in sorted(self.work.glob(f'{number:08d}-*')):
-            payload_file = other / 'da-payload.hex'
-            if payload_file.exists():
-                payload = bytes.fromhex(payload_file.read_text().strip())
-                local[da_commitment(number, payload, self.chain_id).hex()] = payload
-        own = bytes.fromhex(Path(self.c['da']['funding_pubkey']).read_text().strip())
-        batches = {}
-        state = self.follower_state_dir()
-        if state:
-            try:
-                batches = recorded_da_batches(state, self.chain_id, records)
-            except (OSError, ValueError) as error:
-                log('da-batch-unrecoverable', number=number, reason=f'follower store: {error}'[:300])
-        payload = None
-        for record in sorted(records, key=lambda r: (int(r['height']), r['commitment'])):
-            key = (number, record['commitment'])
-            if key in batches and batches[key][0] == own:
-                payload, source = batches[key][1], 'follower'
-                break
-            if record['commitment'] in local:
-                payload, source = local[record['commitment']], 'work'
-                break
-        if payload is None:
-            log('da-batch-unrecoverable', number=number, records=[r['commitment'] for r in records],
-                follower_state=bool(state), reason='no recorded batch of this DA key found')
-            return None
-        transactions = da_batch_transactions(payload)
-        pool = directory / 'da-reuse-spool'
-        shutil.rmtree(pool, ignore_errors=True)
-        pool.mkdir()
-        main = Path(self.c['txpool_dir'])
-        returned = 0
-        for raw in transactions:
-            name = f'{keccak256(raw).hex()}.tx'
-            atomic_write(pool / name, raw.hex() + '\n')
-            if not (main / name).exists():
-                atomic_write(main / name, raw.hex() + '\n')
-                returned += 1
-        log('da-batch-reused', number=number, commitment=da_commitment(number, payload, self.chain_id).hex(),
-            transactions=len(transactions), returned_to_spool=returned, source=source)
-        return pool
-
     def prepare_block(self, view):
         """Return (number, directory) for the next block, reusing a crash-left block."""
         self.program = self.program_of(view)
@@ -1595,13 +1826,9 @@ class Settler:
             anchor_slot = int(source['request'].splitlines()[3])
             self.preflight_source = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n' + (
                 f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n" if 'inbox_count' in source else '')
-            reuse = self.paid_batch_spool(number, view, directory)
-            block = self.extend(parent, anchor, deposits, anchor_slot, number, spool=reuse or True)
+            block = self.extend(parent, anchor, deposits, anchor_slot, number)
             if block.get('transactions', 0) and not self.c['user_transactions']:
                 raise Halt('producer included user transactions while user_transactions is false')
-            if reuse:
-                atomic_write(directory / 'da-reuse.json', json.dumps({'transactions': block.get('transactions', 0),
-                                                                       'hash': block.get('hash')}) + '\n')
             atomic_write(produced, json.dumps(block, sort_keys=True) + '\n')
             log('l2-block-produced', **{k: block[k] for k in ('number', 'hash', 'deposits', 'transactions',
                                                                'withdrawal_count', 'rules', 'timestamp') if k in block},
@@ -1672,17 +1899,24 @@ class Settler:
             for where in order:
                 if name == 'prove':
                     proof.unlink(missing_ok=True)
-                if where == 'remote':
-                    result = self.prove_remote(directory, proof)
-                elif name == 'prove' and not self.local_proof_fits(directory):
-                    result = types.SimpleNamespace(returncode=75)
-                else:
-                    with (directory / f'{name}.log').open('w') as out:
-                        result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                timed_out = False
+                try:
+                    if where == 'remote':
+                        result = self.prove_remote(directory, proof)
+                    elif name == 'prove' and not self.local_proof_fits(directory):
+                        result = types.SimpleNamespace(returncode=75)
+                    else:
+                        with (directory / f'{name}.log').open('w') as out:
+                            result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=3600)
+                except subprocess.TimeoutExpired:
+                    # Review r10 L6: a timeout is a failed attempt at this location, so the next one in
+                    # `remote_prover.order` is still tried. run_bounded has already killed and cleaned the group.
+                    result, timed_out = types.SimpleNamespace(returncode=TIMEOUT_EXIT), True
                 if result.returncode == 0:
                     break
                 if name == 'prove':
-                    log('prover-failed', directory=str(directory), where=where, exit_code=result.returncode)
+                    log('prover-failed', directory=str(directory), where=where, exit_code=result.returncode,
+                        **({'timeout': True} if timed_out else {}))
             steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
@@ -1721,31 +1955,59 @@ class Settler:
     def run_bounded(self, argv, timeout, **kwargs):
         """Run a prover with a time limit that holds for everything it starts. subprocess.run kills only the direct child
         on a timeout: the SP1 native runner it spawned would live on and keep its memory. So the prover gets its own
-        process group, which is killed on a timeout and after every exit. An injected runner (tests) is used as given."""
+        process group, which is killed on a timeout and after every exit. An injected runner (tests) is used as given.
+
+        A stop signal (systemctl stop/restart, Ctrl-C, hangup) takes the timeout path (review r10 M1): the group is
+        killed, the SP1 segments it mapped are removed, and a Gnark container it left is killed. A second signal
+        during that cleanup does not interrupt it. Each run gets its own TMPDIR under the configured one, so its
+        container is found by its bind mounts, and its temporary files go with it."""
         if self.run is not subprocess.run:
             return self.run(argv, timeout=timeout, **kwargs)
         shm = str(Path(self.c.get('prover_shm_dir', '/dev/shm')) if hasattr(self, 'c') else Path('/dev/shm'))
-        process = subprocess.Popen(argv, start_new_session=True, **kwargs)
-        ours = set()  # segments a process of this run's group mapped: only these may be removed afterwards
-        deadline = time.monotonic() + timeout
-        try:
-            while process.poll() is None:
-                ours |= group_segments(process.pid, shm)
-                if time.monotonic() >= deadline:
-                    raise subprocess.TimeoutExpired(argv, timeout)
-                time.sleep(0.5)
-        except BaseException:
+        docker_path = (self.c.get('prover_path') if hasattr(self, 'c') else None) or '/usr/bin:/bin'
+        env = kwargs.get('env')
+        with stop_signals():
+            process, ours, private = None, set(), None  # ours: segments this run's group mapped; only these go
+            try:
+                with deferred_stop():
+                    if env and env.get('TMPDIR'):
+                        try:
+                            private = tempfile.mkdtemp(prefix='prover-', dir=env['TMPDIR'])
+                            kwargs['env'] = {**env, 'TMPDIR': private}
+                        except OSError:  # no usable TMPDIR: run as before, without the container check
+                            private = None
+                    process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+                deadline = time.monotonic() + timeout
+                while process.poll() is None:
+                    ours |= group_segments(process.pid, shm)
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    time.sleep(0.5)
+            except BaseException:
+                with deferred_stop():
+                    self.clean_up_prover(process, ours, shm, private, docker_path, abnormal=True)
+                raise
+            with deferred_stop():
+                self.clean_up_prover(process, ours, shm, private, docker_path, abnormal=process.returncode != 0)
+            return subprocess.CompletedProcess(argv, process.returncode)
+
+    def clean_up_prover(self, process, ours, shm, private, docker_path, abnormal):
+        """Kill the prover group, remove the SP1 segments it mapped, kill its Gnark container after an abnormal end,
+        and remove its private TMPDIR. Runs inside deferred_stop(); every step tolerates a group already gone."""
+        if process is not None:
             ours |= group_segments(process.pid, shm)
-            self.kill_group(process.pid)
-            process.wait()
-            time.sleep(0.2)
+            self.kill_group(process.pid)  # whatever it left running
+            if process.returncode is None:
+                try:
+                    process.wait(30)
+                except subprocess.TimeoutExpired:
+                    pass
+            time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
             remove_leaked_segments(ours)
-            raise
-        ours |= group_segments(process.pid, shm)
-        self.kill_group(process.pid)  # whatever it left running
-        time.sleep(0.2)  # let the kernel tear down the killed processes' mappings
-        remove_leaked_segments(ours)
-        return subprocess.CompletedProcess(argv, process.returncode)
+        if private:
+            if abnormal:
+                stop_gnark_containers(private, docker_path)
+            shutil.rmtree(private, ignore_errors=True)
 
     @staticmethod
     def kill_group(pgid):
@@ -1958,9 +2220,9 @@ class Settler:
         """Send the DA bytes and wait for the record. With `signed_base_fee`, return 'fee-moved' as soon as the
         next base fee differs from it: those bytes can then no longer be included, and waiting is pointless."""
         da = self.c['da']
-        port, response = self.native.submit(tx.hex())
+        ports, response = self.native.submit(tx.hex())
         log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'),
-            port=port, attempt=attempt, fee_estimate_sat=estimate, signed_base_fee=signed_base_fee)
+            ports=ports, attempt=attempt, fee_estimate_sat=estimate, signed_base_fee=signed_base_fee)
         deadline = self.clock() + da.get('inclusion_timeout_seconds', 300)
         while self.clock() < deadline:
             self.sleep(self.c['poll_seconds'])
@@ -2033,10 +2295,11 @@ class Settler:
                                 f'(another settler?) while settling {number}')
 
     def broadcast(self, number, directory, tx, record):
-        """Submit (or rebroadcast) the same bytes. True when some endpoint holds them,
-        False when every refusal was transient; a terminal refusal returns 'terminal'."""
+        """Submit (or rebroadcast) the same bytes to every endpoint. The list of endpoints that hold them
+        (true) when at least one does, False when every refusal was transient; a terminal refusal returns
+        'terminal'."""
         try:
-            port, response = self.native.submit(tx.hex())
+            ports, response = self.native.submit(tx.hex())
         except SubmitRefused as refused:
             kind = refused.kind()
             log('submit-refused', number=number, kind=kind, errors=[f'{p}: {e}'[:300] for p, e in refused.errors])
@@ -2046,8 +2309,8 @@ class Settler:
         record['last_status'] = response.get('status')
         atomic_write(directory / 'submitted.json', json.dumps(record, indent=2) + '\n')
         log('submitted' if response.get('status') != 'duplicate' else 'submitted-duplicate', number=number,
-            response=response.get('status'), tx_hash=response.get('tx_hash'), port=port, attempt=record['attempts'])
-        return True
+            response=response.get('status'), tx_hash=response.get('tx_hash'), ports=ports, attempt=record['attempts'])
+        return ports
 
     def submit_and_wait(self, number, directory, tx, view):
         values = tx[33:33 + VALUES_BYTES]
@@ -2092,10 +2355,13 @@ class Settler:
             if self.clock() - last_sent >= self.c['resubmit_seconds'] or not sent:
                 sent, last_sent = self.broadcast(number, directory, tx, record), self.clock()
         now = self.l1_height()
+        held = sent if isinstance(sent, list) else []
         log('acceptance-timeout', number=number, l1_height_at_submit=height, l1_height_now=now,
-            submitted=bool(sent))
+            submitted=bool(sent), held_by=held)
         if height is not None and now is not None and now <= height:
             log('l1-not-advancing', number=number, l1_height=now)  # the L1 is stalled; nothing to fix here
+        elif held and height is not None and now is not None:
+            self.not_included(number, record['tx_sha256'], held)
         return False
 
     def program_moved(self, current, view):
@@ -2112,6 +2378,21 @@ class Settler:
             return any(self.program_named(e) is self.program for e in current.get('program_schedule') or [])
         except (KeyError, TypeError, ValueError, AttributeError):
             return False
+
+    def not_included(self, number, tx_sha256, held):
+        """An acceptance window ended while endpoints held these bytes and L1 advanced: no endpoint relayed them to
+        a proposer that would include them, or proposers refuse them. Counted per settlement bytes; after
+        `max_unincluded_windows` consecutive windows (default 4, 0 = alert only) the worker halts for the operator
+        instead of looping silently (review r10 M2). A restart changes nothing here: the bytes come from proved.json."""
+        if self.unincluded.get('tx') != tx_sha256:
+            self.unincluded = {'tx': tx_sha256, 'windows': 0}
+        self.unincluded['windows'] += 1
+        windows, limit = self.unincluded['windows'], self.c.get('max_unincluded_windows', 4)
+        log('settlement-not-included', number=number, held_by=held, windows=windows, halt_after=limit)
+        if limit and windows >= limit:
+            raise Halt(f'the settlement of L2 block {number} was held by endpoints {held} for {windows} acceptance '
+                       'windows while L1 advanced, and was never included: check that the endpoints relay to the '
+                       'validators (fork, partition, stuck node) and the proposers\' refusals')
 
     def record_accepted(self, number, directory, accepted):
         atomic_write(directory / 'accepted.json', json.dumps(accepted, indent=2) + '\n')
@@ -2434,6 +2715,14 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
 
 
 def main():
+    install_stop_handlers()
+    try:
+        run_main()
+    except Stopped as stop:
+        exit_by_signal(stop)
+
+
+def run_main():
     config = json.loads(CONFIG.read_text())
     if sys.argv[1:] == ['--check-rpc']:
         sys.exit(check_rpc(config))

@@ -12,6 +12,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import settler_v3 as s  # noqa: E402
+from test_settler_v3 import broadcasts  # noqa: E402  (review r10 M2: one entry per endpoint)
 import test_settler_mainnet as mn  # noqa: E402
 import test_settler_next as nx  # noqa: E402
 
@@ -82,7 +83,7 @@ class ProgramScheduleTest(unittest.TestCase):
         self.assertEqual(extend[extend.index('--rule-set') + 1], 'base')
         [proof] = self.proofs(fake)
         self.assertEqual(Path(proof[0]).name, 'bloch-evm-sp1-settlement-v3')
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.base_values)
         names = [e for e, _ in events]
         self.assertNotIn('program-scheduled', names)
@@ -110,7 +111,7 @@ class ProgramScheduleTest(unittest.TestCase):
         extends = [c for c in fake.calls if c[1] == 'extend']
         self.assertEqual([c[c.index('--rule-set') + 1] for c in extends], ['next'])
         self.assertEqual(fake.rewound, [])
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
         names = [e for e, _ in events]
         self.assertNotIn('program-moved-before-submit', names)
@@ -174,7 +175,7 @@ class ProgramScheduleTest(unittest.TestCase):
             self.assertTrue(settler.cycle())
         self.assertEqual(settler.program['name'], 'next')
         self.assertEqual(fake.rewound, [])
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
 
     def test_after_the_gate_the_next_program_settles_with_an_empty_schedule(self):
@@ -219,7 +220,7 @@ class ProgramScheduleTest(unittest.TestCase):
         self.assertTrue(exports)
         for call in exports:
             self.assertNotIn('--witness', call)
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
         self.assertIn('program-gate-pending', [e for e, _ in events])
 
@@ -254,7 +255,7 @@ class ProgramScheduleTest(unittest.TestCase):
         sparse, fallback = self.proofs(fake)  # the fallback proof made ahead of the gate is not made again after it
         self.assertIn(str(self.root / 'settlement_v3_mainnet_sparse'), sparse)
         self.assertIn(str(self.root / 'settlement_v3_mainnet.fallback'), fallback)
-        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual(len(broadcasts(fake.sent)), 1)
 
     def test_a_block_reproved_for_the_rollback_is_not_proved_again_by_a_later_cycle(self):
         # Without the schedule (old path): the rollback passes during the sparse proof, the block is re-proved by the
@@ -272,7 +273,7 @@ class ProgramScheduleTest(unittest.TestCase):
             fake.include = True
             self.assertTrue(settler.cycle())
         self.assertEqual(len(self.proofs(fake)), 2)
-        self.assertGreaterEqual(len(fake.sent), 2)
+        self.assertGreaterEqual(len(broadcasts(fake.sent)), 2)
         self.assertEqual(len(set(fake.sent)), 1)  # only the one fallback settlement, sent again
 
     def test_swap_and_rollback_both_inside_the_window_target_the_fallback(self):
@@ -298,7 +299,7 @@ class ProgramScheduleTest(unittest.TestCase):
         self.assertEqual(settler.program['name'], 'base')
         [proof] = self.proofs(fake)
         self.assertEqual(Path(proof[0]).name, 'bloch-evm-sp1-settlement-v3')
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.base_values)
         unusable = [f['reason'] for e, f in events if e == 'program-schedule-unusable']
         self.assertEqual(len(unusable), 1, unusable)
@@ -355,7 +356,7 @@ class ProgramScheduleTest(unittest.TestCase):
             self.assertTrue(settler.cycle())
         names = [e for e, _ in events]
         self.assertIn('program-moved-before-submit', names)
-        [tx] = fake.sent
+        [tx] = broadcasts(fake.sent)
         self.assertEqual(tx[33:33 + s.VALUES_BYTES], fake.next_values)
 
     def test_a_schedule_that_recovers_is_used_again(self):

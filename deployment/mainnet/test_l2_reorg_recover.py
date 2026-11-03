@@ -93,7 +93,7 @@ class FakeSettler:
     def local_hash(self, number):
         return 'aa' * 32
 
-    def produce(self, *args):
+    def produce(self, *args, timeout=300):
         self.calls.append(args)
         if args[0] == 'head':
             return {'number': self.head, 'hash': 'aa' * 32}
@@ -142,18 +142,21 @@ class BehindAccepted(unittest.TestCase):
     def test_database_behind_the_accepted_head_is_rebuilt_and_respooled(self):
         report, settler = self.plan(2, respool_from=[self.root / 'live-work'])
         self.assertEqual(report['database'], 'behind')
-        self.assertEqual(report['l1_batches'], [f'4:{r.S.da_commitment(4, self.paid).hex()[:16]}'])
         pool = sorted(p.name for p in (self.root / 'pool').iterdir())
-        expected = {r.S.keccak256(t).hex() + '.tx' for t in (b'\x02paid-one', b'\x02paid-two', b'\x02live')}
-        self.assertEqual(set(pool), expected)
-        self.assertEqual(report['respooled'], 3)
+        expected = {r.S.keccak256(t).hex() + '.tx' for t in (b'\x02paid-one', b'\x02live')}
+        self.assertEqual(set(pool), expected, 'only the pre-restore work directory is re-spooled')
+        self.assertEqual(report['respooled'], 2)
         self.assertTrue(Path(report['old_database']).is_dir())
         self.assertEqual([c[0] for c in settler.calls], ['head', 'reconstruct'])
 
-    def test_batches_of_another_key_are_not_respooled(self):
-        (self.root / 'da.pub').write_text((b'\x77' * 3749).hex() + '\n')
+    def test_a_batch_on_l1_is_never_respooled(self):
+        # The follower store holds a frame naming this settler's DA key for block 4 (setUp). L1 does not prove who
+        # paid for a batch (agents/145 F1), so nothing is taken from L1, whichever key the frame names.
         report, _ = self.plan(2)
-        self.assertEqual((report['l1_batches'], report['respooled']), ([], 0))
+        self.assertEqual(report['respooled'], 0)
+        self.assertNotIn('l1_batches', report)
+        self.assertEqual(list((self.root / 'pool').iterdir()), [])
+        self.assertFalse(hasattr(r, 'own_l1_batches'))
 
     def test_dry_run_reports_and_changes_nothing(self):
         report, _ = self.plan(2, apply=False)

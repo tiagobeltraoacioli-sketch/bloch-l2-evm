@@ -166,7 +166,10 @@ def sample(node: Dict[str, Optional[str]], refs: List[str], timeout: float) -> D
                peers=stuck_metric(text, 'bloch_pos_peer_count'), has_ref_head=None)
     if ref:
         try:
-            out['has_ref_head'] = bool(rpc(node['rpc'], 'getblockbyid', [ref['head']], timeout))
+            block = rpc(node['rpc'], 'getblockbyid', [ref['head']], timeout)
+            # A node also answers for a block it stores on a branch it does not follow, with
+            # `finality: not_canonical` (engine.rs block_reply): that is not "reference head known" (agent 187 F1).
+            out['has_ref_head'] = bool(block) and not (isinstance(block, dict) and block.get('finality') == 'not_canonical')
         except RpcError as e:
             out['has_ref_head'] = False if re.search(r'no block', str(e)) else None
     return out

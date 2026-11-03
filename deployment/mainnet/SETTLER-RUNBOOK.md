@@ -53,13 +53,14 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 
 | File | Source | SHA-256 |
 | --- | --- | --- |
-| `settler_v3.py` | this branch, `deployment/devnet/` | (recorded in the `/opt` path) |
-| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | not a pin: its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
-| `bloch-l2-produce-dev` | `build-release.sh` against native 78d4921c (v2.1 `fb0d5313…28ae`; v2 `7c1cc62b…` lacks the flag-day rebuild fix) | not a pin |
+| `settler_v3.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` of this tree (fork candidate: it moves with every settler change; enforced since agent 155; also recorded in the `/opt` path) |
+| `sequencer_policy.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` (enforced) |
+| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step with `sparse-witness` (serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | **not pinned yet (fork candidate)**: `prepare` refuses every host until the December release build is pinned; the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
+| `bloch-l2-produce-dev` | fork candidate v2 `out/` (agent 143, native f12b4113, reproduced on two hosts): `425d4fe8…`; it moves with the final December build | `425d4fe8…4cc78` (enforced) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
-| `l2_reorg_recover.py` | `deployment/mainnet/l2_reorg_recover.py` | `7c918bb7…9a57` (enforced) |
+| `l2_reorg_recover.py` | `deployment/mainnet/l2_reorg_recover.py` | `2a648b31…9a53` (enforced) |
 | `settlement_v3_mainnet_sparse` | sparse-witness guest (CANDIDATE, the program swap's `PROGRAM_NEXT`) | `78c533fa…7bea` (enforced) |
 | `settlement_v3_mainnet_fallback` | complete-witness guest under the next rules (CANDIDATE, the rollback's `PROGRAM_FALLBACK`; pinned container build of the fork candidate e8feb2b) | `3ad3a4f0…53b3` (enforced) |
 
@@ -112,8 +113,13 @@ sudo python3 install-settler-mainnet.py configure --prover-threads 6
 This writes `/etc/bloch-l2-mainnet-settler/config.json`:
 
 - RPCs `80.240.16.185`, `199.247.22.8` and `45.77.67.251` on port 8080, quorum 2;
-- acceptance timeout 1800 s, rebroadcast every 300 s, polling every 15 s;
-- user transactions **off**.
+- acceptance timeout 1800 s, rebroadcast every 300 s, polling every 15 s; every broadcast goes to all
+  three RPCs (review r10 M2);
+- user transactions **off**;
+- foreign settlement recovery **on** (owner decision D17, 2026-11-02), reading the local follower
+  `/var/lib/bloch-l2-mainnet-follower/native` and `status.json`. `configure` first checks, as the settler
+  user, that both are readable, so start the follower first. `--follower-state DIR --follower-status FILE`
+  names other paths; `--no-foreign-recovery` turns it off (a foreign settlement then halts the worker).
 
 It then runs:
 
@@ -177,6 +183,13 @@ Enable user transactions only after these steps:
 2. the DA key is funded;
 3. the follower and RPC can rebuild from L1 DA.
 
+This build does not reuse a DA batch it finds on L1 (agents/145 F1: L1 does not show who paid for a
+batch). So a settler database restored at the accepted head builds the next block again from the spool and
+may pay one more DA fee (about 2,200 sat), and the transactions of that unsettled block come back only if you
+re-spool them from the pre-restore `work/` (`l2_reorg_recover.py --respool-from OLD_WORK`, or the entry-13
+one-liner of `docs/L2-OPERATOR-RUNBOOK.md`). A database behind the accepted head halts the worker; repair it
+with `l2_reorg_recover.py` and `--respool-from`. Never back up or restore `canonical/` or `work/`.
+
 Then edit `user_transactions: true` in `config.json` and run
 `systemctl restart bloch-l2-mainnet-settler`. The worker refuses this if the live profile does
 not admit user transactions.
@@ -190,6 +203,16 @@ sudo python3 install-settler-mainnet.py rollback
 This stops and disables the unit and removes the unit file. It keeps the L2 database, the work
 directory, the keystore, the passphrase and the config.
 
+Stopping the unit (rollback, `systemctl stop` or `restart`) during a proof is safe since review r10 M1: the
+unit sends SIGTERM to the worker only (`KillMode=mixed`), the worker kills its prover group, removes the SP1
+segments it mapped and kills its Gnark container, then exits by the signal; systemd then kills anything left
+(`TimeoutStopSec=120`). `RemoveIPC=yes` removes any POSIX shared memory of the settler user when the unit stops,
+so do not run `dry-run --prove` while stopping the unit. To confirm after a stop (no output expected):
+
+```
+ls -l /dev/shm | grep bloch-l2-mainnet-settler
+```
+
 An accepted L1 settlement cannot be undone. The L2 simply stops advancing until a settler runs
 again. Restart with `start --confirm-mainnet` (the unit file is recreated). The worker resumes
 from the accepted head; it reuses a block left by a crash if its anchor is unchanged.
@@ -199,12 +222,20 @@ from the accepted head; it reuses a block left by a crash if its anchor is uncha
 | Log event | Meaning / action |
 | --- | --- |
 | `submitted-duplicate` | The node already holds or recently included these bytes. The worker keeps waiting. |
+| `submitted` / `submitted-duplicate` `ports` | The endpoints that hold the bytes. Every broadcast goes to all three RPCs (review r10 M2); `accepted` or `duplicate` from any of them counts. |
+| `submit-partial` | Some RPCs refused or failed while others hold the bytes. Look at the named endpoint if it repeats. |
+| `acceptance-timeout` (`held_by` set, L1 advancing) + `settlement-not-included` | RPCs hold the settlement but no block includes it: an endpoint on a fork or partition, or proposers refusing it. After `max_unincluded_windows` windows in a row (default 4, 2 h on mainnet) the worker halts. |
+| `stopped` | The worker ended on a signal (`systemctl stop`/`restart`) after cleaning up its prover: the process group is killed, its SP1 segments are removed from `/dev/shm`, and its Gnark container is killed (review r10 M1). |
+| `prover-shm-removed`, `prover-container-killed` | Cleanup after a prover timeout, failure or stop. `prover-container-check-failed`: Docker did not answer; check `docker ps` for a left-over `sp1-gnark` container. |
 | `submit-refused` kind `retry` | Another proof is pending, the mempool is full, or a retryable bar. The worker rebroadcasts the **same bytes**. |
 | `acceptance-timeout` + `l1-not-advancing` | The L1 is stalled (the devnet4 block-231 case). Nothing to fix in the settler: the next cycle reuses the same proof and bytes. |
 | `rpc-no-quorum` / `rpc-endpoint-diverged` | The RPCs disagree. The worker waits and never uses a minority answer. |
+| `rpc-quorum-view-behind` | Two RPCs agree on an accepted L2 number below one this process already saw (two stale endpoints, or a real L1 reorg while the third endpoint is down). The worker waits. |
+| `rpc-quorum-behind-floor` then `retry` and exit 1 | The same behind-floor answer has lasted `quorum_floor_stall_seconds` (default 1200 s; review r10 L1). The worker exits 1 after `max_consecutive_failures` retries and systemd restarts it, which resets the in-memory floor. If L1 really reorged, the restarted worker resubmits its block at the accepted number + 1 when the anchor is unchanged, or halts with its own reason (then use `l2_reorg_recover.py`). If two endpoints are stale, fix them: after the restart the worker halts on a database or anchor check, or after `max_unincluded_windows` of `settlement-not-included`. |
+| `prover-failed` `timeout: true` | A prover attempt ran out of time (exit 124 recorded). The next location in `remote_prover.order` is tried (review r10 L6). |
 | `da-funding-low` | Top up the DA fee key. |
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements". No action unless they repeat. |
-| `halt` (exit 3, no auto-restart) | Operator review. Causes: a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
+| `halt` (exit 3, no auto-restart) | Operator review. Causes: a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
 
 ## Idle blocks
 
@@ -212,14 +243,14 @@ Off by default. `configure --skip-idle-blocks [--max-idle-seconds 86400] [--min-
 
 No consensus rule changes. L1 accepts the next L2 block at any time, against the source it froze right after the last acceptance.
 
-A block is due when L1 holds an unconsumed deposit, the spool holds a transaction, or the source is `max_idle_seconds` old. The last one proves prover, proof and submission while no demand does, and sets how late a broken prover is found.
+A block is due when L1 holds an unconsumed deposit, the spool holds a transaction at its sender's next nonce, or the source is `max_idle_seconds` old. The last one proves prover, proof and submission while no demand does, and sets how late a broken prover is found.
 
 **What changes for users and operators:**
 
 - **A deposit made while idle takes two blocks and two proofs.** The frozen source does not list it, so the first block carries nothing and only the next can mint it.
 - **L2 time stands still while idle.** `latest` shows the last block's time, and the next block carries the time of the old source, up to `max_idle_seconds` behind. Its transactions would run at that time, so a block on a source older than 600 s above the pacing is built without the spool, and the transactions go in the next one. This also costs a block.
 - **Pacing.** `min_block_interval_seconds` delays a due block, measured from the last acceptance. It is the only limit on a depositor forcing blocks. A deposit may then wait two intervals plus two proofs.
-- **Junk in the spool still forces blocks.** A transaction the producer cannot include is demand until it leaves the spool. Set pacing before user transactions are on.
+- **Only an entry the next block may take forces a block.** A spooled transaction is demand when its nonce is its sender's next nonce at the head (the producer's `account`). A nonce gap, which the RPC admits up to 16 ahead and keeps 3 h, is not. Bytes that do not read as a transaction, and a sender whose nonce cannot be read, still count (`spool-demand-unknown` in the log); the producer prunes the first at the next block. Fees are not checked here, because the RPC admits only entries that cover the next base fee and the tip floor. The first check after a restart reads every entry's sender, about 10 ms each (40 s for a full 4,096-entry spool); later checks read only new files. Set pacing before user transactions are on.
 
 **Set with the option, or they raise false alerts:**
 
@@ -236,8 +267,11 @@ Follower, settled RPC, attestors and claims do not depend on block cadence.
 Settling needs no authorization. A deposit-only block built by the rules is identical whoever builds
 it, so only a block with other user transactions, and its own paid DA batch, differs from ours.
 
-Without `foreign_recovery`, such a block halts the worker (exit 3). With it (`configure --follower-state
-DIR --follower-status FILE`), the worker:
+Even a deposit-only block can differ, or arrive first: a third party may settle the identical block
+while this worker holds (D15 pacing) or proves, or use another anchor. Without `foreign_recovery`, such
+a block halts the worker (exit 3); agent 152 (M4) showed anyone who can prove can do that at proving cost.
+So `foreign_recovery` is **on at launch** (owner decision D17, 2026-11-02): `configure` sets it by default
+(`--follower-state DIR --follower-status FILE` for other paths, `--no-foreign-recovery` to opt out). With it, the worker:
 
 1. stops working on its own block, and pays no DA for a block that went stale during the proof;
 2. waits until the native follower has finalized the accepted settlement. The rehearsal measured about
@@ -281,9 +315,15 @@ sudo systemctl stop bloch-l2-mainnet-settler bloch-l2-mainnet-rpc
 sudo -u bloch-l2-mainnet-settler python3 REL/l2_reorg_recover.py --config /etc/bloch-l2-mainnet-settler/config.json --follower-state /var/lib/bloch-l2-mainnet-follower/native --follower-status /var/lib/bloch-l2-mainnet-follower/status.json
 ```
 
-`--follower-status` is required: the installed config does not name that file. `prepare` refuses any file but the pinned tool `7c918bb7…`. Its stdout is exactly one JSON document; worker log lines go to stderr. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
+`--follower-status` is required: the tool does not read it from the config. `prepare` refuses any file but the pinned tool `2a648b31…`. Its stdout is exactly one JSON document; worker log lines go to stderr. An install prepared before this tool shipped does not have it in `REL`: copy `deployment/mainnet/l2_reorg_recover.py` there first.
 
-Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool, and keeps the old database for review.
+Exit 75 means the accepted settlement is not finalized yet: run it again later. Exit 3 means refused. When the plan is right, run the same command with `--apply`. It rebuilds a new database from L1, returns the user transactions of orphaned blocks to the spool (and, with `--respool-from OLD_WORK`, those of the pre-restore `work/` above the accepted number; never batches read from L1), and keeps the old database for review.
+
+Since the round-10 kit (agent 152 L2-L4, fixed by agent 198):
+
+- Orphaned blocks are every local block off the accepted chain, found from the common ancestor (the rebuild's blocks, then the follower's finalized settlements); a database that was replaced at the accepted number (`forked`) or left the chain below its head (`ahead` after a deeper reorg) also respools those blocks. The report names `common_ancestor` (with `common_ancestor_assumed` when no canonical hash was known below it).
+- The rebuild gets `--rebuild-timeout SECONDS` (default `foreign_recovery.rebuild_timeout_seconds`, else 3600), not the 300 s of other producer commands. A rebuild that runs out of time is refused cleanly (exit 3); run again with a larger value.
+- The swap is journalled in `<l2_db>.recovery.json`, in the worker's format. If `--apply` is interrupted between its renames, the next `--apply` finishes it (a run without `--apply` refuses and says so), and so does the worker at its next start.
 
 ## Attestor signatures (3-of-5): when and how
 

@@ -34,6 +34,7 @@ which adds `--sparse` after `--mainnet`; the settler sends it the sparse artifac
 Exit codes: 0 proof written, 64 bad request, 70 prover failed, 75 busy.
 Dependency-free Python 3.9+.
 """
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -46,6 +47,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 CONFIG = Path(os.environ.get('BLOCH_REMOTE_PROVER_CONFIG', '/etc/bloch-l2-devnet4-prover/config.json'))
@@ -232,38 +234,168 @@ def remove_leaked_segments(paths, mapped=segment_mapped):
     return removed
 
 
+# ---- stop signals (review r10 M1): the cleanup also runs when this forced command is stopped by a signal ----
+# (sshd or host shutdown, an operator's kill, a hangup). The same code as in settler_v3.py: this file is installed
+# alone on the prover host.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+_STOP = {'signum': None, 'raised': False, 'deferred': 0}
+
+
+class Stopped(SystemExit):
+    """A stop signal turned into an exception, so the prover group, its SP1 segments, its Gnark container and the
+    job directory are cleaned up, and the job lock is released only after that. main() then ends the process by
+    the same signal."""
+
+    def __init__(self, signum):
+        super().__init__(128 + signum)
+        self.signum = signum
+
+
+def _on_stop_signal(signum, _frame):
+    if _STOP['signum'] is not None:
+        return  # already stopping: a second signal must not abort the cleanup the first one started
+    _STOP['signum'] = signum
+    if _STOP['deferred']:
+        return  # inside a cleanup: raised when it ends (deferred_stop)
+    _STOP['raised'] = True
+    raise Stopped(signum)
+
+
+def install_stop_handlers():
+    """Route SIGTERM, SIGINT and SIGHUP to Stopped; returns the handlers it replaced."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    previous = {}
+    for number in STOP_SIGNALS:
+        current = signal.getsignal(number)
+        if current is not _on_stop_signal:
+            previous[number] = current
+            signal.signal(number, _on_stop_signal)
+    return previous
+
+
+@contextlib.contextmanager
+def stop_signals():
+    previous = install_stop_handlers()
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            if handler is not None:
+                signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def deferred_stop():
+    """Run a cleanup to its end: a stop signal that arrives inside it is raised once the cleanup is done."""
+    _STOP['deferred'] += 1
+    try:
+        yield
+    finally:
+        _STOP['deferred'] -= 1
+        if not _STOP['deferred'] and _STOP['signum'] is not None and not _STOP['raised']:
+            _STOP['raised'] = True
+            raise Stopped(_STOP['signum'])
+
+
+def exit_by_signal(stop):
+    signal.signal(stop.signum, signal.SIG_DFL)
+    os.kill(os.getpid(), stop.signum)
+    sys.exit(stop.code)  # not reached for TERM, INT and HUP
+
+
+def stop_gnark_containers(tmpdir, path='/usr/bin:/bin', run=subprocess.run):
+    """Kill the Gnark containers with a bind mount from `tmpdir` (this job's private directory). SP1 runs Groth16
+    wrapping as `docker run --rm` without a name, so killing the prover group kills the docker CLI only and the
+    container (~18.5 GB, outside the prover slice) runs on until its proof ends (review r10 L5)."""
+    docker = shutil.which('docker', path=path) if tmpdir else None
+    if not docker:
+        return []
+    prefix = str(tmpdir).rstrip('/') + '/'
+    try:
+        ids = run([docker, 'ps', '-q', '--no-trunc'], capture_output=True, text=True, timeout=15).stdout.split()
+        found = run([docker, 'inspect', '--format', '{{.Id}}\t{{json .Mounts}}', *ids], capture_output=True,
+                    text=True, timeout=15).stdout if ids else ''
+    except (OSError, subprocess.SubprocessError):
+        return []
+    ours = []
+    for line in found.splitlines():
+        container, _, mounts = line.partition('\t')
+        try:
+            sources = [str(m.get('Source', '')) for m in json.loads(mounts) or []]
+        except (ValueError, AttributeError):
+            continue
+        if any(source.startswith(prefix) for source in sources):
+            ours.append(container)
+    for container in ours:
+        try:
+            run([docker, 'kill', container], capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if ours:
+        print(json.dumps({'event': 'prover-container-killed', 'containers': [c[:12] for c in ours]}),
+              file=sys.stderr, flush=True)
+    return ours
+
+
 def run_while_client_connected(argv, env, log, timeout, gone=client_gone, poll_seconds=1, shm='/dev/shm'):
     """Run the prover in its own process group. A proof nobody can receive holds the lock and tens of GB
     for its whole duration and makes every retry of the restarted settler exit 75, so a dead client or
     the timeout stops the whole group at once. The SP1 shared-memory segments the group mapped are unlinked
-    afterwards: a killed native runner never does it, and they outlive this process in /dev/shm."""
-    process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                               start_new_session=True)
-    deadline = time.monotonic() + timeout
-    ours = set()
-
-    def finish(reason=None):
-        ours.update(group_segments(process.pid, shm))
-        stop_group(process)
-        remove_leaked_segments(ours)
-        if reason:
-            fail(70, reason)
-    while True:
-        ours.update(group_segments(process.pid, shm))
+    afterwards: a killed native runner never does it, and they outlive this process in /dev/shm. A stop signal
+    takes the same path (review r10 M1), and a Gnark container left by a stopped prover is killed too."""
+    with stop_signals():
+        process, ours, reason = None, set(), None
         try:
-            code = process.wait(poll_seconds)
-        except subprocess.TimeoutExpired:
-            code = None
-        if code is not None:
-            finish()
-            return code
-        if gone():
-            finish('client disconnected: proof abandoned')
-        if time.monotonic() >= deadline:
-            finish('prover timed out')
+            with deferred_stop():
+                process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                           start_new_session=True)
+            deadline = time.monotonic() + timeout
+            while True:
+                ours.update(group_segments(process.pid, shm))
+                try:
+                    code = process.wait(poll_seconds)
+                except subprocess.TimeoutExpired:
+                    code = None
+                if code is not None:
+                    break
+                if gone():
+                    reason = 'client disconnected: proof abandoned'
+                    break
+                if time.monotonic() >= deadline:
+                    reason = 'prover timed out'
+                    break
+        except BaseException:
+            with deferred_stop():
+                clean_up_group(process, ours, shm, env, abnormal=True)
+            raise
+        with deferred_stop():
+            clean_up_group(process, ours, shm, env, abnormal=bool(reason) or code != 0)
+    if reason:
+        fail(70, reason)
+    return code
+
+
+def clean_up_group(process, ours, shm, env, abnormal):
+    """Stop the group, remove its segments, and after an abnormal end kill its Gnark container."""
+    if process is None:
+        return
+    ours.update(group_segments(process.pid, shm))
+    stop_group(process)
+    remove_leaked_segments(ours)
+    if abnormal:
+        stop_gnark_containers((env or {}).get('TMPDIR'), (env or {}).get('PATH', '/usr/bin:/bin'))
 
 
 def main():
+    install_stop_handlers()
+    try:
+        serve()
+    except Stopped as stop:
+        exit_by_signal(stop)
+
+
+def serve():
     if os.environ.get('SSH_ORIGINAL_COMMAND', 'prove') != 'prove':
         fail(64, 'only the "prove" command is served')
     try:

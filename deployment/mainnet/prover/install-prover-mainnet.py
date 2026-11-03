@@ -13,7 +13,7 @@ needs no inbound port besides sshd; outbound only Docker's pinned Gnark image
 Run as root from a directory holding:
   bloch-evm-sp1-settlement-v3   host built by build-program.sh (features source-settlement,node-artifact)
   settlement_v3_mainnet         guest ELF, SHA-256 203114bf...c473 (build-reproducible.sh)
-  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet" / "witness"), SHA-256 0d239251...8b69
+  remote_prover.py              deployment/devnet/remote_prover.py (with --config / "mainnet" / "witness"), SHA-256 fb47f008...f135
   SHA256SUMS                    sha256sum of the three files above (reviewed by the operator)
 
   sudo python3 install-prover-mainnet.py install --settler-pubkey FILE --settler-host IP \\
@@ -47,7 +47,7 @@ and settlement_v3_mainnet_fallback (SHA-256 3ad3a4f0...53b3, CANDIDATE) beside t
   sudo python3 install-prover-mainnet.py install --program fallback --settler-pubkey FILE3 --settler-host IP
   sudo python3 install-prover-mainnet.py rollback --program fallback
 
-install refuses unless: the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
+install refuses unless: the host, the guest and remote_prover.py have their pinned SHA-256 (a SHA256SUMS
 beside them is the operator's review aid and proves nothing about which version this is); the host's `--mainnet identity`
 prints exactly the program the native mainnet activation pins (ELF Keccak, KoalaBear and
 BN254 vkeys, proof policy, domain, configuration); the Gnark image is present; nothing is
@@ -70,6 +70,7 @@ import pwd
 import shutil
 import subprocess
 import sys
+import tempfile
 
 USER = 'bloch-l2-prover-mainnet'
 RELEASE = Path('/opt/bloch/l2-mainnet-prover')
@@ -81,7 +82,13 @@ GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473
 # Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
 # Agent 93's measured low-memory setting, used unless --prover-env is given.
 DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
-REMOTE_PROVER_SHA256 = '0d239251d7366d24b816336eb59ab88b993b6cb3fc54d6e214d1d441491e8b69'
+REMOTE_PROVER_SHA256 = 'fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135'
+# The SP1 host. Pinned so that root never executes an unpinned binary: the `identity` check below runs it, and
+# its output is only as honest as the binary. CANDIDATE: the December host (features source-settlement,
+# node-artifact,sparse-witness) has no release build yet, and the launch host 3a24c36d... (GO-LIVE-PINS-PROVER.sha256)
+# does not serve --mainnet-v1 / --mainnet --sparse. This value is no SHA-256, so install refuses every host until
+# the December build pins it (fail closed).
+PROVER_SHA256 = 'unpinned-december-sp1-host'
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
 # codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
 # recipient is a placeholder (TBD-owner), so the configuration and every value below move with it.
@@ -243,22 +250,44 @@ def mem_available_gib():
     die('no MemAvailable')
 
 
-def install(args, here):
-    if getattr(args, 'program', 'activated') in EXTRA_PROGRAMS:
-        return install_next(args, here, args.program)
-    check_sizes(args.memory_gib, args.threads)
+def stage(here, staged, names=FILES):
+    """Copy `names` into a private directory and check the COPIES: the source directory (often under
+    /home/ubuntu) may change after any check of it, so only these hashed bytes are executed and installed."""
     sums = {}
     for line in (here / 'SHA256SUMS').read_text().splitlines():
         if line.strip():
             value, name = line.split()
             sums[Path(name.lstrip('*')).name] = value
-    for name in FILES:
-        if digest(here / name) != sums.get(name):
+    for name in names:
+        shutil.copyfile(here / name, staged / name)
+        (staged / name).chmod(0o700 if name.startswith('bloch-') else 0o600)
+        if digest(staged / name) != sums.get(name):
             die(f'{name} differs from SHA256SUMS')
-    if sums[FILES[1]] != GUEST_SHA256:
+    if FILES[1] in names and sums[FILES[1]] != GUEST_SHA256:
         die('settlement_v3_mainnet is not the pinned guest')
     if sums[FILES[2]] != REMOTE_PROVER_SHA256:
         die(f'remote_prover.py is {sums[FILES[2]]}, not the pinned {REMOTE_PROVER_SHA256}')
+    if sums[FILES[0]] != PROVER_SHA256:
+        die(f'bloch-evm-sp1-settlement-v3 is {sums[FILES[0]]}, not the pinned {PROVER_SHA256}')
+    return sums
+
+
+def install(args, here):
+    program = getattr(args, 'program', 'activated')
+    if program not in EXTRA_PROGRAMS:
+        check_sizes(args.memory_gib, args.threads)
+    staged = Path(tempfile.mkdtemp(prefix='bloch-l2-prover-stage-'))  # 0700, owned by the caller
+    try:
+        if program in EXTRA_PROGRAMS:
+            names = (FILES[0], PROGRAMS[program]['guest'], FILES[2])
+            install_next(args, staged, stage(here, staged, names), program)
+        else:
+            install_staged(args, staged, stage(here, staged))
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def install_staged(args, here, sums):
     identity = check_identity(run([here / FILES[0], *PROGRAMS['activated']['host_args'], 'identity', here / FILES[1]]))
     if not args.circuits:
         die('--circuits is required')
@@ -314,6 +343,8 @@ def install(args, here):
     for name in FILES:
         shutil.copyfile(here / name, RELEASE / name)
         (RELEASE / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
+        if digest(RELEASE / name) != sums[name]:
+            die(f'{RELEASE / name} differs from its pin after the copy (installed.json is in place: run rollback)')
     config = prover_config(RELEASE, STATE, sums[FILES[0]], args.threads, args.memory_gib,
                            parse_prover_env(args.prover_env or DEFAULT_PROVER_ENV), args.timeout_seconds)
     (ETC / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
@@ -328,25 +359,12 @@ def install(args, here):
     print(json.dumps({'installed': True, **plan, 'host_key': ' '.join(host_key[:2])}, indent=2))
 
 
-def read_sums(here, names):
-    sums = {}
-    for line in (here / 'SHA256SUMS').read_text().splitlines():
-        if line.strip():
-            value, name = line.split()
-            sums[Path(name.lstrip('*')).name] = value
-    for name in names:
-        if digest(here / name) != sums.get(name):
-            die(f'{name} differs from SHA256SUMS')
-    return sums
-
-
-def install_next(args, here, program='next'):
+def install_next(args, here, sums, program='next'):
     """The next (or fallback) program beside an installed activated one: its own release and config, the same user,
     slice and work directory (so one proof runs at a time across all), and its own settler key bound to its forced
-    command."""
+    command. `here` is the staging directory and `sums` its checked hashes (stage)."""
     spec = PROGRAMS[program]
     names = (FILES[0], spec['guest'], FILES[2])
-    sums = read_sums(here, names)
     if sums[spec['guest']] != spec['guest_sha256']:
         die(f'{spec["guest"]} is not the pinned {program} guest')
     if sums[FILES[2]] != REMOTE_PROVER_SHA256:
@@ -376,6 +394,8 @@ def install_next(args, here, program='next'):
     for name in names:
         shutil.copyfile(here / name, spec['release'] / name)
         (spec['release'] / name).chmod(0o755 if name.startswith('bloch-') else 0o644)
+        if digest(spec['release'] / name) != sums[name]:
+            die(f'{spec["release"] / name} differs from its pin after the copy (run rollback --program {program})')
     config = prover_config(spec['release'], STATE, sums[FILES[0]], base['threads'], base['memory_gib'],
                            base.get('prover_env'), base.get('timeout_seconds', 5400), program=program)
     (spec['etc'] / 'config.json').write_text(json.dumps(config, indent=2) + '\n')

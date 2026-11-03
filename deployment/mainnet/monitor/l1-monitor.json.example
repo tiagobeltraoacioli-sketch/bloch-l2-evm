@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {"name": "a", "rpc": "http://80.240.16.185:8080", "metrics": "TBD-owner"},
+    {"name": "b", "rpc": "http://199.247.22.8:8080", "metrics": "TBD-owner"},
+    {"name": "c", "rpc": "http://45.77.67.251:8080", "metrics": "TBD-owner"}
+  ],
+  "settler": {"config_file": "/etc/bloch-l2-mainnet-settler/config.json"},
+  "thresholds": {},
+  "state_file": "/var/lib/bloch-l2-monitor/l1-monitor.state.json",
+  "report_file": "/var/lib/bloch-l2-monitor/l1-monitor.report.json",
+  "timeout": 8
+}

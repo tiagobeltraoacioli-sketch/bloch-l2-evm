@@ -28,6 +28,7 @@ CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 
 results = []
+SIM_PER_IP = int(os.environ.get('SIM_PER_IP', '2'))  # render.py --sim-per-ip default
 
 
 def client_ip():
@@ -162,10 +163,10 @@ def limits(url):
 def simulations(url):
     ip = f'198.19.{random.randint(0, 255)}.{random.randint(1, 254)}'
     call_ = lambda i: {'jsonrpc': '2.0', 'id': i, 'method': 'eth_call', 'params': [{'to': '0x' + '00' * 19 + 'be', 'data': '0x'}, 'latest']}
-    s, _, r = request(url, [call_(i) for i in range(16)], ip=ip)
-    check('simulations: a batch of 16 eth_call is answered', s == 200 and len(r) == 16 and all('result' in x for x in r), r)
-    s, h, r = request(url, [call_(i) for i in range(17)], ip=ip)
-    check('simulations: a batch of 17 eth_call exceeds the per-IP slots (429, -32005)', s == 429 and r[0]['error']['code'] == -32005, (s, r))
+    s, _, r = request(url, [call_(i) for i in range(SIM_PER_IP)], ip=ip)
+    check(f'simulations: a batch of {SIM_PER_IP} eth_call is answered', s == 200 and len(r) == SIM_PER_IP and all('result' in x for x in r), r)
+    s, h, r = request(url, [call_(i) for i in range(SIM_PER_IP + 1)], ip=ip)
+    check(f'simulations: a batch of {SIM_PER_IP + 1} eth_call exceeds the per-client slots (429, -32005)', s == 429 and r[0]['error']['code'] == -32005, (s, r))
     statuses = [request(url, call_(i), ip=ip)[0] for i in range(60)]
     check('simulations: slots are released (60 sequential eth_call all 200)', statuses == [200] * 60, statuses)
     import concurrent.futures as cf
@@ -173,8 +174,8 @@ def simulations(url):
         st = list(ex.map(lambda i: request(url, call_(i), ip=ip)[0], range(400)))
     check(f'simulations: 400 parallel eth_call from one IP -> only 200/429 ({st.count(429)} x 429)', set(st) <= {200, 429}, set(st))
     time.sleep(6)  # let the per-IP request rate (limit_req) recover
-    s, _, r = request(url, [call_(i) for i in range(16)], ip=ip)
-    check('simulations: no slot leak after the parallel burst (16 slots free again)', s == 200, (s, r))
+    s, _, r = request(url, [call_(i) for i in range(SIM_PER_IP)], ip=ip)
+    check(f'simulations: no slot leak after the parallel burst ({SIM_PER_IP} slots free again)', s == 200, (s, r))
 
 
 def tx(a, b, raw, sender):

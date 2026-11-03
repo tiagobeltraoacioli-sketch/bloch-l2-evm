@@ -1,0 +1,1084 @@
+{
+ "about": "14 validators; nodes 9-13 cut off and returned (partition), verdict SPLIT: 9-13 stuck at finalized e14",
+ "case": "p1noq",
+ "genesis_time": 0,
+ "note": "getchaininfo views are the recorded fields only; `derived` nodes are reconstructed (see make_fixtures.py)",
+ "rounds": [
+  {
+   "derived": [],
+   "epoch": 29,
+   "getblockbyid": {
+    "n0": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n1": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n10": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": "getblockbyid: rpc error -32000: no block 5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8 is known to th",
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": true
+    },
+    "n11": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": "getblockbyid: rpc error -32000: no block 5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8 is known to th",
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": true
+    },
+    "n12": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": "getblockbyid: rpc error -32000: no block 5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8 is known to th",
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": true
+    },
+    "n13": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": "getblockbyid: rpc error -32000: no block 5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8 is known to th",
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": true
+    },
+    "n2": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n3": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n4": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n5": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n6": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n7": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n8": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": true,
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": "getblockbyid: rpc error -32000: no block 71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200 is known to th"
+    },
+    "n9": {
+     "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8": "getblockbyid: rpc error -32000: no block 5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8 is known to th",
+     "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200": true
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n1": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n10": {
+     "block_id": "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 607,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 933
+    },
+    "n11": {
+     "block_id": "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 607,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 933
+    },
+    "n12": {
+     "block_id": "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 607,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 933
+    },
+    "n13": {
+     "block_id": "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 607,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 933
+    },
+    "n2": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n3": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n4": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n5": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n6": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n7": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n8": {
+     "block_id": "5218e1638755cc6fe9745923f7638ec172554dcb0a39ccac858713e3254cdba8",
+     "finalized": {
+      "epoch": 27,
+      "root": "72ca9c2922a6c702bb0a4302c7f1742b2782e712e8080cb3e519cc3655653f58"
+     },
+     "height": 789,
+     "justified": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "slot": 933
+    },
+    "n9": {
+     "block_id": "71a5038f0d74f99a8f307ba1817bd30064de0298f2ddf8bff5f45425e467b200",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 607,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 933
+    }
+   },
+   "membership": "args",
+   "metrics": {
+    "n0": null,
+    "n1": null,
+    "n10": null,
+    "n11": null,
+    "n12": null,
+    "n13": null,
+    "n2": null,
+    "n3": null,
+    "n4": null,
+    "n5": null,
+    "n6": null,
+    "n7": null,
+    "n8": null,
+    "n9": null
+   },
+   "now": 933,
+   "tag": "back"
+  },
+  {
+   "derived": [
+    "n6",
+    "n7",
+    "n8"
+   ],
+   "epoch": 31,
+   "getblockbyid": {
+    "n0": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": true,
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 is known to th"
+    },
+    "n1": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": true,
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 is known to th"
+    },
+    "n10": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 is known to th",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": true
+    },
+    "n11": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 is known to th",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": true
+    },
+    "n12": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 is known to th",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": true
+    },
+    "n13": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 is known to th",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": true
+    },
+    "n2": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": true,
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 is known to th"
+    },
+    "n3": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": true,
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 is known to th"
+    },
+    "n4": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": true,
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 is known to th"
+    },
+    "n5": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": true,
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 is known to th"
+    },
+    "n6": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": true,
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 (derived: assumed)",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 (derived: assumed)"
+    },
+    "n7": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": true,
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 (derived: assumed)",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 (derived: assumed)"
+    },
+    "n8": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": true,
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 (derived: assumed)",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": "getblockbyid: rpc error -32000: no block 9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7 (derived: assumed)"
+    },
+    "n9": {
+     "47b471e0ca000000000000000000000000000000000000000000000000000000": "getblockbyid: rpc error -32000: no block 47b471e0ca000000000000000000000000000000000000000000000000000000 (derived: assumed)",
+     "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023": "getblockbyid: rpc error -32000: no block 47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023 is known to th",
+     "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7": true
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023",
+     "finalized": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "height": 835,
+     "justified": {
+      "epoch": 29,
+      "root": "48dfa0d7d816471bd5d0bbd85504b53f853dc79b9552d479dddebaa2ea0a940c"
+     },
+     "slot": 990
+    },
+    "n1": {
+     "block_id": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023",
+     "finalized": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "height": 835,
+     "justified": {
+      "epoch": 29,
+      "root": "48dfa0d7d816471bd5d0bbd85504b53f853dc79b9552d479dddebaa2ea0a940c"
+     },
+     "slot": 990
+    },
+    "n10": {
+     "block_id": "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 618,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 980
+    },
+    "n11": {
+     "block_id": "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 618,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 980
+    },
+    "n12": {
+     "block_id": "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 618,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 980
+    },
+    "n13": {
+     "block_id": "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 618,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 980
+    },
+    "n2": {
+     "block_id": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023",
+     "finalized": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "height": 835,
+     "justified": {
+      "epoch": 29,
+      "root": "48dfa0d7d816471bd5d0bbd85504b53f853dc79b9552d479dddebaa2ea0a940c"
+     },
+     "slot": 990
+    },
+    "n3": {
+     "block_id": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023",
+     "finalized": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "height": 835,
+     "justified": {
+      "epoch": 29,
+      "root": "48dfa0d7d816471bd5d0bbd85504b53f853dc79b9552d479dddebaa2ea0a940c"
+     },
+     "slot": 990
+    },
+    "n4": {
+     "block_id": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023",
+     "finalized": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "height": 835,
+     "justified": {
+      "epoch": 29,
+      "root": "48dfa0d7d816471bd5d0bbd85504b53f853dc79b9552d479dddebaa2ea0a940c"
+     },
+     "slot": 990
+    },
+    "n5": {
+     "block_id": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023",
+     "finalized": {
+      "epoch": 28,
+      "root": "85a5d237bf5b65b8cef6d56f158a5788cd80a0560906a7611efad711b74578b0"
+     },
+     "height": 835,
+     "justified": {
+      "epoch": 29,
+      "root": "48dfa0d7d816471bd5d0bbd85504b53f853dc79b9552d479dddebaa2ea0a940c"
+     },
+     "slot": 990
+    },
+    "n6": {
+     "block_id": "47b471e0ca000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 28,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 990
+    },
+    "n7": {
+     "block_id": "47b471e0ca000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 28,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 990
+    },
+    "n8": {
+     "block_id": "47b471e0ca000000000000000000000000000000000000000000000000000000",
+     "finalized": {
+      "epoch": 28,
+      "root": null
+     },
+     "height": null,
+     "justified": null,
+     "slot": 990
+    },
+    "n9": {
+     "block_id": "9634c23d00931e99c90760f9c86d9cf43a9b845da796ecb7f525e895ddac8ea7",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 618,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 980
+    }
+   },
+   "membership": "phase",
+   "metrics": {
+    "n0": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 2",
+    "n1": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 2",
+    "n10": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n11": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n12": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n13": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n2": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 2",
+    "n3": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 2",
+    "n4": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 2",
+    "n5": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 2",
+    "n6": null,
+    "n7": null,
+    "n8": null,
+    "n9": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32"
+   },
+   "now": 990,
+   "tag": "e31"
+  },
+  {
+   "derived": [],
+   "epoch": 34,
+   "getblockbyid": {
+    "n0": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n1": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n10": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": "getblockbyid: rpc error -32000: no block 6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426 is known to th",
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": true
+    },
+    "n11": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": "getblockbyid: rpc error -32000: no block 6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426 is known to th",
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": true
+    },
+    "n12": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": "getblockbyid: rpc error -32000: no block 6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426 is known to th",
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": true
+    },
+    "n13": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": "getblockbyid: rpc error -32000: no block 6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426 is known to th",
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": true
+    },
+    "n2": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n3": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n4": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n5": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n6": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n7": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n8": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": true,
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": "getblockbyid: rpc error -32000: no block d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4 is known to th"
+    },
+    "n9": {
+     "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426": "getblockbyid: rpc error -32000: no block 6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426 is known to th",
+     "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4": true
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n1": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n10": {
+     "block_id": "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 644,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1087
+    },
+    "n11": {
+     "block_id": "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 644,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1087
+    },
+    "n12": {
+     "block_id": "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 644,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1087
+    },
+    "n13": {
+     "block_id": "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 644,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1087
+    },
+    "n2": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n3": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n4": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n5": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n6": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n7": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n8": {
+     "block_id": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426",
+     "finalized": {
+      "epoch": 31,
+      "root": "47b471e0ca827ac63ed671b49a4f3ee9d9df1fb20f5a45cb9215be66451d7023"
+     },
+     "height": 894,
+     "justified": {
+      "epoch": 32,
+      "root": "409e07d7ebf169e2807c7910a63994b67fca0c56a69c7573d6a7998bbc13e60d"
+     },
+     "slot": 1087
+    },
+    "n9": {
+     "block_id": "d4e65ef10f74fd5b2a1e08e3c73ec290193d4910feb507b1bb373fcd240674f4",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 644,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1087
+    }
+   },
+   "membership": "phase",
+   "metrics": {
+    "n0": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n1": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n10": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n11": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n12": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n13": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n2": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n3": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n4": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n5": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n6": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n7": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n8": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 30",
+    "n9": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32"
+   },
+   "now": 1087,
+   "tag": "e34"
+  },
+  {
+   "derived": [],
+   "epoch": 37,
+   "getblockbyid": {
+    "n0": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n1": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n10": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": true,
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": "getblockbyid: rpc error -32000: no block d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08 is known to th"
+    },
+    "n11": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": true,
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": "getblockbyid: rpc error -32000: no block d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08 is known to th"
+    },
+    "n12": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": true,
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": "getblockbyid: rpc error -32000: no block d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08 is known to th"
+    },
+    "n13": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": true,
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": "getblockbyid: rpc error -32000: no block d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08 is known to th"
+    },
+    "n2": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n3": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n4": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n5": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n6": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n7": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n8": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": "getblockbyid: rpc error -32000: no block c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999 is known to th",
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": true
+    },
+    "n9": {
+     "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999": true,
+     "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08": "getblockbyid: rpc error -32000: no block d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08 is known to th"
+    }
+   },
+   "getchaininfo": {
+    "n0": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n1": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n10": {
+     "block_id": "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 668,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1181
+    },
+    "n11": {
+     "block_id": "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 668,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1181
+    },
+    "n12": {
+     "block_id": "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 668,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1181
+    },
+    "n13": {
+     "block_id": "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 668,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1181
+    },
+    "n2": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n3": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n4": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n5": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n6": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n7": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n8": {
+     "block_id": "d85199122d12946874a249ac50b49017363a292df377473998381c00a036cf08",
+     "finalized": {
+      "epoch": 34,
+      "root": "6c2516603d52f45e5086334958a4ab11112d5df98cf26ee3d12a0a39e1a46426"
+     },
+     "height": 965,
+     "justified": {
+      "epoch": 35,
+      "root": "70b736ae81eb16246a10808bee991b3c8576b19238a51f2ece228315e3659a87"
+     },
+     "slot": 1183
+    },
+    "n9": {
+     "block_id": "c0b3f2fea115f502e71c69e348194537beb61fdfcd8aa4a85d5809e4b05e7999",
+     "finalized": {
+      "epoch": 14,
+      "root": "130014ebf439202e3660ce80ffec59dab6f1429fdd5aa585e303fe45ac46b5ff"
+     },
+     "height": 668,
+     "justified": {
+      "epoch": 15,
+      "root": "c117e77b97258ae028cb14fcb32b244e01d28212e6b8e996d057c9f852637624"
+     },
+     "slot": 1181
+    }
+   },
+   "membership": "phase",
+   "metrics": {
+    "n0": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n1": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n10": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n11": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n12": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n13": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32",
+    "n2": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n3": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n4": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n5": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n6": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n7": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n8": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 0\nbloch_pos_blocks_parked 32",
+    "n9": "bloch_pos_peer_count 28\nbloch_pos_peer_count_devnet 28\nbloch_pos_peer_count_p2p 0\nbloch_pos_is_syncing 1\nbloch_pos_blocks_parked 32"
+   },
+   "now": 1183,
+   "tag": "e37"
+  }
+ ],
+ "slot_seconds": 1,
+ "slots_per_epoch": 32,
+ "source": [
+  "agents/69-orphan-recovery-evidence/verdicts/p1noq/probes.jsonl",
+  "agents/69-orphan-recovery-evidence/verdicts/p1noq/verdict.json"
+ ],
+ "verdict": "SPLIT"
+}

@@ -33,6 +33,10 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 ReadWritePaths=/var/lib/bloch-l2-mainnet-shadow
 ReadOnlyPaths=/etc/bloch-l2-mainnet-shadow /opt/bloch/l2-mainnet-shadow /var/lib/bloch-l2-mainnet-settler/work
+# The shadow runs as the settler user, which owns the DA fee key, its passphrase and the prover SSH key and is
+# in the docker group (the Docker socket is root on this host; a read-only mount does not stop a socket
+# connect). The shadow needs none of them.
+InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Read-only getl2settlement on the three Genesis-4 mainnet nodes; nothing else.
 IPAddressDeny=any

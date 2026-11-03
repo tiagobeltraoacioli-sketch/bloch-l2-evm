@@ -19,6 +19,10 @@ RestartSec=10
 # touch their lock files, so it stays writable for the owning user.
 ReadWritePaths=@STATE@ @TXPOOL@ @CANONICAL@
 ReadOnlyPaths=/var/lib/bloch-l2-mainnet-follower
+# On the sequencer host @CANONICAL_USER@ is the settler user: it owns the DA fee key, its passphrase and the
+# prover SSH key, and it is in the docker group (the Docker socket is root on this host; a read-only mount
+# does not stop a socket connect). This network-facing process needs none of them. Missing paths are skipped.
+InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

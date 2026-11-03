@@ -256,7 +256,7 @@ class MainnetSettlerTest(unittest.TestCase):
         self.assertEqual([c[1:3] for c in provers], [['--mainnet', 'execute'], ['--mainnet', 'prove-groth16'],
                                                      ['--mainnet', 'verify-groth16']])
         self.assertTrue(all(c[4].endswith('settlement_v3_mainnet') for c in provers))
-        [tx] = fake.sent
+        [tx] = base.broadcasts(fake.sent)
         self.assertEqual((len(tx), tx[0], tx[1:33].hex()), (1155, 0x13, M['proof_policy']))
         request = next((self.root / 'work').glob('*/native-request.txt')).read_text()
         self.assertEqual(request, REQUEST + '0' * 64 + '\n0\n0\n0\n')
@@ -286,7 +286,7 @@ class MainnetSettlerTest(unittest.TestCase):
         with mock.patch.object(s, 'log') as logged:
             self.assertTrue(self.settler(fake, resubmit_seconds=30).cycle())
         self.assertEqual(len(set(fake.sent)), 1, 'always the same signed bytes')
-        self.assertEqual(len(fake.sent), 7, 'two refused rounds on all three endpoints, then taken')
+        self.assertEqual(len(fake.sent), 9, 'two refused rounds on all three endpoints, then all three take it (M2)')
         self.assertEqual(self.events(logged).count('submit-refused'), 2)
         self.assertNotIn('halt', self.events(logged))
 

@@ -108,7 +108,7 @@ It will not restart. Read the reason, then match it:
 
 Any reorg of an accepted, unfinalized settlement causes this, shallow or deep. Effect while halted: no settlement. The RPC keeps serving the orphaned blocks as `latest` and `safe` (drill: `safe` stayed on a block L1 had dropped), and a DA fee for an orphaned block may already be spent. **Tell integrators that `latest` and `safe` are unreliable until this is done.** `finalized` was not affected in the drill.
 
-`install-settler-mainnet.py prepare` installs the tool next to the worker as `REL/l2_reorg_recover.py`, pinned `7c918bb7…`; `REL` is `/opt/bloch/l2-mainnet-settler/<digest>`. Its stdout is one JSON document; worker log lines go to stderr.
+`install-settler-mainnet.py prepare` installs the tool next to the worker as `REL/l2_reorg_recover.py`, pinned `2a648b31…` at the round-10 integrated kit (`2a0cfabd…` at 4b7f4f7; the value in `GO-LIVE-PINS.sha256` of the frozen kit wins; `678482bf…` was the v2.1 kit's); `REL` is `/opt/bloch/l2-mainnet-settler/<digest>`. Its stdout is one JSON document; worker log lines go to stderr.
 
 Then, during the incident:
 
@@ -171,9 +171,13 @@ Evidence: Alert, real settled-rpc `18be911a…` with a frozen, deleted and resto
 
 ## 7. Status file size
 
-`follower_status_size` WARN at 8 MiB, CRIT at 12 MiB. The settled RPC refuses a status file above 16 MiB. `finalized` then stops following new settlements, and the only sign is a log line. At about 475 bytes per settlement that is about 35,000 settlements.
+`follower_status_size` WARN at 8 MiB, CRIT at 12 MiB. These thresholds are the v2.1 ones and stay conservative for the next build. The size limit depends on the settled RPC (agents/76, 46):
 
-There is no operator repair in this build. Upgrade to a build with the settlement log before the limit.
+- v2.1 settled RPC (`18be911a…`): above 16 MiB `safe` and `finalized` close (-32001) and `latest` keeps serving. A real follower status costs about 555 bytes per settlement, so that is about 30,193 settlements (about 29,970 with a busy bridge), not the 35,000 once estimated from a 475-byte test fixture.
+- Next settled RPC (`e5754d05…`) with the default v2 status: closes above 256 MiB, about 482,800 settlements.
+- Next settled RPC with a v3 status (`--status-schema v3`): no size limit; `status.json` stays about 37 KB.
+
+`follower_status_runway` and `l2_status_runway` give the date at the recent cadence. The repair is the next RPC (it reopens finality on the same file in under a second, agents/76) and, later, the v3 status in the order of `docs/MAINNET-RPC-READINESS.md`.
 
 Evidence: Alert, synthetic padding on a real status with a real RPC: WARN at 9 MiB, CRIT at 15 and 17 MiB. At 17 MiB a new finalized settlement was not followed (`finalized` stayed 0). At 15 MiB with the same settlement it was (`finalized` 1).
 
@@ -284,7 +288,7 @@ What to keep, what is rebuilt, and how long it takes. Measured 2026-11-02 in age
 
 Restoring the database (and `work/`) from a backup older than the accepted settlement does not double-pay and does not fork the settled chain. The worker halts with `L2 head N cannot extend accepted settlement M`, N below M, and pays nothing. It cannot spend a DA input twice either: inputs come from the L1 UTXO set at signing time, and a signed batch is reused only while its inputs are unspent. L1 accepts only settlements that extend the accepted one, so an old state cannot replace a settled block. A restored settler started while the old host still runs is the two-settler case of entry 4 (`another settler?`).
 
-The repair tool does not cover this case: `l2_reorg_recover.py` refuses with `database head N is not ahead of accepted M: nothing to recover`. Rebuild by hand, with the settler and the RPC stopped. `RULE` is `timestamp_rule` from the config:
+In the next kit `l2_reorg_recover.py` covers this case: it reports `database: behind`, rebuilds from L1 and re-spools only from orphaned work directories and `--respool-from OLD_WORK`, never from batches read on L1 (agent 118 part 2, reuse removed in 4b7f4f7 after agents/145). Run its plan and `--apply` as in `deployment/mainnet/SETTLER-RUNBOOK.md`. Only the v2.1 tool (`678482bf…`) refuses with `database head N is not ahead of accepted M: nothing to recover`; with it, or if the tool refuses, rebuild by hand, with the settler and the RPC stopped. `RULE` is `timestamp_rule` from the config:
 
 ```
 sudo systemctl stop bloch-l2-mainnet-settler bloch-l2-mainnet-rpc
@@ -302,7 +306,7 @@ sudo mv /var/lib/bloch-l2-mainnet-settler/canonical.rebuilt /var/lib/bloch-l2-ma
 sudo systemctl start bloch-l2-mainnet-rpc bloch-l2-mainnet-settler
 ```
 
-Proposed for the next build: let `l2_reorg_recover.py` handle a database behind the accepted head (rebuild, no orphans) instead of refusing. It is pinned (`678482bf…`), so this branch does not change it.
+Done in the next kit: `l2_reorg_recover.py` handles a database behind the accepted head (above). A database exactly at the accepted head is still refused (`nothing to recover`).
 
 **User transactions of the unsettled block are dropped.** If, before the restore, a block above the accepted number had been built and its DA batch published, the restored worker rebuilds that number from the current spool, which no longer holds those transactions: they vanish from `latest`, and the DA fee already paid for them is lost. On the private net the restored worker rebuilt block 4 empty, with another hash, while L1 held the DA record of the first block 4 (3 transactions, 2196 sat). To return them, keep the pre-restore `work/` (here `OLD_WORK`) and, before starting the settler, re-spool the transactions of its blocks above the accepted number `M`:
 
