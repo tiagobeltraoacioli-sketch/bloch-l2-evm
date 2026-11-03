@@ -855,8 +855,10 @@ sudo install -d -m 0755 /etc/bloch-l2-monitor
 ```
 
 ```
-sed -e 's/--phase prelaunch/--phase live/' -e 's# --l2-rpc B=http://TBD-owner:18955##' -e 's#$# --max-idle-seconds 86400 --backlog-state /var/lib/bloch-l2-monitor/backlog.json --set block_interval_seconds=1800#' /home/ubuntu/l2-golive-next/kit/monitor/monitor.env.example | sudo tee /etc/bloch-l2-monitor/monitor.env
+sed -e 's/--phase prelaunch/--phase live/' -e 's# --l2-rpc B=http://TBD-owner:18955##' -e 's#http://TBD-owner:8080#THIRD_L1_RPC_URL#' -e 's#$# --max-idle-seconds 86400 --backlog-state /var/lib/bloch-l2-monitor/backlog.json --set block_interval_seconds=1800#' /home/ubuntu/l2-golive-next/kit/monitor/monitor.env.example | sudo tee /etc/bloch-l2-monitor/monitor.env
 ```
+
+`THIRD_L1_RPC_URL` is the third entry of `rpc_urls` in `/etc/bloch-l2-mainnet-settler/config.json`: the env example names only the two public RPCs and leaves the third as `TBD-owner`, so the monitor watches the same three L1 RPCs as the settler and the shadow (`install-shadow.sh --print-l1-rpcs` prints them). After the `tee`, `grep -c TBD-owner /etc/bloch-l2-monitor/monitor.env` must print 0.
 
 The added flags are D15 and D16: `--max-idle-seconds` adds the idle allowance to the age checks and needs `--backlog-state` for `deposit_wait`; `block_interval_seconds=1800` grades `l2_proof_cost` (WARN at 1,260 s, CRIT at 1,800 s). Add the D18 `--set` values the owner picks. The env example also carries `--report dex=…`: remove it if the DEX monitor does not run on A.
 

@@ -7,6 +7,7 @@
 # `prepare` (it needs the settler user and /var/lib/bloch-l2-mainnet-settler/work).
 #
 #   install-shadow.sh --verify OUT_DIR     (no root: pin + build.json checks only, changes nothing)
+#   install-shadow.sh --print-l1-rpcs      (no root: prints the L1 RPCs the install would use)
 #   install-shadow.sh OUT_DIR [--start]
 #   install-shadow.sh --rollback
 #
@@ -20,7 +21,7 @@
 # (commit, native, lock, compiled L1 gates), requires the settler's producer (if configured) to be
 # the same v2 build, creates /var/lib/bloch-l2-mainnet-shadow/{work,tmp} owned by the settler user,
 # writes the config, creates the shadow L2 database at the pinned mainnet genesis (refuses any other
-# hash), runs a read-only `check` against the three mainnet nodes and installs the unit. It starts the
+# hash), runs a read-only `check` against the L1 RPCs and installs the unit. It starts the
 # unit only with --start. The shadow never signs, proves or submits and never opens the settler's
 # database: starting it sends nothing to Bloch L1. It reads getl2settlement only.
 #
@@ -52,7 +53,49 @@ GENESIS_TIME=1786656679
 TIMESTAMP_RULE=1:1786656679:30000
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-# Prints the accepted commitment when a quorum (2 of 3) of the mainnet nodes report the same accepted settlement,
+# L1 RPCs are configuration, not code. Source, in order: $L1_RPC_URLS (URLs separated by spaces or
+# commas), else "rpc_urls" of the settler config, so the shadow reads the same L1 view as the settler.
+# Needs at least 3 distinct http(s)://IPv4:port URLs (the quorum is 2) whose hosts are all listed in the
+# unit's IPAddressAllow (the unit denies every other address). Prints them space-separated.
+resolve_l1_rpcs() {
+  python3 -I - "$SETTLER_CONFIG" "$HERE/$UNIT" "${L1_RPC_URLS:-}" <<'PY'
+import ipaddress, json, os, re, sys
+settler_config, unit, env = sys.argv[1:]
+if env.strip():
+    urls, source = [u for u in re.split(r'[\s,]+', env.strip()) if u], 'L1_RPC_URLS'
+elif os.path.exists(settler_config):
+    urls, source = list(json.load(open(settler_config)).get('rpc_urls') or []), settler_config
+else:
+    sys.exit(f'no L1 RPCs: set L1_RPC_URLS or install the settler first ({settler_config} has rpc_urls)')
+allow = set()
+if os.path.exists(unit):
+    for line in open(unit):
+        if line.strip().startswith('IPAddressAllow='):
+            allow.update(line.strip().split('=', 1)[1].split())
+seen, errors = [], []
+for url in urls:
+    m = re.fullmatch(r'https?://([0-9.]+):([0-9]{1,5})/?', url)
+    if not m:
+        errors.append(f'{url}: not http(s)://IPv4:port')
+        continue
+    try:
+        ipaddress.IPv4Address(m.group(1))
+    except ValueError:
+        errors.append(f'{url}: bad IPv4 address')
+        continue
+    if allow and m.group(1) not in allow:
+        errors.append(f'{url}: host not in {os.path.basename(unit)} IPAddressAllow (add it with a drop-in first)')
+    if url not in seen:
+        seen.append(url)
+if len(seen) < 3:
+    errors.append(f'{len(seen)} distinct L1 RPCs from {source}; need at least 3 for the quorum of 2')
+if errors:
+    sys.exit('L1 RPC configuration refused: ' + '; '.join(errors))
+print(' '.join(seen))
+PY
+}
+
+# Prints the accepted commitment when a quorum (2) of the L1 RPCs report the same accepted settlement,
 # "none" when a quorum reports none, and fails otherwise.
 accepted_number() {
   python3 -I - "$@" <<'PY'
@@ -110,6 +153,11 @@ if [ "${1:-}" = "--verify" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--print-l1-rpcs" ]; then
+  resolve_l1_rpcs
+  exit 0
+fi
+
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 
 if [ "${1:-}" = "--rollback" ]; then
@@ -141,6 +189,10 @@ if systemctl is-active --quiet "$UNIT"; then echo "$UNIT is running; roll back f
 
 id "$USER_" >/dev/null 2>&1 || { echo "user $USER_ missing: run install-settler-mainnet.py prepare first"; exit 1; }
 [ -d "$SETTLER_WORK" ] || { echo "$SETTLER_WORK missing: run install-settler-mainnet.py prepare first"; exit 1; }
+L1_RPCS=$(resolve_l1_rpcs) || { echo "unit NOT installed"; exit 1; }
+read -r -a L1_RPC_LIST <<< "$L1_RPCS"
+L1_RPCS_JSON=$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${L1_RPC_LIST[@]}")
+echo "L1 RPCs: $L1_RPCS"
 install -d -m 0755 "$OPT"
 install -m 0755 "$OUT/bloch-l2-produce-dev" "$OPT/bloch-l2-produce-dev"
 install -m 0644 "$OUT/sequencer_mainnet.py" "$OPT/sequencer_mainnet.py"
@@ -155,7 +207,7 @@ cat > "$ETC/config.json" <<JSON
   "produce_sha256": "$PRODUCE_SHA256",
   "l2_db": "$VAR/canonical",
   "workdir": "$VAR/work",
-  "rpc_urls": ["http://80.240.16.185:8080", "http://199.247.22.8:8080", "http://45.77.67.251:8080"],
+  "rpc_urls": $L1_RPCS_JSON,
   "rpc_quorum": 2,
   "poll_seconds": 15,
   "settler_workdir": "$SETTLER_WORK"
@@ -164,7 +216,7 @@ JSON
 chmod 0644 "$ETC/config.json"
 
 S="runuser -u $USER_ -- env BLOCH_SEQUENCER_CONFIG=$ETC/config.json TMPDIR=$VAR/tmp /usr/bin/python3 -u $OPT/sequencer_mainnet.py"
-ACCEPTED=$(accepted_number http://80.240.16.185:8080 http://199.247.22.8:8080 http://45.77.67.251:8080) || {
+ACCEPTED=$(accepted_number "${L1_RPC_LIST[@]}") || {
   echo "cannot read the accepted settlement; unit NOT installed"; exit 1; }
 if [ "$ACCEPTED" = none ]; then
   $S init      # shadow database; refuses unless the genesis is 632e45ae...f468 / 2ad7e807...c05d
