@@ -464,5 +464,72 @@ class Burn(Base):
         self.assertEqual(tool.main(['find', '--l2-rpc', pending, '--tx', '0xab']), tool.NOT_READY)
 
 
+class ProtocolFee(Base):
+    """The L2 protocol fee (native `l2_revenue`): mirrored arithmetic, the fetch notice and status matching."""
+
+    def test_the_fee_mirrors_the_native_constants(self):
+        self.assertEqual(tool.claim_fee(1_000_000), 5_000)
+        self.assertEqual(tool.claim_fee(10_000_000), 5_000)
+        self.assertEqual(tool.claim_fee(100_000_000), 50_000)
+        self.assertEqual(tool.claim_fee(2_000 * 100_000_000), 100_000_000)
+        self.assertEqual(tool.claim_fee(10_000 * 100_000_000), 100_000_000)
+
+    def fetch_with_gate(self, gate):
+        def script(method, params):
+            if method == 'getchaininfo':
+                return {'height': 1, 'hard_forks': {'l2_revenue': gate}} if gate is not None else {'height': 1}
+            return self.l1
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.fetch(l1=self.url(script))
+        return code, out.getvalue()
+
+    def test_fetch_says_nothing_while_the_gate_is_inert(self):
+        for gate in (None, {'activation_epoch': None, 'active': False}):
+            code, text = self.fetch_with_gate(gate)
+            self.assertEqual(code, tool.OK)
+            self.assertNotIn('protocol fee', text)
+            self.assertNotIn('--epoch', text)
+            os.unlink(self.out)
+
+    def test_fetch_names_the_fee_and_asks_for_the_epoch_once_armed(self):
+        code, text = self.fetch_with_gate({'activation_epoch': 9_000, 'active': False})
+        self.assertEqual(code, tool.OK)
+        self.assertIn('L2 protocol fee from L1 epoch 9000: 5000 sats', text)
+        self.assertIn('receives 995000 sats', text)
+        self.assertIn('--epoch EPOCH', text)
+        os.unlink(self.out)
+        code, text = self.fetch_with_gate({'activation_epoch': 9_000, 'active': True})
+        self.assertIn('L2 protocol fee now', text)
+
+
+class ProtocolFeeStatus(Base):
+    def setUp(self):
+        super().setUp()
+        self.doc = proof_doc(0, 2, 5)
+        self.path = os.path.join(self.dir.name, 'status-proof.json')
+        with open(self.path, 'w') as file:
+            json.dump({k: v for k, v in self.doc.items() if k not in ('finalized', 'native_slot', 'native_block')}, file)
+
+    def ask_net(self, value):
+        rec = record(2, 5)
+        answer = l1_answer([rec], rec)
+        answer['withdrawals']['claimed'] = {'count': 1, 'floor': 0, 'words': [{'word': 0, 'bits': '01' + '00' * 31}]}
+
+        def script(method, params):
+            if method == 'getl2settlement':
+                return answer
+            if method == 'getutxos':
+                return {'utxos': [{'txid': f'{1:064x}', 'vout': 0, 'value_sat': str(value)}], 'truncated': False}
+            return {'status': 'finalized'}
+        return tool.main(['status', '--proof', self.path, '--l1-rpc', self.url(script)])
+
+    def test_a_release_less_the_fee_is_the_paying_output(self):
+        sats = self.doc['withdrawal']['sats']
+        self.assertEqual(self.ask_net(sats - tool.claim_fee(sats)), tool.OK)
+        self.assertEqual(self.ask_net(sats), tool.OK)
+        self.assertEqual(self.ask_net(sats - tool.claim_fee(sats) - 1), tool.CLAIMED)
+
+
 if __name__ == '__main__':
     unittest.main()
