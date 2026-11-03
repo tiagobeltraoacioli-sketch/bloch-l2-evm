@@ -170,7 +170,7 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `6b5782fcd4288ff11ef53bf889a3bdec8f14ee8f77c34e6da0e51b21f49d509f` (agent 154 8d1c873; 201: subrequest size guard) |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `2dbbedf4edbaf48d6d397076aef13488560d046e38acafe84e59b4bf82d13495` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `63198f4a42d8c0a0ac4f6088c2e4dcecd19ea3197fb2dd6773829edaff0c6bfb` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/render.py` | `4c80de91d53fc65900543c317e4490be250d12db21ef15049fc21441d8881446` (agent 154 8d1c873; 201: `--sub-answer-max`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `02a11a0ac516d4c67c5e9f9a500c841c6d00565bb30aeccd3ff7260eba532c74` (agent 156 texts; agent 198 pipefail fix; was `ab24bda0…`) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |

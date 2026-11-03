@@ -143,13 +143,16 @@ server {
         js_content l2rpc.health;
     }
 
+    # A timed-out request is never sent to the other backend (G4): the settled RPC answers a simulation within
+    # its 5 s budget (15 s at most with the permit wait), far below the 30 s read timeout, so a timeout means a
+    # stuck backend, and replaying a write or an eth_call there would only run it twice.
     location = /_l2/local {
         internal;
         error_page 429 502 503 504 = @l2_unavailable;
         proxy_intercept_errors on;
         proxy_pass http://l2_read_local/;
         include @CONF_DIR@/l2rpc-proxy.inc;
-        proxy_next_upstream error timeout http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream error http_429 http_502 http_503 http_504 non_idempotent;
         proxy_next_upstream_tries 2;
         proxy_read_timeout 30s;
     }
@@ -159,7 +162,7 @@ server {
         proxy_intercept_errors on;
         proxy_pass http://l2_read_peer/;
         include @CONF_DIR@/l2rpc-proxy.inc;
-        proxy_next_upstream error timeout http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream error http_429 http_502 http_503 http_504 non_idempotent;
         proxy_next_upstream_tries 2;
         proxy_read_timeout 30s;
     }
@@ -169,7 +172,7 @@ server {
         proxy_intercept_errors on;
         proxy_pass http://l2_seqread/;
         include @CONF_DIR@/l2rpc-proxy.inc;
-        proxy_next_upstream error timeout http_429 http_502 http_503 http_504 non_idempotent;
+        proxy_next_upstream error http_429 http_502 http_503 http_504 non_idempotent;
         proxy_next_upstream_tries 2;
         proxy_read_timeout 30s;
     }
@@ -237,8 +240,7 @@ server {
 
 # ------------------- size guard for subrequests (unix socket in @HOP_DIR@, nginx workers only)
 # The backend locations of the public server, as seen by njs subrequests: same upstreams, retries and
-# timeouts, except that a read timeout is not retried on the other backend: an eth_call that outlived
-# 30 s is not run a second time (G4; the in-memory subrequests of the public server never retried it either).
+# timeouts (a timeout is not retried on the other backend, G4, as in the public server).
 # The filters replace an answer above @SUB_MAX@ bytes with {"l2_too_large": @SUB_MAX@}.
 server {
     listen unix:@HOP_DIR@/guard.sock;
