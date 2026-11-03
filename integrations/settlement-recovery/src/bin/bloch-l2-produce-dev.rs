@@ -37,7 +37,7 @@ use bloch_settlement_recovery::reconstruct::{
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
 use bloch_reth_execution::{
     canonical::rewind_canonical_head, prepare_genesis,
-    proof_export::{export_sparse_forced_with_report, export_with_report}, BlochChainSpec, BlochNextBlockEnvCtx,
+    proof_export::{export_forced_with_report, export_sparse_forced_with_report, export_with_report}, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
 };
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
@@ -563,15 +563,19 @@ fn run(args: &[String]) -> Result<String, String> {
             let factory = open(&target, &runtime, false)?;
             // CANDIDATE: `--witness sparse` writes the artifact of the sparse-witness guest.
             let forced = read_forced_sidecar(&target, number)?.map(|(forced, _)| forced).unwrap_or_default();
-            if !sparse && !forced.is_empty() {
-                return Err(format!("block {number} consumed forced records: only the sparse witness carries them"));
-            }
             let (bytes, hash, anchor, state_entries) = if sparse {
                 let (artifact, state_entries) =
                     export_sparse_forced_with_report(&factory, number, &forced).map_err(|e| e.to_string())?;
                 (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, state_entries)
             } else {
-                let report = export_with_report(&factory, number).map_err(|e| e.to_string())?;
+                // CANDIDATE: a block that consumed forced records exports the complete artifact of the
+                // fallback guest, which carries them.
+                let report = if forced.is_empty() {
+                    export_with_report(&factory, number)
+                } else {
+                    export_forced_with_report(&factory, number, &forced)
+                }
+                .map_err(|e| e.to_string())?;
                 let artifact = report.artifact;
                 (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, report.state_entries)
             };

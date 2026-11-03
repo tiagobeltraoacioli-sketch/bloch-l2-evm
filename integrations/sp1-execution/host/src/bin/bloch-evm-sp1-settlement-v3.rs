@@ -16,6 +16,11 @@
 //!
 //! CANDIDATE: `--sparse` after either mainnet flag selects the sparse-witness guest
 //! and its artifact (`produce export --witness sparse`). The statement is the same.
+//!
+//! CANDIDATE (forced inclusion, `sparse-witness` or `node-artifact` builds): `--mainnet` without
+//! `--sparse` is the rollback fallback guest (`guest-fallback`), the next rules
+//! with forced inclusion on the complete witness. It takes a fifth input, the
+//! forced records the block consumed, which the complete artifact carries.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -82,6 +87,23 @@ struct Qualification {
     /// CANDIDATE: the sparse witness, written to the guest instead of
     /// `execution.witness` (`--sparse`).
     sparse: Option<bloch_l2_evm::sparse_witness::SparseBatchWitness>,
+    /// CANDIDATE: the forced records, written as the fallback guest's fifth
+    /// input (`Some` exactly for that guest; empty when none is due).
+    forced: Option<Vec<bloch_l2_evm::forced_inclusion::ForcedTransaction>>,
+}
+
+/// CANDIDATE: whether `spec` on the complete witness is the forced fallback
+/// guest, which reads the forced list after the settlement context.
+fn forced_fallback(spec: &ChainSpec) -> bool {
+    #[cfg(any(feature = "sparse-witness", feature = "node-artifact"))]
+    {
+        spec.forced_inclusion && !sparse()
+    }
+    #[cfg(not(any(feature = "sparse-witness", feature = "node-artifact")))]
+    {
+        let _ = spec;
+        false
+    }
 }
 
 fn stdin(qualification: &Qualification) -> SP1Stdin {
@@ -94,6 +116,9 @@ fn stdin(qualification: &Qualification) -> SP1Stdin {
     stdin.write(&fixture.context);
     stdin.write_vec(alloy_rlp::encode(&fixture.body));
     stdin.write(&context);
+    if let Some(forced) = &qualification.forced {
+        stdin.write(forced);
+    }
     stdin
 }
 
@@ -102,6 +127,40 @@ fn expect(execution: fixture::Fixture, context: SettlementContextV2) -> Result<Q
 }
 
 fn expect_in(spec: &ChainSpec, domain: B256, execution: fixture::Fixture, context: SettlementContextV2) -> Result<Qualification> {
+    expect_forced_in(spec, domain, execution, context, Vec::new())
+}
+
+/// [`expect_in`] with the forced records the block consumed. Only the forced
+/// fallback guest takes them; a non-empty list for any other program is refused.
+fn expect_forced_in(
+    spec: &ChainSpec,
+    domain: B256,
+    execution: fixture::Fixture,
+    context: SettlementContextV2,
+    forced: Vec<bloch_l2_evm::forced_inclusion::ForcedTransaction>,
+) -> Result<Qualification> {
+    #[cfg(any(feature = "sparse-witness", feature = "node-artifact"))]
+    if forced_fallback(spec) {
+        let expected = bloch_l2_evm::forced_complete::execute_settlement_statement_v3_forced(
+            spec,
+            domain,
+            &execution.witness,
+            &execution.context,
+            &execution.body,
+            context,
+            &forced,
+        )?;
+        return Ok(Qualification {
+            execution,
+            context,
+            expected,
+            sparse: None,
+            forced: Some(forced),
+        });
+    }
+    if !forced.is_empty() {
+        return Err(io::Error::other("forced records apply to the forced fallback guest only").into());
+    }
     let expected = execute_settlement_statement_v3(
         spec,
         domain,
@@ -115,6 +174,7 @@ fn expect_in(spec: &ChainSpec, domain: B256, execution: fixture::Fixture, contex
         context,
         expected,
         sparse: None,
+        forced: None,
     })
 }
 
@@ -140,6 +200,7 @@ fn expect_sparse(
         context,
         expected,
         sparse: Some(witness),
+        forced: None,
     })
 }
 
@@ -204,6 +265,7 @@ fn native_artifact_qualification(
         return Err(io::Error::other("invalid native request position").into());
     }
     let previous_settlement = hash(7, true)?;
+    let mut forced = Vec::new();
     let (artifact, sparse_witness) = if sparse() {
         let loaded = bloch_evm_sp1_host::artifact::load_selected_sparse_artifact_in(artifact, &spec(), domain())?;
         let witness = loaded.witness();
@@ -227,6 +289,7 @@ fn native_artifact_qualification(
         (execution, Some(witness.clone()))
     } else {
         let loaded = bloch_evm_sp1_host::artifact::load_selected_artifact_in(artifact, &spec(), domain())?;
+        forced = loaded.forced().to_vec();
         let execution = fixture::Fixture {
             witness: loaded.witness().clone(),
             context: loaded.context().clone(),
@@ -277,7 +340,7 @@ fn native_artifact_qualification(
     };
     match sparse_witness {
         Some(witness) => expect_sparse(execution, witness, context),
-        None => expect(execution, context),
+        None => expect_forced_in(&spec(), domain(), execution, context, forced),
     }
 }
 
@@ -526,6 +589,41 @@ mod tests {
         // The devnet harness keeps the devnet program parameters.
         assert!(!mainnet());
         assert_eq!((spec(), domain(), program_name()), (ChainSpec::testnet_v3(), B256::repeat_byte(0xd3), "settlement_v3"));
+    }
+
+    /// CANDIDATE: the complete-witness next rules are the forced fallback
+    /// guest (fifth input, the forced list); the activated rules are not, and
+    /// refuse a forced list.
+    #[cfg(any(feature = "sparse-witness", feature = "node-artifact"))]
+    #[test]
+    fn the_complete_next_rules_take_the_forced_list_and_the_activated_rules_do_not() {
+        use bloch_l2_evm::chainspec::MAINNET_DOMAIN;
+        let program = [B256::repeat_byte(9), B256::repeat_byte(10), B256::repeat_byte(11)];
+        let next = ChainSpec::mainnet();
+        assert!(next.forced_inclusion && forced_fallback(&next));
+        let q = expect_in(&next, MAINNET_DOMAIN, fixture::fixture_empty_in(&next, MAINNET_DOMAIN).unwrap(), synthetic_context_for(program, 0))
+            .unwrap();
+        assert_eq!(q.forced, Some(Vec::new()));
+        assert_eq!(
+            format!("{:x}", q.expected.base.configuration),
+            "b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d"
+        );
+        let v1 = ChainSpec::mainnet_v1();
+        assert!(!forced_fallback(&v1));
+        let q = expect_in(&v1, MAINNET_DOMAIN, fixture::fixture_empty_in(&v1, MAINNET_DOMAIN).unwrap(), synthetic_context_for(program, 0))
+            .unwrap();
+        assert_eq!(q.forced, None);
+        let record = bloch_l2_evm::forced_inclusion::ForcedTransaction {
+            record: bloch_l2_evm::forced_inclusion::ForcedRecord {
+                l1_height: 1,
+                l1_txid: [1; 32],
+                envelope_hash: alloy_primitives::keccak256([0xde, 0xad]),
+                gas_limit: 21_000,
+            },
+            envelope: vec![0xde, 0xad].into(),
+        };
+        assert!(expect_forced_in(&v1, MAINNET_DOMAIN, fixture::fixture_empty_in(&v1, MAINNET_DOMAIN).unwrap(), synthetic_context_for(program, 0), vec![record])
+            .is_err());
     }
 
     /// The V3 harness accepts the user-transaction fixture that V2's

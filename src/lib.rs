@@ -159,3 +159,9 @@ pub const REVM_PIN: &str = "41.0.0";
 
 #[cfg(feature = "experimental-escrow")]
 pub mod escrow;
+
+// CANDIDATE, inert: L1 forced inclusion on the complete-witness path (the
+// rollback fallback guest). Declared last, behind its own feature, so that no
+// other program changes.
+#[cfg(feature = "forced-complete")]
+pub mod forced_complete;

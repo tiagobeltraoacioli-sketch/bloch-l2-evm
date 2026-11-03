@@ -13,7 +13,7 @@ default-run = "bloch-evm-sp1-host"
 default = []
 source-settlement = ["dep:bloch-native-domain-devnet", "dep:sha2", "dep:sha3", "dep:sp1-verifier"]
 node-artifact = ["dep:bloch-execution-artifact"]
-sparse-witness = ["bloch-l2-evm/sparse-witness"]
+sparse-witness = ["bloch-l2-evm/sparse-witness", "bloch-l2-evm/forced-complete"]
 
 [[bin]]
 name = "bloch-evm-sp1-sparse-bench"
