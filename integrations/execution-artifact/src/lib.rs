@@ -7,6 +7,8 @@ use alloy_rlp::{Decodable, Encodable};
 use bloch_l2_evm::{
     node_primitives::{NodeBodyV2, NodeHeaderV2},
     proof_statement::{configuration_commitment, execute_statement, ExecutionStatement},
+    forced_complete::execute_statement_forced,
+    forced_inclusion::ForcedTransaction,
     proving::BatchWitness,
     sparse_witness::{verify_node_batch_sparse, BlockHashes, SparseBatchWitness},
     BlockContext, ChainSpec,
@@ -32,6 +34,12 @@ struct Wire {
     header_rlp: Bytes,
     body_rlp: Bytes,
     witness: BatchWitness,
+    /// CANDIDATE (forced inclusion, the complete-witness fallback guest): the
+    /// forced records the block consumed, each with its envelope. Absent from
+    /// the encoding when empty, so every artifact without forced records keeps
+    /// its bytes; decoders without the field refuse an artifact that has it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    forced: Vec<ForcedTransaction>,
 }
 
 /// Checked execution input, NOT a proof-verification or native funding token.
@@ -55,6 +63,20 @@ impl ExecutionArtifact {
         body: &NodeBodyV2,
         witness: BatchWitness,
     ) -> Result<Self> {
+        Self::new_forced(spec, domain, parent, header, body, witness, Vec::new())
+    }
+
+    /// CANDIDATE: [`Self::new`] for a block that consumed forced records (the
+    /// complete-witness fallback guest). Validation re-runs the forced rule.
+    pub fn new_forced(
+        spec: &ChainSpec,
+        domain: B256,
+        parent: &NodeHeaderV2,
+        header: &NodeHeaderV2,
+        body: &NodeBodyV2,
+        witness: BatchWitness,
+        forced: Vec<ForcedTransaction>,
+    ) -> Result<Self> {
         body.validate(spec)?;
         Self::validate(
             spec,
@@ -67,6 +89,7 @@ impl ExecutionArtifact {
                 header_rlp: alloy_rlp::encode(header).into(),
                 body_rlp: alloy_rlp::encode(body).into(),
                 witness,
+                forced,
             },
         )
     }
@@ -102,7 +125,13 @@ impl ExecutionArtifact {
             prevrandao: header.prevrandao,
             anchor_root: header.anchor_root,
         };
-        let expected = execute_statement(spec, domain, &wire.witness, &context, &body)?;
+        // Under rules with forced inclusion the block is checked by the forced
+        // rule (an empty list runs the same block); elsewhere a forced list is refused.
+        let expected = if spec.forced_inclusion || !wire.forced.is_empty() {
+            execute_statement_forced(spec, domain, &wire.witness, &context, &body, &wire.forced)?
+        } else {
+            execute_statement(spec, domain, &wire.witness, &context, &body)?
+        };
         if expected.header_hash != header.hash() {
             return Err(invalid("execution artifact re-execution differs from selected header"));
         }
@@ -138,6 +167,10 @@ impl ExecutionArtifact {
     }
     pub fn witness(&self) -> &BatchWitness {
         &self.wire.witness
+    }
+    /// CANDIDATE: the forced records the block consumed (empty when none).
+    pub fn forced(&self) -> &[ForcedTransaction] {
+        &self.wire.forced
     }
 }
 

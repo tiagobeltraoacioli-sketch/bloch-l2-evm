@@ -159,6 +159,27 @@ pub fn export_sparse_forced_with_report(
     })
 }
 
+/// CANDIDATE (forced inclusion): [`export_with_report`] for a block that consumed these forced records, for the
+/// complete-witness fallback guest. The witness covers the forced rule's reads (skipped senders included) and the
+/// artifact carries the records; a body that does not start with exactly the forced selection is refused here.
+pub fn export_forced_with_report(
+    source: &BlochProviderFactory,
+    number: u64,
+    forced: &[bloch_l2_evm::forced_inclusion::ForcedTransaction],
+) -> Result<ExportReport> {
+    let (artifact, state_entries) =
+        export_from_state(source, number, |state, rules, domain, context, parent, header, body| {
+            let (witness, recorded) = bloch_l2_evm::forced_complete::generate_node_batch_witness_forced(
+                state, rules, domain, context, body, forced,
+            )?;
+            if recorded.header != *header {
+                return Err(invalid("exported witness execution differs from stored block"));
+            }
+            ExecutionArtifact::new_forced(rules, domain, parent, header, body, witness, forced.to_vec())
+        })?;
+    Ok(ExportReport { artifact, state_entries })
+}
+
 fn complete_artifact(
     state: &L2State,
     rules: &ChainSpec,
