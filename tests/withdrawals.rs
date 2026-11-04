@@ -553,11 +553,12 @@ fn shared_withdrawal_vectors() {
 #[test]
 #[ignore]
 fn print_shared_withdrawal_vectors() {
+    // Canonical hex strings keep this optional generator available without the serde feature.
     let chain_id = 700_771u64;
     let vector_leaf = |i: u64| withdrawal_leaf(chain_id, i, B256::repeat_byte((i % 255) as u8 + 1), 1_000_000 + i);
     let leaves = [(700_771u64, 0u64, B256::repeat_byte(0x11), 1_000_000u64), (700_771, 41, B256::repeat_byte(0xa5), 123_456_789), (1, u64::MAX, B256::repeat_byte(0xff), u64::MAX)]
         .iter()
-        .map(|(c, n, r, s)| serde_json::json!({"chain_id": c, "nonce": n, "l1_recipient": r, "sats": s, "leaf": withdrawal_leaf(*c, *n, *r, *s)}))
+        .map(|(c, n, r, s)| serde_json::json!({"chain_id": c, "nonce": n, "l1_recipient": format!("{r:#x}"), "sats": s, "leaf": format!("{:#x}", withdrawal_leaf(*c, *n, *r, *s))}))
         .collect::<Vec<_>>();
     let trees = [
         (1u64, vec![0u64]),
@@ -570,15 +571,15 @@ fn print_shared_withdrawal_vectors() {
         let tree = WithdrawalTree::new((0..*count).map(vector_leaf).collect()).unwrap();
         let proofs = indices
             .iter()
-            .map(|i| serde_json::json!({"index": i, "siblings": tree.proof(*i).unwrap().to_vec()}))
+            .map(|i| serde_json::json!({"index": i, "siblings": tree.proof(*i).unwrap().iter().map(|hash| format!("{hash:#x}")).collect::<Vec<_>>()}))
             .collect::<Vec<_>>();
-        serde_json::json!({"count": count, "root": tree.root(), "proofs": proofs})
+        serde_json::json!({"count": count, "root": format!("{:#x}", tree.root()), "proofs": proofs})
     })
     .collect::<Vec<_>>();
     let fixture = serde_json::json!({
         "format": "BLOCH:L2:WITHDRAW:1 leaf = keccak256(domain || chain_id BE8 || nonce BE8 || l1_recipient || sats BE8); node = keccak256(left || right); depth 32; empty leaf = 0x00..00; tree leaf i = (chain_id, i, bytes32 of (i % 255) + 1, 1000000 + i)",
         "chain_id": chain_id,
-        "empty_root": empty_withdrawal_root(),
+        "empty_root": format!("{:#x}", empty_withdrawal_root()),
         "leaves": leaves,
         "trees": trees,
     });
