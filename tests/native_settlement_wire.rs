@@ -1,22 +1,9 @@
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::B256;
 use bloch_l2_evm::{
-    l1::{FinalizedCheckpoint, TransactionInclusionEvidenceV1},
     native_settlement::SettlementExpectationV1,
     native_settlement::{SettlementTransactionV1, SettlementWireFormat, NATIVE_SETTLEMENT_BYTES},
 };
-use sha3::{Digest, Sha3_256};
 const TX: &[u8] = include_bytes!("fixtures/native-settlement/transaction.bin");
-const HEADER: &[u8] = include_bytes!("fixtures/native-settlement/header.bin");
-fn evidence(header: &[u8], transactions: Vec<Bytes>) -> TransactionInclusionEvidenceV1 {
-    let mut h = Sha3_256::new();
-    h.update(b"BLCH4:BLOCK\0\0\0\0\0");
-    h.update(header);
-    let checkpoint = FinalizedCheckpoint {
-        block: B256::from_slice(&h.finalize()),
-        slot: 2,
-    };
-    TransactionInclusionEvidenceV1::new(checkpoint, vec![Bytes::copy_from_slice(header)], transactions).unwrap()
-}
 #[test]
 fn native_envelope_is_exact_and_legacy_codec_remains_distinct() {
     assert_eq!(TX.len(), NATIVE_SETTLEMENT_BYTES);
