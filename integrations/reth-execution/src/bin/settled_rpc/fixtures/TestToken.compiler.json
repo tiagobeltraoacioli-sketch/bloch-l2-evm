@@ -1,0 +1,22 @@
+{
+  "compiler": {
+    "version": "0.8.24+commit.e11b9ed9"
+  },
+  "settings": {
+    "compilationTarget": {
+      "test/TestBase.sol": "TestToken"
+    },
+    "evmVersion": "paris",
+    "libraries": {},
+    "metadata": {
+      "bytecodeHash": "none"
+    },
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "remappings": []
+  },
+  "source_sha256": "728b8417a44c96abd6b0bffcae082ff00f7ee86f4cafbec6ebede027aa8071c4",
+  "creation_sha256": "f68e9ac6a50554ea4c9d4ddffd3b0708579f91dd2e6fd18739af815226c68075"
+}

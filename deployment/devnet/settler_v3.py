@@ -2144,6 +2144,14 @@ class Settler:
         Fees are not checked: the RPC admits only a fee cap over the next base fee and a tip over the floor."""
         if not self.c['user_transactions']:
             return False
+        if self.budget_on():
+            # RPC admission needs this snapshot before the first transaction
+            # can enter an empty spool. Also publish idle tip decay without
+            # executing a selector, measuring SP1, or waiting for a heartbeat.
+            work = getattr(self, 'work', None)
+            if work is not None:
+                work.mkdir(parents=True, exist_ok=True)
+            self.policy().save()
         files = sorted(Path(self.c['txpool_dir']).glob('*.tx'))
         if not files:
             return False

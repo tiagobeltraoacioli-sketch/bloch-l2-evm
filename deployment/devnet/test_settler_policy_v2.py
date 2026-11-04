@@ -320,6 +320,43 @@ class Config(unittest.TestCase):
             self.assertEqual(restarted.state['last_block_time'], 0.0)
             self.assertEqual(restarted.required_tip(), 10**8)
 
+    def test_admission_policy_publishes_exact_prices_and_canonical_exemptions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'sequencer-policy.json'
+            policy = sp.Policy({'fresh_slot_price_wei': 2**100 + 1,
+                                'write_limit_exempt_senders': ['ab' * 20]}, path, clock=lambda: 0)
+            policy.save()
+            published = json.loads(path.read_text())
+            self.assertEqual(published['admission'], {
+                'version': 1, 'required_tip_wei': str(published['required_tip_wei']),
+                'fresh_slot_price_wei': str(2**100 + 1),
+                'write_limit_exempt_senders': ['0x' + 'ab' * 20],
+            })
+
+    def test_empty_spool_publishes_admission_at_startup_and_after_idle_decay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = object.__new__(s.Settler)
+            worker.work = Path(tmp) / 'work'
+            pool = Path(tmp) / 'pool'
+            pool.mkdir()
+            worker.c = {'user_transactions': True, 'max_block_sp1_gas': 90_000_000,
+                        'txpool_dir': str(pool), 'congestion_max_tip_wei': 3 * 10**9}
+            now = [0.0]
+            worker.clock = lambda: now[0]
+            worker.produce = mock.Mock(side_effect=AssertionError('empty spool must not execute'))
+            self.assertFalse(worker.spool_demand('head'))
+            path = worker.work / 'sequencer-policy.json'
+            self.assertEqual(json.loads(path.read_text())['admission']['version'], 1)
+            # A legacy state is upgraded even though admission cannot accept
+            # the first transaction until the new snapshot exists.
+            path.write_text(json.dumps({'tip': 10**9, 'last_block_time': 0.0}))
+            self.assertFalse(worker.spool_demand('head'))
+            self.assertEqual(json.loads(path.read_text())['admission']['required_tip_wei'], str(10**9))
+            now[0] = 24 * 3600.0
+            self.assertFalse(worker.spool_demand('head'))
+            self.assertEqual(json.loads(path.read_text())['admission']['required_tip_wei'], str(10**8))
+            worker.produce.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

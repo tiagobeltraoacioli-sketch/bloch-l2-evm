@@ -61,6 +61,10 @@
 //! one `<hash>.tx` spool entry (hex) atomically into the pool the settlement
 //! worker selects from; the producer still decides inclusion and drops invalid
 //! entries with a reason. Without `--txpool`, transactions are refused.
+//! With `--required-tip-file`, policy v2's admission snapshot also checks the
+//! current nonce's measured storage price before publishing a spool entry.
+//! A transaction-specific fee refusal carries structured JSON-RPC error data;
+//! future nonces retain spool semantics because their predecessors are unknown.
 //!
 //! EVM simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`, ...)
 //! run at most 4 at a time (a caller waits up to 10 s for a permit), with at
@@ -71,6 +75,8 @@
 //!
 //! `bloch_getWithdrawalProof(index, root?)` serves Merkle proofs of outbox
 //! withdrawals covered by finalized settlements (`settled_rpc/withdrawal_proofs.rs`).
+#[path = "settled_rpc/admission.rs"]
+mod admission;
 #[path = "settled_rpc/capped_api.rs"]
 mod capped_api;
 #[path = "settled_rpc/settlement_log.rs"]
@@ -113,7 +119,8 @@ execution rules the canonical database was written under (default v3: ChainSpec:
 ChainSpec::mainnet, chain id 700770, with the ceremony's --domain and wall-clock --genesis-time).\n\
 pending: latest state, next-block environment for calls/estimates, latest block for block queries.\n\
 --required-tip-file: the sequencer's current required priority fee (JSON, `required_tip_wei` or the `tip` of the\n\
-settler's sequencer-policy.json). The fee methods then suggest it plus --tip-headroom-percent, never below --min-tip-wei.\n";
+settler's sequencer-policy.json). The fee methods then suggest it plus --tip-headroom-percent, never below --min-tip-wei.\n\
+With --txpool, this file must also publish policy v2 admission.version=1 for transaction-specific storage-price preflight.\n";
 
 struct Options {
     data_dir: PathBuf,
@@ -507,7 +514,7 @@ fn sidecar_name(name: &std::ffi::OsStr) -> Option<String> {
 
 /// The first-seen head recorded for entry `name`, or record `head` now (best effort: a lost sidecar only means
 /// the blocks count from this sighting, as before).
-fn first_seen_head(pool: &Path, name: &std::ffi::OsStr, head: u64) -> u64 {
+fn first_seen_head(pool: &Path, name: &std::ffi::OsStr, head: u64, persist: bool) -> u64 {
     let Some(sidecar) = sidecar_name(name).map(|n| pool.join(n)) else {
         return head;
     };
@@ -517,7 +524,9 @@ fn first_seen_head(pool: &Path, name: &std::ffi::OsStr, head: u64) -> u64 {
     {
         return recorded;
     }
-    write_sidecar(&sidecar, head);
+    if persist {
+        write_sidecar(&sidecar, head);
+    }
     head
 }
 
@@ -535,6 +544,17 @@ fn write_sidecar(path: &Path, head: u64) {
 /// head from its sidecar, or is recorded as seen at canonical database head `head`. Sidecars whose entry is gone
 /// (pruned by the producer) are removed.
 fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex, head: u64) -> std::io::Result<Vec<SpoolEntry>> {
+    scan_spool_inner(spec, pool, index, head, true)
+}
+
+/// Admission previews clone the index and leave every spool file unchanged.
+fn scan_spool_inner(
+    spec: &ChainSpec,
+    pool: &Path,
+    index: &mut SpoolIndex,
+    head: u64,
+    persist: bool,
+) -> std::io::Result<Vec<SpoolEntry>> {
     let mut entries = Vec::new();
     let mut sidecars = Vec::new();
     for entry in std::fs::read_dir(pool)? {
@@ -571,7 +591,7 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex, head: u64) 
                 let age = std::time::SystemTime::now()
                     .duration_since(modified)
                     .unwrap_or_default();
-                let first = first_seen_head(pool, &name, head);
+                let first = first_seen_head(pool, &name, head, persist);
                 index.insert(name.clone(), (meta, modified, seen, age, first));
                 (meta, modified, seen, age, first)
             }
@@ -588,7 +608,7 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex, head: u64) 
     let present: std::collections::HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
     index.retain(|name, _| present.contains(name));
     for (sidecar, name) in sidecars {
-        if !present.contains(&name) && !pool.join(&name).exists() {
+        if persist && !present.contains(&name) && !pool.join(&name).exists() {
             let _ = std::fs::remove_file(sidecar);
         }
     }
@@ -610,6 +630,10 @@ const PROGRESS_FILE: &str = ".spool-progress";
 /// of a process the record in `pool` supplies the time the head was first seen, if it names the same head; the
 /// wall clock is all a restart has to go by (a time in the future counts as now).
 fn advance_progress(progress: &mut Option<Progress>, pool: &Path, best: u64) -> Duration {
+    advance_progress_inner(progress, pool, best, true)
+}
+
+fn advance_progress_inner(progress: &mut Option<Progress>, pool: &Path, best: u64, persist: bool) -> Duration {
     let now = std::time::Instant::now();
     match *progress {
         Some(p) if p.head == best => return p.carried + now.saturating_duration_since(p.since),
@@ -636,6 +660,9 @@ fn advance_progress(progress: &mut Option<Progress>, pool: &Path, best: u64) -> 
         since: now,
         carried: Duration::ZERO,
     });
+    if !persist {
+        return Duration::ZERO;
+    }
     let unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -980,28 +1007,128 @@ impl Spool {
         }))
     }
 
-    /// Admit authenticated `raw` bytes, or say why not.
-    fn submit(&self, provider: &BlochProviderFactory, raw: &[u8]) -> Result<B256, String> {
+    /// Cheap admission against a pinned snapshot. No progress record, sidecar,
+    /// eviction, transaction file or database state is changed by a refusal.
+    fn preview(
+        &self,
+        snapshot: &admission::Snapshot,
+        index: &SpoolIndex,
+        meta: &SpoolMeta,
+    ) -> Result<Vec<std::ffi::OsString>, jsonrpsee::types::ErrorObjectOwned> {
+        let number = snapshot.header.0.number;
+        let mut copy = index.clone();
+        let entries = scan_spool_inner(&self.spec, &self.dir, &mut copy, number, false)
+            .map_err(|e| rpc_error(format!("txpool unavailable: {e}")))?;
+        let mut progress = *self.progress.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stalled_for = advance_progress_inner(&mut progress, &self.dir, number, false);
+        let mut cache = std::collections::HashMap::new();
+        let mut unavailable = None;
+        let mut account = |address| {
+            *cache.entry(address).or_insert_with(|| {
+                snapshot.account(address).unwrap_or_else(|error| {
+                    unavailable = Some(error);
+                    (0, alloy_primitives::U256::ZERO)
+                })
+            })
+        };
+        let result = plan_admission(
+            &entries,
+            meta,
+            &mut SpoolHead {
+                account: &mut account,
+                next_base_fee: u128::from(snapshot.context.base_fee_per_gas),
+                instant: std::time::Instant::now(),
+                number,
+                stalled_for,
+                gapped: Default::default(),
+            },
+            self.limits,
+        )
+        .map_err(rpc_error);
+        if let Some(error) = unavailable {
+            return Err(error);
+        }
+        result
+    }
+
+    /// Admit authenticated bytes after a disposable, bounded fee preflight.
+    /// Future nonces retain normal spool semantics: their predecessors must run
+    /// before a storage quote can describe them.
+    fn submit(
+        &self,
+        provider: &BlochProviderFactory,
+        raw: &[u8],
+        policy_path: Option<&Path>,
+        deadline: std::time::Instant,
+    ) -> Result<B256, jsonrpsee::types::ErrorObjectOwned> {
+        self.submit_checked(provider, raw, policy_path, deadline, || {}, || {})
+    }
+
+    /// Callbacks let deterministic tests move the independent producer/policy
+    /// at the two blocking boundaries. Production supplies no-op callbacks.
+    fn submit_checked(
+        &self,
+        provider: &BlochProviderFactory,
+        raw: &[u8],
+        policy_path: Option<&Path>,
+        deadline: std::time::Instant,
+        after_preflight: impl FnOnce(),
+        after_partial: impl FnOnce(),
+    ) -> Result<B256, jsonrpsee::types::ErrorObjectOwned> {
         let tx = bloch_l2_evm::decode_signed_transaction(&self.spec, raw)
-            .map_err(|e| format!("transaction rejected: {e:?}"))?;
+            .map_err(|e| rpc_error(format!("transaction rejected: {e:?}")))?;
         if let Some(why) = never_includable(&self.spec, &tx, self.limits) {
-            return Err(why);
+            return Err(rpc_error(why));
         }
         let hash = tx.hash();
         let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
+        {
+            let _index = self.lock();
+            if self.dir.join(&name).exists() {
+                return Ok(hash); // An acknowledged hash is never reported as a fresh fee refusal.
+            }
+        }
+        let meta = SpoolMeta::of(&tx);
+        let snapshot = admission::Snapshot::read(provider)?;
+        {
+            let index = self.lock();
+            if !self.dir.join(&name).exists() {
+                self.preview(&snapshot, &index, &meta)?;
+            }
+        }
+        admission::check_deadline(deadline)?;
+        let policy = policy_path.map(admission::Policy::read).transpose()?;
+        let verdict = policy.as_ref().map_or(Ok(()), |policy| snapshot.preflight(&tx, policy));
+        // Never return a fee from an obsolete head or a replaced policy file.
+        snapshot.verify(provider)?;
+        if let (Some(policy), Some(path)) = (&policy, policy_path) {
+            policy.verify(path)?;
+        }
+        admission::check_deadline(deadline)?;
+        after_preflight();
         let mut index = self.lock();
         if self.dir.join(&name).exists() {
+            snapshot.verify(provider)?;
+            admission::check_deadline(deadline)?;
             return Ok(hash); // already known, not yet consumed
         }
-        let (number, _) = self.database_head(provider)?;
-        let entries =
-            scan_spool(&self.spec, &self.dir, &mut index, number).map_err(|e| format!("txpool unavailable: {e}"))?;
-        let meta = SpoolMeta::of(&tx);
-        let evict = self.with_head(provider, |head| plan_admission(&entries, &meta, head, self.limits))??;
-        evict_spool(&self.dir, &evict, "displaced at admission");
-        if let Some(sidecar) = sidecar_name(std::ffi::OsStr::new(&name)) {
-            write_sidecar(&self.dir.join(sidecar), number);
+        // Waiting for admission's mutex can outlive the measured head, policy
+        // or deadline. A structured fee refusal must still describe this view.
+        snapshot.verify(provider)?;
+        if let (Some(policy), Some(path)) = (&policy, policy_path) {
+            policy.verify(path)?;
         }
+        admission::check_deadline(deadline)?;
+        verdict?;
+        // Other submissions may have arrived during execution; recheck all
+        // spool limits and replacement fees before publishing anything.
+        let evict = self.preview(&snapshot, &index, &meta)?;
+        snapshot.verify(provider)?;
+        if let (Some(policy), Some(path)) = (&policy, policy_path) {
+            policy.verify(path)?;
+        }
+        admission::check_deadline(deadline)?;
+        let number = snapshot.header.0.number;
         // Write beside, then rename: the producer only reads complete *.tx files.
         let partial = self
             .dir
@@ -1011,10 +1138,39 @@ impl Spool {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o600))
             })
-            .and_then(|()| std::fs::rename(&partial, self.dir.join(&name)));
+            .and_then(|()| {
+                after_partial();
+                // Disk work can also take time. A timed-out EVM task never
+                // publishes later merely because its caller has gone away.
+                snapshot
+                    .verify(provider)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                if let (Some(policy), Some(path)) = (&policy, policy_path) {
+                    policy
+                        .verify(path)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                }
+                admission::check_deadline(deadline)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::TimedOut, error.to_string()))?;
+                std::fs::rename(&partial, self.dir.join(&name))
+            });
         if let Err(error) = written {
             let _ = std::fs::remove_file(&partial);
-            return Err(format!("txpool write failed: {error}"));
+            return Err(rpc_error(format!("txpool write failed: {error}")));
+        }
+        // Housekeeping only follows successful publication; a write failure
+        // cannot evict the sender's old transaction or touch its sidecars.
+        evict_spool(&self.dir, &evict, "displaced at admission");
+        if let Err(error) = scan_spool(&self.spec, &self.dir, &mut index, number) {
+            eprintln!("admitted transaction {hash}; spool housekeeping failed: {error}");
+        }
+        advance_progress(
+            &mut self.progress.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            &self.dir,
+            number,
+        );
+        if let Some(sidecar) = sidecar_name(std::ffi::OsStr::new(&name)) {
+            write_sidecar(&self.dir.join(sidecar), number);
         }
         let sighting = (
             Some(meta),
@@ -1050,12 +1206,43 @@ impl Spool {
 }
 
 /// `eth_sendRawTransaction` into the settlement worker's spool directory.
-fn sequencer_rpc(spool: Arc<Spool>, provider: BlochProviderFactory) -> jsonrpsee::RpcModule<()> {
+fn sequencer_rpc(
+    spool: Arc<Spool>,
+    provider: BlochProviderFactory,
+    policy: Option<PathBuf>,
+    gate: Arc<tokio::sync::Semaphore>,
+    wait: Duration,
+    limit: Duration,
+) -> jsonrpsee::RpcModule<()> {
     let mut module = jsonrpsee::RpcModule::new(());
     module
-        .register_blocking_method("eth_sendRawTransaction", move |params, _, _| {
-            let raw: alloy_primitives::Bytes = params.one()?;
-            spool.submit(&provider, &raw).map_err(rpc_error)
+        .register_async_method("eth_sendRawTransaction", move |params, _, _| {
+            let (spool, provider, policy, gate) = (spool.clone(), provider.clone(), policy.clone(), gate.clone());
+            async move {
+                let raw: alloy_primitives::Bytes = params.one()?;
+                let permit = tokio::time::timeout(wait, gate.acquire_owned())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .ok_or_else(|| {
+                        jsonrpsee::types::ErrorObjectOwned::owned(
+                            -32005,
+                            "eth_sendRawTransaction: too many concurrent EVM simulations, retry later",
+                            None::<()>,
+                        )
+                    })?;
+                let deadline = std::time::Instant::now() + limit;
+                let run = tokio::task::spawn_blocking(move || {
+                    let answer = spool.submit(&provider, &raw, policy.as_deref(), deadline);
+                    drop(permit); // Held until execution really stops, even if the caller times out.
+                    answer
+                });
+                match tokio::time::timeout(limit, run).await {
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(error)) => Err(rpc_error(error.to_string())),
+                    Err(_) => Err(rpc_error("admission preflight timed out; retry later")),
+                }
+            }
         })
         .expect("the send method name is unique in a new module");
     module
@@ -1229,14 +1416,23 @@ fn floor_rewards(history: &mut serde_json::Value, floor: u128) {
 /// been answered `execution aborted (timeout = ...)` after `limit`: an EVM run
 /// cannot be stopped from outside, so a permit freed early would let more than
 /// `permits` runs take the CPU. Other methods are unaffected.
+#[cfg(test)]
 fn limit_simulations(
     module: &mut jsonrpsee::RpcModule<()>,
     permits: usize,
     wait: Duration,
     limit: Duration,
 ) -> Result<()> {
+    limit_simulations_with_gate(module, Arc::new(tokio::sync::Semaphore::new(permits)), wait, limit)
+}
+
+fn limit_simulations_with_gate(
+    module: &mut jsonrpsee::RpcModule<()>,
+    gate: Arc<tokio::sync::Semaphore>,
+    wait: Duration,
+    limit: Duration,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
-    let gate = Arc::new(tokio::sync::Semaphore::new(permits));
     for name in SIMULATION_METHODS {
         if module.remove_method(name).is_none() {
             continue;
@@ -2047,6 +2243,7 @@ async fn main() -> Result<()> {
         runtime.clone(),
     );
     let mut module = api.into_rpc().remove_context();
+    let simulation_gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SIMULATIONS));
     let spool = match &options.txpool {
         Some(pool) => {
             ensure!(
@@ -2069,7 +2266,14 @@ async fn main() -> Result<()> {
                 module.remove_method("eth_sendRawTransaction").is_some(),
                 "eth API lacks eth_sendRawTransaction"
             );
-            module.merge(sequencer_rpc(spool.clone(), factory.clone()))?;
+            module.merge(sequencer_rpc(
+                spool.clone(),
+                factory.clone(),
+                options.required_tip_file.clone(),
+                simulation_gate.clone(),
+                SIMULATION_WAIT,
+                SIMULATION_TIME_LIMIT,
+            ))?;
             Some(spool)
         }
         None => None,
@@ -2107,12 +2311,7 @@ async fn main() -> Result<()> {
         options.tip_headroom_percent,
     ));
     floor_fee_suggestions(&mut module, tip, factory.clone(), rules())?;
-    limit_simulations(
-        &mut module,
-        MAX_CONCURRENT_SIMULATIONS,
-        SIMULATION_WAIT,
-        SIMULATION_TIME_LIMIT,
-    )?;
+    limit_simulations_with_gate(&mut module, simulation_gate, SIMULATION_WAIT, SIMULATION_TIME_LIMIT)?;
     let levels_closed = Arc::new(ClosedLevels::new(true));
     refuse_closed_levels(&mut module, levels_closed.clone())?;
     let server = start_http_rpc(module, options.port).await?;
@@ -2746,7 +2945,7 @@ mod tests {
     #[test]
     fn a_forward_clock_step_does_not_expire_an_entry_seen_while_young() {
         let spec = ChainSpec::mainnet_next_or_rehearsal();
-        let mut young = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
+        let young = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         let mut account = |_| (0, alloy_primitives::U256::MAX);
         let blocks = SPOOL_LIMITS.expire_after_blocks;
         // A wall clock step does not enter: the age is the first-seen age plus monotonic time (blocks went by).

@@ -629,7 +629,14 @@ class Policy:
         if not self.path:
             return
         now = self.clock() if now is None else now
-        document = dict(self.state, required_tip_wei=self.required_tip(now))
+        required = self.required_tip(now)
+        document = dict(self.state, required_tip_wei=required, admission={
+            'version': 1,
+            'required_tip_wei': str(required),
+            'fresh_slot_price_wei': str(self.c['fresh_slot_price_wei']),
+            'write_limit_exempt_senders': ['0x' + sender.removeprefix('0x')
+                                         for sender in self.c['write_limit_exempt_senders']],
+        })
         tmp = self.path.with_name(f'.{self.path.name}.{os.getpid()}.tmp')
         with open(tmp, 'w') as out:
             out.write(json.dumps(document, sort_keys=True))

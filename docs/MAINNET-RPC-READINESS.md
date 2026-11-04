@@ -402,6 +402,52 @@ below it at the spool, evicts older spool entries below it at the sweep, and flo
 spool; the mainnet settler installer sets `min_tip_wei`. This is operator policy, not a consensus rule: blocks with a
 lower tip stay valid, and replay never consults it. Priority fees stay in the keyless vault until a later program change.
 
+**Transaction-specific storage price (candidate, local validation).** With both `--txpool` and
+`--required-tip-file`, `eth_sendRawTransaction` reads the policy v2 file's versioned `admission` object. For the
+sender's current canonical nonce, it runs the producer's selector against a disposable state cache and checks
+`gas_used * effective_tip >= charged_fresh_slots * fresh_slot_price_wei`, as well as the current required tip.
+The effective tip is capped by `maxFeePerGas - nextBaseFee`. Exempt senders have zero charged fresh slots.
+This does not change a consensus rule, a price, a guest, or global wallet fee suggestions.
+
+A refusal has JSON-RPC code `-32000` and `error.data.kind = "sequencer-fee-underpriced"`. Its data contains
+`transactionHash`, `headHash`, and the following Ethereum hex quantities: `headNumber`, `baseFeePerGas`,
+`requiredPriorityFeePerGas`, `requiredMaxFeePerGas`, `effectivePriorityFeePerGas`, `gasUsed`, `freshSlots`,
+`chargedFreshSlots`, and `freshSlotPriceWei`. `scope` is `"latest-state-next-block"`.
+The required priority fee is the integer ceiling of storage price divided by measured gas, or the policy's
+required tip, whichever is greater. `requiredMaxFeePerGas` is exactly that value plus `baseFeePerGas`.
+Clients should bind the error to the hash they submitted and show the quote before requesting a new signature;
+they must not raise a budget, re-sign or retry automatically.
+
+That specific refusal is emitted before any spool write or eviction. An already spooled hash returns its hash,
+even if policy prices later rise. The head and policy are rechecked before using a measurement; drift, missing
+or malformed policy, and timeout produce retryable errors without a fee quote. RPC overload is `-32005`.
+Admitting a transaction is still not a promise of inclusion. The simulation uses latest state and the RPC's
+derived next-block environment, without upcoming deposits, forced transactions or other spooled transactions.
+Future nonces are admitted using the existing cheap rules and are not simulated independently; policy may hold
+them later. Capacity, sender cooldowns, proving cost and changes to state can also delay inclusion.
+
+Admission shares the same four permits as all other EVM simulations, with a ten-second queue bound, a five-second
+execution deadline and the existing 15M declared-gas cap. The permit remains held until the blocking execution
+ends. A timed-out preflight checks its deadline before any publication and cannot later spool its result.
+
+Upgrade the settler's Python policy first and confirm that `sequencer-policy.json` contains `admission.version=1`
+with decimal-string `required_tip_wei`, decimal-string `fresh_slot_price_wei`, and a complete array
+`write_limit_exempt_senders` of `0x` addresses before starting this RPC with `--required-tip-file`. An older
+tip-only file is insufficient for transaction admission and is refused explicitly. Without that flag, the
+existing static-floor admission remains available. Local regressions execute the DEX's compiled TestToken
+`approve`, check exact rounding and fee-cap clipping, and verify no state/spool change on a fee refusal.
+The worker publishes this snapshot even when its spool is empty, before checking demand; cold starts, older
+state files and an idle decaying tip do not require a transaction or SP1 execution to refresh the RPC policy.
+
+For an optional cross-product HTTP rehearsal, run the ignored Rust test
+`admission::tests::serve_disposable_admission_rehearsal` with `BLOCH_ADMISSION_REHEARSAL_FILE` naming a new
+temporary JSON file and `BLOCH_ADMISSION_REHEARSAL_SECONDS` between 1 and 1800 (default 300).
+It creates a fresh canonical database, deploys the DEX TestToken, and listens only on IPv4 loopback.
+`python3 deployment/devnet/rehearse_admission.py FIXTURE --cast PATH_TO_CAST --out RESULT` then checks the real
+fee refusal, explicitly signs the same approve at exactly the quoted fees, and verifies hash, spool bytes,
+idempotence and pending nonce 2. Canonical nonce stays 1, head stays unchanged and receipt stays null:
+the test establishes admission, not inclusion. The driver accepts only this devnet fixture and public test key.
+
 **Level states (`bloch_finality.status.state`).** `starting`: no first read yet, both levels closed (-32001). `ok`. `lagging`: the status names a settlement this database lacks (`missing_settlement`), and nothing it can check contradicts it (genesis, the newest settlements this database holds, the log's presence and size). Levels stay open at their old height, and `age_s` is the file's real age, computed at the call. `behind`: the same, when nothing was published yet in this process, so both levels are closed. A database more than 64 settlements behind cannot be compared until it reaches them. `missing` or `invalid`: both levels closed. While `finalized` is closed, `bloch_settlement` and `bloch_getWithdrawalProof` answer -32001 too. A `safe` settlement that contradicts the local chain closes `safe` only.
 
 A regressed or damaged log stays closed until the follower's log again holds what this RPC verified, or the RPC is restarted. A log with the same settlements in other bytes is read once from its start and compared with the local chain, so a follower upgrade needs no RPC restart. A poll while closed does not read the history again: the cursor stays, and a log refused on a read from its start is not re-read until it or its status changes.

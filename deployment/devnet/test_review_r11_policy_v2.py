@@ -386,22 +386,26 @@ class A243_12GateCascadeEmptiesTheBlock(SlotWorld):
 
 
 class A243_11WritePriceAtTheSuggestedTip(SlotWorld):
-    """A243-11 (High, outside this module). The write price is met from the tip: gas_used x tip >= 200 uBLCH per new
-    slot. The RPC suggests the required tip (+25 % headroom, at most 3 gwei x 1.25) through eth_maxPriorityFeePerGas
-    and refuses nothing at admission for new slots. A new user's first exact approve (about 46k gas, one new slot)
-    needs a 4.35 gwei tip, above the 3 gwei cap; a first swap that creates the output-token balance (about 120k gas)
-    needs 1.67 gwei, 13x the floor. At the suggested tip both are held as `below-write-price` in every block until the
-    RPC evicts them after 3 h, with no error to the wallet. Fixed in the RPC (admission check with a clear error, or
-    a write-aware fee suggestion) and in the DEX and bridge frontends, not here: expected to fail."""
+    """A243-11: the global congestion suggestion is not a per-transaction storage quote.
 
-    @unittest.expectedFailure
-    def test_a_first_approve_at_the_rpc_suggested_tip_is_served(self):
+    The RPC now rejects an underpriced current-nonce transaction before spooling it, with an exact write-aware
+    quote. Its real TestToken execution and no-persistence tests live in settled_rpc/admission.rs. This policy
+    counterpart preserves the price and verifies that the quoted priority fee, even above the congestion ceiling,
+    passes the original gate. Future nonces still need their predecessors and can be held here."""
+
+    def test_first_approve_requires_the_transaction_specific_write_quote(self):
         suggested = self.policy.required_tip(self.now) * 125 // 100
-        self.add_writer('approve', 'nina', 0, 46_000, 1, ['allowance:nina'], tip=suggested)
+        raw = self.add_writer('approve', 'nina', 0, 46_000, 1, ['allowance:nina'], tip=suggested)
         served = []
         for _ in range(4):
             served += self.block()
-        self.assertIn('approve', served)
+        self.assertNotIn('approve', served)
+        self.assertEqual(self.held()['approve'], 'below-write-price')
+        price = self.policy.c['fresh_slot_price_wei']
+        quoted = (price + 46_000 - 1) // 46_000
+        self.assertGreater(quoted, self.policy.c['congestion_max_tip_wei'])
+        self.tx[raw]['tip'] = quoted
+        self.assertIn('approve', self.block())
 
 
 class A243_7bLargeGasFloorAndRecovery(RealTime):
