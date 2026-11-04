@@ -644,6 +644,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deadline_expiry_after_writing_partial_preserves_the_previous_entry() {
+        let world = World::new();
+        world
+            .send(&world.approve(1, 1, 10_000_000_000, 100_000_000_000))
+            .unwrap();
+        let files = || {
+            std::fs::read_dir(&world.spool.dir)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = files();
+        let reached_disk_boundary = std::cell::Cell::new(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let error = world
+            .spool
+            .submit_checked(
+                &world.factory,
+                &world.approve(1, 1, 12_000_000_000, 110_000_000_000),
+                Some(&world.file),
+                deadline,
+                || {},
+                || {
+                    reached_disk_boundary.set(true);
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1));
+                },
+            )
+            .unwrap_err();
+        assert!(
+            reached_disk_boundary.get(),
+            "the test must exercise the final publication boundary"
+        );
+        assert!(error.message().contains("timed out"));
+        assert_eq!(
+            files(),
+            before,
+            "no late transaction, partial, sidecar change or eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_spool_preview_does_not_create_sidecars_on_a_refusal() {
+        let world = World::new();
+        let old = world.approve(1, 1, 10_000_000_000, 100_000_000_000);
+        let hash = bloch_l2_evm::decode_signed_transaction(&world.spool.spec, &old)
+            .unwrap()
+            .hash();
+        let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
+        std::fs::write(world.spool.dir.join(&name), alloy_primitives::hex::encode(&old)).unwrap();
+        // A legacy spool entry has no first-seen sidecar and an empty in-memory
+        // index after restart. Refusing a replacement may inspect but not adopt it.
+        let error = world.send(&world.approve(1, 2, FLOOR, 100_000_000_000)).unwrap_err();
+        assert!(error.message().contains("replacement transaction underpriced"));
+        assert!(world.spool.lock().is_empty());
+        assert_eq!(std::fs::read_dir(&world.spool.dir).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(world.spool.dir.join(name)).unwrap(),
+            alloy_primitives::hex::encode(old)
+        );
+    }
+
+    #[tokio::test]
+    async fn head_drift_after_writing_partial_never_publishes_a_new_transaction() {
+        let mut world = World::new();
+        let spool = world.spool.clone();
+        let error = spool
+            .submit_checked(
+                &world.factory,
+                &world.approve(1, 1, 10_000_000_000, 100_000_000_000),
+                Some(&world.file),
+                Instant::now() + Duration::from_secs(5),
+                || {},
+                || {
+                    world
+                        .coordinator
+                        .extend_raw(
+                            world.coordinator.head().hash(),
+                            BlochNextBlockEnvCtx {
+                                timestamp: 19,
+                                prevrandao: B256::repeat_byte(3),
+                                anchor_root: B256::repeat_byte(4),
+                                deposits: vec![],
+                            },
+                            &[],
+                        )
+                        .unwrap();
+                },
+            )
+            .unwrap_err();
+        assert!(error.message().contains("head changed"));
+        world.empty_pool();
+    }
+
+    #[tokio::test]
     async fn submission_shares_the_simulation_gate_and_overload_does_not_write() {
         let world = World::new();
         let gate = Arc::new(tokio::sync::Semaphore::new(1));
