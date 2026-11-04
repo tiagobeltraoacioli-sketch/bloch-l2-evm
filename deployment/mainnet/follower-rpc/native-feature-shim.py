@@ -21,25 +21,33 @@ SHIM = (
 )
 
 
+def shimmed_text(text: str, path: str) -> str:
+    """The exact transformation, also used to verify a release's source bytes."""
+    if "devnet-kes" in text or "devnet-lc-roster" in text:
+        if SHIM in text:
+            return text
+        # A native release that carries KES and the light-client roster (the L1 hard fork that
+        # ports them to the mainnet line) defines both features with real code. The mainnet
+        # follower still never enables them: on mainnet those rules are epoch-gated, and the
+        # build passes no feature. Anything else is not a tree this recipe knows.
+        if all(f"\n{name} = [" in text for name in ("devnet-kes", "devnet-lc-roster")):
+            return text
+        sys.exit(f"{path}: defines only one of devnet-kes/devnet-lc-roster; not a release tree this recipe knows")
+    if text.count("\n[features]\n") != 1:
+        sys.exit(f"{path}: expected exactly one [features] table")
+    return text.replace("\n[features]\n", "\n[features]\n" + SHIM, 1)
+
+
 def main(root: str) -> int:
     for crate in ("bloch-pos-committee", "bloch-pos-node"):
         path = pathlib.Path(root, "crates", crate, "Cargo.toml")
-        text = path.read_text()
-        if "devnet-kes" in text or "devnet-lc-roster" in text:
-            if SHIM in text:
-                continue
-            # A native release that carries KES and the light-client roster (the L1 hard fork that
-            # ports them to the mainnet line) defines both features with real code. The mainnet
-            # follower still never enables them: on mainnet those rules are epoch-gated, and the
-            # build passes no feature. Anything else is not a tree this recipe knows.
-            if all(f"\n{name} = [" in text for name in ("devnet-kes", "devnet-lc-roster")):
-                print(f"native {path} defines devnet-kes/devnet-lc-roster itself; no shim")
-                continue
-            sys.exit(f"{path}: defines only one of devnet-kes/devnet-lc-roster; not a release tree this recipe knows")
-        if text.count("\n[features]\n") != 1:
-            sys.exit(f"{path}: expected exactly one [features] table")
-        path.write_text(text.replace("\n[features]\n", "\n[features]\n" + SHIM, 1))
-        print(f"shimmed {path}")
+        original = path.read_text()
+        expected = shimmed_text(original, str(path))
+        if expected != original:
+            path.write_text(expected)
+            print(f"shimmed {path}")
+        else:
+            print(f"native {path} already defines both features; no shim")
     return 0
 
 
