@@ -10,7 +10,7 @@
 #   build-release.sh WORK [OUT]          (OUT defaults to WORK/out; must not exist yet)
 #
 # WORK/src must hold, as siblings (the layout every L2 integration crate expects):
-#   bloch-l2-evm             this tree (a git checkout: its commit and cleanliness are recorded)
+#   bloch-l2-evm             this tree (a committed, clean git checkout)
 #   bloch-validator-payout   bloch-sis-pow at exactly NATIVE_COMMIT, clean
 #   reth-bloch-rpc-snapshot  8eb21017 + integrations/reth-execution/reth-snapshot.patch (transaction snapshot
 #                            boundary; RPC simulation gas cap and time budget, RETH-SNAPSHOT.md)
@@ -105,13 +105,16 @@ fi
 [ "$(git -C "$RETH" rev-parse HEAD)" = "$RETH_COMMIT" ] || die "reth snapshot is not $RETH_COMMIT"
 grep -q 'pub const L2_SETTLEMENT_ACTIVATION_EPOCH: u64 = 5_850;' "$N/crates/bloch-pos-committee/src/params.rs" \
   || die "native tree is not the epoch-5850 mainnet release"
-L2_COMMIT=$(git -C "$L2" rev-parse HEAD 2>/dev/null || echo unknown)
-L2_DIRTY=$(git -C "$L2" status --porcelain 2>/dev/null | grep -v '^??' | wc -l || true)
+log "verify release sources before any source mutation or build"
+python3 "$HERE/verify-build-sources.py" --l2 "$L2" --native "$N" --native-revision "$NATIVE_COMMIT"
+python3 "$L2/integrations/reth-execution/prepare-reth.py" --check
+L2_COMMIT=$(git -C "$L2" rev-parse HEAD)
+L2_DIRTY=0
+RETH_PATCH_SHA256=$(sha256sum "$L2/integrations/reth-execution/reth-snapshot.patch" | cut -d' ' -f1)
 
 log "native feature shim (inert devnet-kes / devnet-lc-roster)"
 python3 "$HERE/follower-rpc/native-feature-shim.py" "$N"
-OTHER=$(git -C "$N" status --porcelain | grep -v -E '^ M crates/bloch-pos-(committee|node)/Cargo.toml$' || true)
-[ -z "$OTHER" ] || die "native checkout has other changes: $OTHER"
+python3 "$HERE/verify-build-sources.py" --l2 "$L2" --native "$N" --native-revision "$NATIVE_COMMIT" --shim-applied
 
 log "mainnet Cargo lock for settlement-recovery"
 cp "$SR/Cargo.lock" "$W/settlement-recovery.tree.Cargo.lock"
@@ -127,10 +130,14 @@ log "follower + producer (settlement-recovery, no features)"
 nice cargo "+$TOOLCHAIN" build --release --locked --manifest-path "$SR/Cargo.toml" \
   --bin bloch-l2-native-follower --bin bloch-l2-produce-dev
 log "settled RPC (reth-execution)"
-nice cargo "+$TOOLCHAIN" build --release --locked --manifest-path "$L2/integrations/reth-execution/Cargo.toml" \
+python3 "$L2/integrations/reth-execution/prepare-reth.py" --check -- nice cargo "+$TOOLCHAIN" build --release --locked --manifest-path "$L2/integrations/reth-execution/Cargo.toml" \
   --bin bloch-l2-settled-rpc
 restore
 trap - EXIT
+log "verify source identity after the build"
+python3 "$HERE/verify-build-sources.py" --l2 "$L2" --native "$N" --native-revision "$NATIVE_COMMIT" --shim-applied
+python3 "$L2/integrations/reth-execution/prepare-reth.py" --check
+[ "$(git -C "$L2" rev-parse HEAD)" = "$L2_COMMIT" ] || die "L2 source revision changed during the build"
 
 mkdir -p "$OUT"
 for b in bloch-l2-native-follower bloch-l2-produce-dev bloch-l2-settled-rpc; do
@@ -147,10 +154,10 @@ rm -rf "$G"
 
 (cd "$OUT" && sha256sum bloch-l2-native-follower bloch-l2-produce-dev bloch-l2-settled-rpc sequencer_mainnet.py > SHA256SUMS)
 python3 - "$OUT" "$HEAD" "$L2_COMMIT" "$L2_DIRTY" "$NATIVE_COMMIT" "$RETH_COMMIT" "$TOOLCHAIN" \
-  "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" "$GATES" <<'PY'
+  "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" "$GATES" "$RETH_PATCH_SHA256" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
-out, head, l2, dirty, native, reth, toolchain, lock, gates = sys.argv[1:]
+out, head, l2, dirty, native, reth, toolchain, lock, gates, reth_patch = sys.argv[1:]
 genesis = json.loads(head)
 pins = {'hash': '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468',
         'state_root': '2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d'}
@@ -159,6 +166,7 @@ if any(genesis.get(k) != v for k, v in pins.items()) or genesis.get('number') !=
 rustc = subprocess.run(['rustc', f'+{toolchain}', '--version'], capture_output=True, text=True).stdout.strip()
 report = {'chain_id': 700770, 'l2_commit': l2, 'l2_tracked_changes': int(dirty),
           'native': f'{native} (+ inert devnet-kes/devnet-lc-roster shim)', 'reth_snapshot': reth,
+          'reth_patch_sha256': reth_patch,
           'rustc': rustc, 'features': [], 'settlement_recovery_lock_sha256': lock, 'l2_genesis': genesis,
           'l1_activation_epochs': json.loads(gates),
           'sha256': dict(l.split()[::-1] for l in (Path(out) / 'SHA256SUMS').read_text().splitlines())}
