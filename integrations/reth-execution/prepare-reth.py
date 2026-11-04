@@ -44,7 +44,10 @@ def main():
     require(all(not entry or (not entry[:1].islower() and entry[:1] != b"S") for entry in flags),
             "Prepared Reth has index flags that can hide working-tree edits")
     require(not git(TARGET, "diff", "--cached", *DIFF), "Prepared Reth has staged changes")
-    require(not git(TARGET, "ls-files", "--others", "--exclude-standard"), "Prepared Reth has untracked files")
+    # Local/global ignore rules cannot hide Rust sources or Cargo configuration.
+    # Only reserved build output and platform metadata are exempt.
+    require(not git(TARGET, "ls-files", "--others", "--exclude=target/", "--exclude=.DS_Store", "-z"),
+            "Prepared Reth has untracked files outside reserved build outputs")
     actual = git(TARGET, "diff", *DIFF)
     if not actual and not args.check:
         git(TARGET, "apply", "--check", str(PATCH))
