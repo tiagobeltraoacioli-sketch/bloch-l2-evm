@@ -9,7 +9,12 @@ import argparse
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 
+
+# Verification must not dirty its own source checkout on Python installations
+# that store import bytecode beside the module (the normal Linux default).
+sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 SHIM_PATH = HERE / 'follower-rpc' / 'native-feature-shim.py'
@@ -38,10 +43,18 @@ def worktree(root):
             f'{root}: index flags can hide source edits')
 
 
+def untracked_sources(root):
+    # Ignore only reserved build output and platform metadata, not gitignore,
+    # info/exclude or global excludes that can hide Cargo configuration or a
+    # Rust input. Git prunes excluded target directories without listing them.
+    return git(root, 'ls-files', '--others', '--exclude=target/', '--exclude=.DS_Store', '-z')
+
+
 def verify_l2(root):
     worktree(root)
-    require(not git(root, 'status', '--porcelain', '--untracked-files=all'),
-            'L2 release source must be committed and clean, including untracked files')
+    require(not git(root, 'status', '--porcelain', '--untracked-files=no'),
+            'L2 release source must be committed and clean')
+    require(not untracked_sources(root), 'L2 release source has untracked files outside reserved build outputs')
 
 
 def verify_native(root, expected_revision, applied=False):
@@ -50,7 +63,7 @@ def verify_native(root, expected_revision, applied=False):
     require(git(root, 'rev-parse', 'HEAD').decode().strip() == expected_revision,
             'Native revision differs from the selected release')
     require(not git(root, 'diff', '--cached', '--name-only'), 'Native source has staged changes')
-    require(not git(root, 'ls-files', '--others', '--exclude-standard'), 'Native source has untracked files')
+    require(not untracked_sources(root), 'Native source has untracked files outside reserved build outputs')
     changed = set(filter(None, git(root, 'diff', '--no-ext-diff', '--name-only', '-z').decode().split('\0')))
     require(changed <= set(MANIFESTS), 'Native source has changes outside the two feature-shim manifests')
     for name in MANIFESTS:

@@ -308,14 +308,21 @@ built producer reproduces the pinned L2 genesis and writes `SHA256SUMS` and
 `build.json`. `follower-rpc/build.sh` and `build-sequencer.sh` are wrappers.
 
 Source verification added on 2026-11-04 requires a committed, clean L2
-worktree, including untracked files, before the release recipe starts. The
+worktree before the release recipe starts. Untracked inputs are checked without
+repository, local or global ignore rules: those rules cannot hide Rust sources
+or Cargo configuration. Only directories named `target` and `.DS_Store` platform
+metadata are excluded; release inputs must not live in those reserved output
+paths. The verifier itself does not create Python bytecode in the checkout. The
 native checkout may differ from its selected commit only by the exact inert
 feature shim; unrelated edits in those same manifests are refused. Reth must
 match its pinned commit plus the recorded patch byte for byte. Hidden index
 flags, staged changes and source-root symlinks are refused. Sources are checked
 again after building, and `build.json` includes the Reth patch SHA-256. These
-checks establish source identity; they do not qualify the candidate guest,
-replace the genesis check, or generate an approved deployment pin.
+checks establish checkout identity under those output-path exclusions. They do
+not make the build hermetic: environment variables, external Cargo configuration,
+toolchain and dependency provenance still need independent build controls. They
+do not qualify the candidate guest, replace the genesis check, or generate an
+approved deployment pin.
 
 ## Mainnet follower and settled RPC (2026-10-18)
 

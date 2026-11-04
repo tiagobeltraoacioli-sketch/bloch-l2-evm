@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
+import shutil
 import tempfile
 import unittest
 
@@ -70,6 +72,47 @@ class BuildSources(unittest.TestCase):
         for check in (lambda: verify.verify_l2(self.root), self.native):
             with self.assertRaisesRegex(ValueError, 'untracked'):
                 check()
+
+    def test_ignored_source_and_cargo_configuration_are_refused(self):
+        # Per-checkout excludes must not hide a new Rust build input or Cargo
+        # configuration while claiming the checkout exactly names its commit.
+        (self.root / '.git' / 'info' / 'exclude').write_text('/injected.rs\n/.cargo/\n')
+        (self.root / 'injected.rs').write_text('// unrecorded build input\n')
+        (self.root / '.cargo').mkdir()
+        (self.root / '.cargo' / 'config.toml').write_text('[build]\nrustflags = ["--cfg", "unrecorded"]\n')
+        for check in (lambda: verify.verify_l2(self.root), self.native):
+            with self.assertRaisesRegex(ValueError, 'untracked'):
+                check()
+
+    def test_generated_target_files_do_not_invalidate_source_identity(self):
+        self.git('config', 'core.excludesFile', '/dev/null')
+        (self.root / '.git' / 'info' / 'exclude').write_text('target/\n.DS_Store\n')
+        for name in ('target/debug/build/generated.rs', 'crates/bloch-pos-node/target/cache', '.DS_Store'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('generated output\n')
+        verify.verify_l2(self.root)
+        self.native()
+
+    def test_plain_cli_does_not_create_bytecode_in_the_verified_checkout(self):
+        self.git('config', 'core.excludesFile', '/dev/null')
+        for source in (HERE / 'verify-build-sources.py', verify.SHIM_PATH):
+            target = self.root / source.relative_to(HERE.parent.parent)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        self.commit()
+        revision = self.git('rev-parse', 'HEAD').strip().decode()
+        script = self.root / 'deployment' / 'mainnet' / 'verify-build-sources.py'
+        # macOS sets a shared pycache prefix; reproduce ordinary Linux Python
+        # instead, even when the test suite itself was launched with -B.
+        command = ('import runpy, sys; sys.dont_write_bytecode=False; sys.pycache_prefix=None; '
+                   'sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")')
+        done = subprocess.run([sys.executable, '-c', command, str(script), '--l2', str(self.root),
+                               '--native', str(self.root), '--native-revision', revision],
+                              text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.git('status', '--porcelain', '--untracked-files=all'), b'')
+        self.assertEqual(list(self.root.rglob('*.pyc')), [])
 
     def test_staged_shim_cannot_hide_the_release_diff(self):
         self.apply()
