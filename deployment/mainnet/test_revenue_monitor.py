@@ -685,6 +685,74 @@ class SnapshotConsistency(unittest.TestCase):
                 self.assertEqual(state['anchors'][product]['checkpoint']['number'], world[side]['head']['number'])
 
 
+class ForcedRouteObservations(unittest.TestCase):
+    def world(self):
+        world = load('world_live.json')
+        for name in ('dex', 'bridge', 'l2_fees'):
+            world['config'][name] = {'enabled': False}
+        return world
+
+    def test_rpc_treasury_is_observed_even_when_config_still_says_burned(self):
+        world = self.world()
+        world['config']['forced']['route'] = 'burned'
+        report, _, fake = run_world(world)
+        forced = report['products']['forced']
+        self.assertEqual(forced['route'], 'treasury')
+        self.assertEqual(forced['configured_route'], 'burned')
+        self.assertEqual(forced['treasury_script_hash'], '11' * 32)
+        self.assertEqual(checks(report)['forced_route_config']['level'], 'WARN')
+        self.assertTrue(any(method == 'getbalance' for _, method, _ in fake.log))
+        self.assertNotIn('is burned', json.dumps(report))
+
+    def test_missing_or_null_route_is_not_inferred_from_configuration(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                world = self.world()
+                if missing:
+                    world['l1']['forced'].pop('treasury')
+                else:
+                    world['l1']['forced']['treasury'] = None
+                report, _, fake = run_world(world)
+                self.assertEqual(checks(report)['forced_route']['level'], 'UNKNOWN' if missing else 'WARN')
+                self.assertEqual(report['products']['forced']['route'], 'unknown' if missing else 'unconfigured')
+                self.assertFalse(any(method == 'getbalance' for _, method, _ in fake.log))
+
+    def test_changed_treasury_is_not_a_revenue_increase(self):
+        world = self.world()
+        _, state, _ = run_world(world)
+        world['l1']['forced']['treasury'] = '22' * 32
+        world['l1']['balances']['22' * 32] = 900_000
+        report, state, _ = run_world(world, state)
+        self.assertEqual(checks(report)['forced_recipient']['level'], 'CRIT')
+        self.assertEqual(checks(report)['forced_treasury_baseline']['level'], 'WARN')
+        self.assertNotIn('forced_treasury_in_sat', state['totals'])
+        self.assertEqual(state['last']['forced_treasury_script_hash'], '22' * 32)
+
+    def test_counter_regression_keeps_prior_history(self):
+        world = self.world()
+        _, state, _ = run_world(world)
+        before = copy.deepcopy(state)
+        world['l1']['forced']['queued'] -= 1
+        report, state, _ = run_world(world, state)
+        self.assertEqual(checks(report)['forced_error']['level'], 'UNKNOWN')
+        self.assertEqual(state, before)
+
+    def test_wrong_balance_recipient_discards_partial_observation(self):
+        world = self.world()
+        fake = FakeWorld(world)
+
+        def wrong_recipient(url, method, params):
+            result = fake(url, method, params)
+            if method == 'getbalance':
+                result['script_hash'] = '22' * 32
+            return result
+
+        state = m.empty_state()
+        report = m.run(world['config'], state, m.Client(wrong_recipient), world['now'])
+        self.assertEqual(checks(report)['forced_error']['level'], 'UNKNOWN')
+        self.assertEqual(state['last'], {})
+
+
 class BridgeFeeCorrelation(unittest.TestCase):
     def fixture(self, kind, gross):
         world = load('world_launch.json')
@@ -843,17 +911,18 @@ class LaunchWorld(unittest.TestCase):
         self.assertEqual(report['totals']['bridge_fee_accrued'], '5500')
         self.assertEqual(report['level'], 'OK')
 
-    def test_forced_burned_route_warns_once_traffic_starts(self):
+    def test_legacy_route_is_unverified_even_when_configuration_says_burned(self):
         world = self.world
         world['l1']['forced'] = {'queued': 0, 'consumed': 0, 'pending': 0, 'pending_weight': 0,
                                  'max_pending_weight': 256, 'next_surcharge_sat': '1000'}
         report, state, _ = run_world(world)
-        self.assertEqual(checks(report)['forced_route']['level'], 'OK')
+        self.assertEqual(checks(report)['forced_route']['level'], 'UNKNOWN')
         world['l1']['forced']['queued'] = 2
         report, state, _ = run_world(world, state, world['now'] + 60)
         c = checks(report)['forced_route']
-        self.assertEqual(c['level'], 'WARN')
-        self.assertIn('burned', c['message'])
+        self.assertEqual(c['level'], 'UNKNOWN')
+        self.assertIn('unverified', c['message'])
+        self.assertNotIn('is burned', c['message'])
         self.assertEqual(report['totals']['forced_min_surcharge_sat'], '2000')
 
     def test_vault_balance_before_the_fork_counts_as_accrued_and_locked(self):
@@ -870,9 +939,9 @@ class LaunchWorld(unittest.TestCase):
         self.assertEqual(checks(report)['bridge_fee_recipient']['level'], 'WARN')
         world['config']['forced']['route'] = 'treasury'
         world['config']['forced']['treasury_script_hash'] = 'TBD-owner'
-        world['l1']['forced'] = {'queued': 0, 'consumed': 0, 'pending': 0, 'pending_weight': 0}
+        world['l1']['forced'] = {'queued': 0, 'consumed': 0, 'pending': 0, 'pending_weight': 0, 'treasury': '11' * 32}
         report, _, _ = run_world(world)
-        self.assertEqual(checks(report)['forced_route']['level'], 'WARN')
+        self.assertEqual(checks(report)['forced_recipient']['level'], 'WARN')
 
 
 class Cli(unittest.TestCase):

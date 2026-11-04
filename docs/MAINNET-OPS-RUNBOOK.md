@@ -276,6 +276,11 @@ Deposits report their net amount, while releases report the gross burn amount;
 the monitor applies the vault's integer fee rule to the appropriate amount.
 Small crossings whose fee rounds down to zero are valid. A missing, mismatched,
 or orphan fee event is `CRIT` and leaves the previous bridge counters intact.
+Forced-inclusion routing comes from `getl2settlement.forced.treasury`; the local
+`route` and treasury values are expectations for comparison. Missing telemetry
+is `UNKNOWN`, and a null treasury is unconfigured, neither an observation of a
+burn. Treasury changes start a new balance baseline without treating the
+difference between two accounts as income. Regressed queue counters are refused.
 
 The retained state binds each EVM product to its deployment and previous block
 hash. A changed deployment, a rollback, a replaced checkpoint, or legacy history
