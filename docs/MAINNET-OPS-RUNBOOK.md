@@ -268,6 +268,9 @@ cursor, counters and balances; other successful products remain recorded.
 Runs sharing a state file also share an exclusive lock held from the initial
 read through publication. An overlapping run exits `UNKNOWN` before any RPC;
 the lock is released on success or failure, including when configuration fails.
+Event scans reject removed logs, duplicate positions, wrong address/topic/range
+answers and block hashes that differ from the sampled canonical blocks. Invalid
+scan sizes fail before entering the scan loop.
 
 The retained state binds each EVM product to its deployment and previous block
 hash. A changed deployment, a rollback, a replaced checkpoint, or legacy history

@@ -179,7 +179,8 @@ class FakeWorld:
                     break
             if ok:
                 out.append({'address': e['address'], 'topics': topics, 'data': data, 'blockNumber': hex(e['block']),
-                            'transactionHash': e['tx'], 'logIndex': hex(i)})
+                            'transactionHash': f"0x{int(e['tx'], 16):064x}", 'logIndex': hex(i),
+                            'blockHash': self.block(chain, e['block'])['hash'], 'removed': False})
         return out
 
 
@@ -682,6 +683,59 @@ class SnapshotConsistency(unittest.TestCase):
                 self.assertNotIn(product + '_error', checks(report))
                 self.assertEqual(state['totals'], totals)
                 self.assertEqual(state['anchors'][product]['checkpoint']['number'], world[side]['head']['number'])
+
+
+class EventIntegrity(unittest.TestCase):
+    def world(self):
+        world = load('world_live.json')
+        for product in ('dex', 'l2_fees', 'forced'):
+            world['config'][product] = {'enabled': False}
+        return world
+
+    def test_bad_event_is_refused_without_advancing_history(self):
+        for field, value in [('address', '0x' + '12' * 20), ('topics', []), ('blockNumber', '0x0'),
+                             ('blockHash', '0x' + '12' * 32), ('blockHash', 42), ('removed', True),
+                             ('removed', 0), ('transactionHash', '0xbad'), ('logIndex', False)]:
+            with self.subTest(field=field, value=value):
+                world = self.world()
+                fake = FakeWorld(world)
+
+                def corrupt(url, method, params):
+                    result = fake(url, method, params)
+                    if method == 'eth_getLogs' and result:
+                        result[-1][field] = value
+                    return result
+
+                state = m.empty_state()
+                report = m.run(world['config'], state, m.Client(corrupt), world['now'])
+                self.assertIn('bridge_error', checks(report))
+                self.assertEqual(state['cursors'], {})
+                self.assertEqual(state['totals'], {})
+
+    def test_duplicate_position_is_not_counted_twice(self):
+        world = self.world()
+        fake = FakeWorld(world)
+
+        def duplicate(url, method, params):
+            result = fake(url, method, params)
+            if method == 'eth_getLogs' and result:
+                result.append(dict(result[-1]))
+            return result
+
+        report, state = None, m.empty_state()
+        report = m.run(world['config'], state, m.Client(duplicate), world['now'])
+        self.assertIn('bridge_error', checks(report))
+        self.assertEqual(state['totals'], {})
+
+    def test_nonpositive_scan_limits_refuse_without_looping(self):
+        for key in ('log_chunk_blocks', 'max_scan_blocks'):
+            for value in (0, -1, True, 1.5):
+                with self.subTest(key=key, value=value):
+                    world = self.world()
+                    world['config']['thresholds'] = {key: value}
+                    report, state, _ = run_world(world)
+                    self.assertIn('bridge_error', checks(report))
+                    self.assertEqual(state['cursors'], {})
 
 
 class ConcurrentState(unittest.TestCase):

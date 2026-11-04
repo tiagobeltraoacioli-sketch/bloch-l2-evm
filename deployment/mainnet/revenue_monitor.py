@@ -261,6 +261,7 @@ class Chain:
     def __init__(self, client: Client, urls: List[str], name: str):
         self.client, self.urls, self.name = client, urls, name
         self.block_ts_cache: Dict[int, int] = {}
+        self.block_hash_cache: Dict[int, str] = {}
         self.number = 0
         self.timestamp = 0
         self.base_fee: Optional[int] = None
@@ -280,6 +281,7 @@ class Chain:
         self.timestamp = hexint(head['timestamp'])
         self.base_fee = hexint(head['baseFeePerGas']) if head.get('baseFeePerGas') is not None else None
         self.block_ts_cache[self.number] = self.timestamp
+        self.block_hash_cache[self.number] = self.hash
         self.genesis_hash = self.block_hash(self.rpc('eth_getBlockByNumber', ['0x0', False]), 0)
 
     def chain_id(self) -> int:
@@ -348,11 +350,16 @@ class Chain:
             b = self.rpc('eth_getBlockByNumber', [hex(number), False])
             if not isinstance(b, dict):
                 raise RpcError(f'{self.name}: block {number} missing')
+            self.block_hash_cache[number] = self.block_hash(b, number)
             self.block_ts_cache[number] = hexint(b['timestamp'])
         return self.block_ts_cache[number]
 
     def logs(self, address: Any, topics: list, start: int, end: int, chunk: int) -> List[Dict[str, Any]]:
+        if type(chunk) is not int or chunk <= 0:
+            raise RpcError('log_chunk_blocks must be a positive integer')
         out: List[Dict[str, Any]] = []
+        addresses = {a.lower() for a in (address if isinstance(address, list) else [address])}
+        seen = set()
         lo = start
         while lo <= end:
             hi = min(end, lo + chunk - 1)
@@ -360,18 +367,49 @@ class Chain:
                                             'fromBlock': hex(lo), 'toBlock': hex(hi)}])
             if not isinstance(got, list):
                 raise RpcError(f'{self.name}: eth_getLogs returned {type(got).__name__}')
-            out.extend(got)
+            for raw in got:
+                if not isinstance(raw, dict):
+                    raise RpcError(f'{self.name}: malformed event')
+                log = dict(raw)
+                number, index = hexint(log['blockNumber']), hexint(log['logIndex'])
+                if (type(number) is not int or type(index) is not int or not lo <= number <= hi or index < 0
+                        or (log.get('removed') is not None and log.get('removed') is not False)):
+                    raise RpcError(f'{self.name}: removed or out-of-range event')
+                if not isinstance(log.get('address'), str) or log['address'].lower() not in addresses:
+                    raise RpcError(f'{self.name}: event address does not match the filter')
+                actual_topics = log.get('topics')
+                if not isinstance(actual_topics, list) or any(not isinstance(t, str) for t in actual_topics):
+                    raise RpcError(f'{self.name}: malformed event topics')
+                for position, wanted in enumerate(topics):
+                    if wanted is None:
+                        continue
+                    options = wanted if isinstance(wanted, list) else [wanted]
+                    if position >= len(actual_topics) or actual_topics[position].lower() not in {t.lower() for t in options}:
+                        raise RpcError(f'{self.name}: event topics do not match the filter')
+                tx_hash = log.get('transactionHash')
+                if (not isinstance(tx_hash, str) or len(tx_hash) != 66 or not tx_hash.startswith('0x')
+                        or any(c not in '0123456789abcdefABCDEF' for c in tx_hash[2:])):
+                    raise RpcError(f'{self.name}: malformed event transaction hash')
+                log['_block'] = number
+                log['_ts'] = self.block_time(number)
+                block_hash = log.get('blockHash')
+                if not isinstance(block_hash, str) or block_hash.lower() != self.block_hash_cache[number]:
+                    raise RpcError(f'{self.name}: event block hash is not canonical')
+                identity = (number, index)
+                if identity in seen:
+                    raise RpcError(f'{self.name}: duplicate event position')
+                seen.add(identity)
+                log['_day'] = day_of(log['_ts'])
+                out.append(log)
             lo = hi + 1
-        for log in out:
-            log['_block'] = hexint(log['blockNumber'])
-            log['_ts'] = self.block_time(log['_block'])
-            log['_day'] = day_of(log['_ts'])
         out.sort(key=lambda g: (g['_block'], hexint(g.get('logIndex', '0x0'))))
         return out
 
 
 def scan_range(state_cursor: Optional[int], start_block: int, head: int, max_blocks: int) -> Tuple[int, int, bool]:
     """Blocks [lo, hi] to scan this run, and whether the scan reached the head."""
+    if type(max_blocks) is not int or max_blocks <= 0:
+        raise RpcError('max_scan_blocks must be a positive integer')
     lo = start_block if state_cursor is None else state_cursor + 1
     hi = min(head, lo + max_blocks - 1)
     return lo, hi, hi >= head
