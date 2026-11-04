@@ -98,6 +98,16 @@ class RenderR10(unittest.TestCase):
         bad, _ = self.render('--client-ca', 'none', '--sub-answer-max', '1000')
         self.assertNotEqual(bad.returncode, 0)
 
+    def test_transaction_routes_allow_admission_time_but_never_retry(self):
+        result, out = self.render('--client-ca', 'none')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conf = (out / 'l2rpc-gateway.conf').read_text()
+        for route in ('/_l2/seq', '/seq'):
+            block = re.search(r'location = ' + re.escape(route) + r' \{(.*?)\n    \}', conf, re.S).group(1)
+            self.assertIn('proxy_read_timeout 30s;', block)
+            self.assertIn('proxy_next_upstream off;', block)
+            self.assertNotIn('proxy_next_upstream_tries', block)
+
     def test_the_old_tcp_hop_option_is_refused(self):
         result, _ = self.render('--peer-out-port', '18957', '--client-ca', 'none')
         self.assertNotEqual(result.returncode, 0)

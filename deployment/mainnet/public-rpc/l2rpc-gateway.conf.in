@@ -182,7 +182,9 @@ server {
         proxy_intercept_errors on;
         proxy_pass http://l2_seq/;
         include @CONF_DIR@/l2rpc-proxy.inc;
-        proxy_read_timeout 15s;
+        # Admission can wait 10 s for an EVM permit and execute for 5 s.
+        # Allow transport margin while keeping transaction retries disabled.
+        proxy_read_timeout 30s;
         proxy_next_upstream off;
     }
 
@@ -277,7 +279,9 @@ server {
     location = /seq {
         proxy_pass http://l2_seq/;
         include @CONF_DIR@/l2rpc-proxy.inc;
-        proxy_read_timeout 15s;
+        # Admission can wait 10 s for an EVM permit and execute for 5 s.
+        # Allow transport margin while keeping transaction retries disabled.
+        proxy_read_timeout 30s;
         proxy_next_upstream off;
         js_header_filter l2rpc.guardHeader;
         js_body_filter l2rpc.guardBody buffer_type=buffer;

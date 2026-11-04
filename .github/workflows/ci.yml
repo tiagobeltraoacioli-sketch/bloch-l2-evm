@@ -86,7 +86,7 @@ jobs:
       - name: Check gateway rendering and local transport failures
         run: python3 -m unittest discover -s deployment/mainnet/public-rpc/tests -p 'test_*.py'
       - name: Check gateway EVM budgets and transaction admission responses
-        run: node --test deployment/mainnet/public-rpc/tests/*.test.mjs
+        run: node --test deployment/mainnet/public-rpc/tests/*.test.mjs deployment/mainnet/public-rpc/tests/review_r10_gateway.mjs
 
   reth-provider:
     name: Reth provider execution and storage
