@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import fcntl
 import json
 import os
 import sys
@@ -255,14 +256,18 @@ class Report:
 # ---------------------------------------------------------------- chain access
 
 class Chain:
-    """One EVM chain (the L2 or Ethereum), read at one pinned block number."""
+    """One EVM chain, read from one endpoint at one checked block identity."""
 
     def __init__(self, client: Client, urls: List[str], name: str):
         self.client, self.urls, self.name = client, urls, name
         self.block_ts_cache: Dict[int, int] = {}
+        self.block_hash_cache: Dict[int, str] = {}
         self.number = 0
         self.timestamp = 0
         self.base_fee: Optional[int] = None
+        self.hash: Optional[str] = None
+        self.network: Optional[int] = None
+        self.genesis_hash: Optional[str] = None
 
     def rpc(self, method: str, params: list) -> Any:
         return self.client.call(self.urls, method, params)
@@ -272,12 +277,60 @@ class Chain:
         if not isinstance(head, dict):
             raise RpcError(f'{self.name}: no {tag} block')
         self.number = hexint(head['number'])
+        self.hash = self.block_hash(head, self.number)
         self.timestamp = hexint(head['timestamp'])
         self.base_fee = hexint(head['baseFeePerGas']) if head.get('baseFeePerGas') is not None else None
         self.block_ts_cache[self.number] = self.timestamp
+        self.block_hash_cache[self.number] = self.hash
+        self.genesis_hash = self.block_hash(self.rpc('eth_getBlockByNumber', ['0x0', False]), 0)
 
     def chain_id(self) -> int:
-        return hexint(self.rpc('eth_chainId', []))
+        # Fail over only before selecting a chain. Mixing endpoints during a
+        # sample can combine valid answers from different canonical branches.
+        last: Optional[Exception] = None
+        for url in self.urls:
+            try:
+                network = hexint(self.client.call([url], 'eth_chainId', []))
+            except RpcError as error:
+                last = error
+                continue
+            self.urls = [url]
+            self.network = network
+            return network
+        raise RpcError(str(last) if last else f'{self.name}: no endpoint configured')
+
+    def block_hash(self, block: Any, number: int) -> str:
+        if not isinstance(block, dict) or hexint(block.get('number')) != number or number < 0:
+            raise RpcError(f'{self.name}: missing or inconsistent block {number}')
+        value = block.get('hash')
+        if (not isinstance(value, str) or len(value) != 66 or not value.startswith('0x')
+                or any(c not in '0123456789abcdefABCDEF' for c in value[2:])):
+            raise RpcError(f'{self.name}: invalid hash for block {number}')
+        return value.lower()
+
+    def verify(self) -> None:
+        if hexint(self.rpc('eth_chainId', [])) != self.network:
+            raise RpcError(f'{self.name}: chain identity changed during observation')
+        if self.block_hash(self.rpc('eth_getBlockByNumber', ['0x0', False]), 0) != self.genesis_hash:
+            raise RpcError(f'{self.name}: genesis changed during observation')
+        block = self.rpc('eth_getBlockByNumber', [self.at(), False])
+        if self.block_hash(block, self.number) != self.hash:
+            raise RpcError(f'{self.name}: pinned block changed during observation')
+
+    def checkpoint(self) -> Dict[str, Any]:
+        return {'chain_id': self.network, 'genesis_hash': self.genesis_hash,
+                'number': self.number, 'hash': self.hash}
+
+    def verify_previous(self, checkpoint: Dict[str, Any]) -> None:
+        number = checkpoint['number']
+        if type(number) is not int or number < 0 or number > self.number:
+            raise RpcError(f'{self.name}: observation height regressed or prior checkpoint is invalid')
+        if checkpoint['chain_id'] != self.network or checkpoint['genesis_hash'] != self.genesis_hash:
+            raise RpcError(f'{self.name}: chain differs from the retained revenue history')
+        block = self.rpc('eth_getBlockByNumber', [hex(number), False])
+        if self.block_hash(block, number) != checkpoint['hash']:
+            raise RpcError(f'{self.name}: retained revenue checkpoint is no longer canonical; '
+                           'review the history and start a separate state file')
 
     def at(self) -> str:
         return hex(self.number)
@@ -297,11 +350,16 @@ class Chain:
             b = self.rpc('eth_getBlockByNumber', [hex(number), False])
             if not isinstance(b, dict):
                 raise RpcError(f'{self.name}: block {number} missing')
+            self.block_hash_cache[number] = self.block_hash(b, number)
             self.block_ts_cache[number] = hexint(b['timestamp'])
         return self.block_ts_cache[number]
 
     def logs(self, address: Any, topics: list, start: int, end: int, chunk: int) -> List[Dict[str, Any]]:
+        if type(chunk) is not int or chunk <= 0:
+            raise RpcError('log_chunk_blocks must be a positive integer')
         out: List[Dict[str, Any]] = []
+        addresses = {a.lower() for a in (address if isinstance(address, list) else [address])}
+        seen = set()
         lo = start
         while lo <= end:
             hi = min(end, lo + chunk - 1)
@@ -309,18 +367,49 @@ class Chain:
                                             'fromBlock': hex(lo), 'toBlock': hex(hi)}])
             if not isinstance(got, list):
                 raise RpcError(f'{self.name}: eth_getLogs returned {type(got).__name__}')
-            out.extend(got)
+            for raw in got:
+                if not isinstance(raw, dict):
+                    raise RpcError(f'{self.name}: malformed event')
+                log = dict(raw)
+                number, index = hexint(log['blockNumber']), hexint(log['logIndex'])
+                if (type(number) is not int or type(index) is not int or not lo <= number <= hi or index < 0
+                        or (log.get('removed') is not None and log.get('removed') is not False)):
+                    raise RpcError(f'{self.name}: removed or out-of-range event')
+                if not isinstance(log.get('address'), str) or log['address'].lower() not in addresses:
+                    raise RpcError(f'{self.name}: event address does not match the filter')
+                actual_topics = log.get('topics')
+                if not isinstance(actual_topics, list) or any(not isinstance(t, str) for t in actual_topics):
+                    raise RpcError(f'{self.name}: malformed event topics')
+                for position, wanted in enumerate(topics):
+                    if wanted is None:
+                        continue
+                    options = wanted if isinstance(wanted, list) else [wanted]
+                    if position >= len(actual_topics) or actual_topics[position].lower() not in {t.lower() for t in options}:
+                        raise RpcError(f'{self.name}: event topics do not match the filter')
+                tx_hash = log.get('transactionHash')
+                if (not isinstance(tx_hash, str) or len(tx_hash) != 66 or not tx_hash.startswith('0x')
+                        or any(c not in '0123456789abcdefABCDEF' for c in tx_hash[2:])):
+                    raise RpcError(f'{self.name}: malformed event transaction hash')
+                log['_block'] = number
+                log['_ts'] = self.block_time(number)
+                block_hash = log.get('blockHash')
+                if not isinstance(block_hash, str) or block_hash.lower() != self.block_hash_cache[number]:
+                    raise RpcError(f'{self.name}: event block hash is not canonical')
+                identity = (number, index)
+                if identity in seen:
+                    raise RpcError(f'{self.name}: duplicate event position')
+                seen.add(identity)
+                log['_day'] = day_of(log['_ts'])
+                out.append(log)
             lo = hi + 1
-        for log in out:
-            log['_block'] = hexint(log['blockNumber'])
-            log['_ts'] = self.block_time(log['_block'])
-            log['_day'] = day_of(log['_ts'])
         out.sort(key=lambda g: (g['_block'], hexint(g.get('logIndex', '0x0'))))
         return out
 
 
 def scan_range(state_cursor: Optional[int], start_block: int, head: int, max_blocks: int) -> Tuple[int, int, bool]:
     """Blocks [lo, hi] to scan this run, and whether the scan reached the head."""
+    if type(max_blocks) is not int or max_blocks <= 0:
+        raise RpcError('max_scan_blocks must be a positive integer')
     lo = start_block if state_cursor is None else state_cursor + 1
     hi = min(head, lo + max_blocks - 1)
     return lo, hi, hi >= head
@@ -334,7 +423,7 @@ def log_data_words(log: Dict[str, Any]) -> List[int]:
 # ---------------------------------------------------------------- state
 
 def empty_state() -> Dict[str, Any]:
-    return {'schema': STATE_SCHEMA, 'cursors': {}, 'last': {}, 'marks': {}, 'days': {}, 'totals': {}}
+    return {'schema': STATE_SCHEMA, 'cursors': {}, 'last': {}, 'marks': {}, 'days': {}, 'totals': {}, 'anchors': {}}
 
 
 def load_state(path: Optional[Path]) -> Dict[str, Any]:
@@ -893,9 +982,31 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
                 l2 = None
             else:
                 l2.pin((config.get('l2') or {}).get('block', 'finalized'))
-        except (RpcError, KeyError, TypeError) as e:
+        except (RpcError, KeyError, TypeError, ValueError) as e:
             r.add('l2_rpc', UNKNOWN, f'L2 RPC: {e}')
             l2 = None
+
+    def has_history(name: str) -> bool:
+        prefix = 'l2_' if name == 'l2_fees' else name + '_'
+        return (name in state['cursors'] or any(key.startswith(prefix) for key in state['last'])
+                or any(key.startswith(prefix) for key in state['totals']))
+
+    def observe(name: str, chain: Chain, context: Dict[str, Any], fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+        anchors = state.setdefault('anchors', {})
+        previous = anchors.get(name)
+        if has_history(name):
+            if not isinstance(previous, dict):
+                raise RpcError(f'{name}: prior revenue history has no chain checkpoint; '
+                               'retain it for review and start a separate state file')
+            if previous['context'] != context:
+                raise RpcError(f'{name}: deployment configuration differs from retained revenue history; '
+                               'start a separate state file')
+            chain.verify_previous(previous['checkpoint'])
+        result = fn()
+        chain.verify()
+        if has_history(name):
+            anchors[name] = {'checkpoint': chain.checkpoint(), 'context': copy.deepcopy(context)}
+        return result
 
     def section(name: str, fn: Callable[[], Dict[str, Any]]) -> None:
         # A later RPC or malformed event must not leave a partly advanced cursor,
@@ -914,7 +1025,8 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
     dex_cfg = config.get('dex')
     if dex_cfg and dex_cfg.get('enabled', True):
         if l2 is not None:
-            section('dex', lambda: check_dex(l2, dex_cfg, th, state, r, today, now))
+            section('dex', lambda: observe('dex', l2, dex_deployment(dex_cfg),
+                    lambda: check_dex(l2, dex_cfg, th, state, r, today, now)))
     else:
         products['dex'] = {'enabled': False}
         r.add('dex', OK, 'DEX not deployed (disabled in the config): no protocol fee yet')
@@ -927,7 +1039,9 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
             if cid != int(bridge_cfg.get('chain_id', 1)):
                 raise ValueError(f'Ethereum RPC chain id {cid} is not {bridge_cfg.get("chain_id", 1)}')
             eth.pin(bridge_cfg.get('block', 'finalized'))
-            return check_bridge(eth, bridge_cfg, th, state, r, today, now)
+            context = {key: value for key, value in bridge_cfg.items() if key not in ('rpc', 'enabled')}
+            return observe('bridge', eth, context,
+                           lambda: check_bridge(eth, bridge_cfg, th, state, r, today, now))
         section('bridge', bridge)
     else:
         products['bridge'] = {'enabled': False}
@@ -936,7 +1050,8 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
     l2_cfg = config.get('l2_fees')
     if l2_cfg is not None and l2_cfg.get('enabled', True):
         if l2 is not None:
-            section('l2_fees', lambda: check_l2_fees(l2, l2_cfg, th, state, r, today, now))
+            section('l2_fees', lambda: observe('l2_fees', l2, {'recipient': addr(l2_cfg.get('recipient'))},
+                    lambda: check_l2_fees(l2, l2_cfg, th, state, r, today, now)))
     else:
         products['l2_fees'] = {'enabled': False}
 
@@ -972,6 +1087,25 @@ def main(argv: Optional[List[str]] = None, transport: Optional[Transport] = None
     ap.add_argument('--days', type=int, default=14, help='rows of the daily table (default 14)')
     ap.add_argument('--timeout', type=float, default=20.0)
     args = ap.parse_args(argv)
+    lock = None
+    try:
+        if args.state is not None:
+            args.state.parent.mkdir(parents=True, exist_ok=True)
+            lock = os.open(str(args.state) + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print(f'another revenue monitor holds {args.state}.lock: not run', file=sys.stderr)
+                return UNKNOWN
+        return main_locked(args, transport, now)
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+def main_locked(args: argparse.Namespace, transport: Optional[Transport], now: Optional[float]) -> int:
+    # The state lock covers the read, every observation, and publication. Locking
+    # only the atomic rename would still permit two runs to lose each other's data.
     config = json.loads(args.config.read_text())
     state = load_state(args.state)
     client = Client(transport or http_transport(args.timeout))

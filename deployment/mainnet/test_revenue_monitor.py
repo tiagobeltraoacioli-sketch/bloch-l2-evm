@@ -8,12 +8,13 @@ topics and block-range filtering.
 Run: python3 -m unittest discover -s deployment/mainnet -p 'test_revenue_monitor.py' -v
 """
 import copy
+import fcntl
 import io
 import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -79,7 +80,9 @@ class FakeWorld:
         return head['timestamp'] - (head['number'] - number) * chain['spacing']
 
     def block(self, chain, number):
-        b = {'number': hex(number), 'timestamp': hex(self.ts(chain, number))}
+        branch = 0 if number == 0 else chain.get('branch', 0)
+        identity = (chain['chain_id'] << 128) | (branch << 64) | number
+        b = {'number': hex(number), 'timestamp': hex(self.ts(chain, number)), 'hash': f'0x{identity:064x}'}
         if 'baseFeePerGas' in chain['head']:
             b['baseFeePerGas'] = hex(chain['head']['baseFeePerGas'])
         return b
@@ -176,7 +179,8 @@ class FakeWorld:
                     break
             if ok:
                 out.append({'address': e['address'], 'topics': topics, 'data': data, 'blockNumber': hex(e['block']),
-                            'transactionHash': e['tx'], 'logIndex': hex(i)})
+                            'transactionHash': f"0x{int(e['tx'], 16):064x}", 'logIndex': hex(i),
+                            'blockHash': self.block(chain, e['block'])['hash'], 'removed': False})
         return out
 
 
@@ -549,6 +553,222 @@ class PartialFailures(unittest.TestCase):
         self.assertNotIn('forced_records', state['totals'])
         report, state, _ = run_world(self.world, state)
         self.assertEqual(report['totals']['forced_records'], '2')
+
+
+class SnapshotConsistency(unittest.TestCase):
+    def world_for(self, product):
+        world = load('world_live.json')
+        for name in ('dex', 'bridge', 'l2_fees', 'forced'):
+            if name != product:
+                world['config'][name] = {'enabled': False}
+        return world
+
+    def test_each_evm_product_discards_a_sample_that_changes_branch(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                fake = FakeWorld(world)
+                side = 'eth' if product == 'bridge' else 'l2'
+                mutated = False
+
+                def change_branch(url, method, params):
+                    nonlocal mutated
+                    result = fake(url, method, params)
+                    if not mutated and method in ('eth_call', 'eth_getBalance'):
+                        world[side]['branch'] = 1
+                        mutated = True
+                    return result
+
+                state = m.empty_state()
+                report = m.run(world['config'], state, m.Client(change_branch), world['now'])
+                self.assertTrue(mutated)
+                self.assertIn(product + '_error', checks(report))
+                for key in ('totals', 'cursors', 'last', 'marks', 'days'):
+                    self.assertEqual(state[key], {}, key)
+
+    def test_no_endpoint_failover_after_the_sample_has_started(self):
+        world = self.world_for('dex')
+        fake = FakeWorld(world)
+
+        def first_endpoint_loses_state(url, method, params):
+            if url == 'http://l2a' and method == 'eth_call':
+                raise m.RpcError('state unavailable on pinned endpoint')
+            return fake(url, method, params)
+
+        report = m.run(world['config'], m.empty_state(), m.Client(first_endpoint_loses_state), world['now'])
+        self.assertIn('dex_error', checks(report))
+        self.assertFalse(any(url == 'http://l2b' for url, _, _ in fake.log))
+
+    def test_recheck_rejects_wrong_number_even_with_the_same_hash(self):
+        world = self.world_for('dex')
+        fake = FakeWorld(world)
+        head = hex(world['l2']['head']['number'])
+
+        def wrong_height(url, method, params):
+            result = fake(url, method, params)
+            if method == 'eth_getBlockByNumber' and params[0] == head:
+                result['number'] = hex(world['l2']['head']['number'] + 1)
+            return result
+
+        report = m.run(world['config'], m.empty_state(), m.Client(wrong_height), world['now'])
+        self.assertIn('dex_error', checks(report))
+
+    def test_missing_block_hash_refuses_before_observations(self):
+        world = self.world_for('dex')
+        fake = FakeWorld(world)
+
+        def no_hash(url, method, params):
+            result = fake(url, method, params)
+            if method == 'eth_getBlockByNumber':
+                result.pop('hash')
+            return result
+
+        report = m.run(world['config'], m.empty_state(), m.Client(no_hash), world['now'])
+        self.assertEqual(checks(report)['l2_rpc']['level'], 'UNKNOWN')
+        self.assertFalse(any(method == 'eth_call' for _, method, _ in fake.log))
+
+    def test_reorg_between_runs_preserves_the_last_valid_history(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                _, state, _ = run_world(world)
+                before = copy.deepcopy(state)
+                world['eth' if product == 'bridge' else 'l2']['branch'] = 1
+                report, state, _ = run_world(world, state)
+                self.assertIn(product + '_error', checks(report))
+                self.assertEqual(state, before)
+
+    def test_rollback_does_not_record_a_false_fee_sweep(self):
+        world = self.world_for('l2_fees')
+        _, state, _ = run_world(world)
+        before = copy.deepcopy(state)
+        world['l2']['head']['number'] -= 1
+        world['l2']['accounts'][m.BASE_FEE_VAULT]['balance'] = 0
+        report, state, _ = run_world(world, state)
+        self.assertIn('l2_fees_error', checks(report))
+        self.assertEqual(state, before)
+
+    def test_deployment_change_requires_separate_history(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                _, state, _ = run_world(world)
+                before = copy.deepcopy(state)
+                if product == 'l2_fees':
+                    world['config'][product]['recipient'] = '0x' + '12' * 20
+                else:
+                    world['config'][product]['start_block'] += 1
+                report, state, _ = run_world(world, state)
+                self.assertIn(product + '_error', checks(report))
+                self.assertEqual(state, before)
+
+    def test_unanchored_legacy_history_is_preserved_for_review(self):
+        world = self.world_for('bridge')
+        _, state, _ = run_world(world)
+        state['anchors'].clear()
+        before = copy.deepcopy(state)
+        report, state, _ = run_world(world, state)
+        self.assertIn('bridge_error', checks(report))
+        self.assertEqual(state, before)
+
+    def test_canonical_advancement_keeps_the_existing_totals(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                _, state, _ = run_world(world)
+                totals = dict(state['totals'])
+                side = 'eth' if product == 'bridge' else 'l2'
+                world[side]['head']['number'] += 1
+                report, state, _ = run_world(world, state)
+                self.assertNotIn(product + '_error', checks(report))
+                self.assertEqual(state['totals'], totals)
+                self.assertEqual(state['anchors'][product]['checkpoint']['number'], world[side]['head']['number'])
+
+
+class EventIntegrity(unittest.TestCase):
+    def world(self):
+        world = load('world_live.json')
+        for product in ('dex', 'l2_fees', 'forced'):
+            world['config'][product] = {'enabled': False}
+        return world
+
+    def test_bad_event_is_refused_without_advancing_history(self):
+        for field, value in [('address', '0x' + '12' * 20), ('topics', []), ('blockNumber', '0x0'),
+                             ('blockHash', '0x' + '12' * 32), ('blockHash', 42), ('removed', True),
+                             ('removed', 0), ('transactionHash', '0xbad'), ('logIndex', False)]:
+            with self.subTest(field=field, value=value):
+                world = self.world()
+                fake = FakeWorld(world)
+
+                def corrupt(url, method, params):
+                    result = fake(url, method, params)
+                    if method == 'eth_getLogs' and result:
+                        result[-1][field] = value
+                    return result
+
+                state = m.empty_state()
+                report = m.run(world['config'], state, m.Client(corrupt), world['now'])
+                self.assertIn('bridge_error', checks(report))
+                self.assertEqual(state['cursors'], {})
+                self.assertEqual(state['totals'], {})
+
+    def test_duplicate_position_is_not_counted_twice(self):
+        world = self.world()
+        fake = FakeWorld(world)
+
+        def duplicate(url, method, params):
+            result = fake(url, method, params)
+            if method == 'eth_getLogs' and result:
+                result.append(dict(result[-1]))
+            return result
+
+        report, state = None, m.empty_state()
+        report = m.run(world['config'], state, m.Client(duplicate), world['now'])
+        self.assertIn('bridge_error', checks(report))
+        self.assertEqual(state['totals'], {})
+
+    def test_nonpositive_scan_limits_refuse_without_looping(self):
+        for key in ('log_chunk_blocks', 'max_scan_blocks'):
+            for value in (0, -1, True, 1.5):
+                with self.subTest(key=key, value=value):
+                    world = self.world()
+                    world['config']['thresholds'] = {key: value}
+                    report, state, _ = run_world(world)
+                    self.assertIn('bridge_error', checks(report))
+                    self.assertEqual(state['cursors'], {})
+
+
+class ConcurrentState(unittest.TestCase):
+    def test_overlapping_run_does_not_read_rpc_or_replace_state(self):
+        world = load('world_live.json')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, state_path = root / 'config.json', root / 'state.json'
+            config.write_text(json.dumps(world['config']))
+            state_path.write_text(json.dumps(m.empty_state()))
+            before = state_path.read_bytes()
+            fake = FakeWorld(world)
+            with open(str(state_path) + '.lock', 'a') as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with redirect_stderr(io.StringIO()) as error:
+                    status = m.main(['--config', str(config), '--state', str(state_path)], fake, world['now'])
+                self.assertEqual(status, m.UNKNOWN)
+                self.assertIn('another revenue monitor', error.getvalue())
+                self.assertEqual(state_path.read_bytes(), before)
+                self.assertEqual(fake.log, [])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.main(['--config', str(config), '--state', str(state_path)], fake, world['now']), m.OK)
+
+    def test_exception_releases_state_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, state_path = root / 'config.json', root / 'state.json'
+            config.write_text('invalid JSON')
+            with self.assertRaises(json.JSONDecodeError):
+                m.main(['--config', str(config), '--state', str(state_path)])
+            with open(str(state_path) + '.lock', 'a') as probe:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertFalse(state_path.exists())
 
 
 class LaunchWorld(unittest.TestCase):
