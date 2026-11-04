@@ -89,10 +89,11 @@ const EXPLAINED = {
   eth_signTypedData_v4: 'The node holds no keys. Sign locally.',
 };
 
-// EVM simulations: the expensive calls. Each client IP may have at most
+// EVM simulations and raw transaction admission: the expensive calls. Each client IP may have at most
 // cfg.simPerIp of them in flight (a batch counts each one); they go through
-// njs subrequests so the slot is released when the backend answers.
-const SIMULATIONS = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true };
+// njs subrequests so the slot is released when the backend answers. Admission
+// may simulate storage writes under policy-v2; it shares the same EVM budget.
+const EVM_WORK = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true, eth_sendRawTransaction: true };
 // Longer than a split request can last: two upstream attempts of 30 s, then the finality retry.
 const SLOT_WINDOW_MS = 150000;
 
@@ -110,7 +111,7 @@ const FINALITY_METHODS = { bloch_finality: true, bloch_settlement: true, bloch_g
 const RETRY_CODES = { '-32001': true, '-32041': true, '-32042': true, '-32043': true, '-32045': true, '-32046': true };
 
 // Largest backend answer for one split part (a request that goes through njs subrequests: any eth_call,
-// eth_estimateGas or eth_createAccessList, finality calls, mixed routes). The subrequest is held in memory,
+// eth_estimateGas, eth_createAccessList or eth_sendRawTransaction, finality calls, mixed routes). The subrequest is held in memory,
 // so the answer is bounded: the size guard (guardHeader/guardBody, on the hop in front of each backend)
 // replaces a larger answer with a short marker, and every call of that part gets -32005 "response too large".
 const SUB_ANSWER_MAX = cfg.subAnswerMaxBytes || 2097152;
@@ -371,8 +372,15 @@ function outgoing(x) {
 
 // Subrequests go through the size-guarded twin of each backend location (/_l2s/...).
 async function roundTrip(r, where, calls) {
-  const reply = await r.subrequest(where.replace('/_l2/', '/_l2s/'), { method: 'POST', body: JSON.stringify(calls.map(outgoing)) });
   const byId = {};
+  let reply;
+  try {
+    reply = await r.subrequest(where.replace('/_l2/', '/_l2s/'), { method: 'POST', body: JSON.stringify(calls.map(outgoing)) });
+  } catch (e) {
+    // A rejected subrequest may already have reached the sequencer. Preserve
+    // the unknown-submission response and never retry the transaction route.
+    return byId;
+  }
   if (reply.status === 200) {
     try {
       const parsed = JSON.parse(reply.responseText);
@@ -490,9 +498,9 @@ async function handle(r) {
   const routes = {};
   forward.forEach((f) => { routes[f.route] = true; });
   const routeList = Object.keys(routes);
-  const sims = forward.filter((f) => SIMULATIONS[f.call.method] === true).length;
+  const sims = forward.filter((f) => EVM_WORK[f.call.method] === true).length;
 
-  // Fast path: no simulation, everything forwardable shares one route and
+  // Fast path: no EVM work, everything forwardable shares one route and
   // nothing was answered here, so nginx proxies the original body unchanged.
   if (sims === 0 && replies.length === 0 && routeList.length === 1 && routeList[0] !== 'finality') {
     const route = routeList[0];
@@ -502,7 +510,7 @@ async function handle(r) {
     return;
   }
 
-  // Simulation slots per client and in total (released when the subrequests return). A slot is counted in the
+  // EVM work slots per client and in total (released when the subrequests return). A slot is counted in the
   // window its request started in and read over that window and the one before, so a slot whose release never
   // runs (njs does not resume a handler whose client connection failed) is gone after two windows.
   const slots = ngx.shared.l2rate;
@@ -519,8 +527,8 @@ async function handle(r) {
       slots.incr('S ' + window, -sims, 0);
       r.headersOut['Retry-After'] = '1';
       const msg = mine > cfg.simPerIp
-        ? 'Rate limited: at most ' + cfg.simPerIp + ' eth_call/eth_estimateGas/eth_createAccessList in flight per client.'
-        : 'Busy: too many eth_call/eth_estimateGas/eth_createAccessList in flight; retry shortly.';
+        ? 'Rate limited: at most ' + cfg.simPerIp + ' EVM simulations or transaction admissions in flight per client.'
+        : 'Busy: too many EVM simulations or transaction admissions in flight; retry shortly.';
       const ids = calls.map((c) => (c && typeof c === 'object' ? c.id : null));
       return send(r, 429, batch ? ids.map((id) => err(id, -32005, msg)) : err(ids[0], -32005, msg));
     }

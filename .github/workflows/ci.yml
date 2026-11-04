@@ -78,10 +78,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Check launch configuration, source pins and monitor state
         run: python3 -m unittest discover -s deployment/mainnet -p 'test_*.py'
       - name: Check gateway rendering and local transport failures
         run: python3 -m unittest discover -s deployment/mainnet/public-rpc/tests -p 'test_*.py'
+      - name: Check gateway EVM budgets and transaction admission responses
+        run: node --test deployment/mainnet/public-rpc/tests/*.test.mjs
 
   reth-provider:
     name: Reth provider execution and storage

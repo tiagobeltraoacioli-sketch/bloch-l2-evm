@@ -120,9 +120,9 @@ def main():
     a.add_argument('--calls-per-minute', type=int, default=1200, help='JSON-RPC calls per minute per client IP (a batch counts each call)')
     a.add_argument('--tx-per-minute', type=int, default=30)
     a.add_argument('--sim-per-ip', type=int, default=2,
-                   help='eth_call/eth_estimateGas/eth_createAccessList in flight per client (IPv4 address or IPv6 /64; a batch counts each call)')
+                   help='EVM simulations and eth_sendRawTransaction admissions in flight per client (IPv4 address or IPv6 /64; a batch counts each call)')
     a.add_argument('--sim-total', type=int, default=8,
-                   help='simulations in flight through this gateway for all clients: at most the permits of the backends (2 x 4)')
+                   help='EVM simulations and transaction admissions in flight through this gateway for all clients (each backend also enforces its shared permits)')
     a.add_argument('--backend-conns', type=int, default=48,
                    help='active connections from this gateway to the local settled RPC for reads (sequencer/peer paths get a quarter each)')
     a.add_argument('--max-batch', type=int, default=100, help='calls per batch (ethers v6 batches up to 100)')
