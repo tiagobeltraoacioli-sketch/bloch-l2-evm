@@ -363,6 +363,7 @@ def check_l1(client: Client, urls: List[str], p: Dict[str, Any], r: Report) -> L
     r.graded('l1_finality_lag', lag, p['l1_finality_epochs_warn'], p['l1_finality_epochs_crit'],
              f'L1 epoch {best["epoch"]}, finalized epoch {best["finalized_epoch"]} ({lag} epochs; 2 is normal)')
     check_l1_finality_spread(up, p, r)
+    check_l1_finalized_agreement(up, r)
     return up
 
 
@@ -380,13 +381,43 @@ def check_l1_finality_spread(up: List[Dict[str, Any]], p: Dict[str, Any], r: Rep
     if not behind:
         r.add('l1_finality_spread', OK, f'L1 nodes finalized within {spread} epoch(s) of each other', value=spread)
         return
-    current = [n for n in behind if best_height - n['height'] < p['l1_height_spread_crit']]
+    # A minority branch has fewer proposers, so its height trails the majority's by most of the slots since the split, while
+    # its head slot stays current (agent 205, drill a: 70 blocks behind after 15 min of 2 s slots). Judge "current" by the
+    # head slot when the nodes report it; height alone called every real split "syncing".
+    slots = [n['slot'] for n in up if isinstance(n.get('slot'), int)]
+    if len(slots) == len(up):
+        best_slot = max(slots)
+        current = [n for n in behind if best_slot - n['slot'] < p['l1_height_spread_crit']]
+    else:
+        current = [n for n in behind if best_height - n['height'] < p['l1_height_spread_crit']]
     detail = ', '.join(f'{n["url"]} finalized e{n["finalized_epoch"]} at height {n["height"]}' for n in behind)
     why = ('head current but finality frozen: a branch of its own or a split without finality (L1-6b). Take it out of '
            'the settler, follower and attestor L1 endpoint lists and see docs/L1-STUCK-NODE-RUNBOOK.md'
            if current else 'head and finality both behind: syncing or stuck; see l1_height_spread')
     r.graded('l1_finality_spread', spread, p['l1_finality_spread_warn'], p['l1_finality_spread_crit'],
              f'best finalized e{top}; behind: {detail} ({why})', behind=[n['url'] for n in behind])
+
+
+def check_l1_finalized_agreement(up: List[Dict[str, Any]], r: Report) -> None:
+    """Two nodes that report the same finalized epoch with different roots have finalized conflicting branches. After a
+    long partition the inactivity leak lets each side finalize its own branch (agent 205, drill a: both sides of a 2|3
+    split finalized e68 with different roots). l1_finality_spread then sees no spread and l1_finality_lag no lag; only the
+    height spread moved. Funds on the L2 are at risk on whichever side the settler and the followers read."""
+    by_epoch: Dict[int, Dict[str, List[str]]] = {}
+    for n in up:
+        root = strip0x(n.get('finalized_root'))
+        if root:
+            by_epoch.setdefault(n['finalized_epoch'], {}).setdefault(root, []).append(n['url'])
+    conflicts = {e: roots for e, roots in by_epoch.items() if len(roots) > 1}
+    if not conflicts:
+        if by_epoch:
+            r.add('l1_finalized_agreement', OK, 'L1 nodes at the same finalized epoch agree on its root')
+        return
+    epoch = max(conflicts)
+    detail = '; '.join(f'root {root[:16]}... at {", ".join(urls)}' for root, urls in sorted(conflicts[epoch].items()))
+    r.add('l1_finalized_agreement', CRIT, f'CONFLICTING FINALITY at e{epoch}: {detail}. Two branches are final at once: stop '
+          'the settler, keep every L2 reader on one named branch, and see docs/L1-STUCK-NODE-RUNBOOK.md',
+          epochs=sorted(conflicts))
 
 
 # ------------------------------------------------------------------------------- L1 node on its own branch
@@ -1289,17 +1320,45 @@ def grade_prover_path(name: str, events: List[Dict[str, Any]], p: Dict[str, Any]
               blocks=[Path(d).name for d in failed])
 
 
+def grade_inclusion(name: str, events: List[Dict[str, Any]], r: Report) -> None:
+    """`settlement-not-included` (review r10 M2): an acceptance window ended with the bytes held by endpoints and L1
+    advancing, and nothing included them. Its own check, because `events[NAME]` is one check per log: while it is already
+    WARN for something else (a busy remote prover), a held settlement raised no alert until realert_seconds, i.e. up to an
+    hour, and the halt comes after `max_unincluded_windows` (agent 205, drill f). CRIT one window before that halt.
+    Silent when the event is absent; OK once the same block is accepted later in the window."""
+    last_i = max((i for i, ev in enumerate(events) if ev['event'] == 'settlement-not-included'), default=None)
+    if last_i is None:
+        return
+    last = events[last_i]
+    number, windows, limit = last.get('number'), last.get('windows'), last.get('halt_after')
+    if any(ev['event'] == 'accepted' and ev.get('number') == number for ev in events[last_i + 1:]):
+        r.add(f'settlement_inclusion[{name}]', OK, f'L2 block {number} was accepted after {windows} unincluded window(s)')
+        return
+    near_halt = isinstance(windows, int) and isinstance(limit, int) and limit > 0 and windows >= limit - 1
+    r.add(f'settlement_inclusion[{name}]', CRIT if near_halt else WARN,
+          f'the settlement of L2 block {number} was held by endpoints {last.get("held_by")} for {windows} acceptance window(s) '
+          f'while L1 advanced and was never included (the worker halts after {limit}): an endpoint that answers accepted '
+          'but does not relay to proposers (fork, partition, stuck node), or proposers refuse it', windows=windows)
+
+
 def grade_events(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], window: float, r: Report) -> None:
     grade_prover_path(name, events, p, r)
+    grade_inclusion(name, events, r)
     for ev in events:
         if ev['event'] == 'proof-generated' and isinstance(ev.get('seconds'), (int, float)):
             r.facts.setdefault('proof_seconds', []).append(float(ev['seconds']))
     counts: Dict[str, int] = {}
     level = OK
     last_bad = None
+    # The settler of this kit logs `prover-failed` with `where` for every failed location, right after the
+    # `remote-proof` line of a failed remote attempt. Counting both made one busy remote prover `prover-failed x2`, and
+    # three of them CRIT instead of five (agent 205, drill d). Settlers that logged only `remote-proof` still count it.
+    remote_logged = any(ev['event'] == 'prover-failed' and 'where' in ev for ev in events)
     for ev in events:
         e = ev['event']
         if e == 'remote-proof' and ev.get('exit_code') not in (0, None):
+            if remote_logged:
+                continue
             e = 'prover-failed'
         if e in CRIT_EVENTS or e in WARN_EVENTS:
             counts[e] = counts.get(e, 0) + 1
@@ -1390,7 +1449,8 @@ def check_shm(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> Non
                             info = e.stat(follow_symlinks=False)
                         except OSError:
                             continue
-                        entries.append((e.name, info.st_size, now - info.st_mtime))
+                        # Allocated bytes, not st_size: the `_m` segment is a 2 TiB sparse file (agent 205, drill e).
+                        entries.append((e.name, getattr(info, 'st_blocks', 0) * 512, now - info.st_mtime))
         except OSError as e:
             r.add(f'shm[{name}]', UNKNOWN, f'{path}: {e}')
             continue
@@ -1401,8 +1461,10 @@ def check_shm(specs: List[str], p: Dict[str, Any], now: float, r: Report) -> Non
         level = CRIT if free < p['shm_free_gib_crit'] else WARN if free < p['shm_free_gib_warn'] or stale else OK
         msg = f'{path}: {free:.1f} of {total:.1f} GiB free, {len(entries)} sp1 segment(s)'
         if stale:
-            msg += (f', {len(stale)} older than {p["shm_stale_seconds"] / 3600:.0f} h ({stale_gib:.1f} GiB, leaked by a killed '
-                    'SP1 runner: remove only those no process maps)')
+            age = p['shm_stale_seconds']
+            age_text = f'{age / 3600:.0f} h' if age >= 3600 else f'{age / 60:.0f} min'
+            msg += (f', {len(stale)} older than {age_text} ({stale_gib:.1f} GiB in use, leaked by a killed SP1 runner: remove '
+                    'only those no process maps)')
         if free < p['shm_free_gib_warn']:
             msg += '; the next SP1 run needs about 5 GiB here or dies with SIGBUS'
         r.add(f'shm[{name}]', level, msg, value=round(free, 2), stale=len(stale))
