@@ -478,6 +478,36 @@ class U4BandDemandFollowsTheNextBlock(World):
 
 
 class U5U6F6CongestionTipByTime(World):
+    def test_mandatory_only_quiet_period_survives_restarts(self):
+        self.policy.state['tip'] = GWEI
+        self.policy.state['last_block_time'] = self.now
+        started = self.now
+        quiet_since = None
+        for _ in range(6):
+            self.now += 1800
+            plan = sp.Plan()
+            plan.base = plan.cost = sp.Cost(self.EMPTY_BASE, 0)
+            self.policy.committed(plan, {'included': []})
+            quiet_since = self.now if quiet_since is None else quiet_since
+            self.policy = self.make_policy()
+            self.assertEqual(self.policy.state['idle_since'], quiet_since)
+        self.assertEqual(self.now - started, 3 * 3600)
+        self.assertEqual(self.policy.required_tip(), self.policy.c['min_tip_wei'])
+
+    def test_committed_quiet_decay_is_not_applied_twice(self):
+        self.policy.state.update(tip=50 * GWEI, last_block_time=self.now, idle_since=self.now)
+        self.now += 4500 + 1200
+        self.assertEqual(self.policy.required_tip(), 25 * GWEI)
+        plan = sp.Plan()
+        plan.base = plan.cost = sp.Cost(self.EMPTY_BASE, 0)
+        self.policy.committed(plan, {'included': []})
+        expected = 25 * GWEI * 15 // 16
+        self.assertEqual(self.policy.required_tip(), expected)
+        self.policy = self.make_policy()
+        self.assertEqual(self.policy.required_tip(), expected)
+        self.now += 1200
+        self.assertEqual(self.policy.required_tip(), expected // 2)
+
     def test_after_a_spike_an_idle_chain_admits_a_floor_tip_transaction_within_three_hours(self):
         self.policy.state['tip'] = GWEI
         self.policy.state['last_block_time'] = self.now

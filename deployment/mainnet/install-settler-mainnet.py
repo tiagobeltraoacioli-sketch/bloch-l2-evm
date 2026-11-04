@@ -119,7 +119,7 @@ PINS = {
     # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
     # is pinned here: the worker runs with the DA key, so none is trusted on first use.
     'settler_v3.py': 'adbf7ef8b8870705bbbcd419798223dc90512fb50bbf1989caa1019dd5e5c533',
-    'sequencer_policy_v2.py': 'ac4557dc66a536641478b3f45dfccb813b272a58201c0f460e4dc7349809c24b',
+    'sequencer_policy_v2.py': '83f87fd189d40dbb1727ce865c3f59d375c545fbda7f88002c962f10efa72d8e',
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
     # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
     'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,

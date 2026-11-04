@@ -261,6 +261,14 @@ the grace:
 `required_tip(now)` applies the idle decay at read time. The gate, the demand check and the RPC's published tip all
 read it, so an idle chain admits a floor-tip transaction without first having to build a block (r9 U5).
 
+The quiet interval also spans consecutive measured blocks with no user cost or
+fresh writes. Their first commit records `idle_since`; later mandatory-only
+commits preserve it across restarts. This fixes the r7 paced-deposit case where
+every deposit renewed the grace and a floor-tip transaction waited 18 hours.
+Elapsed decay already incorporated into the stored tip is not applied again.
+Actual user load, an unmeasurable host, or a mandatory-over-budget block ends the
+quiet interval; a single empty block among busy blocks does not bypass the grace.
+
 **Published tip.** The state file carries `required_tip_wei`, decayed to the time of writing. Agent 118's
 `--required-tip-file` on the settled RPC serves it through `eth_maxPriorityFeePerGas`, `eth_feeHistory` and
 `eth_gasPrice` (+25% headroom). The settler must rewrite the file on idle-hold cycles too (`Policy.save(now)`), not only

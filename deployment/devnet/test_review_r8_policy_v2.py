@@ -262,24 +262,35 @@ class N3ReplacementResetsTheUnmeasuredCount(Chain):
 
 
 class N4ZeroFeeSendersAtScale(Chain):
-    """Without replacement: each unmeasurable transaction now gets four rounds (blocks n, n+2, n+6, n+14) before its
-    quarantine, and its sender is struck only then. Every round costs the full-block run, the bisection runs that hold it
-    and its alone run, each up to `preflight_execute_seconds`. Before the fix, the first round quarantined it and struck
-    the sender. Each funded sender, paying nothing, now buys four times the measuring time it bought before."""
+    """An unmeasurable sender cannot exceed the configured retry budget.
+
+    Policy v2 explicitly allows three failures by default (t, t+10m, t+40m),
+    so the historical two-timeout expectation did not match the chosen policy.
+    Both the default and a tighter configured budget must remain enforced.
+    """
 
     def setUp(self):
         super().setUp()
         self.settler.c.update(preflight_execute_seconds=30, preflight_max_seconds=180, strike_cooldown_blocks=32)
 
-    def test_timeouts_per_zero_fee_transaction_stay_at_the_pre_fix_bound(self):
+    def test_timeouts_per_zero_fee_transaction_respect_the_default_budget(self):
         self.add('evil', 'mallory', 0, 4_900_000, TIMEOUT)
         for number in range(2, 20):
             self.block(number)
             if self.quarantined():
                 break
-        # Before the fix: the block run and the alone run, then quarantine (2 timeouts).
-        self.assertLessEqual(self.timeouts, 2, f'{self.timeouts} timeouts ({self.timeouts * 30} s) before quarantine, '
-                                               f'quarantined at block {number}')
+        self.assertEqual(self.timeouts, sp.DEFAULTS['unmeasured_quarantine_after'])
+        self.assertEqual(self.quarantined(), ['evil'])
+
+    def test_two_attempt_configuration_still_quarantines_after_two_timeouts(self):
+        self.settler.c['unmeasured_quarantine_after'] = 2
+        self.add('evil', 'mallory', 0, 4_900_000, TIMEOUT)
+        for number in range(2, 20):
+            self.block(number)
+            if self.quarantined():
+                break
+        self.assertEqual(self.timeouts, 2)
+        self.assertEqual(self.quarantined(), ['evil'])
 
 
 class N5HeldInTheDepositBand(Chain):

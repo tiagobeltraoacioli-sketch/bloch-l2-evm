@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -26,6 +27,7 @@ sys.path.insert(0, str(HERE))
 import settler_v3 as s  # noqa: E402
 import sequencer_policy_v2 as sp  # noqa: E402  ADAPTED (a223)
 import test_settler_foreign as foreign  # noqa: E402
+import test_settler_f5 as signed_spool  # noqa: E402
 
 HEAVY = 10_000_000  # over any budget alone: the fake measurement then reports no cost (timeout), as for a 1G-SP1 modexp
 
@@ -264,10 +266,19 @@ class R5HeldEntriesAreDemand(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def test_a_nonce_gap_entry_does_not_make_blocks_due(self):
-        # Unchanged: without the budget. Fails on the base candidate 4b984af too: an entry that does not decode counts as
-        # demand there by design (spool_demand docstring); see the policy variant below.
+        # A nonce gap must be an actual decoded transaction. The former `00`
+        # fixture was undecodable and deliberately counted as demand so the
+        # producer could retire it; it did not exercise the claimed property.
+        original = self.idle.world.run
+        def run(argv, **kwargs):
+            if Path(argv[0]).name == 'produce' and argv[1] == 'account':
+                return types.SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({'nonce': 0}))
+            return original(argv, **kwargs)
+        self.idle.world.run = run
         settler = self.idle.settler(users=True)
-        (self.idle.root / 'txpool' / 'gap.tx').write_text('00')  # deferred by every selection (DeferReason::NonceGap)
+        raw = signed_spool.eip1559(signed_spool.KEY, 5)
+        self.assertEqual(s.spooled_sender_nonce(raw)[1], 5)
+        (self.idle.root / 'txpool' / 'gap.tx').write_text(raw.hex())
         due = 0
         for age_slots in (1, 2, 3, 4, 5):  # five consecutive fresh sources, no deposit, far below max_idle (100 slots)
             self.idle.world.head_slot = 1000 + age_slots

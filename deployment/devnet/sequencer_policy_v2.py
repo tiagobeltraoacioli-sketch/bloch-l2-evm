@@ -135,7 +135,7 @@ class Policy:
                 fresh = self._fresh_state()
                 # `last_block_time` starts as None and is a number once a block was committed: keep it across restarts,
                 # or the idle decay of the tip stops until the next block (review r9 U5 after a restart).
-                kinds = {k: ((int, float) if k in ('last_block_time', 'large_gas_at') else type(v)) for k, v in fresh.items()}
+                kinds = {k: ((int, float) if k in ('last_block_time', 'idle_since', 'large_gas_at') else type(v)) for k, v in fresh.items()}
                 fresh.update({k: v for k, v in loaded.items() if k in fresh and isinstance(v, kinds[k])
                               and not isinstance(v, bool)})
                 self.state = fresh
@@ -143,7 +143,7 @@ class Policy:
                 self.log('policy-state-unreadable', path=str(self.path), reason=str(error)[:200])
 
     def _fresh_state(self):
-        return {'tip': self.c['min_tip_wei'], 'last_block_time': None, 'empty_base': 0, 'bans': {}, 'waits': {},
+        return {'tip': self.c['min_tip_wei'], 'last_block_time': None, 'idle_since': None, 'empty_base': 0, 'bans': {}, 'waits': {},
                 'failures': {}, 'writes': {}, 'standing': {}, 'large_gas': int(self.c['max_tx_gas']),
                 'large_gas_at': None}
 
@@ -171,16 +171,21 @@ class Policy:
     # Congestion tip (3.5)
 
     def required_tip(self, now=None):
-        """The stored tip, decayed for the time the chain has been idle beyond the grace. The settler's demand check, the
+        """The stored tip, decayed for the time user load has been idle beyond the grace. The settler's demand check, the
         gate and the RPC's published tip all read this, so a quiet chain returns to the floor without building a block
-        (review r9 U5). Time between busy blocks never decays it, however slow the prover is (U6), while the grace
-        exceeds the slowest block time."""
+        (review r9 U5). Consecutive measured blocks with only mandatory work retain their first quiet timestamp.
+        Time between busy blocks never decays it while the grace exceeds the slowest block time (U6)."""
         now = self.clock() if now is None else now
         floor = self.c['min_tip_wei']
         tip = max(int(self.state['tip']), floor)
         last = self.state.get('last_block_time')
         if isinstance(last, (int, float)):
-            idle = now - last - self.c['congestion_idle_grace_seconds']
+            # Consecutive mandatory-only blocks do not constitute user demand.
+            # Keep their quiet interval across commits, while never applying
+            # again the elapsed decay already incorporated in the stored tip.
+            quiet = self.state.get('idle_since')
+            quiet = quiet if isinstance(quiet, (int, float)) else last
+            idle = now - max(last, quiet + self.c['congestion_idle_grace_seconds'])
             if idle > 0:
                 tip = int(tip * 0.5 ** (min(idle, 30 * 86400) / self.c['congestion_idle_half_life_seconds']))
         return max(min(tip, self.c['congestion_max_tip_wei']), floor)
@@ -190,6 +195,7 @@ class Policy:
         if plan.mandatory_over_budget or plan.host_unavailable:
             # No user transaction could be measured in this block: it says nothing about demand, so the tip holds.
             self.state['tip'], self.state['last_block_time'] = tip, now
+            self.state['idle_since'] = None
             return
         ratio = 0.0
         if measured(plan.base) and measured(plan.cost):
@@ -204,6 +210,10 @@ class Policy:
         else:
             tip = tip - int(tip * (1 - ratio) / self.c['congestion_down_denominator'])
         self.state['tip'] = max(min(tip, self.c['congestion_max_tip_wei']), self.c['min_tip_wei'])
+        if ratio > 0:
+            self.state['idle_since'] = None
+        elif self.state.get('idle_since') is None:
+            self.state['idle_since'] = now
         self.state['last_block_time'] = now
 
     # The gate (3.3, 3.4): native facts only. `demand` uses it too, so whatever waits here is no demand either.
