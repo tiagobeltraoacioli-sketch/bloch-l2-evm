@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import fcntl
 import json
 import os
 import sys
@@ -1048,6 +1049,25 @@ def main(argv: Optional[List[str]] = None, transport: Optional[Transport] = None
     ap.add_argument('--days', type=int, default=14, help='rows of the daily table (default 14)')
     ap.add_argument('--timeout', type=float, default=20.0)
     args = ap.parse_args(argv)
+    lock = None
+    try:
+        if args.state is not None:
+            args.state.parent.mkdir(parents=True, exist_ok=True)
+            lock = os.open(str(args.state) + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print(f'another revenue monitor holds {args.state}.lock: not run', file=sys.stderr)
+                return UNKNOWN
+        return main_locked(args, transport, now)
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+def main_locked(args: argparse.Namespace, transport: Optional[Transport], now: Optional[float]) -> int:
+    # The state lock covers the read, every observation, and publication. Locking
+    # only the atomic rename would still permit two runs to lose each other's data.
     config = json.loads(args.config.read_text())
     state = load_state(args.state)
     client = Client(transport or http_transport(args.timeout))

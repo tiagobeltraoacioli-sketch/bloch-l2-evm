@@ -265,6 +265,9 @@ pins the requested block, and checks those identities again after collecting
 the sample. Endpoint fallback is allowed only before a sample starts. A failed
 RPC, malformed event or changed checkpoint discards that product's partial
 cursor, counters and balances; other successful products remain recorded.
+Runs sharing a state file also share an exclusive lock held from the initial
+read through publication. An overlapping run exits `UNKNOWN` before any RPC;
+the lock is released on success or failure, including when configuration fails.
 
 The retained state binds each EVM product to its deployment and previous block
 hash. A changed deployment, a rollback, a replaced checkpoint, or legacy history

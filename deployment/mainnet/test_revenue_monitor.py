@@ -8,12 +8,13 @@ topics and block-range filtering.
 Run: python3 -m unittest discover -s deployment/mainnet -p 'test_revenue_monitor.py' -v
 """
 import copy
+import fcntl
 import io
 import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -681,6 +682,39 @@ class SnapshotConsistency(unittest.TestCase):
                 self.assertNotIn(product + '_error', checks(report))
                 self.assertEqual(state['totals'], totals)
                 self.assertEqual(state['anchors'][product]['checkpoint']['number'], world[side]['head']['number'])
+
+
+class ConcurrentState(unittest.TestCase):
+    def test_overlapping_run_does_not_read_rpc_or_replace_state(self):
+        world = load('world_live.json')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, state_path = root / 'config.json', root / 'state.json'
+            config.write_text(json.dumps(world['config']))
+            state_path.write_text(json.dumps(m.empty_state()))
+            before = state_path.read_bytes()
+            fake = FakeWorld(world)
+            with open(str(state_path) + '.lock', 'a') as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with redirect_stderr(io.StringIO()) as error:
+                    status = m.main(['--config', str(config), '--state', str(state_path)], fake, world['now'])
+                self.assertEqual(status, m.UNKNOWN)
+                self.assertIn('another revenue monitor', error.getvalue())
+                self.assertEqual(state_path.read_bytes(), before)
+                self.assertEqual(fake.log, [])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.main(['--config', str(config), '--state', str(state_path)], fake, world['now']), m.OK)
+
+    def test_exception_releases_state_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, state_path = root / 'config.json', root / 'state.json'
+            config.write_text('invalid JSON')
+            with self.assertRaises(json.JSONDecodeError):
+                m.main(['--config', str(config), '--state', str(state_path)])
+            with open(str(state_path) + '.lock', 'a') as probe:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertFalse(state_path.exists())
 
 
 class LaunchWorld(unittest.TestCase):
