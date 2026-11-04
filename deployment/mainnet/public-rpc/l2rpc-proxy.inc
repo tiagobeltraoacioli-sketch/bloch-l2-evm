@@ -12,7 +12,7 @@ proxy_buffer_size 16k;
 proxy_buffers 32 64k;
 proxy_busy_buffers_size 128k;
 proxy_max_temp_file_size 0;
-subrequest_output_buffer_size 16m;
+# njs subrequests use the /_l2s/ locations and their own bounded buffer (l2rpc-gateway.conf.in).
 proxy_hide_header Access-Control-Allow-Origin;
 proxy_hide_header Access-Control-Allow-Methods;
 proxy_hide_header Access-Control-Allow-Headers;

@@ -1,0 +1,18 @@
+{
+ "_comment": "revenue_monitor.py config. Read-only: no key, no signer. TBD-owner values make the matching check WARN until the owner fills them. Set \"enabled\": false on a product that is not deployed yet. Thresholds are optional; the values below are the defaults.",
+ "l2": {"rpc": ["http://127.0.0.1:18955", "http://10.0.0.2:18955"], "chain_id": 700770, "block": "finalized"},
+ "dex": {"enabled": false, "gate": "/etc/bloch-revenue/dex-finality-gate.json", "start_block": 0},
+ "bridge": {"enabled": false, "rpc": ["https://ethereum-node-of-the-owner.example"], "chain_id": 1, "block": "finalized",
+            "vault": "TBD-owner", "fee_recipient": "TBD-owner", "start_block": 0,
+            "deposit_fee_bps": 5, "release_fee_bps": 5},
+ "l2_fees": {"recipient": "TBD-owner", "fork_time": null, "user_txs_open": false},
+ "forced": {"enabled": false, "l1_rpc": ["http://80.240.16.185:8080", "http://199.247.22.8:8080"], "route": "burned",
+            "treasury_script_hash": "TBD-owner"},
+ "thresholds": {
+  "bridge_sweep_min_units": 50000000, "bridge_sweep_max_age_days": 7,
+  "l2_sweep_min_wei": 50000000000000000, "l2_sweep_max_age_days": 7, "l2_fork_grace_hours": 6,
+  "l2_no_accrual_hours": 24, "l2_min_base_fee_wei": 100000000,
+  "dex_keeper_floor_wei": 1040000000000000, "dex_ceiling_unskimmed_hours": 6,
+  "log_chunk_blocks": 2000, "max_scan_blocks": 200000, "keep_days": 400
+ }
+}

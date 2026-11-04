@@ -43,7 +43,7 @@ The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keysto
 - `l2-claim verify-attestation`.
 
 Consensus code is unchanged. The other binaries come from the next L2 release build
-`bloch-l2-2026-11-02-next-native-78d4921c` (build commit 17383fe, `build-release.sh`):
+`bloch-l2-2026-11-03-next-native-78d4921c` (build commit 926d2cf, `build-release.sh`):
 `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…`.
 
 ## What the agent does each cycle (default 60 s)
@@ -142,6 +142,7 @@ sudo ./install-attestor.sh install --artifacts DIR --index I --bundle attestor-I
 sudo systemctl enable --now bloch-l2-attestor-follower
 sudo systemd-run --pipe --wait -p User=bloch-l2-attestor \
      -p LoadCredential=passphrase:/etc/bloch-l2-attestor/keystore.passphrase \
+     -p RuntimeDirectory=bloch-l2-attestor-check -p RuntimeDirectoryMode=0700 \
      /usr/bin/python3 -I /opt/bloch/l2-attestor/attestor_agent.py check --config /etc/bloch-l2-attestor/config.json
 sudo systemctl enable --now bloch-l2-attestor-feed
 sudo systemctl enable --now bloch-l2-attestor
@@ -215,7 +216,7 @@ Each attestor host had to run the v2 follower and producer **before epoch 7178 (
 - `bloch-l2-native-follower` `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2`
 - `bloch-l2-produce-dev` `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69`
 
-These are the hashes of the next build (build commit 17383fe), which replace v2.1's follower
+These are the hashes of the launch build (release `bloch-l2-2026-11-03-next-native-78d4921c`, build commit 926d2cf), which replace v2.1's follower
 and producer. They are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
 `--produce-sha256` only for a later corrected build whose hashes the coordinator published.
 

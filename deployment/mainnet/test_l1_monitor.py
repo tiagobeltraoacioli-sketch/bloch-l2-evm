@@ -563,5 +563,61 @@ class EndToEnd(unittest.TestCase):
         self.assertGreaterEqual(out.getvalue().count('BLOCH L1:'), 2)
 
 
+
+def recorded_transport(rd):
+    """Agent 205's recordings keep each getblockbyid answer whole (with `finality`), or the node's error text."""
+    def call(u, method, params):
+        n = name_of(u)
+        if method == 'getchaininfo':
+            return rd['getchaininfo'][n]
+        if method == 'getblockbyid':
+            ans = rd['getblockbyid'][n].get(params[0], f'no block {params[0]} is known to this node')
+            if isinstance(ans, dict):
+                return ans
+            raise m.RpcError(ans)
+        raise AssertionError(f'unexpected method {method}')
+    return call
+
+
+class DrillFindings(unittest.TestCase):
+    """Agent 205, round 11: recorded on a private net with real binaries (agents/205-monitor-drills.md)."""
+
+    def test_both_sides_final_with_different_roots_is_crit(self):
+        """Drill a: after a 15 min 2|3 split, each side finalized its own branch (e73 then e74, two roots). l1_split
+        reports a tie, WARN; only l1_finality_conflict says what happened."""
+        fx = fixture('a205-conflict')
+        cfg = m.prepare(config(['n0', 'n1', 'n2', 'n3', 'n4'], sources=['n0', 'n1', 'n2'], quorum=2,
+                               network={'genesis_time': fx['genesis_time'], 'slot_seconds': 2, 'slots_per_epoch': 32}))
+        state, out = {}, []
+        for rd in fx['rounds']:
+            r = m.run_once(cfg, recorded_transport(rd), fetch_for(rd), state, now=rd['now'])
+            out.append({c['check']: (c['level'], c['message']) for c in r.checks})
+        self.assertEqual([o['l1_finality_conflict'][0] for o in out], ['CRIT', 'CRIT'])
+        self.assertIn('CONFLICTING FINALITY at e74', out[1]['l1_finality_conflict'][1])
+        self.assertIn('n0, n1', out[1]['l1_finality_conflict'][1])
+        self.assertEqual(out[1]['l1_split'][0], 'WARN')
+        self.assertIn('tie', out[1]['l1_split'][1])
+
+    def test_agreeing_roots_are_ok(self):
+        rd = json.loads(json.dumps(fixture('a205-conflict')['rounds'][0]))
+        for n in ('n0', 'n1'):
+            rd['getchaininfo'][n] = rd['getchaininfo']['n2']
+        r = m.run_once(m.prepare(config(['n0', 'n1', 'n2'])), recorded_transport(rd), fetch_for(rd), {}, now=rd['now'])
+        self.assertEqual(next(c['level'] for c in r.checks if c['check'] == 'l1_finality_conflict'), 'OK')
+
+    def test_the_real_not_canonical_answer_counts_as_not_on_the_branch(self):
+        """Drill b part 1: after a 40 s split, node 0 stores the losing head and answers it whole, `finality:
+        not_canonical`, `height: null`. That answer must not count as "knows the head"."""
+        side = json.loads((FIXTURES / 'a205-side-block.json').read_text())['result']
+        self.assertEqual(side['finality'], 'not_canonical')
+        rd = json.loads(json.dumps(fixture('a205-conflict')['rounds'][0]))
+        on, off = rd['getchaininfo']['n2']['block_id'], rd['getchaininfo']['n0']['block_id']
+        rd['getblockbyid']['n0'][on] = dict(side, block_id=on)
+        rd['getblockbyid']['n2'][off] = dict(side, block_id=off)
+        probe = m.Probe(m.prepare(config(['n0', 'n2'])), recorded_transport(rd), fetch_for(rd))
+        self.assertIs(probe.knows('n0', 'n2'), False)
+        self.assertIs(probe.same_branch('n0', 'n2'), False)
+
+
 if __name__ == '__main__':
     unittest.main()

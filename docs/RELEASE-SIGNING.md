@@ -1,8 +1,8 @@
 # Bloch L2 release signing ceremony
 
-Release `bloch-l2-2026-11-02-next-native-78d4921c`, build commit `17383feb88602926c26559802b95dee273484cd5`,
+Release `bloch-l2-2026-11-03-next-native-78d4921c`, build commit `926d2cf50af11f389ad1ffa91c0b7720178b3472`,
 native `78d4921c3ec6ba41829f3878eed47f8d3bb96230`. Signing target: the release `SHA256SUMS`,
-SHA-256 `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821`.
+SHA-256 `6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19`.
 
 Only the owner holds the release key and runs sections 2 to 5. Every command is one block; run them in order.
 Sign only after G0 has passed (plan D7) and the kit tip is frozen.
@@ -30,7 +30,7 @@ always with a password (never `-W`), and follow section 7 before using it.
 
 ## 2. Fetch the release from two hosts and compare byte for byte (online)
 
-The release was assembled independently on 209 and 136. Fetch both copies whole and compare them
+The release was assembled independently on 45.77 and 136. Fetch both copies whole and compare them
 on the Mac before signing. Each copy is about 93 MB.
 
 ```
@@ -38,21 +38,21 @@ mkdir -p ~/bloch-l2-signing
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@209.250.236.240:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c ~/bloch-l2-signing/from-209
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@45.77.142.123:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c ~/bloch-l2-signing/from-4577
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c ~/bloch-l2-signing/from-136
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c ~/bloch-l2-signing/from-136
 ```
 
 The next command must print nothing (identical trees, every byte):
 
 ```
-diff -r ~/bloch-l2-signing/from-209 ~/bloch-l2-signing/from-136
+diff -r ~/bloch-l2-signing/from-4577 ~/bloch-l2-signing/from-136
 ```
 
 ```
-cd ~/bloch-l2-signing/from-209
+cd ~/bloch-l2-signing/from-4577
 ```
 
 Every line must say `OK` (8 files):
@@ -61,7 +61,7 @@ Every line must say `OK` (8 files):
 shasum -a 256 -c SHA256SUMS
 ```
 
-Must print `116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821  SHA256SUMS`:
+Must print `6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19  SHA256SUMS`:
 
 ```
 shasum -a 256 SHA256SUMS
@@ -93,7 +93,7 @@ The trusted comment is derived from `release.json` and the SHA-256 of `SHA256SUM
 exactly the line in section 3:
 
 ```
-python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --print-trusted-comment ~/bloch-l2-signing/from-209
+python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --print-trusted-comment ~/bloch-l2-signing/from-4577
 ```
 
 ## 3. Sign (offline)
@@ -105,15 +105,15 @@ is not in `~/.rsign`. If your key file is not `~/.rsign/rsign.key`, change only 
 The trusted comment (signed together with the file; one line, no line breaks):
 
 ```text
-bloch-l2 release=bloch-l2-2026-11-02-next-native-78d4921c sha256sums=116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821 l2_commit=17383feb88602926c26559802b95dee273484cd5 native_commit=78d4921c3ec6ba41829f3878eed47f8d3bb96230 chain_id=700770 platform=linux-x86_64
+bloch-l2 release=bloch-l2-2026-11-03-next-native-78d4921c sha256sums=6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19 l2_commit=926d2cf50af11f389ad1ffa91c0b7720178b3472 native_commit=78d4921c3ec6ba41829f3878eed47f8d3bb96230 chain_id=700770 platform=linux-x86_64
 ```
 
 ```
-cd ~/bloch-l2-signing/from-209
+cd ~/bloch-l2-signing/from-4577
 ```
 
 ```
-rsign sign -s ~/.rsign/rsign.key -p ~/bloch-l2-signing/bloch-release-20260922.pub -x SHA256SUMS.minisig -c "signature from Bloch release key 1A5D96A5C4955EF7" -t "bloch-l2 release=bloch-l2-2026-11-02-next-native-78d4921c sha256sums=116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821 l2_commit=17383feb88602926c26559802b95dee273484cd5 native_commit=78d4921c3ec6ba41829f3878eed47f8d3bb96230 chain_id=700770 platform=linux-x86_64" SHA256SUMS
+rsign sign -s ~/.rsign/rsign.key -p ~/bloch-l2-signing/bloch-release-20260922.pub -x SHA256SUMS.minisig -c "signature from Bloch release key 1A5D96A5C4955EF7" -t "bloch-l2 release=bloch-l2-2026-11-03-next-native-78d4921c sha256sums=6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19 l2_commit=926d2cf50af11f389ad1ffa91c0b7720178b3472 native_commit=78d4921c3ec6ba41829f3878eed47f8d3bb96230 chain_id=700770 platform=linux-x86_64" SHA256SUMS
 ```
 
 If it fails (wrong password, or "Could not verify signature with the provided public key ID"),
@@ -137,7 +137,7 @@ rsign verify -p ~/bloch-l2-signing/bloch-release-20260922.pub -x SHA256SUMS.mini
 The kit verifier, with the pinned key, the canonical trusted comment and every file. Must end with `signature OK`:
 
 ```
-python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-209 --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-4577 --expect-sha256 6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
 ```
 
 The same signature must verify on the copy from the other host:
@@ -147,7 +147,7 @@ cp SHA256SUMS.minisig ~/bloch-l2-signing/from-136/
 ```
 
 ```
-python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-136 --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+python3 -I ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing/from-136 --expect-sha256 6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
 ```
 
 ```
@@ -158,27 +158,28 @@ Record that hash next to D7 in the owner documents.
 
 ## 5. Where the signature and public key go (online again)
 
-- `SHA256SUMS.minisig` goes in the release directory, next to `SHA256SUMS`, on both build hosts,
-  so that plan P2's copy (`…/release/bloch-l2-2026-11-02-next-native-78d4921c/*`) carries it to A
-  and B. `release.json` already names it (`checksum_signature`).
+- `SHA256SUMS.minisig` stays next to `SHA256SUMS` in `~/bloch-l2-signing/from-4577`: plan P2 stages A
+  and B from that signed copy on the Mac (`scp ~/bloch-l2-signing/from-4577/* …`), so it carries the
+  signature. Put it in the release directory on both build hosts as well (below), so that those
+  copies are complete. `release.json` already names it (`checksum_signature`).
 - `bloch-release-20260922.pub` travels with every published copy of the release, as with the node
   releases. Operators must not trust the copy inside a download alone: they compare it with the
   key ID and public key string published earlier (node release READMEs) or rely on the pinned key
   in the kit's verifier.
-- Keep `~/bloch-l2-signing/from-209` (with the signature) as the owner's archive copy of the release.
+- Keep `~/bloch-l2-signing/from-4577` (with the signature) as the owner's archive copy of the release.
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-209/SHA256SUMS.minisig ubuntu@209.250.236.240:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@45.77.142.123:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-209/SHA256SUMS.minisig ubuntu@136.244.93.186:l2dexbridge-20261030/next-rpc-r4/release/bloch-l2-2026-11-02-next-native-78d4921c/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@136.244.93.186:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/
 ```
 
 If A or B was staged before signing, copy it into their `artifacts` too:
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-209/SHA256SUMS.minisig ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@136.244.93.186:l2-golive-next/artifacts/
 ```
 
 ## 6. How operators and installers verify
@@ -187,7 +188,7 @@ scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-2
   Python 3 standard library only):
 
 ```
-python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 116bfaba85cfc3e7db2589a97e2ac2ac76c9006b3091f6cd98a13732ebff4821
+python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
 ```
 
 - **`follower-rpc/install.sh`** runs the same check, with the pinned key, before it installs

@@ -659,9 +659,18 @@ class InstallShadowTest(unittest.TestCase):
                              if line and line[0].isupper() and '=' in line and ' ' not in line.split('=', 1)[0])
 
     def print_config(self, settler_config='/nonexistent/config.json'):
+        import os
+        import re
         import subprocess
-        return subprocess.run(['bash', str(self.SCRIPT), '--print-config', str(settler_config)],
-                              capture_output=True, text=True)
+        env = dict(os.environ, L1_RPC_URLS='http://192.0.2.1:8080,http://192.0.2.2:8080,http://192.0.2.3:8080')
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / self.SCRIPT.name
+            script.write_text(self.SCRIPT.read_text())
+            unit = HERE / 'bloch-l2-mainnet-shadow.service'
+            (Path(tmp) / unit.name).write_text(re.sub(r'(?m)^IPAddressAllow=.*$',
+                'IPAddressAllow=192.0.2.1 192.0.2.2 192.0.2.3', unit.read_text()))
+            return subprocess.run(['bash', str(script), '--print-config', str(settler_config)],
+                                  capture_output=True, text=True, env=env)
 
     def test_the_pins_are_the_settlers_programs_and_this_tree(self):
         c = self.constants

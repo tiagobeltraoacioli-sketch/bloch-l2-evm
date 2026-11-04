@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('install_settler', HERE / 'install-settler-mainnet.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-STATE, DA_DIR = m.STATE, m.DA_DIR  # before any test patches them
+STATE, DA_DIR, DA_PASSPHRASE = m.STATE, m.DA_DIR, m.DA_PASSPHRASE  # before any test patches them
 
 
 class Done:
@@ -37,8 +37,10 @@ class Installer(unittest.TestCase):
         rel.mkdir()
         for name in m.FILES:
             (rel / name).write_text('x')
+        (self.etc / 'da.passphrase').write_text('p\n')
         patches = dict(STATE=root, ETC=self.etc, PUBLIC=root / 'public', CONFIG=self.etc / 'config.json',
-                       PENDING=self.etc / 'config.json.pending', release=lambda: rel,
+                       DA_PASSPHRASE=self.etc / 'da.passphrase',
+                       PENDING=self.etc / 'config.json.pending', release=lambda *_a: rel,
                        settler_module=lambda _d: types.SimpleNamespace(
                            MAINNET={'network': 'n', 'l2_genesis': 'g'}, MAINNET_TIMESTAMP_RULE='r',
                            Settler=lambda _c: None))
@@ -46,6 +48,10 @@ class Installer(unittest.TestCase):
             patcher = mock.patch.object(m, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The L1 RPCs are configuration (test_install_settler_rpc_urls.py); documentation addresses here.
+        env = mock.patch.dict(m.os.environ, {'L1_RPC_URLS': 'http://192.0.2.1:8080,http://192.0.2.2:8080,http://192.0.2.3:8080'})
+        env.start()
+        self.addCleanup(env.stop)
 
     def test_runuser_is_absolute_under_the_clean_path(self):
         with mock.patch.object(m.subprocess, 'run', return_value=Done()) as run:
@@ -177,7 +183,8 @@ class Installer(unittest.TestCase):
         self.assertNotRegex(m.CANDIDATE_HOST_PIN, '^[0-9a-f]{64}$')
 
     def test_units_running_as_the_settler_user_hide_its_secrets(self):
-        hidden = {'/run/docker.sock', str(DA_DIR), str(STATE / 'da.passphrase'), str(STATE / 'ssh')}
+        hidden = {'/run/docker.sock', str(DA_DIR), str(STATE / 'da.passphrase'), str(STATE / 'ssh'), str(DA_PASSPHRASE),
+                  str(m.RUNTIME)}
         for unit in (HERE / 'bloch-l2-mainnet-shadow.service', HERE / 'follower-rpc' / 'bloch-l2-mainnet-rpc.service'):
             paths = set()
             for line in unit.read_text().splitlines():
@@ -191,7 +198,7 @@ class Installer(unittest.TestCase):
         with mock.patch.object(m, 'UNIT', unit), mock.patch.object(m, 'run') as run:
             m.start(['--confirm-mainnet'])
             text = unit.read_text()
-            for line in ('NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=true', 'UMask=0077',
+            for line in ('NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=true', 'UMask=0027',
                          'MemoryMax=32G', 'MemorySwapMax=0', 'Restart=on-failure', 'RestartPreventExitStatus=3',
                          'CapabilityBoundingSet=', 'ProtectKernelTunables=true', 'RestrictSUIDSGID=true'):
                 self.assertIn(line + '\n', text)
@@ -261,13 +268,16 @@ class Prepare(unittest.TestCase):
         me = m.pwd.getpwuid(m.os.getuid())
         patches = dict(PINS=pins, STATE=root / 'var/lib/bloch-l2-mainnet-settler', DA_DIR=root / 'var/lib/da',
                        ETC=etc, PUBLIC=etc / 'public', OPT=root / 'opt/bloch/l2-mainnet-settler',
+                       DA_PASSPHRASE=etc / 'da.passphrase',
                        UNIT=root / 'etc/systemd/system/x.service', settler_module=self.module(fake), run=self.fake_run)
         for name, value in patches.items():
             patcher = mock.patch.object(m, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        for target, value in ((m.pwd, 'getpwnam'), (m.os, 'chown')):
-            patcher = mock.patch.object(target, value, (lambda _n: me) if value == 'getpwnam' else (lambda *_a: None))
+        group = m.grp.getgrgid(m.os.getgid())
+        for target, value, fake in ((m.pwd, 'getpwnam', lambda _n: me), (m.grp, 'getgrnam', lambda _n: group),
+                                    (m.os, 'chown', lambda *_a: None)):
+            patcher = mock.patch.object(target, value, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -296,11 +306,21 @@ class Prepare(unittest.TestCase):
         self.assertEqual(self.loaded_from, release)
         for argv in self.calls:
             self.assertFalse(argv[0].startswith(str(self.source)), argv)
-        passphrase = m.STATE / 'da.passphrase'
-        self.assertEqual(passphrase.stat().st_mode & 0o777, 0o400)
+        passphrase = m.DA_PASSPHRASE  # review r10 M-4: root-only in /etc, never in the worker's state directory
+        self.assertEqual(passphrase.parent, m.ETC)
+        self.assertEqual(passphrase.stat().st_mode & 0o7777, 0o400)
         self.assertEqual(len(passphrase.read_text().strip()), 96)
-        for directory in (m.STATE, m.DA_DIR, m.STATE / 'ssh', m.STATE / 'work'):
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o700, directory)
+        self.assertFalse((m.STATE / 'da.passphrase').exists())
+        keygen = [argv for argv in self.calls if argv[1] == 'keygen']
+        self.assertEqual(len(keygen), 1)
+        # decision 4: setgid read-group state, private ssh/ and DA keystore
+        modes = {m.STATE: 0o2710, m.STATE / 'work': 0o2750, m.STATE / 'txpool': 0o2770, m.STATE / 'tmp': 0o2700,
+                 m.STATE / 'ssh': 0o700, m.DA_DIR: 0o700}
+        for directory, mode in modes.items():
+            self.assertEqual(directory.stat().st_mode & 0o7777, mode, directory)
+        self.assertIn(['groupadd', '--system', '-f', m.READ_GROUP], self.calls)
+        useradd = next(argv for argv in self.calls if argv[0] == 'useradd')
+        self.assertEqual(useradd[useradd.index('--groups') + 1], f'docker,{m.READ_GROUP}')
         self.assertFalse(list(release.glob('__pycache__')))
         before = passphrase.read_bytes()
         with self.assertRaisesRegex(AssertionError, 'already prepared'):
@@ -322,7 +342,7 @@ class Prepare(unittest.TestCase):
         self.assertFalse(m.OPT.exists())
         self.assertFalse(m.STATE.exists())
         m.prepare(['--release', str(self.source)])
-        self.assertTrue((m.STATE / 'da.passphrase').exists())
+        self.assertTrue(m.DA_PASSPHRASE.exists())
 
 
 if __name__ == '__main__':

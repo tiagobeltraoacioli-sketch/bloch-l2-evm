@@ -27,8 +27,8 @@ CRIT at 3; needs `--follower-status`). A settled RPC up to v2.1 keeps `bloch_fin
 lags the file, so read this check, not that age, to know whether finality on a backend is current.
 
 `deployment/mainnet/l2_monitor.py` is a read-only checker (Python 3.9+, no
-dependencies, no keys) for the next L2 build `bloch-l2-2026-11-02-next-native-78d4921c` (follower
-`cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `e5754d05…`; agents/PINS-NEXT.md). It was
+dependencies, no keys) for the next L2 build `bloch-l2-2026-11-03-next-native-78d4921c` (follower
+`cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `53e88565…`; agents/PINS-NEXT.md). It was
 written for v2.1 (`c18752fd…`, `fb0d5313…`, `18be911a…`) and still reads it. Its JSON-RPC
 calls are limited to `eth_chainId`, `eth_blockNumber`,
 `eth_getBlockByNumber`, `eth_getStorageAt`, `bloch_finality`,
@@ -40,11 +40,14 @@ refused before a request is made. Its only other commands are
 ```
 python3 deployment/mainnet/l2_monitor.py --profile mainnet --phase live \
   --l2-rpc A=http://127.0.0.1:18955 --l2-rpc B=http://BACKEND_B:18955 \
-  --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 \
+  --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc THIRD_L1_RPC_URL \
   --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json \
   --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service \
   --attest-drop https://drop.example/attest --alert-config /etc/bloch-l2-monitor/alert.json --json
 ```
+
+`THIRD_L1_RPC_URL` is the third entry of `rpc_urls` in `/etc/bloch-l2-mainnet-settler/config.json` (the owner's
+choice, given to `install-settler-mainnet.py configure --rpc-urls`).
 
 Options:
 
@@ -154,10 +157,12 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `binary[*]` | installed sha256 = v2 pin | – | differs | |
 | `file:*` | heartbeat file age | given | 5 × given | prover/settler/follower liveness |
 | `l1_finality_spread` | best − worst finalized epoch over the `--l1-rpc` nodes; names the nodes behind | 2 | 4 | a node with a current head and frozen finality is on a branch of its own (L1-6b); report 94's settler settled L2 blocks 6-8 on such a branch because its quorum was there. Remove the node from every L2 reader's endpoints |
+| `l1_finalized_agreement` | finalized roots of the `--l1-rpc` nodes that report the same finalized epoch | – | two roots at one epoch | conflicting finality: after a long partition the inactivity leak lets each side finalize its own branch (agent 205, drill a: both sides of a 2\|3 split final at e68 with different roots, while `l1_finality_spread` read 0). Stop the settler and keep every L2 reader on one named branch |
 | `l2_rpc_vs_l1[*]` | hash of each backend's block at the L1-accepted L2 number = the accepted statement's `l2_hash` | `safe` above the accepted number | hash differs | the RPC serves `latest`/`safe` that L1 no longer has (L2-12, report 94): stop the settler, `l2_reorg_recover.py` |
 | `prover_path[*]` | settler `prover-failed` / `local-proof-refused` / `proof-generated` per block in the event window | a block proved on the local fallback after the remote failed (exit 75 = remote busy, R-1 of report 141) | 2 failed prove cycles of one block (every prover failed or refused) | above `local_prove_max_instructions` (3M) the fallback refuses and the block has no prover |
+| `settlement_inclusion[*]` | settler `settlement-not-included` (review r10 M2), cleared by a later `accepted` of the same block | an acceptance window ended with the bytes held by endpoints, L1 advancing, nothing included | one window before the worker's `max_unincluded_windows` halt | its own check because `events[*]` already WARN for another event raised no new alert for up to `realert_seconds` (agent 205, drill f) |
 | `spool_expired[*]` | `evicted tx file=… (expired)` lines in the unit's journal (settled RPC) in the event window | 1 | 5 | acknowledged transactions dropped: the sender holds a hash that never lands (L2-20) |
-| `shm[*]` | `--shm /dev/shm`: free GiB; `sp1_*` segments older than 3 h | < 12 GiB, or any stale segment | < 6 GiB | a killed SP1 runner leaks a 3.4-4.7 GiB segment (F8 of report 121); a full tmpfs makes every SP1 run SIGBUS. The monitor only reads: remove a stale segment only after checking no process maps it |
+| `shm[*]` | `--shm /dev/shm`: free GiB; `sp1_*` segments older than 3 h (the GiB shown is memory in use: the `_m` segment is a 2 TiB sparse file) | < 12 GiB, or any stale segment | < 6 GiB | a killed SP1 runner leaks a 3.4-4.7 GiB segment (F8 of report 121); a full tmpfs makes every SP1 run SIGBUS. The monitor only reads: remove a stale segment only after checking no process maps it |
 | `http[*]` | `--http NAME=URL[\|TEXT]` GET answers 2xx (and contains TEXT) | – | other status, unreachable or TEXT missing | signer `/healthz` (report 105's gap), L1 indexer `/health` (L1-2), gateway and explorer |
 
 The `devnet4` profile keeps the same structure with devnet values (2 s

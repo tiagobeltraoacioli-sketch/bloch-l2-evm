@@ -6,9 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# The settler user: read access to its work dir; the shadow writes only its own state dir.
-User=bloch-l2-mainnet-settler
-Group=bloch-l2-mainnet-settler
+# Its own user (review r10 decision 4), in the settler's read group: it reads the settler's work directory and
+# writes only its own state directory.
+User=bloch-l2-mainnet-shadow
+Group=bloch-l2-mainnet-shadow
+SupplementaryGroups=bloch-l2-mainnet-l2read
 Environment=BLOCH_SEQUENCER_CONFIG=/etc/bloch-l2-mainnet-shadow/config.json
 Environment=HOME=/var/lib/bloch-l2-mainnet-shadow
 Environment=TMPDIR=/var/lib/bloch-l2-mainnet-shadow/tmp
@@ -33,10 +35,9 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 ReadWritePaths=/var/lib/bloch-l2-mainnet-shadow
 ReadOnlyPaths=/etc/bloch-l2-mainnet-shadow /opt/bloch/l2-mainnet-shadow /var/lib/bloch-l2-mainnet-settler/work
-# The shadow runs as the settler user, which owns the DA fee key, its passphrase and the prover SSH key and is
-# in the docker group (the Docker socket is root on this host; a read-only mount does not stop a socket
-# connect). The shadow needs none of them.
-InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh
+# Defence in depth beside the own user: the settler's DA fee key, its passphrase (old, M-4 and runtime copy), the prover
+# SSH key and the Docker socket (a read-only mount does not stop a socket connect). The shadow needs none of them.
+InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh -/etc/bloch-l2-mainnet-settler/da.passphrase -/run/bloch-l2-mainnet-settler
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Read-only getl2settlement on the three Genesis-4 mainnet nodes; nothing else.
 IPAddressDeny=any

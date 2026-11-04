@@ -8,21 +8,27 @@ After=bloch-l2-mainnet-follower.service
 
 [Service]
 Type=simple
-User=@CANONICAL_USER@
-Group=@CANONICAL_USER@
-UMask=0077
+# Its own user (install.sh --rpc-user, review r10 decision 4) in the read group of the database writer; without
+# --rpc-user, install.sh runs it as @CANONICAL_USER@ and drops the two @READ_GROUP@ lines.
+User=@RPC_USER@
+Group=@RPC_USER@
+SupplementaryGroups=@READ_GROUP@
+# 0027: txpool spool files stay readable by the sequencer through the read group.
+UMask=0027
+# Root, before every start (also after the worker swaps the database): the MDBX lock file group-writable, so this
+# reader registers in it. Refuses to start without one.
+ExecStartPre=+/usr/bin/python3 -I /opt/bloch/l2-mainnet/l2_read_access.py @CANONICAL@ @CANONICAL_USER@ @READ_GROUP@
 ExecStartPre=/bin/rm -rf @STATE@/rpc-view
 ExecStart=/opt/bloch/l2-mainnet/bloch-l2-settled-rpc --data-dir @CANONICAL@ --view-dir @STATE@/rpc-view --finality-status /var/lib/bloch-l2-mainnet-follower/status.json --network f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --port 18955 --poll-ms 2000 --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679 --txpool @TXPOOL@
 Restart=on-failure
 RestartSec=10
-# The canonical database is opened read-only, but MDBX/RocksDB readers still
-# touch their lock files, so it stays writable for the owning user.
+# The canonical database is opened read-only, but an MDBX reader registers in db/mdbx.lck: a read-only mount
+# would make libmdbx open it without the lock table. File modes limit an own RPC user to that lock file.
 ReadWritePaths=@STATE@ @TXPOOL@ @CANONICAL@
 ReadOnlyPaths=/var/lib/bloch-l2-mainnet-follower
-# On the sequencer host @CANONICAL_USER@ is the settler user: it owns the DA fee key, its passphrase and the
-# prover SSH key, and it is in the docker group (the Docker socket is root on this host; a read-only mount
-# does not stop a socket connect). This network-facing process needs none of them. Missing paths are skipped.
-InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh
+# Defence in depth beside the own user: the settler's DA fee key, its passphrase (old, M-4 and runtime copy), the prover
+# SSH key and the Docker socket (a read-only mount does not stop a socket connect). Missing paths are skipped.
+InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh -/etc/bloch-l2-mainnet-settler/da.passphrase -/run/bloch-l2-mainnet-settler
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

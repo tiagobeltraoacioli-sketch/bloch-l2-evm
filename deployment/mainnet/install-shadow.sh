@@ -4,7 +4,9 @@
 # user bloch-l2-mainnet-settler): it writes the canonical L2 database. This unit rebuilds every
 # block the settler produced on its OWN database from the native view (+ the settler's DA batch)
 # and stops (exit 3) on any difference, before the proof reaches L1. Install after the settler's
-# `prepare` (it needs the settler user and /var/lib/bloch-l2-mainnet-settler/work).
+# `prepare` (it needs the read group bloch-l2-mainnet-l2read and /var/lib/bloch-l2-mainnet-settler/work).
+# It runs as its own system user bloch-l2-mainnet-shadow (created here, in the read group: review r10 decision 4),
+# never as the settler user, which holds the DA fee key and the prover SSH key.
 #
 #   install-shadow.sh --verify OUT_DIR     (no root: pin + build.json checks only, changes nothing)
 #   install-shadow.sh --print-l1-rpcs      (no root: prints configured L1 RPCs)
@@ -21,11 +23,11 @@
 # native diverges at that native's first fork.
 # What it does: verifies both files against the pins below and build.json against this build (the content
 # pins of both files, native, lock, compiled L1 gates, both L2 program gates present), requires the settler's
-# producer (if configured) to be the same build, creates /var/lib/bloch-l2-mainnet-shadow/{work,tmp} owned by the settler user,
+# producer (if configured) to be the same build, creates /var/lib/bloch-l2-mainnet-shadow/{work,tmp} owned by the shadow user,
 # writes the config (next_elf_keccak and fallback_elf_keccak, so the shadow follows the program swap and its
 # rollback; the settler's program_switch_lead_seconds, so both use one window; refused if the settler's
 # next or fallback l2-config names another ELF), creates the shadow L2 database at the pinned mainnet genesis (refuses any other
-# hash), runs a read-only `check` against the three mainnet nodes and installs the unit. It starts the
+# hash), runs a read-only `check` against the configured L1 RPCs and installs the unit. It starts the
 # unit only with --start. The shadow never signs, proves or submits and never opens the settler's
 # database: starting it sends nothing to Bloch L1. It reads getl2settlement only.
 #
@@ -55,7 +57,8 @@ UNIT=bloch-l2-mainnet-shadow.service
 OPT=/opt/bloch/l2-mainnet-shadow
 ETC=/etc/bloch-l2-mainnet-shadow
 VAR=/var/lib/bloch-l2-mainnet-shadow
-USER_=bloch-l2-mainnet-settler
+USER_=bloch-l2-mainnet-shadow
+READ_GROUP=bloch-l2-mainnet-l2read
 SETTLER_WORK=/var/lib/bloch-l2-mainnet-settler/work
 FOLLOWER_NATIVE=/var/lib/bloch-l2-mainnet-follower/native
 DOMAIN=1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733
@@ -236,8 +239,11 @@ fi
 if systemctl is-active --quiet "$UNIT"; then echo "$UNIT is running; roll back first"; exit 1; fi
 [ ! -e "$VAR/canonical" ] || { echo "$VAR/canonical exists; roll back first (it is moved aside, not deleted)"; exit 1; }
 
-id "$USER_" >/dev/null 2>&1 || { echo "user $USER_ missing: run install-settler-mainnet.py prepare first"; exit 1; }
+getent group "$READ_GROUP" >/dev/null || { echo "group $READ_GROUP missing: run install-settler-mainnet.py prepare first"; exit 1; }
 [ -d "$SETTLER_WORK" ] || { echo "$SETTLER_WORK missing: run install-settler-mainnet.py prepare first"; exit 1; }
+id "$USER_" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$VAR" --shell /usr/sbin/nologin --groups "$READ_GROUP" "$USER_"
+runuser -u "$USER_" -- test -r "$SETTLER_WORK" -a -x "$SETTLER_WORK" || {
+  echo "$USER_ cannot read $SETTLER_WORK through group $READ_GROUP (a prepare by an older installer?)"; exit 1; }
 L1_RPCS=$(resolve_l1_rpcs) || { echo "unit NOT installed"; exit 1; }
 read -r -a L1_RPC_LIST <<< "$L1_RPCS"
 L1_RPCS_JSON=$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${L1_RPC_LIST[@]}")

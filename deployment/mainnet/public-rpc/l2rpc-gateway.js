@@ -109,6 +109,12 @@ const FINALITY_METHODS = { bloch_finality: true, bloch_settlement: true, bloch_g
 // here yet, unknown index, unknown root, index catching up, frozen.
 const RETRY_CODES = { '-32001': true, '-32041': true, '-32042': true, '-32043': true, '-32045': true, '-32046': true };
 
+// Largest backend answer for one split part (a request that goes through njs subrequests: any eth_call,
+// eth_estimateGas or eth_createAccessList, finality calls, mixed routes). The subrequest is held in memory,
+// so the answer is bounded: the size guard (guardHeader/guardBody, on the hop in front of each backend)
+// replaces a larger answer with a short marker, and every call of that part gets -32005 "response too large".
+const SUB_ANSWER_MAX = cfg.subAnswerMaxBytes || 2097152;
+
 const HEX_QTY = /^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const HASH32 = /^0x[0-9a-fA-F]{64}$/;
 
@@ -330,6 +336,12 @@ function send(r, status, body) {
   r.return(status, JSON.stringify(body));
 }
 
+function tooLarge(id) {
+  return err(id, -32005, 'Response too large: the answer to this request is above ' + SUB_ANSWER_MAX +
+    ' bytes. Send this call alone, without eth_call/eth_estimateGas/eth_createAccessList in the same batch, or narrow it.',
+    { limitBytes: SUB_ANSWER_MAX });
+}
+
 function unavailable(id, route) {
   if (route === 'tx') {
     return err(id, -32052, 'Submission outcome unknown: the sequencer did not answer. Check the transaction hash or the nonce before resending.');
@@ -357,13 +369,16 @@ function outgoing(x) {
   return copy;
 }
 
+// Subrequests go through the size-guarded twin of each backend location (/_l2s/...).
 async function roundTrip(r, where, calls) {
-  const reply = await r.subrequest(where, { method: 'POST', body: JSON.stringify(calls.map(outgoing)) });
+  const reply = await r.subrequest(where.replace('/_l2/', '/_l2s/'), { method: 'POST', body: JSON.stringify(calls.map(outgoing)) });
   const byId = {};
   if (reply.status === 200) {
     try {
       const parsed = JSON.parse(reply.responseText);
-      if (Array.isArray(parsed)) {
+      if (parsed && !Array.isArray(parsed) && typeof parsed === 'object' && parsed.l2_too_large !== undefined) {
+        byId.tooLarge = true;
+      } else if (Array.isArray(parsed)) {
         parsed.forEach((item) => {
           if (item && typeof item === 'object' && typeof item.id === 'number') byId[item.id] = item;
         });
@@ -378,6 +393,7 @@ async function roundTrip(r, where, calls) {
 // Finality calls the first backend could not answer because it closed its levels (or did not answer
 // at all) go once to the other one. Its answer replaces the first only if it is not closed too.
 async function retryFinality(r, first, calls, byId) {
+  if (byId.tooLarge) return; // the other backend's answer is as large
   const again = calls.filter((c) => c.call.id !== undefined && (!byId[c.index] || closedAnswer(byId[c.index])));
   if (!again.length || !cfg.peerProbeUrl) return;
   const other = first === BACKEND.local ? BACKEND.peer : BACKEND.local;
@@ -403,6 +419,10 @@ async function forwardParts(r, parts) {
   results.forEach((x) => {
     x.p.calls.forEach((c) => {
       if (c.call.id === undefined) return;
+      if (x.byId.tooLarge) {
+        out.push({ index: c.index, reply: tooLarge(c.call.id), unanswered: false });
+        return;
+      }
       const hit = x.byId[c.index];
       if (hit) hit.id = c.call.id;
       out.push({ index: c.index, reply: hit || unavailable(c.call.id, x.p.route), unanswered: !hit });
@@ -585,6 +605,39 @@ function view(s) {
   };
 }
 
+// ------------------------------------------------------------- size guard
+// On the hop between a subrequest and its backend (the unix-socket guard server). A Content-Length above
+// SUB_ANSWER_MAX is replaced by a short marker at once; a body without a length is passed until it crosses the
+// limit and then cut (the subrequest then fails to parse and answers -32053). The subrequest buffer holds
+// SUB_ANSWER_MAX plus a margin, so nginx never waits on, or aborts for, a body it cannot hold.
+function guardHeader(r) {
+  const n = Number(r.headersOut['Content-Length']);
+  r.variables.l2_guard = n > SUB_ANSWER_MAX ? 'over' : 'pass';
+  r.variables.l2_guard_n = '0';
+  if (n > SUB_ANSWER_MAX) {
+    delete r.headersOut['Content-Length'];
+    r.headersOut['Content-Type'] = 'application/json';
+  }
+}
+
+function guardBody(r, data, flags) {
+  const state = r.variables.l2_guard;
+  if (state === 'done') return;
+  if (state === 'over') {
+    r.variables.l2_guard = 'done';
+    r.sendBuffer(JSON.stringify({ l2_too_large: SUB_ANSWER_MAX }), { last: true });
+    return;
+  }
+  const n = Number(r.variables.l2_guard_n || 0) + data.length;
+  r.variables.l2_guard_n = String(n);
+  if (n > SUB_ANSWER_MAX) {
+    r.variables.l2_guard = 'done';
+    r.sendBuffer('', { last: true });
+    return;
+  }
+  r.sendBuffer(data, flags);
+}
+
 function health(r) {
   const l = readState('local');
   const p = cfg.peerProbeUrl ? readState('peer') : null;
@@ -605,4 +658,4 @@ function health(r) {
   r.return(out.ok ? 200 : 503, JSON.stringify(out));
 }
 
-export default { handle, failure, probe, health, client };
+export default { handle, failure, probe, health, client, guardHeader, guardBody };

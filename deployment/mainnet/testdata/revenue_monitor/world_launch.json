@@ -1,0 +1,92 @@
+{
+ "description": "Deposit-only L2 launch: DEX not deployed, bridge vault live with its first fees and no sweep yet, L2 fee vaults keyless and empty before the December fork, forced inclusion not enabled.",
+ "now": 1793750400,
+ "config": {
+  "l2": {
+   "rpc": [
+    "http://l2a"
+   ],
+   "chain_id": 700770
+  },
+  "dex": {
+   "enabled": false
+  },
+  "bridge": {
+   "rpc": [
+    "http://eth"
+   ],
+   "chain_id": 1,
+   "vault": "0x7a17000000000000000000000000000000000005",
+   "fee_recipient": "0x7e5a000000000000000000000000000000000006",
+   "start_block": 20000000
+  },
+  "l2_fees": {
+   "recipient": "TBD-owner",
+   "fork_time": null,
+   "user_txs_open": false
+  },
+  "forced": {
+   "l1_rpc": [
+    "http://l1"
+   ],
+   "route": "burned"
+  }
+ },
+ "l2": {
+  "chain_id": 700770,
+  "head": {
+   "number": 40,
+   "timestamp": 1793749800,
+   "baseFeePerGas": 249
+  },
+  "spacing": 480,
+  "accounts": {},
+  "factory": {},
+  "pairs": {},
+  "erc20": {},
+  "logs": []
+ },
+ "eth": {
+  "chain_id": 1,
+  "head": {
+   "number": 20007200,
+   "timestamp": 1793749500
+  },
+  "spacing": 12,
+  "vaults": {
+   "0x7a17000000000000000000000000000000000005": {
+    "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "feeRecipient": "0x7e5a000000000000000000000000000000000006",
+    "depositFeeBps": 5,
+    "releaseFeeBps": 5,
+    "feesAccrued": 5500,
+    "totalLocked": 10994500
+   }
+  },
+  "erc20": {
+   "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+    "0x7a17000000000000000000000000000000000005": 11000000,
+    "0x7e5a000000000000000000000000000000000006": 0
+   }
+  },
+  "logs": [
+   {
+    "event": "Deposited",
+    "address": "0x7a17000000000000000000000000000000000005",
+    "block": 20006000,
+    "tx": "0xe1"
+   },
+   {
+    "event": "FeeAccrued",
+    "address": "0x7a17000000000000000000000000000000000005",
+    "fee": 5500,
+    "block": 20006000,
+    "tx": "0xe1"
+   }
+  ]
+ },
+ "l1": {
+  "forced": null,
+  "balances": {}
+ }
+}

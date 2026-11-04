@@ -126,6 +126,8 @@ def main():
     a.add_argument('--backend-conns', type=int, default=48,
                    help='active connections from this gateway to the local settled RPC for reads (sequencer/peer paths get a quarter each)')
     a.add_argument('--max-batch', type=int, default=100, help='calls per batch (ethers v6 batches up to 100)')
+    a.add_argument('--sub-answer-max', type=int, default=2 * 1024 * 1024,
+                   help='largest backend answer of a split request (njs subrequest), bytes; larger ones get -32005')
     a.add_argument('--max-body', default='512k', help='request body cap (the settled RPC refuses more than 512 KiB)')
     a.add_argument('--max-log-range', type=int, default=2000)
     a.add_argument('--max-lag', type=int, default=0,
@@ -160,6 +162,8 @@ def main():
     hop = Path(o.hop_dir)
     if not hop.is_absolute():
         a.error('--hop-dir must be absolute')
+    if not 65536 <= o.sub_answer_max <= 16 * 1024 * 1024:
+        a.error('--sub-answer-max must be between 64 KiB and 16 MiB')
     peer_out = f'unix:{hop}/peer-out.sock'
     local = o.local_rpc
     seq = local if o.role == 'sequencer' else peer_out
@@ -268,6 +272,9 @@ server {{
         'PUBLIC_LISTEN': '\n'.join([f'    listen {x} ssl http2;' for x in listens] + [f'    listen {x};' for x in o.test_plain_listen]),
         'PUBLIC_TLS': '\n'.join(tls),
         'PROBE_PORT': str(o.probe_port),
+        'HOP_DIR': str(hop),
+        'SUB_MAX': str(o.sub_answer_max),
+        'SUB_BUF': str(o.sub_answer_max + 65536),
         'PROBE_INTERVAL': o.probe_interval,
         'PEER_SERVERS': peer_servers,
         'PEER_PROBE': f'''    # The peer probe: always this fixed read-only batch, whatever the local caller sends.
@@ -299,6 +306,7 @@ server {{
         'txPerMinute': o.tx_per_minute,
         'simPerIp': o.sim_per_ip,
         'simTotal': o.sim_total,
+        'subAnswerMaxBytes': o.sub_answer_max,
         'maxLogBlockRange': o.max_log_range,
         'maxLogAddresses': 256,
         'maxLagBlocks': o.max_lag,

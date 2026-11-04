@@ -81,8 +81,22 @@ class RenderR10(unittest.TestCase):
         result, out = self.render('--client-ca', 'none', role='sequencer', peer=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         conf = (out / 'l2rpc-gateway.conf').read_text()
-        self.assertNotIn('unix:', conf)
+        # The only unix socket left is the subrequest size guard (no peer hop).
+        self.assertNotIn('peer-out.sock', conf)
+        self.assertEqual(set(re.findall(r'unix:[^ ;:]+', conf)), {'unix:/run/bloch-l2rpc/guard.sock'})
         self.assertNotIn('_peer_probe', conf)
+
+    def test_subrequest_size_guard(self):
+        result, out = self.render('--client-ca', 'none')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conf = (out / 'l2rpc-gateway.conf').read_text()
+        self.assertIn('location ~ ^/_l2s/(local|peer|seqread|seq)$', conf)
+        self.assertIn('subrequest_output_buffer_size 2162688;', conf)
+        self.assertEqual(conf.count('js_body_filter l2rpc.guardBody buffer_type=buffer;'), 4)
+        self.assertNotIn('16m;\n', (out / 'l2rpc-proxy.inc').read_text())
+        self.assertIn('"subAnswerMaxBytes": 2097152', (out / 'l2rpc-config.js').read_text())
+        bad, _ = self.render('--client-ca', 'none', '--sub-answer-max', '1000')
+        self.assertNotEqual(bad.returncode, 0)
 
     def test_the_old_tcp_hop_option_is_refused(self):
         result, _ = self.render('--peer-out-port', '18957', '--client-ca', 'none')
