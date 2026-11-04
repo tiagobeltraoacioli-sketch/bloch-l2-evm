@@ -314,6 +314,21 @@ class Chain:
         if self.block_hash(block, self.number) != self.hash:
             raise RpcError(f'{self.name}: pinned block changed during observation')
 
+    def checkpoint(self) -> Dict[str, Any]:
+        return {'chain_id': self.network, 'genesis_hash': self.genesis_hash,
+                'number': self.number, 'hash': self.hash}
+
+    def verify_previous(self, checkpoint: Dict[str, Any]) -> None:
+        number = checkpoint['number']
+        if type(number) is not int or number < 0 or number > self.number:
+            raise RpcError(f'{self.name}: observation height regressed or prior checkpoint is invalid')
+        if checkpoint['chain_id'] != self.network or checkpoint['genesis_hash'] != self.genesis_hash:
+            raise RpcError(f'{self.name}: chain differs from the retained revenue history')
+        block = self.rpc('eth_getBlockByNumber', [hex(number), False])
+        if self.block_hash(block, number) != checkpoint['hash']:
+            raise RpcError(f'{self.name}: retained revenue checkpoint is no longer canonical; '
+                           'review the history and start a separate state file')
+
     def at(self) -> str:
         return hex(self.number)
 
@@ -369,7 +384,7 @@ def log_data_words(log: Dict[str, Any]) -> List[int]:
 # ---------------------------------------------------------------- state
 
 def empty_state() -> Dict[str, Any]:
-    return {'schema': STATE_SCHEMA, 'cursors': {}, 'last': {}, 'marks': {}, 'days': {}, 'totals': {}}
+    return {'schema': STATE_SCHEMA, 'cursors': {}, 'last': {}, 'marks': {}, 'days': {}, 'totals': {}, 'anchors': {}}
 
 
 def load_state(path: Optional[Path]) -> Dict[str, Any]:
@@ -932,15 +947,35 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
             r.add('l2_rpc', UNKNOWN, f'L2 RPC: {e}')
             l2 = None
 
-    def section(name: str, fn: Callable[[], Dict[str, Any]], chain: Optional[Chain] = None) -> None:
+    def has_history(name: str) -> bool:
+        prefix = 'l2_' if name == 'l2_fees' else name + '_'
+        return (name in state['cursors'] or any(key.startswith(prefix) for key in state['last'])
+                or any(key.startswith(prefix) for key in state['totals']))
+
+    def observe(name: str, chain: Chain, context: Dict[str, Any], fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+        anchors = state.setdefault('anchors', {})
+        previous = anchors.get(name)
+        if has_history(name):
+            if not isinstance(previous, dict):
+                raise RpcError(f'{name}: prior revenue history has no chain checkpoint; '
+                               'retain it for review and start a separate state file')
+            if previous['context'] != context:
+                raise RpcError(f'{name}: deployment configuration differs from retained revenue history; '
+                               'start a separate state file')
+            chain.verify_previous(previous['checkpoint'])
+        result = fn()
+        chain.verify()
+        if has_history(name):
+            anchors[name] = {'checkpoint': chain.checkpoint(), 'context': copy.deepcopy(context)}
+        return result
+
+    def section(name: str, fn: Callable[[], Dict[str, Any]]) -> None:
         # A later RPC or malformed event must not leave a partly advanced cursor,
         # balance baseline or daily total. Keep successful independent products.
         before = copy.deepcopy(state)
         first_check = len(r.checks)
         try:
             products[name] = fn()
-            if chain is not None:
-                chain.verify()
         except (RpcError, KeyError, TypeError, IndexError, ValueError) as e:
             state.clear()
             state.update(before)
@@ -951,7 +986,8 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
     dex_cfg = config.get('dex')
     if dex_cfg and dex_cfg.get('enabled', True):
         if l2 is not None:
-            section('dex', lambda: check_dex(l2, dex_cfg, th, state, r, today, now), l2)
+            section('dex', lambda: observe('dex', l2, dex_deployment(dex_cfg),
+                    lambda: check_dex(l2, dex_cfg, th, state, r, today, now)))
     else:
         products['dex'] = {'enabled': False}
         r.add('dex', OK, 'DEX not deployed (disabled in the config): no protocol fee yet')
@@ -964,9 +1000,9 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
             if cid != int(bridge_cfg.get('chain_id', 1)):
                 raise ValueError(f'Ethereum RPC chain id {cid} is not {bridge_cfg.get("chain_id", 1)}')
             eth.pin(bridge_cfg.get('block', 'finalized'))
-            result = check_bridge(eth, bridge_cfg, th, state, r, today, now)
-            eth.verify()
-            return result
+            context = {key: value for key, value in bridge_cfg.items() if key not in ('rpc', 'enabled')}
+            return observe('bridge', eth, context,
+                           lambda: check_bridge(eth, bridge_cfg, th, state, r, today, now))
         section('bridge', bridge)
     else:
         products['bridge'] = {'enabled': False}
@@ -975,7 +1011,8 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
     l2_cfg = config.get('l2_fees')
     if l2_cfg is not None and l2_cfg.get('enabled', True):
         if l2 is not None:
-            section('l2_fees', lambda: check_l2_fees(l2, l2_cfg, th, state, r, today, now), l2)
+            section('l2_fees', lambda: observe('l2_fees', l2, {'recipient': addr(l2_cfg.get('recipient'))},
+                    lambda: check_l2_fees(l2, l2_cfg, th, state, r, today, now)))
     else:
         products['l2_fees'] = {'enabled': False}
 

@@ -625,6 +625,63 @@ class SnapshotConsistency(unittest.TestCase):
         self.assertEqual(checks(report)['l2_rpc']['level'], 'UNKNOWN')
         self.assertFalse(any(method == 'eth_call' for _, method, _ in fake.log))
 
+    def test_reorg_between_runs_preserves_the_last_valid_history(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                _, state, _ = run_world(world)
+                before = copy.deepcopy(state)
+                world['eth' if product == 'bridge' else 'l2']['branch'] = 1
+                report, state, _ = run_world(world, state)
+                self.assertIn(product + '_error', checks(report))
+                self.assertEqual(state, before)
+
+    def test_rollback_does_not_record_a_false_fee_sweep(self):
+        world = self.world_for('l2_fees')
+        _, state, _ = run_world(world)
+        before = copy.deepcopy(state)
+        world['l2']['head']['number'] -= 1
+        world['l2']['accounts'][m.BASE_FEE_VAULT]['balance'] = 0
+        report, state, _ = run_world(world, state)
+        self.assertIn('l2_fees_error', checks(report))
+        self.assertEqual(state, before)
+
+    def test_deployment_change_requires_separate_history(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                _, state, _ = run_world(world)
+                before = copy.deepcopy(state)
+                if product == 'l2_fees':
+                    world['config'][product]['recipient'] = '0x' + '12' * 20
+                else:
+                    world['config'][product]['start_block'] += 1
+                report, state, _ = run_world(world, state)
+                self.assertIn(product + '_error', checks(report))
+                self.assertEqual(state, before)
+
+    def test_unanchored_legacy_history_is_preserved_for_review(self):
+        world = self.world_for('bridge')
+        _, state, _ = run_world(world)
+        state['anchors'].clear()
+        before = copy.deepcopy(state)
+        report, state, _ = run_world(world, state)
+        self.assertIn('bridge_error', checks(report))
+        self.assertEqual(state, before)
+
+    def test_canonical_advancement_keeps_the_existing_totals(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                _, state, _ = run_world(world)
+                totals = dict(state['totals'])
+                side = 'eth' if product == 'bridge' else 'l2'
+                world[side]['head']['number'] += 1
+                report, state, _ = run_world(world, state)
+                self.assertNotIn(product + '_error', checks(report))
+                self.assertEqual(state['totals'], totals)
+                self.assertEqual(state['anchors'][product]['checkpoint']['number'], world[side]['head']['number'])
+
 
 class LaunchWorld(unittest.TestCase):
     def setUp(self):

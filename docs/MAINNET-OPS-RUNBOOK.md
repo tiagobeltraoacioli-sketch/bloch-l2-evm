@@ -246,3 +246,33 @@ of 2–3 epochs; on mainnet ≈ 85 min instead of ≈ 40 min). Fetching and
 replaying up to the L1 head (still deriving finality only by replay) would
 roughly halve the exchange confirmation time without changing the trust
 model.
+
+## 7. Protocol revenue observations
+
+`deployment/mainnet/revenue_monitor.py` collects DEX protocol LP balances,
+bridge fee events and L2 fee-vault observations without a signing key. Copy
+`deployment/mainnet/monitor/revenue.json.example`, select the deployed products
+and reviewed addresses, and keep a separate state file for each deployment:
+
+```sh
+python3 deployment/mainnet/revenue_monitor.py \
+  --config /etc/bloch-revenue/revenue.json \
+  --state /var/lib/bloch-revenue/state.json --json
+```
+
+Each EVM product selects one endpoint before reading its chain and genesis,
+pins the requested block, and checks those identities again after collecting
+the sample. Endpoint fallback is allowed only before a sample starts. A failed
+RPC, malformed event or changed checkpoint discards that product's partial
+cursor, counters and balances; other successful products remain recorded.
+
+The retained state binds each EVM product to its deployment and previous block
+hash. A changed deployment, a rollback, a replaced checkpoint, or legacy history
+without a checkpoint returns `UNKNOWN` for that product and preserves its prior
+history. Keep the old file for investigation and start a separately named state
+file only after reviewing the new deployment or canonical history. The monitor
+does not silently reset or rebase accumulated revenue.
+
+These are RPC observations, not independent consensus or finality proofs. L2
+balance changes are net observations: fees arriving between sweeps can hide part
+of the gross flow. The report neither authorizes a deployment nor moves revenue.
