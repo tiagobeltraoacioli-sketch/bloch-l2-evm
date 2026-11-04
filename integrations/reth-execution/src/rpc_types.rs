@@ -152,7 +152,9 @@ impl<'de> Deserialize<'de> for BlochRpcHeader {
             || json.nonce != B64::ZERO
             || json.blob_gas_used != 0
             || json.excess_blob_gas != 0
-            || json.parent_beacon_block_root.is_some_and(|root| root != json.anchor_root)
+            || json
+                .parent_beacon_block_root
+                .is_some_and(|root| root != json.anchor_root)
         {
             return Err(serde::de::Error::custom(
                 "Bloch V2 RPC requires zero difficulty, nonce and blob gas, empty extraData, no ommers and parentBeaconBlockRoot = anchorRoot",
@@ -372,10 +374,16 @@ mod tests {
             ("difficulty", "0x1"),
             ("extraData", "0x01"),
             ("nonce", "0x0000000000000001"),
-            ("sha3Uncles", "0x0000000000000000000000000000000000000000000000000000000000000001"),
+            (
+                "sha3Uncles",
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+            ),
             ("blobGasUsed", "0x1"),
             ("excessBlobGas", "0x1"),
-            ("parentBeaconBlockRoot", "0x0000000000000000000000000000000000000000000000000000000000000001"),
+            (
+                "parentBeaconBlockRoot",
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+            ),
         ] {
             let mut json = serde_json::to_value(&rpc).unwrap();
             json[field] = serde_json::json!(value);

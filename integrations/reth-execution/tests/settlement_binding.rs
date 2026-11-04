@@ -150,7 +150,8 @@ fn history(source: &BlochProviderFactory, wrong_first_body: bool) -> Vec<Settlem
                 keccak256(alloy_rlp::encode(block.body.as_core()))
             },
         };
-        transactions.push(SettlementTransactionV1::new(p.proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES]).unwrap());
+        transactions
+            .push(SettlementTransactionV1::new(p.proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES]).unwrap());
     }
     transactions
 }
@@ -167,11 +168,12 @@ fn binds_real_persisted_deposit_and_signed_transaction_blocks_after_reopen() {
     let provider = CanonicalCoordinator::attach(source.clone()).unwrap().provider();
     assert_eq!(provider.finalized_block_num_hash().unwrap(), None);
     assert_eq!(provider.safe_block_num_hash().unwrap(), None);
-    let (audited, report) = with_canonical_settlement_audit(&source, policy(), pinned, ReplayLimits::default(), |audit| {
-        transactions.iter().try_for_each(|tx| audit.audit_transaction(tx))?;
-        Ok::<_, alloy_evm::block::BlockExecutionError>(transactions.len())
-    })
-    .unwrap();
+    let (audited, report) =
+        with_canonical_settlement_audit(&source, policy(), pinned, ReplayLimits::default(), |audit| {
+            transactions.iter().try_for_each(|tx| audit.audit_transaction(tx))?;
+            Ok::<_, alloy_evm::block::BlockExecutionError>(transactions.len())
+        })
+        .unwrap();
     assert_eq!(audited, 2);
     assert_eq!(report.audited_records, 2);
     assert_eq!(report.last_settlement.unwrap().hash, pinned.hash);
@@ -271,9 +273,10 @@ fn exact_statement_fields_and_order_must_match_the_canonical_block() {
             _ => unreachable!(),
         }
         let tx = SettlementTransactionV1::new(proof_policy, statement, [9; SETTLEMENT_PROOF_V1_BYTES]).unwrap();
-        let result = with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
-            audit.audit_transaction(&tx)
-        });
+        let result =
+            with_canonical_settlement_audit(&source, policy(), floor(&source), ReplayLimits::default(), |audit| {
+                audit.audit_transaction(&tx)
+            });
         assert!(
             matches!(result, Err(CanonicalSettlementAuditErrorV1::Consumer(_))),
             "case {case}"

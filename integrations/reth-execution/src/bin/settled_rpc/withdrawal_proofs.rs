@@ -64,12 +64,20 @@ pub fn final_entries(list: &[Value], after: u64) -> Result<Vec<FinalEntry>, Stri
         if number <= after {
             continue;
         }
-        let hash = entry["l2_hash"].as_str().unwrap_or_default().parse::<B256>().map_err(|e| e.to_string())?;
+        let hash = entry["l2_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .parse::<B256>()
+            .map_err(|e| e.to_string())?;
         let commitment = match entry.get("withdrawals").filter(|v| !v.is_null()) {
             // A V2 settlement has no outbox.
             None => None,
             Some(w) => Some((
-                w["root"].as_str().unwrap_or_default().parse::<B256>().map_err(|e| e.to_string())?,
+                w["root"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .parse::<B256>()
+                    .map_err(|e| e.to_string())?,
                 w["count"].as_u64().ok_or("bad withdrawal count")?,
             )),
         };
@@ -172,7 +180,10 @@ impl ProofIndex {
         } else if end <= u128::from(count) {
             self.levels[height][position as usize]
         } else {
-            pair(self.subtree(height - 1, position * 2, count), self.subtree(height - 1, position * 2 + 1, count))
+            pair(
+                self.subtree(height - 1, position * 2, count),
+                self.subtree(height - 1, position * 2 + 1, count),
+            )
         }
     }
 
@@ -190,9 +201,15 @@ impl ProofIndex {
 
     /// How many withdrawals block `entry` adds, or an inconsistency.
     pub fn added_by(&self, entry: &FinalEntry) -> Result<u64, String> {
-        let Some((_, count)) = entry.commitment else { return Ok(0) };
+        let Some((_, count)) = entry.commitment else {
+            return Ok(0);
+        };
         count.checked_sub(self.count()).ok_or_else(|| {
-            format!("settled withdrawal count {count} of block {} is below the indexed {}", entry.number, self.count())
+            format!(
+                "settled withdrawal count {count} of block {} is below the indexed {}",
+                entry.number,
+                self.count()
+            )
         })
     }
 
@@ -200,29 +217,49 @@ impl ProofIndex {
     /// Nothing becomes servable unless the leaves fold to the settled commitment.
     pub fn apply(&mut self, entry: &FinalEntry, withdrawals: Vec<Withdrawal>) -> Result<(), String> {
         if entry.number != self.indexed + 1 {
-            return Err(format!("finalized block {} follows indexed {}", entry.number, self.indexed));
+            return Err(format!(
+                "finalized block {} follows indexed {}",
+                entry.number, self.indexed
+            ));
         }
         let Some((root, count)) = entry.commitment else {
             if !withdrawals.is_empty() {
-                return Err(format!("block {} has withdrawals but its settlement has no outbox", entry.number));
+                return Err(format!(
+                    "block {} has withdrawals but its settlement has no outbox",
+                    entry.number
+                ));
             }
             self.indexed = entry.number;
             return Ok(());
         };
         let added = self.added_by(entry)?;
         if added != withdrawals.len() as u64 {
-            return Err(format!("block {} has {} withdrawals, its settlement adds {added}", entry.number, withdrawals.len()));
+            return Err(format!(
+                "block {} has {} withdrawals, its settlement adds {added}",
+                entry.number,
+                withdrawals.len()
+            ));
         }
         let first = self.count();
         for (withdrawal, nonce) in withdrawals.into_iter().zip(first..) {
             if withdrawal.nonce != nonce {
-                return Err(format!("block {} withdrawal nonce {} where {nonce} is due", entry.number, withdrawal.nonce));
+                return Err(format!(
+                    "block {} withdrawal nonce {} where {nonce} is due",
+                    entry.number, withdrawal.nonce
+                ));
             }
             self.push(withdrawal, entry.number);
         }
-        let own = if count == 0 { empty_withdrawal_root() } else { self.root_at(count) };
+        let own = if count == 0 {
+            empty_withdrawal_root()
+        } else {
+            self.root_at(count)
+        };
         if own != root {
-            return Err(format!("block {} rebuilt withdrawal root {own} differs from settled {root} (count {count})", entry.number));
+            return Err(format!(
+                "block {} rebuilt withdrawal root {own} differs from settled {root} (count {count})",
+                entry.number
+            ));
         }
         if added > 0 {
             self.by_root.insert(root, self.settled.len());
@@ -246,7 +283,11 @@ impl ProofIndex {
         let leaf = withdrawal.leaf(self.chain_id);
         let siblings = self.siblings(index, settled.count);
         if !verify_withdrawal_proof(leaf, index, &siblings, settled.root) {
-            return Err(failure(-32603, "internal error: the proof does not verify", Value::Null));
+            return Err(failure(
+                -32603,
+                "internal error: the proof does not verify",
+                Value::Null,
+            ));
         }
         Ok(json!({
             "chain_id": self.chain_id,
@@ -273,17 +314,35 @@ impl ProofIndex {
     /// Answer one request. `latest_count` is the outbox counter at this RPC's
     /// head and `finalized` the highest L2 block the status finalizes; both only
     /// choose the error.
-    pub fn answer(&self, index: u64, root: Option<B256>, latest_count: u64, finalized: u64) -> Result<Value, ErrorObjectOwned> {
+    pub fn answer(
+        &self,
+        index: u64,
+        root: Option<B256>,
+        latest_count: u64,
+        finalized: u64,
+    ) -> Result<Value, ErrorObjectOwned> {
         if self.frozen.is_some() {
-            return Err(failure(ERR_FROZEN, "withdrawal proofs are frozen: finalized settlements disagree with this RPC's receipts", Value::Null));
+            return Err(failure(
+                ERR_FROZEN,
+                "withdrawal proofs are frozen: finalized settlements disagree with this RPC's receipts",
+                Value::Null,
+            ));
         }
         let finalized_count = self.count();
         let data = || json!({"finalized_count": finalized_count, "latest_count": latest_count, "finalized_block": self.indexed});
         let settled = match root {
             Some(root) => {
                 let Some(position) = self.by_root.get(&root) else {
-                    let reason = if self.indexed < finalized { ERR_CATCHING_UP } else { ERR_UNKNOWN_ROOT };
-                    return Err(failure(reason, "this root is not the withdrawal root of a finalized settlement known here", data()));
+                    let reason = if self.indexed < finalized {
+                        ERR_CATCHING_UP
+                    } else {
+                        ERR_UNKNOWN_ROOT
+                    };
+                    return Err(failure(
+                        reason,
+                        "this root is not the withdrawal root of a finalized settlement known here",
+                        data(),
+                    ));
                 };
                 &self.settled[*position]
             }
@@ -295,14 +354,21 @@ impl ProofIndex {
                     } else if self.indexed < finalized {
                         (ERR_CATCHING_UP, "the proof index is still reading finalized blocks")
                     } else {
-                        (ERR_NOT_FINALIZED, "this withdrawal is not covered by a finalized settlement yet")
+                        (
+                            ERR_NOT_FINALIZED,
+                            "this withdrawal is not covered by a finalized settlement yet",
+                        )
                     };
                     return Err(failure(code, message, data()));
                 }
             },
         };
         if index >= settled.count {
-            return Err(failure(ERR_INDEX_NOT_IN_ROOT, "this withdrawal is newer than the requested root", json!({"root_count": settled.count})));
+            return Err(failure(
+                ERR_INDEX_NOT_IN_ROOT,
+                "this withdrawal is newer than the requested root",
+                json!({"root_count": settled.count}),
+            ));
         }
         self.document(index, settled)
     }
@@ -319,7 +385,9 @@ fn invalid(message: &str) -> ErrorObjectOwned {
 fn parse_index(value: &Value) -> Result<u64, ErrorObjectOwned> {
     match value {
         Value::Number(n) => n.as_u64(),
-        Value::String(text) => text.strip_prefix("0x").and_then(|hex| u64::from_str_radix(hex, 16).ok()),
+        Value::String(text) => text
+            .strip_prefix("0x")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok()),
         _ => None,
     }
     .ok_or_else(|| invalid("index must be a hex quantity or an integer"))
@@ -383,7 +451,10 @@ impl Shared {
                 Ok(0) => Vec::new(),
                 Ok(_) => read_block(entry.number)?,
                 Err(reason) => {
-                    self.index.write().map_err(|_| "index lock poisoned")?.freeze(reason.clone());
+                    self.index
+                        .write()
+                        .map_err(|_| "index lock poisoned")?
+                        .freeze(reason.clone());
                     return Err(reason);
                 }
             };
@@ -409,8 +480,16 @@ pub fn rpc(shared: Arc<Shared>) -> jsonrpsee::RpcModule<()> {
             }
             let index = parse_index(&values[0])?;
             let root = parse_root(values.get(1).unwrap_or(&Value::Null))?;
-            let guard = shared.index.read().map_err(|_| failure(-32603, "index lock poisoned", Value::Null))?;
-            guard.answer(index, root, shared.latest_count.load(Ordering::Relaxed), shared.finalized.load(Ordering::Relaxed))
+            let guard = shared
+                .index
+                .read()
+                .map_err(|_| failure(-32603, "index lock poisoned", Value::Null))?;
+            guard.answer(
+                index,
+                root,
+                shared.latest_count.load(Ordering::Relaxed),
+                shared.finalized.load(Ordering::Relaxed),
+            )
         })
         .expect("the withdrawal proof method name is unique in a new module");
     module
@@ -473,14 +552,23 @@ mod tests {
         feed(&s, &entries, &blocks).unwrap();
         let index = s.index.read().unwrap();
         assert_eq!(index.indexed(), sizes.len() as u64);
-        assert_eq!(index.settled.len(), 10, "only settlements that added withdrawals are roots");
+        assert_eq!(
+            index.settled.len(),
+            10,
+            "only settlements that added withdrawals are roots"
+        );
         let all: Vec<B256> = (0..index.count()).map(|n| withdrawal(n).leaf(CHAIN)).collect();
         for entry in entries.iter().filter(|e| !blocks[&e.number].is_empty()) {
             let (root, count) = entry.commitment.unwrap();
             let tree = WithdrawalTree::new(all[..count as usize].to_vec()).unwrap();
             for i in 0..count {
                 let doc = index.answer(i, Some(root), count, index.indexed()).unwrap();
-                let expected: Vec<String> = tree.proof(i).unwrap().iter().map(alloy_primitives::hex::encode).collect();
+                let expected: Vec<String> = tree
+                    .proof(i)
+                    .unwrap()
+                    .iter()
+                    .map(alloy_primitives::hex::encode)
+                    .collect();
                 assert_eq!(doc["siblings"], json!(expected), "index {i} at count {count}");
                 assert_eq!(doc["number"], entry.number);
                 assert_eq!(doc["withdrawal_count"], count);
@@ -502,7 +590,10 @@ mod tests {
         assert_eq!(doc["withdrawal"]["nonce"], 1);
         assert_eq!(doc["withdrawal"]["sats"], MIN_WITHDRAWAL_SATS + 1);
         assert_eq!(doc["withdrawal"]["l2_block"], 1);
-        assert_eq!(doc["withdrawal"]["leaf"], json!(alloy_primitives::hex::encode(withdrawal(1).leaf(CHAIN))));
+        assert_eq!(
+            doc["withdrawal"]["leaf"],
+            json!(alloy_primitives::hex::encode(withdrawal(1).leaf(CHAIN)))
+        );
         assert_eq!(doc["siblings"].as_array().unwrap().len(), 32);
         assert_eq!(doc["native_slot"], 1002);
     }
@@ -555,7 +646,13 @@ mod tests {
     fn a_receipt_read_failure_is_retried_without_freezing() {
         let (entries, blocks) = chain(&[1, 1]);
         let s = shared();
-        assert!(s.catch_up(&entries, |n| if n == 2 { Err("busy".into()) } else { Ok(blocks[&n].clone()) }).is_err());
+        assert!(s
+            .catch_up(&entries, |n| if n == 2 {
+                Err("busy".into())
+            } else {
+                Ok(blocks[&n].clone())
+            })
+            .is_err());
         assert!(!s.index.read().unwrap().is_frozen());
         assert_eq!(s.index.read().unwrap().indexed(), 1);
         feed(&s, &entries[1..], &blocks).unwrap();
@@ -609,7 +706,11 @@ mod tests {
         assert_eq!(final_entries(&list, 1).unwrap().len(), 1);
         assert!(final_entries(&list, 2).unwrap().is_empty());
         assert!(final_entries(&[json!({})], 0).is_err());
-        assert!(final_entries(&[json!({"l2_number": 1, "l2_hash": hash, "withdrawals": {"root": "zz", "count": 1}})], 0).is_err());
+        assert!(final_entries(
+            &[json!({"l2_number": 1, "l2_hash": hash, "withdrawals": {"root": "zz", "count": 1}})],
+            0
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -621,14 +722,26 @@ mod tests {
         s.latest_count.store(3, Ordering::Relaxed);
         let module = rpc(s);
         let (old, _) = entries[0].commitment.unwrap();
-        let doc: Value = module.call("bloch_getWithdrawalProof", jsonrpsee::rpc_params![1]).await.unwrap();
+        let doc: Value = module
+            .call("bloch_getWithdrawalProof", jsonrpsee::rpc_params![1])
+            .await
+            .unwrap();
         assert_eq!(doc["withdrawal_count"], 3);
-        let doc: Value = module.call("bloch_getWithdrawalProof", jsonrpsee::rpc_params!["0x1"]).await.unwrap();
+        let doc: Value = module
+            .call("bloch_getWithdrawalProof", jsonrpsee::rpc_params!["0x1"])
+            .await
+            .unwrap();
         assert_eq!(doc["index"], 1);
-        let doc: Value = module.call("bloch_getWithdrawalProof", jsonrpsee::rpc_params![1, old]).await.unwrap();
+        let doc: Value = module
+            .call("bloch_getWithdrawalProof", jsonrpsee::rpc_params![1, old])
+            .await
+            .unwrap();
         assert_eq!(doc["withdrawal_count"], 2);
         let bare = alloy_primitives::hex::encode(old);
-        let doc: Value = module.call("bloch_getWithdrawalProof", jsonrpsee::rpc_params![1, bare]).await.unwrap();
+        let doc: Value = module
+            .call("bloch_getWithdrawalProof", jsonrpsee::rpc_params![1, bare])
+            .await
+            .unwrap();
         assert_eq!(doc["withdrawal_count"], 2);
         for bad in [
             jsonrpsee::rpc_params![],

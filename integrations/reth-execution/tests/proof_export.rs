@@ -157,9 +157,26 @@ fn contract_export(anchor: B256, artifact_variable: Option<&str>, directory_vari
     // The database's state gives the same bytes as re-executing from genesis, at every height.
     for height in 1..=3 {
         let direct = export_canonical_witness(&factory, height).unwrap().encode().unwrap();
-        assert_eq!(direct, bloch_reth_execution::proof_export::export_by_replay(&factory, height).unwrap().encode().unwrap(), "height {height}");
-        let sparse = export_canonical_sparse_witness(&factory, height).unwrap().encode().unwrap();
-        assert_eq!(sparse, bloch_reth_execution::proof_export::export_sparse_by_replay(&factory, height).unwrap().encode().unwrap(), "sparse height {height}");
+        assert_eq!(
+            direct,
+            bloch_reth_execution::proof_export::export_by_replay(&factory, height)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            "height {height}"
+        );
+        let sparse = export_canonical_sparse_witness(&factory, height)
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(
+            sparse,
+            bloch_reth_execution::proof_export::export_sparse_by_replay(&factory, height)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            "sparse height {height}"
+        );
     }
     // CANDIDATE: the sparse artifact of the same block reaches the same statement,
     // carries no complete storage, and is refused by the complete decoder.

@@ -71,18 +71,18 @@
 //!
 //! `bloch_getWithdrawalProof(index, root?)` serves Merkle proofs of outbox
 //! withdrawals covered by finalized settlements (`settled_rpc/withdrawal_proofs.rs`).
-#[path = "settled_rpc/withdrawal_proofs.rs"]
-mod withdrawal_proofs;
-#[path = "settled_rpc/settlement_log.rs"]
-mod settlement_log;
 #[path = "settled_rpc/capped_api.rs"]
 mod capped_api;
+#[path = "settled_rpc/settlement_log.rs"]
+mod settlement_log;
+#[path = "settled_rpc/withdrawal_proofs.rs"]
+mod withdrawal_proofs;
 
 use alloy_primitives::B256;
 use bloch_l2_evm::ChainSpec;
 use bloch_reth_execution::{
-    chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc,
-    BlochBlockchainProvider, BlochEvmConfig, BlochProviderFactory, L2Network, PendingPolicy,
+    chain_identity_rpc, chain_status_rpc, serve_pending_blocks_as_latest, start_http_rpc, BlochBlockchainProvider,
+    BlochEvmConfig, BlochProviderFactory, L2Network, PendingPolicy,
 };
 use capped_api::build_eth_api_capped;
 use eyre::{bail, ensure, Result};
@@ -200,7 +200,13 @@ const _: () = assert!(SIMULATION_GAS_CAP == SPOOL_LIMITS.max_tx_gas);
 /// permit stays taken until the EVM really stops.
 const SIMULATION_TIME_LIMIT: Duration = Duration::from_secs(5);
 /// The methods that run the EVM on request.
-const SIMULATION_METHODS: [&str; 5] = ["eth_call", "eth_estimateGas", "eth_createAccessList", "eth_callMany", "eth_simulateV1"];
+const SIMULATION_METHODS: [&str; 5] = [
+    "eth_call",
+    "eth_estimateGas",
+    "eth_createAccessList",
+    "eth_callMany",
+    "eth_simulateV1",
+];
 /// Periodic eviction of stale spool entries (also done under pressure at admission).
 const SPOOL_SWEEP: Duration = Duration::from_secs(60);
 
@@ -215,17 +221,36 @@ fn parse() -> Result<Options> {
     for pair in args.chunks(2) {
         ensure!(
             [
-                "--data-dir", "--view-dir", "--finality-status", "--network", "--port", "--poll-ms", "--rules", "--domain",
-                "--genesis-time", "--txpool", "--min-tip-wei", "--required-tip-file", "--tip-headroom-percent",
-            ].contains(&pair[0].as_str()),
+                "--data-dir",
+                "--view-dir",
+                "--finality-status",
+                "--network",
+                "--port",
+                "--poll-ms",
+                "--rules",
+                "--domain",
+                "--genesis-time",
+                "--txpool",
+                "--min-tip-wei",
+                "--required-tip-file",
+                "--tip-headroom-percent",
+            ]
+            .contains(&pair[0].as_str()),
             "unknown option {}\n{USAGE}",
             pair[0]
         );
-        ensure!(map.insert(pair[0].clone(), pair[1].clone()).is_none(), "{} repeated", pair[0]);
+        ensure!(
+            map.insert(pair[0].clone(), pair[1].clone()).is_none(),
+            "{} repeated",
+            pair[0]
+        );
     }
     let get = |k: &str| map.get(k).cloned().ok_or_else(|| eyre::eyre!("missing {k}\n{USAGE}"));
     let network = get("--network")?;
-    ensure!(network.len() == 64 && network.bytes().all(|b| b.is_ascii_hexdigit()), "--network must be 64 hex characters");
+    ensure!(
+        network.len() == 64 && network.bytes().all(|b| b.is_ascii_hexdigit()),
+        "--network must be 64 hex characters"
+    );
     Ok(Options {
         data_dir: PathBuf::from(get("--data-dir")?),
         view_dir: PathBuf::from(get("--view-dir")?),
@@ -240,12 +265,19 @@ fn parse() -> Result<Options> {
         )
         .map_err(|e| eyre::eyre!("{e}\n{USAGE}"))?,
         txpool: map.get("--txpool").map(PathBuf::from),
-        min_tip: map.get("--min-tip-wei").map_or(Ok(DEFAULT_MIN_TIP_WEI), |v| v.parse())?,
+        min_tip: map
+            .get("--min-tip-wei")
+            .map_or(Ok(DEFAULT_MIN_TIP_WEI), |v| v.parse())?,
         required_tip_file: map.get("--required-tip-file").map(PathBuf::from),
-        tip_headroom_percent: map.get("--tip-headroom-percent").map_or(Ok(DEFAULT_TIP_HEADROOM_PERCENT), |v| v.parse())?,
+        tip_headroom_percent: map
+            .get("--tip-headroom-percent")
+            .map_or(Ok(DEFAULT_TIP_HEADROOM_PERCENT), |v| v.parse())?,
     })
     .and_then(|options| {
-        ensure!(options.tip_headroom_percent <= 1_000, "--tip-headroom-percent must be at most 1000");
+        ensure!(
+            options.tip_headroom_percent <= 1_000,
+            "--tip-headroom-percent must be at most 1000"
+        );
         ensure!(
             options.required_tip_file.is_some() || !map.contains_key("--tip-headroom-percent"),
             "--tip-headroom-percent needs --required-tip-file"
@@ -283,7 +315,12 @@ struct TipCache {
 
 impl RequiredTip {
     fn new(floor: u128, file: Option<PathBuf>, headroom_percent: u128) -> Self {
-        Self { floor, file, headroom_percent, cache: std::sync::Mutex::new(TipCache::default()) }
+        Self {
+            floor,
+            file,
+            headroom_percent,
+            cache: std::sync::Mutex::new(TipCache::default()),
+        }
     }
 
     /// The priority fee to suggest now.
@@ -291,7 +328,10 @@ impl RequiredTip {
         let Some(path) = &self.file else { return self.floor };
         let mut cache = self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = std::time::Instant::now();
-        if cache.checked.is_none_or(|at| now.duration_since(at) >= TIP_FILE_RECHECK) {
+        if cache
+            .checked
+            .is_none_or(|at| now.duration_since(at) >= TIP_FILE_RECHECK)
+        {
             cache.checked = Some(now);
             match std::fs::metadata(path) {
                 Ok(meta) => {
@@ -305,7 +345,11 @@ impl RequiredTip {
                         match read {
                             Some(tip) => cache.tip = Some(tip),
                             // Keep the last good value over a file that does not parse; it is replaced whole.
-                            None => eprintln!("required tip: {} does not hold a tip; keeping {:?}", path.display(), cache.tip),
+                            None => eprintln!(
+                                "required tip: {} does not hold a tip; keeping {:?}",
+                                path.display(),
+                                cache.tip
+                            ),
                         }
                     }
                 }
@@ -316,7 +360,9 @@ impl RequiredTip {
                 }
             }
         }
-        cache.tip.map_or(self.floor, |tip| self.floor.max(with_headroom(tip, self.headroom_percent)))
+        cache.tip.map_or(self.floor, |tip| {
+            self.floor.max(with_headroom(tip, self.headroom_percent))
+        })
     }
 }
 
@@ -376,9 +422,15 @@ impl SpoolMeta {
 /// spool slot): the producer defers it forever (gas above the block budget) or
 /// drops it without charging a fee (larger than one DA batch, below intrinsic
 /// gas, priority fee above the fee cap, oversized initcode).
-fn never_includable(spec: &ChainSpec, tx: &bloch_l2_evm::AuthenticatedTransaction, limits: SpoolLimits) -> Option<String> {
+fn never_includable(
+    spec: &ChainSpec,
+    tx: &bloch_l2_evm::AuthenticatedTransaction,
+    limits: SpoolLimits,
+) -> Option<String> {
     use bloch_l2_evm::data_availability::{da_framing_bytes, MAX_DA_PAYLOAD_BYTES};
-    use reth_revm::revm::{context_interface::cfg::gas::calculate_initial_tx_gas_for_tx, primitives::eip3860::MAX_INITCODE_SIZE};
+    use reth_revm::revm::{
+        context_interface::cfg::gas::calculate_initial_tx_gas_for_tx, primitives::eip3860::MAX_INITCODE_SIZE,
+    };
     let env = tx.environment();
     let bytes = tx.raw().len();
     if bytes.saturating_add(da_framing_bytes(1)) > MAX_DA_PAYLOAD_BYTES {
@@ -389,18 +441,30 @@ fn never_includable(spec: &ChainSpec, tx: &bloch_l2_evm::AuthenticatedTransactio
     }
     let max_gas = limits.max_tx_gas.min(spec.gas_limit);
     if env.gas_limit > max_gas {
-        return Some(format!("exceeds block gas limit: gas limit {} above {max_gas}", env.gas_limit));
+        return Some(format!(
+            "exceeds block gas limit: gas limit {} above {max_gas}",
+            env.gas_limit
+        ));
     }
     if env.gas_priority_fee.is_some_and(|tip| tip > env.gas_price) {
         return Some("max priority fee per gas higher than max fee per gas".into());
     }
     if env.kind.is_create() && env.data.len() > MAX_INITCODE_SIZE {
-        return Some(format!("max initcode size exceeded: {} bytes, at most {MAX_INITCODE_SIZE}", env.data.len()));
+        return Some(format!(
+            "max initcode size exceeded: {} bytes, at most {MAX_INITCODE_SIZE}",
+            env.data.len()
+        ));
     }
     let gas = calculate_initial_tx_gas_for_tx(env.clone(), spec.spec_id);
-    let intrinsic = gas.initial_regular_gas.saturating_add(gas.initial_state_gas).max(gas.floor_gas);
+    let intrinsic = gas
+        .initial_regular_gas
+        .saturating_add(gas.initial_state_gas)
+        .max(gas.floor_gas);
     if env.gas_limit < intrinsic {
-        return Some(format!("intrinsic gas too low: gas limit {}, needs {intrinsic}", env.gas_limit));
+        return Some(format!(
+            "intrinsic gas too low: gas limit {}, needs {intrinsic}",
+            env.gas_limit
+        ));
     }
     None
 }
@@ -425,7 +489,13 @@ struct SpoolEntry {
 /// read rather than a stat and a decode per entry.
 /// The value: decoded fields, file time, first sight (monotonic), age then, database head then.
 type SpoolIndex = std::collections::HashMap<std::ffi::OsString, SpoolSighting>;
-type SpoolSighting = (Option<SpoolMeta>, std::time::SystemTime, std::time::Instant, Duration, u64);
+type SpoolSighting = (
+    Option<SpoolMeta>,
+    std::time::SystemTime,
+    std::time::Instant,
+    Duration,
+    u64,
+);
 
 /// The sidecar of spool entry `<hash>.tx`: `.<hash>.head`, holding the canonical database head at the entry's
 /// first sighting by any RPC process (agents/146 R1: a restart must not count its blocks again from zero). The
@@ -438,8 +508,13 @@ fn sidecar_name(name: &std::ffi::OsStr) -> Option<String> {
 /// The first-seen head recorded for entry `name`, or record `head` now (best effort: a lost sidecar only means
 /// the blocks count from this sighting, as before).
 fn first_seen_head(pool: &Path, name: &std::ffi::OsStr, head: u64) -> u64 {
-    let Some(sidecar) = sidecar_name(name).map(|n| pool.join(n)) else { return head };
-    if let Some(recorded) = std::fs::read_to_string(&sidecar).ok().and_then(|t| t.trim().parse::<u64>().ok()) {
+    let Some(sidecar) = sidecar_name(name).map(|n| pool.join(n)) else {
+        return head;
+    };
+    if let Some(recorded) = std::fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|t| t.trim().parse::<u64>().ok())
+    {
         return recorded;
     }
     write_sidecar(&sidecar, head);
@@ -467,12 +542,18 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex, head: u64) 
         let path = entry.path();
         if path.extension().is_none_or(|x| x != "tx") {
             let name = entry.file_name();
-            if let Some(stem) = name.to_str().and_then(|n| n.strip_prefix('.')).and_then(|n| n.strip_suffix(".head")) {
+            if let Some(stem) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix('.'))
+                .and_then(|n| n.strip_suffix(".head"))
+            {
                 sidecars.push((path.clone(), std::ffi::OsString::from(format!("{stem}.tx"))));
             }
             continue;
         }
-        let Some(name) = path.file_name().map(|n| n.to_os_string()) else { continue };
+        let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
+            continue;
+        };
         let (meta, modified, seen, age_when_seen, head_when_seen) = match index.get(&name) {
             Some(known) => *known,
             None => {
@@ -487,13 +568,22 @@ fn scan_spool(spec: &ChainSpec, pool: &Path, index: &mut SpoolIndex, head: u64) 
                     .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
                     .map(|tx| SpoolMeta::of(&tx));
                 let seen = std::time::Instant::now();
-                let age = std::time::SystemTime::now().duration_since(modified).unwrap_or_default();
+                let age = std::time::SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default();
                 let first = first_seen_head(pool, &name, head);
                 index.insert(name.clone(), (meta, modified, seen, age, first));
                 (meta, modified, seen, age, first)
             }
         };
-        entries.push(SpoolEntry { name, meta, modified, seen, age_when_seen, head_when_seen });
+        entries.push(SpoolEntry {
+            name,
+            meta,
+            modified,
+            seen,
+            age_when_seen,
+            head_when_seen,
+        });
     }
     let present: std::collections::HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
     index.retain(|name, _| present.contains(name));
@@ -532,13 +622,24 @@ fn advance_progress(progress: &mut Option<Progress>, pool: &Path, best: u64) -> 
             if let Some((head, unix)) = recorded.filter(|(head, _)| *head == best) {
                 let then = std::time::UNIX_EPOCH + Duration::from_secs(unix);
                 let carried = std::time::SystemTime::now().duration_since(then).unwrap_or_default();
-                *progress = Some(Progress { head, since: now, carried });
+                *progress = Some(Progress {
+                    head,
+                    since: now,
+                    carried,
+                });
                 return carried;
             }
         }
     }
-    *progress = Some(Progress { head: best, since: now, carried: Duration::ZERO });
-    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    *progress = Some(Progress {
+        head: best,
+        since: now,
+        carried: Duration::ZERO,
+    });
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let partial = pool.join(format!("{PROGRESS_FILE}.partial"));
     let written = std::fs::write(&partial, format!("{best} {unix}\n"))
         .and_then(|()| std::fs::rename(&partial, pool.join(PROGRESS_FILE)));
@@ -599,7 +700,9 @@ impl SpoolHead<'_> {
     /// an entry. The first-seen head and the stall survive restarts (sidecar, `.spool-progress`), so a restart
     /// never extends a lifetime (agents/146 R1, R2).
     fn expired(&self, entry: &SpoolEntry, limits: SpoolLimits) -> bool {
-        let age = entry.age_when_seen.saturating_add(self.instant.saturating_duration_since(entry.seen));
+        let age = entry
+            .age_when_seen
+            .saturating_add(self.instant.saturating_duration_since(entry.seen));
         let old = age > limits.ttl;
         if self.gapped.contains(&entry.name) {
             return old;
@@ -612,7 +715,9 @@ impl SpoolHead<'_> {
 
     /// Why `entry` can no longer be included and may be evicted, if it cannot.
     fn stale(&mut self, entry: &SpoolEntry, limits: SpoolLimits) -> Option<&'static str> {
-        let Some(meta) = entry.meta else { return Some("undecodable") };
+        let Some(meta) = entry.meta else {
+            return Some("undecodable");
+        };
         let (nonce, balance) = (self.account)(meta.sender);
         if meta.nonce < nonce {
             Some("nonce already used")
@@ -657,13 +762,22 @@ fn plan_admission(
         return Err(format!("nonce too low: next nonce is {nonce}"));
     }
     if new.nonce > nonce.saturating_add(limits.max_nonce_gap) {
-        return Err(format!("nonce too high: next nonce is {nonce}, at most {} ahead is accepted", limits.max_nonce_gap));
+        return Err(format!(
+            "nonce too high: next nonce is {nonce}, at most {} ahead is accepted",
+            limits.max_nonce_gap
+        ));
     }
     if balance < new.cost {
-        return Err(format!("insufficient funds for gas * price + value: balance {balance}, cost {}", new.cost));
+        return Err(format!(
+            "insufficient funds for gas * price + value: balance {balance}, cost {}",
+            new.cost
+        ));
     }
     if new.max_fee < head.next_base_fee {
-        return Err(format!("max fee per gas {} below the next base fee {}", new.max_fee, head.next_base_fee));
+        return Err(format!(
+            "max fee per gas {} below the next base fee {}",
+            new.max_fee, head.next_base_fee
+        ));
     }
     let effective_tip = new.priority.min(new.max_fee - head.next_base_fee);
     if effective_tip < limits.min_tip {
@@ -674,7 +788,10 @@ fn plan_admission(
     }
     let mut evict = Vec::new();
     let mut own = Vec::new();
-    for entry in entries.iter().filter(|e| e.meta.is_some_and(|m| m.sender == new.sender)) {
+    for entry in entries
+        .iter()
+        .filter(|e| e.meta.is_some_and(|m| m.sender == new.sender))
+    {
         if head.stale(entry, limits).is_some() {
             evict.push(entry.name.clone());
         } else {
@@ -683,15 +800,22 @@ fn plan_admission(
     }
     if let Some(old) = own.iter().find(|e| e.meta.is_some_and(|m| m.nonce == new.nonce)) {
         let old_meta = old.meta.expect("own entries decode");
-        let bumped = |old: u128, new: u128| new.saturating_mul(100) >= old.saturating_mul(100 + limits.replace_bump_percent);
+        let bumped =
+            |old: u128, new: u128| new.saturating_mul(100) >= old.saturating_mul(100 + limits.replace_bump_percent);
         if !bumped(old_meta.max_fee, new.max_fee) || !bumped(old_meta.priority, new.priority) {
-            return Err(format!("replacement transaction underpriced: needs a {}% fee bump", limits.replace_bump_percent));
+            return Err(format!(
+                "replacement transaction underpriced: needs a {}% fee bump",
+                limits.replace_bump_percent
+            ));
         }
         evict.push(old.name.clone());
         own.retain(|e| e.name != old.name);
     }
     if own.len() >= limits.max_per_sender {
-        return Err(format!("too many pending transactions from this sender (limit {})", limits.max_per_sender));
+        return Err(format!(
+            "too many pending transactions from this sender (limit {})",
+            limits.max_per_sender
+        ));
     }
     // Each entry alone being affordable is not enough: entries the balance
     // cannot cover together are dropped by execution without paying a fee.
@@ -813,7 +937,9 @@ impl Spool {
 
     /// The canonical database head number, recorded as settlement progress: the time it last changed.
     fn database_head(&self, provider: &BlochProviderFactory) -> Result<(u64, Duration), String> {
-        let best = provider.best_block_number().map_err(|e| format!("state unavailable: {e}"))?;
+        let best = provider
+            .best_block_number()
+            .map_err(|e| format!("state unavailable: {e}"))?;
         let mut progress = self.progress.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok((best, advance_progress(&mut progress, &self.dir, best)))
     }
@@ -856,7 +982,8 @@ impl Spool {
 
     /// Admit authenticated `raw` bytes, or say why not.
     fn submit(&self, provider: &BlochProviderFactory, raw: &[u8]) -> Result<B256, String> {
-        let tx = bloch_l2_evm::decode_signed_transaction(&self.spec, raw).map_err(|e| format!("transaction rejected: {e:?}"))?;
+        let tx = bloch_l2_evm::decode_signed_transaction(&self.spec, raw)
+            .map_err(|e| format!("transaction rejected: {e:?}"))?;
         if let Some(why) = never_includable(&self.spec, &tx, self.limits) {
             return Err(why);
         }
@@ -876,7 +1003,9 @@ impl Spool {
             write_sidecar(&self.dir.join(sidecar), number);
         }
         // Write beside, then rename: the producer only reads complete *.tx files.
-        let partial = self.dir.join(format!(".{}.partial", alloy_primitives::hex::encode(hash)));
+        let partial = self
+            .dir
+            .join(format!(".{}.partial", alloy_primitives::hex::encode(hash)));
         let written = std::fs::write(&partial, format!("{}\n", alloy_primitives::hex::encode(tx.raw())))
             .and_then(|()| {
                 use std::os::unix::fs::PermissionsExt;
@@ -887,7 +1016,13 @@ impl Spool {
             let _ = std::fs::remove_file(&partial);
             return Err(format!("txpool write failed: {error}"));
         }
-        let sighting = (Some(meta), std::time::SystemTime::now(), std::time::Instant::now(), Duration::ZERO, number);
+        let sighting = (
+            Some(meta),
+            std::time::SystemTime::now(),
+            std::time::Instant::now(),
+            Duration::ZERO,
+            number,
+        );
         index.insert(name.into(), sighting);
         println!("spooled tx={hash} from={} nonce={}", meta.sender, meta.nonce);
         Ok(hash)
@@ -902,7 +1037,10 @@ impl Spool {
             scan_spool(&self.spec, &self.dir, &mut index, number).map_err(|e| format!("txpool unavailable: {e}"))?;
         let stale = self.with_head(provider, |head| {
             head.mark_gaps(&entries);
-            entries.iter().filter_map(|e| head.stale(e, self.limits).map(|why| (e.name.clone(), why))).collect::<Vec<_>>()
+            entries
+                .iter()
+                .filter_map(|e| head.stale(e, self.limits).map(|why| (e.name.clone(), why)))
+                .collect::<Vec<_>>()
         })?;
         for (name, why) in &stale {
             evict_spool(&self.dir, std::slice::from_ref(name), why);
@@ -950,7 +1088,10 @@ fn spooled_next_nonce(
 /// The sender's nonce at the database tip (see [`Spool::with_head`]).
 fn tip_nonce(factory: &BlochProviderFactory, sender: alloy_primitives::Address) -> Result<u64, String> {
     let state = factory.latest().map_err(|e| format!("state unavailable: {e}"))?;
-    Ok(state.basic_account(&sender).map_err(|e| format!("state unavailable: {e}"))?.map_or(0, |a| a.nonce))
+    Ok(state
+        .basic_account(&sender)
+        .map_err(|e| format!("state unavailable: {e}"))?
+        .map_or(0, |a| a.nonce))
 }
 
 /// `eth_getTransactionCount(addr, "pending")` in the sequencer's view (see
@@ -962,7 +1103,10 @@ fn spool_pending_nonce(
     factory: BlochProviderFactory,
 ) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
-    ensure!(module.remove_method("eth_getTransactionCount").is_some(), "eth API lacks eth_getTransactionCount");
+    ensure!(
+        module.remove_method("eth_getTransactionCount").is_some(),
+        "eth API lacks eth_getTransactionCount"
+    );
     module.register_async_method("eth_getTransactionCount", move |params, _, _| {
         let (original, spool, factory) = (original.clone(), spool.clone(), factory.clone());
         async move {
@@ -975,8 +1119,10 @@ fn spool_pending_nonce(
                 jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
                 other => rpc_error(other.to_string()),
             };
-            let count: alloy_primitives::U64 =
-                original.call("eth_getTransactionCount", values.clone()).await.map_err(upstream)?;
+            let count: alloy_primitives::U64 = original
+                .call("eth_getTransactionCount", values.clone())
+                .await
+                .map_err(upstream)?;
             if !pending {
                 return Ok(count);
             }
@@ -999,7 +1145,11 @@ fn spool_pending_nonce(
 
 /// A hex quantity raised to `floor`; anything else stays as it is.
 fn floored_quantity(value: &serde_json::Value, floor: u128) -> serde_json::Value {
-    match value.as_str().and_then(|text| text.strip_prefix("0x")).and_then(|hex| u128::from_str_radix(hex, 16).ok()) {
+    match value
+        .as_str()
+        .and_then(|text| text.strip_prefix("0x"))
+        .and_then(|hex| u128::from_str_radix(hex, 16).ok())
+    {
         Some(number) if number < floor => serde_json::Value::String(format!("0x{floor:x}")),
         _ => value.clone(),
     }
@@ -1023,18 +1173,28 @@ fn floor_fee_suggestions(
             let (original, factory, spec, tip) = (original.clone(), factory.clone(), spec.clone(), tip.clone());
             async move {
                 let min_tip = tip.suggested();
-                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
-                let mut result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
-                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
-                    other => rpc_error(other.to_string()),
-                })?;
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() {
+                    vec![]
+                } else {
+                    params.parse()?
+                };
+                let mut result: serde_json::Value =
+                    original.call(method, values).await.map_err(|error| match error {
+                        jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                        other => rpc_error(other.to_string()),
+                    })?;
                 match method {
                     "eth_maxPriorityFeePerGas" => result = floored_quantity(&result, min_tip),
                     "eth_gasPrice" => {
                         let next_base_fee = tokio::task::spawn_blocking(move || -> Result<u128, String> {
                             let best = factory.best_block_number().map_err(|e| e.to_string())?;
-                            let header = factory.sealed_header(best).map_err(|e| e.to_string())?.ok_or("head header missing")?;
-                            Ok(u128::from(spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used)))
+                            let header = factory
+                                .sealed_header(best)
+                                .map_err(|e| e.to_string())?
+                                .ok_or("head header missing")?;
+                            Ok(u128::from(
+                                spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
+                            ))
                         })
                         .await
                         .map_err(|e| rpc_error(e.to_string()))?
@@ -1052,7 +1212,9 @@ fn floor_fee_suggestions(
 
 /// Raise each reward of an `eth_feeHistory` answer to `floor`.
 fn floor_rewards(history: &mut serde_json::Value, floor: u128) {
-    let Some(blocks) = history.get_mut("reward").and_then(|r| r.as_array_mut()) else { return };
+    let Some(blocks) = history.get_mut("reward").and_then(|r| r.as_array_mut()) else {
+        return;
+    };
     for rewards in blocks.iter_mut().filter_map(|b| b.as_array_mut()) {
         for reward in rewards.iter_mut() {
             *reward = floored_quantity(reward, floor);
@@ -1067,7 +1229,12 @@ fn floor_rewards(history: &mut serde_json::Value, floor: u128) {
 /// been answered `execution aborted (timeout = ...)` after `limit`: an EVM run
 /// cannot be stopped from outside, so a permit freed early would let more than
 /// `permits` runs take the CPU. Other methods are unaffected.
-fn limit_simulations(module: &mut jsonrpsee::RpcModule<()>, permits: usize, wait: Duration, limit: Duration) -> Result<()> {
+fn limit_simulations(
+    module: &mut jsonrpsee::RpcModule<()>,
+    permits: usize,
+    wait: Duration,
+    limit: Duration,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     let gate = Arc::new(tokio::sync::Semaphore::new(permits));
     for name in SIMULATION_METHODS {
@@ -1123,9 +1290,11 @@ const HEAD_BOUND_METHODS: [&str; 2] = ["eth_getTransactionReceipt", "eth_getTran
 fn canonical_hash(factory: &BlochProviderFactory, hash: B256, head: u64) -> bool {
     use reth_provider::BlockNumReader;
     match factory.block_number(hash) {
-        Ok(Some(number)) if number <= head => {
-            factory.sealed_header(number).ok().flatten().is_some_and(|header| header.hash() == hash)
-        }
+        Ok(Some(number)) if number <= head => factory
+            .sealed_header(number)
+            .ok()
+            .flatten()
+            .is_some_and(|header| header.hash() == hash),
         _ => false,
     }
 }
@@ -1142,7 +1311,11 @@ const BY_HASH_METHODS: [(&str, usize); 7] = [
 ];
 
 /// Answer null, as for an unknown block, when a call names a block hash that is not canonical in the database.
-fn hide_removed_blocks(module: &mut jsonrpsee::RpcModule<()>, factory: BlochProviderFactory, head: Arc<AtomicU64>) -> Result<()> {
+fn hide_removed_blocks(
+    module: &mut jsonrpsee::RpcModule<()>,
+    factory: BlochProviderFactory,
+    head: Arc<AtomicU64>,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     for (method, position) in BY_HASH_METHODS {
         if module.remove_method(method).is_none() {
@@ -1152,26 +1325,43 @@ fn hide_removed_blocks(module: &mut jsonrpsee::RpcModule<()>, factory: BlochProv
         module.register_async_method(method, move |params, _, _| {
             let (original, factory, head) = (original.clone(), factory.clone(), head.clone());
             async move {
-                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
-                let named = values.get(position).and_then(|v| v.as_str()).filter(|v| v.len() == 66).and_then(|v| v.parse::<B256>().ok());
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() {
+                    vec![]
+                } else {
+                    params.parse()?
+                };
+                let named = values
+                    .get(position)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| v.len() == 66)
+                    .and_then(|v| v.parse::<B256>().ok());
                 if let Some(hash) = named {
                     let served = head.load(Ordering::Acquire);
-                    let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served)).await.unwrap_or(false);
+                    let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served))
+                        .await
+                        .unwrap_or(false);
                     if !known {
                         return Ok(serde_json::Value::Null);
                     }
                 }
-                original.call::<_, serde_json::Value>(method, values).await.map_err(|error| match error {
-                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
-                    other => rpc_error(other.to_string()),
-                })
+                original
+                    .call::<_, serde_json::Value>(method, values)
+                    .await
+                    .map_err(|error| match error {
+                        jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                        other => rpc_error(other.to_string()),
+                    })
             }
         })?;
     }
     Ok(())
 }
 
-fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<AtomicU64>, factory: Option<BlochProviderFactory>) -> Result<()> {
+fn hide_blocks_above_head(
+    module: &mut jsonrpsee::RpcModule<()>,
+    head: Arc<AtomicU64>,
+    factory: Option<BlochProviderFactory>,
+) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     for method in HEAD_BOUND_METHODS {
         ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
@@ -1179,7 +1369,11 @@ fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<Atomi
         module.register_async_method(method, move |params, _, _| {
             let (original, head, factory) = (original.clone(), head.clone(), factory.clone());
             async move {
-                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() {
+                    vec![]
+                } else {
+                    params.parse()?
+                };
                 let result: serde_json::Value = original.call(method, values).await.map_err(|error| match error {
                     jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
                     other => rpc_error(other.to_string()),
@@ -1193,8 +1387,16 @@ fn hide_blocks_above_head(module: &mut jsonrpsee::RpcModule<()>, head: Arc<Atomi
                     return Ok(serde_json::Value::Null);
                 }
                 // A transaction of a block a rewind removed: the cache may still hold it.
-                if let (Some(hash), Some(factory)) = (result.get("blockHash").and_then(|v| v.as_str()).and_then(|v| v.parse::<B256>().ok()), factory) {
-                    let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served)).await.unwrap_or(false);
+                if let (Some(hash), Some(factory)) = (
+                    result
+                        .get("blockHash")
+                        .and_then(|v| v.as_str())
+                        .and_then(|v| v.parse::<B256>().ok()),
+                    factory,
+                ) {
+                    let known = tokio::task::spawn_blocking(move || canonical_hash(&factory, hash, served))
+                        .await
+                        .unwrap_or(false);
                     if !known {
                         return Ok(serde_json::Value::Null);
                     }
@@ -1212,7 +1414,11 @@ fn create_view(data: &Path, view: &Path) -> Result<()> {
     std::fs::create_dir(view)?;
     for directory in ["db", "static", "rocks"] {
         let target = data.join(directory);
-        ensure!(std::fs::symlink_metadata(&target)?.is_dir(), "{} is not a directory", target.display());
+        ensure!(
+            std::fs::symlink_metadata(&target)?.is_dir(),
+            "{} is not a directory",
+            target.display()
+        );
         std::os::unix::fs::symlink(target, view.join(directory))?;
     }
     Ok(())
@@ -1231,7 +1437,11 @@ struct NotLocalYet {
 
 impl std::fmt::Display for NotLocalYet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "settled L2 block {} is not in the local canonical chain yet", self.number)
+        write!(
+            f,
+            "settled L2 block {} is not in the local canonical chain yet",
+            self.number
+        )
     }
 }
 
@@ -1278,7 +1488,10 @@ struct ClosedLevels {
 
 impl ClosedLevels {
     fn new(closed: bool) -> Self {
-        Self { finalized: closed.into(), safe: closed.into() }
+        Self {
+            finalized: closed.into(),
+            safe: closed.into(),
+        }
     }
 
     fn set(&self, finalized: bool, safe: bool) {
@@ -1303,7 +1516,9 @@ fn names_a_closed_level(values: &[serde_json::Value], position: Option<usize>, c
             // EIP-1898 form: {"blockNumber": tag}.
             is_closed(value) || is_closed(value.and_then(|v| v.get("blockNumber")))
         }
-        None => values.first().is_some_and(|f| is_closed(f.get("fromBlock")) || is_closed(f.get("toBlock"))),
+        None => values
+            .first()
+            .is_some_and(|f| is_closed(f.get("fromBlock")) || is_closed(f.get("toBlock"))),
     }
 }
 
@@ -1323,7 +1538,10 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<Close
         )
     }
     let original: jsonrpsee::Methods = module.clone().into();
-    let routes = TAGGED_METHODS.iter().map(|(name, position)| (*name, Some(*position))).chain(FINALIZED_RECORD_METHODS.map(|name| (name, None)));
+    let routes = TAGGED_METHODS
+        .iter()
+        .map(|(name, position)| (*name, Some(*position)))
+        .chain(FINALIZED_RECORD_METHODS.map(|name| (name, None)));
     for (name, position) in routes {
         if module.remove_method(name).is_none() {
             continue;
@@ -1332,7 +1550,11 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<Close
         module.register_async_method(name, move |params, _, _| {
             let (original, closed) = (original.clone(), closed.clone());
             async move {
-                let values: Vec<serde_json::Value> = if params.as_str().is_none() { vec![] } else { params.parse()? };
+                let values: Vec<serde_json::Value> = if params.as_str().is_none() {
+                    vec![]
+                } else {
+                    params.parse()?
+                };
                 let refuse = match position {
                     Some(position) => names_a_closed_level(&values, position, &closed),
                     None => closed.finalized.load(Ordering::Acquire),
@@ -1340,10 +1562,13 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<Close
                 if refuse {
                     return Err(refused());
                 }
-                original.call::<_, serde_json::Value>(name, values).await.map_err(|error| match error {
-                    jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
-                    other => rpc_error(other.to_string()),
-                })
+                original
+                    .call::<_, serde_json::Value>(name, values)
+                    .await
+                    .map_err(|error| match error {
+                        jsonrpsee::core::server::MethodsError::JsonRpc(object) => object,
+                        other => rpc_error(other.to_string()),
+                    })
             }
         })?;
     }
@@ -1352,7 +1577,9 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<Close
 
 /// The `status` member of `bloch_finality`: state of the follower's file and, when known, its age.
 fn status_signal(state: &str, written_at_unix: Option<u64>, schema: Option<&str>) -> serde_json::Value {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     serde_json::json!({
         "state": state,
         "written_at_unix": written_at_unix,
@@ -1412,7 +1639,10 @@ fn verified_levels(
         "unexpected status schema"
     );
     ensure!(status["network"] == network, "status is for another native network");
-    ensure!(status["production_finality"] == false, "status claims production finality");
+    ensure!(
+        status["production_finality"] == false,
+        "status claims production finality"
+    );
     let written_at = status["written_at_unix"].as_u64();
     let schema = status["schema"].as_str().map(str::to_owned);
     // A tip this database has not reached advances nothing, so a syncing RPC does not reread the log at each poll.
@@ -1421,21 +1651,37 @@ fn verified_levels(
             // A lag only if nothing contradicts: the genesis, what this database holds of the newest
             // settlements, and a log of the size the status names. A database further behind than the
             // newest settlements has nothing here to compare until it reaches them.
-            let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
+            let genesis = provider
+                .sealed_header(0)?
+                .ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
             final_genesis(&status, chain_id, genesis.hash())?;
             for entry in settlement_log::recent_entries(&status) {
-                let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad l2_number"))?;
+                let number = entry["l2_number"]
+                    .as_u64()
+                    .ok_or_else(|| eyre::eyre!("bad l2_number"))?;
                 let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
                 if let Some(local) = provider.sealed_header(number)? {
-                    ensure!(local.hash() == hash, "settled L2 block {number} differs from the local canonical header");
+                    ensure!(
+                        local.hash() == hash,
+                        "settled L2 block {number} differs from the local canonical header"
+                    );
                 }
             }
             settlement_log::check_log_present(status_path, &status).map_err(|e| eyre::eyre!(e))?;
-            return Err(NotLocalYet { number: tip, written_at, schema }.into());
+            return Err(NotLocalYet {
+                number: tip,
+                written_at,
+                schema,
+            }
+            .into());
         }
     }
     // A log read from its start and refused is not read again until it or its status changes.
-    let identity = if cursor.reads_from_start() { settlement_log::log_identity(status_path, &status) } else { None };
+    let identity = if cursor.reads_from_start() {
+        settlement_log::log_identity(status_path, &status)
+    } else {
+        None
+    };
     if let (Some(identity), Some((seen, why))) = (&identity, &*refused_log) {
         if identity == seen {
             bail!("{why}");
@@ -1443,10 +1689,18 @@ fn verified_levels(
     }
     // Same settlements in other bytes (a follower build that writes other JSON): read the whole log once and
     // compare it with this chain below. Fewer settlements than verified stays a regression.
-    let first_try = if settlement_log::log_rewritten(&status, cursor) { None } else { Some(cursor) };
+    let first_try = if settlement_log::log_rewritten(&status, cursor) {
+        None
+    } else {
+        Some(cursor)
+    };
     let start = settlement_log::Cursor::default();
     let cursor_used = first_try.unwrap_or(&start);
-    let identity = if first_try.is_none() { settlement_log::log_identity(status_path, &status) } else { identity };
+    let identity = if first_try.is_none() {
+        settlement_log::log_identity(status_path, &status)
+    } else {
+        identity
+    };
     if let (Some(identity), Some((seen, why))) = (&identity, &*refused_log) {
         if identity == seen {
             bail!("{why}");
@@ -1470,18 +1724,28 @@ fn verified_levels(
         }
         eyre::eyre!(why)
     };
-    let genesis = provider.sealed_header(0)?.ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
+    let genesis = provider
+        .sealed_header(0)?
+        .ok_or_else(|| eyre::eyre!("local L2 genesis header missing"))?;
     let mut best = final_genesis(&status, chain_id, genesis.hash())?.then_some(genesis);
     // New entries once, then the newest ones at every poll: a block hash commits to its parents, so
     // a tip that still matches the local chain covers the older blocks already matched.
     for entry in delta.entries.iter().chain(delta.recent.iter()) {
-        let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad l2_number"))?;
+        let number = entry["l2_number"]
+            .as_u64()
+            .ok_or_else(|| eyre::eyre!("bad l2_number"))?;
         let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
-        let local = provider
-            .sealed_header(number)?
-            .ok_or_else(|| NotLocalYet { number, written_at, schema: schema.clone() })?;
+        let local = provider.sealed_header(number)?.ok_or_else(|| NotLocalYet {
+            number,
+            written_at,
+            schema: schema.clone(),
+        })?;
         if local.hash() != hash {
-            return Err(contradicted(format!("settled L2 block {number} differs from the local canonical header"), &identity, refused_log));
+            return Err(contradicted(
+                format!("settled L2 block {number} differs from the local canonical header"),
+                &identity,
+                refused_log,
+            ));
         }
         best = Some(local);
     }
@@ -1491,10 +1755,14 @@ fn verified_levels(
     let safe = match status.get("safe_settlement").filter(|v| !v.is_null()) {
         None => None,
         Some(entry) => {
-            let number = entry["l2_number"].as_u64().ok_or_else(|| eyre::eyre!("bad safe l2_number"))?;
+            let number = entry["l2_number"]
+                .as_u64()
+                .ok_or_else(|| eyre::eyre!("bad safe l2_number"))?;
             let hash: B256 = entry["l2_hash"].as_str().unwrap_or_default().parse()?;
             if number < finalized_number {
-                safe_refused = Some(format!("safe settlement {number} is below finalized {finalized_number}"));
+                safe_refused = Some(format!(
+                    "safe settlement {number} is below finalized {finalized_number}"
+                ));
                 None
             } else {
                 match provider.sealed_header(number)? {
@@ -1505,7 +1773,9 @@ fn verified_levels(
                     }
                     Some(local) if local.hash() == hash => Some(local),
                     Some(_) => {
-                        safe_refused = Some(format!("safe L2 block {number} differs from the local canonical header"));
+                        safe_refused = Some(format!(
+                            "safe L2 block {number} differs from the local canonical header"
+                        ));
                         None
                     }
                 }
@@ -1515,7 +1785,15 @@ fn verified_levels(
     let mut new_settlements = delta.entries;
     // After a whole-log read, what this process already adopted is not new.
     new_settlements.retain(|entry| entry["l2_number"].as_u64().is_some_and(|n| n > cursor.count));
-    Ok(Some(Levels { finalized: best, safe, safe_not_local, safe_refused, status, new_settlements, cursor: delta.cursor }))
+    Ok(Some(Levels {
+        finalized: best,
+        safe,
+        safe_not_local,
+        safe_refused,
+        status,
+        new_settlements,
+        cursor: delta.cursor,
+    }))
 }
 
 /// Whether the status proves the local L2 genesis final: the follower reports
@@ -1524,18 +1802,27 @@ fn verified_levels(
 /// status for another chain id or another L2 genesis is refused.
 fn final_genesis(status: &serde_json::Value, chain_id: u64, local_genesis: B256) -> Result<bool> {
     if let Some(id) = status.get("chain_id").filter(|v| !v.is_null()) {
-        ensure!(id.as_u64() == Some(chain_id), "status is for chain id {id}, this RPC serves {chain_id}");
+        ensure!(
+            id.as_u64() == Some(chain_id),
+            "status is for chain id {id}, this RPC serves {chain_id}"
+        );
     }
-    let Some(genesis) = status.get("l2_genesis").filter(|v| !v.is_null()) else { return Ok(false) };
+    let Some(genesis) = status.get("l2_genesis").filter(|v| !v.is_null()) else {
+        return Ok(false);
+    };
     let hash: B256 = genesis["hash"].as_str().unwrap_or_default().parse()?;
-    ensure!(hash == local_genesis, "the native L2 genesis {hash} differs from the local genesis {local_genesis}");
+    ensure!(
+        hash == local_genesis,
+        "the native L2 genesis {hash} differs from the local genesis {local_genesis}"
+    );
     Ok(genesis["finalized"] == true)
 }
 
 fn level_json(header: &Option<Header>) -> serde_json::Value {
-    header.as_ref().map_or(serde_json::Value::Null, |h| {
-        serde_json::json!({"number": format!("0x{:x}", h.0.number), "hash": h.hash()})
-    })
+    header.as_ref().map_or(
+        serde_json::Value::Null,
+        |h| serde_json::json!({"number": format!("0x{:x}", h.0.number), "hash": h.hash()}),
+    )
 }
 
 /// `net_*` and `web3_*`, which wallets (MetaMask's network check calls
@@ -1545,10 +1832,20 @@ fn net_web3_rpc(chain_id: u64) -> jsonrpsee::RpcModule<()> {
     let mut module = jsonrpsee::RpcModule::new(());
     let version = chain_id.to_string();
     module
-        .register_method("net_version", move |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>(version.clone()))
+        .register_method("net_version", move |_, _, _| {
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>(version.clone())
+        })
         .expect("unique");
-    module.register_method("net_listening", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>(true)).expect("unique");
-    module.register_method("net_peerCount", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x0")).expect("unique");
+    module
+        .register_method("net_listening", |_, _, _| {
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>(true)
+        })
+        .expect("unique");
+    module
+        .register_method("net_peerCount", |_, _, _| {
+            Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x0")
+        })
+        .expect("unique");
     module
         .register_method("web3_clientVersion", |_, _, _| {
             Ok::<_, jsonrpsee::types::ErrorObjectOwned>(concat!("bloch-l2-settled-rpc/v", env!("CARGO_PKG_VERSION")))
@@ -1572,7 +1869,15 @@ type SettlementIndex = std::collections::BTreeMap<u64, Box<str>>;
 fn public_settlement(entry: &serde_json::Value) -> Option<(u64, Box<str>)> {
     let number = entry["l2_number"].as_u64()?;
     let mut out = serde_json::Map::new();
-    for key in ["l2_number", "l2_hash", "l2_state_root", "commitment", "native_slot", "native_block", "withdrawals"] {
+    for key in [
+        "l2_number",
+        "l2_hash",
+        "l2_state_root",
+        "commitment",
+        "native_slot",
+        "native_block",
+        "withdrawals",
+    ] {
         out.insert(key.into(), entry.get(key).cloned().unwrap_or(serde_json::Value::Null));
     }
     out.insert("finalized".into(), true.into());
@@ -1589,12 +1894,18 @@ fn settlement_rpc(index: Arc<std::sync::RwLock<SettlementIndex>>) -> jsonrpsee::
             let value: serde_json::Value = params.one()?;
             let number = match &value {
                 serde_json::Value::Number(n) => n.as_u64(),
-                serde_json::Value::String(text) => {
-                    text.strip_prefix("0x").and_then(|hex| u64::from_str_radix(hex, 16).ok())
-                }
+                serde_json::Value::String(text) => text
+                    .strip_prefix("0x")
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok()),
                 _ => None,
             }
-            .ok_or_else(|| jsonrpsee::types::ErrorObjectOwned::owned(-32602, "block number must be a hex quantity or an integer", None::<()>))?;
+            .ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -32602,
+                    "block number must be a hex quantity or an integer",
+                    None::<()>,
+                )
+            })?;
             Ok::<_, jsonrpsee::types::ErrorObjectOwned>(
                 index
                     .read()
@@ -1647,7 +1958,9 @@ fn follow_withdrawals(
     };
     // Each settlement is read once, so one that cannot be parsed stops the index for good: a later
     // settlement cannot be applied without it.
-    let after = pending.last().map_or(indexed, |entry: &withdrawal_proofs::FinalEntry| entry.number.max(indexed));
+    let after = pending.last().map_or(indexed, |entry: &withdrawal_proofs::FinalEntry| {
+        entry.number.max(indexed)
+    });
     match withdrawal_proofs::final_entries(new_settlements, after) {
         Ok(entries) => pending.extend(entries),
         Err(error) => {
@@ -1676,7 +1989,10 @@ fn follow_withdrawals(
     });
     if let Err(error) = result {
         let frozen = proofs.index.read().map_or(true, |index| index.is_frozen());
-        println!("withdrawal proofs{}: {error}", if frozen { " FROZEN" } else { " not advanced" });
+        println!(
+            "withdrawal proofs{}: {error}",
+            if frozen { " FROZEN" } else { " not advanced" }
+        );
     }
     if let Ok(index) = proofs.index.read() {
         let done = index.indexed();
@@ -1697,10 +2013,16 @@ async fn main() -> Result<()> {
     let rules = || options.l2.rules.clone();
     let spec = Arc::new(options.l2.chain_spec()?);
     let factory: BlochProviderFactory = ProviderFactory::new(
-        Arc::new(open_db_read_only(options.view_dir.join("db"), DatabaseArguments::default())?),
+        Arc::new(open_db_read_only(
+            options.view_dir.join("db"),
+            DatabaseArguments::default(),
+        )?),
         spec.clone(),
         StaticFileProvider::read_only(options.view_dir.join("static"))?,
-        RocksDBBuilder::new(options.view_dir.join("rocks")).with_default_tables().with_read_only(true).build()?,
+        RocksDBBuilder::new(options.view_dir.join("rocks"))
+            .with_default_tables()
+            .with_read_only(true)
+            .build()?,
         runtime.clone(),
     )?
     .with_read_only_sync(true);
@@ -1719,20 +2041,34 @@ async fn main() -> Result<()> {
         PendingPolicy::LatestDerived,
         SIMULATION_GAS_CAP,
     );
-    let filter = EthFilter::new(api.clone(), reth_rpc_eth_types::EthConfig::default().filter_config(), runtime.clone());
+    let filter = EthFilter::new(
+        api.clone(),
+        reth_rpc_eth_types::EthConfig::default().filter_config(),
+        runtime.clone(),
+    );
     let mut module = api.into_rpc().remove_context();
     let spool = match &options.txpool {
         Some(pool) => {
-            ensure!(std::fs::symlink_metadata(pool)?.is_dir(), "--txpool {} is not a directory", pool.display());
+            ensure!(
+                std::fs::symlink_metadata(pool)?.is_dir(),
+                "--txpool {} is not a directory",
+                pool.display()
+            );
             let spool = Arc::new(Spool {
                 spec: rules(),
                 dir: pool.clone(),
                 index: std::sync::Mutex::new(SpoolIndex::new()),
-                limits: SpoolLimits { min_tip: options.min_tip, ..SPOOL_LIMITS },
+                limits: SpoolLimits {
+                    min_tip: options.min_tip,
+                    ..SPOOL_LIMITS
+                },
                 progress: std::sync::Mutex::new(None),
             });
             // Replace the no-pool method of the read-only API with the spooling one.
-            ensure!(module.remove_method("eth_sendRawTransaction").is_some(), "eth API lacks eth_sendRawTransaction");
+            ensure!(
+                module.remove_method("eth_sendRawTransaction").is_some(),
+                "eth API lacks eth_sendRawTransaction"
+            );
             module.merge(sequencer_rpc(spool.clone(), factory.clone()))?;
             Some(spool)
         }
@@ -1751,7 +2087,9 @@ async fn main() -> Result<()> {
     module.merge(finality_rpc(finality.clone()))?;
     let settlements = Arc::new(std::sync::RwLock::new(SettlementIndex::new()));
     module.merge(settlement_rpc(settlements.clone()))?;
-    let withdrawal_proofs = kernel.withdrawal_outbox.map(|outbox| withdrawal_proofs::Shared::new(kernel.chain_id, outbox));
+    let withdrawal_proofs = kernel
+        .withdrawal_outbox
+        .map(|outbox| withdrawal_proofs::Shared::new(kernel.chain_id, outbox));
     if let Some(proofs) = &withdrawal_proofs {
         module.merge(withdrawal_proofs::rpc(proofs.clone()))?;
     }
@@ -1763,9 +2101,18 @@ async fn main() -> Result<()> {
     if let Some(spool) = &spool {
         spool_pending_nonce(&mut module, spool.clone(), factory.clone())?;
     }
-    let tip = Arc::new(RequiredTip::new(options.min_tip, options.required_tip_file.clone(), options.tip_headroom_percent));
+    let tip = Arc::new(RequiredTip::new(
+        options.min_tip,
+        options.required_tip_file.clone(),
+        options.tip_headroom_percent,
+    ));
     floor_fee_suggestions(&mut module, tip, factory.clone(), rules())?;
-    limit_simulations(&mut module, MAX_CONCURRENT_SIMULATIONS, SIMULATION_WAIT, SIMULATION_TIME_LIMIT)?;
+    limit_simulations(
+        &mut module,
+        MAX_CONCURRENT_SIMULATIONS,
+        SIMULATION_WAIT,
+        SIMULATION_TIME_LIMIT,
+    )?;
     let levels_closed = Arc::new(ClosedLevels::new(true));
     refuse_closed_levels(&mut module, levels_closed.clone())?;
     let server = start_http_rpc(module, options.port).await?;
@@ -1773,7 +2120,13 @@ async fn main() -> Result<()> {
         "SETTLED L2 RPC (chain id {}) at {}; finality only from verified native FFG settlement; {}",
         kernel.chain_id,
         server.http_url().unwrap_or_default(),
-        options.txpool.as_ref().map_or("transactions refused".to_string(), |p| format!("eth_sendRawTransaction spools to {}", p.display()))
+        options
+            .txpool
+            .as_ref()
+            .map_or("transactions refused".to_string(), |p| format!(
+                "eth_sendRawTransaction spools to {}",
+                p.display()
+            ))
     );
     let state = provider.canonical_in_memory_state();
     let mut head_number = u64::MAX;
@@ -1979,10 +2332,23 @@ mod tests {
 
     #[test]
     fn required_tip_is_read_from_the_sequencer_state() {
-        assert_eq!(required_tip_from(r#"{"tip": 830000000, "senders": {}}"#), Some(830_000_000));
-        assert_eq!(required_tip_from(r#"{"required_tip_wei": "0x3b9aca00", "tip": 1}"#), Some(1_000_000_000));
+        assert_eq!(
+            required_tip_from(r#"{"tip": 830000000, "senders": {}}"#),
+            Some(830_000_000)
+        );
+        assert_eq!(
+            required_tip_from(r#"{"required_tip_wei": "0x3b9aca00", "tip": 1}"#),
+            Some(1_000_000_000)
+        );
         assert_eq!(required_tip_from(r#"{"required_tip_wei": "250"}"#), Some(250));
-        for bad in [r#"{"tip": -1}"#, r#"{"tip": 1.5}"#, r#"{"tip": null}"#, r#"{"senders": {}}"#, "not json", "[]"] {
+        for bad in [
+            r#"{"tip": -1}"#,
+            r#"{"tip": 1.5}"#,
+            r#"{"tip": null}"#,
+            r#"{"senders": {}}"#,
+            "not json",
+            "[]",
+        ] {
             assert_eq!(required_tip_from(bad), None, "{bad}");
         }
         assert_eq!(with_headroom(100, 25), 125);
@@ -1993,12 +2359,20 @@ mod tests {
 
     #[test]
     fn fee_suggestions_follow_the_required_tip_file() {
-        let dir = std::env::temp_dir().join(format!("required-tip-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "required-tip-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sequencer-policy.json");
         let floor = 100_000_000;
-        assert_eq!(RequiredTip::new(floor, None, 25).suggested(), floor, "no file option: the static floor");
+        assert_eq!(
+            RequiredTip::new(floor, None, 25).suggested(),
+            floor,
+            "no file option: the static floor"
+        );
         let tip = RequiredTip::new(floor, Some(file.clone()), 25);
         let recheck = |tip: &RequiredTip| tip.cache.lock().unwrap().checked = None;
         assert_eq!(tip.suggested(), floor, "file not written yet");
@@ -2009,12 +2383,20 @@ mod tests {
         recheck(&tip);
         assert_eq!(tip.suggested(), floor, "never below the floor the spool admits");
         std::fs::write(&file, r#"{"tip": 8000000000000}"#).unwrap();
-        assert_eq!(tip.suggested(), floor, "a change is seen at the next recheck, not on every call");
+        assert_eq!(
+            tip.suggested(),
+            floor,
+            "a change is seen at the next recheck, not on every call"
+        );
         recheck(&tip);
         assert_eq!(tip.suggested(), 10_000_000_000_000);
         std::fs::write(&file, "{truncated").unwrap();
         recheck(&tip);
-        assert_eq!(tip.suggested(), 10_000_000_000_000, "an unreadable document keeps the last good tip");
+        assert_eq!(
+            tip.suggested(),
+            10_000_000_000_000,
+            "an unreadable document keeps the last good tip"
+        );
         std::fs::remove_file(&file).unwrap();
         recheck(&tip);
         assert_eq!(tip.suggested(), floor, "no file: no published congestion tip");
@@ -2051,12 +2433,20 @@ mod tests {
                 Ok::<_, jsonrpsee::types::ErrorObjectOwned>(json!({"tag": values[0]}))
             })
             .unwrap();
-        module.register_method("bloch_settlement", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>(json!({"l2_number": 1}))).unwrap();
+        module
+            .register_method("bloch_settlement", |_, _, _| {
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>(json!({"l2_number": 1}))
+            })
+            .unwrap();
         let closed = Arc::new(ClosedLevels::new(true));
         refuse_closed_levels(&mut module, closed.clone()).unwrap();
         let ask = |tag: &'static str| {
             let module = module.clone();
-            async move { module.call::<_, Value>("eth_getBlockByNumber", [json!(tag), json!(false)]).await }
+            async move {
+                module
+                    .call::<_, Value>("eth_getBlockByNumber", [json!(tag), json!(false)])
+                    .await
+            }
         };
         let settlement = || {
             let module = module.clone();
@@ -2076,13 +2466,22 @@ mod tests {
 
     #[test]
     fn a_status_ahead_of_this_database_does_not_close_the_levels() {
-        assert!(!closes_levels(&eyre::Report::new(NotLocalYet { number: 7, written_at: None, schema: None })));
-        assert!(closes_levels(&eyre::eyre!("settled L2 block 7 differs from the local canonical header")));
+        assert!(!closes_levels(&eyre::Report::new(NotLocalYet {
+            number: 7,
+            written_at: None,
+            schema: None
+        })));
+        assert!(closes_levels(&eyre::eyre!(
+            "settled L2 block 7 differs from the local canonical header"
+        )));
     }
 
     #[test]
     fn the_status_signal_reports_state_and_age() {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let signal = status_signal("ok", Some(now - 100), Some("v3"));
         assert_eq!(signal["state"], "ok");
         assert!(signal["age_s"].as_u64().unwrap() >= 100);
@@ -2099,10 +2498,17 @@ mod tests {
             max_fee_per_gas: 2_000_000_000,
             ..Default::default()
         };
-        let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let signature: Signature = key
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         let signed = TxEnvelope::from(tx.into_signed(signature));
         let name = format!("{}.tx", alloy_primitives::hex::encode(signed.tx_hash()));
-        std::fs::write(dir.join(name), format!("{}\n", alloy_primitives::hex::encode(signed.encoded_2718()))).unwrap();
+        std::fs::write(
+            dir.join(name),
+            format!("{}\n", alloy_primitives::hex::encode(signed.encoded_2718())),
+        )
+        .unwrap();
     }
 
     fn address(key: u8) -> Address {
@@ -2121,8 +2527,18 @@ mod tests {
         assert!(final_genesis(&status(700_770.into(), entry(local, true)), 700_770, local).unwrap());
         assert!(final_genesis(&status(serde_json::Value::Null, entry(local, true)), 700_770, local).unwrap());
         assert!(final_genesis(&status(700_771.into(), entry(local, true)), 700_770, local).is_err());
-        assert!(final_genesis(&status(700_770.into(), entry(B256::repeat_byte(1), true)), 700_770, local).is_err());
-        assert!(final_genesis(&status(700_770.into(), serde_json::json!({"finalized": true})), 700_770, local).is_err());
+        assert!(final_genesis(
+            &status(700_770.into(), entry(B256::repeat_byte(1), true)),
+            700_770,
+            local
+        )
+        .is_err());
+        assert!(final_genesis(
+            &status(700_770.into(), serde_json::json!({"finalized": true})),
+            700_770,
+            local
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -2166,7 +2582,10 @@ mod tests {
         assert!(listening);
         let peers: String = module.call("net_peerCount", jsonrpsee::rpc_params![]).await.unwrap();
         assert_eq!(peers, "0x0");
-        let client: String = module.call("web3_clientVersion", jsonrpsee::rpc_params![]).await.unwrap();
+        let client: String = module
+            .call("web3_clientVersion", jsonrpsee::rpc_params![])
+            .await
+            .unwrap();
         assert!(client.starts_with("bloch-l2-settled-rpc/v"));
         let hash: B256 = module.call("web3_sha3", jsonrpsee::rpc_params!["0x"]).await.unwrap();
         assert_eq!(hash, alloy_primitives::KECCAK256_EMPTY);
@@ -2202,7 +2621,10 @@ mod tests {
 
     #[test]
     fn the_spool_refuses_and_evicts_a_tip_below_the_minimum() {
-        let limits = SpoolLimits { min_tip: 100_000_000, ..LIMITS };
+        let limits = SpoolLimits {
+            min_tip: 100_000_000,
+            ..LIMITS
+        };
         let meta = |max_fee: u128, priority: u128| SpoolMeta {
             sender: address(1),
             nonce: 0,
@@ -2222,8 +2644,12 @@ mod tests {
         let plan = |head: &mut SpoolHead<'_>, new: SpoolMeta| plan_admission(&[], &new, head, limits);
         // Zero tip, the tip one wei short, and a fee cap that leaves too little over the base fee.
         assert!(plan(&mut head, meta(GWEI, 0)).unwrap_err().contains("underpriced"));
-        assert!(plan(&mut head, meta(GWEI, 99_999_999)).unwrap_err().contains("underpriced"));
-        assert!(plan(&mut head, meta(100_000_999, GWEI)).unwrap_err().contains("underpriced"));
+        assert!(plan(&mut head, meta(GWEI, 99_999_999))
+            .unwrap_err()
+            .contains("underpriced"));
+        assert!(plan(&mut head, meta(100_000_999, GWEI))
+            .unwrap_err()
+            .contains("underpriced"));
         // Exactly the minimum, in both forms; a legacy price pays price minus base fee.
         assert!(plan(&mut head, meta(GWEI, 100_000_000)).is_ok());
         assert!(plan(&mut head, meta(100_001_000, 100_000_000)).is_ok());
@@ -2289,7 +2715,10 @@ mod tests {
             value: alloy_primitives::U256::from(value),
             ..Default::default()
         };
-        let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let signature: Signature = key
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         TxEnvelope::from(tx.into_signed(signature)).encoded_2718()
     }
 
@@ -2304,7 +2733,14 @@ mod tests {
         number: u64,
         stalled_for: Duration,
     ) -> SpoolHead<'a> {
-        SpoolHead { account, next_base_fee: GWEI, instant, number, stalled_for, gapped: Default::default() }
+        SpoolHead {
+            account,
+            next_base_fee: GWEI,
+            instant,
+            number,
+            stalled_for,
+            gapped: Default::default(),
+        }
     }
 
     #[test]
@@ -2347,8 +2783,17 @@ mod tests {
         let mut account = |_| (11, alloy_primitives::U256::MAX);
         let three_hours_later = waiting.seen + Duration::from_secs(3 * 3_600 + 6 * 60);
         // Still proving block 64's successor after 3 h 6 min: no new block yet.
-        let mut head = facts(&mut account, three_hours_later, 64, Duration::from_secs(3 * 3_600 + 6 * 60));
-        assert_eq!(head.stale(&waiting, SPOOL_LIMITS), None, "no block since it was spooled");
+        let mut head = facts(
+            &mut account,
+            three_hours_later,
+            64,
+            Duration::from_secs(3 * 3_600 + 6 * 60),
+        );
+        assert_eq!(
+            head.stale(&waiting, SPOOL_LIMITS),
+            None,
+            "no block since it was spooled"
+        );
         // Blocks 65 to 67 (it was deferred three times, say by fee): still kept.
         for number in 65..64 + SPOOL_LIMITS.expire_after_blocks {
             head.number = number;
@@ -2411,7 +2856,9 @@ mod tests {
             head_when_seen: 64,
             ..entry(&spec, name, key, nonce, fee)
         };
-        let full: Vec<_> = (10..18u8).map(|k| at_64(&format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI)).collect();
+        let full: Vec<_> = (10..18u8)
+            .map(|k| at_64(&format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI))
+            .collect();
         let mut account = |_| (0, alloy_primitives::U256::MAX);
         let instant = full[0].seen + Duration::from_secs(1_000);
         let mut head = facts(&mut account, instant, 65, Duration::ZERO);
@@ -2424,7 +2871,9 @@ mod tests {
         assert_eq!(plan(meta(&spec, 1, 0, 3 * GWEI), &full), Ok(vec!["k10.tx".into()]));
         // The same sender is still capped at max_per_sender.
         let mine: Vec<_> = (0..3).map(|n| at_64(&format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
-        assert!(plan(meta(&spec, 1, 3, 2 * GWEI), &mine).unwrap_err().starts_with("too many"));
+        assert!(plan(meta(&spec, 1, 3, 2 * GWEI), &mine)
+            .unwrap_err()
+            .starts_with("too many"));
     }
 
     #[test]
@@ -2437,7 +2886,10 @@ mod tests {
             std::fs::write(dir.path().join(name), format!("{raw}\n")).unwrap();
         };
         write("a.tx", 0);
-        assert_eq!(scan_spool(&spec, dir.path(), &mut index, 7).unwrap()[0].head_when_seen, 7);
+        assert_eq!(
+            scan_spool(&spec, dir.path(), &mut index, 7).unwrap()[0].head_when_seen,
+            7
+        );
         write("b.tx", 1);
         let mut entries = scan_spool(&spec, dir.path(), &mut index, 9).unwrap();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2491,7 +2943,12 @@ mod tests {
             .iter()
             .map(|(key, nonce, balance)| (address(*key), (*nonce, alloy_primitives::U256::from(*balance))))
             .collect();
-        let mut account = |a: Address| table.get(&a).copied().unwrap_or((0, alloy_primitives::U256::from(u128::MAX)));
+        let mut account = |a: Address| {
+            table
+                .get(&a)
+                .copied()
+                .unwrap_or((0, alloy_primitives::U256::from(u128::MAX)))
+        };
         // Test entries were seen at block 0; the head is far past them, so age alone decides expiry here.
         let mut head = SpoolHead {
             account: &mut account,
@@ -2514,20 +2971,32 @@ mod tests {
         let poor = plan(&[], &new, &[(1, 5, 21_000 * 2 * GWEI - 1)], GWEI).unwrap_err();
         assert!(poor.starts_with("insufficient funds"), "{poor}");
         // value counts too
-        let costly = SpoolMeta::of(
-            &bloch_l2_evm::decode_signed_transaction(&spec, &signed(&spec, 1, 5, 2 * GWEI, 1)).unwrap(),
+        let costly =
+            SpoolMeta::of(&bloch_l2_evm::decode_signed_transaction(&spec, &signed(&spec, 1, 5, 2 * GWEI, 1)).unwrap());
+        assert!(plan(&[], &costly, &[(1, 5, 21_000 * 2 * GWEI)], GWEI)
+            .unwrap_err()
+            .starts_with("insufficient funds"));
+        assert!(plan(&[], &new, &[(1, 6, u128::MAX)], GWEI)
+            .unwrap_err()
+            .starts_with("nonce too low"));
+        assert_eq!(
+            plan(&[], &meta(&spec, 1, 9, 2 * GWEI), &[(1, 5, u128::MAX)], GWEI),
+            Ok(vec![])
         );
-        assert!(plan(&[], &costly, &[(1, 5, 21_000 * 2 * GWEI)], GWEI).unwrap_err().starts_with("insufficient funds"));
-        assert!(plan(&[], &new, &[(1, 6, u128::MAX)], GWEI).unwrap_err().starts_with("nonce too low"));
-        assert_eq!(plan(&[], &meta(&spec, 1, 9, 2 * GWEI), &[(1, 5, u128::MAX)], GWEI), Ok(vec![]));
-        assert!(plan(&[], &meta(&spec, 1, 10, 2 * GWEI), &[(1, 5, u128::MAX)], GWEI).unwrap_err().starts_with("nonce too high"));
-        assert!(plan(&[], &new, &[(1, 5, u128::MAX)], 3 * GWEI).unwrap_err().contains("below the next base fee"));
+        assert!(plan(&[], &meta(&spec, 1, 10, 2 * GWEI), &[(1, 5, u128::MAX)], GWEI)
+            .unwrap_err()
+            .starts_with("nonce too high"));
+        assert!(plan(&[], &new, &[(1, 5, u128::MAX)], 3 * GWEI)
+            .unwrap_err()
+            .contains("below the next base fee"));
     }
 
     #[test]
     fn a_sender_is_capped_and_replaces_only_with_a_fee_bump() {
         let spec = ChainSpec::mainnet_next_or_rehearsal();
-        let mine: Vec<_> = (0..3).map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
+        let mine: Vec<_> = (0..3)
+            .map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI))
+            .collect();
         let cap = plan(&mine, &meta(&spec, 1, 3, 2 * GWEI), &[], GWEI).unwrap_err();
         assert!(cap.starts_with("too many pending transactions"), "{cap}");
         // Another sender is not affected.
@@ -2535,23 +3004,40 @@ mod tests {
         // Same nonce: a <10% bump is refused, a 10% bump replaces the old file.
         let low = plan(&mine, &meta(&spec, 1, 1, 2 * GWEI + GWEI / 10), &[], GWEI).unwrap_err();
         assert!(low.starts_with("replacement transaction underpriced"), "{low}");
-        assert_eq!(plan(&mine, &meta(&spec, 1, 1, 22 * GWEI / 10), &[], GWEI), Ok(vec!["m1.tx".into()]));
+        assert_eq!(
+            plan(&mine, &meta(&spec, 1, 1, 22 * GWEI / 10), &[], GWEI),
+            Ok(vec!["m1.tx".into()])
+        );
         // Entries whose nonce the head already used do not count and are evicted.
-        assert_eq!(plan(&mine, &meta(&spec, 1, 3, 2 * GWEI), &[(1, 2, u128::MAX)], GWEI), Ok(vec!["m0.tx".into(), "m1.tx".into()]));
+        assert_eq!(
+            plan(&mine, &meta(&spec, 1, 3, 2 * GWEI), &[(1, 2, u128::MAX)], GWEI),
+            Ok(vec!["m0.tx".into(), "m1.tx".into()])
+        );
     }
 
     #[test]
     fn a_full_spool_evicts_stale_then_deferred_cheap_entries_or_refuses() {
         let spec = ChainSpec::mainnet_next_or_rehearsal();
         // Eight entries from eight senders (cap 8): key k at nonce 0, fee (k + 1) gwei.
-        let mut full: Vec<_> = (10..18u8).map(|k| entry(&spec, &format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI)).collect();
+        let mut full: Vec<_> = (10..18u8)
+            .map(|k| entry(&spec, &format!("k{k}.tx"), k, 0, u128::from(k - 8) * GWEI))
+            .collect();
         // Full and nothing stale: a transaction paying no more than the cheapest is refused.
-        assert_eq!(plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[], GWEI), Err("txpool full".into()));
+        assert_eq!(
+            plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[], GWEI),
+            Err("txpool full".into())
+        );
         // A better-paying one displaces the cheapest (k10, 2 gwei).
-        assert_eq!(plan(&full, &meta(&spec, 1, 0, 3 * GWEI), &[], GWEI), Ok(vec!["k10.tx".into()]));
+        assert_eq!(
+            plan(&full, &meta(&spec, 1, 0, 3 * GWEI), &[], GWEI),
+            Ok(vec!["k10.tx".into()])
+        );
         // An entry deferred behind a nonce gap goes first, even if it pays more.
         full[7] = entry(&spec, "gap.tx", 17, 2, 9 * GWEI);
-        assert_eq!(plan(&full, &meta(&spec, 1, 0, 3 * GWEI), &[], GWEI), Ok(vec!["gap.tx".into()]));
+        assert_eq!(
+            plan(&full, &meta(&spec, 1, 0, 3 * GWEI), &[], GWEI),
+            Ok(vec!["gap.tx".into()])
+        );
         // Stale entries (used nonce, unfunded, underpriced, expired, undecodable) go without displacing anyone.
         full[0] = entry(&spec, "used.tx", 10, 0, 2 * GWEI);
         full[1] = entry(&spec, "poor.tx", 11, 0, 3 * GWEI);
@@ -2565,11 +3051,22 @@ mod tests {
             age_when_seen: Duration::ZERO,
             head_when_seen: 0,
         };
-        let evicted = plan(&full, &meta(&spec, 1, 0, 2 * GWEI), &[(10, 1, u128::MAX), (11, 0, 1)], GWEI).unwrap();
+        let evicted = plan(
+            &full,
+            &meta(&spec, 1, 0, 2 * GWEI),
+            &[(10, 1, u128::MAX), (11, 0, 1)],
+            GWEI,
+        )
+        .unwrap();
         assert_eq!(evicted, vec!["used.tx", "poor.tx", "k12.tx", "junk.tx"]);
         // Base fee above an entry's cap: underpriced, evicted under pressure.
-        let cheap: Vec<_> = (10..18u8).map(|k| entry(&spec, &format!("c{k}.tx"), k, 0, 2 * GWEI)).collect();
-        assert_eq!(plan(&cheap, &meta(&spec, 1, 0, 4 * GWEI), &[], 3 * GWEI).unwrap().len(), 8);
+        let cheap: Vec<_> = (10..18u8)
+            .map(|k| entry(&spec, &format!("c{k}.tx"), k, 0, 2 * GWEI))
+            .collect();
+        assert_eq!(
+            plan(&cheap, &meta(&spec, 1, 0, 4 * GWEI), &[], 3 * GWEI).unwrap().len(),
+            8
+        );
     }
 
     #[test]
@@ -2577,7 +3074,11 @@ mod tests {
         let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let mut index = SpoolIndex::new();
-        std::fs::write(dir.path().join("a.tx"), format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
+        std::fs::write(
+            dir.path().join("a.tx"),
+            format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0))),
+        )
+        .unwrap();
         std::fs::write(dir.path().join("b.tx"), "zz\n").unwrap();
         std::fs::write(dir.path().join(".c.partial"), "00\n").unwrap();
         let mut entries = scan_spool(&spec, dir.path(), &mut index, 0).unwrap();
@@ -2616,8 +3117,12 @@ mod tests {
             input: input.into(),
             ..Default::default()
         };
-        let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
-        bloch_l2_evm::decode_signed_transaction(spec, &TxEnvelope::from(tx.into_signed(signature)).encoded_2718()).unwrap()
+        let signature: Signature = key
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
+        bloch_l2_evm::decode_signed_transaction(spec, &TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+            .unwrap()
     }
 
     #[test]
@@ -2625,10 +3130,18 @@ mod tests {
         let spec = ChainSpec::mainnet_next_or_rehearsal();
         let call = TxKind::Call(Address::repeat_byte(9));
         let check = |gas, max_fee, priority, to, input: Vec<u8>| {
-            never_includable(&spec, &authenticated(&spec, 1, 0, gas, max_fee, priority, to, input), SPOOL_LIMITS)
+            never_includable(
+                &spec,
+                &authenticated(&spec, 1, 0, gas, max_fee, priority, to, input),
+                SPOOL_LIMITS,
+            )
         };
         assert_eq!(check(21_000, 2 * GWEI, GWEI, call, vec![]), None);
-        assert_eq!(check(15_000_000, 2 * GWEI, GWEI, call, vec![]), None, "exactly the block budget");
+        assert_eq!(
+            check(15_000_000, 2 * GWEI, GWEI, call, vec![]),
+            None,
+            "exactly the block budget"
+        );
         // Deferred by every block (15M budget) although below the 30M protocol limit.
         let above = check(15_000_001, 2 * GWEI, GWEI, call, vec![]).unwrap();
         assert!(above.starts_with("exceeds block gas limit"), "{above}");
@@ -2636,7 +3149,10 @@ mod tests {
         let low = check(20_999, 2 * GWEI, GWEI, call, vec![]).unwrap();
         assert!(low.starts_with("intrinsic gas too low"), "{low}");
         let data = check(21_000, 2 * GWEI, GWEI, call, vec![1; 10]).unwrap();
-        assert!(data.contains("needs 21160"), "16 gas per non-zero calldata byte: {data}");
+        assert!(
+            data.contains("needs 21160"),
+            "16 gas per non-zero calldata byte: {data}"
+        );
         assert_eq!(check(21_160, 2 * GWEI, GWEI, call, vec![1; 10]), None);
         let create = check(21_000, 2 * GWEI, GWEI, TxKind::Create, vec![]).unwrap();
         assert!(create.contains("needs 53000"), "{create}");
@@ -2657,14 +3173,33 @@ mod tests {
     fn a_sender_must_cover_all_its_spooled_entries_together() {
         let spec = ChainSpec::mainnet_next_or_rehearsal();
         let one = 21_000 * 2 * GWEI;
-        let mine: Vec<_> = (0..2).map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI)).collect();
-        assert_eq!(plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 0, 3 * one)], GWEI), Ok(vec![]));
+        let mine: Vec<_> = (0..2)
+            .map(|n| entry(&spec, &format!("m{n}.tx"), 1, n, 2 * GWEI))
+            .collect();
+        assert_eq!(
+            plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 0, 3 * one)], GWEI),
+            Ok(vec![])
+        );
         let over = plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 0, 3 * one - 1)], GWEI).unwrap_err();
-        assert!(over.starts_with("insufficient funds for this and the sender's pending"), "{over}");
+        assert!(
+            over.starts_with("insufficient funds for this and the sender's pending"),
+            "{over}"
+        );
         // A replacement is counted once: the old entry no longer counts.
-        assert_eq!(plan(&mine, &meta(&spec, 1, 1, 22 * GWEI / 10), &[(1, 0, one + 21_000 * 22 * GWEI / 10)], GWEI), Ok(vec!["m1.tx".into()]));
+        assert_eq!(
+            plan(
+                &mine,
+                &meta(&spec, 1, 1, 22 * GWEI / 10),
+                &[(1, 0, one + 21_000 * 22 * GWEI / 10)],
+                GWEI
+            ),
+            Ok(vec!["m1.tx".into()])
+        );
         // Entries the head already consumed do not count.
-        assert_eq!(plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 1, 2 * one)], GWEI), Ok(vec!["m0.tx".into()]));
+        assert_eq!(
+            plan(&mine, &meta(&spec, 1, 2, 2 * GWEI), &[(1, 1, 2 * one)], GWEI),
+            Ok(vec!["m0.tx".into()])
+        );
     }
 
     #[test]
@@ -2673,13 +3208,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut index = SpoolIndex::new();
         let path = dir.path().join("old.tx");
-        std::fs::write(&path, format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0))),
+        )
+        .unwrap();
         let old = std::time::SystemTime::now() - Duration::from_secs(4 * 3_600);
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let entries = scan_spool(&spec, dir.path(), &mut index, 0).unwrap();
         assert_eq!(entries[0].modified, old);
         // Later scans take the time from the index (an expired entry stays expired).
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
         assert_eq!(scan_spool(&spec, dir.path(), &mut index, 0).unwrap()[0].modified, old);
         let mut account = |_| (0, alloy_primitives::U256::MAX);
         // Seen at block 0; four blocks went by without it.
@@ -2697,13 +3246,19 @@ mod tests {
                 Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0x")
             })
             .unwrap();
-        module.register_method("eth_chainId", |_, _, _| Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0xab162")).unwrap();
+        module
+            .register_method("eth_chainId", |_, _, _| {
+                Ok::<_, jsonrpsee::types::ErrorObjectOwned>("0xab162")
+            })
+            .unwrap();
         limit_simulations(&mut module, 1, Duration::from_millis(100), Duration::from_secs(5)).unwrap();
         let (first, second, other) = tokio::join!(
             module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({}), "latest"]),
             async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({}), "latest"]).await
+                module
+                    .call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({}), "latest"])
+                    .await
             },
             async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2715,7 +3270,13 @@ mod tests {
         assert!(busy.contains("too many concurrent EVM simulations"), "{busy}");
         assert_eq!(other.unwrap(), "0xab162", "methods outside the limiter are not gated");
         // Once the permit is free the next call runs.
-        assert_eq!(module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})]).await.unwrap(), "0x");
+        assert_eq!(
+            module
+                .call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})])
+                .await
+                .unwrap(),
+            "0x"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2741,8 +3302,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(slow.contains("execution aborted (timeout = 200ms)"), "{slow}");
-        assert!(started.elapsed() < Duration::from_millis(500), "answered at the limit, not at the end of the run");
-        assert_eq!(ended.load(Ordering::SeqCst), 0, "the run goes on after its caller was answered");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "answered at the limit, not at the end of the run"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            0,
+            "the run goes on after its caller was answered"
+        );
         // Its permit is still taken: the next caller waits 100 ms and is refused.
         let busy = module
             .call::<_, String>("eth_estimateGas", jsonrpsee::rpc_params![serde_json::json!({})])
@@ -2758,7 +3326,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(after.contains("execution aborted"), "the permit was free again: {after}");
+        assert!(
+            after.contains("execution aborted"),
+            "the permit was free again: {after}"
+        );
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(ended.load(Ordering::SeqCst), 2);
     }
@@ -2787,7 +3358,13 @@ mod tests {
             .to_string();
         assert!(busy.contains("too many concurrent EVM simulations"), "{busy}");
         tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(module.call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})]).await.unwrap(), "0x");
+        assert_eq!(
+            module
+                .call::<_, String>("eth_call", jsonrpsee::rpc_params![serde_json::json!({})])
+                .await
+                .unwrap(),
+            "0x"
+        );
     }
 
     #[test]
@@ -2814,7 +3391,11 @@ mod tests {
         let mut head_number = 64;
         for restart in 0..40u64 {
             let mut index = SpoolIndex::new(); // fresh process
-            let mut e = scan_spool(&spec, dir.path(), &mut index, head_number).unwrap().into_iter().next().unwrap();
+            let mut e = scan_spool(&spec, dir.path(), &mut index, head_number)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
             assert_eq!(e.head_when_seen, 64, "restart {restart}: first sighting kept");
             e.age_when_seen = Duration::from_secs((restart + 4) * H);
             let instant = e.seen + Duration::from_secs(3 * H);
@@ -2839,7 +3420,10 @@ mod tests {
         let spec = ChainSpec::mainnet();
         let dir = tempfile::tempdir().unwrap();
         let ten_days = Duration::from_secs(10 * 24 * H);
-        let unix = (std::time::SystemTime::now() - ten_days).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let unix = (std::time::SystemTime::now() - ten_days)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         std::fs::write(dir.path().join(PROGRESS_FILE), format!("64 {unix}\n")).unwrap();
         // A restarted process: head 64 has stood still for 10 days.
         let mut progress = None;
@@ -2853,7 +3437,11 @@ mod tests {
         let instant = e.seen + Duration::from_secs(23 * H);
         let stalled = stalled + Duration::from_secs(23 * H);
         let mut head = facts(&mut account, instant, 64, stalled);
-        assert_eq!(head.stale(&e, SPOOL_LIMITS), Some("expired"), "10 days stuck, shed after a restart");
+        assert_eq!(
+            head.stale(&e, SPOOL_LIMITS),
+            Some("expired"),
+            "10 days stuck, shed after a restart"
+        );
         // A new head resets the clock and is recorded for the next process.
         assert_eq!(advance_progress(&mut progress, dir.path(), 65), Duration::ZERO);
         assert!(advance_progress(&mut None, dir.path(), 65) < Duration::from_secs(60));
@@ -2874,7 +3462,11 @@ mod tests {
         head.mark_gaps(std::slice::from_ref(&gap));
         assert_eq!(head.stale(&gap, SPOOL_LIMITS), None, "inside the TTL");
         head.instant = gap.seen + SPOOL_LIMITS.ttl + Duration::from_secs(1);
-        assert_eq!(head.stale(&gap, SPOOL_LIMITS), Some("expired"), "plain TTL, no heartbeat needed");
+        assert_eq!(
+            head.stale(&gap, SPOOL_LIMITS),
+            Some("expired"),
+            "plain TTL, no heartbeat needed"
+        );
         // With nonce 0 spooled too, nonce 1 is not behind a gap: a slow block does not expire either.
         let mut first = entry(&spec, "f.tx", 1, 0, 2 * GWEI);
         first.head_when_seen = 64;
@@ -2888,7 +3480,10 @@ mod tests {
     fn r146_full_spool_of_unexpired_gap_entries_still_admits() {
         let spec = ChainSpec::mainnet();
         let full: Vec<_> = (10..18u8)
-            .map(|k| SpoolEntry { head_when_seen: 64, ..entry(&spec, &format!("k{k}.tx"), k, 1, 9 * GWEI) })
+            .map(|k| SpoolEntry {
+                head_when_seen: 64,
+                ..entry(&spec, &format!("k{k}.tx"), k, 1, 9 * GWEI)
+            })
             .collect();
         let mut account = |_| (0, alloy_primitives::U256::MAX);
         let instant = full[0].seen + Duration::from_secs(1_000);
@@ -2897,7 +3492,12 @@ mod tests {
         assert_eq!(got.len(), 8, "{got:?}");
         // Inside the TTL they are not stale: one is displaced (gapped first), as before.
         head.instant = full[0].seen + Duration::from_secs(100);
-        assert_eq!(plan_admission(&full, &meta(&spec, 1, 0, GWEI), &mut head, LIMITS).unwrap().len(), 1);
+        assert_eq!(
+            plan_admission(&full, &meta(&spec, 1, 0, GWEI), &mut head, LIMITS)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// R5 (holds): a file time in the future (a backward step before a restart) gives a first-seen age of zero,
@@ -2907,10 +3507,21 @@ mod tests {
         let spec = ChainSpec::mainnet();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.tx");
-        std::fs::write(&path, format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0)))).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n", alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0))),
+        )
+        .unwrap();
         let future = std::time::SystemTime::now() + Duration::from_secs(5 * H);
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(future).unwrap();
-        let e = scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 64).unwrap().remove(0);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        let e = scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 64)
+            .unwrap()
+            .remove(0);
         assert_eq!((e.age_when_seen, e.head_when_seen), (Duration::ZERO, 64));
         let mut account = |_| (0, alloy_primitives::U256::MAX);
         let mut head = facts(&mut account, e.seen, 64, Duration::ZERO);
@@ -2920,5 +3531,4 @@ mod tests {
         head.instant = e.seen + SPOOL_LIMITS.ttl + Duration::from_secs(1);
         assert_eq!(head.stale(&e, SPOOL_LIMITS), Some("expired"));
     }
-
 }

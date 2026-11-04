@@ -40,7 +40,11 @@ pub struct RuleSchedule {
 impl RuleSchedule {
     /// One rule set for the whole chain (the development networks).
     pub fn single(base: ChainSpec) -> Self {
-        Self { base, next: None, next_from: Arc::new(AtomicU64::new(UNSET)) }
+        Self {
+            base,
+            next: None,
+            next_from: Arc::new(AtomicU64::new(UNSET)),
+        }
     }
 
     /// A base and a next rule set. Refused unless they differ only in the block
@@ -62,7 +66,11 @@ impl RuleSchedule {
             ));
         }
         next.validate().map_err(BlockExecutionError::other)?;
-        Ok(Self { base, next: Some(next), next_from: Arc::new(AtomicU64::new(UNSET)) })
+        Ok(Self {
+            base,
+            next: Some(next),
+            next_from: Arc::new(AtomicU64::new(UNSET)),
+        })
     }
 
     /// The rules of the chain's first blocks.
@@ -105,7 +113,10 @@ impl RuleSchedule {
         if number == 0 || number == UNSET {
             return Err(BlockExecutionError::msg("the next rules cannot start at this block"));
         }
-        match self.next_from.compare_exchange(UNSET, number, Ordering::AcqRel, Ordering::Acquire) {
+        match self
+            .next_from
+            .compare_exchange(UNSET, number, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(()),
             Err(current) if current == number => Ok(()),
             Err(current) => Err(BlockExecutionError::msg(format!(
@@ -123,7 +134,9 @@ impl RuleSchedule {
         let Some(recipient) = self.next.as_ref().and_then(|next| next.fee_vault_sweep) else {
             return Ok(false);
         };
-        let code = state.account_code(&self.base.base_fee_vault).map_err(BlockExecutionError::other)?;
+        let code = state
+            .account_code(&self.base.base_fee_vault)
+            .map_err(BlockExecutionError::other)?;
         Ok(code.is_some_and(|code| code.original_bytes() == Bytes::copy_from_slice(&fee_vault_sweep_code(recipient))))
     }
 
@@ -136,7 +149,9 @@ impl RuleSchedule {
         }
         let head = provider.best_block_number().map_err(BlockExecutionError::other)?;
         let installed_at = |number: u64| -> Result<bool, BlockExecutionError> {
-            let state = provider.history_by_block_number(number).map_err(BlockExecutionError::other)?;
+            let state = provider
+                .history_by_block_number(number)
+                .map_err(BlockExecutionError::other)?;
             self.sweep_installed(state.as_ref())
         };
         if head == 0 || !installed_at(head)? {
@@ -214,7 +229,11 @@ mod tests {
         let mut no_sweep = ChainSpec::mainnet_next_or_rehearsal();
         no_sweep.fee_vault_sweep = None;
         assert!(RuleSchedule::new(ChainSpec::mainnet_v1(), no_sweep).is_err());
-        assert!(RuleSchedule::new(ChainSpec::mainnet_next_or_rehearsal(), ChainSpec::mainnet_next_or_rehearsal()).is_err());
+        assert!(RuleSchedule::new(
+            ChainSpec::mainnet_next_or_rehearsal(),
+            ChainSpec::mainnet_next_or_rehearsal()
+        )
+        .is_err());
         assert!(RuleSchedule::new(ChainSpec::testnet_v3(), ChainSpec::mainnet_next_or_rehearsal()).is_err());
     }
 
@@ -223,6 +242,9 @@ mod tests {
     #[test]
     fn no_next_rules_without_the_release_recipient() {
         let scheduled = RuleSchedule::new(ChainSpec::mainnet_v1(), ChainSpec::mainnet());
-        assert_eq!(scheduled.is_ok(), bloch_l2_evm::chainspec::MAINNET_FEE_SWEEP_RECIPIENT.is_some());
+        assert_eq!(
+            scheduled.is_ok(),
+            bloch_l2_evm::chainspec::MAINNET_FEE_SWEEP_RECIPIENT.is_some()
+        );
     }
 }

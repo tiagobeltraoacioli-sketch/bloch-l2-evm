@@ -121,7 +121,9 @@ impl L2Network {
                     Self::mainnet_rehearsal(domain, genesis_time)
                 }
             }
-            other => Err(format!("--rules must be v3, v2, mainnet or mainnet-rehearsal, not {other}")),
+            other => Err(format!(
+                "--rules must be v3, v2, mainnet or mainnet-rehearsal, not {other}"
+            )),
         }
     }
 
@@ -193,12 +195,21 @@ mod tests {
         assert_eq!(addresses, expected);
         let shape: Vec<_> = expected
             .iter()
-            .map(|a| (alloc[a].balance, alloc[a].nonce, alloc[a].storage.as_ref().map_or(0, |s| s.len())))
+            .map(|a| {
+                (
+                    alloc[a].balance,
+                    alloc[a].nonce,
+                    alloc[a].storage.as_ref().map_or(0, |s| s.len()),
+                )
+            })
             .collect();
         assert!(alloc.values().all(|a| a.balance.is_zero()), "no premine: {shape:?}");
         // System accounts carry nonce 1 (EIP-161 non-empty), never value.
         assert!(alloc.values().all(|a| a.nonce == Some(1)), "{shape:?}");
-        assert!(alloc[&BEACON_ROOTS_ADDRESS].code.as_ref().is_some_and(|c| !c.is_empty()));
+        assert!(alloc[&BEACON_ROOTS_ADDRESS]
+            .code
+            .as_ref()
+            .is_some_and(|c| !c.is_empty()));
         assert!(alloc[&BLOCK_INFO].code.as_ref().is_none_or(|c| c.is_empty()));
     }
 

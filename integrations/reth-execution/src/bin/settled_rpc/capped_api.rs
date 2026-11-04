@@ -66,7 +66,9 @@ where
     assert!(gas_cap > 0, "a zero gas cap means no cap");
     // The RPC copy of the EVM configuration (provider ancestry for BLOCKHASH, explicit block
     // overrides) is only made inside the library; take it from a throwaway library EthApi.
-    let evm = build_eth_api_with(components.clone(), runtime.clone(), PendingPolicy::Unavailable).evm_config().clone();
+    let evm = build_eth_api_with(components.clone(), runtime.clone(), PendingPolicy::Unavailable)
+        .evm_config()
+        .clone();
     let converter = rpc_converter(components.provider().chain_spec());
     let builder = EthApiBuilder::new_with_components(CappedRpcComponents { inner: components, evm })
         .with_rpc_converter(converter)

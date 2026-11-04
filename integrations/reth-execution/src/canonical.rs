@@ -41,10 +41,14 @@ pub fn rewind_canonical_head(
         .map_err(BlockExecutionError::other)?
         .ok_or_else(|| BlockExecutionError::msg("canonical head is missing"))?;
     if head.hash() != expected {
-        return Err(BlockExecutionError::msg("the canonical head is not the block to rewind"));
+        return Err(BlockExecutionError::msg(
+            "the canonical head is not the block to rewind",
+        ));
     }
     let writer = factory.database_provider_rw().map_err(BlockExecutionError::other)?;
-    writer.remove_block_and_execution_above(number - 1).map_err(BlockExecutionError::other)?;
+    writer
+        .remove_block_and_execution_above(number - 1)
+        .map_err(BlockExecutionError::other)?;
     writer.commit().map_err(BlockExecutionError::other)?;
     let parent = factory
         .sealed_header(number - 1)
@@ -56,7 +60,9 @@ pub fn rewind_canonical_head(
         .state_root(Default::default())
         .map_err(BlockExecutionError::other)?;
     if factory.best_block_number().map_err(BlockExecutionError::other)? != number - 1 || root != parent.0.state_root {
-        return Err(BlockExecutionError::msg("the rewound database does not match its parent"));
+        return Err(BlockExecutionError::msg(
+            "the rewound database does not match its parent",
+        ));
     }
     Ok(parent)
 }

@@ -3,6 +3,7 @@
 //! accepted only if it hashes to the parent's committed state root, so the cost depends on the state, not the height.
 //! Local selection is trusted; this is not native deposit/finality authentication.
 use crate::BlochProviderFactory;
+use alloy_primitives::{Address, B256, U256};
 use bloch_execution_artifact::{ExecutionArtifact, Result, SparseExecutionArtifact};
 use bloch_l2_evm::{
     node_execution::{execute_node_block, generate_node_batch_witness, genesis_v2, node_head},
@@ -11,15 +12,14 @@ use bloch_l2_evm::{
     BlockContext, ChainSpec, L2State,
 };
 use reth_chainspec::EthChainSpec;
-use alloy_primitives::{Address, B256, U256};
-use std::collections::HashMap;
-use reth_db_api::{cursor::{DbCursorRO, DbDupCursorRO}, tables, transaction::DbTx};
+use reth_db_api::{cursor::DbCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::Account;
 use reth_provider::{
-    BlockNumReader, BlockReader, ChainSpecProvider, ChangeSetReader, DBProvider, HeaderProvider, StorageChangeSetReader,
+    BlockNumReader, BlockReader, ChainSpecProvider, ChangeSetReader, HeaderProvider, StorageChangeSetReader,
     StorageSettingsCache,
 };
 use reth_revm::revm::{primitives::KECCAK_EMPTY, state::AccountInfo};
+use std::collections::HashMap;
 
 /// How far below the database tip a block can be exported. Each block between costs reading its changesets.
 pub const MAX_BLOCKS_BEHIND_TIP: u64 = 4096;
@@ -67,12 +67,14 @@ fn state_before(source: &BlochProviderFactory, number: u64, tip: u64) -> Result<
         Ok(())
     };
     let tx = provider.tx_ref();
-    let mut put = |state: &mut L2State, address: Address, account: Account| -> Result<()> {
+    let put = |state: &mut L2State, address: Address, account: Account| -> Result<()> {
         let hash = account.bytecode_hash.unwrap_or(KECCAK_EMPTY);
         let code = if hash == KECCAK_EMPTY {
             None
         } else {
-            let code = tx.get::<tables::Bytecodes>(hash)?.ok_or_else(|| invalid("missing contract code"))?;
+            let code = tx
+                .get::<tables::Bytecodes>(hash)?
+                .ok_or_else(|| invalid("missing contract code"))?;
             Some(code.0)
         };
         let mut info = AccountInfo::default();
@@ -103,14 +105,20 @@ fn state_before(source: &BlochProviderFactory, number: u64, tip: u64) -> Result<
     while let Some((address, entry)) = row {
         if !slots.contains_key(&(address, entry.key)) && !entry.value.is_zero() {
             count(&mut entries)?;
-            state.db_mut().insert_account_storage(address, entry.key.into(), entry.value).map_err(|_| invalid("storage insert"))?;
+            state
+                .db_mut()
+                .insert_account_storage(address, entry.key.into(), entry.value)
+                .map_err(|_| invalid("storage insert"))?;
         }
         row = cursor.next()?;
     }
     for ((address, key), value) in &slots {
         if !value.is_zero() {
             count(&mut entries)?;
-            state.db_mut().insert_account_storage(*address, (*key).into(), *value).map_err(|_| invalid("storage insert"))?;
+            state
+                .db_mut()
+                .insert_account_storage(*address, (*key).into(), *value)
+                .map_err(|_| invalid("storage insert"))?;
         }
     }
     Ok((state, entries))
@@ -126,7 +134,10 @@ pub fn export_canonical_witness(source: &BlochProviderFactory, number: u64) -> R
 /// [`export_canonical_witness`], reporting the size of the pre-state.
 pub fn export_with_report(source: &BlochProviderFactory, number: u64) -> Result<ExportReport> {
     let (artifact, state_entries) = export_from_state(source, number, complete_artifact)?;
-    Ok(ExportReport { artifact, state_entries })
+    Ok(ExportReport {
+        artifact,
+        state_entries,
+    })
 }
 
 /// CANDIDATE: [`export_canonical_witness`] for the sparse-witness guest (lazy
@@ -177,7 +188,10 @@ pub fn export_forced_with_report(
             }
             ExecutionArtifact::new_forced(rules, domain, parent, header, body, witness, forced.to_vec())
         })?;
-    Ok(ExportReport { artifact, state_entries })
+    Ok(ExportReport {
+        artifact,
+        state_entries,
+    })
 }
 
 fn complete_artifact(
@@ -232,14 +246,24 @@ fn export_from_state<T>(
     if tip_number - number > MAX_BLOCKS_BEHIND_TIP {
         return Err(invalid("proof export block is too far below the tip"));
     }
-    let tip = source.sealed_header(tip_number)?.ok_or_else(|| invalid("missing acknowledged tip"))?;
-    let selected = source.sealed_header(number)?.ok_or_else(|| invalid("missing selected export header"))?;
-    let parent = source.sealed_header(number - 1)?.ok_or_else(|| invalid("missing parent header"))?;
-    let genesis = source.sealed_header(0)?.ok_or_else(|| invalid("missing canonical genesis"))?;
+    let tip = source
+        .sealed_header(tip_number)?
+        .ok_or_else(|| invalid("missing acknowledged tip"))?;
+    let selected = source
+        .sealed_header(number)?
+        .ok_or_else(|| invalid("missing selected export header"))?;
+    let parent = source
+        .sealed_header(number - 1)?
+        .ok_or_else(|| invalid("missing parent header"))?;
+    let genesis = source
+        .sealed_header(0)?
+        .ok_or_else(|| invalid("missing canonical genesis"))?;
     if genesis.header() != spec.genesis_header() || genesis.hash() != spec.genesis_hash() {
         return Err(invalid("proof export genesis differs from trusted configuration"));
     }
-    let block = source.block_by_number(number)?.ok_or_else(|| invalid("missing canonical block body"))?;
+    let block = source
+        .block_by_number(number)?
+        .ok_or_else(|| invalid("missing canonical block body"))?;
     if &block.header != selected.header() || selected.hash() != block.header.0.hash() {
         return Err(invalid("proof export body/header canonical selection mismatch"));
     }

@@ -162,7 +162,10 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
     let batch = |calls: u32| async move {
         let body = format!(
             "[{}]",
-            (0..calls).map(|i| format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"eth_chainId","params":[]}}"#)).collect::<Vec<_>>().join(",")
+            (0..calls)
+                .map(|i| format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"eth_chainId","params":[]}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
         );
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let request = format!(
@@ -178,9 +181,16 @@ async fn actual_http_queries_v2_genesis_and_releases_listener_on_shutdown() {
         serde_json::from_str::<Value>(&json).unwrap_or(Value::Null)
     };
     let within = batch(RPC_MAX_BATCH_CALLS).await;
-    assert_eq!(within.as_array().map(Vec::len), Some(RPC_MAX_BATCH_CALLS as usize), "{within}");
+    assert_eq!(
+        within.as_array().map(Vec::len),
+        Some(RPC_MAX_BATCH_CALLS as usize),
+        "{within}"
+    );
     let over = batch(RPC_MAX_BATCH_CALLS + 1).await;
-    assert!(over["error"]["message"].as_str().is_some_and(|m| m.contains("atch")), "over the batch limit: {over}");
+    assert!(
+        over["error"]["message"].as_str().is_some_and(|m| m.contains("atch")),
+        "over the batch limit: {over}"
+    );
     handle.stop().unwrap();
     drop(client);
     // The public upstream stop is asynchronous. Observe actual listener release,

@@ -92,11 +92,18 @@ pub fn recent_entries(status: &Value) -> Vec<Value> {
 
 /// That the log a v3 status names exists with at least the size it says, without reading it.
 pub fn check_log_present(status_path: &Path, status: &Value) -> Result<(), String> {
-    let Some(log) = status.get("settlement_log") else { return Ok(()) };
-    let name = log["file"].as_str().filter(|n| !n.is_empty() && !n.contains('/') && *n != "." && *n != "..").ok_or("bad settlement log name")?;
+    let Some(log) = status.get("settlement_log") else {
+        return Ok(());
+    };
+    let name = log["file"]
+        .as_str()
+        .filter(|n| !n.is_empty() && !n.contains('/') && *n != "." && *n != "..")
+        .ok_or("bad settlement log name")?;
     let size = log["bytes"].as_u64().ok_or("bad settlement log size")?;
     let path = status_path.parent().unwrap_or(Path::new(".")).join(name);
-    let found = std::fs::metadata(&path).map_err(|e| format!("settlement log {}: {e}", path.display()))?.len();
+    let found = std::fs::metadata(&path)
+        .map_err(|e| format!("settlement log {}: {e}", path.display()))?
+        .len();
     if found < size {
         return Err("settlement log is shorter than the status says".into());
     }
@@ -108,7 +115,9 @@ pub fn check_log_present(status_path: &Path, status: &Value) -> Result<(), Strin
 pub fn log_rewritten(status: &Value, cursor: &Cursor) -> bool {
     let Some(read) = cursor.digest else { return false };
     let log = &status["settlement_log"];
-    let (Some(total), Some(size)) = (log["entries"].as_u64(), log["bytes"].as_u64()) else { return false };
+    let (Some(total), Some(size)) = (log["entries"].as_u64(), log["bytes"].as_u64()) else {
+        return false;
+    };
     if total < cursor.count {
         return false;
     }
@@ -149,11 +158,22 @@ pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Re
         contiguous(&list, 1)?;
         let count = list.len() as u64;
         if count < cursor.count {
-            return Err(format!("finalized settlements regressed from {} to {count}", cursor.count));
+            return Err(format!(
+                "finalized settlements regressed from {} to {count}",
+                cursor.count
+            ));
         }
         let recent = list[list.len().saturating_sub(RECENT_V2)..].to_vec();
         let entries = list.into_iter().skip(cursor.count as usize).collect();
-        return Ok(Delta { entries, recent, cursor: Cursor { count, bytes: 0, digest: None } });
+        return Ok(Delta {
+            entries,
+            recent,
+            cursor: Cursor {
+                count,
+                bytes: 0,
+                digest: None,
+            },
+        });
     }
     if schema != STATUS_V3 {
         return Err("unexpected status schema".into());
@@ -163,23 +183,34 @@ pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Re
         Some(Value::Array(list)) => list,
         _ => return Err("no recent settlements".into()),
     };
-    let name = log["file"].as_str().filter(|n| !n.is_empty() && !n.contains('/') && *n != "." && *n != "..");
+    let name = log["file"]
+        .as_str()
+        .filter(|n| !n.is_empty() && !n.contains('/') && *n != "." && *n != "..");
     let name = name.ok_or("bad settlement log name")?;
     let total = log["entries"].as_u64().ok_or("bad settlement log entries")?;
     let size = log["bytes"].as_u64().ok_or("bad settlement log size")?;
-    let digest: B256 = log["digest"].as_str().unwrap_or_default().parse().map_err(|_| "bad settlement log digest")?;
+    let digest: B256 = log["digest"]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .map_err(|_| "bad settlement log digest")?;
     if object.get("finalized_settlements_count").and_then(Value::as_u64) != Some(total) {
         return Err("settlement count differs from the log".into());
     }
     match recent.last() {
         None if total != 0 => return Err("a non-empty log needs recent settlements".into()),
-        Some(last) if number_of(last)? != total => return Err("the newest recent settlement is not the log's last".into()),
+        Some(last) if number_of(last)? != total => {
+            return Err("the newest recent settlement is not the log's last".into())
+        }
         Some(_) if recent.len() as u64 > total => return Err("more recent settlements than the log holds".into()),
         Some(_) => contiguous(&recent, total + 1 - recent.len() as u64)?,
         None => {}
     }
     if total < cursor.count {
-        return Err(format!("finalized settlements regressed from {} to {total}", cursor.count));
+        return Err(format!(
+            "finalized settlements regressed from {} to {total}",
+            cursor.count
+        ));
     }
     let (mut read, mut bytes, mut running) = match cursor.digest {
         Some(running) => (cursor.count, cursor.bytes, running),
@@ -191,10 +222,14 @@ pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Re
     let mut entries = Vec::new();
     if size > bytes {
         let path = status_path.parent().unwrap_or(Path::new(".")).join(name);
-        let mut file = std::fs::File::open(&path).map_err(|e| format!("settlement log {IO_ERROR} {}: {e}", path.display()))?;
-        file.seek(SeekFrom::Start(bytes)).map_err(|e| format!("settlement log {IO_ERROR}: {e}"))?;
+        let mut file =
+            std::fs::File::open(&path).map_err(|e| format!("settlement log {IO_ERROR} {}: {e}", path.display()))?;
+        file.seek(SeekFrom::Start(bytes))
+            .map_err(|e| format!("settlement log {IO_ERROR}: {e}"))?;
         let mut data = Vec::new();
-        file.take(size - bytes).read_to_end(&mut data).map_err(|e| format!("settlement log {IO_ERROR}: {e}"))?;
+        file.take(size - bytes)
+            .read_to_end(&mut data)
+            .map_err(|e| format!("settlement log {IO_ERROR}: {e}"))?;
         if data.len() as u64 != size - bytes {
             return Err("settlement log is shorter than the status says".into());
         }
@@ -225,7 +260,15 @@ pub fn read_delta(status_path: &Path, status: &mut Value, cursor: &Cursor) -> Re
             return Err("the log's last settlement differs from the status".into());
         }
     }
-    Ok(Delta { entries, recent, cursor: Cursor { count: total, bytes, digest: Some(digest) } })
+    Ok(Delta {
+        entries,
+        recent,
+        cursor: Cursor {
+            count: total,
+            bytes,
+            digest: Some(digest),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -241,9 +284,18 @@ mod tests {
     fn the_tip_comes_from_the_status_alone() {
         let v3 = json!({"schema": STATUS_V3, "finalized_settlements_recent": [entry(69), entry(70)]});
         assert_eq!(tip_number(&v3), Some(70));
-        assert_eq!(tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": [entry(1), entry(2)]})), Some(2));
-        assert_eq!(tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": []})), None);
-        assert_eq!(tip_number(&json!({"schema": "other", "finalized_settlements": [entry(1)]})), None);
+        assert_eq!(
+            tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": [entry(1), entry(2)]})),
+            Some(2)
+        );
+        assert_eq!(
+            tip_number(&json!({"schema": STATUS_V2, "finalized_settlements": []})),
+            None
+        );
+        assert_eq!(
+            tip_number(&json!({"schema": "other", "finalized_settlements": [entry(1)]})),
+            None
+        );
     }
 
     /// Write a v3 status and log with `count` entries, as the follower does.
@@ -264,8 +316,14 @@ mod tests {
 
     #[test]
     fn digest_vector_shared_with_the_follower_and_python() {
-        let digest = next_digest(next_digest(empty_digest(), b"{\"l2_number\":1}\n"), b"{\"l2_number\":2}\n");
-        assert_eq!(alloy_primitives::hex::encode(digest), "e9e101a8fd7ec4784d28979c4a5472bdbcfe04ff5b9313928fd1f14a8d76b30c");
+        let digest = next_digest(
+            next_digest(empty_digest(), b"{\"l2_number\":1}\n"),
+            b"{\"l2_number\":2}\n",
+        );
+        assert_eq!(
+            alloy_primitives::hex::encode(digest),
+            "e9e101a8fd7ec4784d28979c4a5472bdbcfe04ff5b9313928fd1f14a8d76b30c"
+        );
     }
 
     #[test]
@@ -283,7 +341,10 @@ mod tests {
         assert!(read_delta(&path, &mut same, &first.cursor).unwrap().entries.is_empty());
         let mut more = write(dir.path(), 103);
         let next = read_delta(&path, &mut more, &first.cursor).unwrap();
-        assert_eq!(next.entries.iter().map(|e| number_of(e).unwrap()).collect::<Vec<_>>(), vec![101, 102, 103]);
+        assert_eq!(
+            next.entries.iter().map(|e| number_of(e).unwrap()).collect::<Vec<_>>(),
+            vec![101, 102, 103]
+        );
         assert_eq!(next.cursor.count, 103);
     }
 
@@ -352,11 +413,16 @@ mod tests {
         assert!(v2.get("finalized_settlements").is_none());
         let mut v3 = write(dir.path(), 102);
         let next = read_delta(&path, &mut v3, &first.cursor).unwrap();
-        assert_eq!(next.entries.iter().map(|e| number_of(e).unwrap()).collect::<Vec<_>>(), vec![101, 102]);
+        assert_eq!(
+            next.entries.iter().map(|e| number_of(e).unwrap()).collect::<Vec<_>>(),
+            vec![101, 102]
+        );
         let mut gap = json!({"schema": STATUS_V2, "finalized_settlements": [entry(2)]});
         assert!(read_delta(&path, &mut gap, &Cursor::default()).is_err());
         let mut fewer = json!({"schema": STATUS_V2, "finalized_settlements": [entry(1)]});
-        assert!(read_delta(&path, &mut fewer, &first.cursor).unwrap_err().contains("regressed"));
+        assert!(read_delta(&path, &mut fewer, &first.cursor)
+            .unwrap_err()
+            .contains("regressed"));
         let mut unknown = json!({"schema": "x"});
         assert!(read_delta(&path, &mut unknown, &first.cursor).is_err());
     }
