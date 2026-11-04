@@ -302,6 +302,32 @@ on commits.
    already on 4b984af, and agent 135 re-checked it with real binaries in r8 §5.
 7. On every hold cycle, `Policy.save(now)` refreshes `required_tip_wei`.
 
+### Candidate preflight integration
+
+The integrated candidate uses a two-stage execute path whenever
+`BLOCH_PREFLIGHT_CYCLE_LIMIT` is set. First the pinned SP1 minimal executor runs
+the same guest and input without gas tracing. A successful guest exit at or above
+the instruction limit produces the stage-1 verdict and skips the gas run. Below
+the limit, the gas run must finish successfully, match the independently computed
+statement, and count exactly the same instructions. A guest error, a disagreement,
+or a timeout supplies no cost and cannot by itself classify a transaction as an
+over-limit offender. The first stage runs to completion; `run_bounded` remains the
+external wall-clock and process-group backstop.
+
+The settler requires one ordered stage-1 record and either one matching over-limit
+verdict or one cost/statement pair. Duplicate, contradictory, out-of-order, and
+oversized counters are refused. Each scheduled prover/guest/witness combination
+and instruction limit gets its own empty-control check before selection. Changing
+from the active program to the sparse candidate or complete fallback cannot reuse
+the previous program's capability result.
+
+The control block has a separate temporary directory with no forced-record
+sidecar. Actual due forced records remain in every real selection and measurement;
+they count as mandatory work and may settle alone above the optional transaction
+budget. Source integration and unit tests do not establish a release binary,
+production activation, or a new benchmark measurement. The candidate SP1 host
+remains unpinned until its release build is qualified.
+
 ## 5. Measured numbers this rests on
 
 | Number | Value | Source |

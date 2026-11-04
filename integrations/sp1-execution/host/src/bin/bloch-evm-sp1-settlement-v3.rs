@@ -414,12 +414,13 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
 }
 
 /// The settler's preflight ran into `BLOCH_PREFLIGHT_CYCLE_LIMIT`: a measured verdict, not a failure of the host.
+/// Fields: the limit, and stage 1's exact instruction count (at or over the limit).
 #[derive(Debug)]
-struct OverCycleLimit(u64);
+struct OverCycleLimit(u64, u64);
 
 impl std::fmt::Display for OverCycleLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "guest execution exceeded the preflight cycle limit of {} instructions", self.0)
+        write!(f, "guest execution of {} instructions is at or over the preflight cycle limit of {}", self.1, self.0)
     }
 }
 
@@ -439,14 +440,83 @@ fn preflight_cycle_limit(value: Option<&OsStr>) -> Result<Option<u64>> {
     }
 }
 
+/// What stage 1 of the preflight decides from the gas-off instruction count (agent 224, recommendation 2).
+#[derive(Debug, PartialEq, Eq)]
+enum StageOne {
+    /// At or over the cycle limit: the verdict, with no gas run.
+    OverLimit(u64),
+    /// Under the limit: stage 2 (the gas run) measures the SP1 gas.
+    UnderLimit(u64),
+}
+
+/// Stage 1's verdict. SP1 stops a gas run once `instructions >= limit` (sp1-prover worker/prover/execute.rs), so the
+/// same comparison here gives the verdict the gas run would have given, without waiting for its next gas chunk. Only a
+/// guest that ran to a clean exit gives a verdict.
+fn stage_one_verdict(limit: u64, instructions: u64, exit_code: u32) -> Result<StageOne> {
+    if exit_code != 0 {
+        return Err(io::Error::other(format!("settlement V3 guest execution failed in preflight stage 1 (exit code {exit_code})")).into());
+    }
+    Ok(if instructions >= limit { StageOne::OverLimit(instructions) } else { StageOne::UnderLimit(instructions) })
+}
+
+/// Stage 2 must count exactly the instructions stage 1 counted: the two executors run the same program on the same
+/// input. A difference means the measurement cannot be trusted, so the run gives no cost (a host failure for the
+/// policy, never a verdict on a transaction).
+fn check_stage_counts(stage_one: u64, stage_two: u64) -> Result<()> {
+    if stage_one != stage_two {
+        return Err(io::Error::other(format!(
+            "preflight stage 1 counted {stage_one} instructions and stage 2 counted {stage_two}: no cost"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Stage 1: the guest's exact instruction count with SP1 gas off, from the plain (minimal) executor that SP1's own
+/// execute uses (sp1-prover worker/prover/execute.rs), run to the end without tracing: no trace ring, no /dev/shm
+/// trace segments, about 1B instructions per second (agent 224). In SDK 6.8 a gas-off `execute` reports 0
+/// instructions, so the runner is called directly. Returns (instructions, guest exit code).
+async fn count_instructions(elf: &Elf, stdin: SP1Stdin) -> Result<(u64, u32)> {
+    let program = sp1_core_executor::Program::from(elf)
+        .map_err(|error| io::Error::other(format!("preflight stage 1 could not load the ELF: {error}")))?;
+    let memory_limit = sp1_core_executor::SP1CoreOpts::default().memory_limit;
+    let SP1Stdin { buffer, proofs, .. } = stdin;
+    if !proofs.is_empty() {
+        return Err(io::Error::other("preflight stage 1 takes no deferred proofs").into());
+    }
+    let counted = tokio::task::spawn_blocking(move || -> std::result::Result<(u64, u32), String> {
+        // No trace (None) and no trace slots (0), as SP1 runs it with gas off. Dropping the runner kills its child.
+        let mut runner =
+            sp1_core_executor_runner::MinimalExecutorRunner::new(std::sync::Arc::new(program), false, None, memory_limit, 0);
+        for input in &buffer {
+            runner.with_input(input);
+        }
+        while runner.try_execute_chunk().map_err(|error| error.to_string())?.is_some() {}
+        Ok((runner.global_clk(), runner.exit_code()))
+    })
+    .await?;
+    counted.map_err(|error| io::Error::other(format!("preflight stage 1 execution failed: {error}")).into())
+}
+
+/// The longest the runtime may take to shut down before the process exits (agent 224 measured 0-6.6 s).
+const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run `future` on a two-worker runtime, then shut the runtime down (bounded by `grace`) before returning, so an SP1
+/// executor task can drop its native runner child and its /dev/shm segments before the process exits (7c73a6e).
+fn run_then_shut_down<T>(future: impl std::future::Future<Output = Result<T>>, grace: std::time::Duration) -> Result<T> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let result = runtime.block_on(future);
+    runtime.shutdown_timeout(grace);
+    result
+}
+
 fn main() -> Result<()> {
-    // The runtime of `run` is dropped before the exit, so the executor's tasks end first (SP1 stops a run at the cycle
-    // limit at its next trace chunk) and release what they hold.
-    match run() {
+    // The runtime is shut down before the exit, so the executor's tasks end first and release what they hold.
+    match run_then_shut_down(run(), RUNTIME_SHUTDOWN_GRACE) {
         Err(error) => match error.downcast_ref::<OverCycleLimit>() {
-            Some(OverCycleLimit(limit)) => {
+            Some(OverCycleLimit(limit, instructions)) => {
                 use std::io::Write;
-                println!("Settlement V3 over cycle limit: limit={limit}");
+                println!("Settlement V3 over cycle limit: limit={limit} instructions={instructions} stage=1");
                 let _ = io::stdout().flush();
                 std::process::exit(EXIT_OVER_CYCLE_LIMIT);
             }
@@ -456,7 +526,6 @@ fn main() -> Result<()> {
     }
 }
 
-#[tokio::main(worker_threads = 2)]
 async fn run() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-v1 [--sparse]] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
@@ -520,24 +589,41 @@ async fn run() -> Result<()> {
 
     if mode == "execute" {
         let limit = preflight_cycle_limit(std::env::var_os("BLOCH_PREFLIGHT_CYCLE_LIMIT").as_deref())?;
-        let executor = LightProver::new().await;
         let started = Instant::now();
+        // Two-stage preflight (sequencer policy v2, section 3.4). SP1 checks a cycle limit only when a gas chunk of
+        // 2^27 memory entries completes, so a gas run stops 20-30 s late on compute-heavy code (agent 224). Stage 1
+        // counts without gas; at or over the limit that count is the verdict and no gas run starts.
+        let stage_one = match limit {
+            Some(limit) => {
+                let (instructions, exit_code) = count_instructions(&elf, stdin(&qualification)).await?;
+                println!(
+                    "Settlement V3 preflight stage 1: instructions={instructions} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
+                match stage_one_verdict(limit, instructions, exit_code)? {
+                    StageOne::OverLimit(instructions) => return Err(Box::new(OverCycleLimit(limit, instructions))),
+                    StageOne::UnderLimit(instructions) => Some(instructions),
+                }
+            }
+            None => None,
+        };
+        let executor = LightProver::new().await;
         let mut request = executor.execute(elf, stdin(&qualification)).calculate_gas(true);
         if let Some(limit) = limit {
+            // Kept as a second guard: under the limit by stage 1, so it never fires unless the stages disagree.
             request = request.cycle_limit(limit);
         }
         let (public, report) = match request.await {
             Ok(done) => done,
             // SP1 6.8 (sp1-prover worker/prover/execute.rs) returns ExecutionError::ExceededCycleLimit, which the SDK
-            // passes on as text: "exceeded cycle limit of N".
+            // passes on as text: "exceeded cycle limit of N". Stage 1 counted fewer: the stages disagree, no cost.
             Err(error) if limit.is_some() && error.to_string().contains("exceeded cycle limit") => {
-                eprintln!("{error}");
-                return Err(Box::new(OverCycleLimit(limit.unwrap_or_default())));
+                return Err(io::Error::other(format!("preflight stage 2 stopped on the cycle limit after stage 1 counted {}: {error}", stage_one.unwrap_or_default())).into());
             }
             Err(error) => return Err(error.into()),
         };
-        if let Some(limit) = limit.filter(|limit| report.total_instruction_count() >= *limit) {
-            return Err(Box::new(OverCycleLimit(limit)));
+        if let Some(counted) = stage_one {
+            check_stage_counts(counted, report.total_instruction_count())?;
         }
         if report.exit_code != 0 {
             return Err(io::Error::other("settlement V3 guest execution failed").into());
@@ -668,6 +754,63 @@ mod tests {
         for bad in ["0", "", "-1", "+5", "1e9", "0x10", " 5", "18446744073709551616"] {
             assert!(preflight_cycle_limit(Some(OsStr::new(bad))).is_err(), "{bad:?} accepted");
         }
+    }
+
+    #[test]
+    fn stage_one_gives_the_verdict_at_or_over_the_limit() {
+        let limit = 180_000_000;
+        assert_eq!(stage_one_verdict(limit, 2_279_398_170, 0).unwrap(), StageOne::OverLimit(2_279_398_170));
+        assert_eq!(stage_one_verdict(limit, limit, 0).unwrap(), StageOne::OverLimit(limit));
+        assert_eq!(stage_one_verdict(limit, limit - 1, 0).unwrap(), StageOne::UnderLimit(limit - 1));
+        assert_eq!(stage_one_verdict(limit, 1_490_000, 0).unwrap(), StageOne::UnderLimit(1_490_000));
+    }
+
+    #[test]
+    fn stage_one_gives_no_verdict_for_a_failed_guest() {
+        assert!(stage_one_verdict(180_000_000, 2_279_398_170, 1).is_err());
+        assert!(stage_one_verdict(180_000_000, 1_000, 1).is_err());
+    }
+
+    #[test]
+    fn stage_two_must_count_what_stage_one_counted() {
+        assert!(check_stage_counts(1_321_465_654, 1_321_465_654).is_ok());
+        assert!(check_stage_counts(1_321_465_654, 1_321_465_655).is_err());
+        assert!(check_stage_counts(0, 1).is_err());
+    }
+
+    #[test]
+    fn the_runtime_shuts_down_before_the_result_is_returned() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let released = Arc::new(AtomicBool::new(false));
+        let flag = released.clone();
+        let result: Result<()> = run_then_shut_down(
+            async move {
+                // An executor task still holding its runner when the run stops on the cycle limit.
+                tokio::task::spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    flag.store(true, Ordering::SeqCst);
+                });
+                Err(Box::new(OverCycleLimit(7, 9)) as Box<dyn Error>)
+            },
+            std::time::Duration::from_secs(10),
+        );
+        assert!(matches!(result.unwrap_err().downcast_ref::<OverCycleLimit>(), Some(OverCycleLimit(7, 9))));
+        assert!(released.load(Ordering::SeqCst), "returned before the blocking task released its resources");
+    }
+
+    #[test]
+    fn the_runtime_shutdown_is_bounded() {
+        let started = Instant::now();
+        let result: Result<()> = run_then_shut_down(
+            async {
+                tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_secs(20)));
+                Ok(())
+            },
+            std::time::Duration::from_millis(200),
+        );
+        assert!(result.is_ok());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "shutdown waited {:?}", started.elapsed());
     }
 
     #[test]

@@ -1937,10 +1937,9 @@ class Settler:
     def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
         """Build the block from exactly these transactions, with these deposits, on a throwaway copy of the database and
         run the guest in execute mode under the host's cycle limit. Returns (result, producer report): result is a
-        `Cost`, `OVER_LIMIT` when the guest execution hit `BLOCH_PREFLIGHT_CYCLE_LIMIT` (the host prints
-        `Settlement V3 over cycle limit` and exits 3), or None when the run gave no cost (wall-clock backstop, crash,
-        OOM, missing cost line). No proof, no lock."""
-        import sequencer_policy_v2 as policy_v2
+        `Cost`, `OVER_LIMIT` when the two-stage host's gas-off count reached `BLOCH_PREFLIGHT_CYCLE_LIMIT` (it prints
+        `Settlement V3 over cycle limit` and exits 3; `preflight_result`), or None when the run gave no cost
+        (wall-clock backstop, crash, OOM, missing or disagreeing lines, a single-stage host). No proof, no lock."""
         scratch = deposits.parent / f'preflight-{tag}'
         shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True)
@@ -1968,16 +1967,46 @@ class Settler:
                                               timeout=self.c.get('preflight_execute_seconds', 90))
             except subprocess.TimeoutExpired:
                 return None, block
-            text = (scratch / 'execute.log').read_text(errors='replace')
-            if result.returncode == 3 and re.search(r'Settlement V3 over cycle limit: limit=\d+', text):
-                return policy_v2.OVER_LIMIT, block
-            gas = re.findall(r'Settlement V3 cost: gas=(\d+)', text)
-            instructions = re.findall(r'(\d+) instructions', text)
-            if result.returncode or not gas or not instructions:
-                return None, block  # no cost: a host failure for the policy, never a verdict on a transaction
-            return policy_v2.Cost(int(gas[-1]), int(instructions[-1])), block
+            return self.preflight_result(result.returncode, (scratch / 'execute.log').read_text(errors='replace'),
+                                         int(env['BLOCH_PREFLIGHT_CYCLE_LIMIT'])), block
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+    def preflight_result(self, returncode, text, limit):
+        """Read a two-stage preflight run (agent 257, on agent 224's recommendation 2). The host first counts the
+        guest's instructions with SP1 gas off (`Settlement V3 preflight stage 1: instructions=N`); at or over the limit
+        that count is the verdict (`over cycle limit: limit=<n> instructions=N stage=1`, exit 3, no gas run); under it,
+        the gas run gives the cost line with the same count. Anything else, including a single-stage host's late
+        gas-path verdict, is no cost: a host failure for the policy, never a verdict on a transaction."""
+        import sequencer_policy_v2 as policy_v2
+        prefixes = ('Settlement V3 preflight stage 1:', 'Settlement V3 cost:',
+                    'Settlement V3 guest matched the independent host statement:', 'Settlement V3 over cycle limit:')
+        records = [[(position, line) for position, line in enumerate(text.splitlines()) if line.startswith(prefix)]
+                   for prefix in prefixes]
+        stage_one, gas_lines, instruction_lines, over_lines = records
+        self.preflight_single_stage = not stage_one
+        if type(limit) is not int or not 0 < limit <= 2**64 - 1 or type(returncode) is not int or len(stage_one) != 1:
+            return None
+        integer = r'(0|[1-9][0-9]{0,19})'
+        first = re.fullmatch(prefixes[0] + r' instructions=' + integer + r' elapsed_ms=' + integer, stage_one[0][1])
+        if first is None or any(int(value) > 2**64 - 1 for value in first.groups()):
+            return None
+        counted = int(first[1])
+        if returncode == 3:
+            expected = f'{prefixes[3]} limit={limit} instructions={counted} stage=1'
+            if (len(over_lines) == 1 and over_lines[0][1] == expected and counted >= limit
+                    and over_lines[0][0] > stage_one[0][0] and not gas_lines and not instruction_lines):
+                return policy_v2.OVER_LIMIT
+            return None
+        if returncode or over_lines or len(gas_lines) != 1 or len(instruction_lines) != 1 or counted >= limit:
+            return None
+        gas = re.fullmatch(prefixes[1] + r' gas=' + integer + r' touched_memory=[0-9]+ record_bytes=[0-9]+ syscalls=.*',
+                           gas_lines[0][1])
+        instructions = re.fullmatch(prefixes[2] + ' ' + integer + r' instructions in .+', instruction_lines[0][1])
+        if (gas is None or instructions is None or int(gas[1]) > 2**64 - 1 or int(instructions[1]) != counted
+                or not stage_one[0][0] < gas_lines[0][0] < instruction_lines[0][0]):
+            return None
+        return policy_v2.Cost(int(gas[1]), counted)
 
     def measure_empty(self, parent, anchor, deposits, anchor_slot, number, tag):
         """The control: the same block without deposits or transactions, so the request names no consumed deposit. A
@@ -2014,15 +2043,22 @@ class Settler:
         self.preflight_request = self.preflight_source
         tags = iter(range(1 << 30))
         policy = self.policy()
-        if not getattr(self, 'cost_line_checked', False):
+        program_key = (self.program['prover'], tuple(self.program['prover_args']), self.program['guest'],
+                       self.program.get('witness', 'complete'), policy.cycle_limit())
+        if not getattr(self, 'cost_line_checked', False) or getattr(self, 'cost_line_program', None) != program_key:
             # With a budget, the prover must give a cost for an empty block, or users would be starved silently (r7 F2).
             probe = self.measure_empty(parent, anchor, deposits, anchor_slot, number, 'probe')
             try:
                 import sequencer_policy_v2 as policy_v2
                 policy_v2.check_cost_line(probe)
             except RuntimeError as error:
+                if getattr(self, 'preflight_single_stage', False):
+                    raise Halt('the prover is not a two-stage preflight host (no "Settlement V3 preflight stage 1" line): '
+                               'a single-stage host gives its cycle-limit verdict 20-30 s late (agent 224); refusing to '
+                               'start with max_block_sp1_gas set') from None
                 raise Halt(f'{error} (max_block_sp1_gas is set: the prover must print the Settlement V3 cost line)') from None
             self.cost_line_checked = True
+            self.cost_line_program = program_key
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
         plan = policy.plan(
             [raw for _, raw in entries],

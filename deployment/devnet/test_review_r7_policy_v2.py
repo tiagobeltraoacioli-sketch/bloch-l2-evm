@@ -53,6 +53,7 @@ class Harness(unittest.TestCase):
         self.settler.clock = lambda: self.now
         self.settler.preflight_source = 'request'
         self.settler.next_program = None
+        self.settler.program = {'prover': None, 'prover_args': [], 'guest': None}
         self.settler.spool_open = True
         self.cost, self.sender = {}, {}
         self.deposit_cost = 10

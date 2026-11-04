@@ -232,18 +232,23 @@ class Measurement(Harness):
         return self.settler.measure_block('p', 'a', self.deposits, 1, 2, [], 't')[0]
 
     def test_cycle_limit_verdict(self):
-        self.out, self.code = 'Settlement V3 over cycle limit: limit=180000000\n', 3
+        # Two-stage host (agent 257): the gas-off count is the verdict.
+        self.out, self.code = ('Settlement V3 preflight stage 1: instructions=900 elapsed_ms=1\n'
+                               'Settlement V3 over cycle limit: limit=200 instructions=900 stage=1\n'), 3
         self.assertEqual(self.measure_once(), sp.OVER_LIMIT)
         self.assertEqual(self.envs[-1]['BLOCH_PREFLIGHT_CYCLE_LIMIT'], str(2 * self.BUDGET))
 
     def test_default_cycle_limit_is_twice_the_instruction_budget(self):
         del self.settler.c['max_block_instructions']
-        self.out, self.code = 'Settlement V3 over cycle limit: limit=180000000\n', 3
+        self.out, self.code = ('Settlement V3 preflight stage 1: instructions=180000000 elapsed_ms=1\n'
+                               'Settlement V3 over cycle limit: limit=180000000 instructions=180000000 stage=1\n'), 3
         self.measure_once()
         self.assertEqual(self.envs[-1]['BLOCH_PREFLIGHT_CYCLE_LIMIT'], '180000000')
 
     def test_cost(self):
-        self.out = ('Settlement V3 cost: gas=707213 touched_memory=1 record_bytes=2 syscalls=\n'
+        self.settler.c['max_block_instructions'] = 1_000_000  # limit 2M, above the count
+        self.out = ('Settlement V3 preflight stage 1: instructions=522277 elapsed_ms=1\n'
+                    'Settlement V3 cost: gas=707213 touched_memory=1 record_bytes=2 syscalls=\n'
                     'Settlement V3 guest matched the independent host statement: 522277 instructions in 1s\n')
         result = self.measure_once()
         self.assertEqual((result.sp1_gas, result.instructions), (707213, 522277))
