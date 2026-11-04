@@ -1020,7 +1020,8 @@ def check_policy_config(c):
     """The sequencer policy v2 limits this settler accepts (sequencer_policy_v2.DEFAULTS; docs/SEQUENCER-POLICY-V2.md)."""
     for key in ('max_tx_gas', 'exempt_max_tx_gas', 'fresh_slot_price_wei', 'min_tip_wei', 'congestion_max_tip_wei',
                 'preflight_execute_seconds', 'preflight_max_runs', 'preflight_max_seconds', 'sender_ban_seconds',
-                'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib'):
+                'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib', 'large_gas_floor',
+                'large_gas_recovery_seconds', 'gate_dependent_wait_seconds'):
         if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
             raise Halt(f'{key} must be a positive integer')
     if c.get('max_block_txs', 1) > 64 and c.get('user_transactions'):
@@ -2036,6 +2037,9 @@ class Settler:
                  'instructions': base.instructions if base else None, 'over_cycle_limit': plan.base == 'over-limit',
                  'budget_sp1_gas': policy.c['max_block_sp1_gas'], 'budget_instructions': policy.c['max_block_instructions'],
                  'deposits': len(pending), 'forced': len(forced), 'profile': plan.profile}, sort_keys=True) + '\n')
+        # The plan's verdicts (bans, failure counts, waits) are saved before anything moves: a refused final extend
+        # falls back to a deposit-only block without `committed`, and a crash can come anywhere (agents/243 A243-8).
+        policy.save()
         quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
         for name, reason in plan.quarantine:
             if name in by_hash:

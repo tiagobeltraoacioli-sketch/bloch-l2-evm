@@ -105,7 +105,7 @@ still measured against the budget.
 
 | Setting | Value | Was |
 |---|---|---|
-| `fresh_slot_price_wei` | 200 µBLCH per new slot | same |
+| `fresh_slot_price_wei` | 200 µBLCH per new slot, met from the tip: `gas_used × tip ≥ new slots × price` (see A243-11: wallets need a write-aware tip) | same |
 | `fresh_slots_per_block` | 128 | same |
 | `fresh_slots_per_sender` per `fresh_sender_window_seconds` | 256 per 48 h | 256 per 96 blocks |
 | `max_account_slots`, `max_deposit_exposure_slots` | none | none on the sparse guest (D6) |
@@ -163,13 +163,34 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
 - The settler refuses to start with a budget configured when an empty-block probe gives no cost
   (`check_cost_line`). A prover without the cost line can then never starve users silently (r7 F2).
 
-**Try order** (`Policy.try_order`):
-1. **Tier.** Senders with standing (a transaction included within 7 days) and exempt senders come first, then the rest.
-   Standing costs a paid, included transaction; a quarantine removes it.
-2. **Tip.** Within a tier, by effective tip, highest first: a higher tip buys room in a full block (r8 N2). Gas used
-   only breaks ties.
-3. **Nonce.** Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1).
-4. The producer's native selection (`dry`) runs without the block's transaction cap, and the planner applies
+**Try order** (`Policy.try_order`; agents/223 F223-4 and agents/243 A243-1..3):
+1. **First group, by tip, all senders together:** small transactions (gas used below `large_gas`, state, initially
+   `max_tx_gas`) of any sender, and every transaction of a sender with standing or an exempt sender. Ordered by
+   effective tip, highest first: a higher tip buys room in a full block and a place under the transaction cap whoever
+   sends it (r8 N2). Standing only breaks ties. (In 166's first order the tier came before the tip, so senders with
+   standing at the capped tip could keep every new sender out for about 0.07 BLCH a day: A243-1, A243-2.)
+2. **Then large transactions of fresh senders**, which cannot be told from offenders before they are measured
+   (r9 U1). By tip until a quarantine or a run without cost in this block, then by ascending gas used (F223-4). A
+   fresh sender whose first transaction is large waits behind the first group; any small paid transaction (an
+   approve) gives it standing. After a verdict in the block, large transactions of senders with standing (exempt
+   senders aside) join this group too, ahead of the fresh ones (A243-9).
+   Measured sizes (agents/243-evidence/gstar.out, mainnet guest 203114bf): the worst instructions per gas is a KZG
+   point-evaluation loop, about 460 instructions and 390 SP1 gas per gas. A transaction alone over the 90M budget
+   needs about 245-280k gas used, and one over the 180M cycle limit about 440k. So `large_gas` cannot fall below
+   about 120k: transfers and ordinary swaps stay small.
+3. **`large_gas`** is half the gas used of the smallest offender that counted as small, set on a measured verdict
+   (over the cycle limit, or over the budget alone) and persisted. An offender must use at least some G* gas, fixed by
+   the guest's worst instructions per gas, so `large_gas` never falls below G*/2, and each offender small enough to go
+   before small honest transactions halves it. It doubles back once per week without such an offender
+   (`large_gas_recovery_seconds`) and never falls below `large_gas_floor` (120k, half the smallest measured
+   offender), so one odd verdict (the complete fallback guest witnesses whole accounts, so a small transaction can be
+   over there) cannot move every transaction into the large group, where standing comes first again. A run without
+   cost lowers it for its block only, never for good.
+4. **After an offender in a block** the rest is re-ordered and searched from the front without a full run, since the
+   full run would only hit the offenders at the end again (35-40 s per verdict inside the settler, agents/223 F223-3).
+5. **Nonce.** Each sender's transactions stay in nonce order, so every prefix holds nonce n before n+1 (r8 N1); a
+   sender's place follows its next transaction.
+6. The producer's native selection (`dry`) runs without the block's transaction cap, and the planner applies
    `max_block_txs` to the try order. Otherwise the producer's tip order alone would drop a sender with standing behind
    64 high-tip entries before the tiers apply. The first reference test run found this.
 
@@ -178,7 +199,11 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
    items only, writes `deposits-over-budget.json` (renamed `mandatory-over-budget` in the plan) and takes the
    `mandatory-heavy` profile. No cost even for the control: no user transaction.
 2. Gate the spool with native facts (section 3.3, 3.5, bans and waits), repeating the native selection until nothing is
-   refused.
+   refused, at most 6 times. New-slot counts depend on the transactions before, so a refusal can uncover another one
+   (A243-12): a refusal from the second pass on also waits 1 h by sender and nonce (`gate-dependent`), and a gate that
+   has not settled after 6 passes uses its last passing set rather than none. The price of that fallback is that one
+   transaction behind the last refusal may create a slot it did not pay for; the measurement bounds the block and the
+   sender's 48 h rate books the slots from the block's own report.
 3. Measure the mandatory block plus every candidate in try order. **If it fits, that is the block: one run.** This is
    the honest common case: two runs per block in all.
 4. Otherwise find the first misfit by **exponential then binary search from the front**: prefixes of 1, 2, 4… on top of
@@ -246,8 +271,12 @@ on commits.
 `write_limit_exempt_senders`: the operator's deployer and the bridge mint signers or relayers. **Addresses: TBD-owner.**
 
 - Exempt from: the write price, the write rates, and the per-transaction gas cap, which becomes the block gas limit.
-  Always tried in the first tier.
-- Not exempt from: the SP1-gas budget, the measurement, quarantine, the congestion tip, or the producer's own rules.
+  Always tried among the small transactions, by tip.
+- Exempt from the 24 h sender ban (agents/243 A243-5): a quarantine moves only the transaction, and the sender keeps
+  its standing. Otherwise one over-budget deployment, or three runs without cost of a 15M-gas transaction (the 60 s
+  backstop, agents/223 F223-3), would stop that address's bridge mints for a day.
+- Not exempt from: the SP1-gas budget, the measurement, quarantine of the transaction, the congestion tip, or the
+  producer's own rules. A compromised exempt key can make the planner measure one offender per block; rotation as below.
 - Sender identity is the recovered signature, so the exemption cannot be claimed by another key. A compromised exempt
   key can grow state without the write price, still within 64 transactions per block and the SP1 budget. Rotation
   means changing the settler config, with no consensus change.
@@ -334,7 +363,7 @@ it fail (section 9.1). "Integration" means a requirement on the settler, produce
 | R3 | Foreign settlers are not bound | Their own blocks only, on the sparse guest | Consensus repricing only (agent 90): not proposed |
 | R4 | A mandatory-only block above the budget (deposits plus forced, about 114M by addition) | Commits alone with its record; `mandatory-heavy` profile unmeasured | Test P3; operator exit |
 | R5 | The cycle limit is checked per gas chunk, so a run overshoots by up to one chunk | Time not measured | Test H1 |
-| R6 | Standing is cheap (one paid transaction) | It only moves a sender ahead of fresh ones; a quarantine removes it and bans the sender | Accepted |
+| R6 | Standing is cheap (one paid transaction) | It only moves a sender ahead of fresh ones among large transactions and breaks tip ties among small ones (A243-1, A243-2); a quarantine removes it and bans the sender | Accepted |
 | R7 | Spool flooding at the RPC (4,096 entries, 16 per sender, eviction by fee) | Pre-existing; the planner reads at most 16,384 | RPC refusal of banned senders (R1); admission at `max_tx_gas` (3.2) |
 | R8 | The budget's memory margin rests on two 2c points and on load-noisy times | | Tests P1, P2 |
 | R9 | The sparse guest's empty-block cost at height 8191 is not measured | Complete guest: +37k SP1 gas per block of height (agent 82) | Test H3 |
