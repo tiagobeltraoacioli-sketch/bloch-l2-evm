@@ -158,9 +158,10 @@ Record that hash next to D7 in the owner documents.
 
 ## 5. Where the signature and public key go (online again)
 
-- `SHA256SUMS.minisig` goes in the release directory, next to `SHA256SUMS`, on both build hosts,
-  so that plan P2's copy (`…/release/bloch-l2-2026-11-03-next-native-78d4921c/*`) carries it to A
-  and B. `release.json` already names it (`checksum_signature`).
+- `SHA256SUMS.minisig` stays next to `SHA256SUMS` in `~/bloch-l2-signing/from-4577`: plan P2 stages A
+  and B from that signed copy on the Mac (`scp ~/bloch-l2-signing/from-4577/* …`), so it carries the
+  signature. Put it in the release directory on both build hosts as well (below), so that those
+  copies are complete. `release.json` already names it (`checksum_signature`).
 - `bloch-release-20260922.pub` travels with every published copy of the release, as with the node
   releases. Operators must not trust the copy inside a download alone: they compare it with the
   key ID and public key string published earlier (node release READMEs) or rely on the pinned key

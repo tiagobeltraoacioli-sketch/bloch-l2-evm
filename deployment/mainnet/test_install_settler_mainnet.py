@@ -47,6 +47,10 @@ class Installer(unittest.TestCase):
             patcher = mock.patch.object(m, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The L1 RPCs are configuration (test_install_settler_rpc_urls.py); documentation addresses here.
+        env = mock.patch.dict(m.os.environ, {'L1_RPC_URLS': 'http://192.0.2.1:8080,http://192.0.2.2:8080,http://192.0.2.3:8080'})
+        env.start()
+        self.addCleanup(env.stop)
 
     def test_runuser_is_absolute_under_the_clean_path(self):
         with mock.patch.object(m.subprocess, 'run', return_value=Done()) as run:

@@ -17,9 +17,13 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       passphrase is generated here, kept root-only in /etc/bloch-l2-mainnet-settler/da.passphrase and never
       printed: the worker reads only the copy its unit puts in its private runtime directory (review r10 M-4).
       Prints the funding script hash to send the DA fee budget to.
-  sudo python3 install-settler-mainnet.py configure [--user-transactions]
+  sudo python3 install-settler-mainnet.py configure --rpc-urls URL,URL,URL [--user-transactions]
         [--prover-threads N] [--remote-prover USER@HOST --prover-host-key FILE]
         [--follower-state DIR --follower-status FILE | --no-foreign-recovery]
+      The L1 RPCs are configuration, not code: --rpc-urls (or L1_RPC_URLS in the environment of the
+      python3 process, e.g. `sudo L1_RPC_URLS=... python3 ...`) names at least three http(s)://host:port
+      URLs on distinct hosts. Nothing is built in, and a placeholder (TBD-owner) is refused. The quorum
+      is a strict majority (2 of 3). config.json keeps them as rpc_urls, which install-shadow.sh reads.
       Foreign settlement recovery is ON by default (owner decision D17, 2026-11-02): it reads the
       local native follower at FOLLOWER_STATE / FOLLOWER_STATUS, which must exist and be readable
       by the settler user. --no-foreign-recovery leaves it off (any foreign settlement then halts).
@@ -54,11 +58,13 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 
 USER = 'bloch-l2-mainnet-settler'
 # The RPC and shadow users join this group: it reads the canonical database and the work directory only (the
@@ -84,7 +90,12 @@ RUNTIME = Path('/run/bloch-l2-mainnet-settler')
 DA_RUNTIME_PASSPHRASE = RUNTIME / 'da.passphrase'
 # Absolute: as_settler runs with PATH=/usr/bin:/bin, and on Ubuntu 24.04 runuser is only in /usr/sbin.
 RUNUSER = '/usr/sbin/runuser'
-RPC_URLS = ['http://80.240.16.185:8080', 'http://199.247.22.8:8080', 'http://45.77.67.251:8080']
+# The L1 RPCs come from configure --rpc-urls or $L1_RPC_URLS, never from this file (reviews r11 235/240: no
+# operator or validator host is compiled into the kit, and choosing the third RPC is not a kit commit).
+RPC_URLS_ENV = 'L1_RPC_URLS'
+MIN_RPC_URLS = 3
+# Placeholders the plan and the templates use for a value only the owner can fill in.
+RPC_PLACEHOLDER = re.compile(r'tbd|[<>]|THIRD_L1|L1_RPC_3|IP_OF', re.IGNORECASE)
 GNARK_IMAGE = 'ghcr.io/succinctlabs/sp1-gnark@sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d'
 PINS = {
     'settlement_v3_mainnet': '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473',
@@ -122,6 +133,31 @@ def digest(path):
 
 def option(args, name, default=None):
     return args[args.index(name) + 1] if name in args else default
+
+
+def l1_rpc_urls(args, environ=None):
+    """The L1 RPC URLs of this host's settler: --rpc-urls, else $L1_RPC_URLS (separated by commas or spaces)."""
+    environ = os.environ if environ is None else environ
+    raw, source = option(args, '--rpc-urls'), '--rpc-urls'
+    if raw is None:
+        raw, source = environ.get(RPC_URLS_ENV, ''), RPC_URLS_ENV
+    urls = [u for u in re.split(r'[\s,]+', raw.strip()) if u]
+    assert urls, (f'configure needs the L1 RPCs: --rpc-urls URL,URL,URL (or {RPC_URLS_ENV}); '
+                  'none is built into the installer')
+    for url in urls:
+        assert not RPC_PLACEHOLDER.search(url), f'{source}: {url!r} is a placeholder: put the real L1 RPC URL in'
+        parts = urllib.parse.urlsplit(url)
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        assert parts.scheme in ('http', 'https') and parts.hostname and port and '@' not in parts.netloc \
+            and parts.path in ('', '/') and not parts.query and not parts.fragment, \
+            f'{source}: {url!r} is not an http(s)://HOST:PORT URL'
+    hosts = [urllib.parse.urlsplit(u).hostname for u in urls]
+    assert len(set(hosts)) == len(hosts), f'{source}: the L1 RPCs must be on distinct hosts (one failure domain each)'
+    assert len(urls) >= MIN_RPC_URLS, f'{source}: at least {MIN_RPC_URLS} L1 RPCs on distinct hosts (quorum 2 of 3)'
+    return urls
 
 
 def release(config=None):
@@ -223,12 +259,13 @@ def prepare(args):
 
 def configure(args):
     assert STATE.is_dir() and not CONFIG.exists(), 'run prepare first, configure once'
+    rpc_urls = l1_rpc_urls(args)  # before anything else: a missing or placeholder RPC is a usage error
     rel = release()
     settler = settler_module(rel)
     threads = int(option(args, '--prover-threads', '6'))
     config = {
         'network_kind': 'mainnet', 'network': settler.MAINNET['network'], 'l2_genesis': settler.MAINNET['l2_genesis'],
-        'rpc_urls': RPC_URLS, 'rpc_quorum': 2,
+        'rpc_urls': rpc_urls, 'rpc_quorum': len(rpc_urls) // 2 + 1,
         'produce': str(rel / 'bloch-l2-produce-dev'), 'l2_db': str(STATE / 'canonical'),
         'workdir': str(STATE / 'work'), 'home': str(STATE),
         'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),

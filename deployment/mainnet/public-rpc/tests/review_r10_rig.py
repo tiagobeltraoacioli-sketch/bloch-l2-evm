@@ -12,6 +12,7 @@ Each check states what the public endpoint needs. A FAIL is a finding of report 
 """
 import argparse
 import concurrent.futures as cf
+import http.client
 import http.server
 import json
 import os
@@ -129,24 +130,38 @@ class Pair:
             run('nginx', '-q', '-p', conf, '-c', conf / 'nginx.conf')
             self.confs.append(conf)
 
-    def workers_rss_kib(self):
-        total = 0
+    def workers_rss(self):
+        """(total VmRSS KiB, worker count) of the nginx workers of both gateways. Never raises: a master that is
+        reloading (no or empty nginx.pid), a worker that exits between listdir and read (no file, or no VmRSS line
+        any more), or a malformed line just leaves that process out of this sample."""
+        total = workers = 0
         for conf in self.confs:
             try:
-                master = int((conf / 'nginx.pid').read_text())
+                master = int((conf / 'nginx.pid').read_text().strip())
             except (OSError, ValueError):
-                continue  # stopping
-            for pid in os.listdir('/proc'):
-                if not pid.isdigit():
-                    continue
+                continue  # stopping or reloading
+            try:
+                pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
+            except OSError:
+                continue
+            for pid in pids:
                 try:
                     status = Path(f'/proc/{pid}/status').read_text()
                 except OSError:
                     continue
-                # A worker that is exiting has no VmRSS line any more.
-                if f'PPid:\t{master}\n' in status and 'VmRSS:' in status:
-                    total += int(status.split('VmRSS:')[1].split()[0])
-        return total
+                if f'PPid:\t{master}\n' not in status:
+                    continue
+                for line in status.splitlines():
+                    if line.startswith('VmRSS:'):
+                        fields = line.split()
+                        if len(fields) >= 2 and fields[1].isdigit():
+                            total += int(fields[1])
+                            workers += 1
+                        break
+        return total, workers
+
+    def workers_rss_kib(self):
+        return self.workers_rss()[0]
 
     def stop(self):
         for conf in self.confs:
@@ -154,17 +169,32 @@ class Pair:
 
 
 def post(url, body, ip, timeout=90):
+    """(HTTP status, decoded answer). A request the client gives up on is a result, not a crash of the rig: a
+    timeout gives ('timeout', seconds) and a dropped or refused connection ('error', 'Type: message'), so a check
+    that sends many requests reports what each one got."""
     data = body if isinstance(body, bytes) else json.dumps(body).encode()
     request = urllib.request.Request(url, data, {'content-type': 'application/json', 'CF-Connecting-IP': ip})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, json.loads(response.read())
+            raw = response.read()
+            try:
+                return response.status, json.loads(raw)
+            except ValueError:
+                return response.status, raw[:200].decode(errors='replace')
     except urllib.error.HTTPError as error:
         text = error.read()
         try:
             return error.code, json.loads(text)
         except ValueError:
             return error.code, text[:200].decode(errors='replace')
+    except (TimeoutError, socket.timeout) as error:
+        return 'timeout', f'{type(error).__name__} after {timeout} s'
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, (TimeoutError, socket.timeout)):
+            return 'timeout', f'{type(error.reason).__name__} after {timeout} s'
+        return 'error', f'URLError: {error.reason}'
+    except (OSError, http.client.HTTPException) as error:
+        return 'error', f'{type(error).__name__}: {error}'
 
 
 def call(i, method='eth_call', params=None):
@@ -246,32 +276,89 @@ def r3_timeout(pair, A, B):
     time.sleep(36)
 
 
-def r4_memory(pair, A, B):
-    """G5: answers of a split batch are held in njs memory (subrequest_output_buffer_size 16m)."""
-    A.big = B.big = 15 * 1024 * 1024
-    base = pair.workers_rss_kib()
-    peak = [base]
-    stop = threading.Event()
+class RssSampler:
+    """Peak VmRSS of the nginx workers, sampled every 50 ms in a thread that never dies on a sample error: the
+    count of samples and of errors is part of the verdict, so a sampler that measured nothing is a FAIL, not a
+    silent PASS on a stale peak."""
 
-    def sample():
-        while not stop.is_set():
-            peak[0] = max(peak[0], pair.workers_rss_kib())
+    def __init__(self, pair):
+        self.pair, self.samples, self.errors, self.workers = pair, 0, [], 0
+        self.base, self.workers = pair.workers_rss()
+        self.peak = self.base
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                total, workers = self.pair.workers_rss()
+                if workers:
+                    self.samples += 1
+                    self.peak = max(self.peak, total)
+                    self.workers = max(self.workers, workers)
+            except Exception as error:  # noqa: BLE001 - record and keep sampling
+                self.errors.append(f'{type(error).__name__}: {error}')
             time.sleep(0.05)
-    t = threading.Thread(target=sample)
-    t.start()
-    A.call_delay = B.call_delay = 0.5
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc):
+        self.stop_event.set()
+        self.thread.join(5)
+
+    def detail(self):
+        return {'workers_rss_base_mib': round(self.base / 1024), 'peak_growth_mib': round((self.peak - self.base) / 1024),
+                'workers': self.workers, 'samples': self.samples, 'sampler_errors': self.errors[:3]}
+
+    def measured(self):
+        return self.base > 0 and self.samples >= 5 and not self.errors
+
+
+def r4_memory(pair, A, B):
+    """G5: answers of a split batch are held in njs memory (subrequest_output_buffer_size 16m) until the request
+    is merged. Two loads, each 32 concurrent split batches from 16 clients (so the gateway-wide simulation limit,
+    8, binds rather than the per-client one): 15 MiB answers (above the 2 MiB bound: each call gets -32005 and
+    nothing large is held) and 1.9 MiB answers (just under the bound: held and served whole, the largest that a
+    worker holds). Each load is a measured verdict: the RSS sampler must have run, every request must have been
+    answered by the gateway (no client timeout), with 200 or 429, and every 200 must be the right answer."""
+    clients = [f'198.51.100.{51 + i}' for i in range(16)]
     batch = [call(1), call(2, 'eth_getCode', ['0x' + '11' * 20, 'latest'])]
-    with cf.ThreadPoolExecutor(32) as ex:
-        statuses = list(ex.map(lambda i: post(pair.a, batch, f'198.51.100.{51 + i % 2}', timeout=120)[0], range(32)))
-    A.call_delay = B.call_delay = 0
-    stop.set()
-    t.join()
-    grew_mib = (peak[0] - base) / 1024
-    check('R4/G5: 32 concurrent split batches with a 15 MB answer from two clients add under 512 MiB to the nginx workers '
-          'and every admitted one is answered (200, -32005 "response too large")',
-          grew_mib < 512 and set(statuses) <= {200, 429} and 200 in statuses, {'workers_rss_base_mib': round(base / 1024), 'peak_growth_mib': round(grew_mib),
-                           'statuses': {str(s): statuses.count(s) for s in set(statuses)}})
-    A.big = B.big = 64
+    for size, label, whole in ((15 * 1024 * 1024, '15 MiB', False), (int(1.9 * 1024 * 1024), '1.9 MiB', True)):
+        A.big = B.big = size
+        A.call_delay = B.call_delay = 0.5
+        started = time.time()
+        with RssSampler(pair) as rss:
+            with cf.ThreadPoolExecutor(32) as ex:
+                answers = list(ex.map(lambda i: post(pair.a, batch, clients[i % len(clients)], timeout=120), range(32)))
+        took = time.time() - started
+        A.call_delay = B.call_delay = 0
+        A.big = B.big = 64
+        statuses = [s for s, _ in answers]
+        wrong = []
+        for status, answer in answers:
+            if status == 200:
+                if not isinstance(answer, list) or len(answer) != 2:
+                    wrong.append(str(answer)[:120])
+                elif whole and not (answer[0].get('result') == '0x' + '00' * 32
+                                    and len(answer[1].get('result', '')) == 2 + 2 * (size // 2)):
+                    wrong.append({'lengths': [len(json.dumps(x)) for x in answer]})
+                elif not whole and [x.get('error', {}).get('code') for x in answer] != [-32005, -32005]:
+                    wrong.append([x.get('error', {}).get('code') for x in answer])
+            elif status == 429:
+                if not (isinstance(answer, list) and all(x.get('error', {}).get('code') == -32005 for x in answer)):
+                    wrong.append(str(answer)[:120])
+        grew_mib = (rss.peak - rss.base) / 1024
+        detail = {**rss.detail(), 'seconds': round(took, 1),
+                  'statuses': {str(s): statuses.count(s) for s in sorted(set(map(str, statuses)))},
+                  'unanswered': [a for s, a in answers if s in ('timeout', 'error')][:3], 'wrong': wrong[:3]}
+        check(f'R4/G5 ({label}): measured: the RSS sampler ran ({rss.samples} samples, no errors)', rss.measured(), detail)
+        check(f'R4/G5 ({label}): 32 concurrent split batches from 16 clients are all answered by the gateway '
+              f'(200 or 429, none timed out), and every 200 is {"whole" if whole else "-32005 for each call"}',
+              set(statuses) <= {200, 429} and 200 in statuses and not wrong, detail)
+        check(f'R4/G5 ({label}): the nginx workers grow by under 512 MiB', rss.measured() and grew_mib < 512, detail)
+        time.sleep(2)
 
 
 def r5_large_answers(pair, A, B):

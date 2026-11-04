@@ -136,7 +136,7 @@ Installed, NOT started. To start (the first replay of ~155k L1 blocks takes ~30-
   sudo systemctl enable --now bloch-l2-mainnet-follower
   journalctl -fu bloch-l2-mainnet-follower        # wait for status.json with l2_genesis.finalized=true
   sudo systemctl enable --now bloch-l2-mainnet-rpc
-  curl -s -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"bloch_finality","params":[]}'
+  curl -s --retry 30 --retry-delay 1 --retry-connrefused -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"bloch_finality","params":[]}'
 Only on the sequencer host with foreign_recovery on, so the RPC reopens the worker's swapped database:
   sudo systemctl enable --now bloch-l2-mainnet-rpc-restart.path
 MSG

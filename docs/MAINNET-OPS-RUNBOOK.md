@@ -40,11 +40,14 @@ refused before a request is made. Its only other commands are
 ```
 python3 deployment/mainnet/l2_monitor.py --profile mainnet --phase live \
   --l2-rpc A=http://127.0.0.1:18955 --l2-rpc B=http://BACKEND_B:18955 \
-  --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 \
+  --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc THIRD_L1_RPC_URL \
   --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json \
   --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service \
   --attest-drop https://drop.example/attest --alert-config /etc/bloch-l2-monitor/alert.json --json
 ```
+
+`THIRD_L1_RPC_URL` is the third entry of `rpc_urls` in `/etc/bloch-l2-mainnet-settler/config.json` (the owner's
+choice, given to `install-settler-mainnet.py configure --rpc-urls`).
 
 Options:
 

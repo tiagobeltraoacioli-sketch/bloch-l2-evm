@@ -113,12 +113,18 @@ Recommendation:
 ## 2. Configure, then run the read-only checks (no transaction)
 
 ```
-sudo python3 install-settler-mainnet.py configure --prover-threads 6
+sudo python3 install-settler-mainnet.py configure --rpc-urls http://80.240.16.185:8080,http://199.247.22.8:8080,THIRD_L1_RPC_URL --prover-threads 6
 ```
+
+`THIRD_L1_RPC_URL` is the third L1 RPC the owner chose (go-live plan L1-8); replace it with its
+`http://HOST:8080` URL. The installer compiles in no L1 host. It takes the URLs from `--rpc-urls`
+(or `L1_RPC_URLS` in the environment of the `python3` process, `sudo L1_RPC_URLS=... python3 ...`)
+and refuses, before any check: no URL, fewer than three, a repeated host, a URL that is not
+`http(s)://HOST:PORT`, and a placeholder (`TBD-owner`, `THIRD_L1_RPC_URL`, `<...>`).
 
 This writes `/etc/bloch-l2-mainnet-settler/config.json`:
 
-- RPCs `80.240.16.185`, `199.247.22.8` and `45.77.67.251` on port 8080, quorum 2;
+- RPCs: the `--rpc-urls` list, quorum a strict majority (2 of 3);
 - acceptance timeout 1800 s, rebroadcast every 300 s, polling every 15 s; every broadcast goes to all
   three RPCs (review r10 M2);
 - user transactions **off**;

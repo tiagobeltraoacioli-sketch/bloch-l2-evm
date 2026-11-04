@@ -206,7 +206,7 @@ As in the v2.1 plan §3.2: guest `settlement_v3_mainnet` `203114bf34df280d7964fd
 
 ## 4. G0: HF3 finalized cleanly (entry gate for everything below)
 
-Run from any machine, at or after the D1 epoch, against all three L1 RPCs: 80.240.16.185, 199.247.22.8 and 45.77.67.251. These are the three `RPC_URLS` the settler installer fixes (L1-8): choosing another third RPC is a kit commit and a new freeze, before signing. Each command is one block.
+Run from any machine, at or after the D1 epoch, against all three L1 RPCs: 80.240.16.185, 199.247.22.8 and the third RPC the owner chose (L1-8, O2). In this plan `THIRD_L1_RPC_URL` stands for that URL (`http://HOST:8080`); replace it everywhere before you run a command. The kit compiles in no L1 host: the settler installer takes these three URLs at P6 (`configure --rpc-urls`) and refuses a placeholder such as `TBD-owner` or `THIRD_L1_RPC_URL`, so choosing the third RPC is not a kit commit and does not move the freeze. Each command is one block.
 
 ```
 curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":[]}' http://80.240.16.185:8080
@@ -217,7 +217,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 ```
 
 ```
-curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":[]}' http://45.77.67.251:8080
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":[]}' THIRD_L1_RPC_URL
 ```
 
 ```
@@ -229,7 +229,7 @@ curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method"
 ```
 
 ```
-curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' http://45.77.67.251:8080
+curl -s -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getl2settlement","params":[]}' THIRD_L1_RPC_URL
 ```
 
 **GO only if all of these hold:**
@@ -262,7 +262,7 @@ python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_histor
 ```
 
 ```
-python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_history.py --rpc http://45.77.67.251:8080 --from-epoch 7180
+python3 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet/l1_finality_history.py --rpc THIRD_L1_RPC_URL --from-epoch 7180
 ```
 
 Rollback: nothing is installed yet.
@@ -287,24 +287,36 @@ Rollback: none needed.
 
 ## P2. Stage and verify the build (no install)
 
-1. The owner signs the release `SHA256SUMS` (D7) following `docs/RELEASE-SIGNING.md`, and puts `SHA256SUMS.minisig` in the release dir on 209 and 136 before the copy below. After the copy, on A and on B (the verifier pins key `1A5D96A5C4955EF7`, checks the canonical trusted comment and every `SHA256SUMS` line; `follower-rpc/install.sh` runs the same check and refuses an unsigned release):
+1. The owner signs the release `SHA256SUMS` (D7) following `docs/RELEASE-SIGNING.md`, and keeps the signed copy in `~/bloch-l2-signing/from-4577` on the Mac (`docs/RELEASE-SIGNING.md` §2-§5); the copies below start from it. After the copy, on A and on B (the verifier pins key `1A5D96A5C4955EF7`, checks the canonical trusted comment and every `SHA256SUMS` line; `follower-rpc/install.sh` runs the same check and refuses an unsigned release):
 
 ```
 python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
 ```
 
-2. Stage on A, from the Mac. Each command is one block. The release comes from 45.77 (identical copy on 136); `manifest` and `carryover` from 45.77 as before.
+2. Stage on A, from the Mac. Each command is one block. The release comes from the owner's signed and verified copy on the Mac, `~/bloch-l2-signing/from-4577` (fetched from 45.77 and compared byte for byte with 136's copy in `docs/RELEASE-SIGNING.md` §2, with `SHA256SUMS.minisig` beside it); `manifest` and `carryover` come from 45.77 through the Mac too. No copy runs host to host: a third-party `scp` relays through the Mac without retrying and dropped its connection twice in the round-11 rehearsal (agent 202). If a copy stops with `lost connection` or `Connection closed`, run the same command again; it overwrites the partial file, and the pin check after the copy refuses a short or changed one.
+
+```
+mkdir -p ~/bloch-l2-signing/staging
+```
+
+```
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ~/bloch-l2-signing/staging/
+```
+
+```
+ls -l ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ~/bloch-l2-signing/staging/mainnet.manifest
+```
 
 ```
 ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkdir -p l2-golive-next/artifacts l2-golive-next/release-settler-v2
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/* ubuntu@136.244.93.186:l2-golive-next/artifacts/
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/staging/* ubuntu@136.244.93.186:l2-golive-next/artifacts/
 ```
 
 ```
@@ -317,18 +329,18 @@ scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit
 
 `scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 45.77 and 136 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
 
-Stage B (D3, layout in §2) from the Mac; `IP_OF_B` is the D3 host. Each command is one block:
+Stage B (D3, layout in §2) from the same Mac copies; `IP_OF_B` is the D3 host. Each command is one block:
 
 ```
 ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@IP_OF_B mkdir -p l2-golive-next/artifacts
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/rpc-limits-r10/release/bloch-l2-2026-11-03-next-native-78d4921c/*' ubuntu@IP_OF_B:l2-golive-next/artifacts/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/* ubuntu@IP_OF_B:l2-golive-next/artifacts/
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@IP_OF_B:l2-golive-next/artifacts/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/staging/* ubuntu@IP_OF_B:l2-golive-next/artifacts/
 ```
 
 ```
@@ -508,8 +520,10 @@ refuses a populated directory. The data stays. The settler `prepare` state stays
 sudo systemctl enable --now bloch-l2-mainnet-rpc
 ```
 
+The RPC opens its port about a second after `enable --now` returns, so the first call retries a refused connection for up to 30 s (a bare `curl` right after the start got exit 7 in the round-11 rehearsal):
+
 ```
-curl -s -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
+curl -s --retry 30 --retry-delay 1 --retry-connrefused -XPOST 127.0.0.1:18955 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
 ```
 
 ```
@@ -665,10 +679,10 @@ sudo chown -R bloch-l2-mainnet-settler:bloch-l2-mainnet-settler /var/lib/bloch-l
    `rollback` does not undo it, so inspect what it created before you remove anything. Never remove a DA keystore that may already hold funds.
 
 ```
-sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py configure --prover-threads 6 --remote-prover bloch-l2-prover-mainnet@127.0.0.1 --prover-host-key /etc/ssh/ssh_host_ed25519_key.pub --skip-idle-blocks --max-idle-seconds 86400 --min-block-interval 1800
+sudo python3 /home/ubuntu/l2-golive-next/release-settler-v2/install-settler-mainnet.py configure --rpc-urls http://80.240.16.185:8080,http://199.247.22.8:8080,THIRD_L1_RPC_URL --prover-threads 6 --remote-prover bloch-l2-prover-mainnet@127.0.0.1 --prover-host-key /etc/ssh/ssh_host_ed25519_key.pub --skip-idle-blocks --max-idle-seconds 86400 --min-block-interval 1800
 ```
 
-   This is D15. D17: `configure` turns foreign recovery on by default with follower A's paths (`/var/lib/bloch-l2-mainnet-follower/native` and `status.json`), after checking as the settler user that it can read them, so follower A must be running (P3). Do **not** pass `--no-foreign-recovery`. `configure` runs once, so check the result before going on:
+   This is D15. `--rpc-urls` is L1-8: the same three L1 RPCs as G0, in that order (the first answers the reads; every broadcast goes to all three); the installer refuses fewer than three, a repeated host or a placeholder, before any check. D17: `configure` turns foreign recovery on by default with follower A's paths (`/var/lib/bloch-l2-mainnet-follower/native` and `status.json`), after checking as the settler user that it can read them, so follower A must be running (P3). Do **not** pass `--no-foreign-recovery`. `configure` runs once, so check the result before going on:
 
 ```
 sudo python3 -c "import json;c=json.load(open('/etc/bloch-l2-mainnet-settler/config.json'));print(c.get('skip_idle_blocks'),c.get('max_idle_seconds'),c.get('min_block_interval_seconds'),c['user_transactions'],'foreign_recovery' in c,c['remote_prover']['timeout_seconds'])"
@@ -879,7 +893,7 @@ sudo journalctl -u bloch-l2-mainnet-monitor.service -o cat --no-pager -n 40
 The command below needs root for `status.json` only if that file is not world-readable:
 
 ```
-python3 /home/ubuntu/l2-golive-next/kit/l2_monitor.py --profile mainnet --phase live --max-idle-seconds 86400 --backlog-state /tmp/backlog.json --set block_interval_seconds=1800 --l2-rpc A=http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc http://45.77.67.251:8080 --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service --binary /opt/bloch/l2-mainnet/bloch-l2-settled-rpc --build-json /home/ubuntu/l2-golive-next/artifacts/build.json --json
+python3 /home/ubuntu/l2-golive-next/kit/l2_monitor.py --profile mainnet --phase live --max-idle-seconds 86400 --backlog-state /tmp/backlog.json --set block_interval_seconds=1800 --l2-rpc A=http://127.0.0.1:18955 --l1-rpc http://80.240.16.185:8080 --l1-rpc http://199.247.22.8:8080 --l1-rpc THIRD_L1_RPC_URL --follower-status A=/var/lib/bloch-l2-mainnet-follower/status.json --unit settler=bloch-l2-mainnet-settler.service --unit shadow=bloch-l2-mainnet-shadow.service --binary /opt/bloch/l2-mainnet/bloch-l2-settled-rpc --build-json /home/ubuntu/l2-golive-next/artifacts/build.json --json
 ```
 
 GO, after the first L2 finalization: exit 0, or 1 with only the expected WARN `alert_delivery` before D11. Between P8 and that
