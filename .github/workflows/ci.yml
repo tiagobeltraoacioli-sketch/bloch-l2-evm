@@ -73,6 +73,16 @@ jobs:
       # List the pre-existing ignored performance benchmark for discoverability.
       - run: cargo test --locked --test audit_regressions -- --ignored --list
 
+  operator-tests:
+    name: Launch kit, monitor and gateway regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check launch configuration, source pins and monitor state
+        run: python3 -m unittest discover -s deployment/mainnet -p 'test_*.py'
+      - name: Check gateway rendering and local transport failures
+        run: python3 -m unittest discover -s deployment/mainnet/public-rpc/tests -p 'test_*.py'
+
   reth-provider:
     name: Reth provider execution and storage
     runs-on: ubuntu-latest
