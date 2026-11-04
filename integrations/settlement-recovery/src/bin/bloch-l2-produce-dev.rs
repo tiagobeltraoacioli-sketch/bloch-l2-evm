@@ -64,7 +64,7 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
                               [--txs PATH] [--max-gas N] [--max-bytes N] [--max-txs N]
                               [--timestamp-rule FROM:GENESIS:SLOT_MS --anchor-slot N]
                               [--rule-set base|next] [--forced FILE]
-  bloch-l2-produce-dev select ... as extend, with --txs: reports the selection and commits nothing
+  bloch-l2-produce-dev select ... as extend, with --txs and without --max-txs: reports the selection and commits nothing
   bloch-l2-produce-dev rewind --target DIR --number N --hash HEX [--respool DIR]
   bloch-l2-produce-dev export --target DIR --number N --out FILE [--witness complete|sparse]
   bloch-l2-produce-dev head   --target DIR
@@ -97,6 +97,11 @@ directory, files of included and dropped transactions are removed after the
 block is durably committed. Without --txs the block has no user transactions.
 --min-tip-wei N leaves pending the transactions whose effective priority fee at
 this block's base fee is below N (default 0, no minimum); reported as below_min_tip.
+select runs the same selection on the same parent, deposits and limits, and prints
+the report extend would print (included, deferred, dropped, tx_stats with sender,
+nonce, gas used, effective tip and storage slots added and cleared per account),
+without committing a block or pruning the spool. It takes no --max-txs: a
+sequencer policy applies its own count to its own order (sequencer policy v2).
 da writes the canonical L1 data-availability batch (hex) of block N's user
 transactions and prints its da_commitment; a block without user transactions
 has nothing to publish. reconstruct creates NEW_DIR at L2 genesis and replays
@@ -347,13 +352,16 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(json!({"number": 0, "hash": hex::encode(hash)}).to_string())
         }
         "extend" | "select" => {
-            only(
-                rest,
-                &[
-                    "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
-                    "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
-                ],
-            )?;
+            let selecting = command == "select";
+            let allowed: &[&str] = &[
+                "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
+                "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
+            ];
+            if selecting && rest.iter().any(|a| a == "--max-txs") {
+                // Sequencer policy v2: the policy applies its own count to its own try order.
+                return Err("select runs without the per-block transaction cap: --max-txs is not accepted".into());
+            }
+            only(rest, allowed)?;
             // CANDIDATE (forced inclusion): the records L1 names for this block's settlement.
             let forced = match rest.chunks(2).find(|p| p[0] == "--forced") {
                 Some(pair) => read_forced(Path::new(&pair[1]))?,
@@ -451,6 +459,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 if command == "select" {
                     let mut out = selection_report(&selection, below_min_tip);
                     out["forced"] = forced_report(&forced, &forced_selection);
+                    out["committed"] = json!(false);
                     return Ok(out.to_string());
                 }
                 let body: Vec<_> = forced_selection.included.iter().chain(selection.transactions.iter()).cloned().collect();
@@ -476,7 +485,9 @@ fn run(args: &[String]) -> Result<String, String> {
             if command == "select" {
                 // What `extend` would select, per transaction: nothing is committed or pruned.
                 let selection = coordinator.select_pending(&attributes, &candidates, limits).map_err(|e| e.to_string())?;
-                return Ok(selection_report(&selection, below_min_tip).to_string());
+                let mut report = selection_report(&selection, below_min_tip);
+                report["committed"] = json!(false);
+                return Ok(report.to_string());
             }
             let (tip, selection) = coordinator
                 .extend_with_pending(parent, attributes, &candidates, limits)
@@ -509,9 +520,7 @@ fn run(args: &[String]) -> Result<String, String> {
                       "limits": {"max_gas": limits.max_gas, "max_bytes": limits.max_bytes,
                                  "max_txs": limits.max_transactions},
                       "pruned": pruned});
-            if let (Some(fields), serde_json::Value::Object(report)) = (out.as_object_mut(), selection_report(&selection, below_min_tip)) {
-                fields.extend(report);
-            }
+            extend_report(&mut out, &selection, below_min_tip);
             report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
             Ok(out.to_string())
         }
@@ -880,20 +889,40 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
     .to_string())
 }
 
+/// The selection part of the extend and select reports. `tx_stats` is a report only: no block rule reads it.
+fn extend_report(
+    out: &mut serde_json::Value,
+    selection: &bloch_l2_evm::node_execution::select::BlockSelection,
+    below_min_tip: usize,
+) {
+    let slots = |items: &[(Address, u64)]| items.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>();
+    out["included"] = json!(selection.hashes.iter().map(hex::encode).collect::<Vec<_>>());
+    out["deferred"] = json!(selection
+        .deferred
+        .iter()
+        .map(|d| json!({"hash": hex::encode(d.hash), "reason": d.reason.as_str()}))
+        .collect::<Vec<_>>());
+    out["dropped"] = json!(selection
+        .dropped
+        .iter()
+        .map(|d| json!({"index": d.index, "hash": d.hash.map(hex::encode), "reason": d.reason.describe()}))
+        .collect::<Vec<_>>());
+    out["below_min_tip"] = json!(below_min_tip);
+    out["tx_stats"] = json!(selection
+        .stats
+        .iter()
+        .map(|t| json!({"hash": hex::encode(t.hash), "sender": hex::encode(t.sender), "nonce": t.nonce,
+                        "gas_used": t.gas_used, "effective_tip": t.effective_tip.to_string(),
+                        "fresh_slots": slots(&t.fresh_slots), "cleared_slots": slots(&t.cleared_slots)}))
+        .collect::<Vec<_>>());
+}
+
 /// Native inbox records as L2 deposit mints. The native settlement rejects any
 /// body that does not mint exactly these records, so no field is defaulted.
 fn selection_report(selection: &bloch_l2_evm::node_execution::select::BlockSelection, below_min_tip: usize) -> serde_json::Value {
-    let slots = |items: &[(Address, u64)]| items.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>();
-    json!({"included": selection.hashes.iter().map(hex::encode).collect::<Vec<_>>(),
-           "deferred": selection.deferred.iter().map(|d| json!({"hash": hex::encode(d.hash),
-                       "reason": d.reason.as_str()})).collect::<Vec<_>>(),
-           "dropped": selection.dropped.iter().map(|d| json!({"index": d.index,
-                       "hash": d.hash.map(hex::encode), "reason": d.reason.describe()})).collect::<Vec<_>>(),
-           "below_min_tip": below_min_tip,
-           "tx_stats": selection.stats.iter().map(|t| json!({"hash": hex::encode(t.hash),
-                       "sender": hex::encode(t.sender), "gas_used": t.gas_used,
-                       "effective_tip": t.effective_tip.to_string(),
-                       "fresh_slots": slots(&t.fresh_slots), "cleared_slots": slots(&t.cleared_slots)})).collect::<Vec<_>>()})
+    let mut report = json!({});
+    extend_report(&mut report, selection, below_min_tip);
+    report
 }
 
 /// CANDIDATE (forced inclusion): the due records as `getl2settlement.forced.due` lists them, each with its

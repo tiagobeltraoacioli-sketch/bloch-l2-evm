@@ -32,7 +32,7 @@ log_format l2rpc escape=json '{"t":"$time_iso8601","ip":"$remote_addr","edge":"$
     '"origin":"$http_origin"}';
 
 # Backends. local = this host's settled RPC; peer = the other host's settled RPC
-# through the loopback mTLS hop below. The settled RPC accepts 100 connections
+# through the unix-socket mTLS hop below (no other local user can enter its directory). The settled RPC accepts 100 connections
 # (jsonrpsee default in v2) and answers 429 above that, so every path to it is
 # capped (max_conns, shared across workers through the zones): reads
 # @BC@, sequencer paths and the peer listener @BCQ@ each, total below 100.
@@ -227,5 +227,6 @@ server {
         js_periodic l2rpc.probe interval=@PROBE_INTERVAL@ jitter=1;
         return 204;
     }
+@PEER_PROBE@
 }
 @PEER_SERVERS@

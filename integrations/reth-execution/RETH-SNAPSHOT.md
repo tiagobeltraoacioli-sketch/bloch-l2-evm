@@ -5,9 +5,19 @@ The host uses upstream Reth `v2.4.1`, base commit
 [`reth-snapshot.patch`](reth-snapshot.patch). This is a qualified Bloch host
 integration change, not a claim that upstream's published release contains it.
 
-Patch SHA-256: `fe1f293c58cf45281c208e90950c1b9221887459640c031d61c5aed9489d0977`.
-Patched `consistent.rs` SHA-256:
-`1e3b23b5ba0444faf9bb903ba6dc7e65bb928430ded2024869a772e842e91ffa`.
+Patch SHA-256: `e6d960cfbded40ce1cef42c024a362f53e0d6d77b94159358631cb04fdd83a41`.
+Patched files (SHA-256):
+
+| file | SHA-256 |
+|---|---|
+| `crates/storage/provider/src/providers/consistent.rs` | `1e3b23b5ba0444faf9bb903ba6dc7e65bb928430ded2024869a772e842e91ffa` (unchanged since `fe1f293c…`) |
+| `crates/rpc/rpc-eth-api/src/helpers/call.rs` | `95ee7a628e32d1bfb3d2b3ddda06fa73924d29c68e4695fb01387cf3aefa505e` |
+| `crates/rpc/rpc-eth-api/src/helpers/estimate.rs` | `a50853b04a9b9918fd2eeb718e2149453fd4b88e7f78476e8010ef3ce2e3e913` |
+
+The patch has two independent parts: the transaction snapshot correction
+below, and the RPC simulation limits (2026-11-03, review 154 G2/G8, owner
+decision 2), described after it. The previous patch, with the first part only,
+was `fe1f293c58cf45281c208e90950c1b9221887459640c031d61c5aed9489d0977`.
 
 ## Failure and correction
 
@@ -32,6 +42,36 @@ block publication or serialization of all clients is introduced.
 The patch is deliberately about transaction lookup boundaries. Other upstream
 uses of `last_block_number()` and broader snapshot/reorganization behavior are
 outside this correction. It does not make all storage backends crash-atomic.
+
+## RPC simulation limits
+
+Upstream applies the RPC gas cap (`EthApiBuilder::gas_cap`, `Call::call_gas_limit`)
+only to an explicit `eth_call` gas. Three other paths took a larger limit:
+
+| path | upstream limit | reachable with |
+|---|---|---|
+| `eth_call` without gas, with a fee and a funded (or state-overridden) sender | the caller's allowance, capped by the block gas limit, which a block override sets freely | `[tx, tag, {from: {balance}}, {gasLimit: 1e9}]` |
+| `eth_estimateGas` | the block gas limit (or EIP-7825's cap), also open to a block override | `[tx, tag, state, {gasLimit: 1e9}]` |
+| `eth_createAccessList` | the explicit gas, with the block gas limit and EIP-7825's cap disabled | `[{gas: 1e9, ...}]` |
+
+So one anonymous request could run the EVM for hours, holding one of the
+settled RPC's 4 simulation permits; four requests stopped every simulation of
+that backend until a restart. The patch caps all three at `call_gas_limit()`
+(`gas_within_cap`). The settled RPC builds its API with a cap of 15,000,000,
+the spool's `max_tx_gas` (`build_eth_api_capped` in `src/bin/settled_rpc/capped_api.rs`: inside the binary, because any change to the library, even an unused item, changed `bloch-l2-produce-dev`); `build_eth_api` and
+`build_eth_api_with` keep the block gas limit.
+
+It also adds a process-wide wall-clock budget for a request that runs the EVM
+more than once (`set_simulation_time_limit`, default none). `eth_estimateGas`
+checks it before its optimistic run and before every binary-search run, and
+`eth_createAccessList` before its second run; when it is spent they answer
+`execution aborted (timeout = …)` (`EthApiError::ExecutionTimedOut`, code
+-32000 as upstream's tracing timeout). A single EVM run is not interrupted:
+it is bounded by the gas cap. The settled RPC sets 5 s.
+
+Only RPC code changes. The canonical executor, the native follower and the
+block producer do not instantiate these methods; their release binaries are
+byte-identical to the previous build (PINS-NEXT, agent 195).
 
 ## Reproduce and inspect
 

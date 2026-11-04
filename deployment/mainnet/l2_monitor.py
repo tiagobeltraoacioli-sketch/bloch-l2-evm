@@ -157,7 +157,17 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'waiting-for-program', 'shadow-rules-wait',
                          # Forced inclusion (agent 137, merged in fork candidate v3): the rehearsal-only censor_senders
                          # knob moved a spooled transaction aside. Refused on mainnet, so any sighting is a warning.
-                         'tx-censored'})
+                         'tx-censored',
+                         # Agent 236 (user-transaction candidate): the plain SP1 budget (off by default) cut a block
+                         # or quarantined a transaction that cannot fit even alone.
+                         'block-over-budget', 'tx-quarantined',
+                         # Agent 206 (reorg_recovery): a hook that could not deliver a reorg alert; a partial quorum
+                         # below the floor with nothing to recover; a rebuild that did not reach the target.
+                         'reorg-alert-failed', 'reorg-behind-floor-waiting', 'reorg-rebuild-behind-view',
+                         # Agent 223 (sequencer policy v2, logged by sequencer_policy_v2.py through the settler's log):
+                         # a mandatory-only block over the budget (deposits-over-budget.json), a host that measured
+                         # nothing, an unreadable policy state, a gate that did not settle.
+                         'mandatory-over-budget', 'budget-unavailable', 'policy-state-unreadable', 'gate-did-not-settle'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 
@@ -195,6 +205,8 @@ _COMMON: Dict[str, Any] = {
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
     'foreign_window_seconds': 86400, 'foreign_recovered_crit': 2,
+    # settler reorg_recovery: every automatic rebuild after an L1 reorg is reported; two in a day is CRIT.
+    'reorg_recovered_crit': 2,
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
     # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
     'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
@@ -1387,6 +1399,27 @@ def grade_foreign(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r:
                  f'{p["foreign_window_seconds"] / 3600:.0f} h; last: L2 block {last.get("number")} at {last.get("time")}')
 
 
+def grade_reorg(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
+    """Automatic recoveries after an L1 reorg of the worker's own settlement (settler `reorg_recovery`), in the
+    foreign window. Each one is a WARN for the operator; a reached limit (the worker halted) is CRIT. Silent when
+    there is none."""
+    done = [ev for ev in events if ev['event'] in ('reorg-recovered', 'reorg-restored')]
+    pending = [ev for ev in events if ev['event'] in ('reorg-detected', 'reorg-waiting-finality', 'reorg-waiting-follower',
+                                                      'reorg-resubmitting', 'reorg-resubmit-expired',
+                                                      'reorg-resubmit-refused')]
+    limit = [ev for ev in events if ev['event'] == 'reorg-limit']
+    if not (done or pending or limit):
+        return
+    last = (limit or done or pending)[-1]
+    detail = (f'{len(done)} automatic reorg recovery(ies), {len(pending)} reorg alert(s) waiting, in '
+              f'{p["foreign_window_seconds"] / 3600:.0f} h; last: {last["event"]}, accepted L2 block '
+              f'{last.get("accepted")}, database head {last.get("database_head")} at {last.get("time")}')
+    if limit:
+        r.add(f'reorg_recoveries[{name}]', CRIT, 'recovery limit reached, the worker halted: ' + detail)
+    else:
+        r.graded(f'reorg_recoveries[{name}]', max(len(done), 1), 1, p['reorg_recovered_crit'], detail)
+
+
 def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner, r: Report) -> None:
     window = p['event_window_seconds']
     for spec in specs:
@@ -1416,6 +1449,7 @@ def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner
         code, out = run_cmd(['journalctl', '-u', unit, '-o', 'cat', '--no-pager', '-q', '--since', f'@{int(now - day)}'])
         if code == 0:
             grade_foreign(name, parse_events(out, now - day), p, r)
+            grade_reorg(name, parse_events(out, now - day), p, r)
 
 
 def grade_spool_expired(name: str, text: str, p: Dict[str, Any], window: float, r: Report) -> None:
@@ -1513,6 +1547,7 @@ def check_event_logs(specs: List[str], p: Dict[str, Any], now: float, r: Report)
             continue
         grade_events(name, parse_events(text, now - window), p, window, r)
         grade_foreign(name, parse_events(text, now - p['foreign_window_seconds']), p, r)
+        grade_reorg(name, parse_events(text, now - p['foreign_window_seconds']), p, r)
 
 
 def check_l1_progress(path: Optional[str], p: Dict[str, Any], now: float, r: Report) -> None:

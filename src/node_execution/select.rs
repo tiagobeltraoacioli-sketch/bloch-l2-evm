@@ -393,7 +393,7 @@ fn select_in_session<DB: DatabaseRef>(
                     let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
                     selection.stats.push(TxStats {
                         hash: candidate.hash,
-                        sender,
+                        sender, nonce: candidate.env.nonce,
                         gas_used,
                         effective_tip: tip,
                         fresh_slots,
@@ -436,6 +436,8 @@ pub struct TxStats {
     pub hash: B256,
     /// Recovered sender.
     pub sender: Address,
+    /// The authenticated transaction nonce (host report only).
+    pub nonce: u64,
     /// Gas actually used.
     pub gas_used: u64,
     /// Priority fee per gas paid at this block's base fee.

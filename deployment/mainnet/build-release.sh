@@ -12,7 +12,8 @@
 # WORK/src must hold, as siblings (the layout every L2 integration crate expects):
 #   bloch-l2-evm             this tree (a git checkout: its commit and cleanliness are recorded)
 #   bloch-validator-payout   bloch-sis-pow at exactly NATIVE_COMMIT, clean
-#   reth-bloch-rpc-snapshot  8eb21017 + the devnet4 working-tree change (reth-snapshot.patch)
+#   reth-bloch-rpc-snapshot  8eb21017 + integrations/reth-execution/reth-snapshot.patch (transaction snapshot
+#                            boundary; RPC simulation gas cap and time budget, RETH-SNAPSHOT.md)
 # Handled once, here:
 #   * native feature shim: settlement-recovery forwards devnet-kes / devnet-lc-roster, which the
 #     mainnet release does not define; follower-rpc/native-feature-shim.py adds them as EMPTY

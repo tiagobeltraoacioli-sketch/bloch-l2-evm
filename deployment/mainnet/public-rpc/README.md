@@ -6,11 +6,12 @@ It runs on both L2 hosts in front of `bloch-l2-settled-rpc` (loopback
 Cloudflare proxies the DNS name, and nginx does everything else.
 
     wallet / dapp --HTTPS--> Cloudflare (proxied DNS, TLS, DDoS)
-       --HTTPS, Full (strict) + Authenticated Origin Pulls--> nginx :443 on host 136 (role sequencer)
+       --HTTPS, Full (strict) + per-hostname Authenticated Origin Pulls (owner's CA)--> nginx :443 on host 136 (role sequencer)
             validation, allowlist, CORS, limits, routing, /health
             reads  -> local settled RPC (sequencer DB), backup: peer
             tx     -> local settled RPC (--txpool spool)
-            peer   <--mTLS :18956--> nginx on 45.77 (role replica, standby origin)
+            peer   <--mTLS :18956--> nginx on the replica host (role replica, standby origin)
+                   (outbound: unix socket /run/bloch-l2rpc/peer-out.sock, 0750 root:www-data)
                                        reads -> the freshest backend; tx -> 136
 
 ## Files
@@ -24,6 +25,8 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 | `setup-gateway.sh` | owner script: `peer-cert`, `plan`, `apply`, `rollback` (root, on each host) |
 | `cloudflare-ips-v4.txt`, `-v6.txt` | Cloudflare edge ranges (realip, edge check, firewall); refresh from cloudflare.com/ips before apply |
 | `tests/pair.sh` | private two-gateway rig (unprivileged nginx, loopback, throwaway certificates) |
+| `tests/test_render_r10.py` | render checks without nginx: unix-socket peer hop, fixed peer probe, owner AOP CA (refuses the shared CA) |
+| `tests/review_r10_gateway.mjs`, `tests/review_r10_rig.py` | review 154: node model of the njs budgets (per /64, simulation caps, slot windows, split-batch ids) and the real-nginx rig R1-R4 |
 | `tests/test_gateway.py` | integration checks (protocol, allowlist, limits, CORS, routing, failover, follower status with `--status-files`) |
 | `tests/rig-*.sh` | private settled-RPC copies, private block producer, ab load test |
 | `compat/` | ethers v6 / viem / MetaMask call sequence (`compat.mjs`, `write.mjs`), Foundry (`foundry.sh`, `foundry-write.sh`) |
@@ -32,7 +35,8 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 
 | area | policy (defaults; `render.py --help`) |
 |---|---|
-| TLS | Cloudflare Origin CA certificate; `ssl_verify_client on` with the Authenticated Origin Pulls CA; requests whose TCP peer is not a Cloudflare range get 403 |
+| TLS | Cloudflare Origin CA certificate; `ssl_verify_client on`, depth 1, with **the owner's own per-hostname Authenticated Origin Pulls CA** (`/etc/ssl/bloch-l2rpc/aop-client-ca.pem`; `render.py` refuses Cloudflare's shared AOP CA, which every Cloudflare zone presents); requests whose TCP peer is not a Cloudflare range get 403 |
+| Peer hop | the outbound hop to the other host's mTLS listener is a unix socket in `/run/bloch-l2rpc` (0750 root:www-data, `/etc/tmpfiles.d/bloch-l2rpc.conf`): only root and the nginx workers can send with this host's peer certificate. The peer probe uses a loopback location that always sends the same fixed read-only batch |
 | Client IP | `CF-Connecting-IP`, trusted only from Cloudflare ranges |
 | CORS | **production: any origin** (`setup-gateway.sh` passes `--cors-any`, owner decision of 2026-10-30). `render.py` alone defaults to an allowlist: `https://blochl1.com`, `https://blochdex.com`, `https://blochbridge.com` and their `www.` names; preflight 204, max-age 1 day. Requests without `Origin` (wallet extensions, servers, forge) are not affected |
 | Methods | `eth_*` reads, `net_*`, `web3_*`, `bloch_finality`, `bloch_settlement`, `bloch_chainIdentity`, `bloch_chainStatus`, `eth_sendRawTransaction`. Everything else gets -32601. Filters, subscriptions and node signing get an explanation |
@@ -40,7 +44,7 @@ Cloudflare proxies the DNS name, and nginx does everything else.
 | Body / batch | 512 KiB (the settled RPC's own cap), at most 100 calls per batch (ethers v6 batches up to 100), and an empty batch is refused |
 | Withdrawal proofs | `bloch_getWithdrawalProof` takes the read route and the per-IP call budget. It needs a settled RPC with the method. Clients verify every answer against L1 (`deployment/mainnet/withdraw/`) |
 | eth_getLogs | at most 2,000 blocks per call (tags resolved against the probed head) and 256 addresses |
-| Per IP | 20 HTTP req/s, burst 100 (`limit_req`), 32 connections (`limit_conn`), 1,200 calls/min (a batch counts each call), 30 `eth_sendRawTransaction`/min, 2 simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`) in flight, and 8 in flight for all clients together (the 2 x 4 permits of the settled RPCs). A client is an IPv4 address or an IPv6 /64 (`l2rpc.client`, also the `limit_req`/`limit_conn` key). Over a limit: HTTP 429 and JSON-RPC -32005 with `Retry-After` |
+| Per IP | 20 HTTP req/s, burst 100 (`limit_req`), 32 connections (`limit_conn`), 1,200 calls/min (a batch counts each call), 30 `eth_sendRawTransaction`/min, 2 simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`) in flight, and 8 in flight for all clients together (the 2 x 4 permits of the settled RPCs; each simulation runs with at most 15M gas, and the settled RPC answers within 5 s of taking its permit, so a simulation never reaches the 30 s upstream timeout). A client is an IPv4 address or an IPv6 /64 (`l2rpc.client`, also the `limit_req`/`limit_conn` key). Over a limit: HTTP 429 and JSON-RPC -32005 with `Retry-After` |
 | Timeouts | client header/body 10 s (slow-body clients never reach the backend; nginx buffers the whole request), upstream connect 2 s, read 30 s (tx 15 s) |
 | Backend connections | `max_conns` shared across workers: reads 48, sequencer paths and the inbound peer path 12 each. That stays below the settled RPC's 100-connection cap (v2). Idle keepalive is 4/2 per worker for 20 s. Set `worker_processes 4`. `setup-gateway.sh` passes `--backend-conns 400` for settled RPC v2.1 (1,024 connections); 48 is `render.py`'s default for a 100-connection binary |
 | Routing | reads go to the freshest backend from the probe (ties stay local), with the other as nginx backup on error/timeout/429/502/503/504. Pending nonce goes to the sequencer first. Transactions go to the sequencer only, never retried |
@@ -107,6 +111,50 @@ the default `--backend-conns 48`, concurrency above 48 per host is answered
     python3 tests/test_gateway.py --raw-tx HEX --sender ADDR --failover STOP_A START_A STOP_B START_B
     (cd compat && npm ci && NODE_TLS_REJECT_UNAUTHORIZED=0 node compat.mjs https://127.0.0.1:19672 HEX ADDR)
     compat/foundry.sh http://127.0.0.1:19674 WORKDIR
+
+## Authenticated Origin Pulls with the owner's own certificate (per hostname)
+
+Cloudflare's zone-level Authenticated Origin Pulls certificate is shared by all
+Cloudflare customers: any Cloudflare zone pointed at the origin IPs passes
+`ssl_verify_client` and the edge-range check, and skips the WAF and rate rules
+of the `blochl1.com` zone. Per-hostname AOP makes Cloudflare present a
+certificate only the owner holds, for `l2rpc.blochl1.com` only, and the origin
+trusts only the owner's CA (`ssl_verify_depth 1`). The owner's steps, one
+command per block, are in the rpc-limits report
+(`~/Desktop/BLOCH-L2-DEX-BRIDGE-20261030/agents/195-rpc-limits.md`, "Owner
+steps: per-hostname AOP"). In short:
+
+1. On the Mac, create a private CA (RSA 2048, CA key kept offline) and one client
+   certificate signed by it with `extendedKeyUsage=clientAuth`.
+2. Upload the client certificate and key to the zone
+   (`POST /zones/{zone_id}/origin_tls_client_auth/hostnames/certificates`) and
+   wait until it is `active`.
+3. Install the CA certificate (not its key) as
+   `/etc/ssl/bloch-l2rpc/aop-client-ca.pem` on both hosts and run
+   `setup-gateway.sh plan` and `apply`.
+4. Enable it for the hostname
+   (`PUT /zones/{zone_id}/origin_tls_client_auth/hostnames`,
+   `{"hostname":"l2rpc.blochl1.com","cert_id":…,"enabled":true}`) and check
+   `https://l2rpc.blochl1.com/health`.
+
+A gateway already running with the shared CA switches with a bundle: install the
+owner's CA followed by the shared CA as `aop-client-ca.pem`, apply with
+`EXTRA=--allow-shared-aop-ca`, enable the hostname, check, then install the
+owner's CA alone and apply again without the flag. Renew the client
+certificate (825 days) before it expires: a new client certificate from the
+same CA changes nothing on the origin.
+
+## Host users (review 154, G6)
+
+Run **no untrusted local user** on either gateway host, and no account with
+`sudo` that is not the owner's. The settled RPC listens on `127.0.0.1:18955`
+without authentication (on the sequencer it spools transactions), the probe
+server on `127.0.0.1:18958` answers `/health` and the fixed peer probe, and
+root can use the peer key. The unix-socket hop only stops other unprivileged
+users from reaching the *other* host's settled RPC with this host's
+certificate. The shared build host 45.77 does not meet this today (many
+`ubuntu` sessions with `sudo`): the replica must be a dedicated host, or 45.77
+must first be cleared of other users' sessions, keys and work.
 
 ## Production install
 

@@ -54,7 +54,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | File | Source | SHA-256 |
 | --- | --- | --- |
 | `settler_v3.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` of this tree (fork candidate: it moves with every settler change; enforced since agent 155; also recorded in the `/opt` path) |
-| `sequencer_policy.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` (enforced) |
+| `sequencer_policy_v2.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` (enforced) |
 | `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step with `sparse-witness` (serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | **not pinned yet (fork candidate)**: `prepare` refuses every host until the December release build is pinned; the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
 | `bloch-l2-produce-dev` | fork candidate v2 `out/` (agent 143, native f12b4113, reproduced on two hosts): `425d4fe8…`; it moves with the final December build | `425d4fe8…4cc78` (enforced) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
@@ -233,7 +233,10 @@ from the accepted head; it reuses a block left by a crash if its anchor is uncha
 | `acceptance-timeout` + `l1-not-advancing` | The L1 is stalled (the devnet4 block-231 case). Nothing to fix in the settler: the next cycle reuses the same proof and bytes. |
 | `rpc-no-quorum` / `rpc-endpoint-diverged` | The RPCs disagree. The worker waits and never uses a minority answer. |
 | `rpc-quorum-view-behind` | Two RPCs agree on an accepted L2 number below one this process already saw (two stale endpoints, or a real L1 reorg while the third endpoint is down). The worker waits. |
-| `rpc-quorum-behind-floor` then `retry` and exit 1 | The same behind-floor answer has lasted `quorum_floor_stall_seconds` (default 1200 s; review r10 L1). The worker exits 1 after `max_consecutive_failures` retries and systemd restarts it, which resets the in-memory floor. If L1 really reorged, the restarted worker resubmits its block at the accepted number + 1 when the anchor is unchanged, or halts with its own reason (then use `l2_reorg_recover.py`). If two endpoints are stale, fix them: after the restart the worker halts on a database or anchor check, or after `max_unincluded_windows` of `settlement-not-included`. |
+| `rpc-quorum-behind-floor` then `retry` and exit 1 | The same behind-floor answer has lasted `quorum_floor_stall_seconds` (default 1200 s; review r10 L1). The worker exits 1 after `max_consecutive_failures` retries and systemd restarts it, which resets the in-memory floor. If L1 really reorged, the restarted worker resubmits its block at the accepted number + 1 when the anchor is unchanged, or halts with its own reason (then use `l2_reorg_recover.py`). If two endpoints are stale, fix them: after the restart the worker halts on a database or anchor check, or after `max_unincluded_windows` of `settlement-not-included`. With `reorg_recovery` on, a behind-floor view goes to the reorg gates instead (see "Automatic reorg recovery") and this restart is not used. |
+| `reorg-detected`, `reorg-resubmitting`, `reorg-resubmit-expired`, `reorg-resubmit-refused`, `reorg-waiting-finality`, `reorg-waiting-follower`, `reorg-recovered`, `reorg-restored`, `reorg-resolved` | An L1 reorg removed an own accepted settlement while the next block was built (`reorg_recovery` on). See "Automatic reorg recovery". Each one is an alert; review the reorg on L1. |
+| `reorg-behind-floor-waiting` | A partial quorum shows an accepted settlement below the highest one seen, and the database does not hold unsettled blocks above it: the worker waits, as without `reorg_recovery`. |
+| `reorg-limit` (then `halt`) | Too many automatic recoveries in the window: run `l2_reorg_recover.py` and find out why L1 keeps reorging. |
 | `prover-failed` `timeout: true` | A prover attempt ran out of time (exit 124 recorded). The next location in `remote_prover.order` is tried (review r10 L6). |
 | `da-funding-low` | Top up the DA fee key. |
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements". No action unless they repeat. |
@@ -326,6 +329,52 @@ Since the round-10 kit (agent 152 L2-L4, fixed by agent 198):
 - Orphaned blocks are every local block off the accepted chain, found from the common ancestor (the rebuild's blocks, then the follower's finalized settlements); a database that was replaced at the accepted number (`forked`) or left the chain below its head (`ahead` after a deeper reorg) also respools those blocks. The report names `common_ancestor` (with `common_ancestor_assumed` when no canonical hash was known below it).
 - The rebuild gets `--rebuild-timeout SECONDS` (default `foreign_recovery.rebuild_timeout_seconds`, else 3600), not the 300 s of other producer commands. A rebuild that runs out of time is refused cleanly (exit 3); run again with a larger value.
 - The swap is journalled in `<l2_db>.recovery.json`, in the worker's format. If `--apply` is interrupted between its renames, the next `--apply` finishes it (a run without `--apply` refuses and says so), and so does the worker at its next start.
+
+### Automatic reorg recovery (`reorg_recovery`, off by default)
+
+The worker can do the tool's work itself for exactly this case: its database holds the accepted settlement M and
+unsettled blocks above it (`L2 head N cannot extend accepted settlement M`, or `unsettled L2 block M+1 has anchor …`).
+It stays off in the launch kit. Turn it on at configure time with `--reorg-recovery` (it reads the follower of D17's
+`foreign_recovery` and is refused with `--no-foreign-recovery`), and enable
+the RPC restart path unit as for `foreign_recovery`. The worker then:
+
+1. alerts `reorg-detected`. The case is also seen when only two of the three endpoints show it (one endpoint down
+   or still on the losing fork): such a partial view below the highest accepted settlement seen never builds,
+   proves or pays DA, it only reaches the gates below;
+2. when the native request of M+1 is unchanged (the reorg removed the acceptance of M+1 but kept the block that
+   accepted M), its own proved settlement of M+1 is still valid: it rebroadcasts those bytes every
+   `resubmit_seconds` (`reorg-resubmitting`; the DA batch first if its record is gone, on a full-quorum view only)
+   for `resubmit_window_seconds` (default 1800) before any rebuild may start. When they land, the worker goes on
+   from M+1 with no rebuild and no new proof (`reorg-resolved`). A refusal of the bytes for good
+   (`reorg-resubmit-refused`) or the end of the window (`reorg-resubmit-expired`) lets the steps below go on;
+3. waits until the same accepted settlement and the same local head were seen for `stable_seconds` (default 120).
+   If L1 flips back meanwhile, nothing is changed (`reorg-resolved`);
+4. waits until the follower has finalized M **and** L1 `finalized_height` has passed the L1 height at which the
+   reorg was first seen (`reorg-waiting-finality`; about 40 min on mainnet). Then neither M nor the removal of M+1
+   can be undone by L1. `wait_for_finality: false` is refused on mainnet and in the mainnet rehearsal; on a devnet
+   it skips this wait but still never rebuilds while L1 finality lags the head by more than `max_finality_lag`
+   (default 256) blocks;
+5. re-reads the view, which must still show the same case, then rebuilds a new database from verified L1 blocks.
+   It must end exactly at M with the accepted hash; a follower still on the losing fork is waited for
+   (`reorg-waiting-follower`);
+6. records the recovery in the history, returns the orphaned user transactions to the spool, moves the orphaned work
+   aside, swaps the databases (the path unit restarts the RPC) and continues (`reorg-recovered`, with the orphans,
+   `wasted_proofs` and `wasted_da_signed`).
+
+If the old settlement of M+1 still lands after the rebuild, the database kept aside (`<l2_db>.orphaned-*`) holds the
+accepted block: the worker swaps it back with its work directories, through the same journal (`reorg-restored`),
+instead of a second rebuild from L1. A restore counts against `max_recoveries`.
+
+No DA batch is ever read from L1 (kit `4b7f4f7`): the next block is built from the spool, which holds the orphaned
+transactions again, so a block whose DA batch was paid on the losing fork pays its DA once more on the winning chain
+(the cost recorded in `wasted_da_signed`). More than `max_recoveries` (default 3) recoveries within `window_seconds` (default 6 h) halt
+the worker (`reorg-limit`, exit 3): then use the tool above. The count is kept in `<l2_db>.reorg-recoveries.json`, so a
+restart does not reset it; an unreadable or malformed history file halts the worker (exit 3) for the operator. A local block M that is not the accepted hash is a foreign settlement, never this case.
+
+Each alert is a journal line, a JSON line in `/var/lib/bloch-l2-mainnet-settler/l2-reorg-alerts.jsonl`
+(`reorg_recovery.alert_file`), and, when `reorg_recovery.alert_command` is set, that command with the alert on its
+standard input (30 s limit; a failing hook never stops the worker). `l2_monitor.py` grades `reorg_recoveries`: WARN at
+each recovery or waiting alert, CRIT at two in 24 h or at the limit.
 
 ## Attestor signatures (3-of-5): when and how
 

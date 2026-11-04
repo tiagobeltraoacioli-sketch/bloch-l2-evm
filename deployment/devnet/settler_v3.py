@@ -165,6 +165,25 @@ Differences, all deliberate:
   `censor_senders` (rehearsal only, refused on mainnet) moves the spool entries of listed L2 senders aside, to
   rehearse a censoring sequencer.
 
+* reorgs of this worker's own settlements (drills 2026-10-31 and 2026-11-02, "L2 head N cannot extend accepted
+  settlement M"; optional `reorg_recovery`, off by default): an L1 reorg can remove an accepted settlement of this
+  worker while the next block is already built. The database then holds the accepted block M and unsettled blocks
+  above it that no request can use. Without `reorg_recovery` this halts (exit 3) for `l2_reorg_recover.py`, as
+  before. With it the worker does what that tool does, unattended: it waits until the same accepted settlement and
+  the same local head were seen for `stable_seconds` (a flapping view never triggers a rebuild), and, unless
+  `wait_for_finality` is false, until the native follower has finalized M (a finalized settlement cannot be
+  reorged away, so a rebuild can never be undone by L1); it rebuilds a NEW database from verified L1 blocks
+  (`produce reconstruct`), requires block M to be the accepted hash, returns the user transactions of the orphaned
+  blocks to the spool, moves their work directories aside, swaps the databases (the journalled swap of
+  `foreign_recovery`, which also restarts the settled RPC through `l2-db-generation.json`) and continues. While the
+  native request of M+1 is unchanged, the worker's own proved settlement of M+1 is rebroadcast first
+  (`resubmit_window_seconds`), and a database kept aside is swapped back if those bytes land after a rebuild
+  (agent 206, review 153 M2). A partial quorum below the highest accepted settlement seen reaches these gates too
+  (153 M1), but never builds, proves or pays DA. No paid DA batch is ever read from L1 (kit 4b7f4f7). More than `max_recoveries` within `window_seconds` (kept on disk across restarts) halts
+  for the operator. Every step is an alert: a `reorg-*` log line, a JSON line in `alert_file` (default
+  `<workdir>/../l2-reorg-alerts.jsonl`) and, when set, `alert_command` with the alert on its standard input.
+  A database whose block M is not the accepted hash is a foreign settlement, never this case.
+
 * `--dry-run [--prove]`: builds the next settlement against the live network
   in a scratch copy of the L2 database and validates it (identity, request,
   producer, SP1 execute; with --prove also Groth16 + every pre-submit check)
@@ -236,12 +255,19 @@ FORCED_VIEW_FIELDS = ('due', 'due_hash')
 INBOX_DOMAIN = b'BLOCH:L2:INBOX:2'
 FORCED_MAX_PER_SETTLEMENT, FORCED_MAX_GAS_PER_SETTLEMENT = 16, 300_000
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sequencer_policy  # noqa: E402  (installed beside this file)
 
 SPOOL_READ_LIMIT = 16_384  # the producer's MAX_POOL_ENTRIES
 DEFAULTS = {'user_transactions': False, 'network_kind': 'devnet', 'max_block_gas': 15_000_000,
             'max_block_bytes': 114_688, 'max_block_txs': 128,  # bytes: one native DA batch
             'poll_seconds': 6, 'resubmit_seconds': 120}
+# reorg_recovery (off unless configured). stable_seconds: how long the same accepted settlement and local head must be
+# seen before a rebuild; max_recoveries per window_seconds: past that the worker halts for the operator.
+# resubmit_window_seconds: while the native request of M+1 is unchanged, the worker's own proved settlement of M+1 is
+# still valid on L1; it is rebroadcast for this long (from first sight) before a rebuild may start (0: never).
+# max_finality_lag: with wait_for_finality false (never on the mainnet path), no rebuild while L1 finality lags the
+# head by more than this many blocks (a fork whose finality is stalled).
+REORG_DEFAULTS = {'wait_for_finality': True, 'stable_seconds': 120, 'max_recoveries': 3, 'window_seconds': 6 * 3600,
+                  'keep': 2, 'rebuild_timeout_seconds': 3600, 'resubmit_window_seconds': 1800, 'max_finality_lag': 256}
 NETWORK_KINDS = ('devnet', 'mainnet', 'mainnet-rehearsal')
 # Kinds that run the mainnet L2 program path (chain 700770, --rules mainnet, prover --mainnet).
 MAINNET_PATH_KINDS = ('mainnet', 'mainnet-rehearsal')
@@ -378,6 +404,16 @@ def follower_finals(status_path):
 
 
 TIMEOUT_EXIT = 124  # exit code recorded for a prover attempt that ran out of time (as timeout(1) reports it)
+
+
+class LocalAhead(Exception):
+    """The local database holds the accepted settlement but has unsettled blocks above it that cannot be used: an
+    L1 reorg removed a later settlement of this worker (or the request it was anchored to) while the next block was
+    already built. Recoverable with `reorg_recovery`; without it this halts with the same reason as before."""
+
+    def __init__(self, reason, accepted, head, kind):
+        super().__init__(reason)
+        self.accepted, self.head, self.kind = accepted, head, kind
 
 
 class QuorumFloorStall(RuntimeError):
@@ -980,6 +1016,24 @@ def check_mainnet_config(c):
             raise Halt(f'{key} must be a positive integer')
 
 
+def check_policy_config(c):
+    """The sequencer policy v2 limits this settler accepts (sequencer_policy_v2.DEFAULTS; docs/SEQUENCER-POLICY-V2.md)."""
+    for key in ('max_tx_gas', 'exempt_max_tx_gas', 'fresh_slot_price_wei', 'min_tip_wei', 'congestion_max_tip_wei',
+                'preflight_execute_seconds', 'preflight_max_runs', 'preflight_max_seconds', 'sender_ban_seconds',
+                'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib'):
+        if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
+            raise Halt(f'{key} must be a positive integer')
+    if c.get('max_block_txs', 1) > 64 and c.get('user_transactions'):
+        raise Halt('with the policy budget, max_block_txs is at most 64 (docs/SEQUENCER-POLICY-V2.md 3.1)')
+    if c.get('preflight_cycle_limit_factor', 2) < 2:
+        raise Halt('preflight_cycle_limit_factor must be at least 2: a cycle-limit verdict proves a transaction over budget')
+    if c.get('min_tip_wei') and c.get('congestion_max_tip_wei') and c['congestion_max_tip_wei'] < c['min_tip_wei']:
+        raise Halt('congestion_max_tip_wei is below min_tip_wei')
+    exempt = c.get('write_limit_exempt_senders', [])
+    if not isinstance(exempt, list) or not all(isinstance(a, str) and re.fullmatch(r'[0-9a-f]{40}', a) for a in exempt):
+        raise Halt('write_limit_exempt_senders must be a list of 40-character lowercase hex addresses without 0x')
+
+
 def check_rehearsal_config(c):
     """mainnet-rehearsal: the mainnet program and L2 genesis on a private network, never Genesis-4."""
     if c.get('network') == MAINNET['network']:
@@ -1550,6 +1604,31 @@ class Settler:
                 raise Halt('foreign_recovery needs follower_state and follower_status')
             if not isinstance(recovery.get('keep', 2), int) or recovery.get('keep', 2) < 1:
                 raise Halt('foreign_recovery.keep must be a positive integer')
+        reorg = self.c.get('reorg_recovery')
+        if reorg is not None:
+            if not isinstance(reorg, dict):
+                raise Halt('reorg_recovery must be an object')
+            reorg = self.c['reorg_recovery'] = {**REORG_DEFAULTS, **reorg}
+            for key in ('follower_state', 'follower_status'):
+                reorg[key] = reorg.get(key) or (recovery or {}).get(key) or self.c.get(key)
+                if not reorg[key]:
+                    raise Halt(f'reorg_recovery needs {key} (here, in foreign_recovery or at the top level)')
+            for key in ('stable_seconds', 'max_recoveries', 'window_seconds', 'keep', 'rebuild_timeout_seconds',
+                        'resubmit_window_seconds', 'max_finality_lag'):
+                value = reorg[key]
+                zero = key in ('stable_seconds', 'resubmit_window_seconds')
+                if not isinstance(value, int) or isinstance(value, bool) or value < (0 if zero else 1):
+                    raise Halt(f'reorg_recovery.{key} must be a {"non-negative" if zero else "positive"} integer')
+            if not isinstance(reorg['wait_for_finality'], bool):
+                raise Halt('reorg_recovery.wait_for_finality must be true or false')
+            if self.mainnet_path and not reorg['wait_for_finality']:
+                # Without the finality wait a 2-of-3 view on a fork whose finality has stopped is rebuilt onto
+                # (report 94's dead fork): never on the mainnet program path.
+                raise Halt('reorg_recovery.wait_for_finality false is refused on the mainnet path')
+            command = reorg.get('alert_command')
+            if command is not None and (not isinstance(command, list) or not command
+                                        or not all(isinstance(a, str) for a in command)):
+                raise Halt('reorg_recovery.alert_command must be a non-empty list of strings')
         if not isinstance(self.c.get('skip_idle_blocks', False), bool):
             raise Halt('skip_idle_blocks must be true or false')
         if self.c.get('skip_idle_blocks'):
@@ -1575,15 +1654,25 @@ class Settler:
         self.spool_open = True  # false: the next block is built without the spool (see hold_block)
         self.holding_since = None  # monotonic time this worker began to hold; None while it builds
         self.hold_logged_at = None
-        for key in ('max_block_sp1_gas', 'max_block_instructions', 'local_prove_max_sp1_gas'):
-            value = self.c.get(key)
-            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
-                raise Halt(f'{key} must be a positive integer')
-        if self.c.get('max_block_instructions') and not self.c.get('max_block_sp1_gas'):
-            raise Halt('max_block_instructions needs max_block_sp1_gas: the budget is in SP1 gas')
+        budgets = [self.c.get(key) for key in ('max_block_instructions', 'max_block_sp1_gas')]
+        if budgets != [None, None] and not all(isinstance(b, int) and not isinstance(b, bool) and b > 0 for b in budgets):
+            raise Halt('max_block_instructions and max_block_sp1_gas go together, as positive integers')
+        self.policy_clock = time.time  # the policy's windows are wall seconds, persisted across restarts
+        if budgets != [None, None]:
+            check_policy_config(self.c)
+        local_gas = self.c.get('local_prove_max_sp1_gas')
+        if local_gas is not None and (type(local_gas) is not int or local_gas <= 0):
+            raise Halt('local_prove_max_sp1_gas must be a positive integer')
         self.work = Path(self.c['workdir'])
         self.rebuild_discarded_at = None
         self.waiting_for = None  # the accepted settlement a recovery last reported waiting on
+        self.reorg_seen = None  # (accepted number, hash, local head, head hash) of a reorg case being watched
+        self.reorg_since = None  # monotonic time that case was first seen
+        self.reorg_l1_height = None  # L1 chain height when that case was first seen
+        self.reorg_resubmit = None  # {'case', 'number', 'last', 'state'}: rebroadcast of a still-valid own settlement
+        self.view_behind = False  # the last native_view was a partial quorum below accepted_floor (reorg_recovery)
+        self.view_support = []  # ports that formed the last native_view
+        self.reorg_reported = set()  # (alert kind, case) already alerted, so each alert fires once per case
         self.native = Endpoints(rpc_endpoints(self.c), rpc_quorum(self.c), self.rpc, self.clock, self.sleep)
         self.accepted_floor = 0  # highest accepted L2 number seen in a quorum view
         self.floor_stall = None  # (number, first seen, reads) while a partial quorum stays behind the floor
@@ -1621,8 +1710,14 @@ class Settler:
         log('identity-checked', network=view['network'], chain_id=view['chain_id'], mainnet=self.mainnet)
         return True
 
-    def native_view(self):
-        """The settlement view a quorum of validator RPCs reports identically, or None."""
+    def native_view(self, allow_behind=False):
+        """The settlement view a quorum of validator RPCs reports identically, or None.
+
+        A partial quorum below `accepted_floor` is None, except with `allow_behind` (reorg detection only): then it
+        is returned and `view_behind` is set. Such a view never builds, proves or pays DA; it can only reach
+        `recover_reorg`, whose gates decide whether the reorg is real (153 M1: one endpoint stuck on the losing
+        fork must not hide a real reorg). The floor-stall restart is then not needed and not used."""
+        self.view_behind = False
         view, support = self.native.agreed('getl2settlement', project=settlement_view)
         if view is None:
             return None  # validators momentarily disagree; retry later
@@ -1631,10 +1726,14 @@ class Settler:
         accepted = view.get('accepted')
         number = statement_fields(accepted['statement'])['l2_number'] if accepted else 0
         unanimous = len(support) == len(self.native.ports)
+        self.view_support = support
         if not unanimous and number < self.accepted_floor:
             # A partial quorum must not move the accepted head backwards (two stale
             # endpoints); a unanimous view is trusted as before.
             log('rpc-quorum-view-behind', accepted=number, seen=self.accepted_floor, ports=support)
+            if allow_behind:
+                self.view_behind = True
+                return view
             self.floor_stall_check(number, support)
             return None
         self.floor_stall = None
@@ -1751,7 +1850,7 @@ class Settler:
         """Extend by one block. With the user-transaction spool, a producer refusal is retried once
         without it (deposits only): the spool is untrusted input and must not stop settlement."""
         try:
-            if self.c.get('max_block_sp1_gas'):
+            if self.budget_on():
                 return self.extend_within_budget(parent, anchor, deposits, anchor_slot, number)
             return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot))
         except ProducerError as error:
@@ -1775,141 +1874,21 @@ class Settler:
             entries.append((path, raw))
         return entries
 
-    def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):
-        """What the producer's selection would do with these transactions. Native execution, nothing is committed."""
-        pool = directory / 'dry.json'
-        pool.write_text(json.dumps(raws))
-        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
-        args[0] = 'select'
-        return self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
-                            '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
+    def budget_on(self):
+        """Sequencer policy v2 (sequencer_policy_v2.py, docs/SEQUENCER-POLICY-V2.md) decides the user transactions of
+        each block: user transactions on and a block budget in SP1 gas configured."""
+        return bool(self.c.get('user_transactions') and self.c.get('max_block_sp1_gas'))
 
-    def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
-        """Build the block from exactly these transactions, deposits included, on a throwaway copy of the database and run
-        the guest in execute mode. Returns (Cost, or None when the time limit was hit, producer report). No proof, no lock."""
-        scratch = deposits.parent / f'preflight-{tag}'
-        shutil.rmtree(scratch, ignore_errors=True)
-        scratch.mkdir(parents=True)
-        try:
-            db = scratch / 'db'
-            shutil.copytree(self.c['l2_db'], db, symlinks=True)
-            pool = scratch / 'pool.json'
-            pool.write_text(json.dumps(raws))
-            args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
-            args[args.index('--target') + 1] = str(db)
-            block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
-                                 '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
-            self.produce('export', '--target', str(db), '--number', str(number), '--out', str(scratch / 'block.artifact'),
-                         *self.export_witness())
-            request = scratch / 'native-request.txt'
-            request.write_text(self.preflight_request)
-            env = {'PATH': self.c.get('prover_path', '/usr/bin:/bin'), 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
-                   'SP1_CIRCUIT_MODE': 'release', 'BLOCH_NATIVE_L2_REQUEST': str(request),
-                   'BLOCH_NATIVE_L2_ARTIFACT': str(scratch / 'block.artifact')}
-            # The guest of the program L1 holds now, on the witness that guest reads: the budget is that guest's cost.
-            argv = [self.program['prover'], *self.program['prover_args'], 'execute', 'native-artifact', self.program['guest']]
-            try:
-                with (scratch / 'execute.log').open('w') as out:
-                    result = self.run(argv, env=env, stdout=out, stderr=subprocess.STDOUT,
-                                      timeout=self.c.get('preflight_execute_seconds', 120))
-            except subprocess.TimeoutExpired:
-                return None, block
-            text = (scratch / 'execute.log').read_text(errors='replace')
-            gas = re.findall(r'Settlement V3 cost: gas=(\d+)', text)
-            instructions = re.findall(r'(\d+) instructions', text)
-            if result.returncode or not gas or not instructions:
-                return None, block  # no cost from this guest and host: treat the block as over any budget
-            return sequencer_policy.Cost(int(gas[-1]), int(instructions[-1])), block
-        finally:
-            shutil.rmtree(scratch, ignore_errors=True)
-
-    def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
-        """Commit only a block the policy of `sequencer_policy.py` chose: measured in SP1 gas with its deposits.
-
-        A block whose deposits alone are over the budget still commits, because L1 names exactly those deposits for the next
-        settlement; it carries nothing else, and the operator's exit is a bigger prover. See that module."""
-        entries = self.spool_entries() if self.c['user_transactions'] else []
-        pending = json.loads(deposits.read_text())
-        # Forced records bypass the budget like deposits: L1 names them for this settlement (agent 122, tip 3).
-        forced = read_forced(deposits.parent)
-        by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
-        if not entries and not pending and not forced:
-            return self.produce(*self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False))
-        self.preflight_request = self.preflight_source
-        tags = itertools.count()
-        planner = self.planner()
-        plan = planner.plan(
-            [raw for _, raw in entries],
-            lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
-            lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
-            number, has_deposits=bool(pending) or bool(forced))
-        if plan.deposits_over_budget:
-            atomic_write(deposits.parent / 'deposits-over-budget.json', json.dumps(
-                {'number': number, 'sp1_gas': plan.base.sp1_gas if plan.base else None,
-                 'instructions': plan.base.instructions if plan.base else None, 'budget': planner.budget,
-                 'deposits': len(pending), 'forced': len(forced)}, sort_keys=True) + '\n')
-        quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
-        for name, reason in plan.quarantine:
-            if name in by_hash:
-                quarantine.mkdir(exist_ok=True, mode=0o700)
-                try:
-                    by_hash[name][0].replace(quarantine / by_hash[name][0].name)
-                except FileNotFoundError:
-                    pass
-                log('tx-quarantined', number=number, hash=name, reason=reason)
-        if plan.held:
-            log('txs-held', number=number, held=[{'hash': h, 'reason': r} for h, r in plan.held[:32]], count=len(plan.held))
-        pool = deposits.parent / 'selected.json'
-        atomic_write(pool, json.dumps(plan.chosen))
-        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
-        block = self.produce(*args, '--txs', str(pool), '--max-gas', str(self.c['max_block_gas']),
-                             '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs']))
-        chosen_hashes = [keccak256(bytes.fromhex(raw)).hex() for raw in plan.chosen]
-        for name in chosen_hashes + plan.finished:  # committed: what the producer does for a spool directory
-            if name in by_hash:
-                by_hash[name][0].unlink(missing_ok=True)
-        planner.committed(plan, number)
-        log('block-plan', number=number, runs=plan.runs, exhausted=plan.exhausted, transactions=len(plan.chosen),
-            sp1_gas=plan.cost.sp1_gas if plan.cost else None, base_sp1_gas=plan.base.sp1_gas if plan.base else None,
-            required_tip=planner.required_tip())
-        return block
-
-    def planner(self):
-        sequencer_policy.set_hash(keccak256)
-        return sequencer_policy.Planner(self.c, self.work / 'sequencer-policy.json', self.clock, log)
-
-    def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
-        args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
-        if read_forced(Path(deposits).parent):
-            # L1 forced inclusion: the producer runs these first, after the deposits, outside every sequencer limit.
-            args += ['--forced', str(Path(deposits).parent / 'forced.json')]
-        if self.c.get('timestamp_rule'):
-            # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
-            args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
-        if self.c['user_transactions'] and spool and self.spool_open:
-            args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
-                     '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
-            if self.c.get('min_tip_wei'):
-                args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
-        if self.next_program is not None:
-            args += ['--rule-set', self.program['rules']]
-        return args
-
-    def source_age(self, view):
-        """Seconds of L1 time since the frozen source, which is the block right after the last acceptance. The L1 head
-        slot is bounded by an honest endpoint's, so a lying endpoint cannot age the source. An L1 that stops stops this
-        clock too: no block is due while nothing could settle it."""
-        rule = self.c.get('timestamp_rule')
-        slot_seconds = int(rule.split(':')[2]) / 1000 if rule else 30
-        return (self.native.bounded_value('getchaininfo', 'slot') - int(view['source']['slot'])) * slot_seconds
-
-    def inbox_backlog(self):
-        """Deposits L1 holds and no settlement has consumed. `source.pending` cannot show this: the source freezes the
-        inbox count right after an acceptance, so a deposit made later appears there only after one more settlement.
-        Bounded by an honest endpoint's answer, so a lying endpoint cannot force a block."""
-        values = sorted(int(a['inbox']['count']) - int(a['inbox']['consumed'])
-                        for a in self.native.gather('getl2settlement').values())
-        return values[max(0, len(values) - 1 - self.native.faults)]
+    def policy(self):
+        """The v2 planner with this settler's limits. Its state (bans, waits, standing, congestion tip) lives in
+        `<workdir>/sequencer-policy.json`, which the settled RPC reads with `--required-tip-file`. Windows are wall
+        seconds, persisted across restarts."""
+        import sequencer_policy_v2 as policy_v2
+        policy_v2.set_hash(keccak256)
+        config = {key: self.c[key] for key in policy_v2.DEFAULTS if key in self.c}
+        work = getattr(self, 'work', None)
+        clock = getattr(self, 'policy_clock', None) or getattr(self, 'clock', time.time)
+        return policy_v2.Policy(config, work / 'sequencer-policy.json' if work else None, clock, log)
 
     def forced_backlog(self):
         """Forced records L1 holds and no settlement has consumed (0 while the queue is not enabled). Like the inbox, the
@@ -1934,7 +1913,189 @@ class Settler:
                     continue
                 log('tx-censored', number=number, hash=keccak256(bytes.fromhex(raw)).hex(), sender=sender.hex())
 
-    def spool_demand(self, head):
+    def pool_arguments(self, pool, selecting=False):
+        """The producer's limits for the spool, a preflight list or the selected list. `select` (the policy's native
+        report) runs without the per-block transaction cap: the policy applies `max_block_txs` to its own try order, so the
+        producer's tip order cannot drop a sender with standing before the tiers apply (agents/166 §1.5)."""
+        args = ['--txs', str(pool), '--max-gas', str(self.c['max_block_gas']), '--max-bytes', str(self.c['max_block_bytes'])]
+        if not selecting:
+            args += ['--max-txs', str(self.c['max_block_txs'])]
+        if self.c.get('min_tip_wei'):
+            args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
+        return args
+
+    def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):
+        """What the producer's selection would do with these transactions on this parent and these deposits, per
+        transaction (`produce-dev select`): native execution, nothing committed or pruned."""
+        pool = directory / 'dry.json'
+        pool.write_text(json.dumps(raws))
+        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+        args[0] = 'select'
+        return self.produce(*args, *self.pool_arguments(pool, selecting=True))
+
+    def measure_block(self, parent, anchor, deposits, anchor_slot, number, raws, tag):
+        """Build the block from exactly these transactions, with these deposits, on a throwaway copy of the database and
+        run the guest in execute mode under the host's cycle limit. Returns (result, producer report): result is a
+        `Cost`, `OVER_LIMIT` when the guest execution hit `BLOCH_PREFLIGHT_CYCLE_LIMIT` (the host prints
+        `Settlement V3 over cycle limit` and exits 3), or None when the run gave no cost (wall-clock backstop, crash,
+        OOM, missing cost line). No proof, no lock."""
+        import sequencer_policy_v2 as policy_v2
+        scratch = deposits.parent / f'preflight-{tag}'
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir(parents=True)
+        try:
+            db = scratch / 'db'
+            shutil.copytree(self.c['l2_db'], db, symlinks=True)
+            pool = scratch / 'pool.json'
+            pool.write_text(json.dumps(raws))
+            args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+            args[args.index('--target') + 1] = str(db)
+            block = self.produce(*args, *self.pool_arguments(pool))
+            self.produce('export', '--target', str(db), '--number', str(number), '--out', str(scratch / 'block.artifact'),
+                         *self.export_witness())
+            request = scratch / 'native-request.txt'
+            request.write_text(self.preflight_request)
+            env = {'PATH': self.c.get('prover_path', '/usr/bin:/bin'), 'HOME': self.c['home'], 'TMPDIR': self.c['home'] + '/tmp',
+                   'SP1_CIRCUIT_MODE': 'release', 'BLOCH_NATIVE_L2_REQUEST': str(request),
+                   'BLOCH_NATIVE_L2_ARTIFACT': str(scratch / 'block.artifact'),
+                   'BLOCH_PREFLIGHT_CYCLE_LIMIT': str(self.policy().cycle_limit())}
+            argv = [self.program['prover'], *self.program['prover_args'], 'execute', 'native-artifact', self.program['guest']]
+            try:
+                with (scratch / 'execute.log').open('w') as out:
+                    # In its own process group, killed with its SP1 segments on a timeout (F8, as the proof stages).
+                    result = self.run_bounded(argv, env=env, stdout=out, stderr=subprocess.STDOUT,
+                                              timeout=self.c.get('preflight_execute_seconds', 90))
+            except subprocess.TimeoutExpired:
+                return None, block
+            text = (scratch / 'execute.log').read_text(errors='replace')
+            if result.returncode == 3 and re.search(r'Settlement V3 over cycle limit: limit=\d+', text):
+                return policy_v2.OVER_LIMIT, block
+            gas = re.findall(r'Settlement V3 cost: gas=(\d+)', text)
+            instructions = re.findall(r'(\d+) instructions', text)
+            if result.returncode or not gas or not instructions:
+                return None, block  # no cost: a host failure for the policy, never a verdict on a transaction
+            return policy_v2.Cost(int(gas[-1]), int(instructions[-1])), block
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def measure_empty(self, parent, anchor, deposits, anchor_slot, number, tag):
+        """The control: the same block without deposits or transactions, so the request names no consumed deposit. A
+        cost here and none for the block tells a heavy block from a failing host."""
+        # Give the control its own directory: extend_arguments reads forced.json beside deposits.
+        # Leaving it beside the real deposits would accidentally include mandatory forced work.
+        control = Path(tempfile.mkdtemp(prefix=f'.empty-control-{tag}-', dir=deposits.parent))
+        empty = control / 'deposits.json'
+        empty.write_text('[]')
+        request = getattr(self, 'preflight_request', None)
+        try:
+            if request:
+                lines = request.split('\n')
+                if len(lines) >= 4 and lines[-1] == '':
+                    lines[-2] = lines[-3]  # consumed_end = consumed_start: no deposit consumed
+                self.preflight_request = '\n'.join(lines)
+            return self.measure_block(parent, anchor, empty, anchor_slot, number, [], tag)[0]
+        finally:
+            self.preflight_request = request
+            shutil.rmtree(control)
+
+    def extend_within_budget(self, parent, anchor, deposits, anchor_slot, number):
+        """Commit only the block sequencer policy v2 chose (sequencer_policy_v2.py, docs/SEQUENCER-POLICY-V2.md).
+
+        Declared EVM gas does not bound proving cost, so candidate blocks are built on a copy of the database and run in
+        execute mode under the host's cycle limit (twice the instruction budget). A block whose mandatory items (deposits or forced records)
+        alone are over the budget still commits, because L1 names exactly those deposits; it carries nothing else and
+        writes `deposits-over-budget.json` for the operator's exit (STUCK-BLOCK-RUNBOOK.md). Only what the committed
+        block's own report included, or what the producer dropped for good, leaves the spool (review r8 N1)."""
+        # hold_block closes the spool for a block on a stale source: this path reads the spool itself, so it must too.
+        entries = self.spool_entries() if getattr(self, 'spool_open', True) else []
+        pending = json.loads(deposits.read_text())
+        forced = read_forced(deposits.parent)
+        self.preflight_request = self.preflight_source
+        tags = iter(range(1 << 30))
+        policy = self.policy()
+        if not getattr(self, 'cost_line_checked', False):
+            # With a budget, the prover must give a cost for an empty block, or users would be starved silently (r7 F2).
+            probe = self.measure_empty(parent, anchor, deposits, anchor_slot, number, 'probe')
+            try:
+                import sequencer_policy_v2 as policy_v2
+                policy_v2.check_cost_line(probe)
+            except RuntimeError as error:
+                raise Halt(f'{error} (max_block_sp1_gas is set: the prover must print the Settlement V3 cost line)') from None
+            self.cost_line_checked = True
+        by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
+        plan = policy.plan(
+            [raw for _, raw in entries],
+            lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
+            lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
+            lambda: self.measure_empty(parent, anchor, deposits, anchor_slot, number, next(tags)),
+            has_mandatory=bool(pending) or bool(forced))
+        base = plan.base if hasattr(plan.base, 'sp1_gas') else None
+        if plan.mandatory_over_budget:
+            atomic_write(deposits.parent / 'deposits-over-budget.json', json.dumps(
+                {'number': number, 'sp1_gas': base.sp1_gas if base else None,
+                 'instructions': base.instructions if base else None, 'over_cycle_limit': plan.base == 'over-limit',
+                 'budget_sp1_gas': policy.c['max_block_sp1_gas'], 'budget_instructions': policy.c['max_block_instructions'],
+                 'deposits': len(pending), 'forced': len(forced), 'profile': plan.profile}, sort_keys=True) + '\n')
+        quarantine = Path(self.c['txpool_dir']).with_name(Path(self.c['txpool_dir']).name + '-quarantine')
+        for name, reason in plan.quarantine:
+            if name in by_hash:
+                quarantine.mkdir(exist_ok=True, mode=0o700)
+                try:
+                    by_hash[name][0].replace(quarantine / by_hash[name][0].name)
+                except FileNotFoundError:
+                    pass
+                log('tx-quarantined', number=number, hash=name, reason=reason)
+        if plan.held:
+            log('txs-held', number=number, held=[{'hash': h, 'reason': r} for h, r in plan.held[:32]], count=len(plan.held))
+        pool = deposits.parent / 'selected.json'
+        atomic_write(pool, json.dumps(plan.raws))
+        args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
+        block = self.produce(*args, *self.pool_arguments(pool))
+        for name in policy.committed(plan, block):  # committed: only what this block's own report names
+            if name in by_hash:
+                by_hash[name][0].unlink(missing_ok=True)
+        cost = plan.cost if hasattr(plan.cost, 'sp1_gas') else None
+        atomic_write(deposits.parent / 'prover-profile.json', json.dumps(
+            {'number': number, 'profile': plan.profile, 'sp1_gas': cost.sp1_gas if cost else None,
+             'instructions': cost.instructions if cost else None}, sort_keys=True) + '\n')
+        log('block-plan', number=number, runs=plan.runs, seconds=round(plan.seconds, 1), exhausted=plan.exhausted,
+            transactions=len(plan.chosen), sp1_gas=cost.sp1_gas if cost else None,
+            base_sp1_gas=base.sp1_gas if base else None, profile=plan.profile,
+            mandatory_over_budget=plan.mandatory_over_budget, host_unavailable=plan.host_unavailable,
+            required_tip=policy.required_tip())
+        return block
+
+    def extend_arguments(self, parent, anchor, deposits, anchor_slot=None, spool=True):
+        args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor, '--deposits', str(deposits)]
+        if read_forced(Path(deposits).parent):
+            # L1 forced inclusion: the producer runs these first, after the deposits, outside every sequencer limit.
+            args += ['--forced', str(Path(deposits).parent / 'forced.json')]
+        if self.c.get('timestamp_rule'):
+            # L2 time follows the anchored native slot (rollup rule); attestors rebuild with the same rule.
+            args += ['--timestamp-rule', self.c['timestamp_rule'], '--anchor-slot', str(anchor_slot)]
+        if self.c['user_transactions'] and spool and self.spool_open:
+            args += self.pool_arguments(self.c['txpool_dir'])
+        if self.next_program is not None:
+            args += ['--rule-set', self.program['rules']]
+        return args
+
+    def source_age(self, view):
+        """Seconds of L1 time since the frozen source, which is the block right after the last acceptance. The L1 head
+        slot is bounded by an honest endpoint's, so a lying endpoint cannot age the source. An L1 that stops stops this
+        clock too: no block is due while nothing could settle it."""
+        rule = self.c.get('timestamp_rule')
+        slot_seconds = int(rule.split(':')[2]) / 1000 if rule else 30
+        return (self.native.bounded_value('getchaininfo', 'slot') - int(view['source']['slot'])) * slot_seconds
+
+    def inbox_backlog(self):
+        """Deposits L1 holds and no settlement has consumed. `source.pending` cannot show this: the source freezes the
+        inbox count right after an acceptance, so a deposit made later appears there only after one more settlement.
+        Bounded by an honest endpoint's answer, so a lying endpoint cannot force a block."""
+        values = sorted(int(a['inbox']['count']) - int(a['inbox']['consumed'])
+                        for a in self.native.gather('getl2settlement').values())
+        return values[max(0, len(values) - 1 - self.native.faults)]
+
+    def spool_demand(self, head, view=None):
         """Whether a spooled transaction may go into the next block on `head`. A file alone is not demand: the RPC admits
         nonces up to 16 ahead and keeps them 3 hours, and the producer defers a nonce gap without dropping it, so one such
         entry would make every cycle due (review r7 F5). Demand is an entry whose nonce is its sender's next nonce at the
@@ -1946,6 +2107,8 @@ class Settler:
         files = sorted(Path(self.c['txpool_dir']).glob('*.tx'))
         if not files:
             return False
+        if self.budget_on() and view is not None:
+            return self.policy_demand(head, view)
         known = getattr(self, 'spool_senders', {})
         self.spool_senders = {}
         nonces = getattr(self, 'spool_nonces', (None, {}))
@@ -1975,6 +2138,29 @@ class Settler:
                 return True
         return False
 
+    def policy_demand(self, head, view):
+        """Demand under sequencer policy v2: the producer's native selection of the spool on `head` (`select`, nothing
+        committed), then the policy's own gate at the current time, with the decayed tip and with no mandatory item, since
+        a block with deposits is due anyway (review r8 N8, r9 U4, U5). The policy state is saved, so the tip the RPC
+        publishes decays while the chain is idle. If this cannot be answered, the spool counts as demand."""
+        directory = self.work / '.demand'
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            deposits = directory / 'deposits.json'
+            deposits.write_text('[]')
+            request = view['source'].get('request')
+            slot = int(request.splitlines()[3]) if request else None
+            args = self.extend_arguments(head, view['source']['block'], deposits, slot, spool=False)
+            args[0] = 'select'
+            report = self.produce(*args, *self.pool_arguments(self.c['txpool_dir'], selecting=True))
+            policy = self.policy()
+            due = policy.demand(report.get('tx_stats') or [], policy.clock(), False)
+            policy.save()
+            return due
+        except Exception as error:  # noqa: BLE001
+            log('spool-demand-unknown', reason=f'{type(error).__name__}: {error}'[:300])
+            return True
+
     def hold_block(self, view):
         """With `skip_idle_blocks`: whether to build no block in this cycle. Not a block rule: L1, the guest, the follower
         and every rebuild only see fewer blocks, each with an older anchor. See SETTLER-RUNBOOK.md, "Idle blocks".
@@ -1996,9 +2182,8 @@ class Settler:
             log('idle-check-failed', reason=f'{type(error).__name__}: {error}'[:300])
             return True
         pace = self.c.get('min_block_interval_seconds', 0)
-        # A due forced record is never held: every settlement on this source must consume it, whoever settles.
         reason = ('forced' if forced or (view.get('forced') or {}).get('due') else
-                  'deposits' if backlog or view['source'].get('pending') else 'transactions' if self.spool_demand(expected)
+                  'deposits' if backlog or view['source'].get('pending') else 'transactions' if self.spool_demand(expected, view)
                   else 'max-idle' if age >= self.c['max_idle_seconds'] else None)
         if reason is None or age < pace:
             now = self.clock()
@@ -2115,10 +2300,19 @@ class Settler:
                                 *self.export_witness())
             probe.unlink()
             if info['anchor'] != anchor:
-                raise Halt(f'unsettled L2 block {number} has anchor {info["anchor"]}, native now requests {anchor}')
+                reason = f'unsettled L2 block {number} has anchor {info["anchor"]}, native now requests {anchor}'
+                if self.c.get('reorg_recovery'):
+                    raise LocalAhead(reason, number - 1, head, 'anchor')
+                raise Halt(reason)
             log('l2-block-reused', number=number, hash=info['hash'])
         else:
-            raise Halt(f'L2 head {head["number"]} cannot extend accepted settlement {number - 1}')
+            reason = f'L2 head {head["number"]} cannot extend accepted settlement {number - 1}'
+            if self.c.get('reorg_recovery'):
+                if self.local_hash(number - 1) != parent:
+                    raise ForeignSettlement(f'{reason}: local block {number - 1} is not the accepted {parent} '
+                                            '(another settler?)')
+                raise LocalAhead(reason, number - 1, head, 'ahead')
+            raise Halt(reason)
         artifact = directory / 'block.artifact'
         if not artifact.exists():
             self.produce('export', '--target', self.c['l2_db'], '--number', str(number), '--out', str(artifact),
@@ -2126,13 +2320,20 @@ class Settler:
             if self.next_program is not None:
                 atomic_write(directory / 'program.json', json.dumps({'name': self.program['name']}) + '\n')
         request = directory / 'native-request.txt'
-        text = view['source']['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
-        if 'inbox_count' in source:
-            text += f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n"
+        text = self.request_text(view)
         if request.exists() and request.read_text() != text:
             raise Halt(f'{request} already holds a different request')
         atomic_write(request, text)
         return number, directory
+
+    @staticmethod
+    def request_text(view):
+        """The native request of the next block as `native-request.txt` holds it (what the proof binds to)."""
+        accepted, source = view.get('accepted'), view['source']
+        text = source['request'] + (accepted['commitment'] if accepted else '0' * 64) + '\n'
+        if 'inbox_count' in source:
+            text += f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n"
+        return text
 
     def local_hash(self, number):
         """The hash of block `number` in the local database."""
@@ -2157,6 +2358,9 @@ class Settler:
                'SP1_GNARK_IMAGE': self.c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(directory / 'native-request.txt'),
                'BLOCH_NATIVE_L2_ARTIFACT': str(directory / 'block.artifact')}
+        profile = self.prover_profile(directory)
+        if profile:
+            env.update(profile['env'])
         steps = []
         for name, args in (('execute', ['execute']), ('prove', ['prove-groth16']), ('verify', ['verify-groth16'])):
             if name not in stages:
@@ -2174,7 +2378,8 @@ class Settler:
                 try:
                     if where == 'remote':
                         result = self.prove_remote(directory, proof)
-                    elif name == 'prove' and not self.local_proof_fits(directory):
+                    elif name == 'prove' and not (self.local_proof_fits(directory)
+                                                  and self.local_profile_fits(directory, profile)):
                         result = types.SimpleNamespace(returncode=75)
                     else:
                         with (directory / f'{name}.log').open('w') as out:
@@ -2201,6 +2406,30 @@ class Settler:
         atomic_write(directory / 'proved.json', json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps), program=self.program['name'])
         return proof
+
+    def prover_profile(self, directory):
+        """The prover settings sequencer policy v2 chose for this block by its preflight SP1 gas (`prover-profile.json`,
+        written when the block was built): `fast`, `lowmem-2c` or `mandatory-heavy` (sequencer_policy_v2.PROFILES). None
+        without a budget or for a block built without the policy."""
+        if not self.budget_on():
+            return None
+        try:
+            name = json.loads((directory / 'prover-profile.json').read_text())['profile']
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        import sequencer_policy_v2 as policy_v2
+        profile = policy_v2.PROFILES.get(name)
+        return dict(profile, name=name) if profile else None
+
+    def local_profile_fits(self, directory, profile):
+        """`local_prove_max_memory_gib` (optional): the local prover is not tried for a block whose profile needs a larger
+        memory scope than this unit has; the remote prover, if configured, takes it."""
+        limit = self.c.get('local_prove_max_memory_gib')
+        if limit is None or profile is None or profile['memory_max_gib'] <= limit:
+            return True
+        log('local-proof-refused', directory=str(directory), profile=profile['name'],
+            memory_max_gib=profile['memory_max_gib'], limit=limit)
+        return False
 
     def local_proof_fits(self, directory):
         """Whether the local prover may try this block: `local_prove_max_sp1_gas` and `local_prove_max_instructions`
@@ -2679,17 +2908,22 @@ class Settler:
         self.finish_swap()
         if not self.check_identity():
             return False
-        view = self.native_view()
+        view = self.native_view(allow_behind=bool(self.c.get('reorg_recovery')))
         if view is None or view.get('source') is None:
             return False
         try:
+            if self.view_behind:
+                return self.behind_floor_case(view)
             if self.c.get('skip_idle_blocks') and self.hold_block(view):
                 return False
-            try:
-                number, directory = self.prepare_block(view)
-            except WaitForProgram as wait:
-                log('waiting-for-program', reason=str(wait))
-                return False
+            number, directory = self.prepare_block(view)
+            if self.reorg_seen is not None:
+                # The reorg case being watched went away without a rebuild (L1 flipped back, the own settlement was
+                # resubmitted and landed, or a new settlement): nothing was changed. A return alerts again.
+                self.reorg_alert('resolved', accepted=self.reorg_seen[0], database_head=self.reorg_seen[2],
+                                 next_block=number, resubmitted=bool(self.reorg_resubmit and self.reorg_resubmit['last']))
+                self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+                self.reorg_reported.clear()
             proof = self.prove(directory, view=view)
             # A proof takes many minutes: never pay DA for a block another settlement made stale meanwhile.
             if proof is None:
@@ -2718,11 +2952,343 @@ class Settler:
             return self.submit_and_wait(number, directory, tx, view)
         except ForeignSettlement as foreign:
             return self.recover_foreign(str(foreign))
+        except LocalAhead as ahead:
+            return self.recover_reorg(ahead)
+
+    # ---- reorgs of this worker's own settlements: rebuild from L1 and continue ----
+    def reorg_alert(self, kind, case=None, **fields):
+        """One operator alert: a `reorg-<kind>` log line, a line in the alert file, and the alert command. With
+        `case`, an alert fires once per (kind, case). Alert delivery never stops the worker."""
+        if case is not None:
+            if (kind, case) in self.reorg_reported:
+                return
+            self.reorg_reported.add((kind, case))
+        reorg = self.c['reorg_recovery']
+        alert = {'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'event': f'reorg-{kind}', **fields}
+        log(f'reorg-{kind}', **fields)
+        path = Path(reorg.get('alert_file') or self.work.parent / 'l2-reorg-alerts.jsonl')
+        try:
+            with path.open('a') as f:
+                f.write(json.dumps(alert, sort_keys=True) + '\n')
+        except OSError as error:
+            log('reorg-alert-failed', target=str(path), reason=str(error)[:200])
+        if reorg.get('alert_command'):
+            try:
+                done = self.run(reorg['alert_command'], input=json.dumps(alert, sort_keys=True) + '\n',
+                                capture_output=True, text=True, timeout=30)
+                if done.returncode:
+                    log('reorg-alert-failed', target='alert_command', code=done.returncode,
+                        reason=(done.stderr or '').strip()[:200])
+            except Exception as error:  # noqa: BLE001 - an alert hook must never stop settlement
+                log('reorg-alert-failed', target='alert_command', reason=f'{type(error).__name__}: {error}'[:200])
+
+    def reorg_history(self):
+        return Path(self.c['l2_db']).with_name(Path(self.c['l2_db']).name + '.reorg-recoveries.json')
+
+    def read_reorg_history(self):
+        """The persisted recovery history (the loop guard). Unreadable or malformed: halt for the operator, never a
+        retry (a retry would end in a restart loop that re-alerts on every start; 153 L4)."""
+        path = self.reorg_history()
+        if not path.exists():
+            return []
+        try:
+            history = json.loads(path.read_text())
+            if not isinstance(history, list) or not all(isinstance(h, dict) and isinstance(h.get('unix'), int)
+                                                        for h in history):
+                raise ValueError('not a list of records with an integer "unix"')
+        except (OSError, ValueError) as error:
+            raise Halt(f'reorg recovery history {path} is unreadable ({type(error).__name__}: {str(error)[:200]}): '
+                       'operator review (l2_reorg_recover.py), then repair or remove the file') from None
+        return history
+
+    def recent_recoveries(self, reorg, case=None, brief=None, reason=''):
+        """The recoveries within the window; halts (alert `reorg-limit`) when the limit is reached."""
+        recent = [h for h in self.read_reorg_history() if h['unix'] > time.time() - reorg['window_seconds']]
+        if len(recent) >= reorg['max_recoveries']:
+            self.reorg_alert('limit', case, recoveries=len(recent), window_seconds=reorg['window_seconds'], **(brief or {}))
+            raise Halt(f'{reason}: {len(recent)} automatic reorg recoveries within {reorg["window_seconds"]} s, the '
+                       'limit: operator review (l2_reorg_recover.py)')
+        return recent
+
+    def first_sight_height(self):
+        """The L1 height at which the current view was seen: the (faults + 1)-th largest height reported by the
+        endpoints that formed the view (153 L2: one endpoint, inside or outside the view, cannot push it out of
+        reach). None without an answer from the view's endpoints."""
+        answers = self.native.gather('getchaininfo')
+        heights = sorted(int(a['height']) for port, a in answers.items() if port in self.view_support)
+        if not heights:
+            return None
+        return heights[max(0, len(heights) - 1 - self.native.faults)]
+
+    def behind_floor_case(self, view):
+        """A partial quorum shows an accepted settlement below the highest one seen (`accepted_floor`): two stale
+        endpoints, or a real reorg while one endpoint stays on the losing fork (153 M1). Nothing is built, proved or
+        paid on such a view. When the database holds the view's accepted block and unsettled blocks above it, the
+        case goes to `recover_reorg`, whose gates (stable time, follower finality, L1 finality past first sight,
+        exact rebuild) tell a stale pair from a reorg. Anything else waits, as before."""
+        accepted = view.get('accepted')
+        if not accepted:
+            log('reorg-behind-floor-waiting', reason='the partial quorum shows no accepted settlement',
+                floor=self.accepted_floor)
+            return False
+        fields = statement_fields(accepted['statement'])
+        number, parent = fields['l2_number'], fields['l2_hash']
+        head = self.produce('head', '--target', self.c['l2_db'])
+        if head['number'] <= number or self.local_hash(number) != parent:
+            log('reorg-behind-floor-waiting', accepted=number, floor=self.accepted_floor, database_head=head['number'])
+            return False
+        kind = 'ahead'
+        if head['number'] == number + 1:
+            probe = self.work / f'.probe-{number + 1}.artifact'
+            probe.unlink(missing_ok=True)
+            info = self.produce('export', '--target', self.c['l2_db'], '--number', str(number + 1), '--out', str(probe))
+            probe.unlink(missing_ok=True)
+            kind = 'anchor' if info['anchor'] != view['source']['block'] else 'reuse'
+        raise LocalAhead(f'partial quorum {self.view_support} accepts L2 block {number}, below the accepted '
+                         f'{self.accepted_floor} seen before; L2 head {head["number"]}', number, head, kind)
+
+    def still_valid_settlement(self, view, number):
+        """(directory, transaction bytes) of this worker's own proved settlement of block number + 1 when it is still
+        valid against the current native request (153 M2): the request it was proved for equals the request now,
+        and it settles the local block number + 1. A reorg that removed the acceptance of M+1 but kept the block
+        that accepted M leaves that request byte-identical. Else None."""
+        directory = self.work / f'{number + 1:08d}-{view["source"]["block"][:16]}'
+        tx_path, request = directory / 'transaction.bin', directory / 'native-request.txt'
+        if not tx_path.is_file() or not request.is_file() or request.read_text() != self.request_text(view):
+            return None
+        tx = tx_path.read_bytes()
+        values = tx[33:33 + VALUES_BYTES]
+        if len(values) != VALUES_BYTES:
+            return None
+        fields = statement_fields(values.hex())
+        if fields['l2_number'] != number + 1 or fields['l2_hash'] != self.local_hash(number + 1):
+            return None
+        submitted = directory / 'submitted.json'
+        if submitted.exists() and json.loads(submitted.read_text()).get('tx_sha256') not in (
+                None, hashlib.sha256(tx).hexdigest()):
+            return None
+        return directory, tx
+
+    def resubmit_own_settlement(self, view, case, number, brief):
+        """Rebroadcast the still-valid settlement of number + 1 (no finality wait: it can only land the block the
+        database already holds). True while that is under way, which holds back any rebuild; False when there is
+        nothing to resubmit, the window has passed, or the nodes refuse the bytes for good."""
+        reorg = self.c['reorg_recovery']
+        window, now = reorg['resubmit_window_seconds'], self.clock()
+        state = self.reorg_resubmit
+        if state is None or state['case'] != case:
+            found = self.still_valid_settlement(view, number) if window else None
+            state = self.reorg_resubmit = {'case': case, 'found': found, 'since': now, 'last': None,
+                                           'state': 'open' if found else 'none'}
+            if found:
+                self.reorg_alert('resubmitting', case, next_block=number + 1, directory=found[0].name,
+                                 window_seconds=window, **brief)
+        if state['state'] != 'open':
+            return False
+        if now - state['since'] >= window:
+            state['state'] = 'expired'
+            self.reorg_alert('resubmit-expired', case, next_block=number + 1, window_seconds=window, **brief)
+            return False
+        if state['last'] is not None and now - state['last'] < self.c['resubmit_seconds']:
+            return True
+        directory, tx = state['found']
+        values = tx[33:33 + VALUES_BYTES]
+        if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big'):
+            commitment = values[T + DA_COMMITMENT:T + DA_COMMITMENT + 32].hex()
+            if not any(r.get('l2_number') == number + 1 and r.get('commitment') == commitment
+                       for r in view.get('data_availability', [])):
+                if self.view_behind:
+                    # publish_da reads the full-quorum view; on a partial view below the floor it could pay again.
+                    state['state'] = 'da-missing'
+                    self.reorg_alert('resubmit-expired', case, next_block=number + 1, reason='DA record missing on '
+                                     'a partial view', **brief)
+                    return False
+                self.da_payload(number + 1, directory)
+                if not self.publish_da(number + 1, directory, values):
+                    state['last'] = self.clock()
+                    return True
+        path = directory / 'submitted.json'
+        record = json.loads(path.read_text()) if path.exists() else {}
+        record['tx_sha256'] = hashlib.sha256(tx).hexdigest()
+        sent = self.broadcast(number + 1, directory, tx, record)
+        state['last'] = self.clock()
+        if sent == 'terminal':
+            state['state'] = 'refused'
+            self.reorg_alert('resubmit-refused', case, next_block=number + 1, **brief)
+            return False
+        return True
+
+    def same_case(self, case):
+        """Re-read the view (153 L1): the case still holds, else forget it (alert `reorg-resolved`)."""
+        view = self.native_view(allow_behind=True)
+        accepted = view and view.get('accepted')
+        if accepted:
+            fields = statement_fields(accepted['statement'])
+            if (fields['l2_number'], fields['l2_hash']) == case[:2]:
+                return True
+        if self.reorg_seen is not None:
+            self.reorg_alert('resolved', accepted=self.reorg_seen[0], database_head=self.reorg_seen[2])
+        self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+        self.reorg_reported.clear()
+        return False
+
+    def recover_reorg(self, ahead):
+        """The database holds the accepted settlement M and unusable unsettled blocks above it. False while waiting
+        (own settlement of M+1 being resubmitted, view not stable yet, M not finalized yet, follower behind); True
+        once the rebuilt database is swapped in. Halts when disabled (the reason of old), when the recovery limit is
+        reached, or when L1 data cannot rebuild M."""
+        reorg = self.c.get('reorg_recovery')
+        if not reorg or self.dry_run:
+            raise Halt(str(ahead))
+        if ahead.accepted == 0:
+            raise Halt(f'{ahead}: L1 holds no accepted settlement any more; rebuild the initial database by hand')
+        view = self.native_view(allow_behind=True)
+        accepted = view and view.get('accepted')
+        if not accepted or statement_fields(accepted['statement'])['l2_number'] != ahead.accepted:
+            # The view moved since the cycle read it: forget the case (a return alerts and waits again).
+            if self.reorg_seen is not None:
+                self.reorg_alert('resolved', accepted=self.reorg_seen[0], database_head=self.reorg_seen[2])
+            self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+            self.reorg_reported.clear()
+            return False
+        fields = statement_fields(accepted['statement'])
+        number, l2_hash = fields['l2_number'], fields['l2_hash']
+        case = (number, l2_hash, ahead.head['number'], ahead.head['hash'])
+        brief = {'accepted': number, 'accepted_hash': l2_hash, 'database_head': ahead.head['number'],
+                 'database_head_hash': ahead.head['hash'], 'shape': ahead.kind}
+        if self.view_behind:
+            brief.update(behind_floor=self.accepted_floor, view_ports=self.view_support)
+        now = self.clock()
+        if self.reorg_seen != case:
+            # The L1 height at first sight: the reorg that removed M+1 is final once L1 finality passes it.
+            try:
+                height = self.first_sight_height()
+            except Exception:  # noqa: BLE001 - no quorum: look again next cycle
+                return False
+            if height is None:
+                return False
+            self.reorg_l1_height = height
+            self.reorg_seen, self.reorg_since, self.reorg_resubmit = case, now, None
+            self.reorg_alert('detected', case, reason=str(ahead)[:300], stable_seconds=reorg['stable_seconds'],
+                             l1_height=self.reorg_l1_height, **brief)
+        if ahead.kind in ('ahead', 'reuse') and self.resubmit_own_settlement(view, case, number, brief):
+            return False
+        if now - self.reorg_since < reorg['stable_seconds']:
+            return False
+        finals = follower_finals(reorg['follower_status'])
+        if number in finals and finals[number] != l2_hash:
+            raise Halt(f'reorg recovery: the follower finalized L2 block {number} as {finals[number]}, the native '
+                       f'quorum accepts {l2_hash}: operator review')
+        if max(finals, default=0) > number:
+            # The follower finalized more than the quorum view shows: a stale view. Wait, never rebuild on it.
+            self.reorg_alert('waiting-follower', case, follower_finalized=max(finals), **brief)
+            return False
+        try:
+            l1_final = self.native.bounded_value('getchaininfo', 'finalized_height')
+            l1_head = None if reorg['wait_for_finality'] else self.native.bounded_value('getchaininfo', 'height')
+        except Exception:  # noqa: BLE001 - no quorum: wait
+            return False
+        if reorg['wait_for_finality']:
+            # Finality of M alone is not enough: the reorg that removed M+1 can itself be undone until L1 finality
+            # passes the height at which it was seen. Then the rebuild can never be reversed by L1.
+            if finals.get(number) != l2_hash or l1_final < self.reorg_l1_height:
+                self.reorg_alert('waiting-finality', case, finalized_prefix=max(finals, default=0),
+                                 l1_finalized_height=l1_final, l1_height_seen=self.reorg_l1_height, **brief)
+                return False
+        elif l1_head - l1_final > reorg['max_finality_lag']:
+            # Off the mainnet path only: still never rebuild onto a fork whose finality has stopped (153 L3).
+            self.reorg_alert('waiting-finality', case, reason='L1 finality stalled', l1_height=l1_head,
+                             l1_finalized_height=l1_final, max_finality_lag=reorg['max_finality_lag'], **brief)
+            return False
+        recent = self.recent_recoveries(reorg, case, brief, str(ahead))
+        if not self.same_case(case):
+            return False
+        entry = {'unix': int(time.time()), 'accepted': number, 'accepted_hash': l2_hash,
+                 'database_head': ahead.head['number']}
+
+        def count(outcome):
+            # Written before the swap (153 L5): a crash between the two can only over-count.
+            atomic_write(self.reorg_history(), json.dumps([*recent, {**entry, 'rebuilt_head': outcome['number']}],
+                                                          indent=1) + '\n')
+        outcome = self.rebuild_from_l1(number, l2_hash, fields['l2_state_root'], reorg, 'reorg', exact=True,
+                                       finals=finals, before_swap=count)
+        if outcome is None:
+            self.reorg_alert('waiting-follower', case, **brief)
+            return False
+        self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+        self.accepted_floor = number  # acted on: the view at M is the chain now
+        self.reorg_alert('recovered', recoveries_in_window=len(recent) + 1, max_recoveries=reorg['max_recoveries'],
+                         finalized=finals.get(number) == l2_hash, **brief, **outcome)
+        return True
+
+    def restore_own_settlement(self):
+        """After a rebuild, this worker's old settlement of M+1 can still land (its bytes are public and the request
+        was unchanged; 153 M2). Then a database kept aside by an earlier swap holds the accepted block: swap it back
+        (journalled, with its work directories) instead of a second reconstruct. None when no kept database holds the
+        accepted block; True once swapped. Counts against the recovery limit."""
+        reorg = self.c['reorg_recovery']
+        view = self.native_view()
+        accepted = view and view.get('accepted')
+        if not accepted:
+            return None
+        fields = statement_fields(accepted['statement'])
+        number, l2_hash = fields['l2_number'], fields['l2_hash']
+        db = Path(self.c['l2_db'])
+        prefix = f'{db.name}.orphaned-'
+        kept = sorted((p for p in db.parent.iterdir() if p.name.startswith(prefix) and p.name[len(prefix):].isdigit()),
+                      key=lambda p: int(p.name[len(prefix):]), reverse=True)
+        for candidate in kept:
+            try:
+                head = self.produce('head', '--target', str(candidate))
+                if head['number'] < number or self.produce('hash', '--target', str(candidate), '--number',
+                                                           str(number))['hash'] != l2_hash:
+                    continue
+            except (ProducerError, KeyError, ValueError):
+                continue
+            break
+        else:
+            return None
+        brief = {'accepted': number, 'accepted_hash': l2_hash, 'restored': candidate.name,
+                 'restored_head': head['number']}
+        recent = self.recent_recoveries(reorg, None, brief, f'own settlement {number} landed after a rebuild')
+        current = self.produce('head', '--target', str(db))['number'] if db.exists() else 0
+        common = 0
+        for n in range(min(current, head['number']), 0, -1):
+            if self.local_hash(n) == self.produce('hash', '--target', str(candidate), '--number', str(n))['hash']:
+                common = n
+                break
+        orphans = list(range(common + 1, current + 1))
+        respooled = self.respool_orphans(orphans)
+        source = self.work.parent / f'{self.work.name}-orphaned-{candidate.name[len(prefix):]}'
+        names = sorted(p.name for p in source.iterdir() if p.is_dir() and p.name[:8].isdigit()
+                       and common < int(p.name[:8]) <= head['number']) if source.is_dir() else []
+        stale = {d.name for d in self.stale_directories(common, current, number)}
+        stale |= {n for n in names if (self.work / n).exists()}
+        stamp = time.time_ns()
+        atomic_write(self.reorg_history(), json.dumps([*recent, {'unix': int(time.time()), 'accepted': number,
+                                                                 'accepted_hash': l2_hash, 'restored': candidate.name,
+                                                                 'rebuilt_head': head['number']}], indent=1) + '\n')
+        journal = {'rebuilt': str(candidate), 'kept': str(db.with_name(f'{db.name}.orphaned-{stamp}')),
+                   'work_aside': str(self.work.parent / f'{self.work.name}-orphaned-{stamp}'),
+                   'stale': sorted(stale), 'number': head['number'], 'l2_hash': head['hash'],
+                   'restore_work': {'from': str(source), 'names': names}}
+        atomic_write(self.recovery_journal(), json.dumps(journal, indent=2) + '\n')
+        self.finish_swap()
+        self.reorg_seen = self.reorg_since = self.reorg_resubmit = None
+        self.reorg_reported.clear()
+        self.reorg_alert('restored', recoveries_in_window=len(recent) + 1, max_recoveries=reorg['max_recoveries'],
+                         common_ancestor=common, orphaned_blocks=orphans, respooled=respooled,
+                         restored_work=names, **brief)
+        return True
 
     # ---- foreign settlements: rebuild from L1 and continue ----
     def recover_foreign(self, reason):
         """Replace a database that does not hold the accepted settlement with one rebuilt from finalized L1
         blocks. False while waiting; True once swapped. Halts when L1 data cannot reproduce the block."""
+        if self.c.get('reorg_recovery') and not self.dry_run:
+            restored = self.restore_own_settlement()
+            if restored is not None:
+                return restored
         recovery = self.c.get('foreign_recovery')
         if not recovery or self.dry_run:
             raise Halt(reason)
@@ -2745,10 +3311,27 @@ class Settler:
             if not prefix or self.holds_block(prefix, finals[prefix]):
                 return False
             number, l2_hash, expected_root = prefix, finals[prefix], None
+        outcome = self.rebuild_from_l1(number, l2_hash, expected_root, recovery, 'foreign', finals=finals)
+        if outcome is None:
+            return False
+        self.waiting_for = None
+        log('foreign-settlement-recovered', **outcome)
+        return True
+
+    def rebuild_from_l1(self, number, l2_hash, expected_root, recovery, label, exact=False, finals=None,
+                        before_swap=None):
+        """Rebuild a NEW database from the follower's verified L1 blocks, require block `number` to be `l2_hash`
+        (and `expected_root` unless None), return orphaned user transactions to the spool, move stale work aside and
+        swap the databases through the journal. None when the rebuild does not reach the target yet (the follower is
+        behind the view); then a dict describing the swap. Halts when L1 data cannot be rebuilt or contradicts the
+        follower's finalized settlements. Shared by `foreign_recovery` and `reorg_recovery`. With `exact`, the
+        rebuild must also end at `number`: a follower still on the losing fork holds settlements above it that L1
+        no longer has, and a database rebuilt from them would only be reorged again."""
+        finals = follower_finals(recovery['follower_status']) if finals is None else finals
         # One rebuild per input: a rebuild that did not hold the target is not repeated until the follower has more.
         tip = follower_verified_tip(recovery['follower_status'])
         if self.rebuild_discarded_at is not None and self.rebuild_discarded_at == tip:
-            return False
+            return None
         db = Path(self.c['l2_db'])
         rebuilding = db.with_name(db.name + '.rebuilding')
         shutil.rmtree(rebuilding, ignore_errors=True)
@@ -2760,7 +3343,8 @@ class Settler:
                           timeout=recovery.get('rebuild_timeout_seconds', 3600))
         if result.returncode:
             shutil.rmtree(rebuilding, ignore_errors=True)
-            raise Halt(f'rebuild from L1 refused while recovering from a foreign settlement of L2 block {number}: the '
+            what = 'a foreign settlement' if label == 'foreign' else 'a reorg of the accepted settlement'
+            raise Halt(f'rebuild from L1 refused while recovering from {what} of L2 block {number}: the '
                        f'block is off-rule, or the follower store is damaged: {result.stderr.strip()[:400]}')
         document = json.loads(result.stdout)
         blocks = {b['number']: b for b in document.get('blocks', [])}
@@ -2768,11 +3352,12 @@ class Settler:
         # `reconstruct` replays everything the follower verified, so the head can lie above the target. The target
         # must be there; the worker then holds the newest settled block and competes from it. A later reorg of that
         # unfinalized tail on L1 is one more divergence, recovered the same way.
-        if rebuilt is None or rebuilt['hash'] != l2_hash or expected_root not in (None, rebuilt['state_root']):
+        if rebuilt is None or rebuilt['hash'] != l2_hash or expected_root not in (None, rebuilt['state_root']) \
+                or (exact and max(blocks) != number):
             shutil.rmtree(rebuilding, ignore_errors=True)
             self.rebuild_discarded_at = tip
-            log('foreign-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
-            return False
+            log(f'{label}-rebuild-behind-view', number=number, rebuilt_head=document.get('head'))
+            return None
         self.rebuild_discarded_at = None
         number, l2_hash = max(blocks), blocks[max(blocks)]['hash']
         wrong = [n for n, h in finals.items() if n in blocks and blocks[n]['hash'] != h]
@@ -2785,6 +3370,8 @@ class Settler:
         stale = self.stale_directories(common, old_head, number)
         proofs = sum((d / 'proved.json').exists() for d in stale)
         da_paid = sum(len(list(d.glob('da-signed-*.hex'))) for d in stale)
+        if before_swap is not None:
+            before_swap({'number': number, 'l2_hash': l2_hash})
         stamp = time.time_ns()
         ready = db.with_name(f'{db.name}.rebuilt-{stamp}')
         rebuilding.rename(ready)
@@ -2793,11 +3380,9 @@ class Settler:
                    'stale': [d.name for d in stale], 'number': number, 'l2_hash': l2_hash}
         atomic_write(self.recovery_journal(), json.dumps(journal, indent=2) + '\n')
         self.finish_swap()
-        self.waiting_for = None
-        log('foreign-settlement-recovered', number=number, l2_hash=l2_hash, common_ancestor=common,
-            orphaned_blocks=orphans, respooled=respooled, wasted_proofs=proofs, wasted_da_signed=da_paid,
-            rebuild_seconds=round(self.clock() - start, 1), native_blocks=document.get('native_blocks'))
-        return True
+        return {'number': number, 'l2_hash': l2_hash, 'common_ancestor': common, 'orphaned_blocks': orphans,
+                'respooled': respooled, 'wasted_proofs': proofs, 'wasted_da_signed': da_paid,
+                'rebuild_seconds': round(self.clock() - start, 1), 'native_blocks': document.get('native_blocks')}
 
     def holds_block(self, number, l2_hash):
         """Whether the local database has this hash at this number."""
@@ -2871,7 +3456,14 @@ class Settler:
         for name in state['stale']:
             if (self.work / name).exists():
                 (self.work / name).rename(aside / name)
-        keep = self.c['foreign_recovery'].get('keep', 2) if self.c.get('foreign_recovery') else 2
+        restore = state.get('restore_work')  # a kept database swapped back: its work directories come back too
+        if restore:
+            source = Path(restore['from'])
+            for name in restore['names']:
+                if (source / name).exists() and not (self.work / name).exists():
+                    (source / name).rename(self.work / name)
+        keeps = [self.c[k].get('keep', 2) for k in ('foreign_recovery', 'reorg_recovery') if self.c.get(k)]
+        keep = max(keeps) if keeps else 2
         for prefix, parent in ((f'{db.name}.orphaned-', db.parent), (f'{self.work.name}-orphaned-', self.work.parent)):
             old = sorted((p for p in parent.iterdir() if p.name.startswith(prefix)), key=lambda p: int(p.name[len(prefix):]))
             for path in old[:-keep]:
@@ -2985,7 +3577,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
                     transaction={'tag': hex(tx[0]), 'bytes': len(tx), 'sha256': hashlib.sha256(tx).hexdigest(),
                                  'proof_policy': tx[1:33].hex(), 'user_transactions': users,
                                  'file': str(base / 'settlement-tx.hex')}, **fee)
-    except (Halt, ProducerError, ForeignSettlement, WaitForProgram) as error:
+    except (Halt, ProducerError, ForeignSettlement, LocalAhead) as error:
         return done(False, reason=str(error))
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The settler installer's runuser path, its configure retry, its pins and its prepare step. No root, no RPC."""
 import hashlib
+import json
 import importlib.util
 import json
 from pathlib import Path
@@ -90,8 +91,16 @@ class Installer(unittest.TestCase):
     def test_the_proving_budget_is_set_only_when_given(self):
         import json
         with mock.patch.object(m.subprocess, 'run', return_value=Done()):
-            m.configure(['--max-block-sp1-gas', '150000000'])
+            m.configure(['--max-block-sp1-gas', '150000000', '--max-block-instructions', '90000000'])
         self.assertEqual(json.loads((self.etc / 'config.json').read_text())['max_block_sp1_gas'], 150_000_000)
+        self.assertEqual(json.loads((self.etc / 'config.json').read_text())['max_block_instructions'], 90_000_000)
+
+    def test_incomplete_custom_budget_never_writes_configuration(self):
+        for args in (['--max-block-sp1-gas', '150000000'], ['--max-block-instructions', '90000000']):
+            with self.subTest(args=args), self.assertRaisesRegex(AssertionError, 'supplied together'):
+                m.configure(args)
+            self.assertFalse((self.etc / 'config.json').exists())
+            self.assertFalse((self.etc / 'config.json.pending').exists())
 
     def test_the_sparse_guest_pin_is_the_settlers(self):
         spec = importlib.util.spec_from_file_location('settler_v3', HERE.parent / 'devnet' / 'settler_v3.py')
@@ -154,7 +163,7 @@ class Installer(unittest.TestCase):
         # the activated guest, bloch-pos and the manifest; the December SP1 host is not pinned yet (refused).
         self.assertEqual(set(m.PINS), set(m.FILES))
         for name, path in (('settler_v3.py', HERE.parent / 'devnet' / 'settler_v3.py'),
-                           ('sequencer_policy.py', HERE.parent / 'devnet' / 'sequencer_policy.py'),
+                           ('sequencer_policy_v2.py', HERE.parent / 'devnet' / 'sequencer_policy_v2.py'),
                            ('l2_reorg_recover.py', HERE / 'l2_reorg_recover.py')):
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), m.PINS[name], name)
         golive = {}
@@ -191,6 +200,35 @@ class Installer(unittest.TestCase):
             self.assertEqual(unit.read_text(), text)
         self.assertEqual([c.args[0][:2] for c in run.call_args_list][-2:], [['systemctl', 'daemon-reload'],
                                                                             ['systemctl', 'enable']])
+
+    def test_reorg_recovery_is_off_unless_asked_for(self):
+        config, _ = self.configured([])
+        self.assertIn('foreign_recovery', config)
+        self.assertNotIn('reorg_recovery', config)
+
+    def test_reorg_recovery_flag(self):
+        with self.assertRaisesRegex(AssertionError, 'needs foreign recovery'):
+            self.configured(['--reorg-recovery', '--no-foreign-recovery'])
+        config, _ = self.configured(['--reorg-recovery'])
+        self.assertEqual(config['reorg_recovery'], config['foreign_recovery'])
+        (self.etc / 'config.json').unlink()
+        config, _ = self.configured(['--reorg-recovery', '--follower-state', '/var/lib/f/native',
+                                     '--follower-status', '/var/lib/f/status.json'])
+        self.assertEqual(config['reorg_recovery'], {'follower_state': '/var/lib/f/native',
+                                                    'follower_status': '/var/lib/f/status.json'})
+
+    def test_sequencer_policy_v2_is_shipped_and_configured_only_with_user_transactions(self):
+        self.assertIn('sequencer_policy_v2.py', m.FILES)
+        with self.assertRaisesRegex(AssertionError, 'needs --user-transactions'):
+            m.configure(['--sequencer-policy-v2'])
+        with mock.patch.object(m.subprocess, 'run', return_value=Done()):
+            m.configure(['--user-transactions', '--sequencer-policy-v2', '--no-foreign-recovery'])
+        config = json.loads((self.etc / 'config.json').read_text())
+        self.assertEqual((config['max_block_sp1_gas'], config['max_block_txs'], config['congestion_max_tip_wei']),
+                         (90_000_000, 64, 3 * 10**9))
+        sys.path.insert(0, str(HERE.parent / 'devnet'))
+        import settler_v3
+        settler_v3.check_policy_config(config)
 
     def test_reorg_tool_pin_is_the_file_in_this_tree(self):
         self.assertIn('l2_reorg_recover.py', m.FILES)
