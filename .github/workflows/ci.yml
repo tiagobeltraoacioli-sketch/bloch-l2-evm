@@ -81,6 +81,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Check settlement worker policy, program gates and recovery
+        run: python3 -B -m unittest discover -s deployment/devnet -p 'test_*.py'
       - name: Check launch configuration, source pins and monitor state
         run: python3 -m unittest discover -s deployment/mainnet -p 'test_*.py'
       - name: Check gateway rendering and local transport failures
