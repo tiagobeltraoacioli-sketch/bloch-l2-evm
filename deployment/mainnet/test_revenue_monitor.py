@@ -152,10 +152,10 @@ class FakeWorld:
             topics += [wa(e['recipient'])]
             data = w(e['amount'])
         elif ev in ('Deposited', 'Released'):
-            topics += ['0x' + w(1), '0x' + w(2)]
+            topics += ['0x' + w(e.get('id', 1)), '0x' + w(2)]
             data = w(0) + w(0) + w(e.get('amount', 0)) + w(0)
         elif ev == 'ReleaseExecuted':
-            topics += ['0x' + w(1)]
+            topics += ['0x' + w(e.get('id', 1))]
             data = w(0) + w(e.get('amount', 0))
         return topics, '0x' + data
 
@@ -683,6 +683,62 @@ class SnapshotConsistency(unittest.TestCase):
                 self.assertNotIn(product + '_error', checks(report))
                 self.assertEqual(state['totals'], totals)
                 self.assertEqual(state['anchors'][product]['checkpoint']['number'], world[side]['head']['number'])
+
+
+class BridgeFeeCorrelation(unittest.TestCase):
+    def fixture(self, kind, gross):
+        world = load('world_launch.json')
+        for product in ('dex', 'l2_fees', 'forced'):
+            world['config'][product] = {'enabled': False}
+        fee = gross * 5 // 10_000
+        template = world['eth']['logs'][0]
+        crossing = dict(template, event=kind, id=7, amount=gross - fee if kind == 'Deposited' else gross)
+        logs = [crossing]
+        if fee:
+            logs.append(dict(world['eth']['logs'][1], id=7, fee=fee))
+        world['eth']['logs'] = logs
+        vault = world['config']['bridge']['vault']
+        world['eth']['vaults'][vault]['feesAccrued'] = fee
+        return world
+
+    def test_floor_rounded_zero_fees_and_first_paid_unit_are_valid(self):
+        for kind in ('Deposited', 'Released', 'ReleaseExecuted'):
+            for gross in (1, 1999, 2000, 2001):
+                with self.subTest(kind=kind, gross=gross):
+                    world = self.fixture(kind, gross)
+                    report, state, _ = run_world(world)
+                    self.assertNotIn('bridge_fee_accrual', checks(report))
+                    self.assertNotIn('bridge_error', checks(report))
+                    self.assertEqual(int(state['totals'].get('bridge_fee_accrued', '0')), gross * 5 // 10_000)
+
+    def test_one_crossing_fee_does_not_mask_another_missing_fee(self):
+        world = load('world_live.json')
+        world['eth']['logs'] = [e for e in world['eth']['logs'] if not (e['event'] == 'FeeAccrued' and e['tx'] == '0xe3')]
+        report, state, _ = run_world(world)
+        self.assertEqual(checks(report)['bridge_fee_accrual']['level'], 'CRIT')
+        self.assertNotIn('bridge', state['cursors'])
+        self.assertFalse(any(k.startswith('bridge_') for k in state['totals']))
+
+    def test_fee_must_match_id_transaction_and_exact_amount(self):
+        for field, value in (('id', 8), ('tx', '0xe2'), ('fee', 3)):
+            with self.subTest(field=field):
+                world = self.fixture('Deposited', 4000)
+                world['eth']['logs'][1][field] = value
+                report, state, _ = run_world(world)
+                self.assertEqual(checks(report)['bridge_fee_accrual']['level'], 'CRIT')
+                self.assertEqual(state['cursors'], {})
+
+    def test_orphan_or_duplicate_fee_is_refused_atomically(self):
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                world = self.fixture('Deposited', 4000)
+                if duplicate:
+                    world['eth']['logs'].append(dict(world['eth']['logs'][1]))
+                else:
+                    world['eth']['logs'].pop(0)
+                report, state, _ = run_world(world)
+                self.assertEqual(checks(report)['bridge_fee_accrual']['level'], 'CRIT')
+                self.assertEqual(state['totals'], {})
 
 
 class EventIntegrity(unittest.TestCase):

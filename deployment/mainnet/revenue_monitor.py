@@ -125,6 +125,10 @@ class RpcError(Exception):
     pass
 
 
+class FeeAccountingError(RpcError):
+    """Crossing events and fee events contradict the immutable fee rule."""
+
+
 Transport = Callable[[str, str, list], Any]
 
 
@@ -634,6 +638,46 @@ def check_dex(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: Dict
 
 # ---------------------------------------------------------------- bridge
 
+def check_crossing_fees(logs: List[Dict[str, Any]], deposit_bps: int, release_bps: int) -> None:
+    """Bind each fee to its transaction and crossing ID; deposits report net amounts."""
+    fees, crossings = {}, {}
+    kinds = {TOPIC[name]: name for name in ('Deposited', 'Released', 'ReleaseExecuted', 'FeeAccrued')}
+    for log in logs:
+        kind = kinds.get(log['topics'][0].lower())
+        if kind is None:
+            continue
+        topics = log['topics']
+        expected_topics = 3 if kind in ('Deposited', 'Released') else 2
+        data = log_data_words(log)
+        expected_words = {'Deposited': 4, 'Released': 4, 'ReleaseExecuted': 2, 'FeeAccrued': 1}[kind]
+        if len(topics) != expected_topics or len(data) != expected_words:
+            raise RpcError(f'malformed {kind} event layout')
+        event_id = topics[1]
+        if (len(event_id) != 66 or not event_id.startswith('0x')
+                or any(c not in '0123456789abcdefABCDEF' for c in event_id[2:])):
+            raise RpcError(f'malformed {kind} event ID')
+        key = (log['transactionHash'].lower(), event_id.lower())
+        value = data[{'Deposited': 2, 'Released': 2, 'ReleaseExecuted': 1, 'FeeAccrued': 0}[kind]]
+        if not 0 < value < 2 ** 64:
+            raise RpcError(f'{kind} amount is not a positive uint64')
+        target = fees if kind == 'FeeAccrued' else crossings
+        if key in target:
+            raise FeeAccountingError(f'duplicate {kind} for crossing {key[1]}')
+        target[key] = value if kind == 'FeeAccrued' else (kind, value)
+    for key, (kind, amount) in crossings.items():
+        fee = fees.pop(key, 0)
+        # A small crossing may legitimately pay zero after floor rounding. For
+        # deposits the event's amount is net, so reconstruct gross with its fee.
+        gross = amount + fee if kind == 'Deposited' else amount
+        bps = deposit_bps if kind == 'Deposited' else release_bps
+        expected = gross * bps // 10_000
+        if gross >= 2 ** 64 or fee != expected:
+            raise FeeAccountingError(f'{kind} {key[1]}: fee {fee} does not match {expected} '
+                                     f'at {bps} bps (missing or mismatched FeeAccrued)')
+    if fees:
+        raise FeeAccountingError('FeeAccrued has no matching crossing in the same transaction')
+
+
 def check_bridge(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: Dict[str, Any], r: Report,
                  today: str, now: float) -> Dict[str, Any]:
     vault = addr(cfg.get('vault'))
@@ -678,17 +722,18 @@ def check_bridge(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: D
     cursor = state['cursors'].get('bridge')
     lo, hi, complete = scan_range(cursor, int(cfg.get('start_block', 0)), chain.number, th['max_scan_blocks'])
     chunk = th['log_chunk_blocks']
-    run_accrued = run_swept = crossings = fee_logs = 0
+    run_accrued = run_swept = 0
     if lo <= hi:
         logs = chain.logs(vault, [[TOPIC['FeeAccrued'], TOPIC['FeesSwept'], TOPIC['Deposited'], TOPIC['Released'],
                                    TOPIC['ReleaseExecuted']]], lo, hi, chunk)
+        if (dep_bps, rel_bps) == (want_dep, want_rel) and 0 < dep_bps < 10_000 and 0 < rel_bps < 10_000:
+            check_crossing_fees(logs, dep_bps, rel_bps)
         for g in logs:
             t0 = g['topics'][0].lower()
             if t0 == TOPIC['FeeAccrued']:
                 fee = log_data_words(g)[0]
                 bump(state, g['_day'], 'bridge_fee_accrued', fee)
                 run_accrued += fee
-                fee_logs += 1
                 state['marks'].setdefault('bridge_unswept_since', g['_ts'])
                 if state['marks']['bridge_unswept_since'] is None:
                     state['marks']['bridge_unswept_since'] = g['_ts']
@@ -700,17 +745,12 @@ def check_bridge(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: D
                 state['marks']['bridge_unswept_since'] = None
             elif t0 == TOPIC['Deposited']:
                 bump(state, g['_day'], 'bridge_deposits', 1)
-                crossings += 1
             else:
                 bump(state, g['_day'], 'bridge_releases', 1)
-                crossings += 1
         state['cursors']['bridge'] = hi
     if not complete:
         r.add('bridge_scan', WARN, f'bridge log scan reached block {hi} of {chain.number}; the next run continues')
 
-    if crossings and not fee_logs:
-        r.add('bridge_fee_accrual', CRIT, f'{crossings} deposits/releases in blocks {lo}-{hi} and no FeeAccrued log: '
-              'crossings are not paying the protocol fee')
     # Reconciliation: the previous feesAccrued plus logged accruals minus logged sweeps is the current value.
     prev = state['last'].get('bridge_fees_accrued')
     if prev is not None and complete and lo <= hi and int(prev) + run_accrued - run_swept != accrued:
@@ -1019,7 +1059,9 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
             state.clear()
             state.update(before)
             del r.checks[first_check:]
-            r.add(f'{name}_error', UNKNOWN, f'{name}: {type(e).__name__}: {e}')
+            fee_error = isinstance(e, FeeAccountingError)
+            r.add('bridge_fee_accrual' if fee_error else f'{name}_error', CRIT if fee_error else UNKNOWN,
+                  f'{name}: {type(e).__name__}: {e}')
             products[name] = {'enabled': True, 'error': str(e)}
 
     dex_cfg = config.get('dex')
