@@ -2777,7 +2777,7 @@ mod tests {
     /// proofs this is the normal case, not an outage: an entry expires only once the settler passed it over.
     #[test]
     fn agent55_a_slow_but_live_chain_keeps_acknowledged_entries_past_the_ttl() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let mut waiting = entry(&spec, "a.tx", 1, 11, 2 * GWEI);
         waiting.head_when_seen = 64;
         let mut account = |_| (11, alloy_primitives::U256::MAX);
@@ -2812,7 +2812,7 @@ mod tests {
     /// clock. Its blocks count from that sighting, so the restart does not evict them all at once.
     #[test]
     fn a_restart_during_a_slow_block_does_not_expire_acknowledged_entries() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let mut waiting = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         let now = std::time::SystemTime::now();
         waiting.modified = now - Duration::from_secs(4 * 3_600);
@@ -2828,7 +2828,7 @@ mod tests {
     /// A settler that stopped (no block for `stuck_after`) still sheds its spool: past the TTL and waiting as long.
     #[test]
     fn a_stopped_settler_still_sheds_its_spool() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let mut waiting = entry(&spec, "a.tx", 1, 0, 2 * GWEI);
         waiting.head_when_seen = 64;
         let mut account = |_| (0, alloy_primitives::U256::MAX);
@@ -2851,7 +2851,7 @@ mod tests {
     /// a nonce gap, and is refused otherwise.
     #[test]
     fn a_full_spool_of_a_slow_chain_still_displaces_by_fee_or_refuses() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let at_64 = |name: &str, key: u8, nonce: u64, fee: u128| SpoolEntry {
             head_when_seen: 64,
             ..entry(&spec, name, key, nonce, fee)
@@ -2878,7 +2878,7 @@ mod tests {
 
     #[test]
     fn scan_records_the_head_an_entry_was_first_seen_at() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let mut index = SpoolIndex::new();
         let write = |name: &str, nonce: u64| {
@@ -3383,7 +3383,7 @@ mod tests {
     /// still expires an entry the settler keeps passing over.
     #[test]
     fn r146_restarts_every_three_blocks_keep_an_entry_forever() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let raw = alloy_primitives::hex::encode(signed(&spec, 1, 0, 2 * GWEI, 0));
         std::fs::write(dir.path().join("a.tx"), format!("{raw}\n")).unwrap();
@@ -3417,7 +3417,7 @@ mod tests {
     /// the RPC's uptime.
     #[test]
     fn r146_restart_resets_the_stopped_settler_clock() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let ten_days = Duration::from_secs(10 * 24 * H);
         let unix = (std::time::SystemTime::now() - ten_days)
@@ -3453,7 +3453,7 @@ mod tests {
     /// four heartbeats. Its consecutive siblings keep the progress rule.
     #[test]
     fn r146_idle_heartbeat_keeps_a_gap_entry_about_four_days() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let mut gap = entry(&spec, "g.tx", 1, 1, 2 * GWEI); // nonce 1, head nonce 0, no nonce 0 spooled
         gap.head_when_seen = 64;
         let mut account = |_| (0, alloy_primitives::U256::MAX);
@@ -3478,7 +3478,7 @@ mod tests {
     /// R4: a full spool of gap entries past the TTL is stale: every one goes, for free, and the newcomer is admitted.
     #[test]
     fn r146_full_spool_of_unexpired_gap_entries_still_admits() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let full: Vec<_> = (10..18u8)
             .map(|k| SpoolEntry {
                 head_when_seen: 64,
@@ -3504,7 +3504,7 @@ mod tests {
     /// so monotonic time applies, and nothing expires without blocks or the TTL.
     #[test]
     fn r146_clock_steps_need_blocks_too() {
-        let spec = ChainSpec::mainnet();
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.tx");
         std::fs::write(
