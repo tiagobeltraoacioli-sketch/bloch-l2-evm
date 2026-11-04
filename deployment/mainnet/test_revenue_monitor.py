@@ -79,7 +79,9 @@ class FakeWorld:
         return head['timestamp'] - (head['number'] - number) * chain['spacing']
 
     def block(self, chain, number):
-        b = {'number': hex(number), 'timestamp': hex(self.ts(chain, number))}
+        branch = 0 if number == 0 else chain.get('branch', 0)
+        identity = (chain['chain_id'] << 128) | (branch << 64) | number
+        b = {'number': hex(number), 'timestamp': hex(self.ts(chain, number)), 'hash': f'0x{identity:064x}'}
         if 'baseFeePerGas' in chain['head']:
             b['baseFeePerGas'] = hex(chain['head']['baseFeePerGas'])
         return b
@@ -549,6 +551,79 @@ class PartialFailures(unittest.TestCase):
         self.assertNotIn('forced_records', state['totals'])
         report, state, _ = run_world(self.world, state)
         self.assertEqual(report['totals']['forced_records'], '2')
+
+
+class SnapshotConsistency(unittest.TestCase):
+    def world_for(self, product):
+        world = load('world_live.json')
+        for name in ('dex', 'bridge', 'l2_fees', 'forced'):
+            if name != product:
+                world['config'][name] = {'enabled': False}
+        return world
+
+    def test_each_evm_product_discards_a_sample_that_changes_branch(self):
+        for product in ('dex', 'bridge', 'l2_fees'):
+            with self.subTest(product=product):
+                world = self.world_for(product)
+                fake = FakeWorld(world)
+                side = 'eth' if product == 'bridge' else 'l2'
+                mutated = False
+
+                def change_branch(url, method, params):
+                    nonlocal mutated
+                    result = fake(url, method, params)
+                    if not mutated and method in ('eth_call', 'eth_getBalance'):
+                        world[side]['branch'] = 1
+                        mutated = True
+                    return result
+
+                state = m.empty_state()
+                report = m.run(world['config'], state, m.Client(change_branch), world['now'])
+                self.assertTrue(mutated)
+                self.assertIn(product + '_error', checks(report))
+                for key in ('totals', 'cursors', 'last', 'marks', 'days'):
+                    self.assertEqual(state[key], {}, key)
+
+    def test_no_endpoint_failover_after_the_sample_has_started(self):
+        world = self.world_for('dex')
+        fake = FakeWorld(world)
+
+        def first_endpoint_loses_state(url, method, params):
+            if url == 'http://l2a' and method == 'eth_call':
+                raise m.RpcError('state unavailable on pinned endpoint')
+            return fake(url, method, params)
+
+        report = m.run(world['config'], m.empty_state(), m.Client(first_endpoint_loses_state), world['now'])
+        self.assertIn('dex_error', checks(report))
+        self.assertFalse(any(url == 'http://l2b' for url, _, _ in fake.log))
+
+    def test_recheck_rejects_wrong_number_even_with_the_same_hash(self):
+        world = self.world_for('dex')
+        fake = FakeWorld(world)
+        head = hex(world['l2']['head']['number'])
+
+        def wrong_height(url, method, params):
+            result = fake(url, method, params)
+            if method == 'eth_getBlockByNumber' and params[0] == head:
+                result['number'] = hex(world['l2']['head']['number'] + 1)
+            return result
+
+        report = m.run(world['config'], m.empty_state(), m.Client(wrong_height), world['now'])
+        self.assertIn('dex_error', checks(report))
+
+    def test_missing_block_hash_refuses_before_observations(self):
+        world = self.world_for('dex')
+        fake = FakeWorld(world)
+
+        def no_hash(url, method, params):
+            result = fake(url, method, params)
+            if method == 'eth_getBlockByNumber':
+                result.pop('hash')
+            return result
+
+        report = m.run(world['config'], m.empty_state(), m.Client(no_hash), world['now'])
+        self.assertEqual(checks(report)['l2_rpc']['level'], 'UNKNOWN')
+        self.assertFalse(any(method == 'eth_call' for _, method, _ in fake.log))
 
 
 class LaunchWorld(unittest.TestCase):

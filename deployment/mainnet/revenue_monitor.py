@@ -255,7 +255,7 @@ class Report:
 # ---------------------------------------------------------------- chain access
 
 class Chain:
-    """One EVM chain (the L2 or Ethereum), read at one pinned block number."""
+    """One EVM chain, read from one endpoint at one checked block identity."""
 
     def __init__(self, client: Client, urls: List[str], name: str):
         self.client, self.urls, self.name = client, urls, name
@@ -263,6 +263,9 @@ class Chain:
         self.number = 0
         self.timestamp = 0
         self.base_fee: Optional[int] = None
+        self.hash: Optional[str] = None
+        self.network: Optional[int] = None
+        self.genesis_hash: Optional[str] = None
 
     def rpc(self, method: str, params: list) -> Any:
         return self.client.call(self.urls, method, params)
@@ -272,12 +275,44 @@ class Chain:
         if not isinstance(head, dict):
             raise RpcError(f'{self.name}: no {tag} block')
         self.number = hexint(head['number'])
+        self.hash = self.block_hash(head, self.number)
         self.timestamp = hexint(head['timestamp'])
         self.base_fee = hexint(head['baseFeePerGas']) if head.get('baseFeePerGas') is not None else None
         self.block_ts_cache[self.number] = self.timestamp
+        self.genesis_hash = self.block_hash(self.rpc('eth_getBlockByNumber', ['0x0', False]), 0)
 
     def chain_id(self) -> int:
-        return hexint(self.rpc('eth_chainId', []))
+        # Fail over only before selecting a chain. Mixing endpoints during a
+        # sample can combine valid answers from different canonical branches.
+        last: Optional[Exception] = None
+        for url in self.urls:
+            try:
+                network = hexint(self.client.call([url], 'eth_chainId', []))
+            except RpcError as error:
+                last = error
+                continue
+            self.urls = [url]
+            self.network = network
+            return network
+        raise RpcError(str(last) if last else f'{self.name}: no endpoint configured')
+
+    def block_hash(self, block: Any, number: int) -> str:
+        if not isinstance(block, dict) or hexint(block.get('number')) != number or number < 0:
+            raise RpcError(f'{self.name}: missing or inconsistent block {number}')
+        value = block.get('hash')
+        if (not isinstance(value, str) or len(value) != 66 or not value.startswith('0x')
+                or any(c not in '0123456789abcdefABCDEF' for c in value[2:])):
+            raise RpcError(f'{self.name}: invalid hash for block {number}')
+        return value.lower()
+
+    def verify(self) -> None:
+        if hexint(self.rpc('eth_chainId', [])) != self.network:
+            raise RpcError(f'{self.name}: chain identity changed during observation')
+        if self.block_hash(self.rpc('eth_getBlockByNumber', ['0x0', False]), 0) != self.genesis_hash:
+            raise RpcError(f'{self.name}: genesis changed during observation')
+        block = self.rpc('eth_getBlockByNumber', [self.at(), False])
+        if self.block_hash(block, self.number) != self.hash:
+            raise RpcError(f'{self.name}: pinned block changed during observation')
 
     def at(self) -> str:
         return hex(self.number)
@@ -893,17 +928,19 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
                 l2 = None
             else:
                 l2.pin((config.get('l2') or {}).get('block', 'finalized'))
-        except (RpcError, KeyError, TypeError) as e:
+        except (RpcError, KeyError, TypeError, ValueError) as e:
             r.add('l2_rpc', UNKNOWN, f'L2 RPC: {e}')
             l2 = None
 
-    def section(name: str, fn: Callable[[], Dict[str, Any]]) -> None:
+    def section(name: str, fn: Callable[[], Dict[str, Any]], chain: Optional[Chain] = None) -> None:
         # A later RPC or malformed event must not leave a partly advanced cursor,
         # balance baseline or daily total. Keep successful independent products.
         before = copy.deepcopy(state)
         first_check = len(r.checks)
         try:
             products[name] = fn()
+            if chain is not None:
+                chain.verify()
         except (RpcError, KeyError, TypeError, IndexError, ValueError) as e:
             state.clear()
             state.update(before)
@@ -914,7 +951,7 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
     dex_cfg = config.get('dex')
     if dex_cfg and dex_cfg.get('enabled', True):
         if l2 is not None:
-            section('dex', lambda: check_dex(l2, dex_cfg, th, state, r, today, now))
+            section('dex', lambda: check_dex(l2, dex_cfg, th, state, r, today, now), l2)
     else:
         products['dex'] = {'enabled': False}
         r.add('dex', OK, 'DEX not deployed (disabled in the config): no protocol fee yet')
@@ -927,7 +964,9 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
             if cid != int(bridge_cfg.get('chain_id', 1)):
                 raise ValueError(f'Ethereum RPC chain id {cid} is not {bridge_cfg.get("chain_id", 1)}')
             eth.pin(bridge_cfg.get('block', 'finalized'))
-            return check_bridge(eth, bridge_cfg, th, state, r, today, now)
+            result = check_bridge(eth, bridge_cfg, th, state, r, today, now)
+            eth.verify()
+            return result
         section('bridge', bridge)
     else:
         products['bridge'] = {'enabled': False}
@@ -936,7 +975,7 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
     l2_cfg = config.get('l2_fees')
     if l2_cfg is not None and l2_cfg.get('enabled', True):
         if l2 is not None:
-            section('l2_fees', lambda: check_l2_fees(l2, l2_cfg, th, state, r, today, now))
+            section('l2_fees', lambda: check_l2_fees(l2, l2_cfg, th, state, r, today, now), l2)
     else:
         products['l2_fees'] = {'enabled': False}
 
