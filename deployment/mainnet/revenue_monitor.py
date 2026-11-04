@@ -881,15 +881,18 @@ def check_l2_fees(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: 
 def check_forced(client: Client, cfg: Dict[str, Any], state: Dict[str, Any], r: Report, today: str,
                  now: float) -> Dict[str, Any]:
     urls = list(cfg.get('l1_rpc') or [])
-    route = cfg.get('route', 'burned')
+    expected_route = cfg.get('route', 'burned')
     settlement = client.call(urls, 'getl2settlement', [])
     forced = settlement.get('forced') if isinstance(settlement, dict) else None
-    out: Dict[str, Any] = {'enabled': True, 'route': route, 'active': forced is not None}
+    out: Dict[str, Any] = {'enabled': True, 'route': 'unknown', 'configured_route': expected_route,
+                           'active': forced is not None}
     if forced is None:
         r.add('forced', OK, 'forced inclusion is not enabled on L1 (no `forced` in getl2settlement)')
         return out
     queued = int(forced['queued'])
     prev = state['last'].get('forced_queued')
+    if queued < 0 or (prev is not None and queued < int(prev)):
+        raise RpcError('forced queue counter regressed; retain the state for canonical-history review')
     new = queued - int(prev) if prev is not None else 0
     state['last']['forced_queued'] = queued
     if new > 0:
@@ -898,17 +901,40 @@ def check_forced(client: Client, cfg: Dict[str, Any], state: Dict[str, Any], r: 
         bump(state, today, 'forced_min_surcharge_sat', new * BASE_SURCHARGE_SAT)
     out.update({'queued': queued, 'consumed': int(forced['consumed']), 'pending_weight': int(forced['pending_weight']),
                 'next_surcharge_sat': forced.get('next_surcharge_sat'), 'new_records': new})
-    if route == 'burned':
-        level = WARN if new > 0 else OK
-        r.add('forced_route', level, f'{new} new forced records; their surcharge is burned by the node build. Decided '
-              '(round 10, R4/R6): the fee and surcharge go to the protocol treasury - not in this build')
+    if 'treasury' not in forced:
+        r.add('forced_route', UNKNOWN, 'the L1 RPC does not report forced.treasury; the revenue route is unverified '
+              '(the configured route is an expectation, not an observation)')
         return out
-    script = cfg.get('treasury_script_hash')
-    if not script or script == TBD:
-        r.add('forced_route', WARN, f'forced-inclusion treasury script hash is {TBD}')
+    script = forced['treasury']
+    if script is None:
+        out['route'] = 'unconfigured'
+        r.add('forced_route', WARN, 'the L1 RPC reports no configured forced-inclusion treasury; '
+              'this does not establish that a surcharge was burned')
         return out
-    bal = int(client.call(urls, 'getbalance', [script])['balance_sat'])
+    if not isinstance(script, str) or len(script) != 64 or any(c not in '0123456789abcdef' for c in script):
+        raise RpcError('forced.treasury is not a lowercase 32-byte script hash')
+    out.update(route='treasury', treasury_script_hash=script)
+    expected_script = cfg.get('treasury_script_hash')
+    if expected_route != 'treasury':
+        r.add('forced_route_config', WARN, f'L1 reports treasury routing, while configuration expects {expected_route}')
+    if not expected_script or expected_script == TBD:
+        r.add('forced_recipient', WARN, f'expected forced-inclusion treasury is {TBD}; RPC reports {script}')
+    elif expected_script != script:
+        r.add('forced_recipient', CRIT, f'RPC treasury {script} differs from expected {expected_script}')
+    balance = client.call(urls, 'getbalance', [script])
+    if not isinstance(balance, dict) or balance.get('script_hash') != script:
+        raise RpcError('treasury balance response belongs to a different script hash')
+    bal = int(balance['balance_sat'])
+    if bal < 0:
+        raise RpcError('treasury balance cannot be negative')
     prev_bal = state['last'].get('forced_treasury_sat')
+    previous_script = state['last'].get('forced_treasury_script_hash')
+    if previous_script != script:
+        if prev_bal is not None:
+            r.add('forced_treasury_baseline', WARN, 'treasury identity changed or the prior baseline was unbound; '
+                  'recording a new balance baseline without counting the difference as revenue')
+        prev_bal = None
+    state['last']['forced_treasury_script_hash'] = script
     state['last']['forced_treasury_sat'] = str(bal)
     put(state, today, 'forced_treasury_sat', bal)
     out['treasury_balance_sat'] = str(bal)
