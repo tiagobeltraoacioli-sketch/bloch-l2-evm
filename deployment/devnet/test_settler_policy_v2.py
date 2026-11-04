@@ -333,6 +333,37 @@ class Config(unittest.TestCase):
                 'write_limit_exempt_senders': ['0x' + 'ab' * 20],
             })
 
+    def test_a_paced_mandatory_cycle_publishes_admission_before_skipping_the_spool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = object.__new__(s.Settler)
+            worker.work = root / 'work'
+            pool, db = root / 'pool', root / 'db'
+            pool.mkdir()
+            db.mkdir()
+            worker.c = {'user_transactions': True, 'max_block_sp1_gas': 90_000_000,
+                        'txpool_dir': str(pool), 'l2_db': str(db), 'l2_genesis': 'genesis',
+                        'skip_idle_blocks': True, 'min_block_interval_seconds': 1800,
+                        'max_idle_seconds': 86400}
+            worker.clock = lambda: 10.0
+            worker.finish_swap = mock.Mock()
+            worker.check_identity = mock.Mock(return_value=True)
+            worker.native_view = mock.Mock(return_value={'accepted': None, 'source': {'pending': 1}})
+            worker.view_behind = False
+            worker.source_age = mock.Mock(return_value=10)
+            worker.inbox_backlog = mock.Mock(return_value=1)
+            worker.holding_since = worker.hold_logged_at = None
+            worker.produce = mock.Mock(return_value={'hash': 'genesis'})
+            worker.prepare_block = mock.Mock(side_effect=AssertionError('pacing must hold the block'))
+            worker.spool_demand = mock.Mock(side_effect=AssertionError('mandatory work skips spool demand'))
+            with mock.patch.object(s, 'log'):
+                self.assertFalse(worker.cycle())
+            path = worker.work / 'sequencer-policy.json'
+            self.assertTrue(path.is_file(), 'admission must not wait for the first paced mandatory block')
+            self.assertEqual(json.loads(path.read_text())['admission']['version'], 1)
+            worker.prepare_block.assert_not_called()
+            worker.spool_demand.assert_not_called()
+
     def test_empty_spool_publishes_admission_at_startup_and_after_idle_decay(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker = object.__new__(s.Settler)

@@ -1891,6 +1891,14 @@ class Settler:
         clock = getattr(self, 'policy_clock', None) or getattr(self, 'clock', time.time)
         return policy_v2.Policy(config, work / 'sequencer-policy.json' if work else None, clock, log)
 
+    def publish_admission_policy(self):
+        """Refresh RPC admission independently of whether a cycle examines the spool or builds a block."""
+        if self.budget_on():
+            work = getattr(self, 'work', None)
+            if work is not None:
+                work.mkdir(parents=True, exist_ok=True)
+            self.policy().save()
+
     def forced_backlog(self):
         """Forced records L1 holds and no settlement has consumed (0 while the queue is not enabled). Like the inbox, the
         queue freezes with the source, so a record queued later is due only one settlement after the next. Bounded by an
@@ -2144,14 +2152,8 @@ class Settler:
         Fees are not checked: the RPC admits only a fee cap over the next base fee and a tip over the floor."""
         if not self.c['user_transactions']:
             return False
-        if self.budget_on():
-            # RPC admission needs this snapshot before the first transaction
-            # can enter an empty spool. Also publish idle tip decay without
-            # executing a selector, measuring SP1, or waiting for a heartbeat.
-            work = getattr(self, 'work', None)
-            if work is not None:
-                work.mkdir(parents=True, exist_ok=True)
-            self.policy().save()
+        # Direct demand checks also publish before examining an empty spool.
+        self.publish_admission_policy()
         files = sorted(Path(self.c['txpool_dir']).glob('*.tx'))
         if not files:
             return False
@@ -2959,6 +2961,10 @@ class Settler:
         view = self.native_view(allow_behind=bool(self.c.get('reorg_recovery')))
         if view is None or view.get('source') is None:
             return False
+        # Mandatory backlog can bypass spool_demand, and pacing or an existing
+        # block can postpone selection. Publish before those branches so cold
+        # startup and idle fee decay do not wait for the next proof or heartbeat.
+        self.publish_admission_policy()
         try:
             if self.view_behind:
                 return self.behind_floor_case(view)
