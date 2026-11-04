@@ -77,11 +77,13 @@ fn state_before(source: &BlochProviderFactory, number: u64, tip: u64) -> Result<
                 .ok_or_else(|| invalid("missing contract code"))?;
             Some(code.0)
         };
-        let mut info = AccountInfo::default();
-        info.balance = account.balance;
-        info.nonce = account.nonce;
-        info.code_hash = hash;
-        info.code = code;
+        let info = AccountInfo {
+            balance: account.balance,
+            nonce: account.nonce,
+            code_hash: hash,
+            code,
+            ..Default::default()
+        };
         state.db_mut().insert_account_info(address, info);
         Ok(())
     };

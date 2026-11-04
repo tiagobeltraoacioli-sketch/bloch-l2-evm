@@ -12,6 +12,7 @@
 //! - `safe`: the settlement the operator's own native node holds at its
 //!   canonical head (accepted on L1, not yet finalized), when it matches the
 //!   local canonical header; never below `finalized`.
+//!
 //! No checkpoint signature is involved. `finalized` never regresses; `safe` follows an L1 reorg down to it. Both start
 //! closed. A status file that is lost, unreadable or whose finalized settlements
 //! are inconsistent with the local chain closes both: their tags,
@@ -223,7 +224,10 @@ fn parse() -> Result<Options> {
         print!("{USAGE}");
         std::process::exit(0);
     }
-    ensure!(args.len() % 2 == 0, "options must be --name value pairs\n{USAGE}");
+    ensure!(
+        args.len().is_multiple_of(2),
+        "options must be --name value pairs\n{USAGE}"
+    );
     let mut map = std::collections::BTreeMap::new();
     for pair in args.chunks(2) {
         ensure!(
