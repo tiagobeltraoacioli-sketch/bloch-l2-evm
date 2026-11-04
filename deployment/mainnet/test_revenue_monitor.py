@@ -488,6 +488,69 @@ class LiveWorld(unittest.TestCase):
         self.assertEqual(checks(report)['l2_chain']['level'], 'CRIT')
 
 
+class PartialFailures(unittest.TestCase):
+    def setUp(self):
+        self.world = load('world_live.json')
+
+    def test_bridge_failure_after_first_event_does_not_count_it_twice(self):
+        bad = copy.deepcopy(self.world)
+        fees = [e for e in bad['eth']['logs'] if e['event'] == 'FeeAccrued']
+        self.assertGreaterEqual(len(fees), 2)
+        fake = FakeWorld(bad)
+        original = fake.encode
+
+        def malformed_later_event(event):
+            topics, data = original(event)
+            return (topics, '0x') if event is fees[-1] else (topics, data)
+
+        fake.encode = malformed_later_event
+        state = m.empty_state()
+        failed = m.run(bad['config'], state, m.Client(fake), bad['now'])
+        self.assertIn('bridge_error', checks(failed))
+        self.assertFalse(any(k.startswith('bridge_') for k in state['totals']))
+        self.assertNotIn('bridge', state['cursors'])
+        self.assertIn('dex', state['cursors'], 'successful independent sections must be retained')
+        retried, state, _ = run_world(self.world, state)
+        expected, _, _ = run_world(self.world)
+        self.assertEqual(retried['totals']['bridge_fee_accrued'], expected['totals']['bridge_fee_accrued'])
+
+    def test_l2_failure_after_one_vault_preserves_both_baselines(self):
+        _, state, _ = run_world(self.world)
+        before = copy.deepcopy(state)
+        self.world['l2']['accounts'][m.BASE_FEE_VAULT]['balance'] = 0
+        fake = FakeWorld(self.world)
+
+        def fail_second_vault(url, method, params):
+            if method == 'eth_getBalance' and params[0] == m.SEQUENCER_FEE_VAULT:
+                raise m.RpcError('second vault unavailable')
+            return fake(url, method, params)
+
+        failed = m.run(self.world['config'], state, m.Client(fail_second_vault), self.world['now'])
+        self.assertIn('l2_fees_error', checks(failed))
+        self.assertEqual(state['last']['l2_vault:base_fee'], before['last']['l2_vault:base_fee'])
+        self.assertNotIn('l2_swept_base_fee', state['totals'])
+        report, state, _ = run_world(self.world, state)
+        self.assertEqual(report['totals']['l2_swept_base_fee'], before['last']['l2_vault:base_fee'])
+
+    def test_forced_failure_keeps_queue_counter_for_retry(self):
+        _, state, _ = run_world(self.world)
+        self.world['l1']['forced']['queued'] += 2
+        fake = FakeWorld(self.world)
+
+        def fail_balance(url, method, params):
+            if method == 'getbalance':
+                raise m.RpcError('treasury unavailable')
+            return fake(url, method, params)
+
+        before = copy.deepcopy(state)
+        failed = m.run(self.world['config'], state, m.Client(fail_balance), self.world['now'])
+        self.assertIn('forced_error', checks(failed))
+        self.assertEqual(state['last']['forced_queued'], before['last']['forced_queued'])
+        self.assertNotIn('forced_records', state['totals'])
+        report, state, _ = run_world(self.world, state)
+        self.assertEqual(report['totals']['forced_records'], '2')
+
+
 class LaunchWorld(unittest.TestCase):
     def setUp(self):
         self.world = load('world_launch.json')

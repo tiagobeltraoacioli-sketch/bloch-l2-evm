@@ -898,9 +898,16 @@ def run(config: Dict[str, Any], state: Dict[str, Any], client: Client, now: Opti
             l2 = None
 
     def section(name: str, fn: Callable[[], Dict[str, Any]]) -> None:
+        # A later RPC or malformed event must not leave a partly advanced cursor,
+        # balance baseline or daily total. Keep successful independent products.
+        before = copy.deepcopy(state)
+        first_check = len(r.checks)
         try:
             products[name] = fn()
         except (RpcError, KeyError, TypeError, IndexError, ValueError) as e:
+            state.clear()
+            state.update(before)
+            del r.checks[first_check:]
             r.add(f'{name}_error', UNKNOWN, f'{name}: {type(e).__name__}: {e}')
             products[name] = {'enabled': True, 'error': str(e)}
 
