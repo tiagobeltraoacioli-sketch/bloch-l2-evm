@@ -3004,6 +3004,12 @@ class Settler:
                     not self.publish_da(number, directory, values):
                 return False
             return self.submit_and_wait(number, directory, tx, view)
+        except WaitForProgram as wait:
+            # L1 can temporarily return to the activated program across a
+            # reorganization while our unaccepted local block uses next rules.
+            # This is a wait, not a worker failure or permission to send it.
+            log('waiting-for-program', reason=str(wait))
+            return False
         except ForeignSettlement as foreign:
             return self.recover_foreign(str(foreign))
         except LocalAhead as ahead:

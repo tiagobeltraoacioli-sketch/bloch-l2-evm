@@ -189,10 +189,16 @@ class ProgramSwapTest(unittest.TestCase):
         fake = SwapFake(self.root, mn.mainnet_statement())
         fake.head, fake.head_rules, fake.head_hash = 1, 'next', '51' * 32
         events = []
+        worker = self.settler(fake)
         with mock.patch.object(s, 'log', lambda event, **f: events.append(event)):
-            self.assertFalse(self.settler(fake).cycle())
-        self.assertIn('waiting-for-program', events)
-        self.assertEqual(fake.sent, [])
+            self.assertFalse(worker.cycle())
+            self.assertFalse(worker.cycle())  # repeated observations remain a wait, never a failed attempt
+            self.assertEqual(fake.sent, [])
+            self.assertEqual(fake.rewound, [])
+            fake.swap()
+            self.assertTrue(worker.cycle())
+        self.assertEqual(events.count('waiting-for-program'), 2)
+        self.assertEqual(fake.sent[0][33:33 + s.VALUES_BYTES], fake.next_values)
 
     def test_a_node_without_the_report_is_on_the_activated_program(self):
         fake = SwapFake(self.root, mn.mainnet_statement())
