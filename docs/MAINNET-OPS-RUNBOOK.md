@@ -271,6 +271,11 @@ the lock is released on success or failure, including when configuration fails.
 Event scans reject removed logs, duplicate positions, wrong address/topic/range
 answers and block hashes that differ from the sampled canonical blocks. Invalid
 scan sizes fail before entering the scan loop.
+Bridge fees are matched to each crossing by transaction hash and event ID.
+Deposits report their net amount, while releases report the gross burn amount;
+the monitor applies the vault's integer fee rule to the appropriate amount.
+Small crossings whose fee rounds down to zero are valid. A missing, mismatched,
+or orphan fee event is `CRIT` and leaves the previous bridge counters intact.
 
 The retained state binds each EVM product to its deployment and previous block
 hash. A changed deployment, a rollback, a replaced checkpoint, or legacy history
