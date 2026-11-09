@@ -407,7 +407,9 @@ the RPC restart path unit as for `foreign_recovery`. The worker then:
 
 If the old settlement of M+1 still lands after the rebuild, the database kept aside (`<l2_db>.orphaned-*`) holds the
 accepted block: the worker swaps it back with its work directories, through the same journal (`reorg-restored`),
-instead of a second rebuild from L1. A restore counts against `max_recoveries`.
+instead of a second rebuild from L1. Restores are limited apart from rebuilds (`max_recoveries` each per window). When the old
+settlement landed in a new L1 block, the kept block above it has a stale anchor and is dropped by one gated rebuild
+(shape `anchor`): the same single reconstruct the foreign path would have cost, after the finality wait.
 
 No DA batch is ever read from L1 (kit `4b7f4f7`): the next block is built from the spool, which holds the orphaned
 transactions again, so a block whose DA batch was paid on the losing fork pays its DA once more on the winning chain

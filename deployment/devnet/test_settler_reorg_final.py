@@ -155,6 +155,33 @@ class BehindFloor(FinalTest):
         self.assertFalse([c for c in world.calls if c[1:2] in (['head'], ['extend'])])
 
 
+class FloorStallKept(BehindFloor):
+    """Review (agent 206's subagent): a behind-floor view the reorg path only waits on (here block 1 replaced by a
+    foreign one below the floor) still ends in the kit's floor-stall restart (review r10 L1), as with the option off."""
+    for _name in [n for n in dir(BehindFloor) if n.startswith('test_')]:
+        locals()[_name] = None
+
+    def run_case(self, reorg):
+        world = self.per_port(self.reorged())
+        world.foreign(2, A2)
+        settler = self.settler(world, reorg=reorg, quorum_floor_stall_seconds=30)
+        self.assertIsNotNone(settler.native_view())
+        stuck = dict(world.accepted)
+        world.foreign(1, f.block('b1'))
+        world.port_view[3] = lambda: {**world.view(), 'accepted': stuck}
+        with mock.patch.object(settler, 'prove', return_value=None):
+            for _ in range(40):
+                settler.cycle()
+
+    def test_off_restarts_via_floor_stall(self):
+        with self.assertRaises(s.QuorumFloorStall):
+            self.run_case(reorg=False)
+
+    def test_on_also_restarts_via_floor_stall(self):
+        with self.assertRaises(s.QuorumFloorStall):
+            self.run_case(reorg=None)
+
+
 class Resubmit(FinalTest):
     def test_landing_resolves_without_a_rebuild_or_a_proof(self):
         world = self.landing(self.reorged())
@@ -298,10 +325,31 @@ class Restore(FinalTest):
         for raw in s.da_batch_transactions(base.batch(3)):
             self.assertIn(f'{s.keccak256(raw).hex()}.tx', spool)
 
-    def test_restores_count_against_the_limit(self):
+    def test_restores_have_their_own_limit(self):
+        """Review (agent 206's subagent): a restore whose kept tail has a stale anchor is followed by one gated
+        rebuild; that pair is one reorg and must not use two of max_recoveries. Restores are limited apart."""
         world, settler = self.rebuilt_then_landed(max_recoveries=1)
-        with self.assertRaisesRegex(s.Halt, '1 automatic reorg recoveries'):
+        history = self.root / 'db.reorg-recoveries.json'
+        before = json.loads(history.read_text())
+        self.assertEqual(len(before), 1, 'the rebuild is in the window')
+        self.assertTrue(settler.cycle(), 'one rebuild in the window does not block a restore')
+        self.assertEqual(self.local(), [G, A1[0], A2[0], A3[0]])
+
+    def test_a_second_restore_in_the_window_halts(self):
+        world, settler = self.rebuilt_then_landed(max_recoveries=1)
+        history = self.root / 'db.reorg-recoveries.json'
+        history.write_text(json.dumps([*json.loads(history.read_text()), {'unix': int(__import__('time').time()),
+                                                                          'accepted': 2, 'restored': 'x'}]))
+        with self.assertRaisesRegex(s.Halt, '1 automatic reorg restores'):
             settler.cycle()
+        self.assertEqual(self.local(), [G, A1[0]])
+
+    def test_a_corrupt_submitted_record_is_never_resubmitted(self):
+        world = self.landing(self.reorged())
+        self.store_proved_block_2(world)
+        (self.root / 'work' / TX_DIR / 'submitted.json').write_text('{bad')
+        self.assertTrue(self.settler(world).cycle())
+        self.assertFalse(self.settlements_sent(world))
         self.assertEqual(self.local(), [G, A1[0]])
 
     def test_without_a_kept_database_it_is_the_foreign_path_as_before(self):

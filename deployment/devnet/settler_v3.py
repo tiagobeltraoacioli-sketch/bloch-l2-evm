@@ -3061,13 +3061,17 @@ class Settler:
                        'operator review (l2_reorg_recover.py), then repair or remove the file') from None
         return history
 
-    def recent_recoveries(self, reorg, case=None, brief=None, reason=''):
-        """The recoveries within the window; halts (alert `reorg-limit`) when the limit is reached."""
+    def recent_recoveries(self, reorg, case=None, brief=None, reason='', restores=False):
+        """The history entries within the window; halts (alert `reorg-limit`) when the limit is reached. Rebuilds
+        and restores are limited separately (`max_recoveries` each): a restore whose kept tail has a stale anchor
+        is followed by one gated rebuild, and the pair is one reorg. Returns the entries of the window (both kinds)."""
         recent = [h for h in self.read_reorg_history() if h['unix'] > time.time() - reorg['window_seconds']]
-        if len(recent) >= reorg['max_recoveries']:
-            self.reorg_alert('limit', case, recoveries=len(recent), window_seconds=reorg['window_seconds'], **(brief or {}))
-            raise Halt(f'{reason}: {len(recent)} automatic reorg recoveries within {reorg["window_seconds"]} s, the '
-                       'limit: operator review (l2_reorg_recover.py)')
+        same = sum(('restored' in h) == restores for h in recent)
+        if same >= reorg['max_recoveries']:
+            self.reorg_alert('limit', case, recoveries=same, restores=restores, window_seconds=reorg['window_seconds'],
+                             **(brief or {}))
+            raise Halt(f'{reason}: {same} automatic reorg {"restores" if restores else "recoveries"} within '
+                       f'{reorg["window_seconds"]} s, the limit: operator review (l2_reorg_recover.py)')
         return recent
 
     def first_sight_height(self):
@@ -3085,17 +3089,20 @@ class Settler:
         endpoints, or a real reorg while one endpoint stays on the losing fork (153 M1). Nothing is built, proved or
         paid on such a view. When the database holds the view's accepted block and unsettled blocks above it, the
         case goes to `recover_reorg`, whose gates (stable time, follower finality, L1 finality past first sight,
-        exact rebuild) tell a stale pair from a reorg. Anything else waits, as before."""
+        exact rebuild) tell a stale pair from a reorg. Anything else waits, as before, including the floor-stall
+        restart (review r10 L1) when it lasts."""
         accepted = view.get('accepted')
         if not accepted:
             log('reorg-behind-floor-waiting', reason='the partial quorum shows no accepted settlement',
                 floor=self.accepted_floor)
+            self.floor_stall_check(0, self.view_support)
             return False
         fields = statement_fields(accepted['statement'])
         number, parent = fields['l2_number'], fields['l2_hash']
         head = self.produce('head', '--target', self.c['l2_db'])
         if head['number'] <= number or self.local_hash(number) != parent:
             log('reorg-behind-floor-waiting', accepted=number, floor=self.accepted_floor, database_head=head['number'])
+            self.floor_stall_check(number, self.view_support)
             return False
         kind = 'ahead'
         if head['number'] == number + 1:
@@ -3124,8 +3131,11 @@ class Settler:
         if fields['l2_number'] != number + 1 or fields['l2_hash'] != self.local_hash(number + 1):
             return None
         submitted = directory / 'submitted.json'
-        if submitted.exists() and json.loads(submitted.read_text()).get('tx_sha256') not in (
-                None, hashlib.sha256(tx).hexdigest()):
+        try:
+            recorded = json.loads(submitted.read_text()).get('tx_sha256') if submitted.exists() else None
+        except (OSError, ValueError, AttributeError):
+            return None  # an unreadable record: never resubmit on it; the rebuild gates decide
+        if recorded not in (None, hashlib.sha256(tx).hexdigest()):
             return None
         return directory, tx
 
@@ -3168,7 +3178,7 @@ class Settler:
                     state['last'] = self.clock()
                     return True
         path = directory / 'submitted.json'
-        record = json.loads(path.read_text()) if path.exists() else {}
+        record = json.loads(path.read_text()) if path.exists() else {}  # read and checked in still_valid_settlement
         record['tx_sha256'] = hashlib.sha256(tx).hexdigest()
         sent = self.broadcast(number + 1, directory, tx, record)
         state['last'] = self.clock()
@@ -3303,14 +3313,15 @@ class Settler:
                 if head['number'] < number or self.produce('hash', '--target', str(candidate), '--number',
                                                            str(number))['hash'] != l2_hash:
                     continue
-            except (ProducerError, KeyError, ValueError):
+            except (ProducerError, KeyError, ValueError, subprocess.TimeoutExpired):
                 continue
             break
         else:
             return None
         brief = {'accepted': number, 'accepted_hash': l2_hash, 'restored': candidate.name,
                  'restored_head': head['number']}
-        recent = self.recent_recoveries(reorg, None, brief, f'own settlement {number} landed after a rebuild')
+        recent = self.recent_recoveries(reorg, None, brief, f'own settlement {number} landed after a rebuild',
+                                        restores=True)
         current = self.produce('head', '--target', str(db))['number'] if db.exists() else 0
         common = 0
         for n in range(min(current, head['number']), 0, -1):
