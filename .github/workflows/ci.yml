@@ -85,6 +85,11 @@ jobs:
         run: python3 -B -m unittest discover -s deployment/devnet -p 'test_*.py'
       - name: Check launch configuration, source pins and monitor state
         run: python3 -m unittest discover -s deployment/mainnet -p 'test_*.py'
+      - name: Check follower, RPC, attestor, prover, replica and withdrawal tooling
+        run: |
+          for suite in follower-rpc/tests attestor/tests withdraw/tests replica/tests prover; do
+            python3 -B -m unittest discover -s "deployment/mainnet/$suite" -p 'test_*.py'
+          done
       - name: Check gateway rendering and local transport failures
         run: python3 -m unittest discover -s deployment/mainnet/public-rpc/tests -p 'test_*.py'
       - name: Check gateway EVM budgets and transaction admission responses
@@ -93,6 +98,11 @@ jobs:
   reth-provider:
     name: Reth provider execution and storage
     runs-on: ubuntu-latest
+    # The workflow-wide `-D warnings` also reaches the pinned Reth checkout, a path dependency whose own deprecation
+    # warnings (reth-ecies) then fail the build (seen on Linux, agents/304). Clippy below still denies warnings in
+    # this repository's crate.
+    env:
+      RUSTFLAGS: ""
     defaults:
       run:
         working-directory: bloch-modular-execution

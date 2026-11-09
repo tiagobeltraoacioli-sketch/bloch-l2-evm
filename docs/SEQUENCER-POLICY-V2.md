@@ -436,7 +436,7 @@ one pass, no dependency between passes). It moves the producer binary, not the g
 | SP1 host | `BLOCH_PREFLIGHT_CYCLE_LIMIT`, over-limit line, exit 3 | prover host hash; not the ELF, not the vkey |
 | Settler | Replace the old `extend_within_budget` with the v2 planner; control run; `check_cost_line` at start; `demand` in `hold_block`; profile per block; `save(now)` on hold cycles | `settler_v3.py`, new `sequencer_policy_v2.py`, installer FILES and pins |
 | Installer | Defaults from section 3; exempt addresses TBD-owner; prover profiles; scopes 48/64/96 GiB | kit pins |
-| RPC | Unit flag `--required-tip-file <workdir>/sequencer-policy.json` (agent 118, built). Optional: admission at `max_tx_gas`, refuse banned senders | RPC unit; the optional parts move the RPC hash |
+| RPC | Unit flag `--required-tip-file <workdir>/sequencer-policy.json` (agent 118, built; round 14: `follower-rpc/install.sh --required-tip-file PATH` writes it into the unit, only with `--rpc-user/--read-group`, and without the option the unit's command line is the deposit-only one). Optional: admission at `max_tx_gas`, refuse banned senders | RPC unit; the optional parts move the RPC hash |
 
 The deposit-only launch build `116bfaba…` and its kit are not affected: user transactions stay off there.
 

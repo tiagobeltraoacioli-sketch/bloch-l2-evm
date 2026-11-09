@@ -30,13 +30,14 @@ class RpcUnitTemplate(unittest.TestCase):
                     continue
                 line = line.replace('@READ_GROUP@', group)
             lines.append(line.replace('@RPC_USER@', rpc_user or 'canon').replace('@CANONICAL_USER@', 'canon')
-                         .replace('@CANONICAL@', '/c').replace('@STATE@', '/s').replace('@TXPOOL@', '/t'))
+                         .replace('@CANONICAL@', '/c').replace('@STATE@', '/s').replace('@TXPOOL@', '/t')
+                         .replace('@REQUIRED_TIP@', ''))
         return '\n'.join(lines) + '\n'
 
     def test_install_sh_substitutes_every_placeholder(self):
         script = (HERE / 'install.sh').read_text()
         placeholders = {p for p in ('@RPC_USER@', '@READ_GROUP@', '@CANONICAL_USER@', '@CANONICAL@', '@STATE@',
-                                    '@TXPOOL@') if p in (HERE / 'bloch-l2-mainnet-rpc.service').read_text()}
+                                    '@TXPOOL@', '@REQUIRED_TIP@') if p in (HERE / 'bloch-l2-mainnet-rpc.service').read_text()}
         for placeholder in placeholders:
             self.assertIn(f's#{placeholder}#', script.replace("'/@READ_GROUP@/d'", 's#@READ_GROUP@#'), placeholder)
         self.assertIn('run install -m 0755 "$HERE/l2_read_access.py" $OPT/', script)

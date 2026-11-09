@@ -7,11 +7,17 @@
 #   sudo ./install.sh --artifacts DIR --l1-rpc-url http://HOST:PORT \
 #        --canonical /var/lib/bloch-l2-mainnet/canonical --canonical-user bloch-l2-mainnet \
 #        --txpool /var/lib/bloch-l2-mainnet/txpool [--rpc-user USER --read-group GROUP] [--dry-run] [--allow-unsigned]
+#        [--required-tip-file /var/lib/bloch-l2-mainnet-settler/work/sequencer-policy.json]
 #
 # --rpc-user/--read-group (review r10 decision 4; the sequencer host uses bloch-l2-mainnet-rpc and
 # bloch-l2-mainnet-l2read, created by install-settler-mainnet.py prepare): the RPC runs as its own system user
 # in GROUP, the read group of the database writer, instead of as --canonical-user. Its unit makes the MDBX lock
 # file group-writable before every start (l2_read_access.py). Without them it runs as --canonical-user.
+#
+# --required-tip-file (user transactions under sequencer policy v2 only; never at the deposit-only launch): the
+# settler's policy state, which carries the required tip and the admission snapshot. The RPC then suggests that tip
+# and refuses a transaction that underpays its new storage slots. The file is group-readable through the settler's
+# read group, so this needs --rpc-user/--read-group. Without the option the unit's command line is unchanged.
 #
 # DIR must hold the owner's SHA256SUMS.minisig and release.json: the release signature is checked
 # against the pinned release key (../verify_release_signature.py) before anything else.
@@ -27,18 +33,24 @@
 set -Eeuo pipefail
 trap 'echo "install.sh: FAILED at line $LINENO: $BASH_COMMAND (nothing was started; fix the cause and run it again: it resumes)" >&2' ERR
 HERE=$(cd "$(dirname "$0")" && pwd)
-ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0 RPC_USER= READ_GROUP=
+ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0 RPC_USER= READ_GROUP= TIP_FILE=
 while [ $# -gt 0 ]; do
   case $1 in
     --artifacts) ART=$2; shift 2;; --l1-rpc-url) L1=$2; shift 2;;
     --canonical) CANONICAL=$2; shift 2;; --canonical-user) CANON_USER=$2; shift 2;;
     --txpool) TXPOOL=$2; shift 2;; --dry-run) DRY=1; shift;; --allow-unsigned) UNSIGNED=1; shift;;
     --rpc-user) RPC_USER=$2; shift 2;; --read-group) READ_GROUP=$2; shift 2;;
+    --required-tip-file) TIP_FILE=$2; shift 2;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
-[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,27p "$0"; exit 2; }
+[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,33p "$0"; exit 2; }
 [ -n "$RPC_USER$READ_GROUP" ] && { [ -z "$RPC_USER" ] || [ -z "$READ_GROUP" ]; } && { echo "install.sh: --rpc-user and --read-group go together" >&2; exit 2; }
+if [ -n "$TIP_FILE" ]; then
+  # It goes into a unit's command line: an absolute path of plain characters, nothing systemd would expand or split.
+  [[ $TIP_FILE =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ $TIP_FILE != *..* ]] || { echo "install.sh: --required-tip-file must be an absolute path of letters, digits, '.', '_', '-' and '/'" >&2; exit 2; }
+  [ -n "$RPC_USER" ] || { echo "install.sh: --required-tip-file needs --rpc-user and --read-group (the file is read through the settler's read group)" >&2; exit 2; }
+fi
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 die() { trap - ERR; echo "install.sh: $*" >&2; exit 1; }
 R=${BLOCH_L2_INSTALL_ROOT:-}
@@ -56,6 +68,9 @@ if [ -n "$RPC_USER" ]; then
   [ "$RPC_USER" != "$CANON_USER" ] || die "--rpc-user must differ from --canonical-user"
   getent group "$READ_GROUP" >/dev/null || die "read group $READ_GROUP missing (install-settler-mainnet.py prepare creates it)"
   [ -f "$CANONICAL/db/mdbx.lck" ] || die "$CANONICAL/db/mdbx.lck missing (not an initialized L2 database)"
+fi
+if [ -n "$TIP_FILE" ]; then
+  [ -d "$R$(dirname "$TIP_FILE")" ] || die "$(dirname "$TIP_FILE") missing (the settler's work directory; install-settler-mainnet.py prepare creates it)"
 fi
 for unit in bloch-l2-mainnet-follower bloch-l2-mainnet-rpc; do
   [ ! -e $UNITS/$unit.service ] || die "$UNITS/$unit.service exists; refusing to overwrite"
@@ -127,7 +142,7 @@ if [ $DRY = 1 ]; then echo "+ write follower.env, units, drop-in"; else
   printf '[Service]\nIPAddressAllow=localhost %s\n' "$L1_IP" > $UNITS/bloch-l2-mainnet-follower.service.d/l1-rpc.conf
   if [ -n "$RPC_USER" ]; then KEEP=(-e "s#@READ_GROUP@#$READ_GROUP#g"); else KEEP=(-e '/@READ_GROUP@/d'); fi
   sed "${KEEP[@]}" -e "s#@RPC_USER@#$UNIT_USER#g" -e "s#@CANONICAL_USER@#$CANON_USER#g" -e "s#@CANONICAL@#$CANONICAL#g" \
-    -e "s#@STATE@#$STATE#g" -e "s#@TXPOOL@#$TXPOOL#g" "$HERE/bloch-l2-mainnet-rpc.service" > $UNITS/bloch-l2-mainnet-rpc.service
+    -e "s#@STATE@#$STATE#g" -e "s#@TXPOOL@#$TXPOOL#g" -e "s#@REQUIRED_TIP@#${TIP_FILE:+ --required-tip-file $TIP_FILE}#g" "$HERE/bloch-l2-mainnet-rpc.service" > $UNITS/bloch-l2-mainnet-rpc.service
   install -m 0644 "$HERE/bloch-l2-mainnet-rpc-restart.path" "$HERE/bloch-l2-mainnet-rpc-restart.service" $UNITS/
   systemctl daemon-reload
 fi

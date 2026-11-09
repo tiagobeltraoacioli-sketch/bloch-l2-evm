@@ -2,6 +2,8 @@
 # the public gateway fronts it). Serves the sequencer's canonical database
 # read-only; finalized/safe only from the follower's verified status;
 # eth_sendRawTransaction spools to the sequencer's txpool. Installed by install.sh.
+# With install.sh --required-tip-file (user transactions under sequencer policy v2 only) the fee methods and the
+# admission check follow the settler's published policy; without it the command line is the deposit-only one.
 [Unit]
 Description=Bloch L2 mainnet settled RPC (chain id 700770)
 After=bloch-l2-mainnet-follower.service
@@ -19,7 +21,7 @@ UMask=0027
 # reader registers in it. Refuses to start without one.
 ExecStartPre=+/usr/bin/python3 -I /opt/bloch/l2-mainnet/l2_read_access.py @CANONICAL@ @CANONICAL_USER@ @READ_GROUP@
 ExecStartPre=/bin/rm -rf @STATE@/rpc-view
-ExecStart=/opt/bloch/l2-mainnet/bloch-l2-settled-rpc --data-dir @CANONICAL@ --view-dir @STATE@/rpc-view --finality-status /var/lib/bloch-l2-mainnet-follower/status.json --network f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --port 18955 --poll-ms 2000 --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679 --txpool @TXPOOL@
+ExecStart=/opt/bloch/l2-mainnet/bloch-l2-settled-rpc --data-dir @CANONICAL@ --view-dir @STATE@/rpc-view --finality-status /var/lib/bloch-l2-mainnet-follower/status.json --network f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966 --port 18955 --poll-ms 2000 --rules mainnet --domain 1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733 --genesis-time 1786656679 --txpool @TXPOOL@@REQUIRED_TIP@
 Restart=on-failure
 RestartSec=10
 # The canonical database is opened read-only, but an MDBX reader registers in db/mdbx.lck: a read-only mount
