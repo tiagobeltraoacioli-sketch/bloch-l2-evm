@@ -72,6 +72,9 @@ DEFAULTS = {
     'fast_profile_max_sp1_gas': 10_500_000,
     'gate_passes': 6,
     'gate_dependent_wait_seconds': 3600,
+    # Places under `max_block_txs` that go by tip alone, whatever the group (agents/264 F264-5): a fresh sender's
+    # large transaction at a high tip is not kept out for good by 64 small ones at the floor. They are tried last.
+    'tip_reserved_txs': 8,
     # Small/large split of the try order (A243-3, A243-9). The floor rests on the smallest measured offender: a KZG
     # point-evaluation loop is over the 90M budget alone from about 245-280k gas (agents/243-evidence/gstar.out).
     'large_gas_floor': 120_000,
@@ -117,6 +120,7 @@ class Plan:
         self.seconds = 0.0
         self.exhausted = False
         self.profile = None
+        self.gate_settled = True
 
 
 class Policy:
@@ -145,7 +149,7 @@ class Policy:
     def _fresh_state(self):
         return {'tip': self.c['min_tip_wei'], 'last_block_time': None, 'idle_since': None, 'empty_base': 0, 'bans': {}, 'waits': {},
                 'failures': {}, 'writes': {}, 'standing': {}, 'large_gas': int(self.c['max_tx_gas']),
-                'large_gas_at': None}
+                'large_gas_at': None, 'exempt_offenders': {}}
 
     # Bounds
 
@@ -237,6 +241,11 @@ class Policy:
             name, sender, gas, tip = tx['hash'], tx['sender'], int(tx['gas_used']), int(tx['effective_tip'])
             fresh = 0 if sender in exempt else sum(int(n) for _, n in tx.get('fresh_slots', []))
             wait = self.state['waits'].get(self.key(tx))
+            if wait and wait.get('hash') not in (None, name):
+                # A gate-dependent wait names the bytes it refused: a replacement at the same nonce is judged on its
+                # own payment (agents/264 F264-3). Bans, band and unmeasured waits follow sender and nonce as before.
+                wait = None
+            offender = self.state['exempt_offenders'].get(sender) if sender in exempt else None
             reason = None
             if sender in stopped:
                 reason = ('behind-held-nonce', False)  # its earlier nonce waits: the producer would defer it anyway
@@ -246,6 +255,11 @@ class Policy:
                 reason = (f"{wait['kind']}-wait", False)
             elif gas > (self.c['exempt_max_tx_gas'] if sender in exempt else self.c['max_tx_gas']):
                 reason = ('tx-gas-cap', True)
+            elif offender and offender['until'] > now and gas >= offender['gas']:
+                # An exempt sender is never banned (A243-5), but after a verdict its transactions of at least half
+                # the offender's gas wait out the ban time unmeasured: a resent offender must not cost two
+                # cycle-limit verdicts ahead of every user in every block (agents/264 F264-4).
+                reason = ('exempt-offender-wait', False)
             elif tip < tip_floor:
                 reason = ('below-required-tip', False)
             elif fresh and gas * tip < fresh * price:
@@ -284,10 +298,10 @@ class Policy:
         another one pass after pass (agents/243 A243-12: senders writing the same slot at descending tips, each below
         the write price for one new slot). Such a dependent refusal (from the second pass on) also waits
         `gate_dependent_wait_seconds` by sender and nonce, so the next blocks gate it out before the native selection
-        and need one pass. If the gate still has not settled after `gate_passes`, the last pass's passing set is used
-        as it stands rather than none: an unpaid chain must never empty the block. Its cost is that a transaction
-        behind the last refusal may create a new slot it did not pay for; the measurement still bounds the block, and
-        `committed` books the slots from the block's own report against the sender's 48 h rate."""
+        and need one pass. If the gate still has not settled after `gate_passes`, the last pass's passing set goes on
+        to the measurement rather than none: an unpaid chain must never empty the block. A transaction behind the last
+        refusal may then create slots it did not pay for, so `_final_gate` runs the gate again on the block as chosen
+        (agents/264 F264-2)."""
         stats = []
         for number in range(self.c['gate_passes']):
             report = dry(raws)
@@ -305,14 +319,18 @@ class Policy:
             for name, (reason, permanent) in refused.items():
                 (plan.quarantine if permanent else plan.held).append((name, reason))
                 if number and reason in ('below-write-price', 'sender-write-limit'):  # its own payment, not capacity
-                    self.state['waits'][self.key(info[name])] = {
-                        'until': now + self.c['gate_dependent_wait_seconds'], 'kind': 'gate-dependent'}
+                    self._dependent_wait(info[name], now)
             raws = [by_hash[name] for name in passing]
             if not raws:
                 return {}, []
             stats = [t for t in stats if t['hash'] in set(passing)]
         self.log('gate-did-not-settle', passes=self.c['gate_passes'], used=len(raws))
+        plan.gate_settled = False  # the final gate decides on the block as chosen
         return {t['hash']: raw for t, raw in zip(stats, raws)}, stats
+
+    def _dependent_wait(self, tx, now):
+        self.state['waits'][self.key(tx)] = {'until': now + self.c['gate_dependent_wait_seconds'],
+                                             'kind': 'gate-dependent', 'hash': tx['hash']}
 
     def large_gas(self, now=None):
         """Gas used from which a transaction counts as large: half the gas of the smallest offender that counted as
@@ -370,6 +388,28 @@ class Policy:
             sender = min((s for s in queues if queues[s]), key=lambda s: key(s, *queues[s][0]))
             order.append(queues[sender].pop(0)[1]['hash'])
         return order
+
+    def _capped(self, order, info, plan):
+        """Apply `max_block_txs` to the try order. The last `tip_reserved_txs` places go to the highest tips among
+        everything behind the first cut, whatever the group, and are tried last in try order (agents/264 F264-5).
+        A sender's later nonce never takes a place its earlier nonce lost."""
+        cap = int(self.c['max_block_txs'])
+        if len(order) <= cap:
+            return order
+        reserve = max(0, min(int(self.c.get('tip_reserved_txs', 0)), cap))
+        head, rest = order[:cap - reserve], order[cap - reserve:]
+        position = {name: index for index, name in enumerate(rest)}
+        taken, cut = [], set()
+        for name in sorted(rest, key=lambda h: (-int(info[h]['effective_tip']), position[h])):
+            sender = info[name]['sender']
+            earlier = [h for h in rest[:position[name]] if info[h]['sender'] == sender]
+            if len(taken) < reserve and sender not in cut and all(h in taken for h in earlier):
+                taken.append(name)
+            else:
+                cut.add(sender)
+        kept = set(taken)
+        plan.held.extend((name, 'block-limits') for name in rest if name not in kept)
+        return head + [name for name in rest if name in kept]
 
     def degraded_order(self, names, info, now, large_gas=None):
         """The try order of `names` after a quarantine or a run without cost in this block (F223-4, A243-3)."""
@@ -434,9 +474,7 @@ class Policy:
         # `dry` runs without the block's transaction cap, so that the producer's tip order cannot push a sender with
         # standing out of the candidates before the tiers apply; the cap applies here, to the try order.
         large = self.large_gas(now)  # this block's threshold: also lowered by runs without cost, which persist nothing
-        remaining = self.try_order(stats, now, large)
-        plan.held.extend((name, 'block-limits') for name in remaining[self.c['max_block_txs']:])
-        remaining = remaining[:self.c['max_block_txs']]
+        remaining = self._capped(self.try_order(stats, now, large), info, plan)
         best = []
         degraded = False
         while remaining and not out_of_work():
@@ -456,9 +494,13 @@ class Policy:
                     remaining = []
                     break
                 found = self._first_misfit(best, remaining, by_hash, run, out_of_work, result)
-            if found is None:
-                break  # out of work inside the search: keep what is known to fit
-            lo, lo_cost, misfit = found
+            lo, lo_cost, misfit, complete = found
+            if not complete:
+                # Out of work inside the search: what it measured as fitting is the block (agents/264 F264-1). The rest
+                # stays in the spool, not reached; the offender behind it is found by a later block's search.
+                if lo:
+                    best, plan.cost, remaining = best + remaining[:lo], lo_cost, remaining[lo:]
+                break
             if lo == len(remaining):
                 best, plan.cost, remaining = best + remaining, lo_cost, []
                 break
@@ -487,16 +529,89 @@ class Policy:
                 degraded = True
                 remaining = self.degraded_order(remaining, info, now, large)
         plan.held.extend((h, 'not-reached') for h in remaining)
+        if best and (not plan.gate_settled or set(best) != {t['hash'] for t in stats}):
+            best = self._final_gate(best, by_hash, dry, measure, now, plan, has_mandatory)
         plan.chosen = best
         plan.raws = [by_hash[h] for h in best]
         plan.profile = self.profile_for(plan.cost.sp1_gas if measured(plan.cost) else None)
         return plan
 
+    def _final_gate(self, best, by_hash, dry, measure, now, plan, has_mandatory):
+        """The gate on the block as chosen (agents/264 F264-2). New-slot counts depend on the transactions before, and
+        the choice is a subset of what `_gated` passed: a writer that was refused, quarantined or cut leaves the next
+        writer of the same slots creating them, unpaid and outside the per-block limit. So the producer's selection
+        report of exactly the chosen set goes through the gate once more. A refused transaction leaves with its
+        sender's later ones, and what is left is measured again, because a block without one of its transactions is
+        another block (one run per pass, at most `gate_passes`, outside the search allowance). If that run does not
+        fit, or the passes run out, the block is the chosen set's prefix in block order before the first refusal,
+        when that keeps at least half of it: every transaction of that prefix runs after exactly the transactions it
+        ran after in the measured block, so its new-slot counts stand and its cost is within the measured one.
+        Otherwise the measured block stands as it is, with the unpaid slots of its remaining chain (logged
+        `final-gate-unsettled`; `committed` books them against the sender's 48 h rate): senders that never pay must
+        not be able to empty a block by spooling a chain longer than the passes (A243-12 comes first). Never an
+        unmeasured block. The complete remedy is the write price inside the producer's own selection loop, one pass
+        and no dependency (a compiled-producer change, listed as open in agents/304)."""
+        def refusals(names):
+            report = dry([by_hash[h] for h in names])
+            stats = report.get('tx_stats') or []
+            passing, refused = self.gate(stats, now, has_mandatory)
+            return stats, set(passing), refused
+
+        def note(stats, refused):
+            info = {t['hash']: t for t in stats}
+            for name, (reason, _) in refused.items():
+                held.append((name, reason))
+                if reason in ('below-write-price', 'sender-write-limit'):
+                    self._dependent_wait(info[name], now)
+
+        def prefix(names, stats, refused):
+            before = set()
+            for tx in stats:
+                if tx['hash'] in refused:
+                    break
+                before.add(tx['hash'])
+            if 2 * len(before) < len(names):
+                self.log('final-gate-unsettled', kept=len(names), prefix=len(before), refused=len(refused))
+                return names
+            plan.held.extend((h, 'behind-final-gate-refusal') for h in names if h not in before and h not in refused)
+            self.log('final-gate-prefix', kept=len(before), of=len(names))
+            return [h for h in names if h in before]
+
+        held = []  # refusals of this pass: reported only for what really leaves the block
+
+        def leave(names):
+            plan.held.extend(item for item in held if item[0] not in set(names))
+            return names
+
+        for _ in range(self.c['gate_passes']):
+            stats, passing, refused = refusals(best)
+            if not refused:
+                return leave(best)
+            note(stats, refused)
+            trimmed = [h for h in best if h in passing]
+            if not trimmed:
+                plan.cost = plan.base
+                return leave([])
+            plan.runs += 1
+            before = self.clock()
+            result, _ = measure([by_hash[h] for h in trimmed])
+            plan.seconds += self.clock() - before
+            if not self.fits(result):
+                return leave(prefix(best, stats, refused))
+            best, plan.cost = trimmed, result
+        stats, passing, refused = refusals(best)
+        if not refused:
+            return leave(best)
+        note(stats, refused)
+        return leave(prefix(best, stats, refused))
+
     def _first_misfit(self, best, remaining, by_hash, run, out_of_work, full_result, full_known=True):
         """The shortest prefix of `remaining` that, on top of `best`, does not fit. Exponential then binary search from
         the front, so an offender at position p costs about 2·log2(p+1) runs and one at the front costs one: tip order
         puts an unpaid high tip at the front, where it is now cheapest to find (r9 U1). Returns (lo, cost of best +
-        remaining[:lo] or None, result of the run of best + remaining[:lo + 1] or None), or None if out of work.
+        remaining[:lo] or None, result of the run of best + remaining[:lo + 1] or None, complete). `complete` is False
+        when the allowance ran out inside the search: `lo` is then the longest prefix measured as fitting so far, and
+        nothing is known about the transaction behind it (agents/264 F264-1).
         With `full_known` False the whole of `remaining` was not run: the search measures it last, and lo ==
         len(remaining) means all of it fits."""
         lo, lo_cost, hi, hi_result = 0, None, len(remaining), full_result
@@ -504,26 +619,26 @@ class Policy:
         while size < hi or (not full_known and lo < hi and size >= hi):
             size = min(size, hi)
             if out_of_work():
-                return None
+                return lo, lo_cost, None, False
             result, _ = run([by_hash[h] for h in best + remaining[:size]])
             if self.fits(result):
                 lo, lo_cost = size, result
                 if size == hi:
-                    return lo, lo_cost, None
+                    return lo, lo_cost, None, True
                 size *= 2
             else:
                 hi, hi_result = size, result
                 break
         while hi - lo > 1:
             if out_of_work():
-                return None
+                return lo, lo_cost, None, False
             middle = (lo + hi) // 2
             result, _ = run([by_hash[h] for h in best + remaining[:middle]])
             if self.fits(result):
                 lo, lo_cost = middle, result
             else:
                 hi, hi_result = middle, result
-        return lo, lo_cost, hi_result
+        return lo, lo_cost, hi_result, True
 
     def _classify(self, plan, tx, alone, now, has_mandatory, host_ok):
         """What happens to a transaction that broke the budget. Returns False when the host stopped measuring."""
@@ -581,6 +696,8 @@ class Policy:
             # An exempt sender (operator, bridge signers and relayers; TBD-owner) loses only this transaction: a ban
             # would stop its bridge mints for a day after one over-budget deployment or three runs without cost
             # (agents/243 A243-5). It stays inside the budget and the measurement.
+            self.state['exempt_offenders'][tx['sender']] = {'until': now + self.c['sender_ban_seconds'],
+                                                            'gas': max(int(tx['gas_used']) // 2, 1)}
             self.log('exempt-sender-not-banned', sender=tx['sender'], hash=tx['hash'], reason=reason)
         else:
             self.state['bans'][tx['sender']] = now + self.c['sender_ban_seconds']
@@ -615,6 +732,7 @@ class Policy:
         self.state['writes'] = {s: kept for s, entries in self.state['writes'].items()
                                 if (kept := [e for e in entries if e[0] > now - window])}
         self.state['bans'] = {s: until for s, until in self.state['bans'].items() if until > now}
+        self.state['exempt_offenders'] = {s: o for s, o in self.state['exempt_offenders'].items() if o['until'] > now}
         self.state['waits'] = {k: w for k, w in self.state['waits'].items() if w['until'] > now - 86400}
         memory = self.c['failure_memory_seconds']
         self.state['failures'] = {k: f for k, f in self.state['failures'].items() if f['at'] > now - memory}

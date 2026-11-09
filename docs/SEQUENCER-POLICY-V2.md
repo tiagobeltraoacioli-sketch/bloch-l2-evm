@@ -193,6 +193,14 @@ exploitable. With a cycle limit, a heavy transaction stops the run itself, quick
 6. The producer's native selection (`dry`) runs without the block's transaction cap, and the planner applies
    `max_block_txs` to the try order. Otherwise the producer's tip order alone would drop a sender with standing behind
    64 high-tip entries before the tiers apply. The first reference test run found this.
+7. **Places by tip** (round 14, F264-5). The last `tip_reserved_txs` (8) of the `max_block_txs` places go to the
+   highest tips among everything behind the first 56 of the try order, whatever the group, and are tried last. Without
+   them, once a verdict has lowered `large_gas`, 64 small transfers at the floor tip per block kept a fresh sender's
+   large transaction out for good, whatever its tip.
+8. **Exempt offender** (round 14, F264-4). An exempt sender is never banned, but after a verdict on one of its
+   transactions, its transactions of at least half that one's gas used wait `sender_ban_seconds` unmeasured
+   (`exempt-offender-wait`). Smaller ones (bridge mints) go on as before. A resent offender no longer costs two
+   cycle-limit verdicts ahead of every user in every block.
 
 **Search** (`Policy.plan`, `_first_misfit`):
 1. Measure the mandatory-only block (twice at most). Over the budget or over the limit: the block carries its mandatory
@@ -387,6 +395,24 @@ it fail (section 9.1). "Integration" means a requirement on the settler, produce
 | r9 U4 band demand ignores the next block | Medium | `demand(..., next_has_mandatory)` | Unit `U4…` |
 | r9 U5 tip read without decay | Medium | `required_tip(now)` everywhere | Unit `U5U6F6…` |
 | r9 U6 slow blocks decay the tip | Medium | No time decay while busy; grace 4,500 s above the slowest proof | Unit `U5U6F6…slow_blocks…` |
+
+### Round 14 (agent 264's review 2, closed by agent 304)
+
+| Finding | Severity | Closure | Test (`test_review_r12_policy_v2.py`) |
+|---|---|---|---|
+| F264-1 the allowance running out inside the search dropped the prefix already measured as fitting: one unpaid offender at the back of 64 emptied every block | High | `_first_misfit` returns the measured prefix with `complete = False`; `plan` commits it and leaves the rest `not-reached` | `F264_1…`, `F264_1b…` |
+| F264-2 the unsettled-gate fallback let a transaction behind the last refusal create unpaid slots, above the per-block limit too | Medium | `_final_gate`: the gate runs again on the selection report of the block as chosen; refused ones leave and the rest is measured again (one run per pass); else the block-order prefix before the first refusal when it keeps at least half; else the measured block stands and `final-gate-unsettled` is logged | `F264_2…` |
+| F264-3 a gate-dependent wait outlived a replacement that pays | Low | the wait names the refused hash; another hash at the same nonce is judged on its own payment | `F264_3…` |
+| F264-4 a resent exempt offender was measured first in every block | Low | 3.4 rule 8 | `F264_4…` |
+| F264-5 a fresh sender's large transaction never got under the transaction cap | Low | 3.4 rule 7 | `F264_5…` |
+| F264-6 every preflight run copied the whole database | Medium (scaling) | one copy per block plan, rewound to the parent after each run and checked with `head`; a copy that does not read back as the parent is discarded (`preflight_database`, default `rewind`; `copy` is the old behaviour) | `F264_6…` (two tests) |
+
+Residual of F264-2 (open, needs a compiled-producer change): a slot chain longer than the gate's and the final gate's
+passes together (more than about 12 unpaid writers of one slot in one block) still leaves the block with the chain's
+last members, whose first one creates its slot unpaid. Emptying the block instead would hand free starvation to
+senders that never pay (A243-12), so liveness comes first. The complete remedy is the write price inside
+`produce-dev select`'s own loop (skip a transaction whose gas used times tip is under its new slots times the price,
+one pass, no dependency between passes). It moves the producer binary, not the guest.
 
 ## 7. Residual risks (accepted or open)
 

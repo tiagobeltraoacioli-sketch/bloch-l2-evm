@@ -1024,6 +1024,11 @@ def check_policy_config(c):
                 'large_gas_recovery_seconds', 'gate_dependent_wait_seconds'):
         if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
             raise Halt(f'{key} must be a positive integer')
+    reserved = c.get('tip_reserved_txs', 0)
+    if not isinstance(reserved, int) or isinstance(reserved, bool) or not 0 <= reserved <= c.get('max_block_txs', 64):
+        raise Halt('tip_reserved_txs must be an integer from 0 to max_block_txs')
+    if c.get('preflight_database', 'rewind') not in ('rewind', 'copy'):
+        raise Halt('preflight_database must be "rewind" (one copy per block plan) or "copy" (one per run)')
     if c.get('max_block_txs', 1) > 64 and c.get('user_transactions'):
         raise Halt('with the policy budget, max_block_txs is at most 64 (docs/SEQUENCER-POLICY-V2.md 3.1)')
     if c.get('preflight_cycle_limit_factor', 2) < 2:
@@ -1947,13 +1952,18 @@ class Settler:
         run the guest in execute mode under the host's cycle limit. Returns (result, producer report): result is a
         `Cost`, `OVER_LIMIT` when the two-stage host's gas-off count reached `BLOCH_PREFLIGHT_CYCLE_LIMIT` (it prints
         `Settlement V3 over cycle limit` and exits 3; `preflight_result`), or None when the run gave no cost
-        (wall-clock backstop, crash, OOM, missing or disagreeing lines, a single-stage host). No proof, no lock."""
+        (wall-clock backstop, crash, OOM, missing or disagreeing lines, a single-stage host). No proof, no lock.
+
+        The copy is made once per block plan and rewound to the parent after each run (`preflight_database`,
+        agents/264 F264-6): a plan takes up to 24 runs plus the control, and a copy per run grows with the chain's
+        state inside the 180 s allowance. A copy that does not read back as the parent after the rewind is thrown
+        away, and the next run copies again."""
         scratch = deposits.parent / f'preflight-{tag}'
         shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True)
+        db = None
         try:
-            db = scratch / 'db'
-            shutil.copytree(self.c['l2_db'], db, symlinks=True)
+            db = self.preflight_database(deposits.parent, scratch)
             pool = scratch / 'pool.json'
             pool.write_text(json.dumps(raws))
             args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
@@ -1978,7 +1988,40 @@ class Settler:
             return self.preflight_result(result.returncode, (scratch / 'execute.log').read_text(errors='replace'),
                                          int(env['BLOCH_PREFLIGHT_CYCLE_LIMIT'])), block
         finally:
+            if db is not None and db.parent != scratch:
+                self.preflight_rewind(db, parent, number)
             shutil.rmtree(scratch, ignore_errors=True)
+
+    def preflight_database(self, directory, scratch):
+        """The database a preflight run builds on: this plan's one copy (`preflight-db` beside the block's files), or
+        a copy of its own when `preflight_database` is `copy` or no plan is open (the start-up probe)."""
+        shared = getattr(self, 'preflight_shared', None)
+        if self.c.get('preflight_database', 'rewind') != 'rewind' or shared is None:
+            db = scratch / 'db'
+            shutil.copytree(self.c['l2_db'], db, symlinks=True)
+            return db
+        if not shared.exists():
+            partial = shared.with_name(shared.name + '.partial')
+            shutil.rmtree(partial, ignore_errors=True)
+            shutil.copytree(self.c['l2_db'], partial, symlinks=True)
+            partial.replace(shared)
+        return shared
+
+    def preflight_rewind(self, db, parent, number):
+        """Take the measured block off the plan's copy again. The copy is kept only when the producer then reads the
+        parent as its head; anything else (a rewind the producer refuses, a run killed mid-write) removes the copy."""
+        try:
+            head = self.produce('head', '--target', str(db))
+            if head.get('number') == number:
+                self.produce('rewind', '--target', str(db), '--number', str(number - 1), '--hash', parent)
+                head = self.produce('head', '--target', str(db))
+            if head.get('number') == number - 1 and head.get('hash') == parent:
+                return
+            reason = f'head {head.get("number")} after the rewind'
+        except (ProducerError, OSError, ValueError, AttributeError, subprocess.TimeoutExpired) as error:
+            reason = str(error)[:200]
+        log('preflight-copy-discarded', number=number, reason=reason)
+        shutil.rmtree(db, ignore_errors=True)
 
     def preflight_result(self, returncode, text, limit):
         """Read a two-stage preflight run (agent 257, on agent 224's recommendation 2). The host first counts the
@@ -2068,12 +2111,18 @@ class Settler:
             self.cost_line_checked = True
             self.cost_line_program = program_key
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
-        plan = policy.plan(
-            [raw for _, raw in entries],
-            lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
-            lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
-            lambda: self.measure_empty(parent, anchor, deposits, anchor_slot, number, next(tags)),
-            has_mandatory=bool(pending) or bool(forced))
+        self.preflight_shared = deposits.parent / 'preflight-db'
+        shutil.rmtree(self.preflight_shared, ignore_errors=True)  # never a copy from an earlier plan or process
+        try:
+            plan = policy.plan(
+                [raw for _, raw in entries],
+                lambda raws: self.select_block(parent, anchor, deposits, anchor_slot, raws, deposits.parent),
+                lambda raws: self.measure_block(parent, anchor, deposits, anchor_slot, number, raws, next(tags)),
+                lambda: self.measure_empty(parent, anchor, deposits, anchor_slot, number, next(tags)),
+                has_mandatory=bool(pending) or bool(forced))
+        finally:
+            shutil.rmtree(self.preflight_shared, ignore_errors=True)
+            self.preflight_shared = None
         base = plan.base if hasattr(plan.base, 'sp1_gas') else None
         if plan.mandatory_over_budget:
             atomic_write(deposits.parent / 'deposits-over-budget.json', json.dumps(

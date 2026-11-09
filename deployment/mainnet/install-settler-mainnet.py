@@ -118,8 +118,8 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
     # is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': 'be68b706838ab882b9848e3ff77f72dc6131cdf7a24d319143c4a62dd1e38b44',
-    'sequencer_policy_v2.py': '1c284e2b7dea6f12036f7619453ae08fa0127cb50bc8dea0a590e6e12af05586',
+    'settler_v3.py': '8b774d31cf94ff84bd345f73ee5f9f3cc22766cf3fbe38d5b66c9ab5489aeb53',
+    'sequencer_policy_v2.py': '09b46c3d64fea0717aa324cc63e42c5cb104f44653443f60fbc365ca094282de',
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
     # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
     'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,
@@ -153,6 +153,8 @@ POLICY_V2 = {
     'band_max_wait_seconds': 7200,
     # Try order and gate (agents/243): small/large split floor and weekly recovery, wait for dependent gate refusals.
     'large_gas_floor': 120_000, 'large_gas_recovery_seconds': 7 * 86400, 'gate_dependent_wait_seconds': 3600,
+    # Agents 264/304: 8 of the 64 places go by tip alone; preflight runs share one database copy per block plan.
+    'tip_reserved_txs': 8, 'preflight_database': 'rewind',
     # Congestion tip ON, capped at 3 gwei (owner, middle ground). Tips go where the L2 fee recipient sends them.
     'congestion_max_tip_wei': 3 * 10**9,
     # Operator and signer addresses only: TBD-owner (40 lowercase hex characters each, no 0x).

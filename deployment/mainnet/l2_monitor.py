@@ -167,7 +167,9 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # Agent 223 (sequencer policy v2, logged by sequencer_policy_v2.py through the settler's log):
                          # a mandatory-only block over the budget (deposits-over-budget.json), a host that measured
                          # nothing, an unreadable policy state, a gate that did not settle.
-                         'mandatory-over-budget', 'budget-unavailable', 'policy-state-unreadable', 'gate-did-not-settle'})
+                         'mandatory-over-budget', 'budget-unavailable', 'policy-state-unreadable', 'gate-did-not-settle',
+                         # Round 14: a block kept unpaid new slots (F264-2 residual); a preflight copy did not rewind.
+                         'final-gate-unsettled', 'preflight-copy-discarded'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 
