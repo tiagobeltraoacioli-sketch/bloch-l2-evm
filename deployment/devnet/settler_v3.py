@@ -2013,7 +2013,8 @@ class Settler:
         try:
             head = self.produce('head', '--target', str(db))
             if head.get('number') == number:
-                self.produce('rewind', '--target', str(db), '--number', str(number - 1), '--hash', parent)
+                # `rewind` names the head block it removes, by number and hash.
+                self.produce('rewind', '--target', str(db), '--number', str(number), '--hash', head['hash'])
                 head = self.produce('head', '--target', str(db))
             if head.get('number') == number - 1 and head.get('hash') == parent:
                 return

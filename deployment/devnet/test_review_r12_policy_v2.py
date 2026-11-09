@@ -192,9 +192,12 @@ class F264_6EveryRunCopiesTheWholeDatabase(SettlerHarness):
                 return {}
             if args[0] == 'head':
                 return {'number': heads.get(target, 1), 'hash': 'p' if heads.get(target, 1) == 1 else 'x'}
-            if args[0] == 'rewind':
+            if args[0] == 'rewind':  # as the real producer: it removes the head block, named by number and hash
+                named = int(args[args.index('--number') + 1]), args[args.index('--hash') + 1]
+                if named != (heads.get(target, 1), 'x'):
+                    raise settler.ProducerError(f'refused: the head is block {heads.get(target, 1)}, not {named[0]}')
                 rewinds.append(target)
-                heads[target] = int(args[args.index('--number') + 1])
+                heads[target] = named[0] - 1
                 return {}
             if args[0] == 'extend':
                 heads[target] = heads.get(target, 1) + 1
@@ -226,6 +229,7 @@ class F264_6EveryRunCopiesTheWholeDatabase(SettlerHarness):
             block = self.block()
         self.assertLessEqual(len(copies), 1, f'{len(copies)} full database copies for one block plan')
         self.assertGreaterEqual(len(rewinds), 3, 'every run takes its block off the copy again')
+        self.assertNotIn('preflight-copy-discarded', [event for event, _ in self.logged])
         self.assertEqual(self.names(), [], 'the plan is the same as with a copy per run')
         self.assertEqual(self.quarantined(), ['b'])
         self.assertFalse((self.dir / 'preflight-db').exists(), 'the copy does not outlive the plan')

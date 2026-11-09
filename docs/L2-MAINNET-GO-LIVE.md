@@ -157,11 +157,11 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `abf040c3308b4c819cf9992f4f05e986d041c208a34ec5a6f58b31f03661e45a` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `043d6d92d5d66387fac1b4996286891a7dbee594f00bd81a6f1f5be8cef54b95` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `d462eb739366af11772c49f105e8722aa9008b315ba99469962344dd1b1fbcbd` |
-| `deployment/devnet/settler_v3.py` | `8b774d31cf94ff84bd345f73ee5f9f3cc22766cf3fbe38d5b66c9ab5489aeb53` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/devnet/settler_v3.py` | `01893cb9a8579b19c9be1804c43c3432582f5f8746fd2d3afa36b8bd17528233` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `9fd608a76831df09e5adac50263ea5aef49b97e22776cc7f7ddf37fff7df65c6` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `aadc951fbb1ee79efd3ddabeb1b3d13ca3503cbff61de305435bebe108f38a6a` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d52b7086c7cdfed78ee71de58a4323b5ee9826fdec8fccc7bace09e37d5b40f7` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
 | `deployment/mainnet/install-shadow.sh` | `60b22d8c48c27afc481fe5a5204905566cae16278866fccac6488a0d29c9aaad` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
@@ -385,7 +385,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `abf040c3308b4c819cf9992f4f05e986d041c208a34ec5a6f58b31f03661e45a` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `043d6d92d5d66387fac1b4996286891a7dbee594f00bd81a6f1f5be8cef54b95` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 

@@ -118,7 +118,7 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
     # is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': '8b774d31cf94ff84bd345f73ee5f9f3cc22766cf3fbe38d5b66c9ab5489aeb53',
+    'settler_v3.py': '01893cb9a8579b19c9be1804c43c3432582f5f8746fd2d3afa36b8bd17528233',
     'sequencer_policy_v2.py': '09b46c3d64fea0717aa324cc63e42c5cb104f44653443f60fbc365ca094282de',
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
     # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
