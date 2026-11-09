@@ -164,7 +164,7 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 | `deployment/mainnet/install-settler-mainnet.py` | `aadc951fbb1ee79efd3ddabeb1b3d13ca3503cbff61de305435bebe108f38a6a` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d52b7086c7cdfed78ee71de58a4323b5ee9826fdec8fccc7bace09e37d5b40f7` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
-| `deployment/mainnet/install-shadow.sh` | `60b22d8c48c27afc481fe5a5204905566cae16278866fccac6488a0d29c9aaad` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
+| `deployment/mainnet/install-shadow.sh` | `a9abfa0e5f7bad969e7c255fb543cc431d83305244726563ecd1fc4556e48e05` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
 | `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `5956d4e15d3f721e720027a55e1e5ee249c61cdfddf4c0e9091a9458bdc30886` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `cb6afc4ca02d37cffb86048948c531fc566c8a609a6e05cefe3c5f94dd85e54c` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: own RPC user) |
 | `deployment/mainnet/follower-rpc/install.sh` | `64aa9cb5544e9b3fea4874187728bf53c0e1203ab593b59ff26fb3de09dcbb68` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
