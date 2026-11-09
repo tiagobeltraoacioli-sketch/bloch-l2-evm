@@ -516,27 +516,94 @@ fn sidecar_name(name: &std::ffi::OsStr) -> Option<String> {
     Some(format!(".{}.head", name.strip_suffix(".tx")?))
 }
 
-/// The first-seen head recorded for entry `name`, or record `head` now (best effort: a lost sidecar only means
-/// the blocks count from this sighting, as before).
-fn first_seen_head(pool: &Path, name: &std::ffi::OsStr, head: u64, persist: bool) -> u64 {
-    let Some(sidecar) = sidecar_name(name).map(|n| pool.join(n)) else {
-        return head;
-    };
-    if let Some(recorded) = std::fs::read_to_string(&sidecar)
-        .ok()
-        .and_then(|t| t.trim().parse::<u64>().ok())
+/// A clock that outlives this process and ignores wall-clock steps: the kernel's boot id and the seconds since that
+/// boot (Linux `/proc/sys/kernel/random/boot_id` and `/proc/uptime`, which counts suspended time). `None` where the
+/// kernel offers neither; ages recorded against it are used only by a later process of the same boot.
+///
+/// The wall clock was all a restarted process had to date an entry and the stall by, so a forward clock step
+/// followed by a restart evicted transactions acknowledged minutes earlier (drill `spool-step-restart`, agents/65,
+/// 133, 147, 260). With this record, a restart inside one boot reads real elapsed time; after a reboot, or
+/// without the record, the wall clock decides as before.
+fn boot_clock() -> Option<(String, u64)> {
+    #[cfg(test)]
     {
-        return recorded;
+        if let Some(forced) = tests::BOOT_CLOCK.with(|cell| cell.borrow().clone()) {
+            return forced;
+        }
     }
-    if persist {
-        write_sidecar(&sidecar, head);
-    }
-    head
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let id = id.trim();
+    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+    let seconds = uptime
+        .split_whitespace()
+        .next()?
+        .split('.')
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    let plain = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+    plain.then(|| (id.to_owned(), seconds))
 }
 
-fn write_sidecar(path: &Path, head: u64) {
+/// Time since a record made at `(boot, uptime)`, if this is still that boot.
+fn since_boot_record(boot: &str, uptime: u64) -> Option<Duration> {
+    let (now_boot, now_uptime) = boot_clock()?;
+    (now_boot == boot && now_uptime >= uptime).then(|| Duration::from_secs(now_uptime - uptime))
+}
+
+/// What a sidecar holds: the first-seen head, and, when the kernel has a boot clock, the entry's age at a moment
+/// of that clock (`<head> <boot id> <uptime seconds> <age seconds>`). The first field alone is the older format.
+struct Sidecar {
+    head: u64,
+    /// The entry's age now, from the boot-clock record of this boot.
+    age: Option<Duration>,
+}
+
+fn read_sidecar(path: &Path) -> Option<Sidecar> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut words = text.split_whitespace();
+    let head = words.next()?.parse::<u64>().ok()?;
+    let age = (|| {
+        let boot = words.next()?;
+        let uptime = words.next()?.parse::<u64>().ok()?;
+        let age = words.next()?.parse::<u64>().ok()?;
+        Some(Duration::from_secs(age).saturating_add(since_boot_record(boot, uptime)?))
+    })();
+    Some(Sidecar { head, age })
+}
+
+/// The first-seen head and, inside one boot, the age recorded for entry `name`; or record `head` and
+/// `wall_age` now (best effort: a lost sidecar only means the blocks count from this sighting, as before).
+/// A sidecar of an earlier boot, or of the older format, keeps its head and is given this boot's clock with the
+/// wall-clock age, so the next restart of this boot no longer depends on the wall clock.
+fn first_seen(pool: &Path, name: &std::ffi::OsStr, head: u64, wall_age: Duration, persist: bool) -> (u64, Duration) {
+    let Some(sidecar) = sidecar_name(name).map(|n| pool.join(n)) else {
+        return (head, wall_age);
+    };
+    match read_sidecar(&sidecar) {
+        Some(Sidecar { head, age: Some(age) }) => (head, age),
+        Some(Sidecar { head, age: None }) => {
+            if persist && boot_clock().is_some() {
+                write_sidecar(&sidecar, head, wall_age);
+            }
+            (head, wall_age)
+        }
+        None => {
+            if persist {
+                write_sidecar(&sidecar, head, wall_age);
+            }
+            (head, wall_age)
+        }
+    }
+}
+
+fn write_sidecar(path: &Path, head: u64, age: Duration) {
     use std::os::unix::fs::PermissionsExt;
-    let written = std::fs::write(path, format!("{head}\n"))
+    let record = match boot_clock() {
+        Some((boot, uptime)) => format!("{head} {boot} {uptime} {}\n", age.as_secs()),
+        None => format!("{head}\n"),
+    };
+    let written = std::fs::write(path, record)
         .and_then(|()| std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)));
     if let Err(error) = written {
         println!("spool sidecar {} not written: {error}", path.display());
@@ -592,10 +659,10 @@ fn scan_spool_inner(
                     .and_then(|raw| bloch_l2_evm::decode_signed_transaction(spec, &raw).ok())
                     .map(|tx| SpoolMeta::of(&tx));
                 let seen = std::time::Instant::now();
-                let age = std::time::SystemTime::now()
+                let wall_age = std::time::SystemTime::now()
                     .duration_since(modified)
                     .unwrap_or_default();
-                let first = first_seen_head(pool, &name, head, persist);
+                let (first, age) = first_seen(pool, &name, head, wall_age, persist);
                 index.insert(name.clone(), (meta, modified, seen, age, first));
                 (meta, modified, seen, age, first)
             }
@@ -631,8 +698,9 @@ struct Progress {
 const PROGRESS_FILE: &str = ".spool-progress";
 
 /// Advance `progress` to database head `best` and return how long that head has stood still. On the first call
-/// of a process the record in `pool` supplies the time the head was first seen, if it names the same head; the
-/// wall clock is all a restart has to go by (a time in the future counts as now).
+/// of a process the record in `pool` supplies the time the head was first seen, if it names the same head: by the
+/// boot clock when the record is of this boot ([`boot_clock`]), else by the wall clock (a time in the future
+/// counts as now).
 fn advance_progress(progress: &mut Option<Progress>, pool: &Path, best: u64) -> Duration {
     advance_progress_inner(progress, pool, best, true)
 }
@@ -643,13 +711,18 @@ fn advance_progress_inner(progress: &mut Option<Progress>, pool: &Path, best: u6
         Some(p) if p.head == best => return p.carried + now.saturating_duration_since(p.since),
         Some(_) => {}
         None => {
+            // `<head> <unix seconds> [<boot id> <uptime seconds>]`: inside one boot the stall is real elapsed time.
             let recorded = std::fs::read_to_string(pool.join(PROGRESS_FILE)).ok().and_then(|text| {
-                let mut words = text.split_whitespace().map(|w| w.parse::<u64>().ok());
-                Some((words.next()??, words.next()??))
+                let mut words = text.split_whitespace();
+                let head = words.next()?.parse::<u64>().ok()?;
+                let unix = words.next()?.parse::<u64>().ok()?;
+                let booted = (|| since_boot_record(words.next()?, words.next()?.parse::<u64>().ok()?))();
+                Some((head, unix, booted))
             });
-            if let Some((head, unix)) = recorded.filter(|(head, _)| *head == best) {
+            if let Some((head, unix, booted)) = recorded.filter(|(head, _, _)| *head == best) {
                 let then = std::time::UNIX_EPOCH + Duration::from_secs(unix);
-                let carried = std::time::SystemTime::now().duration_since(then).unwrap_or_default();
+                let carried =
+                    booted.unwrap_or_else(|| std::time::SystemTime::now().duration_since(then).unwrap_or_default());
                 *progress = Some(Progress {
                     head,
                     since: now,
@@ -672,8 +745,11 @@ fn advance_progress_inner(progress: &mut Option<Progress>, pool: &Path, best: u6
         .unwrap_or_default()
         .as_secs();
     let partial = pool.join(format!("{PROGRESS_FILE}.partial"));
-    let written = std::fs::write(&partial, format!("{best} {unix}\n"))
-        .and_then(|()| std::fs::rename(&partial, pool.join(PROGRESS_FILE)));
+    let record = match boot_clock() {
+        Some((boot, uptime)) => format!("{best} {unix} {boot} {uptime}\n"),
+        None => format!("{best} {unix}\n"),
+    };
+    let written = std::fs::write(&partial, record).and_then(|()| std::fs::rename(&partial, pool.join(PROGRESS_FILE)));
     if let Err(error) = written {
         println!("spool progress not recorded: {error}");
     }
@@ -729,7 +805,8 @@ impl SpoolHead<'_> {
     /// Age is the wall-clock age when this process first saw the entry (zero for one it admitted, and for a file
     /// time in the future) plus monotonic time since: a clock step while the process runs neither evicts nor keeps
     /// an entry. The first-seen head and the stall survive restarts (sidecar, `.spool-progress`), so a restart
-    /// never extends a lifetime (agents/146 R1, R2).
+    /// never extends a lifetime (agents/146 R1, R2); inside one boot both also carry a boot-clock record, so a
+    /// wall-clock step followed by a restart does not shorten one either ([`boot_clock`]).
     fn expired(&self, entry: &SpoolEntry, limits: SpoolLimits) -> bool {
         let age = entry
             .age_when_seen
@@ -1174,7 +1251,7 @@ impl Spool {
             number,
         );
         if let Some(sidecar) = sidecar_name(std::ffi::OsStr::new(&name)) {
-            write_sidecar(&self.dir.join(sidecar), number);
+            write_sidecar(&self.dir.join(sidecar), number, Duration::ZERO);
         }
         let sighting = (
             Some(meta),
@@ -2528,6 +2605,17 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// A test's boot clock: `Some(None)` is a kernel without one, `Some(Some((boot id, uptime)))` a chosen
+        /// reading. Unset, the host's own clock is read.
+        pub(super) static BOOT_CLOCK: std::cell::RefCell<Option<Option<(String, u64)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn set_boot_clock(reading: Option<(&str, u64)>) {
+        BOOT_CLOCK.with(|cell| *cell.borrow_mut() = Some(reading.map(|(boot, uptime)| (boot.to_owned(), uptime))));
+    }
     use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{Address, Signature, TxKind};
@@ -3614,6 +3702,207 @@ mod tests {
         std::fs::write(dir.path().join(".b.head"), "7\n").unwrap();
         scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 0).unwrap();
         assert!(!dir.path().join(".b.head").exists());
+    }
+
+    // ---- spool-step-restart (agents/260 analysis; closed in round 14): a restart under a stepped wall clock ----
+    // A forward wall step of S is modelled by file times and records S older than they are: after the step,
+    // `SystemTime::now() - mtime` reads S more than the real age, exactly what the restarted process sees.
+    // The boot clock is set by the test: `UP` at admission, `UP + real age` at the restart.
+
+    const UP: u64 = 1_000_000;
+
+    /// Admit like `Spool::submit`: sidecar with the head (age zero at this boot-clock reading), then the entry.
+    fn step_admitted(dir: &Path, spec: &ChainSpec, key: u8, nonce: u64, head: u64) -> String {
+        let raw = signed(spec, key, nonce, 2 * GWEI, 0);
+        let hash = alloy_primitives::keccak256(&raw);
+        let name = format!("{}.tx", alloy_primitives::hex::encode(hash));
+        write_sidecar(
+            &dir.join(sidecar_name(std::ffi::OsStr::new(&name)).unwrap()),
+            head,
+            Duration::ZERO,
+        );
+        std::fs::write(dir.join(&name), format!("{}\n", alloy_primitives::hex::encode(raw))).unwrap();
+        name
+    }
+
+    fn wall_step(dir: &Path, name: &str, real_age: Duration, step: Duration) {
+        let file = std::fs::File::options().write(true).open(dir.join(name)).unwrap();
+        file.set_modified(std::time::SystemTime::now() - real_age - step)
+            .unwrap();
+    }
+
+    fn stale_after_restart(dir: &Path, spec: &ChainSpec, number: u64, stalled: Duration) -> Vec<Option<&'static str>> {
+        let entries = scan_spool(spec, dir, &mut SpoolIndex::new(), number).unwrap();
+        let mut account = |_| (0, alloy_primitives::U256::MAX);
+        let mut head = facts(&mut account, std::time::Instant::now(), number, stalled);
+        head.mark_gaps(&entries);
+        entries.iter().map(|e| head.stale(e, SPOOL_LIMITS)).collect()
+    }
+
+    /// The drill's own shape (agents/62, 65): three consecutive entries, +4 h, SIGKILL and restart, no block.
+    #[test]
+    fn step_restart_keeps_consecutive_entries_under_a_forward_step() {
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
+        let dir = tempfile::tempdir().unwrap();
+        set_boot_clock(Some(("boot-a", UP)));
+        let names: Vec<_> = (0..3).map(|n| step_admitted(dir.path(), &spec, 1, n, 64)).collect();
+        for name in &names {
+            wall_step(dir.path(), name, Duration::from_secs(10), Duration::from_secs(4 * H));
+        }
+        set_boot_clock(Some(("boot-a", UP + 10)));
+        assert_eq!(
+            stale_after_restart(dir.path(), &spec, 64, Duration::ZERO),
+            vec![None; 3]
+        );
+    }
+
+    /// A young entry one nonce ahead of a missing one (a wallet sent n+1 before n), which expires on the plain
+    /// TTL: +4 h and a restart must not make its 10 minutes read as more than 3 h.
+    #[test]
+    fn step_restart_keeps_a_young_gapped_entry() {
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
+        let dir = tempfile::tempdir().unwrap();
+        set_boot_clock(Some(("boot-a", UP)));
+        let name = step_admitted(dir.path(), &spec, 1, 1, 64);
+        wall_step(dir.path(), &name, Duration::from_secs(600), Duration::from_secs(4 * H));
+        set_boot_clock(Some(("boot-a", UP + 600)));
+        assert_eq!(
+            stale_after_restart(dir.path(), &spec, 64, Duration::ZERO),
+            vec![None],
+            "10 min old, TTL 3 h"
+        );
+    }
+
+    /// Four fast blocks passed an entry over within its first hour (deferred by fee or budget): +4 h and a restart.
+    #[test]
+    fn step_restart_keeps_a_passed_over_entry_inside_the_ttl() {
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
+        let dir = tempfile::tempdir().unwrap();
+        set_boot_clock(Some(("boot-a", UP)));
+        let name = step_admitted(dir.path(), &spec, 1, 0, 64);
+        wall_step(dir.path(), &name, Duration::from_secs(H), Duration::from_secs(4 * H));
+        set_boot_clock(Some(("boot-a", UP + H)));
+        assert_eq!(
+            stale_after_restart(dir.path(), &spec, 68, Duration::ZERO),
+            vec![None],
+            "1 h old, TTL 3 h"
+        );
+    }
+
+    /// No block for 10 min (one slow proof), then +25 h and a restart: by the wall clock both the stall record and
+    /// the entry read 25 h, which is the stopped-settler rule.
+    #[test]
+    fn step_restart_keeps_a_young_entry_of_a_slow_chain_under_a_day_step() {
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
+        let dir = tempfile::tempdir().unwrap();
+        let step = Duration::from_secs(25 * H);
+        set_boot_clock(Some(("boot-a", UP)));
+        let name = step_admitted(dir.path(), &spec, 1, 0, 64);
+        assert_eq!(advance_progress(&mut None, dir.path(), 64), Duration::ZERO);
+        // The step: the entry's file time and the record's wall time now read 25 h and 10 min old.
+        wall_step(dir.path(), &name, Duration::from_secs(600), step);
+        let record = std::fs::read_to_string(dir.path().join(PROGRESS_FILE)).unwrap();
+        let words: Vec<_> = record.split_whitespace().collect();
+        assert_eq!(words.len(), 4, "head, unix time, boot id, uptime: {record}");
+        let unix = words[1].parse::<u64>().unwrap() - 600 - step.as_secs();
+        std::fs::write(
+            dir.path().join(PROGRESS_FILE),
+            format!("64 {unix} {} {}\n", words[2], words[3]),
+        )
+        .unwrap();
+        set_boot_clock(Some(("boot-a", UP + 600)));
+        let stalled = advance_progress(&mut None, dir.path(), 64);
+        assert_eq!(stalled, Duration::from_secs(600), "the stall is real elapsed time");
+        assert_eq!(
+            stale_after_restart(dir.path(), &spec, 64, stalled),
+            vec![None],
+            "10 min old, stalled 10 min"
+        );
+    }
+
+    /// The boot clock never extends a lifetime: real time that passed while the process was down counts, so an
+    /// entry really past the TTL and passed over by four blocks is evicted after a restart, with no clock step.
+    #[test]
+    fn step_restart_still_expires_an_entry_that_is_really_old() {
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
+        let dir = tempfile::tempdir().unwrap();
+        set_boot_clock(Some(("boot-a", UP)));
+        step_admitted(dir.path(), &spec, 1, 0, 64);
+        set_boot_clock(Some(("boot-a", UP + 4 * H)));
+        assert_eq!(
+            stale_after_restart(dir.path(), &spec, 68, Duration::ZERO),
+            vec![Some("expired")]
+        );
+        // And a dead settler sheds its spool by the boot clock too.
+        let dir = tempfile::tempdir().unwrap();
+        set_boot_clock(Some(("boot-a", UP)));
+        step_admitted(dir.path(), &spec, 1, 0, 64);
+        advance_progress(&mut None, dir.path(), 64);
+        set_boot_clock(Some(("boot-a", UP + 25 * H)));
+        let stalled = advance_progress(&mut None, dir.path(), 64);
+        assert_eq!(stalled, Duration::from_secs(25 * H));
+        assert_eq!(
+            stale_after_restart(dir.path(), &spec, 64, stalled),
+            vec![Some("expired")]
+        );
+    }
+
+    /// After a reboot, on a kernel without the clock, or with a record this code cannot read, the wall clock
+    /// decides as before and the first-seen head is kept; the sidecar is then given this boot's record.
+    #[test]
+    fn step_restart_falls_back_to_the_wall_clock_outside_the_recorded_boot() {
+        let spec = ChainSpec::mainnet_next_or_rehearsal();
+        let old = Duration::from_secs(4 * H);
+        for case in ["reboot", "no-clock", "old-format", "garbled", "uptime-behind"] {
+            let dir = tempfile::tempdir().unwrap();
+            set_boot_clock(Some(("boot-a", UP)));
+            let name = step_admitted(dir.path(), &spec, 1, 0, 64);
+            let sidecar = dir.path().join(sidecar_name(std::ffi::OsStr::new(&name)).unwrap());
+            wall_step(dir.path(), &name, old, Duration::ZERO);
+            match case {
+                "reboot" => set_boot_clock(Some(("boot-b", 30))),
+                "no-clock" => set_boot_clock(None),
+                "old-format" => std::fs::write(&sidecar, "64\n").unwrap(),
+                "garbled" => std::fs::write(&sidecar, "64 boot-a soon 0\n").unwrap(),
+                _ => set_boot_clock(Some(("boot-a", UP - 1))),
+            }
+            let entries = scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 68).unwrap();
+            assert_eq!(entries[0].head_when_seen, 64, "{case}");
+            assert!(
+                entries[0].age_when_seen >= old,
+                "{case}: {:?}",
+                entries[0].age_when_seen
+            );
+            let record = std::fs::read_to_string(&sidecar).unwrap();
+            match case {
+                "no-clock" => assert_eq!(record.split_whitespace().next(), Some("64"), "{case}"),
+                "reboot" => assert!(record.starts_with("64 boot-b 30 144"), "{case}: {record}"),
+                _ => assert!(record.starts_with("64 boot-a "), "{case}: {record}"),
+            }
+        }
+        // A sidecar that does not even name a head is replaced: the blocks count from this sighting, as before.
+        let dir = tempfile::tempdir().unwrap();
+        set_boot_clock(Some(("boot-a", UP)));
+        let name = step_admitted(dir.path(), &spec, 1, 0, 64);
+        let sidecar = dir.path().join(sidecar_name(std::ffi::OsStr::new(&name)).unwrap());
+        std::fs::write(&sidecar, "not a head\n").unwrap();
+        let entries = scan_spool(&spec, dir.path(), &mut SpoolIndex::new(), 70).unwrap();
+        assert_eq!(entries[0].head_when_seen, 70);
+    }
+
+    /// The host's own reading, where there is one: a plain id and whole seconds.
+    #[test]
+    fn boot_clock_reads_the_kernel_record() {
+        BOOT_CLOCK.with(|cell| *cell.borrow_mut() = None);
+        if std::path::Path::new("/proc/sys/kernel/random/boot_id").exists() {
+            let (boot, uptime) = boot_clock().expect("a Linux kernel has a boot id and an uptime");
+            assert_eq!(boot.len(), 36, "{boot}");
+            assert!(uptime > 0);
+            assert_eq!(since_boot_record(&boot, uptime).map(|d| d.as_secs() <= 5), Some(true));
+            assert_eq!(since_boot_record("another-boot", uptime), None);
+        } else {
+            assert_eq!(boot_clock(), None);
+        }
     }
 
     /// R2: the no-block clock survives restarts (`.spool-progress`), so a dead settler sheds its spool whatever
