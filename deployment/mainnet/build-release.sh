@@ -54,7 +54,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-CANDIDATE_NATIVE_COMMIT=c05c62e3462abd0d1ae498065f3ca1c4db0e937c
+CANDIDATE_NATIVE_COMMIT=883ce70f2179b8c41734aa6f64b602a84bc61021
 CANDIDATE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 NATIVE_COMMIT=${NATIVE_COMMIT:-$CANDIDATE_NATIVE_COMMIT}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
@@ -99,7 +99,7 @@ sys.exit(0 if all(g.get(n) == "inert" for n in names) else 1)' \
   # Release gate (agents 163 B-1, 217): this native commit is the next-rules (program swap) release, and its
   # follower, producer and RPC compile ChainSpec::mainnet(). Refuse it until the owner's fee-sweep recipient is set.
   python3 "$HERE/set-sweep-recipient.py" gate --l2 "$L2" >/dev/null \
-    || die "the next-rules release needs the owner's fee-sweep recipient: set-sweep-recipient.py set ADDRESS --l2 ... --native ..."
+    || die "the next-rules release needs the owner's fee-sweep recipient: set-sweep-recipient.py set 0xADDRESS --l2 ... --native ... --rpc URL (or --confirm 0xADDRESS); the address in EIP-55 form"
 fi
 [ "$(git -C "$N" rev-parse HEAD)" = "$NATIVE_COMMIT" ] || die "native checkout is not $NATIVE_COMMIT"
 [ "$(git -C "$RETH" rev-parse HEAD)" = "$RETH_COMMIT" ] || die "reth snapshot is not $RETH_COMMIT"

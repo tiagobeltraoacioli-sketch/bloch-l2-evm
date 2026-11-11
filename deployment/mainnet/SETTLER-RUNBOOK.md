@@ -283,7 +283,7 @@ the private stub has no native source to build a block from.
 | `reorg-limit` (then `halt`) | Too many automatic recoveries in the window: run `l2_reorg_recover.py` and find out why L1 keeps reorging. |
 | `prover-failed` `timeout: true` | A prover attempt ran out of time (exit 124 recorded). The next location in `remote_prover.order` is tried (review r10 L6). |
 | `da-funding-low` | Top up the DA fee key. |
-| `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements". No action unless they repeat. |
+| `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements": the settler needs no action, the SHADOW must be reinstalled each time. Otherwise no action unless they repeat. |
 | `halt` (exit 3, no auto-restart) | Operator review. Causes: a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
 
 ## Idle blocks
@@ -312,6 +312,26 @@ A block is due when L1 holds an unconsumed deposit, the spool holds a transactio
 Follower, settled RPC, attestors and claims do not depend on block cadence.
 
 ## Foreign settlements
+
+**The shadow producer after a foreign settlement (agent 312, F312-4, rehearsed with real proofs).** The
+settler recovers alone (`foreign-settlement-recovered`) and goes on settling. The shadow does not: its own
+database does not hold the foreign block, so it stops with `L2 head N cannot extend accepted settlement N+1`
+(exit 3, no automatic restart) and the settler's blocks are then built without the independent check.
+The monitor shows `foreign_settlements` WARN followed by `unit[shadow]` CRIT. Repair, each time, once the
+settler has logged `foreign-settlement-recovered` and the follower has reached that settlement: roll the shadow
+back and install it again (it rebuilds its database from L1 up to the accepted settlement):
+
+```
+sudo bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --rollback
+```
+
+```
+sudo bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh /home/ubuntu/l2-golive-next/artifacts --start
+```
+
+After the repair the journal still holds the old `halt` line: count halts since the unit's last start
+(`journalctl -u bloch-l2-mainnet-shadow --since "$(systemctl show -p ActiveEnterTimestamp --value bloch-l2-mainnet-shadow)"`),
+not over the whole journal.
 
 Settling needs no authorization. A deposit-only block built by the rules is identical whoever builds
 it, so only a block with other user transactions, and its own paid DA batch, differs from ours.

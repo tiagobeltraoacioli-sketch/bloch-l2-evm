@@ -80,7 +80,7 @@ Nothing here may be filled in by an operator or an agent. `TBD-OWNER` means the 
 | **D7** | Release signature | Sign release `SHA256SUMS` `6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19` (`bloch-l2-2026-11-03-next-native-78d4921c`, in `~/l2dexbridge-20261030/rpc-limits-r10/release/` on 45.77 and 136) with the Bloch release key `1A5D96A5C4955EF7` and `rsign` on the owner's Mac (minisign is not installed there), exactly as in `docs/RELEASE-SIGNING.md`, after G0 gates 1-5 and 7 and before P2. The signature completes gate 6. | P2 |
 | **D8** | Retire the 10-18 scratch follower/RPC on 45.77 | As in the v2.1 plan: check `ps -o pid,cmd -p 1452988,1304666` first, then `kill 1452988 1304666`. | none |
 | **D9** | Public gateway | nginx + njs on A and B; do not deploy the Worker. Open: DNS timing and failover (manual switch to B by default). | P11 |
-| **D10** | When to enable user transactions | **Not with this build while F5 is open** (K13): F5 fires only with idle blocks and user transactions together, so the deposit-only launch keeps `skip_idle_blocks` on and user transactions off, and user transactions stay off until F5 is fixed in a later build. Then only after: the P12 deposit test; R2 (DA after HF2) on a private net; the gas-heavy 15M measurement; the stuck-block rehearsal; a dedicated prover (D2); **and with `foreign_recovery` on** (D17). | P12 |
+| **D10** | When to enable user transactions | **Not with this build while F5 is open** (K13): F5 fires only with idle blocks and user transactions together, so the deposit-only launch keeps `skip_idle_blocks` on and user transactions off, and user transactions stay off until F5 is fixed in a later build. Then only after: the P12 deposit test; R2 (DA after HF2) on a private net; the gas-heavy 15M measurement; the stuck-block rehearsal; a dedicated prover (D2); **and with `foreign_recovery` on** (D17). | P12 Also (agent 312, F312-5, found with real proofs): the settled RPC of release `926d2cf` writes each spool file `0600` owned by the RPC's own user (`--rpc-user`, this plan's layout), so the settler cannot read it, logs `producer-refused-spool … Permission denied` and proves empty blocks: user transactions cannot be enabled on this release with the own RPC user. The candidate line writes `0640` (read through the spool directory's read group). |
 | **D11** | Alert destinations | **`TBD-OWNER`**: webhook URL (and bearer file), Telegram bot token file and chat id, or an `alert_command`; plus a `heartbeat_url` (dead-man service). Until set, alerts are not delivered and WARN `alert_delivery` is expected. | P9 |
 | **D12** | DA signer `bloch-pos` | 78d4921c `700631b0…`, enforced by the installer. | P6 |
 | **D13** | L2 finding F1 (timestamp and prevrandao not bound in the guest) | Do not delay block 1. Cap deposits and bridge value at what the owner accepts seeing frozen during an emergency fork. | P8, P12 |
@@ -157,29 +157,29 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `043d6d92d5d66387fac1b4996286891a7dbee594f00bd81a6f1f5be8cef54b95` |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `d462eb739366af11772c49f105e8722aa9008b315ba99469962344dd1b1fbcbd` |
-| `deployment/devnet/settler_v3.py` | `01893cb9a8579b19c9be1804c43c3432582f5f8746fd2d3afa36b8bd17528233` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `7d11fbada56d8fc9a7577a69899991b8d3bdb553db3c9a015106fa35f5519eda` |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `480a513cd5e0305c0c2b909f405a0aea48eb02320314be597df1511490a8d77d` |
+| `deployment/devnet/settler_v3.py` | `55c2c913696a1ec83f2f036845616f8c862a0696519b1477febda8f33cb574a2` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `aadc951fbb1ee79efd3ddabeb1b3d13ca3503cbff61de305435bebe108f38a6a` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `829ecac3b2b573125fe036208aaa814f54baffa259d79c497e49a0fae6d94c6e` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d52b7086c7cdfed78ee71de58a4323b5ee9826fdec8fccc7bace09e37d5b40f7` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
-| `deployment/mainnet/install-shadow.sh` | `a9abfa0e5f7bad969e7c255fb543cc431d83305244726563ecd1fc4556e48e05` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
-| `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `5956d4e15d3f721e720027a55e1e5ee249c61cdfddf4c0e9091a9458bdc30886` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
+| `deployment/mainnet/install-shadow.sh` | `b50928fe521f813b7c05456280a7df5bfa0a8e5b2ea16934c11ed7a4a7ea3a5d` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
+| `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `aaa0eb2d2cd5758faa1de371e4c661ecacf511543bcb8319b77bc249b575a5fb` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `cb6afc4ca02d37cffb86048948c531fc566c8a609a6e05cefe3c5f94dd85e54c` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: own RPC user) |
-| `deployment/mainnet/follower-rpc/install.sh` | `64aa9cb5544e9b3fea4874187728bf53c0e1203ab593b59ff26fb3de09dcbb68` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
+| `deployment/mainnet/follower-rpc/install.sh` | `3984e0edb591cfbc4c53390f6a414c61d88032dcd97154fa7d706519f0035854` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
 | `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/l2_monitor.py` | `eab83e2b4caadd8fa65e045cae6b81017a1c76f3ba6c647499d313e6480178d9` (agents 157, 187 F1, 198) |
-| `deployment/mainnet/l1_monitor.py` | `d7dab752328f639882e732fa0609e6b224e7aa0b853f1002bcb4a7ac53f43b86` (agent 187) |
+| `deployment/mainnet/l2_monitor.py` | `5b053d7caead95f191fcea1960d2d0aa6116290904c8003fb544661d0a661be7` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l1_monitor.py` | `583b3ce20cbaa0240c54a9154631b885da090226caf72fe1488b75f3d9786d8c` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `0d65038eba157b2025424adf69182dcd3860a4ac27af64fb2d40dc97ebde8730` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `85855e2d7ce05e35199f1d116fca8191cf7a5284a4926847f857ab99ef1e4379` (agent 154 8d1c873; 201: subrequest size guard) |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `891a7f101662167557cec31a5ec28d556865d7c6c40d5d9d8abcf011f92a2c33` (agent 154 8d1c873; 201: subrequest size guard) |
-| `deployment/mainnet/public-rpc/render.py` | `39ec028f46cf402802120c74f12dd7360c0185d0cf9cac49bd1d382a0e1f2975` (agent 154 8d1c873; 201: `--sub-answer-max`) |
-| `deployment/mainnet/attestor/install-attestor.sh` | `446912552190566bcc1cc2276fe8c521bb6c8eab9c9f8263d56aca2d53115e91` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `4be2d9f4ae0d30c020ce715bf3ec2fba072048e8a0edbdf4457df5ca6c6997d0` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `47cfa512a118de8a244ffcea6644f5f6ea5b992d7aa7171ffe4b0dbc2ddbeeb9` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/render.py` | `92a7cdd3c6291f5a7228083404ac10b7a0b215b7e9defa4c7579ae357698a522` (agent 154 8d1c873; 201: `--sub-answer-max`) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `5661315056a73345a206966bd29876e7acaadeef48851dfb6c9375d4ba56616b` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
-| `deployment/mainnet/attestor/attestor_agent.py` | `cad7809f5ff5776587825c330897d62fa6ca269652ad9179bf3a9f9227122fc7` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
+| `deployment/mainnet/attestor/attestor_agent.py` | `f4fbe82db9cb94ffdbc6cbf051df5a68dccb83b2e4aef5d03561c0ae5775d372` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
 | `deployment/mainnet/attestor/systemd/bloch-l2-attestor.service` | `bbcdf495e3657f6c3e20530edc546b48a56b1a1c78e24ea4ba193cdc503047b2` (agent 203: `RuntimeDirectory=bloch-l2-attestor`, mode 0700) |
 | `deployment/mainnet/attestor/attestor_lib.py` | `b996845f0e77b82aea66a7d73d1ad46525ba868fdafefe06380e2a7ac91fcc78` |
 | `deployment/mainnet/attestor/sigfeed.py` | `6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5` |
@@ -385,7 +385,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `043d6d92d5d66387fac1b4996286891a7dbee594f00bd81a6f1f5be8cef54b95` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `7d11fbada56d8fc9a7577a69899991b8d3bdb553db3c9a015106fa35f5519eda` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 
@@ -777,6 +777,12 @@ GO:
 sudo journalctl -u bloch-l2-mainnet-shadow -o cat --no-pager | grep -c '"event": "halt"'
 ```
 
+After a shadow repair (a foreign settlement stops the shadow for good while the settler recovers alone: `SETTLER-RUNBOOK.md`, "Foreign settlements"; the repair is the rollback below and then this phase's install command) the journal keeps the old `halt` line, so this count stays at 1 or more. Count since the unit's last start instead:
+
+```
+sudo journalctl -u bloch-l2-mainnet-shadow -o cat --no-pager --since "$(systemctl show -p ActiveEnterTimestamp --value bloch-l2-mainnet-shadow)" | grep -c '"event": "halt"'
+```
+
 
 NO-GO: a pin refusal (wrong release or kit) or a check failure.
 
@@ -825,7 +831,7 @@ GO (the L2 is live):
 
 - `accepted.statement` L2 number 1 on all three nodes;
 - `source.height` greater than 1 (it follows the L1 chain, it is not the L2 number);
-- the P7 `grep -c` still prints `0`;
+- the P7 `grep -c` still prints `0` (after a shadow repair: the since-last-start form of P7). A shadow that halts with `cannot extend accepted settlement` after the monitor's `foreign_settlements` WARN is repaired, not a reason to stop the launch: `SETTLER-RUNBOOK.md`, "Foreign settlements";
 - after FFG finality of the including block (`getchaininfo.finalized_height` ≥ that block, about
   2–3 epochs), RPC A and RPC B show `safe` → block 1, then `finalized` → block 1. On B this happens
   after the K5 refresh.
