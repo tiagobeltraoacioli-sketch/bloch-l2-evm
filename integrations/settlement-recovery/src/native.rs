@@ -836,9 +836,9 @@ mod node_parity {
 
     /// (b) The node's `crypto_policy`: every committee policy maps to the
     /// bloch-crypto policy of the same name, including `CompatiblePinned`.
-    /// An honest signature cannot tell the pinned ML-DSA backend from the
-    /// CPU-dispatching one (they disagree only on crafted edge cases, for which
-    /// no fixture exists in the native crates), so the mapping is pinned by
+    /// A valid signature is accepted under every policy of its form, so
+    /// acceptance alone does not show which bloch-crypto entry point ran
+    /// behind a committee policy. The mapping is therefore pinned by
     /// equality with the exact bloch-crypto entry point the node calls, on
     /// both signature forms, and by the epochs that select the policy.
     #[cfg(bloch_native_sig_policy)]
