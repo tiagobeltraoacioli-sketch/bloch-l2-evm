@@ -1866,7 +1866,12 @@ class Settler:
                                    f'{self.accepted_floor} for {round(now - since)} s')
 
     def produce(self, *args, timeout=300):
-        result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=timeout)
+        try:
+            result = self.run([self.c['produce'], *args, *self.network_args], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # A producer that does not answer is a producer refusal (review R308-2P-13): with the spool, `extend`
+            # then builds the deposits-only block instead of leaving through the retry loop that ends the unit.
+            raise ProducerError(f'producer timed out after {timeout} s for {args[0]}') from None
         if result.returncode:
             raise ProducerError(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         try:
@@ -2282,8 +2287,16 @@ class Settler:
             slot = int(request.splitlines()[3]) if request else None
             args = self.extend_arguments(head, view['source']['block'], deposits, slot, spool=False)
             args[0] = 'select'
-            report = self.produce(*args, *self.pool_arguments(self.c['txpool_dir'], selecting=True))
             policy = self.policy()
+            pool = self.c['txpool_dir']
+            waiting = policy.waiting_unpaid(policy.clock())
+            if waiting:
+                # Transactions that wait out a refusal of their own payment are not given to the producer again
+                # (review R308-2P-13): the demand check runs every idle cycle.
+                pool = directory / 'pool.json'
+                pool.write_text(json.dumps([raw for _, raw in self.spool_entries()
+                                            if keccak256(bytes.fromhex(raw)).hex() not in waiting]))
+            report = self.produce(*args, *self.pool_arguments(pool, selecting=True))
             due = policy.demand(report.get('tx_stats') or [], policy.clock(), False)
             policy.save()
             return due

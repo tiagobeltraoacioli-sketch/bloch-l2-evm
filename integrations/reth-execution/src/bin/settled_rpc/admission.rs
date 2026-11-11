@@ -308,6 +308,9 @@ impl Snapshot {
             "freshSlots": format!("0x{slots:x}"),
             "chargedFreshSlots": format!("0x{charged_slots:x}"),
             "freshSlotPriceWei": format!("0x{:x}", policy.fresh_slot_price),
+            // The amount itself (review R308-2P-15): admission asks gasUsed x tip >= this, so a transaction that
+            // uses less gas than this run (an access list, another gas limit) owes more per gas than the figure above.
+            "writePriceOwedWei": format!("0x{:x}", U256::from(charged_slots) * U256::from(policy.fresh_slot_price)),
             "scope": "latest-state-next-block"
         }))
     }
@@ -876,6 +879,8 @@ mod tests {
         assert_eq!(quantity(&quote["minimumPriorityFeePerGas"]), FLOOR);
         let required = quantity(&quote["requiredPriorityFeePerGas"]);
         assert!(required > FLOOR, "a new slot costs more than the floor here");
+        assert_eq!(quantity(&quote["writePriceOwedWei"]), PRICE);
+        assert_eq!(required, PRICE.div_ceil(quantity(&quote["gasUsed"])));
         // The same call, signed at the floor tip, is refused with the same numbers.
         let cap = 100_000_000_000;
         let refused = world.send(&world.approve(1, 7, FLOOR, cap)).unwrap_err();

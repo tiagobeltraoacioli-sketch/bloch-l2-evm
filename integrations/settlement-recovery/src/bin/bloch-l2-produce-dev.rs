@@ -101,9 +101,10 @@ this block's base fee is below N (default 0, no minimum); reported as below_min_
 transaction whose gas used times effective tip is below N times the storage slots
 it adds, measured on the block as it will be built: the first such transaction in
 block order is taken out and the selection runs again, so a transaction is judged
-after exactly the transactions it would run after (after 64 such passes every unpaid
-transaction of a pass goes at once). --write-exempt A,B names senders that pay no
-write price. Left transactions keep their spool files and are reported as unpaid.
+after exactly the transactions it would run after. At most 8 such passes run: if the
+last one still finds an unpaid transaction, the block keeps the transactions ahead of
+it and everything else stays pending, reported as not_judged. --write-exempt A,B names
+senders that pay no write price. Left transactions keep their spool files (unpaid).
 select runs the same selection on the same parent, deposits and limits, and prints
 the report extend would print (included, deferred, dropped, tx_stats with sender,
 nonce, gas used, effective tip and storage slots added and cleared per account),
@@ -1105,30 +1106,37 @@ fn write_price(args: &[String]) -> Result<Option<WritePrice>, String> {
 #[derive(Default)]
 struct UnpaidReport {
     entries: Vec<serde_json::Value>,
+    not_judged: Vec<String>,
     passes: usize,
-    conservative: bool,
+    capped: bool,
 }
 
 impl UnpaidReport {
     fn report(&self, out: &mut serde_json::Value, price: &Option<WritePrice>) {
         if let Some(price) = price {
             out["unpaid"] = json!(self.entries);
+            out["not_judged"] = json!(self.not_judged);
             out["write_price"] = json!({"fresh_slot_price_wei": price.per_slot.to_string(), "passes": self.passes,
-                                        "conservative": self.conservative});
+                                        "max_passes": WRITE_PRICE_MAX_PASSES, "capped": self.capped});
         }
     }
 }
 
-/// Exact passes of [`leave_unpaid`] before it turns conservative.
-const WRITE_PRICE_EXACT_PASSES: usize = 64;
+/// Hard cap on the selections one `select` or `extend` runs for the write price (review R308-2P-13). Each pass is
+/// one selection over the whole pool, so the work of a call is at most this many selections whatever the pool holds.
+const WRITE_PRICE_MAX_PASSES: usize = 8;
 
 /// Take out of `pool` every candidate that would be included without paying the write price.
 /// The slots a transaction adds depend on the transactions before it, so the selection runs on the candidates,
 /// the FIRST unpaid transaction in block order leaves, and the selection runs again: every transaction is then
 /// judged after exactly the transactions it runs after in the block that is built, and a transaction is never
-/// refused for what an earlier refused one did. Each pass removes at least one candidate, so it ends. After
-/// `WRITE_PRICE_EXACT_PASSES` passes every unpaid transaction of a pass leaves at once (bounded work under a
-/// long chain of non-payers; a payer can then wait one block more than needed, never the reverse).
+/// refused for what an earlier refused one did.
+///
+/// The passes are capped. When the last allowed pass still finds an unpaid transaction, the block keeps only the
+/// transactions AHEAD of it in block order: each of them ran after exactly the transactions it will run after, so
+/// its count stands and nothing unpaid is built. The unpaid one is reported, and everything behind it is reported
+/// as `not_judged` and stays pending for the next block (liveness first: the prefix is served, nobody is refused
+/// for a count that was not measured, and a chain of non-payers of any length costs at most the cap).
 fn leave_unpaid(
     coordinator: &CanonicalCoordinator,
     attributes: &BlochNextBlockEnvCtx,
@@ -1146,26 +1154,41 @@ fn leave_unpaid(
             coordinator.select_pending_after_forced(attributes, forced, &candidates, limits).map_err(|e| e.to_string())?.1
         };
         report.passes += 1;
-        report.conservative = report.passes > WRITE_PRICE_EXACT_PASSES;
-        let mut leaving = Vec::new();
-        for stats in &selection.stats {
+        let unpaid = selection.stats.iter().position(|stats| {
             let slots = stats.fresh_slots.iter().fold(0u64, |total, (_, n)| total.saturating_add(*n));
-            let owed = U256::from(slots) * U256::from(price.per_slot);
-            if slots == 0 || price.exempt.contains(&stats.sender) || U256::from(stats.gas_used) * U256::from(stats.effective_tip) >= owed {
-                continue;
-            }
-            leaving.push(stats.hash);
-            report.entries.push(json!({"hash": hex::encode(stats.hash), "sender": hex::encode(stats.sender), "nonce": stats.nonce,
-                                       "gas_used": stats.gas_used, "effective_tip": stats.effective_tip.to_string(),
-                                       "fresh_slots": slots, "owed_wei": owed.to_string()}));
-            if !report.conservative {
-                break;
-            }
-        }
-        if leaving.is_empty() {
+            slots > 0
+                && !price.exempt.contains(&stats.sender)
+                && U256::from(stats.gas_used) * U256::from(stats.effective_tip) < U256::from(slots) * U256::from(price.per_slot)
+        });
+        let Some(at) = unpaid else {
             return Ok((pool, report));
+        };
+        let stats = &selection.stats[at];
+        let slots = stats.fresh_slots.iter().fold(0u64, |total, (_, n)| total.saturating_add(*n));
+        report.entries.push(json!({"hash": hex::encode(stats.hash), "sender": hex::encode(stats.sender), "nonce": stats.nonce,
+                                   "gas_used": stats.gas_used, "effective_tip": stats.effective_tip.to_string(),
+                                   "fresh_slots": slots,
+                                   "owed_wei": (U256::from(slots) * U256::from(price.per_slot)).to_string()}));
+        if report.passes < WRITE_PRICE_MAX_PASSES {
+            let leaving = stats.hash;
+            pool.retain(|(_, raw)| alloy_primitives::keccak256(raw) != leaving);
+            continue;
         }
-        pool.retain(|(_, raw)| !leaving.contains(&alloy_primitives::keccak256(raw)));
+        // The cap: keep the measured prefix, leave everything else pending, unjudged.
+        report.capped = true;
+        let prefix: Vec<B256> = selection.stats[..at].iter().map(|stats| stats.hash).collect();
+        let unpaid_hash = stats.hash;
+        pool.retain(|(_, raw)| {
+            let hash = alloy_primitives::keccak256(raw);
+            if prefix.contains(&hash) {
+                return true;
+            }
+            if hash != unpaid_hash {
+                report.not_judged.push(hex::encode(hash));
+            }
+            false
+        });
+        return Ok((pool, report));
     }
 }
 

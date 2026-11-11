@@ -444,8 +444,15 @@ next base fee with tip zero, and priced by the rule the send path uses. The resu
 `kind = "sequencer-admission-quote"`, `headHash`, `scope = "latest-state-next-block"` and the hex quantities
 `headNumber`, `nonce`, `baseFeePerGas`, `requiredPriorityFeePerGas`, `requiredMaxFeePerGas`,
 `minimumPriorityFeePerGas` (the published required tip), `gasUsed`, `freshSlots`, `chargedFreshSlots` and
-`freshSlotPriceWei`: field for field what a refused send of the same call reports, and a transaction that pays
-`requiredPriorityFeePerGas` is not refused for its fee on that head (tested both ways). It is refused when the
+`freshSlotPriceWei` and `writePriceOwedWei` (`chargedFreshSlots` times the price): the fields a refused send of the
+same call reports, plus the amount. A transaction of the same shape (same call, no access list, so the same gas
+used) that pays `requiredPriorityFeePerGas` is not refused for its fee on that head (tested both ways). The rule
+itself is `gasUsed x tip >= writePriceOwedWei`: a transaction that uses less gas than the quoted run (an access
+list, a tighter execution) owes more per gas, so a client that changes the shape computes
+`ceil(writePriceOwedWei / its own gasUsed)` and takes the larger of that and `minimumPriorityFeePerGas`.
+Known limit: every quote runs on the sequencer and takes one of its EVM permits, the same pool a send waits for;
+the gateway's transaction reserve has no counterpart inside the RPC (a quote can delay a send by its run time,
+it cannot refuse it). It is refused when the
 sender cannot pay `gas` at the next base fee plus `value`, or when the call cannot execute. It takes one EVM
 simulation permit, the same wait and the same time limit as a send, writes nothing, and says nothing about the
 spool, other senders, waits or bans: it is not a promise of inclusion. A quote is for one head and one policy

@@ -89,5 +89,56 @@ class ProducerWritePrice(PricedWorld):
         self.assertEqual(self.unpaid_slots(finals[-1]), [])
 
 
+class UnpaidWaitsEscalate(PricedWorld):
+    """Review R308-2P-13 / R308-2P-14: a first unpaid report waits five minutes, each further report of the same
+    bytes twice as long up to the hour; a waiting non-payer is not handed to the producer; a replacement starts again."""
+
+    def given(self):
+        seen = []
+        inner = self.report
+
+        def report(raws):
+            seen.append({self.tx[r]['name'] for r in raws})
+            return inner(raws)
+        self.report = report
+        return seen
+
+    def test_waits_double_and_keep_the_non_payer_out_of_the_producer(self):
+        self.add_writer('np', 'mallory', 0, 50_000, 1, ['own'], tip=GWEI)
+        waits = []
+        for _ in range(6):
+            seen = self.given()
+            self.block(advance=0)
+            wait = self.policy.state['waits'].get('mallory:0')
+            waits.append(round(wait['until'] - self.now))
+            self.assertTrue(any('np' in names for names in seen), 'a non-payer whose wait ended is tried again')
+            self.now += waits[-1] - 1          # one second before the wait ends: not handed over
+            seen = self.given()
+            self.block(advance=2)              # and then past it
+            self.assertFalse(any('np' in names for names in seen), f'handed to the producer inside its wait {waits}')
+            self.assertEqual(dict(self.plans[-1].held).get(next(iter(dict(self.plans[-1].held)))), 'gate-dependent-wait')
+        # measured from the end of the plan, which takes a few seconds of the world's clock
+        self.assertTrue(all(0 <= want - got <= 30 for want, got in zip([300, 600, 1200, 2400, 3600, 3600], waits)), waits)
+
+    def test_the_producers_pass_cap_holds_the_rest_without_a_wait(self):
+        self.add('behind', 'user', 0, 21_000, 1, tip=GWEI)
+        inner = self.report
+
+        def capped(raws):
+            report = inner(raws)
+            if any(self.tx[r]['name'] == 'behind' for r in raws):
+                report['included'] = [n for n in report['included'] if self.tx_name(n) != 'behind']
+                report['tx_stats'] = [t for t in report['tx_stats'] if self.tx_name(t['hash']) != 'behind']
+                report['not_judged'] = [sp_hash(r) for r in raws if self.tx[r]['name'] == 'behind']
+            return report
+        self.report = capped
+        self.block(advance=0)
+        self.assertIn('behind-unpaid-pass-cap', dict(self.plans[-1].held).values())
+        self.assertEqual(self.policy.state['waits'], {})
+
+    def tx_name(self, name):
+        return next(t['name'] for r, t in self.tx.items() if sp_hash(r) == name)
+
+
 if __name__ == '__main__':
     unittest.main()

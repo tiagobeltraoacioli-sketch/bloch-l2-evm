@@ -357,12 +357,15 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     assert!(unpriced.get("unpaid").is_none());
     assert_eq!(unpriced["tx_stats"][0]["fresh_slots"][0][1], 1, "the first writer creates the slot");
     assert_eq!(unpriced["tx_stats"][1]["fresh_slots"].as_array().unwrap().len(), 0);
-    // With the price: the first writer leaves, the second becomes the creator and leaves, and so on, in one call.
+    // With the price: the first writer leaves, the second becomes the creator and leaves, and so on, up to the
+    // pass cap (8, review R308-2P-13): the eighth pass still finds an unpaid creator, so nothing ahead of it is
+    // kept (there is nothing ahead) and the last one is left unjudged for the next block.
     let priced = select(&["--fresh-slot-price-wei", PRICE]);
     assert_eq!(priced["included"].as_array().unwrap().len(), 0, "{priced}");
-    assert_eq!(priced["unpaid"].as_array().unwrap().len(), 9);
-    assert_eq!(priced["write_price"]["passes"], 10);
-    assert_eq!(priced["write_price"]["conservative"], false);
+    assert_eq!(priced["unpaid"].as_array().unwrap().len(), 8);
+    assert_eq!(priced["not_judged"].as_array().unwrap().len(), 1);
+    assert_eq!(priced["write_price"]["passes"], 8);
+    assert_eq!(priced["write_price"]["capped"], true);
     assert_eq!(priced["unpaid"][0]["hash"], unpriced["included"][0], "refused in block order, highest tip first");
     assert_eq!(priced["tx_stats"].as_array().unwrap().len(), 0);
     // An exempt sender pays no write price: it creates the slot and the eight behind it add none.
@@ -381,7 +384,9 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     // the payer of slot 6 behind it is judged on the block without it.
     std::fs::write(pool.join("other-unpaid.tx"), signed_by(seeds[0], 1, TxKind::Call(contract), store(1, 6), 20 * GWEI)).unwrap();
     let mixed = select(&["--fresh-slot-price-wei", PRICE]);
-    assert_eq!(mixed["unpaid"].as_array().unwrap().len(), 10, "{mixed}");
+    assert_eq!(mixed["unpaid"].as_array().unwrap().len(), 8, "{mixed}");
+    assert_eq!(mixed["not_judged"].as_array().unwrap().len(), 2);
+    assert_eq!(mixed["included"].as_array().unwrap().len(), 0);
     std::fs::remove_file(pool.join("other-unpaid.tx")).unwrap();
     // extend with the price builds the block without them and keeps their files; without --txs the flag is refused.
     let err = produce(&["extend", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--fresh-slot-price-wei", PRICE]);
@@ -390,7 +395,87 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     let two = produce(&["extend", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(),
                         "--txs", pool_s, "--fresh-slot-price-wei", PRICE]).unwrap();
     assert_eq!(two["transactions"], 0, "{two}");
-    assert_eq!(two["unpaid"].as_array().unwrap().len(), 9);
+    assert_eq!(two["unpaid"].as_array().unwrap().len(), 8);
+    assert_eq!(two["not_judged"].as_array().unwrap().len(), 1);
     assert_eq!(two["pruned"], 0);
     assert_eq!(spool(&pool), files_before, "an unpaid transaction keeps its spool file");
+}
+
+/// Review R308-2P-13, measured: an adversarial chain (every sender writes the same slot below the price, so each
+/// refusal uncovers the next) against the pass cap, with honest transfers ahead of and behind it. Prints the
+/// wall time of the priced and unpriced `select`; the numbers are recorded in docs/SEQUENCER-POLICY-V2.md.
+#[test]
+fn write_price_pass_cap_bounds_an_adversarial_chain() {
+    const GWEI: u128 = 1_000_000_000;
+    const PRICE: &str = "1000000000000000";
+    const CHAIN: usize = 400;
+    const HONEST: usize = 40;
+    let root = tempfile::tempdir().unwrap();
+    let (db, pool) = (root.path().join("db"), root.path().join("pool"));
+    std::fs::create_dir(&pool).unwrap();
+    let (db_s, pool_s) = (db.to_str().unwrap(), pool.to_str().unwrap());
+    let parent = produce(&["init", "--target", db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let key_of = |i: usize| SigningKey::from_bytes((&{
+        let mut seed = [9u8; 32];
+        seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+        seed
+    }).into()).unwrap();
+    let sign = |i: usize, nonce: u64, to: TxKind, input: Vec<u8>, value: u64, tip: u128| {
+        let tx = TxEip1559 { chain_id: 700_771, nonce, to, input: input.into(), value: U256::from(value), gas_limit: 200_000,
+                             max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
+        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+    };
+    let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
+    let deposits = root.path().join("deposits.json");
+    let mints: Vec<_> = (0..CHAIN + HONEST + 1)
+        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .collect();
+    std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
+    let anchor = "ab".repeat(32);
+    let init = hex::decode("67600035602035550060005260086018f3").unwrap();
+    std::fs::write(pool.join("deploy.tx"), sign(CHAIN + HONEST, 0, TxKind::Create, init, 0, 30 * GWEI)).unwrap();
+    let one = produce(&["extend", "--target", db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", pool_s]).unwrap();
+    assert_eq!(one["transactions"], 1, "{one}");
+    let head = one["hash"].as_str().unwrap().to_string();
+    let contract = address(CHAIN + HONEST).create(0);
+    let mut store = vec![0u8; 64];
+    store[31] = 1;
+    store[63] = 5;
+    // Honest transfers at 15 gwei (ahead of the chain) and at 1 gwei (behind it); the chain at 10 gwei down to 6.
+    for i in 0..HONEST {
+        let tip = if i < HONEST / 2 { 15 * GWEI } else { GWEI };
+        std::fs::write(pool.join(format!("honest-{i}.tx")), sign(CHAIN + i, 0, TxKind::Call(Address::repeat_byte(0x55)), vec![], 1_000, tip)).unwrap();
+    }
+    for i in 0..CHAIN {
+        let tip = 10 * GWEI - (i as u128) * 10_000_000;
+        std::fs::write(pool.join(format!("chain-{i}.tx")), sign(i, 0, TxKind::Call(contract), store.clone(), 0, tip)).unwrap();
+    }
+    let empty = root.path().join("empty.json");
+    std::fs::write(&empty, "[]").unwrap();
+    let timed = |extra: &[&str]| {
+        let mut args = vec!["select", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(), "--txs", pool_s];
+        args.extend_from_slice(extra);
+        let started = std::time::Instant::now();
+        let report = produce(&args).unwrap();
+        (report, started.elapsed())
+    };
+    let (plain, plain_time) = timed(&[]);
+    let (priced, priced_time) = timed(&["--fresh-slot-price-wei", PRICE]);
+    eprintln!(
+        "R308-2P-13 measured: pool {} entries (chain {CHAIN}, honest {HONEST}); select without the price {:?} ({} included); with the price {:?}: passes {}, capped {}, included {}, unpaid {}, not judged {}",
+        CHAIN + HONEST, plain_time, plain["included"].as_array().unwrap().len(), priced_time, priced["write_price"]["passes"],
+        priced["write_price"]["capped"], priced["included"].as_array().unwrap().len(),
+        priced["unpaid"].as_array().unwrap().len(), priced["not_judged"].as_array().unwrap().len()
+    );
+    assert_eq!(priced["write_price"]["passes"], 8);
+    assert_eq!(priced["write_price"]["capped"], true);
+    assert_eq!(priced["unpaid"].as_array().unwrap().len(), 8);
+    // Liveness: the honest transfers ahead of the chain are in the block; nothing unpaid is.
+    assert_eq!(priced["included"].as_array().unwrap().len(), HONEST / 2, "{}", priced["write_price"]);
+    assert!(priced["tx_stats"].as_array().unwrap().iter().all(|t| t["fresh_slots"].as_array().unwrap().is_empty()));
+    assert_eq!(priced["not_judged"].as_array().unwrap().len(), CHAIN - 8 + HONEST / 2);
+    // Bounded work: at most the cap times one selection, with slack for a loaded host.
+    assert!(priced_time < plain_time * 12 + std::time::Duration::from_secs(5), "{priced_time:?} against {plain_time:?}");
 }
