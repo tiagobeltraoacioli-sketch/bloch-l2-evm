@@ -533,6 +533,17 @@ class Alerts(unittest.TestCase):
         m.handle_alerts(cfg, self.report(), 1060, False, 5.0, sender=sender)  # unchanged: quiet, still pinged
         self.assertEqual((order, len(self.pings)), (['alert'], 2))
 
+    def test_r308_2p_11_one_dead_target_does_not_undo_a_delivery(self):
+        """Review R308-2P-11: the webhook delivered, the command failed. The alert counts as delivered: the plain
+        ping goes out, the state is written and the webhook does not get the same alert on the next run."""
+        cfg = self.alert_config(webhook_url='https://hooks.example/x', alert_command=[sys.executable, '-c', 'raise SystemExit(7)'])
+        r = self.report()
+        self.assertEqual(m.handle_alerts(cfg, r, 1000, False, 5.0), 'raise')
+        self.assertIsNone(m.handle_alerts(cfg, self.report(), 1060, False, 5.0))
+        self.assertEqual(self.pings, ['https://hooks.example/x', 'https://hc.example/ping/l1', 'https://hc.example/ping/l1'])
+        delivery = next(c for c in r.checks if c['check'] == 'alert_delivery')
+        self.assertIn('alert delivered by webhook; failed: command: RuntimeError: alert_command exit 7', delivery['message'])
+
     def test_r308_31_no_heartbeat_configured_is_warn(self):
         for url in ('TBD-owner', None):
             ok = m.Report()
