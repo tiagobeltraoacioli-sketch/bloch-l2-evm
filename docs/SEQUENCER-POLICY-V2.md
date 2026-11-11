@@ -432,13 +432,19 @@ it fail (section 9.1). "Integration" means a requirement on the settler, produce
 
 Residual of F264-2: closed in round 15. The write price is inside the producer's own selection
 (`produce-dev select|extend --fresh-slot-price-wei N [--write-exempt A,B]`, turned on by `producer_write_price`):
-the first transaction in block order that adds slots without paying leaves and the selection runs again, so a
-chain of non-payers of any length leaves in one selection, a payer behind it is judged on the block as built,
-and no block of this producer holds an unpaid slot whatever the gate did. The producer reports what it left
-under `unpaid`; the policy holds those as `below-write-price`. `final-gate-unsettled` can still be logged when a
-write LIMIT does not settle; it no longer means an unpaid slot. Tests: `tests/produce_txs.rs`
-(`write_price_leaves_a_whole_chain_of_non_payers_pending`, the real binary) and
-`test_round15_producer_write_price.py`.
+the first transaction in block order that adds slots without paying leaves and the selection runs again, so each
+transaction is judged on the block as built, and no block of this producer holds an unpaid slot whatever the gate
+did. The passes are capped at 8 per call (review R308-2P-13): when the eighth still finds an unpaid transaction,
+the block keeps the transactions ahead of it and everything behind stays pending, reported as `not_judged`
+(held `behind-unpaid-pass-cap`, no wait). The producer reports what it left under `unpaid`; the policy holds those
+as `below-write-price` with a wait of `unpaid_first_wait_seconds` (300 s) that doubles with every further report
+of the same bytes up to one hour, and leaves a waiting transaction out of every producer call, the idle demand
+check included; a same-nonce replacement starts again (R308-2P-14: a payer whose slot someone else created is
+served once the short first wait is over). A producer call that times out is a producer refusal, so the
+deposits-only block is still built. `final-gate-unsettled` can still be logged when a write LIMIT does not
+settle; it no longer means an unpaid slot. Measured (the real binary, debug build, shared build host): a pool of 440 entries, 400 of them a chain in which each refusal uncovers the next, 20 honest transfers ahead of it and 20 behind: one selection without the price takes 0.39 s (150 fit the declared-gas limit); with the price the call takes 2.5 s: 8 passes, capped, the 20 honest transactions ahead are in the block, 8 are reported unpaid, 412 not judged. Without the cap the same pool would take 401 passes, about 2.5 minutes at this rate, in every call. Tests: `tests/produce_txs.rs`
+(`write_price_leaves_a_whole_chain_of_non_payers_pending`, `write_price_pass_cap_bounds_an_adversarial_chain`,
+the real binary), `test_round15_producer_write_price.py`, `review_r15_308_2p_u3_waits.py`.
 
 ## 7. Residual risks (accepted or open)
 
