@@ -38,7 +38,7 @@ class ReorgTest(Base):
     def settler(self, world, reorg=None, **extra):
         if reorg is not False:
             extra['reorg_recovery'] = self.reorg_config(**(reorg or {}))
-        return self.base_settler(world, recovery=extra.pop('recovery', False), **extra)
+        return self.base_settler(world, recovery=extra.pop('recovery', True), **extra)
 
     def reorged(self, finalized=True):
         """Local 1 (accepted, kept by L1), 2 (accepted on the losing fork) and 3 (built); L1 now accepts 1."""
@@ -177,10 +177,11 @@ class ReorgTest(Base):
         world.l1 = [f.block('c1')]
         world.foreign(1, f.block('c1'))
         world.finalize(f.block('c1'))
-        with self.assertRaisesRegex(s.Halt, 'another settler'):
-            self.settler(world).cycle()
-        self.assertFalse(self.rebuilt(world))
+        # reorg_recovery always comes with foreign_recovery (R308-22): the block goes to the foreign path, which
+        # is none of this suite's business; the reorg path neither detects nor counts it.
+        self.settler(world).cycle()
         self.assertFalse(self.events('reorg-detected'))
+        self.assertFalse((self.root / 'db.reorg-recoveries.json').exists())
 
     def test_a_follower_finality_that_contradicts_the_quorum_halts(self):
         world = self.reorged(finalized=False)
@@ -245,7 +246,7 @@ class ReorgTest(Base):
 
     def test_dry_run_reports_the_case_and_changes_nothing(self):
         world = self.reorged()
-        config = self.config(recovery=False, reorg_recovery=self.reorg_config())
+        config = self.config(recovery=True, reorg_recovery=self.reorg_config())
         (self.root / 'out').mkdir()
         code = s.dry_run(config, out=str(self.root / 'out' / 'run'), rpc=world.rpc, run=world.run, sleep=lambda _: None)
         self.assertEqual(code, 2)
@@ -281,8 +282,10 @@ class ReorgTest(Base):
                     {'window_seconds': True}):
             with self.assertRaises(s.Halt):
                 self.settler(world, reorg=bad)
-        with self.assertRaisesRegex(s.Halt, 'needs follower_state'):
-            self.base_settler(world, recovery=False, reorg_recovery={})
+        # R308-22: reorg_recovery alone is refused, with or without its own follower paths.
+        for alone in ({}, self.reorg_config()):
+            with self.assertRaisesRegex(s.Halt, 'reorg_recovery needs foreign_recovery'):
+                self.base_settler(world, recovery=False, reorg_recovery=alone)
         # The follower paths can come from foreign_recovery.
         settler = self.base_settler(world, recovery=True, reorg_recovery={})
         self.assertEqual(settler.c['reorg_recovery']['follower_state'], str(self.root / 'follower'))

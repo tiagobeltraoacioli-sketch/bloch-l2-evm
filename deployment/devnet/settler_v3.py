@@ -1260,7 +1260,7 @@ class Endpoints:
             held.append(port)
             first = response if first is None else first
         if not held:
-            raise SubmitRefused(errors)
+            raise SubmitRefused(errors, self.quorum)
         if errors:
             log('submit-partial', held_by=held, errors=[f'{p}: {e}'[:300] for p, e in errors])
         return held, first
@@ -1269,6 +1269,8 @@ class Endpoints:
 # Native sendrawtransaction refusals (bloch-pos-node rpc.rs / engine.rs, release 78b7343a).
 TX_REFUSED, TX_REFUSED_RETRYABLE, MEMPOOL_FULL, TX_REFUSED_SOURCE_CAP = -32008, -32009, -32003, -32010
 ONE_PROOF_PENDING = 'one L2 proof is already pending'
+# Cycles in a row a producer timeout on a kept database means "wait" before it means "unusable" (R308-22).
+KEPT_SCAN_TIMEOUTS = 3
 # sendrawtransaction answers that mean the node holds the bytes (native rpc.rs Admitted::New / Duplicate).
 SUBMIT_HELD = ('accepted', 'duplicate')
 
@@ -1279,8 +1281,8 @@ class SubmitRefused(RuntimeError):
     another proof already pending; anything else (transport failure, full
     mempool, retryable bar, a pending proof) is 'retry'."""
 
-    def __init__(self, errors):
-        self.errors = errors
+    def __init__(self, errors, quorum=None):
+        self.errors, self.quorum = errors, quorum
         super().__init__('sendrawtransaction failed on every RPC endpoint: '
                          + '; '.join(f'{p}: {e}'[:200] for p, e in errors))
 
@@ -1290,6 +1292,18 @@ class SubmitRefused(RuntimeError):
             return 'retry'
         terminal = [e for e in refusals if f"'code': {TX_REFUSED}," in e and ONE_PROOF_PENDING not in e]
         return 'terminal' if len(terminal) == len(refusals) else 'retry'
+
+    def refused_by_quorum(self):
+        """Whether at least a quorum of endpoints answered and every answer was a terminal refusal, while the rest
+        gave no answer at all (R308-25: one endpoint down, the tolerated fault). `kind()` stays 'retry' for that
+        mix, because the silent endpoint might have taken the bytes; the worker counts such acceptance windows and
+        halts after `max_unincluded_windows` of them instead of rebroadcasting for ever."""
+        if self.quorum is None or self.kind() == 'terminal':
+            return False
+        refusals = [e for _, e in self.errors if e.startswith('RpcError')]
+        if len(refusals) < self.quorum or any(e.startswith('UnexpectedAnswer') for _, e in self.errors):
+            return False
+        return all(f"'code': {TX_REFUSED}," in e and ONE_PROOF_PENDING not in e for e in refusals)
 
 
 def statement_fields(hex_statement):
@@ -1614,6 +1628,10 @@ class Settler:
         if reorg is not None:
             if not isinstance(reorg, dict):
                 raise Halt('reorg_recovery must be an object')
+            if recovery is None:
+                # R308-22: an own settlement that lands after a rebuild, with no kept database left that holds it,
+                # can only be followed by the foreign rebuild; without it that case is a Halt.
+                raise Halt('reorg_recovery needs foreign_recovery as well')
             reorg = self.c['reorg_recovery'] = {**REORG_DEFAULTS, **reorg}
             for key in ('follower_state', 'follower_status'):
                 reorg[key] = reorg.get(key) or (recovery or {}).get(key) or self.c.get(key)
@@ -1685,6 +1703,9 @@ class Settler:
         stall = self.c.get('quorum_floor_stall_seconds', 1200)
         if not isinstance(stall, int) or isinstance(stall, bool) or stall < 0:
             raise Halt('quorum_floor_stall_seconds must be a non-negative integer')
+        self.quorum_refused = False  # the last broadcast was refused for good by a quorum, the rest silent
+        self.refused = {}  # consecutive acceptance windows that ended so, per settlement bytes (R308-25)
+        self.kept_scan_timeouts = 0  # consecutive cycles a kept database timed out in restore_own_settlement
         self.unincluded = {}  # consecutive acceptance windows the same bytes were held but not included
         limit = self.c.get('max_unincluded_windows', 4)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
@@ -2914,8 +2935,13 @@ class Settler:
             ports, response = self.native.submit(tx.hex())
         except SubmitRefused as refused:
             kind = refused.kind()
-            log('submit-refused', number=number, kind=kind, errors=[f'{p}: {e}'[:300] for p, e in refused.errors])
+            by_quorum = refused.refused_by_quorum()
+            self.quorum_refused = self.quorum_refused or by_quorum
+            log('submit-refused', number=number, kind=kind, errors=[f'{p}: {e}'[:300] for p, e in refused.errors],
+                **({'refused_by_quorum': True} if by_quorum else {}))
             return 'terminal' if kind == 'terminal' else False
+        self.quorum_refused = False
+        self.refused = {}
         record['attempts'] = record.get('attempts', 0) + 1
         record.setdefault('first_unix', int(time.time()))
         record['last_status'] = response.get('status')
@@ -2923,6 +2949,23 @@ class Settler:
         log('submitted' if response.get('status') != 'duplicate' else 'submitted-duplicate', number=number,
             response=response.get('status'), tx_hash=response.get('tx_hash'), ports=ports, attempt=record['attempts'])
         return ports
+
+    def submitted_record(self, directory):
+        """The broadcast record of a work directory ({} before the first broadcast). The file is written
+        atomically, so an empty, cut or non-object one is outside damage: a named halt for the operator (R308-24),
+        not a decode error that restarts the unit every minute with the proved block never rebroadcast."""
+        path = directory / 'submitted.json'
+        if not path.exists():
+            return {}
+        try:
+            record = json.loads(path.read_text())
+            if not isinstance(record, dict):
+                raise ValueError(f'a JSON {type(record).__name__}, not an object')
+        except (OSError, ValueError) as error:
+            raise Halt(f'{path} is unreadable ({type(error).__name__}: {str(error)[:200]}): it records which '
+                       'settlement bytes were broadcast for this block. Operator review: compare transaction.bin '
+                       'with what L1 holds, then remove the file so the same proved bytes are broadcast again') from None
+        return record
 
     def submit_and_wait(self, number, directory, tx, view):
         values = tx[33:33 + VALUES_BYTES]
@@ -2936,14 +2979,14 @@ class Settler:
             # The proof is of another program than L1 holds: L1 refuses it. The next cycle rebuilds this block.
             log('program-moved-before-submit', number=number, program=current.get('program'))
             return False
-        path = directory / 'submitted.json'
-        record = json.loads(path.read_text()) if path.exists() else {}
+        record = self.submitted_record(directory)
         if record.get('tx_sha256') not in (None, hashlib.sha256(tx).hexdigest()):
             raise Halt(f'{directory} was submitted with other settlement bytes')
         record['tx_sha256'] = hashlib.sha256(tx).hexdigest()
         if self.dry_run:
             raise Halt('dry run never broadcasts')
         height = self.l1_height()
+        self.quorum_refused = False
         sent = self.broadcast(number, directory, tx, record)
         last_sent = self.clock()
         deadline = self.clock() + self.c['acceptance_timeout_seconds']
@@ -2974,7 +3017,25 @@ class Settler:
             log('l1-not-advancing', number=number, l1_height=now)  # the L1 is stalled; nothing to fix here
         elif held and height is not None and now is not None:
             self.not_included(number, record['tx_sha256'], held)
+        if not held and self.quorum_refused:
+            self.refused_window(number, record['tx_sha256'])
         return False
+
+    def refused_window(self, number, tx_sha256):
+        """An acceptance window ended in which no endpoint held these bytes and the last broadcast was refused for
+        good by a quorum of endpoints while the others did not answer (R308-25). Such a settlement will not be
+        taken; with an endpoint down the refusal is classed `retry`, so without this count the worker would
+        rebroadcast for ever. Same limit and counter shape as `not_included` (`max_unincluded_windows`, 0 = alert
+        only); a held broadcast or other bytes reset it."""
+        if self.refused.get('tx') != tx_sha256:
+            self.refused = {'tx': tx_sha256, 'windows': 0}
+        self.refused['windows'] += 1
+        windows, limit = self.refused['windows'], self.c.get('max_unincluded_windows', 4)
+        log('settlement-refused-by-quorum', number=number, windows=windows, halt_after=limit)
+        if limit and windows >= limit:
+            raise Halt(f'a quorum of native endpoints refused the settlement of L2 block {number} for good (policy, '
+                       f'source, successor or proof) in {windows} acceptance windows in a row while the other '
+                       'endpoints did not answer, and its request is unchanged: operator review')
 
     def program_moved(self, current, view):
         """Whether L1 no longer holds the program this block was proved for. With `next_program` that is the
@@ -3133,14 +3194,24 @@ class Settler:
         return recent
 
     def first_sight_height(self):
-        """The L1 height at which the current view was seen: the (faults + 1)-th largest height reported by the
-        endpoints that formed the view (153 L2: one endpoint, inside or outside the view, cannot push it out of
-        reach). None without an answer from the view's endpoints."""
+        """The L1 height at which the current view was seen: the upper median of the heights reported by every
+        answering endpoint, inside or outside the view (the larger of two). It gates the rebuild from below
+        (`l1_final < reorg_l1_height` waits), so it must not be lowered by one endpoint (R308-23: with a
+        two-endpoint view the old (faults + 1)-th largest was the smaller of the two); with three or more answers one
+        endpoint cannot push it out of reach either (153 L2). With two answers one endpoint can raise it: that only
+        delays the rebuild until L1 finality passes the height it named. None when no endpoint of the view
+        answered."""
         answers = self.native.gather('getchaininfo')
-        heights = sorted(int(a['height']) for port, a in answers.items() if port in self.view_support)
-        if not heights:
+        heights = {}
+        for port, answer in answers.items():
+            try:
+                heights[port] = int(answer['height'])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not any(port in self.view_support for port in heights):
             return None
-        return heights[max(0, len(heights) - 1 - self.native.faults)]
+        ordered = sorted(heights.values())
+        return ordered[len(ordered) // 2]
 
     def behind_floor_case(self, view):
         """A partial quorum shows an accepted settlement below the highest one seen (`accepted_floor`): two stale
@@ -3235,8 +3306,7 @@ class Settler:
                 if not self.publish_da(number + 1, directory, values):
                     state['last'] = self.clock()
                     return True
-        path = directory / 'submitted.json'
-        record = json.loads(path.read_text()) if path.exists() else {}  # read and checked in still_valid_settlement
+        record = self.submitted_record(directory)  # read and checked in still_valid_settlement
         record['tx_sha256'] = hashlib.sha256(tx).hexdigest()
         sent = self.broadcast(number + 1, directory, tx, record)
         state['last'] = self.clock()
@@ -3353,7 +3423,11 @@ class Settler:
         """After a rebuild, this worker's old settlement of M+1 can still land (its bytes are public and the request
         was unchanged; 153 M2). Then a database kept aside by an earlier swap holds the accepted block: swap it back
         (journalled, with its work directories) instead of a second reconstruct. None when no kept database holds the
-        accepted block; True once swapped. Counts against the recovery limit."""
+        accepted block; True once swapped. Counts against the recovery limit.
+
+        False (wait, scan again next cycle) when the producer timed out on a kept database (R308-22): a loaded host
+        is not "no kept database holds the block", and reading it so starts a second reconstruct that discards the
+        kept work and proofs. After `KEPT_SCAN_TIMEOUTS` cycles in a row the database is read as unusable."""
         reorg = self.c['reorg_recovery']
         view = self.native_view()
         accepted = view and view.get('accepted')
@@ -3365,17 +3439,30 @@ class Settler:
         prefix = f'{db.name}.orphaned-'
         kept = sorted((p for p in db.parent.iterdir() if p.name.startswith(prefix) and p.name[len(prefix):].isdigit()),
                       key=lambda p: int(p.name[len(prefix):]), reverse=True)
+        slow = []
         for candidate in kept:
             try:
                 head = self.produce('head', '--target', str(candidate))
                 if head['number'] < number or self.produce('hash', '--target', str(candidate), '--number',
                                                            str(number))['hash'] != l2_hash:
                     continue
-            except (ProducerError, KeyError, ValueError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
+                slow.append(candidate.name)
+                continue
+            except (ProducerError, KeyError, ValueError):
                 continue
             break
         else:
+            if slow and self.kept_scan_timeouts < KEPT_SCAN_TIMEOUTS:
+                self.kept_scan_timeouts += 1
+                log('kept-database-scan-timeout', accepted=number, databases=slow, cycles=self.kept_scan_timeouts,
+                    give_up_after=KEPT_SCAN_TIMEOUTS)
+                return False
+            if slow:
+                log('kept-database-unreadable', accepted=number, databases=slow, cycles=self.kept_scan_timeouts)
+            self.kept_scan_timeouts = 0
             return None
+        self.kept_scan_timeouts = 0
         brief = {'accepted': number, 'accepted_hash': l2_hash, 'restored': candidate.name,
                  'restored_head': head['number']}
         recent = self.recent_recoveries(reorg, None, brief, f'own settlement {number} landed after a rebuild',
@@ -3393,7 +3480,7 @@ class Settler:
                        and common < int(p.name[:8]) <= head['number']) if source.is_dir() else []
         stale = {d.name for d in self.stale_directories(common, current, number)}
         stale |= {n for n in names if (self.work / n).exists()}
-        stamp = time.time_ns()
+        stamp = self.swap_stamp()
         atomic_write(self.reorg_history(), json.dumps([*recent, {'unix': int(time.time()), 'accepted': number,
                                                                  'accepted_hash': l2_hash, 'restored': candidate.name,
                                                                  'rebuilt_head': head['number']}], indent=1) + '\n')
@@ -3501,7 +3588,7 @@ class Settler:
         da_paid = sum(len(list(d.glob('da-signed-*.hex'))) for d in stale)
         if before_swap is not None:
             before_swap({'number': number, 'l2_hash': l2_hash})
-        stamp = time.time_ns()
+        stamp = self.swap_stamp()
         ready = db.with_name(f'{db.name}.rebuilt-{stamp}')
         rebuilding.rename(ready)
         journal = {'rebuilt': str(ready), 'kept': str(db.with_name(f'{db.name}.orphaned-{stamp}')),
@@ -3569,6 +3656,18 @@ class Settler:
                     stale.append(path)
         return stale
 
+    def swap_stamp(self):
+        """The number that names what a swap keeps aside: the wall clock in nanoseconds, but always above every
+        number already used by a kept database or work directory, so that the names stay in swap order when the
+        clock steps back (R308-26)."""
+        db = Path(self.c['l2_db'])
+        used = [0]
+        for prefix, parent in ((f'{db.name}.orphaned-', db.parent), (f'{self.work.name}-orphaned-', self.work.parent)):
+            if parent.is_dir():
+                used += [int(p.name[len(prefix):]) for p in parent.iterdir()
+                         if p.name.startswith(prefix) and p.name[len(prefix):].isdigit()]
+        return max(time.time_ns(), max(used) + 1)
+
     def finish_swap(self):
         """Complete a journalled swap; every step is skipped once done, so a crash at any point resumes here."""
         journal = self.recovery_journal()
@@ -3593,9 +3692,15 @@ class Settler:
                     (source / name).rename(self.work / name)
         keeps = [self.c[k].get('keep', 2) for k in ('foreign_recovery', 'reorg_recovery') if self.c.get(k)]
         keep = max(keeps) if keeps else 2
-        for prefix, parent in ((f'{db.name}.orphaned-', db.parent), (f'{self.work.name}-orphaned-', self.work.parent)):
-            old = sorted((p for p in parent.iterdir() if p.name.startswith(prefix)), key=lambda p: int(p.name[len(prefix):]))
-            for path in old[:-keep]:
+        # What this swap has just kept is never pruned, whatever its number says (R308-26: a journal written before
+        # a backward clock step, or by an older worker); it takes one of the `keep` places. Names whose suffix is
+        # not a number (an operator's copy, `*.orphaned-N.bak`) are not this worker's and are left alone (R308-24).
+        for prefix, parent, mine in ((f'{db.name}.orphaned-', db.parent, kept),
+                                     (f'{self.work.name}-orphaned-', self.work.parent, aside)):
+            old = sorted((p for p in parent.iterdir() if p.name.startswith(prefix) and p.name[len(prefix):].isdigit()
+                          and p != mine), key=lambda p: int(p.name[len(prefix):]))
+            room = keep - 1 if mine.parent == parent and mine.exists() else keep
+            for path in old[:len(old) - room]:
                 shutil.rmtree(path, ignore_errors=True)
         atomic_write(self.work.parent / 'l2-db-generation.json', json.dumps(
             {'database': str(db), 'number': state['number'], 'l2_hash': state['l2_hash'], 'time': int(time.time())}) + '\n')
