@@ -150,6 +150,9 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'foreign-rebuild-behind-view', 'idle-check-failed', 'spool-demand-unknown',
                          # Agent 193 (M2): some RPCs refused a broadcast; held bytes not included while L1 advances.
                          'submit-partial', 'settlement-not-included',
+                         # Review R308-22, R308-25: a kept database the producer cannot read in time (the worker waits,
+                         # then gives it up); an acceptance window in which a quorum refused the bytes for good.
+                         'kept-database-scan-timeout', 'kept-database-unreadable', 'settlement-refused-by-quorum',
                          # Agent 198 (152 L1): a partial quorum stays behind the accepted floor.
                          'rpc-quorum-behind-floor',
                          # Fork candidate (agent 218): a proof wasted at a program gate, the schedule unusable (fail-safe

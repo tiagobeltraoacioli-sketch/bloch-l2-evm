@@ -130,7 +130,7 @@ class Commitment(unittest.TestCase):
         self.assertNotIn('allow-burn', (HERE / 'SWEEP-RECIPIENT-PROCEDURE.md').read_text())
 
     def test_patterned_is_quiet_on_ordinary_addresses(self):
-        for a in (THROWAWAY, 'd8da6bf26964af9d7eed9e03e53415d37aa96045', '5aaeb6053f3e94c9b9a09f33669435e7ef1beaed',
+        for a in (THROWAWAY, 'fb6916095ca1df60bb79ce92ce3ea74c37c5d359', '5aaeb6053f3e94c9b9a09f33669435e7ef1beaed',
                   '000000000022d473030f116ddee9f6b43ac78ba3', '00000000219ab540356cbb839cbe05303d7705fa'):
             self.assertIsNone(m.patterned(a), a)
             self.assertEqual(m.parse_address(m.eip55(a)), a)
@@ -296,7 +296,7 @@ class Steps(unittest.TestCase):
                  'one-line constant with the doc': (good.replace(m.recipient_constant(THROWAWAY), one_line), 0),
                  'hand edit, no doc line': (m.RECIPIENT_RE.sub(lambda _: one_line, text), 3),
                  'one wrong digit in the constant': (good.replace(f'hex!("{THROWAWAY}")', f'hex!("{typo}")'), 3),
-                 'doc line of another address': (good.replace(T55, m.eip55('d8da6bf26964af9d7eed9e03e53415d37aa96045')), 3),
+                 'doc line of another address': (good.replace(T55, m.eip55('fb6916095ca1df60bb79ce92ce3ea74c37c5d359')), 3),
                  'doc line in lowercase': (good.replace(T55, '0x' + THROWAWAY), 3),
                  'two doc lines': (good.replace('/// rules, fixed', '/// rules, fixed by the owner: `' + T55 + '`.\n/// rules, fixed'), 3)}
         for name, (body, code) in cases.items():
@@ -367,7 +367,7 @@ class Steps(unittest.TestCase):
 
     def test_set_is_one_command(self):
         # R308-4: without --rpc the address is typed twice; a missing, different or unchecked second form writes nothing
-        other = m.eip55('d8da6bf26964af9d7eed9e03e53415d37aa96045')
+        other = m.eip55('fb6916095ca1df60bb79ce92ce3ea74c37c5d359')
         for extra in ((), ('--confirm', other), ('--confirm', '0x' + THROWAWAY), ('--confirm', T55, '--allow-codeless')):
             with self.subTest(extra=extra), self.assertRaises(SystemExit):
                 run('set', T55, '--l2', self.l2, '--native', self.native, *extra)

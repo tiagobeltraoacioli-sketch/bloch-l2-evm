@@ -128,7 +128,8 @@ Differences, all deliberate:
   off-rule block), requires its head to be the accepted hash, returns the user transactions of orphaned
   local blocks to the spool, moves their work directories aside (so no DA batch of theirs is ever paid
   again), swaps the databases and continues. A refused rebuild still halts (exit 3): that is an off-rule
-  block or local damage. Without `foreign_recovery` any foreign statement halts, as before. Readers of
+  block or local damage. Without `foreign_recovery` any foreign statement halts, as before
+  (`reorg_recovery` cannot be set without it: review R308-22). Readers of
   the database must reopen it after a swap: the worker rewrites `<workdir>/../l2-db-generation.json`,
   which a systemd path unit watches to restart the settled RPC.
 * program swap (`next_program`, candidate; native `L2_NEXT_PROGRAM_EPOCH` inert):
