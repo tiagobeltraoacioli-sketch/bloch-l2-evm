@@ -159,11 +159,11 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `0d274db835d7b405439023d476c14c0e182d081a70f17c050caf74169efe5f8c` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `d57961bdaaca49ebc115de8aee128580ae6bc89bbaf442884fa190e5f87eec07` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `480a513cd5e0305c0c2b909f405a0aea48eb02320314be597df1511490a8d77d` |
 | `deployment/devnet/settler_v3.py` | `ac748f3f3050397398c176d93c6461bc326ae9db82efc8ef7679f32cceb849af` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `b900a6baf54d62711c28ac76d9cd2f96a69aa87dee390f7a1123554951a657c7` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `ca6b7992cb440f8064e1e3b15c33f8be8eda618a7ca3a5829f9b4f58a9478c10` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d52b7086c7cdfed78ee71de58a4323b5ee9826fdec8fccc7bace09e37d5b40f7` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
 | `deployment/mainnet/install-shadow.sh` | `a0494cd96d873d93c27a3ab04bd1eba509938562ba2001a4541c55ae5074c8b1` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
@@ -387,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `0d274db835d7b405439023d476c14c0e182d081a70f17c050caf74169efe5f8c` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `d57961bdaaca49ebc115de8aee128580ae6bc89bbaf442884fa190e5f87eec07` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 
