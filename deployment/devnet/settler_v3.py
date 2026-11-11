@@ -1976,6 +1976,15 @@ class Settler:
             args += ['--fresh-slot-price-wei', str(policy.c['fresh_slot_price_wei'])]
             if policy.c['write_limit_exempt_senders']:
                 args += ['--write-exempt', ','.join(policy.c['write_limit_exempt_senders'])]
+            # Senders with standing are selected ahead of the others; senders that wait out an unpaid report are
+            # not executed at all (review R308-3P-2). Both lists are the policy's state, written beside the pool.
+            lists = Path(pool).parent if Path(pool).is_file() else self.work
+            for flag, name, senders in (('--write-standing', 'write-standing.json', sorted(policy.state['standing'])),
+                                        ('--write-waiting', 'write-waiting.json', sorted(policy.waiting_senders(policy.clock())))):
+                if senders:
+                    path = Path(lists) / name
+                    atomic_write(path, json.dumps(senders))
+                    args += [flag, str(path)]
         return args
 
     def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):
@@ -2293,15 +2302,9 @@ class Settler:
             args = self.extend_arguments(head, view['source']['block'], deposits, slot, spool=False)
             args[0] = 'select'
             policy = self.policy()
-            pool = self.c['txpool_dir']
-            waiting = policy.waiting_unpaid(policy.clock())
-            if waiting:
-                # Transactions that wait out a refusal of their own payment are not given to the producer again
-                # (review R308-2P-13): the demand check runs every idle cycle.
-                pool = directory / 'pool.json'
-                pool.write_text(json.dumps([raw for _, raw in self.spool_entries()
-                                            if keccak256(bytes.fromhex(raw)).hex() not in waiting]))
-            report = self.produce(*args, *self.pool_arguments(pool, selecting=True))
+            # Senders that wait out an unpaid report are left out by the producer itself (`--write-waiting`, from
+            # `pool_arguments`), in the demand check as in the plan.
+            report = self.produce(*args, *self.pool_arguments(self.c['txpool_dir'], selecting=True))
             due = policy.demand(report.get('tx_stats') or [], policy.clock(), False)
             policy.save()
             return due

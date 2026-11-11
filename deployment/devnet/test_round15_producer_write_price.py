@@ -90,8 +90,9 @@ class ProducerWritePrice(PricedWorld):
 
 
 class UnpaidWaitsEscalate(PricedWorld):
-    """Review R308-2P-13 / R308-2P-14: a first unpaid report waits five minutes, each further report of the same
-    bytes twice as long up to the hour; a waiting non-payer is not handed to the producer; a replacement starts again."""
+    """Review R308-3P-2 (coordinator decision): the SENDER of an unpaid transaction waits 40 minutes, longer than a
+    block interval, and twice as long after each further report, up to a day; while it waits its bytes are not
+    handed to the producer. The wait follows the sender: a replacement or another nonce does not start again."""
 
     def given(self):
         seen = []
@@ -116,11 +117,25 @@ class UnpaidWaitsEscalate(PricedWorld):
             seen = self.given()
             self.block(advance=2)              # and then past it
             self.assertFalse(any('np' in names for names in seen), f'handed to the producer inside its wait {waits}')
-            self.assertEqual(dict(self.plans[-1].held).get(next(iter(dict(self.plans[-1].held)))), 'gate-dependent-wait')
+            self.assertEqual(dict(self.plans[-1].held).get(next(iter(dict(self.plans[-1].held)))), 'unpaid-sender-wait')
         # measured from the end of the plan, which takes a few seconds of the world's clock
-        self.assertTrue(all(0 <= want - got <= 30 for want, got in zip([300, 600, 1200, 2400, 3600, 3600], waits)), waits)
+        self.assertTrue(all(0 <= want - got <= 30 for want, got in zip([2400, 4800, 9600, 19200, 38400, 76800], waits)), waits)
 
-    def test_the_producers_pass_cap_holds_the_rest_without_a_wait(self):
+    def test_a_replacement_or_a_later_nonce_does_not_reset_the_senders_wait(self):
+        self.add_writer('np', 'mallory', 0, 50_000, 1, ['own'], tip=GWEI)
+        self.block(advance=0)
+        first = self.policy.state['unpaid_senders']['mallory']
+        self.assertEqual(first['count'], 1)
+        self.assertEqual(self.policy.waiting_senders(self.now), {'mallory'})
+        self.now += 2500   # past the first wait: the sender tries other bytes
+        self.spool.clear()
+        self.add_writer('np2', 'mallory', 0, 50_000, 1, ['own2'], tip=2 * GWEI)
+        self.block(advance=0)
+        second = self.policy.state['unpaid_senders']['mallory']
+        self.assertEqual(second['count'], 2)
+        self.assertGreaterEqual(second['until'] - second['at'], 4800)
+
+    def test_the_producers_allowance_holds_the_rest_without_a_wait(self):
         self.add('behind', 'user', 0, 21_000, 1, tip=GWEI)
         inner = self.report
 
@@ -133,7 +148,7 @@ class UnpaidWaitsEscalate(PricedWorld):
             return report
         self.report = capped
         self.block(advance=0)
-        self.assertIn('behind-unpaid-pass-cap', dict(self.plans[-1].held).values())
+        self.assertIn('unpaid-allowance-exhausted', dict(self.plans[-1].held).values())
         self.assertEqual(self.policy.state['waits'], {})
 
     def tx_name(self, name):

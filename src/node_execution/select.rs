@@ -573,3 +573,309 @@ pub fn quote_node_transaction<DB: DatabaseRef>(
         cleared_slots,
     }))
 }
+
+/// The producer's write price (sequencer policy v2), for [`select_node_transactions_priced`]. Host builds only.
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, Default)]
+pub struct WritePrice {
+    /// Wei owed per storage slot a transaction adds: it must hold `gas_used * effective_tip >= slots * per_slot`.
+    pub per_slot: u128,
+    /// Senders that owe no write price.
+    pub exempt: BTreeSet<Address>,
+    /// Senders with standing (they have paid before): selected ahead of every other sender, then by tip.
+    pub standing: BTreeSet<Address>,
+    /// Gas that may be spent executing transactions that are then left out; past it only plain transfers run.
+    pub wasted_gas_allowance: u64,
+}
+
+/// A transaction left out for the write price.
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnpaidTransaction {
+    /// Transaction hash.
+    pub hash: B256,
+    /// Recovered sender.
+    pub sender: Address,
+    /// Its nonce.
+    pub nonce: u64,
+    /// Gas its execution used before its changes were dropped.
+    pub gas_used: u64,
+    /// Priority fee per gas it offered at this block's base fee.
+    pub effective_tip: u128,
+    /// Storage slots it would have added.
+    pub fresh_slots: u64,
+}
+
+/// What a priced selection left out, besides the usual deferred and dropped lists.
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, Default)]
+pub struct LeftUnpaid {
+    /// Executed, would add slots it does not pay for, left out; in the order met.
+    pub unpaid: Vec<UnpaidTransaction>,
+    /// Not executed because the allowance for non-payers was used up; they stay pending.
+    pub not_judged: Vec<B256>,
+    /// Gas spent on the transactions in `unpaid`.
+    pub wasted_gas: u64,
+    /// Whether the allowance ran out.
+    pub exhausted: bool,
+}
+
+/// [`select_node_transactions`] with the producer's write price judged inside the loop (review R308-3P-2, the
+/// remedy agents/304 named): a transaction that would add storage slots it does not pay for is left out, its
+/// changes dropped, and the selection goes on with the next candidate on the block WITHOUT it. One pass; no
+/// transaction is refused for what a refused one did; a non-payer never displaces a payer. Host builds only.
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+pub fn select_node_transactions_priced<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: DB,
+    previous_root: B256,
+    context: &BlockContext,
+    deposits: &[DepositMint],
+    candidates: &[Bytes],
+    limits: SelectionLimits,
+    price: &WritePrice,
+) -> Result<(BlockSelection, LeftUnpaid), BlockExecutionError> {
+    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
+        super::prepare_parent(spec, domain, db, previous_root, context)
+    })?;
+    let mut left = LeftUnpaid::default();
+    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left)?;
+    Ok((selection, left))
+}
+
+/// [`select_node_transactions_priced`] after the forced envelopes (see [`select_node_transactions_after_forced`]).
+#[cfg(all(feature = "std", feature = "forced-inclusion"))]
+#[allow(clippy::too_many_arguments)]
+pub fn select_node_transactions_priced_after_forced<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: DB,
+    previous_root: B256,
+    context: &BlockContext,
+    deposits: &[DepositMint],
+    forced: &[crate::forced_inclusion::ForcedTransaction],
+    candidates: &[Bytes],
+    limits: SelectionLimits,
+    price: &WritePrice,
+) -> Result<(crate::forced_inclusion::ForcedSelection, BlockSelection, LeftUnpaid), BlockExecutionError> {
+    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
+        super::prepare_parent(spec, domain, db, previous_root, context)
+    })?;
+    let forced = if spec.forced_inclusion || !forced.is_empty() {
+        if !spec.forced_inclusion {
+            return Err(crate::forced_inclusion::ForcedRuleError::NotEnabled.into());
+        }
+        crate::forced_inclusion::run_forced(spec, &mut session, forced)?
+    } else {
+        Default::default()
+    };
+    let mut left = LeftUnpaid::default();
+    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left)?;
+    Ok((forced, selection, left))
+}
+
+// The loop of `select_in_session`, with the write price judged before a transaction's changes land. A copy, not
+// a change of that function: it is compiled into the settlement guests and must keep its bytes and line numbers.
+#[cfg(feature = "std")]
+fn select_priced_in_session<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    session: &mut BlockSession<DB>,
+    context: &BlockContext,
+    candidates: &[Bytes],
+    limits: SelectionLimits,
+    price: &WritePrice,
+    left: &mut LeftUnpaid,
+) -> Result<BlockSelection, BlockExecutionError> {
+    let limits = limits.clamp(spec);
+    let mut selection = BlockSelection::default();
+
+    // Authenticate and group by sender in nonce order (stable for equal nonces).
+    let mut seen = BTreeSet::new();
+    let mut queues: BTreeMap<Address, VecDeque<Candidate>> = BTreeMap::new();
+    for (index, raw) in candidates.iter().enumerate() {
+        match decode_signed_transaction(spec, raw) {
+            Err(error) => selection.dropped.push(DroppedTransaction {
+                index,
+                hash: None,
+                reason: DropReason::Authentication(error),
+            }),
+            Ok(tx) if !seen.insert(tx.hash()) => selection.dropped.push(DroppedTransaction {
+                index,
+                hash: Some(tx.hash()),
+                reason: DropReason::Duplicate,
+            }),
+            Ok(tx) => queues.entry(tx.sender()).or_default().push_back(Candidate {
+                index,
+                hash: tx.hash(),
+                raw: tx.raw().clone(),
+                env: tx.environment().clone(),
+            }),
+        }
+    }
+    let base_fee = context.base_fee_per_gas;
+    for queue in queues.values_mut() {
+        queue.make_contiguous().sort_by(|a, b| {
+            a.env
+                .nonce
+                .cmp(&b.env.nonce)
+                .then(b.effective_tip(base_fee).cmp(&a.effective_tip(base_fee)))
+                .then(a.hash.cmp(&b.hash))
+        });
+    }
+
+    let defer_rest = |queue: &mut VecDeque<Candidate>, deferred: &mut Vec<DeferredTransaction>| {
+        for rest in queue.drain(..) {
+            deferred.push(DeferredTransaction {
+                index: rest.index,
+                hash: rest.hash,
+                reason: DeferReason::SenderBlocked,
+            });
+        }
+    };
+
+    loop {
+        // Best next candidate across senders: highest effective tip, then lowest hash.
+        let Some(sender) = queues
+            .iter()
+            .filter_map(|(sender, queue)| queue.front().map(|c| (*sender, c.effective_tip(base_fee), c.hash)))
+            .max_by(|a, b| {
+                // Senders with standing first, then by tip: a sender that never paid cannot stand ahead of one that did.
+                price.standing.contains(&a.0).cmp(&price.standing.contains(&b.0)).then(a.1.cmp(&b.1)).then(b.2.cmp(&a.2))
+            })
+            .map(|(sender, _, _)| sender)
+        else {
+            break;
+        };
+        let queue = queues.get_mut(&sender).expect("selected sender has a queue");
+        let candidate = queue.pop_front().expect("selected queue is non-empty");
+        let defer = |reason, queue: &mut VecDeque<Candidate>, deferred: &mut Vec<DeferredTransaction>| {
+            deferred.push(DeferredTransaction {
+                index: candidate.index,
+                hash: candidate.hash,
+                reason,
+            });
+            defer_rest(queue, deferred);
+        };
+        let expected = session.account_nonce(sender)?;
+        if candidate.env.nonce < expected {
+            selection.dropped.push(DroppedTransaction {
+                index: candidate.index,
+                hash: Some(candidate.hash),
+                reason: DropReason::NonceTooLow {
+                    expected,
+                    got: candidate.env.nonce,
+                },
+            });
+            continue;
+        }
+        if candidate.raw.len().saturating_add(da_framing_bytes(1)) > MAX_DA_PAYLOAD_BYTES {
+            // No DA batch can ever carry it, so no settleable block can hold it.
+            selection.dropped.push(DroppedTransaction {
+                index: candidate.index,
+                hash: Some(candidate.hash),
+                reason: DropReason::Execution("larger than one L1 data-availability batch".to_string()),
+            });
+            defer_rest(queue, &mut selection.deferred);
+            continue;
+        }
+        if candidate.env.gas_limit > spec.gas_limit {
+            // No block can ever hold it.
+            selection.dropped.push(DroppedTransaction {
+                index: candidate.index,
+                hash: Some(candidate.hash),
+                reason: DropReason::Execution("gas limit above the protocol block gas limit".to_string()),
+            });
+            defer_rest(queue, &mut selection.deferred);
+            continue;
+        }
+        // Remaining protocol block gas (deposits already charged) is enforced
+        // by the session itself and reported as a gas-limit deferral.
+        let reason = if candidate.env.nonce > expected {
+            Some(DeferReason::NonceGap)
+        } else if candidate.env.gas_price < u128::from(base_fee) {
+            Some(DeferReason::FeeBelowBaseFee)
+        } else if selection.transactions.len() >= limits.max_transactions {
+            Some(DeferReason::CountLimit)
+        } else if selection.declared_gas.saturating_add(candidate.env.gas_limit) > limits.max_gas {
+            Some(DeferReason::GasLimit)
+        } else if selection.bytes.saturating_add(candidate.raw.len()) > limits.max_bytes
+            || selection
+                .bytes
+                .saturating_add(candidate.raw.len())
+                .saturating_add(da_framing_bytes(selection.transactions.len() + 1))
+                > MAX_DA_PAYLOAD_BYTES
+        {
+            Some(DeferReason::ByteLimit)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            defer(reason, queue, &mut selection.deferred);
+            continue;
+        }
+        // The work spent on non-payers is bounded: past the allowance only plain transfers, which add no slot
+        // whatever ran before them, are still executed; everything else stays pending, unjudged.
+        if left.wasted_gas >= price.wasted_gas_allowance && (candidate.env.gas_limit != 21_000 || !candidate.env.data.is_empty()) {
+            left.exhausted = true;
+            left.not_judged.push(candidate.hash);
+            for rest in queue.drain(..) {
+                left.not_judged.push(rest.hash);
+            }
+            continue;
+        }
+        let (tip, before) = (candidate.effective_tip(base_fee), cached_storage(session.database()));
+        let mut refused = None;
+        let attempt = session.try_transaction_judged(&candidate.env, |gas_used, fresh| {
+            let pays = fresh == 0
+                || price.exempt.contains(&sender)
+                || alloy_primitives::U256::from(gas_used) * alloy_primitives::U256::from(tip)
+                    >= alloy_primitives::U256::from(fresh) * alloy_primitives::U256::from(price.per_slot);
+            if !pays {
+                refused = Some((gas_used, fresh));
+            }
+            pays
+        });
+        if let (Ok(None), Some((gas_used, fresh))) = (&attempt, refused) {
+            // Left out, its changes dropped: the transactions behind it run on the block without it.
+            left.wasted_gas = left.wasted_gas.saturating_add(gas_used);
+            left.unpaid.push(UnpaidTransaction { hash: candidate.hash, sender, nonce: candidate.env.nonce, gas_used, effective_tip: tip, fresh_slots: fresh });
+            continue;
+        }
+        match attempt {
+            Ok(_outcome) => {
+                        {
+                    let gas_used = _outcome.map_or(0, |outcome| outcome.gas_used);
+                    let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
+                    selection.stats.push(TxStats {
+                        hash: candidate.hash,
+                        sender, nonce: candidate.env.nonce,
+                        gas_used,
+                        effective_tip: tip,
+                        fresh_slots,
+                        cleared_slots,
+                    });
+                }
+                selection.declared_gas += candidate.env.gas_limit;
+                selection.bytes += candidate.raw.len();
+                selection.hashes.push(candidate.hash);
+                selection.transactions.push(candidate.raw);
+            }
+            Err(BlockExecutionError::BlockGasLimitExceeded { .. }) => {
+                defer(DeferReason::GasLimit, queue, &mut selection.deferred);
+            }
+            Err(error) => {
+                selection.dropped.push(DroppedTransaction {
+                    index: candidate.index,
+                    hash: Some(candidate.hash),
+                    reason: DropReason::Execution(error.to_string()),
+                });
+                defer_rest(queue, &mut selection.deferred);
+            }
+        }
+    }
+    selection.deferred.sort_by_key(|d| d.index);
+    selection.dropped.sort_by_key(|d| d.index);
+    Ok(selection)
+}

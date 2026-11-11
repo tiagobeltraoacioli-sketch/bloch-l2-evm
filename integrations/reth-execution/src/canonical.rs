@@ -224,6 +224,44 @@ impl CanonicalCoordinator {
         .map_err(BlockExecutionError::other)
     }
 
+    /// [`Self::select_pending_after_forced`] (or [`Self::select_pending`] when `forced` is empty) with the
+    /// producer's write price judged inside the selection (review R308-3P-2): a transaction that would add
+    /// storage slots it does not pay for is left out and reported; the block body is `forced.included` followed
+    /// by the selection's transactions, in that order.
+    pub fn select_pending_priced(
+        &self,
+        attributes: &BlochNextBlockEnvCtx,
+        forced: &[bloch_l2_evm::forced_inclusion::ForcedTransaction],
+        candidates: &[alloy_primitives::Bytes],
+        limits: SelectionLimits,
+        price: &bloch_l2_evm::node_execution::select::WritePrice,
+    ) -> Result<
+        (
+            bloch_l2_evm::forced_inclusion::ForcedSelection,
+            BlockSelection,
+            bloch_l2_evm::node_execution::select::LeftUnpaid,
+        ),
+        BlockExecutionError,
+    > {
+        let spec = self.factory.chain_spec();
+        let config = BlochEvmConfig::for_chain(&spec);
+        let context = config.next_context(self.head.header(), attributes)?;
+        let state = self.factory.latest().map_err(BlockExecutionError::other)?;
+        bloch_l2_evm::node_execution::select::select_node_transactions_priced_after_forced(
+            spec.execution_at(context.number),
+            spec.domain(),
+            reth_revm::database::StateProviderDatabase::new(state.as_ref()),
+            self.head.0.state_root,
+            &context,
+            &attributes.deposits,
+            forced,
+            candidates,
+            limits,
+            price,
+        )
+        .map_err(BlockExecutionError::other)
+    }
+
     /// CANDIDATE (forced inclusion): the forced envelopes L1 names for this
     /// block, by the rule of `bloch_l2_evm::forced_inclusion`, then
     /// [`Self::select_pending`] after them. The block body is

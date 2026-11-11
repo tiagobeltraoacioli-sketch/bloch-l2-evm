@@ -75,11 +75,14 @@ DEFAULTS = {
     'fast_profile_max_sp1_gas': 10_500_000,
     'gate_passes': 6,
     'gate_dependent_wait_seconds': 3600,
-    # A transaction the producer left unpaid waits this long after the first report and twice as long after each
-    # further report of the same bytes, up to `gate_dependent_wait_seconds` (review R308-2P-13, R308-2P-14): a payer
-    # whose slot someone else created meanwhile is served in the next block, a standing non-payer is handed to the
-    # producer less and less often.
-    'unpaid_first_wait_seconds': 300,
+    # A SENDER whose transaction the producer left unpaid waits this long after the first report and twice as long
+    # after each further one, up to `unpaid_max_wait_seconds`; the count is forgotten `unpaid_memory_seconds` after
+    # the last report (review R308-3P-2, coordinator decision: a non-payer is not handed back every block, a fixed
+    # set of keys cannot repeat it each block). The first wait is longer than one block interval. While it waits
+    # none of the sender's transactions is executed by the producer (`--write-waiting`).
+    'unpaid_first_wait_seconds': 2400,
+    'unpaid_max_wait_seconds': 86400,
+    'unpaid_memory_seconds': 7 * 86400,
     # Places under `max_block_txs` that go by tip alone, whatever the group (agents/264 F264-5): a fresh sender's
     # large transaction at a high tip is not kept out for good by 64 small ones at the floor. They are tried last.
     'tip_reserved_txs': 8,
@@ -347,34 +350,32 @@ class Policy:
                 held.append((tx['hash'], 'below-write-price'))
             self._unpaid_wait(tx, now)
             names.append(tx['hash'])
-        # Not judged (the producer's pass cap, R308-2P-13): behind the first unpaid transaction of the last pass. They
-        # keep their files and are tried again in the next block; no wait, they may well pay.
-        for name in report.get('not_judged') or []:
-            if (name, 'behind-unpaid-pass-cap') not in held:
-                held.append((name, 'behind-unpaid-pass-cap'))
+        # Not judged: the producer's allowance for executing non-payers ran out before it reached them. Waiting: their
+        # sender waits out an earlier unpaid report. Both keep their files; neither gets a new wait.
+        for key, reason in (('not_judged', 'unpaid-allowance-exhausted'), ('waiting', 'unpaid-sender-wait')):
+            for name in report.get(key) or []:
+                if (name, reason) not in held:
+                    held.append((name, reason))
         return names
 
     def _unpaid_wait(self, tx, now):
-        """The escalating wait of a transaction the producer reported unpaid: `unpaid_first_wait_seconds`, doubled
-        for every further report of the same bytes (one report per block plan), capped at
-        `gate_dependent_wait_seconds`. A replacement at the same nonce starts again."""
-        seen = self.state.setdefault('unpaid_reports', {})
-        key, record = self.key(tx), None
-        record = seen.get(key)
-        if not record or record.get('hash') != tx['hash']:
-            record = {'hash': tx['hash'], 'count': 0, 'at': None}
+        """The escalating wait of a sender the producer reported unpaid: `unpaid_first_wait_seconds`, doubled for
+        every further report (one per block plan), up to `unpaid_max_wait_seconds`. It follows the SENDER, not the
+        bytes or the nonce: a replacement or a later nonce does not start again."""
+        senders = self.state.setdefault('unpaid_senders', {})
+        record = senders.get(tx['sender'])
+        if not record or (record.get('at') or 0) < now - self.c['unpaid_memory_seconds']:
+            record = {'count': 0, 'at': None, 'until': 0}
         if record['at'] != now:
-            record = {'hash': tx['hash'], 'count': record['count'] + 1, 'at': now}
-        seen[key] = record
-        wait = min(self.c['gate_dependent_wait_seconds'], self.c['unpaid_first_wait_seconds'] * 2 ** (record['count'] - 1))
-        self.state['waits'][key] = {'until': now + wait, 'kind': 'gate-dependent', 'hash': tx['hash']}
+            count = record['count'] + 1
+            wait = min(self.c['unpaid_max_wait_seconds'], self.c['unpaid_first_wait_seconds'] * 2 ** (count - 1))
+            record = {'count': count, 'at': now, 'until': now + wait}
+        senders[tx['sender']] = record
+        self.state['waits'][self.key(tx)] = {'until': record['until'], 'kind': 'gate-dependent', 'hash': tx['hash']}
 
-    def waiting_unpaid(self, now):
-        """Hashes that wait out a refusal of their own payment: left out of every producer call until the wait ends
-        (R308-2P-13: the producer must not run its write-price passes over the same non-payers in every block and
-        every demand check). Their senders' later nonces then defer in the producer as a nonce gap, unexecuted."""
-        return {w['hash'] for w in self.state['waits'].values()
-                if w.get('kind') == 'gate-dependent' and w.get('hash') and w['until'] > now}
+    def waiting_senders(self, now):
+        """Senders that wait out an unpaid report: the producer is told to leave their transactions unexecuted."""
+        return {sender for sender, record in self.state.get('unpaid_senders', {}).items() if record['until'] > now}
 
     def _dependent_wait(self, tx, now):
         self.state['waits'][self.key(tx)] = {'until': now + self.c['gate_dependent_wait_seconds'],
@@ -517,13 +518,16 @@ class Policy:
             plan.profile = self.profile_for(plan.base.sp1_gas)
             return plan
 
-        waiting = self.waiting_unpaid(now)
+        # Bytes whose sender waits out an unpaid report are not handed to the producer (the producer itself leaves
+        # out everything else of those senders, `--write-waiting`).
+        waiting = {w['hash'] for w in self.state['waits'].values()
+                   if w.get('kind') == 'gate-dependent' and w.get('hash') and w['until'] > now}
         if waiting:
             kept = []
             for raw in entries:
                 name = _hash_raw(raw)
                 if name in waiting:
-                    plan.held.append((name, 'gate-dependent-wait'))
+                    plan.held.append((name, 'unpaid-sender-wait'))
                 else:
                     kept.append(raw)
             entries = kept
@@ -803,8 +807,8 @@ class Policy:
         self.state['bans'] = {s: until for s, until in self.state['bans'].items() if until > now}
         self.state['exempt_offenders'] = {s: o for s, o in self.state['exempt_offenders'].items() if o['until'] > now}
         self.state['waits'] = {k: w for k, w in self.state['waits'].items() if w['until'] > now - 86400}
-        self.state['unpaid_reports'] = {k: r for k, r in self.state.get('unpaid_reports', {}).items()
-                                        if (r.get('at') or 0) > now - 86400}
+        self.state['unpaid_senders'] = {k: r for k, r in self.state.get('unpaid_senders', {}).items()
+                                        if (r.get('at') or 0) > now - self.c['unpaid_memory_seconds'] or r['until'] > now}
         memory = self.c['failure_memory_seconds']
         self.state['failures'] = {k: f for k, f in self.state['failures'].items() if f['at'] > now - memory}
         horizon = now - self.c['standing_seconds']

@@ -64,7 +64,9 @@ class APayerWaitsAnHour(PricedWorld):
     def test_a_transaction_unpaid_in_one_block_is_served_in_the_next_when_it_no_longer_adds_a_slot(self):
         # x writes slot s at 1 gwei x 50k gas = 5e13 < 2e14: unpaid while s is new.
         self.add_writer('x', 'xavier', 0, 50_000, 1, ['s'], tip=GWEI)
-        self.assertNotIn('x', self.block(advance=600))
+        # round 15, third pass (coordinator decision on R308-3P-2): the sender of an unpaid transaction waits 40
+        # minutes, longer than a block interval; x is served in the first block after that, not one hour later.
+        self.assertNotIn('x', self.block(advance=2500 if self.PRODUCER else 600))
         # Ten minutes later someone else creates s in the same block, ahead of x, and pays for it (5 gwei x 50k = 2.5e14):
         # x then adds no slot and owes nothing.
         self.add_writer('y', 'yara', 0, 50_000, 1, ['s'], tip=5 * GWEI)
