@@ -159,7 +159,7 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `2cc960ce617f4f2bb174facd3c2cde51179d60bf2cc851482cf4f0772cfdb694` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `3ddbf16c99997e362be13c9fabe8d038801451dcf76311a0e687ad724e18776b` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `480a513cd5e0305c0c2b909f405a0aea48eb02320314be597df1511490a8d77d` |
 | `deployment/devnet/settler_v3.py` | `55c19b77a8e01fa5044292aeb12819d26f091b57aad606ce372ceb76e8d8e860` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
@@ -179,7 +179,7 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `1fd870cafde624252aee7e23a51088fa69dbba14f6d947bd0f34a3f847bfb617` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `47cfa512a118de8a244ffcea6644f5f6ea5b992d7aa7171ffe4b0dbc2ddbeeb9` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/render.py` | `c0d77915a6e8793d8fc7a41adb4874b474bb81484165070f62deffeb255d5f64` (agent 154 8d1c873; 201: `--sub-answer-max`) |
-| `deployment/mainnet/attestor/install-attestor.sh` | `19190b5557db0e1614d01025c6b6c8fe99d8f54229e263bf0dd10029597743b3` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `ad70e897710dde8cb64744167d8840602cef8ef817530de7fb256a105412dfd6` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `f2684764064c43552ccc3925a00ad5b3358ea579c21cbaa55907aa46ae2ff72d` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
 | `deployment/mainnet/attestor/systemd/bloch-l2-attestor.service` | `01d7e35f9e2bc20f88de684780ee1cc15debb0a28e252dafe38e22b807c59d04` (agent 203: `RuntimeDirectory=bloch-l2-attestor`, mode 0700) |
@@ -387,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `2cc960ce617f4f2bb174facd3c2cde51179d60bf2cc851482cf4f0772cfdb694` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `3ddbf16c99997e362be13c9fabe8d038801451dcf76311a0e687ad724e18776b` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 

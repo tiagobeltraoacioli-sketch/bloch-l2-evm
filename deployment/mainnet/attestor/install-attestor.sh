@@ -80,7 +80,16 @@ usage() { sed -n '3,/^set -euo/p' "$0" | sed '$d'; }
 DRY=0
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad URL $1"; echo "${BASH_REMATCH[1]}"; }
-ip_of() { { getent ahostsv4 "$1" || true; } | awk 'NR==1{print $1}'; }
+# First IPv4 address of a host. An IPv4 literal is its own address; a name goes to `getent ahostsv4`, and when that
+# answers nothing (it asks only for address families this host has a non-loopback address of: a machine with no
+# network yet answered nothing even for a literal or for localhost, agent 312 F312-6) to the plain resolver.
+ip_of() {
+  local ip
+  if [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then echo "$1"; return; fi
+  ip=$({ getent ahostsv4 "$1" || true; } | awk 'NR==1{print $1}')
+  [ -n "$ip" ] || ip=$(python3 -I -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "$1" 2>/dev/null || true)
+  echo "$ip"
+}
 # One spelling per host for the distinct-host rule: its first IPv4 address when the name resolves here, else
 # the name in lower case without a trailing dot (so "Node.Example.", "node.example" and its IP literal are one host).
 host_key() { local h ip; h=$(tr 'A-Z' 'a-z' <<<"$1"); h=${h%.}; ip=$(ip_of "$h"); echo "${ip:-$h}"; }
