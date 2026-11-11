@@ -207,7 +207,7 @@ is pinned.
 
 **History.** This section was written for hosts installed before HF1 (epoch 7180, 2026-11-01 16:11
 UTC). HF1 and HF2 are past. A host installed from a current bundle already runs these binaries and
-needs no upgrade. `upgrade-rollback` is refused now (see the end of this section). The same
+needs no upgrade. `upgrade-rollback` to a pre-fork backup is refused now (see the end of this section). The same
 `upgrade` command, with new `--follower-sha256`/`--produce-sha256` values, is the path for later
 binary changes, one host at a time.
 
@@ -268,6 +268,12 @@ steps 7–10 with the old follower. It also works after a failed upgrade. It is 
 minutes before epoch 7180 on, because the old follower's re-verify could not finish before the
 fork, and an old follower cannot follow the chain past it. After that, keep `PAUSE` and fix forward
 with the published build. Partials already signed stay valid either way.
+
+**Rollback from a later corrected build (any time):** when the backup holds the published post-fork
+follower (the launch build pinned in `install-attestor.sh`, or the build named with
+`--follower-sha256 HEX`, and the backed-up file must hash to it), `sudo ./install-attestor.sh
+upgrade-rollback --tag TAG` restores it and runs the same wait, check and unpause. Use the `--tag`
+you gave to `upgrade`. Verified under systemd 255 on five operator hosts in containers (round 15).
 
 Rehearsal without root or systemd: `upgrade`/`upgrade-rollback --prefix DIR --service-cmd CMD
 --check-cmd CMD` run against a `--prefix` install. `CMD start|stop|is-active follower|agent` stands
