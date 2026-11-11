@@ -159,43 +159,24 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-<<<<<<< HEAD
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `7d11fbada56d8fc9a7577a69899991b8d3bdb553db3c9a015106fa35f5519eda` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `0d274db835d7b405439023d476c14c0e182d081a70f17c050caf74169efe5f8c` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `480a513cd5e0305c0c2b909f405a0aea48eb02320314be597df1511490a8d77d` |
-| `deployment/devnet/settler_v3.py` | `55c2c913696a1ec83f2f036845616f8c862a0696519b1477febda8f33cb574a2` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/devnet/settler_v3.py` | `ac748f3f3050397398c176d93c6461bc326ae9db82efc8ef7679f32cceb849af` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `829ecac3b2b573125fe036208aaa814f54baffa259d79c497e49a0fae6d94c6e` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `b900a6baf54d62711c28ac76d9cd2f96a69aa87dee390f7a1123554951a657c7` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d52b7086c7cdfed78ee71de58a4323b5ee9826fdec8fccc7bace09e37d5b40f7` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
-| `deployment/mainnet/install-shadow.sh` | `b50928fe521f813b7c05456280a7df5bfa0a8e5b2ea16934c11ed7a4a7ea3a5d` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
-=======
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `27aaaf12bbeeadd02936498be788e16e8548591c19268b3cab207496adcc7ca7` |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` |
-| `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
-| `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `53f67eff3069a69d8dd1a572adfc86fe616b258fd8c520a97c36930bc4cd913e` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
-| `deployment/devnet/remote_prover.py` | `601a52f4a3b4f0bf9ef0f0fa747a5a558e80b6778593436fb2ce655d09a61107` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
-| `deployment/mainnet/prover/install-prover-mainnet.py` | `75ce214fbf931e5973b3a6c99d33b5a5257a98a595dc16eecd6448b39b4872fe` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
-| `deployment/mainnet/install-shadow.sh` | `16e013e415fcdf6135b9e6f3780c08046510b0b3bd698a8b0e49d127f9ce8010` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
->>>>>>> 2930f62 (Kit pins, the go-live plan's hash table and the public runbook variants follow the second-pass fixes (review R308-2P-6 to R308-2P-12))
+| `deployment/mainnet/install-shadow.sh` | `a0494cd96d873d93c27a3ab04bd1eba509938562ba2001a4541c55ae5074c8b1` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
 | `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `aaa0eb2d2cd5758faa1de371e4c661ecacf511543bcb8319b77bc249b575a5fb` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `cb6afc4ca02d37cffb86048948c531fc566c8a609a6e05cefe3c5f94dd85e54c` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: own RPC user) |
 | `deployment/mainnet/follower-rpc/install.sh` | `3984e0edb591cfbc4c53390f6a414c61d88032dcd97154fa7d706519f0035854` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
 | `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-<<<<<<< HEAD
-| `deployment/mainnet/l2_monitor.py` | `5b053d7caead95f191fcea1960d2d0aa6116290904c8003fb544661d0a661be7` (agents 157, 187 F1, 198) |
-| `deployment/mainnet/l1_monitor.py` | `583b3ce20cbaa0240c54a9154631b885da090226caf72fe1488b75f3d9786d8c` (agent 187) |
-| `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
-| `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `0d65038eba157b2025424adf69182dcd3860a4ac27af64fb2d40dc97ebde8730` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `4be2d9f4ae0d30c020ce715bf3ec2fba072048e8a0edbdf4457df5ca6c6997d0` (agent 154 8d1c873; 201: subrequest size guard) |
-=======
-| `deployment/mainnet/l2_monitor.py` | `4c49352dbe6103958ce3aba9f01329782175f7324e4b488fedac096bea247468` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l2_monitor.py` | `3556fe4768c3800e15eb53e36f462e21bbee4a05e8d17e008cd85fe8b5775583` (agents 157, 187 F1, 198) |
 | `deployment/mainnet/l1_monitor.py` | `b62c28f295ea93452152d7699c913fb9672c5b01957acd358472ec643790238a` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
-| `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `14a4634d0538b79f57594499051c05074a56c5caf937464bfd0dfd7354405566` (agent 154 8d1c873; 201: subrequest size guard) |
->>>>>>> 2930f62 (Kit pins, the go-live plan's hash table and the public runbook variants follow the second-pass fixes (review R308-2P-6 to R308-2P-12))
+| `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `0d65038eba157b2025424adf69182dcd3860a4ac27af64fb2d40dc97ebde8730` |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `1fd870cafde624252aee7e23a51088fa69dbba14f6d947bd0f34a3f847bfb617` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `47cfa512a118de8a244ffcea6644f5f6ea5b992d7aa7171ffe4b0dbc2ddbeeb9` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/render.py` | `c0d77915a6e8793d8fc7a41adb4874b474bb81484165070f62deffeb255d5f64` (agent 154 8d1c873; 201: `--sub-answer-max`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `19190b5557db0e1614d01025c6b6c8fe99d8f54229e263bf0dd10029597743b3` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
@@ -406,11 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-<<<<<<< HEAD
-- `kit/GO-LIVE-PINS.sha256` hashes to `7d11fbada56d8fc9a7577a69899991b8d3bdb553db3c9a015106fa35f5519eda` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
-=======
-- `kit/GO-LIVE-PINS.sha256` hashes to `27aaaf12bbeeadd02936498be788e16e8548591c19268b3cab207496adcc7ca7` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
->>>>>>> 2930f62 (Kit pins, the go-live plan's hash table and the public runbook variants follow the second-pass fixes (review R308-2P-6 to R308-2P-12))
+- `kit/GO-LIVE-PINS.sha256` hashes to `0d274db835d7b405439023d476c14c0e182d081a70f17c050caf74169efe5f8c` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 

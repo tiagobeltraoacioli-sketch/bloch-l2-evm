@@ -31,6 +31,7 @@ SOURCES = {
     'release-settler-v2/settler_v3.py': HERE.parent / 'devnet' / 'settler_v3.py',
     'release-settler-v2/l2_reorg_recover.py': HERE / 'l2_reorg_recover.py',
     'release-settler-v2/install-settler-mainnet.py': HERE / 'install-settler-mainnet.py',
+    'release-settler-v2/sequencer_policy_v2.py': HERE.parent / 'devnet' / 'sequencer_policy_v2.py',
 }
 PROVER_SOURCES = {
     'release-prover-v2/remote_prover.py': HERE.parent / 'devnet' / 'remote_prover.py',
