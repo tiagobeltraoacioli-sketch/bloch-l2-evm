@@ -344,6 +344,29 @@ budget. Source integration and unit tests do not establish a release binary,
 production activation, or a new benchmark measurement. The candidate SP1 host
 remains unpinned until its release build is qualified.
 
+**Measured (round 15, execute-only, no proof).** Agent 243's precompile offenders, one transaction per
+block, the mainnet guest `203114bf…`, limit 180M instructions (factor 2 on the 90M budget), host
+45.77.142.123 under a 24 GiB scope with another build running. "Before" is the single-stage host with the
+cycle limit (`853c7e20…`), "after" the candidate's two-stage host built from this line (`5b6d2459…`,
+unpinned, run with `--mainnet-v1`). Wall seconds of the whole host process:
+
+| Transaction | Gas used | Instructions | Before: verdict or cost | After: verdict or cost | Stage 1 alone |
+| --- | --- | --- | --- | --- | --- |
+| KZG, 200k gas (fits) | 156,453 | 48.5M | cost in 9.0 s | cost in 9.1 s | 0.30 s |
+| KZG, 450k gas (under the limit, over the budget) | 407,158 | 164.7M | cost in 13.2 s | cost in 13.5 s | 0.36 s |
+| KZG, 700k gas | 657,863 | 280.8M | over limit in 17.0 s | over limit in 6.3 s | 0.47 s |
+| KZG, 1.5M gas | 1,460,119 | 652.5M | over limit in 27.9 s | over limit in 6.9 s | 0.85 s |
+| modexp 512 bytes, 450k gas (under the limit) | 391,779 | 91.3M | cost in 7.1 s | cost in 8.7 s | 0.47 s |
+| modexp 512 bytes, 1.5M gas | 1,440,819 | 374.6M | over limit in 16.9 s | over limit in 3.5 s | 0.54 s |
+| modexp 512 bytes, 3M gas | 2,941,839 | 779.8M | over limit in 28.8 s | over limit in 5.5 s | 0.93 s |
+
+An over-limit verdict costs 3.5 to 6.9 s instead of 17 to 29 s, and the count itself stays under one
+second up to 780M instructions; most of what is left is process start and input loading. A block under
+the limit pays the count once more: 0.1 to 1.6 s. Stage 1 and the gas run counted the same instructions
+in every row. Not measured here: the sparse and fallback candidate guests (they need the recipient
+rebuild), the settler's own work around the host (database copy, extend, export), and a second host for
+a reproducible build of the SP1 host.
+
 ## 5. Measured numbers this rests on
 
 | Number | Value | Source |
@@ -407,12 +430,15 @@ it fail (section 9.1). "Integration" means a requirement on the settler, produce
 | F264-5 a fresh sender's large transaction never got under the transaction cap | Low | 3.4 rule 7 | `F264_5…` |
 | F264-6 every preflight run copied the whole database | Medium (scaling) | one copy per block plan, rewound to the parent after each run and checked with `head`; a copy that does not read back as the parent is discarded (`preflight_database`, default `rewind`; `copy` is the old behaviour) | `F264_6…` (two tests) |
 
-Residual of F264-2 (open, needs a compiled-producer change): a slot chain longer than the gate's and the final gate's
-passes together (more than about 12 unpaid writers of one slot in one block) still leaves the block with the chain's
-last members, whose first one creates its slot unpaid. Emptying the block instead would hand free starvation to
-senders that never pay (A243-12), so liveness comes first. The complete remedy is the write price inside
-`produce-dev select`'s own loop (skip a transaction whose gas used times tip is under its new slots times the price,
-one pass, no dependency between passes). It moves the producer binary, not the guest.
+Residual of F264-2: closed in round 15. The write price is inside the producer's own selection
+(`produce-dev select|extend --fresh-slot-price-wei N [--write-exempt A,B]`, turned on by `producer_write_price`):
+the first transaction in block order that adds slots without paying leaves and the selection runs again, so a
+chain of non-payers of any length leaves in one selection, a payer behind it is judged on the block as built,
+and no block of this producer holds an unpaid slot whatever the gate did. The producer reports what it left
+under `unpaid`; the policy holds those as `below-write-price`. `final-gate-unsettled` can still be logged when a
+write LIMIT does not settle; it no longer means an unpaid slot. Tests: `tests/produce_txs.rs`
+(`write_price_leaves_a_whole_chain_of_non_payers_pending`, the real binary) and
+`test_round15_producer_write_price.py`.
 
 ## 7. Residual risks (accepted or open)
 
