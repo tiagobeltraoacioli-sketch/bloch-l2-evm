@@ -16,7 +16,13 @@ class D4(unittest.TestCase):
         urls = settler.l1_rpc_urls(['--rpc-urls', ','.join(f'http://192.0.2.{i}:8080' for i in (1, 2, 3, 4))], environ={})
         self.assertEqual(len(urls), 4)                                   # settler configure: accepted, quorum 3
         text = open(W + '/install-shadow.sh').read()
-        quorum = int(re.search(r'^  "rpc_quorum": (\d+),$', text, re.M).group(1))   # what install-shadow.sh writes
+        literal = re.search(r'^  "rpc_quorum": (\d+),$', text, re.M)
+        if literal:
+            quorum = int(literal.group(1))   # what install-shadow.sh wrote before the round-15 fix
+        else:   # round 15: the script writes $L1_QUORUM, a strict majority of the configured RPCs
+            self.assertIn('L1_QUORUM=$(( ${#L1_RPC_LIST[@]} / 2 + 1 ))', text)
+            self.assertIn('"rpc_quorum": $L1_QUORUM,', text)
+            quorum = len(urls) // 2 + 1
         print('install-shadow.sh writes rpc_quorum =', quorum, 'for', len(urls), 'rpc_urls')
         d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
         produce = os.path.join(d, 'produce'); open(produce, 'wb').write(b'x')
