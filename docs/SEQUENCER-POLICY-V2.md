@@ -430,21 +430,33 @@ it fail (section 9.1). "Integration" means a requirement on the settler, produce
 | F264-5 a fresh sender's large transaction never got under the transaction cap | Low | 3.4 rule 7 | `F264_5…` |
 | F264-6 every preflight run copied the whole database | Medium (scaling) | one copy per block plan, rewound to the parent after each run and checked with `head`; a copy that does not read back as the parent is discarded (`preflight_database`, default `rewind`; `copy` is the old behaviour) | `F264_6…` (two tests) |
 
-Residual of F264-2: closed in round 15. The write price is inside the producer's own selection
-(`produce-dev select|extend --fresh-slot-price-wei N [--write-exempt A,B]`, turned on by `producer_write_price`):
-the first transaction in block order that adds slots without paying leaves and the selection runs again, so each
-transaction is judged on the block as built, and no block of this producer holds an unpaid slot whatever the gate
-did. The passes are capped at 8 per call (review R308-2P-13): when the eighth still finds an unpaid transaction,
-the block keeps the transactions ahead of it and everything behind stays pending, reported as `not_judged`
-(held `behind-unpaid-pass-cap`, no wait). The producer reports what it left under `unpaid`; the policy holds those
-as `below-write-price` with a wait of `unpaid_first_wait_seconds` (300 s) that doubles with every further report
-of the same bytes up to one hour, and leaves a waiting transaction out of every producer call, the idle demand
-check included; a same-nonce replacement starts again (R308-2P-14: a payer whose slot someone else created is
-served once the short first wait is over). A producer call that times out is a producer refusal, so the
-deposits-only block is still built. `final-gate-unsettled` can still be logged when a write LIMIT does not
-settle; it no longer means an unpaid slot. Measured (the real binary, debug build, shared build host): a pool of 440 entries, 400 of them a chain in which each refusal uncovers the next, 20 honest transfers ahead of it and 20 behind: one selection without the price takes 0.39 s (150 fit the declared-gas limit); with the price the call takes 2.5 s: 8 passes, capped, the 20 honest transactions ahead are in the block, 8 are reported unpaid, 412 not judged. Without the cap the same pool would take 401 passes, about 2.5 minutes at this rate, in every call. Tests: `tests/produce_txs.rs`
-(`write_price_leaves_a_whole_chain_of_non_payers_pending`, `write_price_pass_cap_bounds_an_adversarial_chain`,
-the real binary), `test_round15_producer_write_price.py`, `review_r15_308_2p_u3_waits.py`.
+Residual of F264-2: closed in round 15, in the form agents/304 named as the complete remedy. The write price is
+judged INSIDE the producer's selection (`produce-dev select|extend --fresh-slot-price-wei N`, turned on by
+`producer_write_price`): after a transaction ran, if it would add storage slots it does not pay for, its changes are
+dropped and the selection goes on with the next candidate on the block without it. One pass; no transaction is
+refused for what a refused one did; **a non-payer never displaces a payer**, wherever it stands in tip order
+(review R308-3P-2 replaced the capped re-selection of the second pass, which kept only the transactions ahead of
+the eighth non-payer). `extend` builds exactly the judged block, so no block of this producer holds an unpaid slot.
+The work spent on non-payers is bounded: `--write-wasted-gas` (default twice the block gas limit) is the gas that
+may go to transactions that are then left out; past it only plain transfers, which add no slot whatever ran before
+them, are still executed and the rest is reported `not_judged` (held `unpaid-allowance-exhausted`, no wait).
+Non-paying is self-limiting: the SENDER of an unpaid transaction waits `unpaid_first_wait_seconds` (2,400 s, longer
+than a block interval), twice as long after each further report, up to a day, whatever bytes or nonce it sends
+next; while it waits the producer does not execute anything of that sender (`--write-waiting`, the demand check
+included). Senders with standing (they have paid before) are selected ahead of all others, then by tip
+(`--write-standing`), so keys that never paid, funded or not, are judged after every sender that has, and the
+allowance they can burn is spent behind those. A fresh key gets one judged attempt per 40 minutes; its funding
+transfer is a paying transaction. A producer call that times out is a producer refusal, so the deposits-only
+block is still built, as the last resort only. Measured on the real binary (debug build, shared build host),
+30 honest transactions at 3 gwei behind N non-payers at 3.9 gwei from N keys: N = 8: 0.17 s, N = 64: 0.22 s,
+N = 400: 0.52 s as independent writers; N = 64: 0.40 s, N = 400: 0.49 s as a chain on one slot (each refusal
+uncovers the next); in every run all 30 honest transactions are included, all N are reported unpaid, one pass;
+the unpriced selection of the same pools takes 0.20 to 0.84 s. With a 100,000-gas allowance the 20 plain transfers
+are still served, and with the honest senders in the standing list all 30. The plan's allowance is 180 s.
+Tests: `tests/produce_txs.rs` (`eight_non_payers_ahead_in_tip_order_do_not_empty_the_block`, which fails on the
+capped producer with the 30 honest transactions not judged; `many_non_payers_at_a_high_tip_cost_one_pass_and_serve_every_payer`;
+`write_price_leaves_a_whole_chain_of_non_payers_pending`), `test_round15_producer_write_price.py`,
+`review_r15_308_2p_u3_waits.py`, `review_r15_308_3p_cap_starves_users.py`.
 
 ## 7. Residual risks (accepted or open)
 

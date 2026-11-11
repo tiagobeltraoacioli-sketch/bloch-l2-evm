@@ -32,30 +32,22 @@ class CappedWorld(SlotWorld):
         return {**super().config(), 'producer_write_price': True}
 
     def report(self, raws):
-        raws, unpaid, calls = list(raws), [], 0
+        # Round 15, third pass fix: the real producer now judges the write price inside its selection, one pass
+        # (tests/produce_txs.rs `eight_non_payers_ahead_in_tip_order_do_not_empty_the_block` runs the reviewer's
+        # scenario on the binary). This model does the same: every non-payer is left out where it stands and the
+        # transactions behind it are served. The capped model this file was written against is in git history.
         self.passes = getattr(self, 'passes', [])
+        self.passes.append(1)
+        raws, unpaid = list(raws), []
         while True:
             report = SlotWorld.report(self, raws)
-            calls += 1
-            stats = report['tx_stats']
-            at = next((i for i, t in enumerate(stats)
-                       if (fresh := sum(n for _, n in t['fresh_slots'])) and int(t['gas_used']) * int(t['effective_tip']) < fresh * PRICE), None)
-            if at is None:
+            first = next((t for t in report['tx_stats']
+                          if (fresh := sum(n for _, n in t['fresh_slots'])) and int(t['gas_used']) * int(t['effective_tip']) < fresh * PRICE), None)
+            if first is None:
                 report['unpaid'] = unpaid
-                self.passes.append(calls)
                 return report
-            first = stats[at]
             unpaid.append({'hash': first['hash'], 'sender': first['sender'], 'nonce': first['nonce']})
-            if calls < MAX_PASSES:
-                raws = [raw for raw in raws if sp_hash(raw) != first['hash']]
-                continue
-            prefix = {t['hash'] for t in stats[:at]}
-            kept = [raw for raw in raws if sp_hash(raw) in prefix]
-            report = SlotWorld.report(self, kept)
-            report['unpaid'] = unpaid
-            report['not_judged'] = [sp_hash(raw) for raw in raws if sp_hash(raw) not in prefix and sp_hash(raw) != first['hash']]
-            self.passes.append(calls)
-            return report
+            raws = [raw for raw in raws if sp_hash(raw) != first['hash']]
 
 
 class R308_3P_2(CappedWorld):

@@ -371,7 +371,7 @@ class Policy:
             wait = min(self.c['unpaid_max_wait_seconds'], self.c['unpaid_first_wait_seconds'] * 2 ** (count - 1))
             record = {'count': count, 'at': now, 'until': now + wait}
         senders[tx['sender']] = record
-        self.state['waits'][self.key(tx)] = {'until': record['until'], 'kind': 'gate-dependent', 'hash': tx['hash']}
+        self.state['waits'][self.key(tx)] = {'until': record['until'], 'kind': 'unpaid-sender', 'hash': tx['hash']}
 
     def waiting_senders(self, now):
         """Senders that wait out an unpaid report: the producer is told to leave their transactions unexecuted."""
@@ -521,7 +521,7 @@ class Policy:
         # Bytes whose sender waits out an unpaid report are not handed to the producer (the producer itself leaves
         # out everything else of those senders, `--write-waiting`).
         waiting = {w['hash'] for w in self.state['waits'].values()
-                   if w.get('kind') == 'gate-dependent' and w.get('hash') and w['until'] > now}
+                   if w.get('kind') == 'unpaid-sender' and w.get('hash') and w['until'] > now}
         if waiting:
             kept = []
             for raw in entries:

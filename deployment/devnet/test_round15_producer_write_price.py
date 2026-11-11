@@ -66,7 +66,7 @@ class ProducerWritePrice(PricedWorld):
         self.assertNotIn('gate-did-not-settle', events)
         self.assertNotIn('final-gate-unsettled', events)
         # The non-payers wait by sender, nonce and hash: the next block gates them out before the selection.
-        self.assertEqual(sum(w['kind'] == 'gate-dependent' for w in self.policy.state['waits'].values()), 30)
+        self.assertEqual(sum(w['kind'] == 'unpaid-sender' for w in self.policy.state['waits'].values()), 30)
 
     def test_the_f264_2_chains_buy_no_unpaid_slot_and_stay_under_the_block_limit(self):
         for tag, top in (('a', 39), ('b', 29)):

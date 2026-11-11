@@ -40,7 +40,7 @@ class WaitsDoNotShieldTheProducer(Counting):
             self.add_writer(f'np{i}', f'c{i}', 0, 50_000, 1, [f'own{i}'], tip=(39 - i) * GWEI // 10)
         self.add('h0', 'user0', 0, 21_000, 1, tip=GWEI)
         self.block(advance=120)   # round-15 fix: the next block comes inside the first wait (300 s)
-        self.assertEqual(sum(w['kind'] == 'gate-dependent' for w in self.policy.state['waits'].values()), 30)
+        self.assertEqual(sum(w['kind'] == 'unpaid-sender' for w in self.policy.state['waits'].values()), 30)
         first_block = list(self.calls)
         self.calls.clear()
         self.add('h1', 'user1', 0, 21_000, 1, tip=GWEI)
