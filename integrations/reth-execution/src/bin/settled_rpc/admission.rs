@@ -3,7 +3,7 @@
 //! the selector runs against a disposable cache and never persists a block.
 use alloy_primitives::{Address, B256, U256};
 use bloch_l2_evm::{
-    node_execution::select::{select_node_transactions, SelectionLimits, TxStats},
+    node_execution::select::{quote_node_transaction, select_node_transactions, QuoteCall, SelectionLimits, TxStats},
     AuthenticatedTransaction, BlockContext, ChainSpec,
 };
 use bloch_reth_execution::{BlochNodeHeader, BlochProviderFactory, LatestDerivedPending};
@@ -78,12 +78,9 @@ impl Policy {
         Ok(())
     }
 
-    fn check(
-        &self,
-        stats: &TxStats,
-        head: &SealedHeader<BlochNodeHeader>,
-        base_fee: u64,
-    ) -> Result<(), ErrorObjectOwned> {
+    /// (new slots, charged new slots, required priority fee per gas) for one measured execution: the one
+    /// rule both the admission verdict and `bloch_admissionQuote` use, so a quote is what admission asks.
+    fn requirement(&self, stats: &TxStats) -> Result<(u64, u64, U256), ErrorObjectOwned> {
         let slots = stats
             .fresh_slots
             .iter()
@@ -98,7 +95,16 @@ impl Policy {
             return Err(rpc_error("sequencer admission returned zero gas used"));
         }
         let write_tip = cost / gas + U256::from(!((cost % gas).is_zero()));
-        let required = write_tip.max(U256::from(self.required_tip));
+        Ok((slots, charged_slots, write_tip.max(U256::from(self.required_tip))))
+    }
+
+    fn check(
+        &self,
+        stats: &TxStats,
+        head: &SealedHeader<BlochNodeHeader>,
+        base_fee: u64,
+    ) -> Result<(), ErrorObjectOwned> {
+        let (slots, charged_slots, required) = self.requirement(stats)?;
         if U256::from(stats.effective_tip) >= required {
             return Ok(());
         }
@@ -227,6 +233,83 @@ impl Snapshot {
                 ))
             })?;
         policy.check(stats, &self.header, self.context.base_fee_per_gas)
+    }
+}
+
+/// The call of `bloch_admissionQuote`: what a wallet knows before it signs.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QuoteRequest {
+    pub from: Address,
+    #[serde(default)]
+    pub to: Option<Address>,
+    #[serde(default)]
+    pub data: Option<alloy_primitives::Bytes>,
+    #[serde(default)]
+    pub input: Option<alloy_primitives::Bytes>,
+    #[serde(default)]
+    pub value: Option<U256>,
+    #[serde(default)]
+    pub gas: Option<alloy_primitives::U64>,
+}
+
+impl Snapshot {
+    /// What admission would require of `request` sent now as the sender's next transaction: the same
+    /// session, execution, new-slot count and fee rule as [`Snapshot::preflight`], on an unsigned call.
+    /// Read-only. It says nothing about the spool, other senders, bans or waits, and nothing a refused
+    /// `eth_sendRawTransaction` does not already say in `error.data`; inclusion is not promised.
+    pub fn quote(&self, request: &QuoteRequest, policy: &Policy) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if request.data.is_some() && request.input.is_some() && request.data != request.input {
+            return Err(rpc_error("admission quote: `data` and `input` differ"));
+        }
+        let (nonce, balance) = self.account(request.from)?;
+        let base_fee = self.context.base_fee_per_gas;
+        let cap = SIMULATION_GAS_CAP.min(self.spec.gas_limit);
+        let gas_limit = request.gas.map_or(cap, |gas| gas.to::<u64>().min(cap));
+        // Measured at the lowest fee the block accepts (tip zero), so the balance needed for the quote is
+        // the least a real transaction with this gas limit could need.
+        let value = request.value.unwrap_or_default();
+        let needed = U256::from(gas_limit) * U256::from(base_fee) + value;
+        if balance < needed {
+            return Err(rpc_error(format!(
+                "admission quote: sender balance {balance} is below gas limit {gas_limit} at the next base fee plus value ({needed}); pass a smaller `gas`"
+            )));
+        }
+        let call = QuoteCall {
+            sender: request.from,
+            to: request.to,
+            data: request.data.clone().or_else(|| request.input.clone()).unwrap_or_default(),
+            value,
+            gas_limit,
+            nonce,
+            max_fee_per_gas: u128::from(base_fee),
+        };
+        let stats = quote_node_transaction(
+            &self.spec,
+            self.domain,
+            StateProviderDatabase::new(self.state.as_ref()),
+            self.header.0.state_root,
+            &self.context,
+            &call,
+        )
+        .map_err(|e| rpc_error(format!("admission quote unavailable: {e}")))?
+        .map_err(|reason| rpc_error(format!("call cannot execute at admission head: {reason}")))?;
+        let (slots, charged_slots, required) = policy.requirement(&stats)?;
+        Ok(serde_json::json!({
+            "kind": "sequencer-admission-quote",
+            "headHash": self.header.hash(),
+            "headNumber": format!("0x{:x}", self.header.0.number),
+            "nonce": format!("0x{nonce:x}"),
+            "baseFeePerGas": format!("0x{base_fee:x}"),
+            "requiredPriorityFeePerGas": format!("0x{required:x}"),
+            "requiredMaxFeePerGas": format!("0x{:x}", required + U256::from(base_fee)),
+            "minimumPriorityFeePerGas": format!("0x{:x}", policy.required_tip),
+            "gasUsed": format!("0x{:x}", stats.gas_used),
+            "freshSlots": format!("0x{slots:x}"),
+            "chargedFreshSlots": format!("0x{charged_slots:x}"),
+            "freshSlotPriceWei": format!("0x{:x}", policy.fresh_slot_price),
+            "scope": "latest-state-next-block"
+        }))
     }
 }
 
@@ -763,6 +846,87 @@ mod tests {
         }
         world.empty_pool();
         drop(permit);
+    }
+
+    fn approve_request(value: u64, gas: Option<u64>) -> QuoteRequest {
+        let mut input = vec![0x09, 0x5e, 0xa7, 0xb3];
+        input.extend(Address::repeat_byte(0x22).into_word());
+        input.extend(U256::from(value).to_be_bytes::<32>());
+        QuoteRequest {
+            from: sender(),
+            to: Some(sender().create(0)),
+            data: Some(input.into()),
+            input: None,
+            value: None,
+            gas: gas.map(alloy_primitives::U64::from),
+        }
+    }
+
+    /// Round 15 (DEX request): the quote for an unsigned call is, field by field, what a refused send of
+    /// the same call reports, and a transaction that pays exactly the quote is admitted.
+    #[tokio::test]
+    async fn admission_quote_equals_the_refusal_of_the_same_call_and_is_enough() {
+        let world = World::new();
+        let policy = policy(vec![]);
+        let snapshot = Snapshot::read(&world.factory).unwrap();
+        let quote = snapshot.quote(&approve_request(7, Some(200_000)), &policy).unwrap();
+        assert_eq!(quote["kind"], "sequencer-admission-quote");
+        assert_eq!(quantity(&quote["freshSlots"]), 1);
+        assert_eq!(quantity(&quote["chargedFreshSlots"]), 1);
+        assert_eq!(quantity(&quote["minimumPriorityFeePerGas"]), FLOOR);
+        let required = quantity(&quote["requiredPriorityFeePerGas"]);
+        assert!(required > FLOOR, "a new slot costs more than the floor here");
+        // The same call, signed at the floor tip, is refused with the same numbers.
+        let cap = 100_000_000_000;
+        let refused = world.send(&world.approve(1, 7, FLOOR, cap)).unwrap_err();
+        let refusal = data(&refused);
+        for field in [
+            "headHash", "headNumber", "baseFeePerGas", "requiredPriorityFeePerGas", "requiredMaxFeePerGas",
+            "gasUsed", "freshSlots", "chargedFreshSlots", "freshSlotPriceWei", "scope",
+        ] {
+            assert_eq!(quote[field], refusal[field], "{field}");
+        }
+        // One wei below the quote is refused; the quote itself is admitted.
+        assert!(world.send(&world.approve(1, 7, required - 1, cap)).is_err());
+        world.send(&world.approve(1, 7, required, cap)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn admission_quote_charges_nothing_for_no_new_slot_or_an_exempt_sender_and_writes_nothing() {
+        let world = World::new();
+        let snapshot = Snapshot::read(&world.factory).unwrap();
+        // approve(…, 0) leaves the allowance slot zero: no new slot, the floor alone.
+        let none = snapshot.quote(&approve_request(0, None), &policy(vec![])).unwrap();
+        assert_eq!(quantity(&none["freshSlots"]), 0);
+        assert_eq!(quantity(&none["requiredPriorityFeePerGas"]), FLOOR);
+        let exempt = snapshot.quote(&approve_request(7, None), &policy(vec![sender()])).unwrap();
+        assert_eq!(quantity(&exempt["freshSlots"]), 1);
+        assert_eq!(quantity(&exempt["chargedFreshSlots"]), 0);
+        assert_eq!(quantity(&exempt["requiredPriorityFeePerGas"]), FLOOR);
+        // Read-only: nothing spooled, the head and the sender's nonce are where they were.
+        assert_eq!(std::fs::read_dir(&world.spool.dir).unwrap().count(), 0);
+        snapshot.verify(&world.factory).unwrap();
+        assert_eq!(quantity(&exempt["nonce"]), 1);
+    }
+
+    #[tokio::test]
+    async fn admission_quote_refuses_what_cannot_execute() {
+        let world = World::new();
+        let snapshot = Snapshot::read(&world.factory).unwrap();
+        // An account without funds gets no quote (and no free simulation).
+        let mut poor = approve_request(7, None);
+        poor.from = Address::repeat_byte(0x99);
+        let error = snapshot.quote(&poor, &policy(vec![])).unwrap_err();
+        assert!(error.message().contains("below gas limit"), "{}", error.message());
+        // Too little gas: the call cannot execute, so there is nothing to price.
+        let error = snapshot.quote(&approve_request(7, Some(21_000)), &policy(vec![])).unwrap_err();
+        assert!(error.message().contains("cannot execute"), "{}", error.message());
+        // `data` and `input` that disagree are refused, as wallets expect.
+        let mut both = approve_request(7, None);
+        both.input = Some(Bytes::from_static(&[1]));
+        assert!(snapshot.quote(&both, &policy(vec![])).is_err());
+        // Unknown fields (state overrides, block tags) are not silently ignored.
+        assert!(serde_json::from_str::<QuoteRequest>(r#"{"from":"0x0000000000000000000000000000000000000001","stateOverride":{}}"#).is_err());
     }
 
     #[test]

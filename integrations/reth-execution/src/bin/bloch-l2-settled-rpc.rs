@@ -1329,6 +1329,64 @@ fn sequencer_rpc(
     module
 }
 
+/// `bloch_admissionQuote(call)`: what `eth_sendRawTransaction` would require of this call, before the wallet
+/// signs. Same EVM permit, wait and time limit as a send, same head and policy checks; nothing is written.
+/// Refused where no admission policy is published (the caller keeps its own estimate).
+fn admission_quote_rpc(
+    module: &mut jsonrpsee::RpcModule<()>,
+    provider: BlochProviderFactory,
+    policy: Option<PathBuf>,
+    gate: Arc<tokio::sync::Semaphore>,
+    wait: Duration,
+    limit: Duration,
+) {
+    module
+        .register_async_method("bloch_admissionQuote", move |params, _, _| {
+            let (provider, policy, gate) = (provider.clone(), policy.clone(), gate.clone());
+            async move {
+                let request: admission::QuoteRequest = params.one()?;
+                let Some(path) = policy else {
+                    return Err(rpc_error(
+                        "bloch_admissionQuote: this endpoint publishes no sequencer admission policy",
+                    ));
+                };
+                let permit = tokio::time::timeout(wait, gate.acquire_owned())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .ok_or_else(|| {
+                        jsonrpsee::types::ErrorObjectOwned::owned(
+                            -32005,
+                            "bloch_admissionQuote: too many concurrent EVM simulations, retry later",
+                            None::<()>,
+                        )
+                    })?;
+                let deadline = std::time::Instant::now() + limit;
+                let run = tokio::task::spawn_blocking(move || {
+                    let answer = (|| {
+                        let snapshot = admission::Snapshot::read(&provider)?;
+                        let policy = admission::Policy::read(&path)?;
+                        admission::check_deadline(deadline)?;
+                        let quote = snapshot.quote(&request, &policy)?;
+                        // Never return a fee from an obsolete head or a replaced policy file.
+                        snapshot.verify(&provider)?;
+                        policy.verify(&path)?;
+                        admission::check_deadline(deadline)?;
+                        Ok::<_, jsonrpsee::types::ErrorObjectOwned>(quote)
+                    })();
+                    drop(permit); // Held until execution really stops, even if the caller times out.
+                    answer
+                });
+                match tokio::time::timeout(limit, run).await {
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(error)) => Err(rpc_error(error.to_string())),
+                    Err(_) => Err(rpc_error("admission quote timed out; retry later")),
+                }
+            }
+        })
+        .expect("the quote method name is unique in the send module");
+}
+
 /// The sender's next nonce in the sequencer's view: `latest` plus every
 /// consecutive nonce already waiting in the spool (new names are recorded as seen at database head `head`).
 fn spooled_next_nonce(
@@ -2347,14 +2405,23 @@ async fn main() -> Result<()> {
                 module.remove_method("eth_sendRawTransaction").is_some(),
                 "eth API lacks eth_sendRawTransaction"
             );
-            module.merge(sequencer_rpc(
+            let mut send = sequencer_rpc(
                 spool.clone(),
                 factory.clone(),
                 options.required_tip_file.clone(),
                 simulation_gate.clone(),
                 SIMULATION_WAIT,
                 SIMULATION_TIME_LIMIT,
-            ))?;
+            );
+            admission_quote_rpc(
+                &mut send,
+                factory.clone(),
+                options.required_tip_file.clone(),
+                simulation_gate.clone(),
+                SIMULATION_WAIT,
+                SIMULATION_TIME_LIMIT,
+            );
+            module.merge(send)?;
             Some(spool)
         }
         None => None,

@@ -497,3 +497,79 @@ fn storage_growth<DB: DatabaseRef>(
     cleared.sort();
     Ok((fresh, cleared))
 }
+
+/// An unsigned call, as the next transaction of `sender`, for [`quote_node_transaction`]. Host builds only.
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuoteCall {
+    /// The account that would sign it.
+    pub sender: Address,
+    /// `None` creates a contract.
+    pub to: Option<Address>,
+    /// Call data or init code.
+    pub data: Bytes,
+    /// Value sent.
+    pub value: alloy_primitives::U256,
+    /// Declared gas limit.
+    pub gas_limit: u64,
+    /// The sender's nonce in the parent state (the only nonce a single execution can speak for).
+    pub nonce: u64,
+    /// Fee cap per gas the sender must be able to pay for (`gas_limit` times this, plus `value`).
+    pub max_fee_per_gas: u128,
+}
+
+/// What `call` would do as the only user transaction of the next block on the parent committed in `db`:
+/// the same session, the same execution and the same new-slot count as [`select_node_transactions`] reports
+/// for a signed candidate, without a signature. `Ok(Err(reason))` when it cannot execute (nonce, funds, block
+/// gas, static validity). Read-only: nothing is persisted. Host builds only (`std`), kept at the end of the
+/// file like the selection reports, so no settlement guest changes.
+#[cfg(feature = "std")]
+pub fn quote_node_transaction<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: DB,
+    previous_root: B256,
+    context: &BlockContext,
+    call: &QuoteCall,
+) -> Result<Result<TxStats, String>, BlockExecutionError> {
+    let base = u128::from(context.base_fee_per_gas);
+    let Ok(env) = TxEnv::builder()
+        .caller(call.sender)
+        .kind(match call.to {
+            Some(to) => revm::primitives::TxKind::Call(to),
+            None => revm::primitives::TxKind::Create,
+        })
+        .data(call.data.clone())
+        .value(call.value)
+        .gas_limit(call.gas_limit)
+        .max_fee_per_gas(call.max_fee_per_gas)
+        .gas_priority_fee(Some(call.max_fee_per_gas.saturating_sub(base)))
+        .nonce(call.nonce)
+        .chain_id(Some(spec.chain_id))
+        .build()
+    else {
+        return Ok(Err("the call is not a valid EIP-1559 transaction".to_string()));
+    };
+    if call.max_fee_per_gas < base {
+        return Ok(Err("fee cap below the next base fee".to_string()));
+    }
+    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, &[], |db| {
+        super::prepare_parent(spec, domain, db, previous_root, context)
+    })?;
+    let before = cached_storage(session.database());
+    let gas_used = match session.try_transaction(&env, |_| true) {
+        Ok(outcome) => outcome.map_or(0, |outcome| outcome.gas_used),
+        Err(BlockExecutionError::Database { detail }) => return Err(BlockExecutionError::Database { detail }),
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
+    Ok(Ok(TxStats {
+        hash: B256::ZERO,
+        sender: call.sender,
+        nonce: call.nonce,
+        gas_used,
+        effective_tip: call.max_fee_per_gas.saturating_sub(base),
+        fresh_slots,
+        cleared_slots,
+    }))
+}
