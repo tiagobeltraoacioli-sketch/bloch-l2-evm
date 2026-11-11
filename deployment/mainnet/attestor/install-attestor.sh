@@ -81,6 +81,9 @@ DRY=0
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad URL $1"; echo "${BASH_REMATCH[1]}"; }
 ip_of() { { getent ahostsv4 "$1" || true; } | awk 'NR==1{print $1}'; }
+# One spelling per host for the distinct-host rule: its first IPv4 address when the name resolves here, else
+# the name in lower case without a trailing dot (so "Node.Example.", "node.example" and its IP literal are one host).
+host_key() { local h ip; h=$(tr 'A-Z' 'a-z' <<<"$1"); h=${h%.}; ip=$(ip_of "$h"); echo "${ip:-$h}"; }
 
 cmd_install() {
   local ART= INDEX= BUNDLE= L1= PUB_URL= PUB_TOKEN= PUB_CMD= ALERT= RPCS=() PREFIX= RSET= FEED_PORT= FEED_BIND=0.0.0.0 ANYMANIFEST=0
@@ -119,7 +122,7 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   [[ $INDEX =~ ^[0-4]$ ]] || die "--index must be 0..4"
   [ ${#RPCS[@]} -gt 0 ] || RPCS=("${DEFAULT_RPCS[@]}")
   [ ${#RPCS[@]} -eq 3 ] || die "give exactly three --rpc URLs (quorum 2-of-3)"
-  local rpc_hosts; rpc_hosts=$(for u in "${RPCS[@]}"; do host_of "$u" | tr 'A-Z' 'a-z'; done | sort -u | wc -l)
+  local rpc_hosts; rpc_hosts=$(for u in "${RPCS[@]}"; do host_key "$(host_of "$u")"; done | sort -u | wc -l)
   [ "$rpc_hosts" -eq 3 ] || die "the three --rpc URLs must be on three distinct hosts (a quorum of 2 must not come from one node)"
   [[ $L1 =~ ^http://[A-Za-z0-9.-]+:[0-9]+/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$PREFIX" ] || die "run as root"
