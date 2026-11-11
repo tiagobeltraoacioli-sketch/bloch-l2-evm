@@ -47,6 +47,11 @@ Do **not** run this on the three 128 GB mainnet validator hosts. They ran out of
 **Run one settler.** Nothing on L1 gives it exclusivity, so see "Foreign settlements" below for what
 happens when anyone else settles a block.
 
+**Known issues.** `KNOWN-ISSUES.md` (this directory) lists what stays open for the deposit-only launch,
+with the log line or monitor check that shows each one and what to do: the shadow after a foreign
+settlement, user transactions on release 926d2cf, a damaged `submitted.json` or a stray `orphaned` name,
+a refused settlement with one L1 RPC down, and the pruning of kept databases.
+
 ## 0. Release directory (on the operator host)
 
 Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
