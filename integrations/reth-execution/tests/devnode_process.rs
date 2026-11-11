@@ -135,13 +135,30 @@ async fn send_and_mine(client: &HttpClient, transaction: Bytes) -> Value {
                 .await
                 .unwrap();
             if !receipt.is_null() {
+                // The node commits a block to storage before it advances the
+                // head, so a receipt (looked up by hash) can be served while
+                // "latest" and the polling filters still end one block
+                // earlier. Return only once the head has reached the block.
+                let mined = block_number(&receipt["blockNumber"]);
+                while head_number(client).await < mined {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
                 return receipt;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("node must mine admitted transaction")
+    .expect("node must mine admitted transaction and advance its head to it")
+}
+
+fn block_number(quantity: &Value) -> u64 {
+    u64::from_str_radix(quantity.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
+}
+
+async fn head_number(client: &HttpClient) -> u64 {
+    let head: Value = client.request("eth_blockNumber", rpc_params![]).await.unwrap();
+    block_number(&head)
 }
 
 #[tokio::test]
@@ -316,11 +333,33 @@ async fn contract_restart(replay: bool) {
         .await
         .unwrap();
     assert_eq!(changes, called["logs"]);
-    let changes: Value = client
-        .request("eth_getFilterChanges", rpc_params![&filter])
-        .await
-        .unwrap();
-    assert_eq!(changes, serde_json::json!([]));
+    // A poll with no block since the previous poll returns nothing. Blocks
+    // are mined on a timer, and a filter with a pinned start is served from
+    // that start again once a new block exists, so take the pair of polls
+    // from an attempt during which the head did not move.
+    let (resynced, drained) = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let before = head_number(&client).await;
+            let resynced: Value = client
+                .request("eth_getFilterChanges", rpc_params![&filter])
+                .await
+                .unwrap();
+            let drained: Value = client
+                .request("eth_getFilterChanges", rpc_params![&filter])
+                .await
+                .unwrap();
+            if head_number(&client).await == before {
+                return (resynced, drained);
+            }
+        }
+    })
+    .await
+    .expect("two filter polls must fit between two mined blocks");
+    assert!(
+        resynced == serde_json::json!([]) || resynced == called["logs"],
+        "a poll returns nothing or exactly the event: {resynced}"
+    );
+    assert_eq!(drained, serde_json::json!([]));
     let filter_logs: Value = client.request("eth_getFilterLogs", rpc_params![&filter]).await.unwrap();
     assert_eq!(filter_logs, called["logs"]);
     let removed: bool = client
