@@ -55,8 +55,9 @@ class Guards(unittest.TestCase):
         cases = [['http://rpc-a.invalid:1', 'http://RPC-A.invalid.:2', 'http://198.51.100.3:3']]
         if shutil.which('getent'):   # the IP literal and a name of the same node (needs the resolver)
             cases.append(['http://127.0.0.1:1', 'http://localhost:2', 'http://198.51.100.3:3'])
+        art = self.artifacts()
         for rpcs in cases:
-            done = self.install(self.artifacts(), '--dry-run', *sum((['--rpc', u] for u in rpcs), []))
+            done = self.install(art, '--dry-run', *sum((['--rpc', u] for u in rpcs), []))
             self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
             self.assertIn('three distinct hosts', done.stderr, rpcs)
 
