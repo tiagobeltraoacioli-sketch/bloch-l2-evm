@@ -12,7 +12,9 @@ const source = readFileSync(GW, 'utf8')
   .replace('export default {', 'globalThis.gateway = {');
 const hash = '0x' + 'ab'.repeat(32);
 
+// keys() and the l2slots dictionary: added by the fix line (the EVM slots moved to their own zone, R308-27).
 class Dictionary extends Map {
+  keys() { return [...super.keys()]; }
   incr(key, amount, initial) {
     const next = (this.get(key) ?? initial) + amount;
     this.set(key, next);
@@ -22,7 +24,7 @@ class Dictionary extends Map {
 
 // render.py defaults: simPerIp 2, simTotal 8, 1200 calls/min, 30 tx/min, batch 100.
 function harness() {
-  const shared = { l2rate: new Dictionary(), l2state: new Dictionary() };
+  const shared = { l2rate: new Dictionary(), l2slots: new Dictionary(), l2state: new Dictionary() };
   const clock = { now: 1_800_000_000_000 - (1_800_000_000_000 % 150000) + 1000 }; // 1 s into a 150 s slot window
   class FakeDate extends Date { static now() { return clock.now; } }
   const context = vm.createContext({

@@ -47,6 +47,8 @@ class Dict {
   }
   get(k) { const e = this.live(k); return e ? e.v : undefined; }
   set(k, v) { this.m.set(k, { v, expire: Date.now() + this.timeoutMs }); return this; }
+  delete(k) { return this.m.delete(k); }
+  keys(max) { return [...this.m.keys()].filter((k) => this.live(k)).slice(0, max || 1024); }
   incr(k, delta, init) {
     const e = this.live(k);
     const v = (e ? e.v : (init || 0)) + delta;
@@ -55,7 +57,7 @@ class Dict {
   }
 }
 
-globalThis.ngx = { shared: { l2rate: new Dict(120000), l2state: new Dict() }, fetch: async () => { throw new Error('no fetch in tests'); } };
+globalThis.ngx = { shared: { l2rate: new Dict(120000), l2slots: new Dict(120000), l2state: new Dict() }, fetch: async () => { throw new Error('no fetch in tests'); } };
 const gw = (await import(pathToFileURL(join(out, 'gateway.mjs')).href)).default;
 const cfg = (await import(pathToFileURL(join(out, 'config.mjs')).href)).default;
 
@@ -68,6 +70,7 @@ function healthy() {
 function reset() {
   offsetMs = 0;
   ngx.shared.l2rate = new Dict(120000); // js_shared_dict_zone zone=l2rate:16m timeout=120s
+  ngx.shared.l2slots = new Dict(120000); // js_shared_dict_zone zone=l2slots:1m timeout=120s
   healthy();
 }
 
@@ -128,12 +131,16 @@ test('model: the call budget holds for one IPv4 address (61st batch of 20 is 429
   assert.equal(statuses[60], 429);
 });
 
-test('model: simPerIp + 1 eth_call in one batch are refused', async () => {
+// Since review R308-33b (round 15) such a batch is no longer refused whole: it runs simPerIp calls at a time.
+test('model: simPerIp + 1 eth_call in one batch are served, never more than simPerIp in flight', async () => {
   reset();
   const be = backend();
   const r = request(Array.from({ length: cfg.simPerIp + 1 }, (_, i) => ethCall(i)), '192.0.2.11', be);
   await gw.handle(r);
-  assert.equal(r.status, 429);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.length, cfg.simPerIp + 1);
+  assert.ok(r.body.every((x) => x.result !== undefined), JSON.stringify(r.body));
+  assert.ok(be.maxInFlight <= cfg.simPerIp, `in flight at the backend: ${be.maxInFlight}`);
 });
 
 // ------------------------------------------------------------------ findings (each fails at f1c8033)
@@ -172,8 +179,11 @@ test('G2: one client cannot hold more EVM simulations in flight than one backend
   const done = gw.handle(r);
   await tick();
   const admitted = be.inFlight;
-  be.release();
-  await done;
+  // The batch runs in waves of simPerIp calls (review R308-33b): keep answering until it is done.
+  let finished = false;
+  done.then(() => { finished = true; });
+  while (!finished) { be.release(); await tick(); }
+  assert.ok(be.maxInFlight <= BACKEND_PERMITS, `in flight at the backend: ${be.maxInFlight}`);
   assert.ok(admitted <= BACKEND_PERMITS,
     `one IPv4 client has ${admitted} eth_call in flight at the backend, which serves ${BACKEND_PERMITS} at a time for every client`);
 });
@@ -219,7 +229,7 @@ test('G3: a client that closes its connection mid-simulation does not lose its s
   }
   healthy();
   assert.notEqual(statuses[statuses.length - 1], 429,
-    `ten minutes later still 429 (${JSON.stringify(statuses)}); l2rate "s ${ip}" = ${ngx.shared.l2rate.get('s ' + ip)}`);
+    `ten minutes later still 429 (${JSON.stringify(statuses)}); l2slots = ${JSON.stringify(ngx.shared.l2slots.keys())}`);
 });
 
 test('G7 (Info): duplicate ids inside a split batch get their own answers', async () => {

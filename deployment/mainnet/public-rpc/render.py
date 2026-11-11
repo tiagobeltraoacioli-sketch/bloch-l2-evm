@@ -120,9 +120,16 @@ def main():
     a.add_argument('--calls-per-minute', type=int, default=1200, help='JSON-RPC calls per minute per client IP (a batch counts each call)')
     a.add_argument('--tx-per-minute', type=int, default=30)
     a.add_argument('--sim-per-ip', type=int, default=2,
-                   help='EVM simulations and eth_sendRawTransaction admissions in flight per client (IPv4 address or IPv6 /64; a batch counts each call)')
+                   help='EVM simulations in flight per client (IPv4 address or IPv6 /56); a batch with more runs them this many at a time')
+    a.add_argument('--tx-per-ip', type=int, default=None,
+                   help='eth_sendRawTransaction admissions in flight per client, counted apart from its simulations (default: --sim-per-ip)')
     a.add_argument('--sim-total', type=int, default=8,
                    help='EVM simulations and transaction admissions in flight through this gateway for all clients (each backend also enforces its shared permits)')
+    a.add_argument('--tx-reserve', type=int, default=2,
+                   help='slots of --sim-total kept for eth_sendRawTransaction: simulations use at most --sim-total minus this')
+    a.add_argument('--slot-ttl', type=int, default=60,
+                   help='seconds after which the EVM slot of a request that never returned (client connection lost) stops counting; '
+                        'above the 40 s a subrequest can last')
     a.add_argument('--backend-conns', type=int, default=48,
                    help='active connections from this gateway to the local settled RPC for reads (sequencer/peer paths get a quarter each)')
     a.add_argument('--max-batch', type=int, default=100, help='calls per batch (ethers v6 batches up to 100)')
@@ -162,6 +169,14 @@ def main():
     hop = Path(o.hop_dir)
     if not hop.is_absolute():
         a.error('--hop-dir must be absolute')
+    if o.tx_per_ip is None:
+        o.tx_per_ip = o.sim_per_ip
+    if o.sim_per_ip < 1 or o.tx_per_ip < 1:
+        a.error('--sim-per-ip and --tx-per-ip must be at least 1')
+    if not 0 <= o.tx_reserve < o.sim_total:
+        a.error('--tx-reserve must be at least 0 and below --sim-total (simulations need a slot)')
+    if not 45 <= o.slot_ttl <= 600:
+        a.error('--slot-ttl must be between 45 and 600 seconds (a subrequest can last 40 s)')
     if not 65536 <= o.sub_answer_max <= 16 * 1024 * 1024:
         a.error('--sub-answer-max must be between 64 KiB and 16 MiB')
     peer_out = f'unix:{hop}/peer-out.sock'
@@ -273,6 +288,7 @@ server {{
         'PUBLIC_TLS': '\n'.join(tls),
         'PROBE_PORT': str(o.probe_port),
         'HOP_DIR': str(hop),
+        'SLOT_ZONE_TIMEOUT': str(2 * o.slot_ttl),
         'SUB_MAX': str(o.sub_answer_max),
         'SUB_BUF': str(o.sub_answer_max + 65536),
         'PROBE_INTERVAL': o.probe_interval,
@@ -306,6 +322,9 @@ server {{
         'txPerMinute': o.tx_per_minute,
         'simPerIp': o.sim_per_ip,
         'simTotal': o.sim_total,
+        'txPerIp': o.tx_per_ip,
+        'txReserve': o.tx_reserve,
+        'slotTtlMs': o.slot_ttl * 1000,
         'subAnswerMaxBytes': o.sub_answer_max,
         'maxLogBlockRange': o.max_log_range,
         'maxLogAddresses': 256,

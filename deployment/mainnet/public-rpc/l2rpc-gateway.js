@@ -14,7 +14,8 @@
 //            bloch_getWithdrawalProof: to a backend whose follower status is valid
 //            and younger than cfg.maxStatusAgeS and, among those, the one with the
 //            higher finalized level; once more to the other backend when the first
-//            has closed those levels, answers null, or lacks the proof. A stale
+//            has closed those levels, answers null, lacks the proof, or refused the
+//            round trip (429/502/503); never after a read timeout (504). A stale
 //            status alone never refuses a read: old finality is still true, and
 //            /health reports the age. A backend with no status view is not current.
 //   tx       eth_sendRawTransaction, the sequencer only, never retried
@@ -89,13 +90,20 @@ const EXPLAINED = {
   eth_signTypedData_v4: 'The node holds no keys. Sign locally.',
 };
 
-// EVM simulations and raw transaction admission: the expensive calls. Each client IP may have at most
-// cfg.simPerIp of them in flight (a batch counts each one); they go through
-// njs subrequests so the slot is released when the backend answers. Admission
-// may simulate storage writes under policy-v2; it shares the same EVM budget.
-const EVM_WORK = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true, eth_sendRawTransaction: true };
-// Longer than a split request can last: two upstream attempts of 30 s, then the finality retry.
-const SLOT_WINDOW_MS = 150000;
+// EVM simulations and raw transaction admission: the expensive calls. They go through njs subrequests and
+// hold a slot each while in flight (see "EVM slots" below): simulations 'e', transaction admission 't'.
+const SIMULATION = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true };
+function evmKind(method) {
+  if (method === 'eth_sendRawTransaction') return 't';
+  return SIMULATION[method] === true ? 'e' : null;
+}
+// A slot lives this long unless its request ends first: longer than one round trip can last (the subrequest
+// hop reads for 40 s at most). It is renewed before the finality retry.
+const SLOT_TTL_MS = cfg.slotTtlMs || 60000;
+// Slots of cfg.simTotal that simulations never take, so transaction admission is not starved by them.
+const TX_RESERVE = cfg.txReserve === undefined ? Math.floor(cfg.simTotal / 4) : cfg.txReserve;
+// Transaction admissions in flight per client, counted apart from its simulations.
+const TX_PER_IP = cfg.txPerIp === undefined ? cfg.simPerIp : cfg.txPerIp;
 
 // Position of the block parameter of each method that takes a tag.
 const TAG_POSITION = {
@@ -303,7 +311,8 @@ function classify(call) {
 
 // The budget key of a client: its IPv4 address, or the /64 of its IPv6 address (one subscriber line holds a
 // whole /64, so a per-address key would let it multiply every budget). IPv4-mapped IPv6 counts as IPv4.
-function clientKey(addr) {
+// bits 56: the key of the EVM slots, since a subscriber line usually holds a /56 (review R308-27).
+function clientKey(addr, bits) {
   if (typeof addr !== 'string' || addr.indexOf(':') < 0) return addr;
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(addr);
   if (mapped) return mapped[1];
@@ -311,7 +320,12 @@ function clientKey(addr) {
   const head = halves[0] ? halves[0].split(':') : [];
   const tail = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
   const groups = halves.length > 1 ? head.concat(Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), tail) : head;
-  return groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':') + '::/64';
+  const four = groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, ''));
+  if (bits === 56) {
+    if (four.length === 4) four[3] = (('0000' + four[3]).slice(-4).slice(0, 2) + '00').replace(/^0+(?=.)/, '');
+    return four.join(':') + '::/56';
+  }
+  return four.join(':') + '::/64';
 }
 
 // js_set $l2_client: the key of nginx's limit_req and limit_conn zones.
@@ -327,6 +341,75 @@ function charge(r, calls, txs) {
   if (c > cfg.callsPerMinute) return 'call';
   if (txs > 0 && d.incr('t ' + ip + ' ' + minute, txs, 0) > cfg.txPerMinute) return 'tx';
   return null;
+}
+
+// ------------------------------------------------------------------- EVM slots
+//
+// One key per call in flight in the shared dictionary l2slots: "<kind> <client> <request> <n>", its value the
+// time (ms) it stops counting. A request deletes its keys when its subrequests return; a request whose client
+// connection failed is never resumed by njs, and its keys then stop counting by themselves after SLOT_TTL_MS
+// (review R308-27: no counter that needs a release). Limits, each counted over the live keys:
+//   simulations per client          cfg.simPerIp
+//   transaction admissions per client   TX_PER_IP
+//   simulations, all clients        cfg.simTotal - TX_RESERVE (the reserve is for transactions only)
+//   simulations and admissions, all clients   cfg.simTotal
+// The client of a slot is its IPv4 address or its IPv6 /56.
+
+function slotCounts(d, now, who) {
+  const n = { e: 0, t: 0, myE: 0, myT: 0 };
+  const mine = ' ' + who + ' ';
+  const keys = d.keys(4096);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const until = d.get(key);
+    if (until === undefined) continue;
+    if (until <= now) {
+      d.delete(key);
+      continue;
+    }
+    const kind = key.charAt(0) === 't' ? 't' : 'e';
+    n[kind]++;
+    if (key.indexOf(mine) === 1) n[kind === 't' ? 'myT' : 'myE']++;
+  }
+  return n;
+}
+
+function releaseSlots(hold) {
+  hold.keys.forEach((key) => { hold.d.delete(key); });
+}
+
+function renewSlots(hold) {
+  const until = Date.now() + SLOT_TTL_MS;
+  hold.keys.forEach((key) => { hold.d.set(key, until); });
+}
+
+// Takes `sims` simulation slots and `txs` admission slots for one wave of a request. Returns the hold, with
+// hold.refused set ('client' or 'busy', and nothing held) when a limit is reached. The keys are written
+// first and counted after, so two workers racing for the last slot can both be refused, never both admitted.
+function takeSlots(r, tag, sims, txs) {
+  const d = ngx.shared.l2slots;
+  const who = clientKey(r.variables.remote_addr, 56);
+  const hold = { d: d, keys: [], refused: null };
+  const now = Date.now();
+  for (let i = 0; i < sims + txs; i++) {
+    const key = (i < sims ? 'e' : 't') + ' ' + who + ' ' + tag + '.' + i;
+    d.set(key, now + SLOT_TTL_MS);
+    hold.keys.push(key);
+  }
+  const n = slotCounts(d, now, who);
+  if ((sims > 0 && n.myE > cfg.simPerIp) || (txs > 0 && n.myT > TX_PER_IP)) hold.refused = 'client';
+  else if (n.e + n.t > cfg.simTotal || (sims > 0 && n.e + n.t - txs > cfg.simTotal - TX_RESERVE)) hold.refused = 'busy';
+  if (hold.refused) {
+    releaseSlots(hold);
+    hold.keys = [];
+  }
+  return hold;
+}
+
+function slotMessage(refused) {
+  return refused === 'client'
+    ? 'Rate limited: at most ' + cfg.simPerIp + ' EVM simulations and ' + TX_PER_IP + ' transaction admissions in flight per client.'
+    : 'Busy: too many EVM simulations or transaction admissions in flight; retry shortly.';
 }
 
 // ---------------------------------------------------------------------- output
@@ -371,8 +454,10 @@ function outgoing(x) {
 }
 
 // Subrequests go through the size-guarded twin of each backend location (/_l2s/...).
+// The answers by batch index; byId.status is the HTTP status of the hop, 0 when the subrequest itself failed.
 async function roundTrip(r, where, calls) {
   const byId = {};
+  Object.defineProperty(byId, 'status', { value: 0, writable: true, enumerable: false });
   let reply;
   try {
     reply = await r.subrequest(where.replace('/_l2/', '/_l2s/'), { method: 'POST', body: JSON.stringify(calls.map(outgoing)) });
@@ -381,6 +466,7 @@ async function roundTrip(r, where, calls) {
     // the unknown-submission response and never retry the transaction route.
     return byId;
   }
+  byId.status = Number(reply.status) || 0;
   if (reply.status === 200) {
     try {
       const parsed = JSON.parse(reply.responseText);
@@ -398,12 +484,22 @@ async function roundTrip(r, where, calls) {
   return byId;
 }
 
-// Finality calls the first backend could not answer because it closed its levels (or did not answer
-// at all) go once to the other one. Its answer replaces the first only if it is not closed too.
-async function retryFinality(r, first, calls, byId) {
+// The hop refused or could not reach its backends: nothing ran there, so the other backend may be asked.
+// 504 (the 30 s read timeout), a failed subrequest and an answer that does not parse are not in this list:
+// the call may still be running on the first backend (decision G4: a read timeout is never retried on the
+// other backend; review R308-28).
+const RETRY_STATUS = { 429: true, 502: true, 503: true };
+
+// Finality calls go once to the other backend when the first one answered them with a parsed "closed"
+// answer, or refused the whole round trip with 429/502/503. The second answer replaces the first only if it
+// is not closed too. `before` runs ahead of the second round trip (the caller renews its EVM slots).
+async function retryFinality(r, first, calls, byId, before) {
   if (byId.tooLarge) return; // the other backend's answer is as large
-  const again = calls.filter((c) => c.call.id !== undefined && (!byId[c.index] || closedAnswer(byId[c.index])));
-  if (!again.length || !cfg.peerProbeUrl) return;
+  if (!cfg.peerProbeUrl) return;
+  const refused = RETRY_STATUS[byId.status] === true;
+  const again = calls.filter((c) => c.call.id !== undefined && (byId[c.index] ? closedAnswer(byId[c.index]) : refused));
+  if (!again.length) return;
+  if (before) before();
   const other = first === BACKEND.local ? BACKEND.peer : BACKEND.local;
   const second = await roundTrip(r, other, again);
   again.forEach((c) => {
@@ -413,16 +509,16 @@ async function retryFinality(r, first, calls, byId) {
   });
 }
 
-async function forwardPart(r, p) {
+async function forwardPart(r, p, before) {
   const where = location(p.route);
   const byId = await roundTrip(r, where, p.calls);
-  if (p.route === 'finality') await retryFinality(r, where, p.calls, byId);
+  if (p.route === 'finality') await retryFinality(r, where, p.calls, byId, before);
   return { p: p, byId: byId };
 }
 
-async function forwardParts(r, parts) {
+async function forwardParts(r, parts, before) {
   // parts: [{route, calls: [{index, call}]}]; one upstream round trip per route, plus a retry for finality.
-  const results = await Promise.all(parts.map((p) => forwardPart(r, p)));
+  const results = await Promise.all(parts.map((p) => forwardPart(r, p, before)));
   const out = [];
   results.forEach((x) => {
     x.p.calls.forEach((c) => {
@@ -498,11 +594,11 @@ async function handle(r) {
   const routes = {};
   forward.forEach((f) => { routes[f.route] = true; });
   const routeList = Object.keys(routes);
-  const sims = forward.filter((f) => EVM_WORK[f.call.method] === true).length;
+  const evm = forward.filter((f) => evmKind(f.call.method) !== null);
 
   // Fast path: no EVM work, everything forwardable shares one route and
   // nothing was answered here, so nginx proxies the original body unchanged.
-  if (sims === 0 && replies.length === 0 && routeList.length === 1 && routeList[0] !== 'finality') {
+  if (evm.length === 0 && replies.length === 0 && routeList.length === 1 && routeList[0] !== 'finality') {
     const route = routeList[0];
     const failures = forward.filter((f) => f.call.id !== undefined).map((f) => unavailable(f.call.id, route));
     r.variables.l2_failure = JSON.stringify(batch ? failures : failures[0] || err(null, -32053, 'No healthy L2 backend; retry shortly.'));
@@ -510,39 +606,57 @@ async function handle(r) {
     return;
   }
 
-  // EVM work slots per client and in total (released when the subrequests return). A slot is counted in the
-  // window its request started in and read over that window and the one before, so a slot whose release never
-  // runs (njs does not resume a handler whose client connection failed) is gone after two windows.
-  const slots = ngx.shared.l2rate;
-  const window = Math.floor(Date.now() / SLOT_WINDOW_MS);
-  const slotKey = 's ' + clientKey(r.variables.remote_addr) + ' ';
-  const inFlight = (key) => (slots.get(key + window) || 0) + (slots.get(key + (window - 1)) || 0);
-  if (sims > 0) {
-    slots.incr(slotKey + window, sims, 0);
-    slots.incr('S ' + window, sims, 0);
-    const mine = inFlight(slotKey);
-    const all = inFlight('S ');
-    if (mine > cfg.simPerIp || all > cfg.simTotal) {
-      slots.incr(slotKey + window, -sims, 0);
-      slots.incr('S ' + window, -sims, 0);
-      r.headersOut['Retry-After'] = '1';
-      const msg = mine > cfg.simPerIp
-        ? 'Rate limited: at most ' + cfg.simPerIp + ' EVM simulations or transaction admissions in flight per client.'
-        : 'Busy: too many EVM simulations or transaction admissions in flight; retry shortly.';
-      const ids = calls.map((c) => (c && typeof c === 'object' ? c.id : null));
-      return send(r, 429, batch ? ids.map((id) => err(id, -32005, msg)) : err(ids[0], -32005, msg));
+  // Waves: the calls without EVM work go with the first one; the EVM calls follow in request order, as many
+  // per wave as one client may have in flight (cfg.simPerIp simulations, TX_PER_IP admissions). A batch
+  // with more of them is therefore served, a wave at a time, and never holds more slots than its client may
+  // (review R308-33b).
+  const waves = [];
+  let wave = { calls: forward.filter((f) => evmKind(f.call.method) === null), e: 0, t: 0 };
+  evm.forEach((f) => {
+    const kind = evmKind(f.call.method);
+    if ((kind === 'e' && wave.e >= cfg.simPerIp) || (kind === 't' && wave.t >= TX_PER_IP)) {
+      waves.push(wave);
+      wave = { calls: [], e: 0, t: 0 };
     }
-  }
+    wave.calls.push(f);
+    wave[kind]++;
+  });
+  waves.push(wave);
 
-  // Split per route, merge in request order.
-  const parts = routeList.map((route) => ({ route: route, calls: forward.filter((f) => f.route === route) }));
-  let forwarded;
-  try {
-    forwarded = await forwardParts(r, parts);
-  } finally {
-    if (sims > 0) {
-      slots.incr(slotKey + window, -sims, 0);
-      slots.incr('S ' + window, -sims, 0);
+  const tag = (r.variables.request_id || String(Math.random()).slice(2)) + '.';
+  let forwarded = [];
+  for (let k = 0; k < waves.length; k++) {
+    const w = waves[k];
+    let hold = null;
+    if (w.e + w.t > 0) {
+      hold = takeSlots(r, tag + k, w.e, w.t);
+      if (hold.refused && k === 0) {
+        // Nothing of this request ran: the whole request is refused.
+        r.headersOut['Retry-After'] = '1';
+        const msg = slotMessage(hold.refused);
+        const ids = calls.map((c) => (c && typeof c === 'object' ? c.id : null));
+        return send(r, 429, batch ? ids.map((id) => err(id, -32005, msg)) : err(ids[0], -32005, msg));
+      }
+      if (hold.refused) {
+        // Earlier waves ran: the calls of this wave and the later ones are answered one by one.
+        const msg = slotMessage(hold.refused) + ' This call of the batch was not run; send it again.';
+        for (let j = k; j < waves.length; j++) {
+          waves[j].calls.forEach((c) => {
+            if (c.call.id === undefined) return;
+            forwarded.push({ index: c.index, reply: err(c.call.id, -32005, msg, { run: false, submitted: false }), unanswered: false });
+          });
+        }
+        break;
+      }
+    }
+    // Split per route, merge in request order.
+    const waveRoutes = {};
+    w.calls.forEach((f) => { waveRoutes[f.route] = true; });
+    const parts = Object.keys(waveRoutes).map((route) => ({ route: route, calls: w.calls.filter((f) => f.route === route) }));
+    try {
+      forwarded = forwarded.concat(await forwardParts(r, parts, hold ? () => renewSlots(hold) : null));
+    } finally {
+      if (hold) releaseSlots(hold);
     }
   }
   const merged = replies.concat(forwarded).sort((a, b) => a.index - b.index).map((x) => x.reply);
