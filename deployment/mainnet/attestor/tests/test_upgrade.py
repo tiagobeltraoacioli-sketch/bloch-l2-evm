@@ -344,6 +344,38 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertEqual(self.config()['follower_sha256'], sha(self.NEW_FOLLOWER))
         self.assertFalse((self.etc / 'PAUSE').exists())
 
+    def test_rollback_after_hf1_to_a_published_post_fork_backup(self):
+        """Round 15 (task 251): a launch-build host upgraded to a corrected build must be able to go back.
+        The backup then holds the published post-fork follower, which follows the chain at any epoch."""
+        after = FORK_UNIX + 900 * EPOCH
+        # The host runs a published post-fork pair with its pin in config.json (a current install).
+        launch = {**self.old_config, 'follower': str(self.opt / 'bloch-l2-native-follower'),
+                  'follower_sha256': sha(self.OLD_FOLLOWER)}
+        (self.etc / 'config.json').write_text(json.dumps(launch, indent=1) + '\n')
+        done = self.upgrade('--tag', 'corrected', now=after)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.config()['follower_sha256'], sha(self.NEW_FOLLOWER))
+        # Without naming the backup's follower as published, the kit's own pin decides: refused, nothing changed.
+        refused = self.script('upgrade-rollback', '--tag', 'corrected', now=after)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('refused', refused.stderr)
+        self.assertEqual(self.config()['follower_sha256'], sha(self.NEW_FOLLOWER))
+        # A backup binary that is not what its config pins is never accepted as the published build.
+        keep = (self.opt.parent / 'l2-attestor.corrected/bloch-l2-native-follower')
+        keep.write_bytes(b'tampered backup\n')
+        tampered = self.script('upgrade-rollback', '--tag', 'corrected', '--follower-sha256', sha(self.OLD_FOLLOWER), now=after)
+        self.assertEqual(tampered.returncode, 1)
+        self.assertIn('refused', tampered.stderr)
+        keep.write_bytes(self.OLD_FOLLOWER)
+        back = self.script('upgrade-rollback', '--tag', 'corrected', '--follower-sha256', sha(self.OLD_FOLLOWER), now=after)
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertIn('published post-fork follower', back.stdout)
+        self.assertEqual(self.config(), launch)
+        self.assertEqual((self.opt / 'bloch-l2-native-follower').read_bytes(), self.OLD_FOLLOWER)
+        self.assertEqual((self.opt / 'bloch-l2-produce-dev').read_bytes(), self.OLD_PRODUCE)
+        self.assertFalse((self.etc / 'PAUSE').exists())
+        self.assertRegex(back.stdout, r'REPORT: attestor 2: upgrade-rollback check-ok')
+
     def test_artifact_not_matching_the_published_hash_changes_nothing(self):
         (self.art / 'bloch-l2-native-follower').write_bytes(b'#!/bin/sh\nexit 0\n')
         done = self.upgrade()

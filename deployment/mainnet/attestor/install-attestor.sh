@@ -5,7 +5,7 @@
 #
 #   sudo ./install-attestor.sh upgrade --artifacts DIR [--tag pre-hf123] [--resume] [--no-unpause]
 #        [--wait-timeout SEC (7200)] [--advance-timeout SEC (2400)] [--poll SEC (30)]
-#   sudo ./install-attestor.sh upgrade-rollback [--tag pre-hf123] [--resume] [--no-unpause] [timeouts]
+#   sudo ./install-attestor.sh upgrade-rollback [--tag pre-hf123] [--follower-sha256 HEX] [--resume] [--no-unpause] [timeouts]
 #   sudo ./install-attestor.sh install --artifacts DIR --index I --bundle attestor-I.sealed \
 #        --l1-rpc-url http://HOST:8080 [--rpc http://H:8080 --rpc ... (3; default: the 3 public RPCs)] \
 #        [--publish-url https://drop.example/attest --publish-token-file FILE] \
@@ -27,8 +27,11 @@
 # stops with PAUSE in place and the follower running; `--resume` continues from the follower start.
 # Run it inside tmux/screen: the wait is long.
 # upgrade-rollback: restore the .TAG backup (binaries, agent scripts, config.json), move status.json
-# aside, then the same wait/check/unpause tail. Refused from 70 min before epoch 7180 (HF1, 2026-11-01
-# 16:11 UTC) on: the pre-fork follower cannot follow the chain past the fork. Fix forward instead.
+# aside, then the same wait/check/unpause tail. A backup that holds a PRE-fork follower is refused from
+# 70 min before epoch 7180 (HF1, 2026-11-01 16:11 UTC) on: it cannot follow the chain past the fork; fix
+# forward instead. A backup whose follower is the published post-fork build (the launch pin below, or
+# --follower-sha256 of a later published build) can be restored at any time: this is the way back from
+# a corrected build that does not come up.
 #
 # install refuses any bloch-pos, follower or producer whose SHA-256 is not the published one below, even when
 # DIR/SHA256SUMS lists it: that file travels with the binaries and cannot vouch for them.
@@ -541,10 +544,17 @@ cmd_upgrade_rollback() {
   OP=upgrade-rollback; upgrade_opts "$@"
   local fork=$((L1_GENESIS_UNIX + HF1_EPOCH * L1_EPOCH_SECONDS)) t epoch f
   t=$(now); epoch=$(( (t - L1_GENESIS_UNIX) / L1_EPOCH_SECONDS ))
-  if [ $((t + ROLLBACK_LEAD_SECONDS)) -ge $fork ]; then
+  # A backup that holds the published post-fork follower (the launch pin, or --follower-sha256 of a later
+  # published build) follows the chain at any epoch: going back to it from a corrected build is allowed.
+  local backup_pin= backup_file=$OPT.$TAG/bloch-l2-native-follower
+  [ ! -f "$ETC/config.json.$TAG" ] || backup_pin=$(jget "$ETC/config.json.$TAG" follower_sha256)
+  if [ "$backup_pin" = "$FOLLOWER_SHA256" ] && [ -f "$backup_file" ] && [ "$(sha "$backup_file")" = "$FOLLOWER_SHA256" ]; then
+    say "L1 epoch $epoch: the backup .$TAG holds the published post-fork follower ${FOLLOWER_SHA256:0:8}, rollback allowed"
+  elif [ $((t + ROLLBACK_LEAD_SECONDS)) -ge $fork ]; then
     die "refused: L1 epoch $epoch; HF1 (epoch $HF1_EPOCH) starts at $(date -u -d @$fork +%FT%TZ 2>/dev/null || echo $fork). A pre-fork follower re-verifying now cannot follow past the fork. Keep PAUSE and fix forward with the published build."
+  else
+    say "L1 epoch $epoch: $(( (fork - t) / 60 )) min before HF1, rollback allowed"
   fi
-  say "L1 epoch $epoch: $(( (fork - t) / 60 )) min before HF1, rollback allowed"
   resume_or_fresh
   [ -d "$OPT.$TAG" ] && [ -f "$ETC/config.json.$TAG" ] || die "no backup $OPT.$TAG + $ETC/config.json.$TAG to roll back to"
   say "1. check the backup against its own config.json pins"

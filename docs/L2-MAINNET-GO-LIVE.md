@@ -172,7 +172,7 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `6b5782fcd4288ff11ef53bf889a3bdec8f14ee8f77c34e6da0e51b21f49d509f` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `63198f4a42d8c0a0ac4f6088c2e4dcecd19ea3197fb2dd6773829edaff0c6bfb` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/render.py` | `4c80de91d53fc65900543c317e4490be250d12db21ef15049fc21441d8881446` (agent 154 8d1c873; 201: `--sub-answer-max`) |
-| `deployment/mainnet/attestor/install-attestor.sh` | `9b8a90956ed6d55b4c1a0275868a598e26c205625086feb2e43d4ee1aed3ce4c` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`) |
+| `deployment/mainnet/attestor/install-attestor.sh` | `446912552190566bcc1cc2276fe8c521bb6c8eab9c9f8263d56aca2d53115e91` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `cad7809f5ff5776587825c330897d62fa6ca269652ad9179bf3a9f9227122fc7` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
 | `deployment/mainnet/attestor/systemd/bloch-l2-attestor.service` | `bbcdf495e3657f6c3e20530edc546b48a56b1a1c78e24ea4ba193cdc503047b2` (agent 203: `RuntimeDirectory=bloch-l2-attestor`, mode 0700) |
@@ -913,7 +913,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
    (`keykit/KEY-HANDOFF-CHECKLIST.md`). The keys never travel unsealed. The
    originals are now destroyed before the handoff, gated on verified bundles and two read-back media.
 2. Each operator host (§2 spec) gets an `ARTEFATOS` dir with:
-   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `9b8a9095…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
+   - `bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…` (from this build; the kit's `install-attestor.sh` `44691255…` and `operator-pins-v2.sha256` `359892b7…` refuse the v2.1 ones);
    - the attestor `bloch-pos` (e7d2c8b2 Linux build; `keykit/operator-pins-v2.sha256` pins `093909a2…`, owner to confirm);
    - `mainnet.manifest`, `carryover.tsv.gz` and `.sha256`;
    - `SHA256SUMS` over the three binaries;
