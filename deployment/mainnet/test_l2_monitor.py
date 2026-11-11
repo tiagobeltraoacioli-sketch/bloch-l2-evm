@@ -3,15 +3,17 @@
 
 Run: python3 -m unittest discover -s deployment/mainnet -p 'test_l2_monitor.py' -v
 """
+import atexit
 import copy
 import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -118,9 +120,17 @@ class Fake:
         raise AssertionError(f'unexpected {method}')
 
 
+# An attestation drop that exists and is empty: a live mainnet run without --attest-drop is WARN (review R308-30).
+EMPTY_DROP = tempfile.mkdtemp(prefix='l2mon-drop-')
+atexit.register(shutil.rmtree, EMPTY_DROP, True)
+
+
 def run(world, *extra, phase='live', runner=None, fetch=None):
     argv = ['--profile', 'mainnet', '--phase', phase, '--l2-rpc', f'A={L2A}', '--l2-rpc', f'B={L2B}']
     argv += sum((['--l1-rpc', u] for u in L1), []) + list(extra)
+    if '--attest-drop' not in extra and '--no-default-drop' not in extra:
+        argv += ['--attest-drop', EMPTY_DROP]
+    argv = [a for a in argv if a != '--no-default-drop']
     args = m.parse(argv)
     fake = Fake(world)
     return m.run(args, fake, now=NOW, run_cmd=runner or (lambda a: (1, '')), fetch=fetch or (lambda u: None)), fake
@@ -587,6 +597,7 @@ class MonitorTests(unittest.TestCase):
         good = {f'https://drop/700770/{root}/attestor-{i}.partial': partial(i, root) for i in range(3)}
         good[f'https://drop/700770/{root}/attestor-3.partial'] = partial(4, root)       # wrong index
         good[f'https://drop/700770/{root}/attestor-4.partial'] = partial(4, 'ff' * 32)  # wrong root
+        good['https://drop/healthz'] = b'ok\n'
         r, _ = run(w, '--attest-drop', 'https://drop', fetch=good.get)
         self.assertEqual(r.facts['attestation_rounds'][0]['signers'], [0, 1, 2])
         self.assertEqual(level(r, 'attestors'), 'WARN')
@@ -781,7 +792,8 @@ class MonitorTests(unittest.TestCase):
     def alert_args(self, d, cfg, dry=False):
         path = Path(d, 'alert.json')
         path.write_text(json.dumps({'state_file': str(Path(d, 'state.json')), **cfg}))
-        argv = ['--alert-config', str(path)] + (['--alert-dry-run'] if dry else [])
+        # prelaunch: a live run without heartbeat_url is WARN (review R308-31); the tests of that are below.
+        argv = ['--phase', 'prelaunch', '--alert-config', str(path)] + (['--alert-dry-run'] if dry else [])
         return m.parse(argv)
 
     def test_alert_on_change_realert_and_recovery(self):
@@ -931,7 +943,7 @@ class MonitorTests(unittest.TestCase):
         with mock.patch.object(m, 'http_transport', return_value=fake), mock.patch.object(m.time, 'time', return_value=NOW):
             out = io.StringIO()
             with redirect_stdout(out):
-                code = m.main(['--l2-rpc', L2A, '--l1-rpc', L1[0], '--json'])
+                code = m.main(['--l2-rpc', L2A, '--l1-rpc', L1[0], '--attest-drop', EMPTY_DROP, '--json'])
         doc = json.loads(out.getvalue())
         self.assertEqual(code, m.OK, json.dumps(doc['checks'], indent=1))
         self.assertEqual(doc['status'], 'OK')
@@ -1177,7 +1189,7 @@ class ByNumber(Fake):
 
 def run_by_number(world, *extra):
     argv = ['--profile', 'mainnet', '--phase', 'live', '--l2-rpc', f'A={L2A}', '--l2-rpc', f'B={L2B}']
-    argv += sum((['--l1-rpc', u] for u in L1), []) + list(extra)
+    argv += sum((['--l1-rpc', u] for u in L1), []) + list(extra) + ['--attest-drop', EMPTY_DROP]
     fake = ByNumber(world)
     return m.run(m.parse(argv), fake, now=NOW, run_cmd=lambda a: (1, ''), fetch=lambda u: None), fake
 
@@ -1477,6 +1489,285 @@ class DrillFindings(unittest.TestCase):
         done = held + [{'time': stamp(30), 'event': 'accepted', 'number': 4, 'commitment': 'cc' * 32}]
         r4, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': done}))
         self.assertEqual(level(r4, 'settlement_inclusion[settler]'), 'OK')
+
+
+class ReviewR15Tests(unittest.TestCase):
+    """Review r15 (agent 308), R308-29 to R308-31 and R308-33a: the demonstrations of
+    review-r15-308/monitors.py as regression tests."""
+    UNIT = 'bloch-l2-mainnet-settler.service'
+
+    # ---- R308-29: a journal that cannot be read is never silence
+    def test_r308_29_unreadable_journal_is_an_unknown_events_check(self):
+        for code, out in ((1, ''), (127, 'Command timed out after 30 seconds')):
+            def runner(argv, code=code, out=out):
+                return (0, ACTIVE) if argv[0] == 'systemctl' else (code, out)
+            report, _ = run(healthy(), '--unit', f'settler={self.UNIT}', runner=runner)
+            self.assertEqual(level(report, 'unit[settler]'), 'OK')
+            self.assertEqual(level(report, 'events[settler]'), 'UNKNOWN')
+            self.assertEqual(level(report, 'foreign_settlements[settler]'), 'UNKNOWN')
+            self.assertIn('journalctl exit %d' % code, next(c['message'] for c in report.checks if c['check'] == 'events[settler]'))
+            self.assertEqual(report.status, m.UNKNOWN)
+
+    def test_r308_29_a_readable_journal_keeps_its_grades(self):
+        report, _ = run(healthy(), '--unit', f'settler={self.UNIT}', runner=journal({self.UNIT: []}))
+        self.assertEqual(level(report, 'events[settler]'), 'OK')
+        self.assertNotIn('foreign_settlements[settler]', [c['check'] for c in report.checks])
+        self.assertEqual(report.status, m.OK)
+
+    def test_r308_29_subprocess_runner_reports_a_timeout_as_a_failure(self):
+        with mock.patch.object(m.subprocess, 'run', side_effect=m.subprocess.TimeoutExpired('journalctl', 30)):
+            code, out = m.subprocess_runner(['journalctl', '-u', self.UNIT])
+        self.assertEqual(code, 127)
+        self.assertIn('timed out', out)
+
+    # ---- R308-30: attestors
+    def roots_world(self, age=500, withdrawn_blch=176):
+        world = healthy()
+        for node in world['l1'].values():
+            node['l2']['withdrawals']['roots'] = [{'root': 'ab' * 32, 'finalized': True, 'height': 34000 - age, 'l2_number': 90}]
+        for b in world['l2'].values():
+            b['ledger']['0x3'] = withdrawn_blch * BLCH_WEI
+        return world
+
+    def attest_message(self, report):
+        return next(c['message'] for c in report.checks if c['check'] == 'attestors')
+
+    def test_r308_30_live_mainnet_without_a_drop_is_warn(self):
+        report, _ = run(healthy(), '--no-default-drop')
+        self.assertEqual(level(report, 'attestors'), 'WARN')
+        self.assertIn('not watched', self.attest_message(report))
+        report, _ = run(prelaunch(), '--no-default-drop', phase='prelaunch')
+        self.assertNotIn('attestors', [c['check'] for c in report.checks])
+
+    def test_r308_30_a_fetcher_that_cannot_tell_absent_from_unreachable_counts_as_unreachable(self):
+        report, _ = run(self.roots_world(), '--attest-drop', 'https://drop.example/attest', fetch=lambda url: None)
+        self.assertEqual(level(report, 'attestors'), 'CRIT')
+        self.assertIn('drop https://drop.example/attest unreachable (no answer)', self.attest_message(report))
+
+    def test_r308_30_unreachable_drops_are_told_apart_from_nothing_to_sign(self):
+        feeds = [f'http://att{i}.example:8600' for i in range(5)]
+        args = sum((['--attest-drop', f] for f in feeds), [])
+
+        def fetcher(down, no_health=()):
+            def fetch(url):
+                base = url.split('/', 3)[:3]
+                base = '/'.join(base)
+                if base in down:
+                    fetch.errors[url] = 'URLError: connection refused'
+                    return None
+                if url.endswith('/healthz') and base not in no_health:
+                    return b'ok\n'
+                return None  # 404: a missing partial, or a static host with no health route
+            fetch.errors = {}
+            return fetch
+        # No finalized root at all: all feeds up is OK, "nothing to sign"; any feed down is told.
+        report, _ = run(healthy(), *args, fetch=fetcher(set()))
+        self.assertEqual(level(report, 'attestors'), 'OK')
+        report, _ = run(healthy(), *args, fetch=fetcher(set(), no_health=set(feeds)))
+        self.assertEqual(level(report, 'attestors'), 'OK', 'a 404 on /healthz is an answer')
+        report, _ = run(healthy(), *args, fetch=fetcher({feeds[4]}))
+        self.assertEqual(level(report, 'attestors'), 'WARN')
+        self.assertIn('nothing to sign; drop http://att4.example:8600 unreachable (URLError: connection refused)',
+                      self.attest_message(report))
+        report, _ = run(healthy(), *args, fetch=fetcher(set(feeds[:3])))
+        self.assertEqual(level(report, 'attestors'), 'CRIT', 'fewer feeds reachable than the threshold of 3')
+        report, _ = run(healthy(), *args, fetch=fetcher(set(feeds)))
+        self.assertEqual(level(report, 'attestors'), 'CRIT')
+        self.assertEqual(report.facts['attestation_drops'], {'configured': 5, 'unreachable': sorted(feeds)})
+        # A missing directory drop is unreachable too.
+        report, _ = run(healthy(), '--attest-drop', os.path.join(EMPTY_DROP, 'missing'))
+        self.assertEqual(level(report, 'attestors'), 'CRIT')
+        self.assertIn('not a directory', self.attest_message(report))
+
+    def test_r308_30_old_unsigned_root_with_a_large_unclaimed_sum_is_warn(self):
+        # 176 BLCH released on L1. Withdrawn on L2: 176 (all claimed), 275.99 (below 100 unclaimed), 276 (100 unclaimed).
+        for withdrawn, age, want in ((176, 500, 'OK'), (275, 500, 'OK'), (276, 500, 'WARN'), (400, 500, 'WARN'),
+                                     (400, 100, 'OK')):  # within the grace of 120 blocks: not judged yet
+            report, _ = run(self.roots_world(age, withdrawn))
+            self.assertEqual(level(report, 'attestors'), want, (withdrawn, age))
+        self.assertIn('carry no partial while', self.attest_message(run(self.roots_world(500, 400))[0]))
+        report, _ = run(self.roots_world(500, 400), '--set', 'attest_unclaimed_warn_sat=30000000000')
+        self.assertEqual(level(report, 'attestors'), 'OK', 'the operator can move the threshold')
+
+    def test_r308_30_http_fetcher_records_transport_errors_and_not_404(self):
+        fetch = m.http_fetcher(1.0)
+
+        def urlopen(url, timeout=None):
+            if url.endswith('/gone'):
+                raise m.urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            if url.endswith('/broken'):
+                raise m.urllib.error.HTTPError(url, 502, 'Bad Gateway', {}, None)
+            raise m.urllib.error.URLError('connection refused')
+        with mock.patch.object(m.urllib.request, 'urlopen', urlopen):
+            self.assertIsNone(fetch('http://x/gone'))
+            self.assertIsNone(fetch('http://x/broken'))
+            self.assertIsNone(fetch('http://x/down'))
+        self.assertEqual(sorted(fetch.errors), ['http://x/broken', 'http://x/down'])
+
+    # ---- R308-31: the monitor's own failures
+    def alert_setup(self, d, phase='live', **cfg):
+        path = Path(d, 'alert.json')
+        path.write_text(json.dumps({'state_file': str(Path(d, 'alert.state')), **cfg}))
+        return m.parse(['--phase', phase, '--alert-config', str(path)])
+
+    def crit_report(self):
+        r = m.Report()
+        r.add('settlement_age', m.CRIT, 'last settlement accepted 180 min ago')
+        return r
+
+    def pings(self):
+        seen = []
+
+        def urlopen(req, timeout=None):
+            seen.append(req.full_url)
+            return io.BytesIO(b'OK')
+        return seen, mock.patch.object(m.urllib.request, 'urlopen', urlopen)
+
+    def test_r308_31_no_plain_ping_when_a_due_alert_was_not_delivered(self):
+        def failing(cfg, text, payload, timeout, dry_run):
+            raise OSError('HTTP Error 401: Unauthorized')
+        for sender, why in ((failing, 'delivery raised'), (lambda *a: [], 'no target configured')):
+            with tempfile.TemporaryDirectory() as d:
+                args = self.alert_setup(d, webhook_url='https://hooks.example/x', heartbeat_url='https://hc.example/ping/uuid')
+                seen, patch = self.pings()
+                r = self.crit_report()
+                with patch:
+                    self.assertEqual(m.handle_alerts(args, r, 1_800_000_000.0, sender=sender), 'raise')
+                self.assertEqual(seen, [], why)
+                self.assertEqual(level(r, 'alert_delivery'), 'WARN')
+                # With a failure URL the dead-man service is told at once.
+                args = self.alert_setup(d, webhook_url='https://hooks.example/x', heartbeat_url='https://hc.example/ping/uuid',
+                                        heartbeat_fail_url='https://hc.example/ping/uuid/fail')
+                seen, patch = self.pings()
+                with patch:
+                    m.handle_alerts(args, self.crit_report(), 1_800_000_000.0, sender=sender)
+                self.assertEqual(seen, ['https://hc.example/ping/uuid/fail'], why)
+
+    def test_r308_31_the_ping_follows_a_delivered_alert_and_a_quiet_run(self):
+        order = []
+
+        def sender(cfg, text, payload, timeout, dry_run):
+            order.append('alert')
+            return ['webhook']
+        with tempfile.TemporaryDirectory() as d:
+            args = self.alert_setup(d, webhook_url='https://hooks.example/x', heartbeat_url='https://hc.example/ping/uuid')
+
+            def urlopen(req, timeout=None):
+                order.append('ping')
+                return io.BytesIO(b'OK')
+            with mock.patch.object(m.urllib.request, 'urlopen', urlopen):
+                self.assertEqual(m.handle_alerts(args, self.crit_report(), 1_800_000_000.0, sender=sender), 'raise')
+                self.assertIsNone(m.handle_alerts(args, self.crit_report(), 1_800_000_060.0, sender=sender))  # unchanged
+                ok = m.Report()
+                ok.add('l2_head_age', m.OK, 'fine')
+                with tempfile.TemporaryDirectory() as d2:
+                    quiet = self.alert_setup(d2, webhook_url='https://hooks.example/x', heartbeat_url='https://hc.example/ping/uuid')
+                    self.assertIsNone(m.handle_alerts(quiet, ok, 1_800_000_000.0, sender=sender))
+        self.assertEqual(order, ['alert', 'ping', 'ping', 'ping'])
+
+    def test_r308_31_live_phase_without_heartbeat_is_warn_and_alerted(self):
+        texts = []
+
+        def sender(cfg, text, payload, timeout, dry_run):
+            texts.append(text)
+            return ['webhook']
+        for url in ('TBD-owner', '', None):
+            with tempfile.TemporaryDirectory() as d:
+                args = self.alert_setup(d, webhook_url='https://hooks.example/x', heartbeat_url=url)
+                r = m.Report()
+                r.add('l2_head_age', m.OK, 'fine')
+                self.assertEqual(m.handle_alerts(args, r, 1_800_000_000.0, sender=sender), 'raise')
+                self.assertEqual(level(r, 'heartbeat'), 'WARN')
+                self.assertIn('WARN heartbeat: no heartbeat_url configured', texts[-1])
+                pre = self.alert_setup(d, phase='prelaunch', webhook_url='https://hooks.example/x', heartbeat_url=url,
+                                       state_file=str(Path(d, 'pre.state')))
+                r = m.Report()
+                r.add('l2_head_age', m.OK, 'fine')
+                self.assertIsNone(m.handle_alerts(pre, r, 1_800_000_000.0, sender=sender))
+                self.assertNotIn('heartbeat', [c['check'] for c in r.checks])
+
+    def test_r308_31_a_check_that_raises_is_a_crit_and_the_others_still_run(self):
+        world = healthy()
+        world['l1'][L1[0]]['info']['height'] += 1
+        world['l1'][L1[0]]['l2']['inbox']['escrow_sat'] = None
+        err = io.StringIO()
+        with redirect_stderr(err):
+            report, _ = run(world, '--unit', f'settler={self.UNIT}', runner=journal({self.UNIT: []}))
+        self.assertEqual(level(report, 'monitor[escrow_and_backlog]'), 'CRIT')
+        self.assertIn('TypeError', next(c['message'] for c in report.checks if c['check'] == 'monitor[escrow_and_backlog]'))
+        self.assertIn('Traceback', err.getvalue())
+        self.assertEqual(level(report, 'settlement_age'), 'OK')
+        self.assertEqual(level(report, 'unit[settler]'), 'OK', 'checks after the failing one still ran')
+        self.assertEqual(report.status, m.CRIT)
+
+    def test_r308_31_main_turns_an_exception_into_a_crit_that_is_alerted(self):
+        sent = []
+
+        def sender(cfg, text, payload, timeout, dry_run):
+            sent.append(text)
+            return ['webhook']
+        real_handle = m.handle_alerts
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d, 'alert.json')
+            cfg.write_text(json.dumps({'state_file': str(Path(d, 'alert.state')), 'webhook_url': 'https://hooks.example/x',
+                                       'heartbeat_url': 'https://hc.example/ping/uuid'}))
+            seen, patch = self.pings()
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(m, 'run', side_effect=KeyError('height')), patch, \
+                    mock.patch.object(m, 'handle_alerts', lambda a, r, now: real_handle(a, r, now, sender=sender)), \
+                    redirect_stdout(out), redirect_stderr(err):
+                code = m.main(['--l2-rpc', L2A, '--l1-rpc', L1[0], '--alert-config', str(cfg), '--json'])
+            self.assertEqual(code, m.CRIT)
+            doc = json.loads(out.getvalue())
+            self.assertEqual([(c['check'], c['level']) for c in doc['checks']], [('monitor', 'CRIT')])
+            self.assertIn('CRIT monitor: the monitor run failed with KeyError', sent[0])
+            self.assertEqual(seen, ['https://hc.example/ping/uuid'], 'the alert was delivered, so the ping follows')
+            self.assertIn('Traceback', err.getvalue())
+            # An alert path that fails itself (config cut short) is CRIT too, exit 2, never a traceback with exit 1.
+            cfg.write_text('{')
+            fake = Fake(healthy())
+            out = io.StringIO()
+            with mock.patch.object(m, 'http_transport', return_value=fake), mock.patch.object(m.time, 'time', return_value=NOW), \
+                    redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = m.main(['--l2-rpc', L2A, '--l1-rpc', L1[0], '--attest-drop', EMPTY_DROP, '--alert-config', str(cfg), '--json'])
+            self.assertEqual(code, m.CRIT)
+            self.assertIn(('alert_delivery', 'CRIT'), [(c['check'], c['level']) for c in json.loads(out.getvalue())['checks']])
+
+    def test_r308_31_shipped_unit_and_alert_example(self):
+        mon = Path(__file__).resolve().parent / 'monitor'
+        example = json.loads((mon / 'alert.json.example').read_text())
+        self.assertIn('heartbeat_url', example)
+        self.assertIn('heartbeat_fail_url', example)
+        # The feeds exist only after P10 of the go-live plan, so the example carries no --attest-drop; the live
+        # monitor says so (WARN attestors) until the five feeds are added, and the plan tells the operator to.
+        self.assertNotIn('--attest-drop', (mon / 'monitor.env.example').read_text())
+        plan = (Path(__file__).resolve().parents[2] / 'docs' / 'L2-MAINNET-GO-LIVE.md').read_text()
+        self.assertIn('--attest-drop http://FEED_HOST:8787', plan)
+        self.assertIn('heartbeat_fail_url', plan)
+        unit = (mon / 'bloch-l2-mainnet-monitor.service').read_text()
+        self.assertIn('SupplementaryGroups=systemd-journal', unit)
+
+    # ---- R308-33a: one L1 endpoint does not decide the settlement age
+    def test_r308_33a_settlement_age_is_the_worst_among_nodes_within_the_height_spread(self):
+        old = (NOW - 3 * 3600 - m.L1_GENESIS_TIME) // 30
+        world = healthy()
+        for url in L1[:2]:
+            world['l1'][url]['l2']['source']['slot'] = old
+        world['l1'][L1[2]]['info']['height'] += 1
+        report, _ = run(world)
+        self.assertEqual(level(report, 'settlement_age'), 'CRIT')
+        self.assertIn('still reports this older settlement', next(c['message'] for c in report.checks if c['check'] == 'settlement_age'))
+        # A node outside the tolerated spread (3 blocks on mainnet) is l1_height_spread's to report, not a witness.
+        world = healthy()
+        world['l1'][L1[0]]['l2']['source']['slot'] = old
+        for url in L1[1:]:
+            world['l1'][url]['info']['height'] += 3
+        report, _ = run(world)
+        self.assertEqual(level(report, 'settlement_age'), 'OK')
+        self.assertEqual(level(report, 'l1_height_spread'), 'WARN')
+        # All nodes agree: the message is the plain one.
+        report, _ = run(healthy())
+        self.assertNotIn('still reports', next(c['message'] for c in report.checks if c['check'] == 'settlement_age'))
 
 
 if __name__ == '__main__':

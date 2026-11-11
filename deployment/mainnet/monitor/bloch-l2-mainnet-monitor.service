@@ -7,11 +7,15 @@ Wants=network-online.target
 Type=oneshot
 User=bloch-l2-monitor
 Group=bloch-l2-monitor
-# systemctl show / journalctl of the L2 units (read-only) need the systemd-journal group.
+# systemctl show / journalctl of the L2 units (read-only) need the systemd-journal group. Without it the monitor
+# reports events[UNIT] UNKNOWN on every run (review R308-29).
 SupplementaryGroups=systemd-journal
 EnvironmentFile=/etc/bloch-l2-monitor/monitor.env
 StateDirectory=bloch-l2-monitor
-# Exit 1/2/3 = WARN/CRIT/UNKNOWN: reported through the alert config, not a unit failure.
+# Exit 1/2/3 = WARN/CRIT/UNKNOWN: reported through the alert config, not a unit failure. A fault of the monitor
+# itself is a CRIT that goes through the same alerts (exit 2). The dead-man ping (heartbeat_url) is sent only
+# after a due alert was delivered; a wrong command line (argparse, exit 2) sends neither, so the dead-man
+# service is what reports it (review R308-31).
 SuccessExitStatus=1 2 3
 ExecStart=/usr/bin/python3 -I /opt/bloch/l2-monitor/l2_monitor.py $MONITOR_ARGS --alert-config /etc/bloch-l2-monitor/alert.json
 TimeoutStartSec=120
