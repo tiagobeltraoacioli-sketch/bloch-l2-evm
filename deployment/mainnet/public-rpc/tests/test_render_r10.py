@@ -108,6 +108,39 @@ class RenderR10(unittest.TestCase):
             self.assertIn('proxy_next_upstream off;', block)
             self.assertNotIn('proxy_next_upstream_tries', block)
 
+    def slot_config(self, *extra):
+        result, out = self.render('--client-ca', 'none', *extra)
+        if result.returncode:
+            return result, None
+        text = (out / 'l2rpc-config.js').read_text()
+        return result, {k: int(v) for k, v in re.findall(r'"(simPerIp|simTotal|txPerIp|txReserve|simFloor|slotTtlMs|slotGraceMs)": (\d+)', text)}
+
+    def test_evm_slot_defaults(self):
+        """Review R308-2P-6: one admission in flight per client and a reserve of 3 of the 8 slots; R308-2P-7: a floor
+        of 2 for simulations and a grace of 20 s for slots nobody renews."""
+        result, config = self.slot_config()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config, {'simPerIp': 2, 'simTotal': 8, 'txPerIp': 1, 'txReserve': 3, 'simFloor': 2,
+                                  'slotTtlMs': 60000, 'slotGraceMs': 20000})
+
+    def test_evm_slot_limits_that_cannot_work_are_refused(self):
+        for extra, message in (
+                (['--tx-per-ip', '2'], 'more than half of --tx-reserve'),                 # R308-2P-6
+                (['--tx-per-ip', '2', '--tx-reserve', '3'], 'more than half of --tx-reserve'),
+                (['--sim-per-ip', '8'], 'such a wave could never run'),                   # R308-2P-7c
+                (['--sim-per-ip', '6'], 'such a wave could never run'),
+                (['--sim-floor', '6'], '--sim-floor must be'),
+                (['--tx-reserve', '8'], '--tx-reserve must be'),
+                (['--slot-grace', '4'], '--slot-grace must be'),
+                (['--slot-grace', '61'], '--slot-grace must be')):
+            result, _ = self.slot_config(*extra)
+            self.assertNotEqual(result.returncode, 0, extra)
+            self.assertIn(message, result.stderr, extra)
+        for extra in (['--tx-per-ip', '2', '--tx-reserve', '4'], ['--sim-per-ip', '5'], ['--tx-reserve', '0', '--sim-floor', '0'],
+                      ['--sim-total', '16', '--tx-reserve', '6', '--tx-per-ip', '3', '--sim-per-ip', '4', '--sim-floor', '4']):
+            result, _ = self.slot_config(*extra)
+            self.assertEqual(result.returncode, 0, (extra, result.stderr))
+
     def test_the_old_tcp_hop_option_is_refused(self):
         result, _ = self.render('--peer-out-port', '18957', '--client-ca', 'none')
         self.assertNotEqual(result.returncode, 0)

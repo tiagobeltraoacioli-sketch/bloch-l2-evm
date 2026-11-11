@@ -99,13 +99,32 @@ function evmKind(method) {
   if (method === 'eth_sendRawTransaction') return 't';
   return SIMULATION[method] === true ? 'e' : null;
 }
-// A slot lives this long unless its request ends first: longer than one round trip can last (the subrequest
-// hop reads for 40 s at most). It is renewed before the finality retry.
+// The longest one wave of a request keeps its slots: longer than one round trip can last (the subrequest
+// hop reads for 40 s at most). Slots are renewed before the finality retry.
 const SLOT_TTL_MS = cfg.slotTtlMs || 60000;
+// A slot counts for this long after its request last renewed it. A request in flight renews its slots on a
+// timer, never past SLOT_TTL_MS. A handler that is never resumed (its worker was killed) renews nothing, and
+// its slots stop counting after this grace instead of the whole lifetime: the time the backend may still work
+// on a call nobody waits for (10 s permit wait + 5 s execution, and a margin). Measured on nginx 1.24 with
+// njs 0.8.2: a request whose CLIENT closed the connection is not lost; it runs on until its backend answers
+// (at most the 30 s read timeout) and then releases its slots like any other, so a slot is held for as long
+// as the backend works on the call. Without timers (unit tests) a slot lives SLOT_TTL_MS.
+const SLOT_GRACE_MS = Math.min(cfg.slotGraceMs || 20000, SLOT_TTL_MS);
+const SLOT_TIMERS = typeof setTimeout === 'function' && typeof clearTimeout === 'function';
 // Slots of cfg.simTotal that simulations never take, so transaction admission is not starved by them.
 const TX_RESERVE = cfg.txReserve === undefined ? Math.floor(cfg.simTotal / 4) : cfg.txReserve;
-// Transaction admissions in flight per client, counted apart from its simulations.
-const TX_PER_IP = cfg.txPerIp === undefined ? cfg.simPerIp : cfg.txPerIp;
+// Slots of cfg.simTotal that transaction admissions never take, so simulations are not starved by them.
+const SIM_FLOOR = Math.min(cfg.simFloor === undefined ? Math.floor(cfg.simTotal / 4) : cfg.simFloor, cfg.simTotal - TX_RESERVE);
+const SIM_MAX = cfg.simTotal - TX_RESERVE;
+const TX_MAX = cfg.simTotal - SIM_FLOOR;
+// Simulations in flight per client: never more than the simulations' own share, or a wave of that size
+// would be refused on an idle gateway.
+const SIM_PER_IP = Math.max(1, Math.min(cfg.simPerIp, SIM_MAX));
+// Transaction admissions in flight per client, counted apart from its simulations. One client never holds
+// more than half of the reserve (review R308-2P-6): with the simulations at their cap, the reserve is all
+// that is left for everyone's transactions.
+const TX_PER_IP = Math.max(1, Math.min(cfg.txPerIp === undefined ? 1 : cfg.txPerIp, TX_MAX,
+  TX_RESERVE > 0 ? Math.floor(TX_RESERVE / 2) : TX_MAX));
 
 // Position of the block parameter of each method that takes a tag.
 const TAG_POSITION = {
@@ -350,13 +369,16 @@ function charge(r, calls, txs) {
 // ------------------------------------------------------------------- EVM slots
 //
 // One key per call in flight in the shared dictionary l2slots: "<kind> <client> <request> <n>", its value the
-// time (ms) it stops counting. A request deletes its keys when its subrequests return; a request whose client
-// connection failed is never resumed by njs, and its keys then stop counting by themselves after SLOT_TTL_MS
-// (review R308-27: no counter that needs a release). Limits, each counted over the live keys:
-//   simulations per client          cfg.simPerIp
-//   transaction admissions per client   TX_PER_IP
-//   simulations, all clients        cfg.simTotal - TX_RESERVE (the reserve is for transactions only)
+// time (ms) it stops counting. A request deletes its keys when its subrequests return, and renews them on a
+// timer while it waits; the keys of a handler that never comes back stop counting by themselves after
+// SLOT_GRACE_MS (review R308-27: no counter that needs a release; review R308-2P-7: such a slot is not held
+// for the full lifetime). Limits, each counted over the live keys:
+//   simulations per client              SIM_PER_IP
+//   transaction admissions per client   TX_PER_IP (at most half of the reserve)
+//   simulations, all clients            cfg.simTotal - TX_RESERVE (the reserve is for transactions only)
+//   admissions, all clients             cfg.simTotal - SIM_FLOOR (the floor is for simulations only)
 //   simulations and admissions, all clients   cfg.simTotal
+// Simulations and admissions do not count against each other's limit, only against the total.
 // The client of a slot is its IPv4 address or its IPv6 /56.
 
 function slotCounts(d, now, who) {
@@ -379,12 +401,34 @@ function slotCounts(d, now, who) {
 }
 
 function releaseSlots(hold) {
+  if (hold.timer !== null && hold.timer !== undefined) clearTimeout(hold.timer);
+  hold.timer = null;
   hold.keys.forEach((key) => { hold.d.delete(key); });
+  hold.keys = [];
+}
+
+function slotUntil() {
+  return Date.now() + (SLOT_TIMERS ? SLOT_GRACE_MS : SLOT_TTL_MS);
 }
 
 function renewSlots(hold) {
-  const until = Date.now() + SLOT_TTL_MS;
+  const until = hold.end ? Math.min(slotUntil(), hold.end) : slotUntil();
   hold.keys.forEach((key) => { hold.d.set(key, until); });
+}
+
+// Renews the slots of a wave while its request waits for the backend, until releaseSlots(); no slot of the
+// wave counts past SLOT_TTL_MS from here.
+function keepSlots(hold) {
+  if (!SLOT_TIMERS) return;
+  hold.end = Date.now() + SLOT_TTL_MS;
+  const every = Math.max(250, Math.floor(SLOT_GRACE_MS / 4));
+  const again = () => {
+    hold.timer = null;
+    if (hold.keys.length === 0 || Date.now() >= hold.end) return;
+    renewSlots(hold);
+    hold.timer = setTimeout(again, every);
+  };
+  hold.timer = setTimeout(again, every);
 }
 
 // Takes `sims` simulation slots and `txs` admission slots for one wave of a request. Returns the hold, with
@@ -393,26 +437,24 @@ function renewSlots(hold) {
 function takeSlots(r, tag, sims, txs) {
   const d = ngx.shared.l2slots;
   const who = clientKey(r.variables.remote_addr, 56);
-  const hold = { d: d, keys: [], refused: null };
+  const hold = { d: d, keys: [], refused: null, timer: null, end: 0 };
   const now = Date.now();
+  const until = slotUntil();
   for (let i = 0; i < sims + txs; i++) {
     const key = (i < sims ? 'e' : 't') + ' ' + who + ' ' + tag + '.' + i;
-    d.set(key, now + SLOT_TTL_MS);
+    d.set(key, until);
     hold.keys.push(key);
   }
   const n = slotCounts(d, now, who);
-  if ((sims > 0 && n.myE > cfg.simPerIp) || (txs > 0 && n.myT > TX_PER_IP)) hold.refused = 'client';
-  else if (n.e + n.t > cfg.simTotal || (sims > 0 && n.e + n.t - txs > cfg.simTotal - TX_RESERVE)) hold.refused = 'busy';
-  if (hold.refused) {
-    releaseSlots(hold);
-    hold.keys = [];
-  }
+  if ((sims > 0 && n.myE > SIM_PER_IP) || (txs > 0 && n.myT > TX_PER_IP)) hold.refused = 'client';
+  else if (n.e + n.t > cfg.simTotal || (sims > 0 && n.e > SIM_MAX) || (txs > 0 && n.t > TX_MAX)) hold.refused = 'busy';
+  if (hold.refused) releaseSlots(hold);
   return hold;
 }
 
 function slotMessage(refused) {
   return refused === 'client'
-    ? 'Rate limited: at most ' + cfg.simPerIp + ' EVM simulations and ' + TX_PER_IP + ' transaction admissions in flight per client.'
+    ? 'Rate limited: at most ' + SIM_PER_IP + ' EVM simulations and ' + TX_PER_IP + ' transaction admissions in flight per client.'
     : 'Busy: too many EVM simulations or transaction admissions in flight; retry shortly.';
 }
 
@@ -611,14 +653,14 @@ async function handle(r) {
   }
 
   // Waves: the calls without EVM work go with the first one; the EVM calls follow in request order, as many
-  // per wave as one client may have in flight (cfg.simPerIp simulations, TX_PER_IP admissions). A batch
+  // per wave as one client may have in flight (SIM_PER_IP simulations, TX_PER_IP admissions). A batch
   // with more of them is therefore served, a wave at a time, and never holds more slots than its client may
   // (review R308-33b).
   const waves = [];
   let wave = { calls: forward.filter((f) => evmKind(f.call.method) === null), e: 0, t: 0 };
   evm.forEach((f) => {
     const kind = evmKind(f.call.method);
-    if ((kind === 'e' && wave.e >= cfg.simPerIp) || (kind === 't' && wave.t >= TX_PER_IP)) {
+    if ((kind === 'e' && wave.e >= SIM_PER_IP) || (kind === 't' && wave.t >= TX_PER_IP)) {
       waves.push(wave);
       wave = { calls: [], e: 0, t: 0 };
     }
@@ -658,6 +700,7 @@ async function handle(r) {
     w.calls.forEach((f) => { waveRoutes[f.route] = true; });
     const parts = Object.keys(waveRoutes).map((route) => ({ route: route, calls: w.calls.filter((f) => f.route === route) }));
     try {
+      if (hold) keepSlots(hold);
       // njs (0.8.2) does not take `await` inside call arguments.
       const done = await forwardParts(r, parts, hold ? () => renewSlots(hold) : null);
       forwarded = forwarded.concat(done);
