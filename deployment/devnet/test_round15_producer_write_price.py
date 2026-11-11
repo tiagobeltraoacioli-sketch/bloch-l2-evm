@@ -234,6 +234,35 @@ class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
             self.assertEqual(json.loads(Path(args[args.index('--write-waiting') + 1]).read_text()), ['cc' * 20])
 
 
+class DatabaseCopyCarriesNoModeBits(unittest.TestCase):
+    """Agent 312 F312-7: the settler unit has RestrictSUIDSGID=yes and the read-group database directories are
+    setgid; a copy that sets a directory's mode from its source is refused there. `copy_database` never sets a mode
+    (the same check under a real unit with that property: agents/311-evidence/f312-7/)."""
+
+    def test_the_copy_calls_no_chmod_and_keeps_names_contents_and_links(self):
+        import os
+        import tempfile
+        from unittest import mock
+        import settler_v3 as settler
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / 'db', Path(directory) / 'copy'
+            (source / 'db' / 'static').mkdir(parents=True)
+            (source / 'db' / 'CURRENT').write_bytes(b'MANIFEST-000001\n')
+            (source / 'db' / 'static' / '000001.sst').write_bytes(bytes(range(256)) * 64)
+            os.symlink('CURRENT', source / 'db' / 'link')
+            os.symlink('static', source / 'db' / 'dirlink')
+
+            def refused(*args, **kwargs):
+                raise PermissionError(1, 'Operation not permitted')
+            with mock.patch('os.chmod', refused), mock.patch('shutil.copystat', refused), mock.patch('shutil.copymode', refused):
+                settler.copy_database(source, target)
+            self.assertEqual((target / 'db' / 'static' / '000001.sst').read_bytes(), bytes(range(256)) * 64)
+            self.assertEqual(os.readlink(target / 'db' / 'link'), 'CURRENT')
+            self.assertEqual(os.readlink(target / 'db' / 'dirlink'), 'static')
+            self.assertEqual(sorted(p.relative_to(target).as_posix() for p in target.rglob('*')),
+                             sorted(p.relative_to(source).as_posix() for p in source.rglob('*')))
+
+
 class ProducerTimeoutIsARefusal(unittest.TestCase):
     """Review R308-2P-13: a producer that does not answer is a ProducerError, which `extend` answers with the
     deposits-only block; it stays distinguishable (ProducerTimeout) for the kept-database scan of R308-22."""

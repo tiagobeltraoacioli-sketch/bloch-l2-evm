@@ -445,6 +445,24 @@ def log(event, **fields):
     print(json.dumps({'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'event': event, **fields}), flush=True)
 
 
+def copy_database(source, target):
+    """Copy a database directory: names, contents and symbolic links, never mode bits. `shutil.copytree` copies the
+    mode of every directory, and the canonical database of the read-group layout is setgid (follower-rpc/install.sh
+    `--read-group`): under the settler unit's `RestrictSUIDSGID=yes` that chmod is refused with EPERM and no block
+    was ever built (agent 312 F312-7). The copy is this user's scratch: directories 0700, files by the umask."""
+    source, target = Path(source), Path(target)
+    for root, directories, files in os.walk(source):
+        out = target / Path(root).relative_to(source)
+        out.mkdir(mode=0o700)
+        for name in list(directories) + files:
+            entry = Path(root) / name
+            if entry.is_symlink():
+                os.symlink(os.readlink(entry), out / name)
+            elif name in files:
+                shutil.copyfile(entry, out / name)
+        directories[:] = [name for name in directories if not (Path(root) / name).is_symlink()]
+
+
 def atomic_write(path, data):
     """Replace `path` whole or not at all: a crash or a full disk never leaves a truncated state file,
     which the next cycle would read as a conflicting request or as corrupt JSON."""
@@ -2051,12 +2069,12 @@ class Settler:
         shared = getattr(self, 'preflight_shared', None)
         if self.c.get('preflight_database', 'rewind') != 'rewind' or shared is None:
             db = scratch / 'db'
-            shutil.copytree(self.c['l2_db'], db, symlinks=True)
+            copy_database(self.c['l2_db'], db)
             return db
         if not shared.exists():
             partial = shared.with_name(shared.name + '.partial')
             shutil.rmtree(partial, ignore_errors=True)
-            shutil.copytree(self.c['l2_db'], partial, symlinks=True)
+            copy_database(self.c['l2_db'], partial)
             partial.replace(shared)
         return shared
 
@@ -3806,7 +3824,7 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
             if not live.is_dir():
                 return done(False, reason=f'native accepted L2 block {report["native"]["accepted_l2_number"]}: '
                                           'the dry run needs a copy of the settled L2 database (l2_db)')
-            shutil.copytree(live, base / 'canonical')  # stop the settler first: a live RocksDB copy may be torn
+            copy_database(live, base / 'canonical')  # stop the settler first: a live RocksDB copy may be torn
         else:
             settler.produce('init', '--target', str(base / 'canonical'))
             head = settler.produce('head', '--target', str(base / 'canonical'))
