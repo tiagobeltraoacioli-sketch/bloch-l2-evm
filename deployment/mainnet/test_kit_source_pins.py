@@ -37,5 +37,21 @@ class KitSourcePins(unittest.TestCase):
                                  f'{name} was changed without refreshing its source pin')
 
 
+class KitPinsCoverTheKitAndThePlan(unittest.TestCase):
+    """Review R308-14 / R308-17, agent 312 F312-1: every kit file a host may run or install has a pin line,
+    and the go-live plan's hash table and P2 GO line equal the tree. Refresh: refresh_kit_pins.py --write."""
+
+    def test_pin_lists_and_plan_table_equal_the_tree(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('refresh_kit_pins', HERE / 'refresh_kit_pins.py')
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        self.assertEqual(tool.differences(), [])
+        pinned = {name for name, _ in tool.read_pins(HERE / 'GO-LIVE-PINS.sha256')}
+        for must in ('kit/install-shadow.sh', 'kit/bloch-l2-mainnet-shadow.service', 'kit/attestor/install-attestor.sh',
+                     'kit/attestor/attestor_agent.py', 'kit/follower-rpc/bloch-l2-mainnet-rpc.service',
+                     'kit/public-rpc/setup-gateway.sh', 'kit/replica/install-replica.sh', 'kit/monitor/bloch-l2-mainnet-monitor.service'):
+            self.assertIn(must, pinned)
+
 if __name__ == '__main__':
     unittest.main()
