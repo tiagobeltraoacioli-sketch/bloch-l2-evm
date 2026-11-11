@@ -704,25 +704,59 @@ pub fn select_node_transactions_priced_after_forced<DB: DatabaseRef>(
     } else {
         Default::default()
     };
-    // One transaction alone, after the deposits, on the parent state: (gas used, slots added), or None when it
-    // cannot run there (a queued nonce, funds). Nothing is kept.
-    let mut alone = |env: &TxEnv| -> Result<Option<(u64, u64)>, BlockExecutionError> {
-        let mut fresh_session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
-            super::prepare_parent(spec, domain, db, previous_root, context)
-        })?;
-        let mut seen = None;
-        match fresh_session.try_transaction_judged(env, |gas_used, fresh| {
-            seen = Some((gas_used, fresh));
-            false
-        }) {
-            Ok(_) => Ok(seen),
-            Err(BlockExecutionError::Database { detail }) => Err(BlockExecutionError::Database { detail }),
-            Err(_) => Ok(None),
-        }
-    };
+    let mut alone = |env: &TxEnv| judged_alone(spec, domain, db, previous_root, context, deposits, env);
     let mut left = LeftUnpaid::default();
     let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left, &mut alone)?;
     Ok((forced, selection, left))
+}
+
+/// [`select_node_transactions_priced_after_forced`] without forced records.
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+pub fn select_node_transactions_priced<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: &DB,
+    previous_root: B256,
+    context: &BlockContext,
+    deposits: &[DepositMint],
+    candidates: &[Bytes],
+    limits: SelectionLimits,
+    price: &WritePrice,
+) -> Result<(BlockSelection, LeftUnpaid), BlockExecutionError> {
+    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
+        super::prepare_parent(spec, domain, db, previous_root, context)
+    })?;
+    let mut alone = |env: &TxEnv| judged_alone(spec, domain, db, previous_root, context, deposits, env);
+    let mut left = LeftUnpaid::default();
+    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left, &mut alone)?;
+    Ok((selection, left))
+}
+
+// One transaction alone, after the deposits, on the parent state: (gas used, slots added), or None when it cannot
+// run there (a queued nonce, funds). Nothing is kept.
+#[cfg(feature = "std")]
+fn judged_alone<DB: DatabaseRef>(
+    spec: &ChainSpec,
+    domain: B256,
+    db: &DB,
+    previous_root: B256,
+    context: &BlockContext,
+    deposits: &[DepositMint],
+    env: &TxEnv,
+) -> Result<Option<(u64, u64)>, BlockExecutionError> {
+    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
+        super::prepare_parent(spec, domain, db, previous_root, context)
+    })?;
+    let mut seen = None;
+    match session.try_transaction_judged(env, |gas_used, fresh| {
+        seen = Some((gas_used, fresh));
+        false
+    }) {
+        Ok(_) => Ok(seen),
+        Err(BlockExecutionError::Database { detail }) => Err(BlockExecutionError::Database { detail }),
+        Err(_) => Ok(None),
+    }
 }
 
 // The loop of `select_in_session`, with the write price judged before a transaction's changes land. A copy, not
