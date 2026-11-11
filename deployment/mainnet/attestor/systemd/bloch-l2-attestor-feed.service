@@ -15,7 +15,9 @@ EnvironmentFile=/etc/bloch-l2-attestor/feed.env
 ExecStart=/usr/bin/python3 -I /opt/bloch/l2-attestor/sigfeed.py serve --root /var/lib/bloch-l2-attestor/outbox --bind ${SIGFEED_BIND} --port ${SIGFEED_PORT}
 Restart=always
 RestartSec=10
-TemporaryFileSystem=/var/lib:ro
+# /run is empty for the feed: it runs as the agent's user and must not see the agent's 0400 passphrase copy
+# (/run/bloch-l2-attestor) or any credential directory, also when they appear after the feed started.
+TemporaryFileSystem=/var/lib:ro /run:ro
 BindReadOnlyPaths=/var/lib/bloch-l2-attestor/outbox
 InaccessiblePaths=-/etc/bloch-l2-attestor/attestor.sealed -/etc/bloch-l2-attestor/keystore.passphrase -/etc/bloch-l2-attestor/publish-token
 NoNewPrivileges=true

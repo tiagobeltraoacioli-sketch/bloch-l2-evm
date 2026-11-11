@@ -230,6 +230,7 @@ class UpgradeScriptTest(unittest.TestCase):
         (self.tmp / 'check.py').write_text(FAKE_CHECK)
         threshold, keys = lib.read_set(KIT / 'public/attestors.set')
         self.set_hash = lib.set_hash(threshold, keys)
+        (self.root / 'agent.started').write_text('running before the upgrade\n')   # a host in normal operation
 
     def tearDown(self):
         subprocess.run([sys.executable, str(self.tmp / 'services.py'), str(self.root), 'stop', 'follower'])
@@ -283,7 +284,7 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertIn('"event": "check-ok"', done.stdout)
         self.assertRegex(done.stdout, r'REPORT: attestor 2: upgrade check-ok, epoch \d+->\d+')
         order = (self.root / 'services.log').read_text().split('\n')
-        self.assertEqual(order[:3], ['stop agent', 'stop follower', 'start follower'])
+        self.assertEqual(order[:4], ['is-active agent', 'stop agent', 'stop follower', 'start follower'])
         self.assertEqual([x for x in order if x.endswith('agent')][-2:], ['start agent', 'is-active agent'])
 
         again = self.upgrade(now=FORK_UNIX - 86_400)
@@ -300,7 +301,7 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertFalse(feed_unit.exists())
         self.assertFalse((self.etc / 'feed.env').exists())
         self.assertEqual(self.state(), {'op': 'upgrade-rollback', 'tag': 'pre-hf123', 'phase': 'done',
-                                        'moved_at': self.state()['moved_at']})
+                                        'moved_at': self.state()['moved_at'], 'was_paused': '0', 'was_active': '1'})
         self.assertIn('REPORT: attestor 2: upgrade-rollback check-ok', back.stdout)
 
     def test_upgrade_keeps_an_existing_feed_and_its_settings(self):
@@ -375,6 +376,37 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertEqual((self.opt / 'bloch-l2-produce-dev').read_bytes(), self.OLD_PRODUCE)
         self.assertFalse((self.etc / 'PAUSE').exists())
         self.assertRegex(back.stdout, r'REPORT: attestor 2: upgrade-rollback check-ok')
+
+    def test_upgrade_keeps_an_operator_pause_and_a_stopped_agent(self):
+        """Review R308-15: an operator who paused signing for an incident and then takes the fixed build must
+        not find the pause removed and the agent signing again."""
+        (self.etc / 'PAUSE').write_text('operator pause: incident\n')
+        (self.root / 'agent.started').unlink()
+        done = self.upgrade(now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue((self.etc / 'PAUSE').exists(), 'upgrade deleted the PAUSE the operator set before it')
+        self.assertFalse((self.root / 'agent.started').exists(), 'upgrade started an agent that was stopped before it')
+        self.assertEqual(self.state()['phase'], 'done')
+        self.assertIn('is KEPT', done.stdout)
+        self.assertIn('stays stopped', done.stdout)
+        self.assertEqual((self.opt / 'bloch-l2-native-follower').read_bytes(), self.NEW_FOLLOWER)
+
+    def test_upgrade_keeps_a_pause_but_restarts_a_running_agent(self):
+        """A paused host whose agent runs (it logs `paused` and signs nothing): the pause stays, the agent runs again."""
+        (self.etc / 'PAUSE').write_text('operator pause\n')
+        done = self.upgrade(now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue((self.etc / 'PAUSE').exists())
+        self.assertTrue((self.root / 'agent.started').exists())
+
+    def test_resume_remembers_the_pause_seen_before_the_first_attempt(self):
+        (self.etc / 'PAUSE').write_text('operator pause\n')
+        first = self.upgrade(now=FORK_UNIX - 86_400, env={'FAKE_CHECK_FAIL': '1'})
+        self.assertEqual(first.returncode, 1)
+        self.assertEqual(self.state()['was_paused'], '1')
+        done = self.script('upgrade', '--resume', now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue((self.etc / 'PAUSE').exists(), 'the resumed upgrade removed the operator pause')
 
     def test_artifact_not_matching_the_published_hash_changes_nothing(self):
         (self.art / 'bloch-l2-native-follower').write_bytes(b'#!/bin/sh\nexit 0\n')
