@@ -12,7 +12,7 @@ import sys
 import unittest
 from unittest import mock
 
-WT = Path(os.environ.get('WT', str(Path(__file__).resolve().parents[2])))
+WT = Path(os.environ.get('WT', str(Path(__file__).resolve().parents[3])))
 sys.path.insert(0, str(WT / 'deployment/devnet'))
 import settler_v3 as s  # noqa: E402
 import test_settler_v3 as t  # noqa: E402
