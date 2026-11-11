@@ -345,8 +345,8 @@ production activation, or a new benchmark measurement. The candidate SP1 host
 remains unpinned until its release build is qualified.
 
 **Measured (round 15, execute-only, no proof).** Agent 243's precompile offenders, one transaction per
-block, the mainnet guest `203114bf…`, limit 180M instructions (factor 2 on the 90M budget), host
-45.77.142.123 under a 24 GiB scope with another build running. "Before" is the single-stage host with the
+block, the mainnet guest `203114bf…`, limit 180M instructions (factor 2 on the 90M budget), on the shared
+build host under a 24 GiB scope with another build running. "Before" is the single-stage host with the
 cycle limit (`853c7e20…`), "after" the candidate's two-stage host built from this line (`5b6d2459…`,
 unpinned, run with `--mainnet-v1`). Wall seconds of the whole host process:
 
