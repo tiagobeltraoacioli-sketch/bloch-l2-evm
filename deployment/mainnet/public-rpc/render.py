@@ -121,15 +121,22 @@ def main():
     a.add_argument('--tx-per-minute', type=int, default=30)
     a.add_argument('--sim-per-ip', type=int, default=2,
                    help='EVM simulations in flight per client (IPv4 address or IPv6 /56); a batch with more runs them this many at a time')
-    a.add_argument('--tx-per-ip', type=int, default=None,
-                   help='eth_sendRawTransaction admissions in flight per client, counted apart from its simulations (default: --sim-per-ip)')
+    a.add_argument('--tx-per-ip', type=int, default=1,
+                   help='eth_sendRawTransaction admissions in flight per client, counted apart from its simulations; '
+                        'above 1 it must be at most half of --tx-reserve (no client may hold the reserve)')
     a.add_argument('--sim-total', type=int, default=8,
                    help='EVM simulations and transaction admissions in flight through this gateway for all clients (each backend also enforces its shared permits)')
-    a.add_argument('--tx-reserve', type=int, default=2,
+    a.add_argument('--tx-reserve', type=int, default=3,
                    help='slots of --sim-total kept for eth_sendRawTransaction: simulations use at most --sim-total minus this')
+    a.add_argument('--sim-floor', type=int, default=2,
+                   help='slots of --sim-total kept for simulations: transaction admissions use at most --sim-total minus this')
     a.add_argument('--slot-ttl', type=int, default=60,
-                   help='seconds after which the EVM slot of a request that never returned (client connection lost) stops counting; '
+                   help='seconds one wave of a request may keep its EVM slots at most (renewals stop there); '
                         'above the 40 s a subrequest can last')
+    a.add_argument('--slot-grace', type=int, default=20,
+                   help='seconds an EVM slot keeps counting after its request last renewed it (a request in flight renews every quarter of this; '
+                        'a handler that never comes back, e.g. a killed worker, renews nothing): the time a backend may still work on the call '
+                        '(10 s permit wait + 5 s execution)')
     a.add_argument('--backend-conns', type=int, default=48,
                    help='active connections from this gateway to the local settled RPC for reads (sequencer/peer paths get a quarter each)')
     a.add_argument('--max-batch', type=int, default=100, help='calls per batch (ethers v6 batches up to 100)')
@@ -169,12 +176,24 @@ def main():
     hop = Path(o.hop_dir)
     if not hop.is_absolute():
         a.error('--hop-dir must be absolute')
-    if o.tx_per_ip is None:
-        o.tx_per_ip = o.sim_per_ip
     if o.sim_per_ip < 1 or o.tx_per_ip < 1:
         a.error('--sim-per-ip and --tx-per-ip must be at least 1')
     if not 0 <= o.tx_reserve < o.sim_total:
         a.error('--tx-reserve must be at least 0 and below --sim-total (simulations need a slot)')
+    if not 0 <= o.sim_floor <= o.sim_total - o.tx_reserve:
+        a.error('--sim-floor must be at least 0 and at most --sim-total minus --tx-reserve')
+    if o.sim_floor == o.sim_total:
+        a.error('--sim-floor must be below --sim-total (transactions need a slot)')
+    if o.sim_per_ip > o.sim_total - o.tx_reserve:
+        a.error(f'--sim-per-ip {o.sim_per_ip} is above the {o.sim_total - o.tx_reserve} slots simulations can use '
+                '(--sim-total minus --tx-reserve): such a wave could never run')
+    if o.tx_per_ip > o.sim_total - o.sim_floor:
+        a.error('--tx-per-ip is above the slots transaction admissions can use (--sim-total minus --sim-floor)')
+    if o.tx_per_ip > 1 and 2 * o.tx_per_ip > o.tx_reserve:
+        a.error(f'--tx-per-ip {o.tx_per_ip} is more than half of --tx-reserve {o.tx_reserve}: one client could hold '
+                'the slots kept for everyone\'s transactions. Raise --tx-reserve or lower --tx-per-ip')
+    if not 5 <= o.slot_grace <= o.slot_ttl:
+        a.error('--slot-grace must be between 5 seconds and --slot-ttl')
     if not 45 <= o.slot_ttl <= 600:
         a.error('--slot-ttl must be between 45 and 600 seconds (a subrequest can last 40 s)')
     if not 65536 <= o.sub_answer_max <= 16 * 1024 * 1024:
@@ -324,7 +343,9 @@ server {{
         'simTotal': o.sim_total,
         'txPerIp': o.tx_per_ip,
         'txReserve': o.tx_reserve,
+        'simFloor': o.sim_floor,
         'slotTtlMs': o.slot_ttl * 1000,
+        'slotGraceMs': o.slot_grace * 1000,
         'subAnswerMaxBytes': o.sub_answer_max,
         'maxLogBlockRange': o.max_log_range,
         'maxLogAddresses': 256,

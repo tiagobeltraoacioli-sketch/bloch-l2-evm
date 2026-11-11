@@ -17,7 +17,15 @@ function harness(extra) {
   const shared = { l2rate: new Dictionary(), l2slots: new Dictionary(), l2state: new Dictionary() };
   const clock = { now: 1_800_000_000_000 };
   class FakeDate extends Date { static now() { return clock.now; } }
+  // Added by the developer (fix of R308-2P-7b): the handler now renews its slots on njs timers, so the harness
+  // has setTimeout/clearTimeout on the fake clock. dropTimers() is a handler lost for good with its timers (a
+  // killed worker). Measured on nginx 1.24 / njs 0.8.2: a client closing its connection does not lose the
+  // handler at all; it resumes when the backend answers and frees its slots (public-rpc/README.md, EVM slots).
+  let timers = [];
+  const dropTimers = () => { timers = []; };
   const context = vm.createContext({
+    setTimeout(fn, ms) { const t = { at: clock.now + ms, fn }; timers.push(t); return t; },
+    clearTimeout(t) { timers = timers.filter((x) => x !== t); },
     injectedConfig: Object.assign({
       role: 'sequencer', peerProbeUrl: 'http://peer/probe', chainId: 700770, chainIdHex: '0xab162',
       stateMaxAgeMs: 15000, maxStatusAgeS: 900, maxBatch: 100, callsPerMinute: 1200, txPerMinute: 30,
@@ -40,7 +48,7 @@ function harness(extra) {
   });
   const setState = (name) => shared.l2state.set(name, JSON.stringify({ ok: true, head: 100, finalized: 90,
     statusState: 'ok', statusAge: 5, ts: clock.now, error: null }));
-  return { handle: context.gateway.handle, request, shared, clock, setState };
+  return { handle: context.gateway.handle, request, shared, clock, setState, dropTimers };
 }
 const ethCall = (id) => ({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to: '0x' + '11'.repeat(20) }, 'latest'] });
 const rawTx = (id) => ({ jsonrpc: '2.0', id, method: 'eth_sendRawTransaction', params: ['0x01'] });
@@ -84,6 +92,7 @@ test('K3: 59 s after six aborted eth_call (three addresses) another client\'s et
   const aborted = () => new Promise(() => {});
   for (let n = 0; n < 3; n++) for (let k = 0; k < 2; k++) h.handle(h.request(ethCall(1), `203.0.113.${n + 1}`, aborted));
   await tick();
+  h.dropTimers();   // adapted: the six handlers are lost for good (see harness)
   h.clock.now += 59000; h.setState('local');
   const victim = h.request(ethCall('sim'), '198.51.100.7');
   await h.handle(victim);
@@ -101,12 +110,16 @@ test('K4: simPerIp 8, simTotal 8, txReserve 2 (accepted by render.py): a batch o
 
 // Controls (pass): things checked and found correct.
 test('control: refused later wave reports submitted:false only for transactions that were never forwarded; order kept', async () => {
-  const h = harness(); h.setState('local');
+  // Adapted by the developer: two admissions per client now need a reserve of at least 4 (R308-2P-6), and
+  // admissions no longer count against the simulations' cap (R308-2P-7a), so the other clients fill the
+  // gateway with simulations. The reviewer's lines were harness() and rawTx(1) in the blockers; the
+  // assertions are unchanged.
+  const h = harness({ txReserve: 4 }); h.setState('local');
   const t = slowTransport();
   let blockers = [];
   const r = h.request([rawTx('a'), rawTx('b'), rawTx('c'), ethCall('d')], '192.0.2.9', async (where, options, answer) => {
     // while wave 0 (a, b) is in flight, other clients fill the gateway
-    if (!blockers.length) for (let n = 0; n < 4; n++) for (let k = 0; k < 2; k++) blockers.push(h.handle(h.request(rawTx(1), `203.0.113.${n + 1}`, t.slow)));
+    if (!blockers.length) for (let n = 0; n < 4; n++) for (let k = 0; k < 2; k++) blockers.push(h.handle(h.request(ethCall(1), `203.0.113.${n + 1}`, t.slow)));
     await tick();
     return answer(options);
   });

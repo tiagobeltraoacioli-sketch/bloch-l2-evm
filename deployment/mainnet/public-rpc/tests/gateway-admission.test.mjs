@@ -22,12 +22,34 @@ class Dictionary extends Map {
   }
 }
 
-function harness(overrides = {}) {
+// `timers: true` gives the handler njs's setTimeout/clearTimeout, driven by the fake clock (advance). Without
+// it the handler sees no timers and a slot lives its whole lifetime, as before review R308-2P-7.
+function harness(overrides = {}, { timers = false } = {}) {
   const shared = { l2rate: new Dictionary(), l2slots: new Dictionary(), l2state: new Dictionary() };
   const clock = { now: 1_800_000_000_000 };
   class FakeDate extends Date { static now() { return clock.now; } }
+  let pending = [];
+  let nextTimer = 1;
+  const fakeTimers = !timers ? {} : {
+    setTimeout(fn, ms) { const id = nextTimer++; pending.push({ id, at: clock.now + ms, fn }); return id; },
+    clearTimeout(id) { pending = pending.filter((t) => t.id !== id); },
+  };
+  // Moves the clock, running the timers that fall due on the way, in order.
+  const advance = (ms) => {
+    const end = clock.now + ms;
+    for (;;) {
+      const due = pending.filter((t) => t.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      pending = pending.filter((t) => t !== due);
+      clock.now = Math.max(clock.now, due.at);
+      due.fn();
+    }
+    clock.now = end;
+  };
+  // A worker that is killed takes its requests and their njs timers with it.
+  const destroyRequests = () => { pending = []; };
   const context = vm.createContext({
-    Date: FakeDate,
+    Date: FakeDate, ...fakeTimers,
     injectedConfig: {
       role: 'sequencer', peerProbeUrl: 'http://peer/probe',
       chainId: 31337, chainIdHex: '0x7a69', stateMaxAgeMs: 60000,
@@ -58,7 +80,8 @@ function harness(overrides = {}) {
   const slots = () => shared.l2slots.keys();
   const setState = (name, more = {}) => shared.l2state.set(name, JSON.stringify({ ok: true, head: 100, finalized: 90,
     statusState: 'ok', statusAge: 5, ts: clock.now, error: null, ...more }));
-  return { handle: context.gateway.handle, client: context.gateway.client, request, slots, shared, requests, clock, setState };
+  return { handle: context.gateway.handle, client: context.gateway.client, request, slots, shared, requests, clock, setState,
+    advance, destroyRequests, timers: () => pending.length };
 }
 
 function deferredReply() {
@@ -160,7 +183,7 @@ const pendingTransport = () => {
   return { transport, waiting, release: () => waiting.splice(0).forEach((f) => f()) };
 };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-const DEFAULTS = { simPerIp: 2, simTotal: 8, txReserve: 2 }; // render.py
+const DEFAULTS = { simPerIp: 2, simTotal: 8, txPerIp: 1, txReserve: 3, simFloor: 2, slotTtlMs: 60000, slotGraceMs: 20000 }; // render.py
 
 test('R308-27: simulations never take the slots reserved for transactions', async () => {
   const h = harness(DEFAULTS);
@@ -174,49 +197,137 @@ test('R308-27: simulations never take the slots reserved for transactions', asyn
     }
   }
   await tick();
-  assert.equal(slow.waiting.length, 6, 'simulations in flight: simTotal 8 minus the reserve of 2');
+  assert.equal(slow.waiting.length, 5, 'simulations in flight: simTotal 8 minus the reserve of 3');
   const sim = h.request(call('eth_estimateGas'), '198.51.100.7');
   await h.handle(sim);
   assert.equal(sim.response.status, 429);
   assert.match(sim.response.body.error.message, /^Busy/);
-  // Two transactions of two other clients still reach the sequencer; a third finds the total used.
-  const tx1 = h.request(call(), '198.51.100.7', slow.transport);
-  const tx2 = h.request(call(), '198.51.100.8', slow.transport);
-  running.push(h.handle(tx1), h.handle(tx2));
+  // Three transactions of three other clients still reach the sequencer; a fourth finds the total used.
+  const txs = [7, 8, 9].map((n) => h.request(call(), `198.51.100.${n}`, slow.transport));
+  txs.forEach((r) => running.push(h.handle(r)));
   await tick();
-  assert.deepEqual([tx1.subrequests.length, tx2.subrequests.length], [1, 1]);
-  assert.equal(tx1.subrequests[0].where, '/_l2s/seq');
-  const tx3 = h.request(call(), '198.51.100.9');
-  await h.handle(tx3);
-  assert.equal(tx3.response.status, 429);
-  assert.equal(tx3.subrequests.length, 0);
+  assert.deepEqual(txs.map((r) => r.subrequests.length), [1, 1, 1]);
+  assert.equal(txs[0].subrequests[0].where, '/_l2s/seq');
+  const tx4 = h.request(call(), '198.51.100.10');
+  await h.handle(tx4);
+  assert.equal(tx4.response.status, 429);
+  assert.equal(tx4.subrequests.length, 0);
   slow.release();
   await Promise.all(running);
-  assert.deepEqual(statuses.sort(), [200, 200, 200, 200, 200, 200, 429, 429]);
+  assert.deepEqual(statuses.sort(), [200, 200, 200, 200, 200, 429, 429, 429]);
   assert.deepEqual(h.slots(), []);
 });
 
-test('R308-27: transactions may use every slot, and simulations then wait', async () => {
+test('R308-2P-7: transactions use every slot but the simulations\' floor, and a simulation is still served', async () => {
   const h = harness(DEFAULTS);
   const slow = pendingTransport();
   const running = [];
   for (let n = 0; n < 8; n++) running.push(h.handle(h.request(call(), `192.0.2.${n + 1}`, slow.transport)));
   await tick();
-  assert.equal(slow.waiting.length, 8);
-  const sim = h.request(call('eth_call'), '198.51.100.7');
-  await h.handle(sim);
-  assert.equal(sim.response.status, 429);
+  assert.equal(slow.waiting.length, 6, 'admissions in flight: simTotal 8 minus the simulation floor of 2');
+  const sims = [7, 8].map((n) => h.request(call('eth_call'), `198.51.100.${n}`, slow.transport));
+  sims.forEach((r) => running.push(h.handle(r)));
+  await tick();
+  assert.deepEqual(sims.map((r) => r.subrequests.length), [1, 1]);
+  const third = h.request(call('eth_call'), '198.51.100.9');
+  await h.handle(third);
+  assert.equal(third.response.status, 429, 'the total of 8 is used');
   slow.release();
   await Promise.all(running);
+  assert.deepEqual(h.slots(), []);
+});
+
+// Review R308-2P-6 (demonstration K1 of agent 308, second pass): the reserve was 2 and one client could have 2
+// admissions in flight, so three keys at the simulation cap and a fourth with two admissions refused everyone's
+// transactions. Now one client holds one admission, never more than half of the reserve.
+for (const [name, config] of [['render.py defaults', DEFAULTS],
+  ['the configuration of the finding (2 per client, reserve 2)', { simPerIp: 2, simTotal: 8, txPerIp: 2, txReserve: 2 }]]) {
+  test(`R308-2P-6: one client cannot hold the transaction reserve (${name})`, async () => {
+    const h = harness(config);
+    const slow = pendingTransport();
+    const running = [];
+    for (let n = 0; n < 3; n++) for (let k = 0; k < 2; k++) running.push(h.handle(h.request(call('eth_call'), `203.0.113.${n + 1}`, slow.transport)));
+    const greedy = [0, 1].map(() => h.request(call(), '203.0.113.9', slow.transport));
+    greedy.forEach((r) => running.push(h.handle(r)));
+    await tick();
+    assert.deepEqual(greedy.map((r) => r.subrequests.length), [1, 0], 'the second admission in flight of one client');
+    assert.match(greedy[1].response.body.error.message, /per client/);
+    const victim = h.request(call(), '198.51.100.7');
+    await h.handle(victim);
+    assert.equal(victim.subrequests.length, 1, 'victim transaction refused: ' + JSON.stringify(victim.response));
+    slow.release();
+    await Promise.all(running);
+    assert.deepEqual(h.slots(), []);
+  });
+}
+
+test('R308-2P-7: a per-client simulation count above the simulations\' share still runs on an idle gateway', async () => {
+  const h = harness({ simPerIp: 8, simTotal: 8, txReserve: 2 }); // render.py now refuses this; the handler clamps it
+  const r = h.request([1, 2, 3, 4, 5, 6, 7].map((id) => call('eth_call', id)), '192.0.2.9');
+  await h.handle(r);
+  assert.equal(r.response.status, 200, JSON.stringify(r.response.body[0]));
+  assert.deepEqual(r.subrequests.map((s) => s.body.length), [6, 1]);
+});
+
+// Review R308-2P-7 (K3): a handler that never came back held its slots for the whole lifetime (60 s). With
+// timers a slot counts for the grace only (20 s) and a request in flight renews it. On nginx 1.24 / njs 0.8.2
+// a client that closes its connection does NOT lose the handler (it resumes when the backend answers; see the
+// README); the lost handler of this test is a killed worker, whose timers die with it.
+test('R308-2P-7: the slots of handlers that never come back stop counting after the grace, not the lifetime', async () => {
+  const h = harness(DEFAULTS, { timers: true });
+  const aborted = () => new Promise(() => {});
+  for (let n = 0; n < 3; n++) for (let k = 0; k < 2; k++) h.handle(h.request(call('eth_call'), `203.0.113.${n + 1}`, aborted));
+  for (let n = 0; n < 3; n++) h.handle(h.request(call(), `203.0.113.${n + 10}`, aborted));
+  await tick();
+  assert.equal(h.slots().length, 8);
+  h.destroyRequests();
+  h.advance(19000);
+  for (const method of ['eth_sendRawTransaction', 'eth_call']) {
+    const r = h.request(call(method), '198.51.100.7');
+    await h.handle(r);
+    assert.equal(r.response.status, 429, method + ' inside the grace');
+  }
+  h.advance(1001);
+  for (const method of ['eth_sendRawTransaction', 'eth_call']) {
+    const r = h.request(call(method), '198.51.100.7');
+    await h.handle(r);
+    assert.equal(r.response.status, 200, method + ' after the grace: ' + JSON.stringify(r.response));
+  }
+  assert.deepEqual(h.slots(), []);
+  assert.equal(h.timers(), 0, 'a finished request leaves no timer behind');
+});
+
+test('R308-2P-7: a request in flight keeps its slots past the grace, up to the slot lifetime', async () => {
+  const h = harness(DEFAULTS, { timers: true });
+  const slow = pendingTransport();
+  const running = [];
+  for (let n = 0; n < 3; n++) for (let k = 0; k < 2; k++) running.push(h.handle(h.request(call('eth_call'), `203.0.113.${n + 1}`, slow.transport)));
+  await tick();
+  assert.equal(h.slots().length, 5);
+  h.advance(45000);
+  const during = h.request(call('eth_call'), '198.51.100.7');
+  await h.handle(during);
+  assert.equal(during.response.status, 429, 'five simulations still in flight after 45 s');
+  h.advance(14000);
+  const late = h.request(call('eth_call'), '198.51.100.7');
+  await h.handle(late);
+  assert.equal(late.response.status, 429, 'still in flight after 59 s');
+  h.advance(1001);   // the lifetime of 60 s: renewals never carry a slot past it
+  const after = h.request(call('eth_call'), '198.51.100.7');
+  await h.handle(after);
+  assert.equal(after.response.status, 200);
+  slow.release();
+  await Promise.all(running);
+  assert.equal(h.timers(), 0);
 });
 
 test('R308-27: the slots of requests that never return stop counting after the slot lifetime', async () => {
   const h = harness({ ...DEFAULTS, slotTtlMs: 60000 });
   const aborted = () => new Promise(() => {}); // njs never resumes a handler whose client connection failed
   for (let n = 0; n < 3; n++) for (let k = 0; k < 2; k++) h.handle(h.request(call('eth_call'), `203.0.113.${n + 1}`, aborted));
-  for (let n = 0; n < 2; n++) h.handle(h.request(call(), `203.0.113.${n + 10}`, aborted));
+  for (let n = 0; n < 3; n++) h.handle(h.request(call(), `203.0.113.${n + 10}`, aborted));
   await tick();
-  assert.equal(h.slots().length, 8);
+  assert.equal(h.slots().length, 8, 'five simulations (the sixth is refused) and three admissions');
   h.clock.now += 59000;
   for (const method of ['eth_sendRawTransaction', 'eth_call']) {
     const r = h.request(call(method), '198.51.100.7');
@@ -366,9 +477,8 @@ test('R308-33b: a later wave that finds the gateway busy is answered per entry; 
   const others = [];
   const r = h.request([call('eth_call', 1), call('eth_call', 2), call('eth_call', 3), call('eth_sendRawTransaction', 4)], '192.0.2.9',
     async (where, options) => {
-      // While the first wave runs, other clients take the rest: four simulations (6 in all) and two admissions.
-      for (let n = 0; n < 2; n++) for (let k = 0; k < 2; k++) others.push(h.handle(h.request(call('eth_call'), `203.0.113.${n + 1}`, slow.transport)));
-      for (let n = 0; n < 2; n++) others.push(h.handle(h.request(call(), `203.0.113.${n + 10}`, slow.transport)));
+      // While the first wave runs, six other clients take every slot admissions may use (8 minus the floor of 2).
+      for (let n = 0; n < 6; n++) others.push(h.handle(h.request(call(), `203.0.113.${n + 10}`, slow.transport)));
       await tick();
       return good(options);
     });
@@ -392,7 +502,7 @@ test('R308-33b: a batch of transactions is admitted a client share at a time, ea
   const r = h.request([call('eth_sendRawTransaction', 1), call('eth_sendRawTransaction', 2), call('eth_sendRawTransaction', 3)]);
   await h.handle(r);
   assert.equal(r.response.status, 200);
-  assert.deepEqual(r.subrequests.map((s) => [s.where, s.body.length]), [['/_l2s/seq', 2], ['/_l2s/seq', 1]]);
+  assert.deepEqual(r.subrequests.map((s) => [s.where, s.body.length]), [['/_l2s/seq', 1], ['/_l2s/seq', 1], ['/_l2s/seq', 1]]);
 });
 
 test('raw admission retains the independent per-minute transaction budget', async () => {
