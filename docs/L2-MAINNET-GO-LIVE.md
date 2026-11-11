@@ -774,6 +774,12 @@ GO:
 sudo journalctl -u bloch-l2-mainnet-shadow -o cat --no-pager | grep -c '"event": "halt"'
 ```
 
+After a shadow repair (a foreign settlement stops the shadow for good while the settler recovers alone: `SETTLER-RUNBOOK.md`, "Foreign settlements"; the repair is the rollback below and then this phase's install command) the journal keeps the old `halt` line, so this count stays at 1 or more. Count since the unit's last start instead:
+
+```
+sudo journalctl -u bloch-l2-mainnet-shadow -o cat --no-pager --since "$(systemctl show -p ActiveEnterTimestamp --value bloch-l2-mainnet-shadow)" | grep -c '"event": "halt"'
+```
+
 
 NO-GO: a pin refusal (wrong release or kit) or a check failure.
 
@@ -822,7 +828,7 @@ GO (the L2 is live):
 
 - `accepted.statement` L2 number 1 on all three nodes;
 - `source.height` greater than 1 (it follows the L1 chain, it is not the L2 number);
-- the P7 `grep -c` still prints `0`;
+- the P7 `grep -c` still prints `0` (after a shadow repair: the since-last-start form of P7). A shadow that halts with `cannot extend accepted settlement` after the monitor's `foreign_settlements` WARN is repaired, not a reason to stop the launch: `SETTLER-RUNBOOK.md`, "Foreign settlements";
 - after FFG finality of the including block (`getchaininfo.finalized_height` ≥ that block, about
   2–3 epochs), RPC A and RPC B show `safe` → block 1, then `finalized` → block 1. On B this happens
   after the K5 refresh.
