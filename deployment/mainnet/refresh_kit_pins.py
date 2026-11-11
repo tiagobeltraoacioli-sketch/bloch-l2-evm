@@ -53,7 +53,7 @@ def kit_files():
         rel = path.relative_to(HERE).as_posix()
         parts = rel.split('/')
         if ('tests' in parts or 'testdata' in parts or '__pycache__' in parts or 'node_modules' in parts
-                or parts[0] == 'review-r15-308' or parts[-1].startswith('test_') or parts[-1].endswith(('.md', '.pyc'))
+                or parts[0].startswith('review-r15-308') or parts[-1].startswith('test_') or parts[-1].endswith(('.md', '.pyc'))
                 or parts[-1] in ('.gitignore', '.DS_Store') or path in (PINS, PROVER_PINS)):
             continue
         out.append(rel)
