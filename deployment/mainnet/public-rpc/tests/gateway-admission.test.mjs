@@ -421,3 +421,21 @@ test('njs: no await inside call arguments', () => {
   const hits = source.split('\n').map((line, i) => [i + 1, line]).filter(([, line]) => !/^\s*\/\//.test(line) && /[(,[]\s*await\b/.test(line));
   assert.deepEqual(hits, []);
 });
+
+test('round 15: bloch_admissionQuote goes to the sequencer first and holds one simulation slot', async () => {
+  const h = harness({ simPerIp: 1, simTotal: 2 });
+  const held = deferredReply();
+  const first = h.request({ jsonrpc: '2.0', id: 1, method: 'bloch_admissionQuote', params: [{ from: '0x' + '11'.repeat(20) }] }, '192.0.2.1', held.transport);
+  const running = h.handle(first);
+  await Promise.resolve();
+  assert.equal(h.slots().length, 1, 'the quote is EVM work');
+  // The same client's second quote is over its simulation limit while the first runs.
+  const second = h.request({ jsonrpc: '2.0', id: 2, method: 'bloch_admissionQuote', params: [{ from: '0x' + '11'.repeat(20) }] });
+  await h.handle(second);
+  assert.equal(second.response.body.error.code, -32005);
+  held.release();
+  await running;
+  assert.equal(first.subrequests.length, 1);
+  assert.match(first.subrequests[0].where, /seqread/);
+  assert.deepEqual(h.slots(), []);
+});

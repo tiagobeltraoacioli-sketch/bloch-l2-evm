@@ -71,6 +71,7 @@ const METHODS = {
   bloch_finality: 'read',
   bloch_settlement: 'read',
   bloch_chainIdentity: 'read',
+  bloch_admissionQuote: 'read',
   bloch_chainStatus: 'read',
   bloch_getWithdrawalProof: 'read',
 };
@@ -92,7 +93,8 @@ const EXPLAINED = {
 
 // EVM simulations and raw transaction admission: the expensive calls. They go through njs subrequests and
 // hold a slot each while in flight (see "EVM slots" below): simulations 'e', transaction admission 't'.
-const SIMULATION = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true };
+// bloch_admissionQuote (candidate, round 15) executes the call once on the sequencer: it is a simulation here too.
+const SIMULATION = { eth_call: true, eth_estimateGas: true, eth_createAccessList: true, bloch_admissionQuote: true };
 function evmKind(method) {
   if (method === 'eth_sendRawTransaction') return 't';
   return SIMULATION[method] === true ? 'e' : null;
@@ -303,6 +305,8 @@ function classify(call) {
   }
   // Only the sequencer's RPC knows the sequencer's required tip (--required-tip-file); a replica suggests the floor.
   if (FEE_METHODS[m] === true && !namesFinalityLevel(m, call.params)) return { route: 'seqread' };
+  // Only the sequencer's RPC prices admission; a replica answers that it publishes no admission policy.
+  if (m === 'bloch_admissionQuote') return { route: 'seqread' };
   if (route === 'read' && (FINALITY_METHODS[m] === true || namesFinalityLevel(m, call.params))) return { route: 'finality' };
   return { route: route };
 }
