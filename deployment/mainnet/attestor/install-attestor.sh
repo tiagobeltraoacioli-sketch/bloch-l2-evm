@@ -25,6 +25,8 @@
 # re-verify (status.json rewritten: about 50-60 min), run `attestor_agent.py check` (must print
 # check-ok), wait for native_finalized_epoch to advance, remove PAUSE, start the agent. Any failure
 # stops with PAUSE in place and the follower running; `--resume` continues from the follower start.
+# --no-unpause ends a finished, verified install with PAUSE kept and the agent stopped: the operator
+# resumes signing by hand, and a later `--resume` or `upgrade` never removes a PAUSE set after that.
 # Run it inside tmux/screen: the wait is long.
 # upgrade-rollback: restore the .TAG backup (binaries, agent scripts, config.json), move status.json
 # aside, then the same wait/check/unpause tail. A backup that holds a PRE-fork follower is refused from
@@ -185,7 +187,8 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   fi
   # $ETC stays traversable (the follower reads public/); the secrets are restricted per file.
   run install -d -m 0755 "$OPT" "$ETC" "$ETC/public"
-  run install -d -m 0700 "${own_agent[@]}" "$STATE" "$STATE/outbox"
+  # $STATE-marker holds only the agent's "has saved signing state" marker, outside the directory whose loss it detects.
+  run install -d -m 0700 "${own_agent[@]}" "$STATE" "$STATE/outbox" "$STATE-marker"
   run install -d -m 0755 "${own_follower[@]}" "$FSTATE"
   run install -m 0755 "$ART/bloch-pos" "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
   run install -m 0644 "$HERE/attestor_agent.py" "$HERE/attestor_lib.py" "$HERE/aggregate_attestation.py" "$HERE/sigfeed.py" "$OPT/"
@@ -318,6 +321,7 @@ ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF
 KIT_FILES=(attestor_agent.py attestor_lib.py aggregate_attestation.py sigfeed.py)
 FEED_UNIT=bloch-l2-attestor-feed.service FEED_PORT= FEED_BIND= NO_FEED=0
 WAS_PAUSED=0 WAS_ACTIVE=1   # what the operator had before this run: only what the script paused or stopped is undone
+HOLD=   # identity of the PAUSE file this script left behind under --no-unpause (see hold_intact)
 SERVICE_CMD= CHECK_CMD= NOW_UNIX= TAG=pre-hf123 RESUME=0 UNPAUSE=1 WAIT_TIMEOUT=7200 ADVANCE_TIMEOUT=2400 POLL=30
 
 now() { echo "${NOW_UNIX:-$(date +%s)}"; }
@@ -336,9 +340,21 @@ run_check() {
   systemd-run --pipe --wait --quiet -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \
     -p RuntimeDirectory=bloch-l2-attestor-check -p RuntimeDirectoryMode=0700 /usr/bin/python3 -I "$OPT/attestor_agent.py" check --config "$ETC/config.json"
 }
+pause_mark() {  # identity of the PAUSE file as it is now ('' when absent): inode, mtime in ns, size
+  python3 -I -c 'import os,sys
+try: s=os.stat(sys.argv[1])
+except OSError: sys.exit(0)
+print("%d:%d:%d" % (s.st_ino, s.st_mtime_ns, s.st_size))' "$ETC/PAUSE"
+}
+hold_intact() {  # phase `verified` (--no-unpause) and nobody touched its hold since: the same PAUSE file, agent stopped
+  local hold; hold=$(read_state hold)
+  [ "$(read_state phase)" = verified ] && [ -n "$hold" ] && [ "$hold" = "$(pause_mark)" ] && ! svc is-active agent
+}
 pause_and_stop() {  # remember the operator's own pause and a stopped agent, then pause and stop
   local phase; phase=$(read_state phase)
-  if [ -n "$phase" ] && [ "$phase" != done ] && [ -n "$(read_state was_paused)" ]; then
+  # `verified` is a finished install whose signing was left to the operator (--no-unpause). Its record
+  # counts only while its own hold is untouched; afterwards PAUSE and the agent are the operator's.
+  if [ -n "$phase" ] && [ "$phase" != done ] && [ -n "$(read_state was_paused)" ] && { [ "$phase" != verified ] || hold_intact; }; then
     # An unfinished upgrade or rollback left its own PAUSE and a stopped agent: what counts is what it saw.
     WAS_PAUSED=$(read_state was_paused) WAS_ACTIVE=$(read_state was_active)
   else
@@ -350,7 +366,7 @@ pause_and_stop() {  # remember the operator's own pause and a stopped agent, the
   touch "$ETC/PAUSE"; svc stop agent || die "could not stop the agent"; svc stop follower || die "could not stop the follower"
 }
 write_state() {  # the resumable record of an upgrade / upgrade-rollback in progress
-  printf 'op=%s\ntag=%s\nphase=%s\nmoved_at=%s\nwas_paused=%s\nwas_active=%s\n' "$OP" "$TAG" "$1" "$MOVED_AT" "$WAS_PAUSED" "$WAS_ACTIVE" > "$ETC/upgrade.state.tmp"
+  printf 'op=%s\ntag=%s\nphase=%s\nmoved_at=%s\nwas_paused=%s\nwas_active=%s\nhold=%s\n' "$OP" "$TAG" "$1" "$MOVED_AT" "$WAS_PAUSED" "$WAS_ACTIVE" "$HOLD" > "$ETC/upgrade.state.tmp"
   mv "$ETC/upgrade.state.tmp" "$ETC/upgrade.state"
 }
 status_newer_than() {  # the follower wrote status.json at or after unix time $1 (it writes only after re-verify)
@@ -472,8 +488,11 @@ upgrade_tail() {  # follower start -> re-verify -> check -> finality advances ->
   done
   say "  native_finalized_epoch $e0 -> $e1"
   if [ $UNPAUSE = 0 ]; then
-    write_state verified
+    # The install is finished and verified; signing is left to the operator. The state records which PAUSE
+    # file is this script's hold: a later --resume or upgrade undoes it only while it is still that file.
+    HOLD=$(pause_mark); write_state verified; HOLD=
     say "--no-unpause: PAUSE kept, agent stopped. To resume signing: rm $ETC/PAUSE; systemctl start bloch-l2-attestor"
+    say "   (or: $0 $OP --resume, which does the same only while this PAUSE and the stopped agent are untouched)"
   elif [ "$WAS_PAUSED" = 1 ] || [ "$WAS_ACTIVE" = 0 ]; then
     # The operator had paused signing or stopped the agent before this run (an incident, a first install
     # not yet enabled): the build is verified, and what the operator set stays as it was.
@@ -501,11 +520,19 @@ resume_or_fresh() {  # a recorded unfinished operation must be resumed (or rolle
     TAG=$(read_state tag) MOVED_AT=$(read_state moved_at)
     WAS_PAUSED=$(read_state was_paused) WAS_ACTIVE=$(read_state was_active)
     WAS_PAUSED=${WAS_PAUSED:-0} WAS_ACTIVE=${WAS_ACTIVE:-1}   # a state file of an older kit has neither
+    if [ "$phase" = verified ] && ! hold_intact; then
+      # --no-unpause finished this $OP; since then PAUSE was removed or set again, or the agent was started:
+      # the operator took signing over. Whatever is there now is the operator's and stays.
+      write_state done
+      say "$OP was finished with --no-unpause and signing was taken over by hand since: nothing to resume, nothing changed"
+      if [ -e "$ETC/PAUSE" ]; then say "PAUSE is set and is KEPT: the agent signs nothing until you remove it (rm $ETC/PAUSE)"; fi
+      exit 0
+    fi
     say "resume $OP (tag $TAG, phase $phase): pins on disk"
     verify_pins_on_disk
     upgrade_tail; [ "$OP" != upgrade ] || feed_note; exit 0
   fi
-  if [ -n "$phase" ] && [ "$phase" != done ] && { [ "$OP" = upgrade ] || [ "$op" = upgrade-rollback ]; }; then
+  if [ -n "$phase" ] && [ "$phase" != done ] && [ "$phase" != verified ] && { [ "$OP" = upgrade ] || [ "$op" = upgrade-rollback ]; }; then
     die "an unfinished $op (phase $phase) is recorded in $ETC/upgrade.state: use --resume (or upgrade-rollback)"
   fi
   return 0
@@ -522,6 +549,9 @@ install_feed() {  # prepare the read-only feed as `install --feed-port` does; ne
   if [ "$NO_FEED" = 1 ]; then say "   feed unit skipped (--no-feed)"; return 0; fi
   mkdir -p "$UNITS"
   [ -e "$UNITS/$FEED_UNIT" ] || touch "$ETC/feed-added.$TAG"
+  # What this upgrade overwrites is kept beside the binary backup; upgrade-rollback puts it back.
+  if [ -f "$UNITS/$FEED_UNIT" ] && ! cmp -s "$HERE/systemd/$FEED_UNIT" "$UNITS/$FEED_UNIT"; then cp -a "$UNITS/$FEED_UNIT" "$OPT.$TAG/$FEED_UNIT.unit"; fi
+  if [ -s "$ETC/feed.env" ]; then cp -a "$ETC/feed.env" "$OPT.$TAG/feed.env.backup"; fi
   install -m 0644 "$HERE/systemd/$FEED_UNIT" "$UNITS/"
   if [ -n "$FEED_PORT$FEED_BIND" ] || [ ! -s "$ETC/feed.env" ]; then
     printf 'SIGFEED_BIND=%s\nSIGFEED_PORT=%s\n' "${FEED_BIND:-0.0.0.0}" "${FEED_PORT:-8787}" > "$ETC/feed.env"; chmod 0644 "$ETC/feed.env"
@@ -558,6 +588,8 @@ cmd_upgrade() {
   say "4. install the two binaries, the agent scripts and the feed unit (not enabled)"
   install -m 0755 "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
   for f in "${KIT_FILES[@]}"; do install -m 0644 "$HERE/$f" "$OPT/"; done
+  # The sibling directory for the agent's "has saved signing state" marker (kept by upgrade-rollback: harmless).
+  if [ -n "$SERVICE_CMD" ]; then install -d -m 0700 "$STATE-marker"; else install -d -m 0700 -o $USER_AGENT -g $USER_AGENT "$STATE-marker"; fi
   # The agent unit of this kit (RuntimeDirectory for the 0400 passphrase copy): an older unit would halt the
   # new agent. The old unit is kept beside the binary backup and restored by upgrade-rollback.
   if [ -f "$UNITS/bloch-l2-attestor.service" ] && ! cmp -s "$HERE/systemd/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor.service"; then
@@ -611,8 +643,11 @@ cmd_upgrade_rollback() {
     [ -n "$SERVICE_CMD" ] || systemctl disable --now "$FEED_UNIT" 2>/dev/null || true
     rm -f "$UNITS/$FEED_UNIT" "$ETC/feed.env" "$ETC/feed-added.$TAG"
     [ -n "$SERVICE_CMD" ] || systemctl daemon-reload
-  elif [ -z "$SERVICE_CMD" ]; then
-    systemctl try-restart "$FEED_UNIT" 2>/dev/null || true
+  else
+    # An upgrade that found a feed kept its unit and feed.env in the backup when it overwrote them.
+    if [ -f "$OPT.$TAG/$FEED_UNIT.unit" ]; then install -m 0644 "$OPT.$TAG/$FEED_UNIT.unit" "$UNITS/$FEED_UNIT"; fi
+    if [ -f "$OPT.$TAG/feed.env.backup" ]; then install -m 0644 "$OPT.$TAG/feed.env.backup" "$ETC/feed.env"; fi
+    if [ -z "$SERVICE_CMD" ]; then systemctl daemon-reload; systemctl try-restart "$FEED_UNIT" 2>/dev/null || true; fi
   fi
   if [ -f "$OPT.$TAG/bloch-l2-attestor.service.unit" ]; then
     install -m 0644 "$OPT.$TAG/bloch-l2-attestor.service.unit" "$UNITS/bloch-l2-attestor.service"

@@ -24,6 +24,8 @@ RestartSec=60
 # Exit 3 = pin/identity halt or a refused rebuild: operator review, no restart loop.
 RestartPreventExitStatus=3
 ReadWritePaths=/var/lib/bloch-l2-attestor
+# Only the "has saved signing state" marker lives here (a lost /var/lib/bloch-l2-attestor must not read as a new host).
+ReadWritePaths=-/var/lib/bloch-l2-attestor-marker
 ReadOnlyPaths=/var/lib/bloch-l2-attestor-follower /etc/bloch-l2-attestor
 NoNewPrivileges=true
 PrivateTmp=true

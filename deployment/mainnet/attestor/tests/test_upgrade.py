@@ -301,7 +301,7 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertFalse(feed_unit.exists())
         self.assertFalse((self.etc / 'feed.env').exists())
         self.assertEqual(self.state(), {'op': 'upgrade-rollback', 'tag': 'pre-hf123', 'phase': 'done',
-                                        'moved_at': self.state()['moved_at'], 'was_paused': '0', 'was_active': '1'})
+                                        'moved_at': self.state()['moved_at'], 'was_paused': '0', 'was_active': '1', 'hold': ''})
         self.assertIn('REPORT: attestor 2: upgrade-rollback check-ok', back.stdout)
 
     def test_upgrade_keeps_an_existing_feed_and_its_settings(self):
@@ -318,6 +318,27 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
         self.assertTrue((units / 'bloch-l2-attestor-feed.service').exists())
         self.assertTrue((self.opt / 'sigfeed.py').exists())
+
+    def test_rollback_restores_a_replaced_feed_unit_and_feed_env(self):
+        """Review R308-21: upgrade-rollback restored binaries, scripts and config.json, but left the feed unit
+        and a feed.env rewritten by --feed-port as the upgrade made them."""
+        units = self.root / 'systemd'
+        units.mkdir()
+        (units / 'bloch-l2-attestor-feed.service').write_text('old unit\n')
+        (units / 'bloch-l2-attestor.service').write_text('old agent unit\n')
+        shutil.copy(KIT / 'sigfeed.py', self.opt / 'sigfeed.py')
+        (self.etc / 'feed.env').write_text('SIGFEED_BIND=10.0.0.1\nSIGFEED_PORT=9000\n')
+        done = self.upgrade('--feed-port', '9100', now=FORK_UNIX - 86_400)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.etc / 'feed.env').read_text(), 'SIGFEED_BIND=0.0.0.0\nSIGFEED_PORT=9100\n')
+        self.assertEqual((units / 'bloch-l2-attestor-feed.service').read_bytes(),
+                         (KIT / 'systemd/bloch-l2-attestor-feed.service').read_bytes())
+        self.assertTrue((self.root / 'var/lib/bloch-l2-attestor-marker').is_dir(), 'the marker directory of R308-2P-9')
+        back = self.script('upgrade-rollback', now=FORK_UNIX - 86_400)
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertEqual((units / 'bloch-l2-attestor-feed.service').read_text(), 'old unit\n')
+        self.assertEqual((units / 'bloch-l2-attestor.service').read_text(), 'old agent unit\n')
+        self.assertEqual((self.etc / 'feed.env').read_text(), 'SIGFEED_BIND=10.0.0.1\nSIGFEED_PORT=9000\n')
 
     def test_no_feed_skips_the_unit_but_not_the_script(self):
         done = self.upgrade('--no-feed', now=FORK_UNIX - 86_400)
@@ -466,6 +487,86 @@ class UpgradeScriptTest(unittest.TestCase):
         self.assertTrue((self.etc / 'PAUSE').exists())
         self.assertFalse((self.root / 'agent.started').exists())
         self.assertEqual(self.state()['phase'], 'verified')
+
+    def by_hand(self):
+        """The operator resumes signing as --no-unpause printed: rm PAUSE; systemctl start bloch-l2-attestor."""
+        (self.etc / 'PAUSE').unlink()
+        (self.root / 'agent.started').write_text('started by the operator\n')
+
+    def test_resume_after_no_unpause_keeps_a_pause_set_later(self):
+        """Review R308-2P-8: --no-unpause must not leave an "unfinished upgrade" behind for ever. Weeks after
+        the operator resumed signing by hand he pauses for an incident: a new upgrade is not refused and
+        --resume does not delete his pause or start the agent."""
+        self.assertEqual(self.upgrade('--no-unpause', now=FORK_UNIX + 86_400).returncode, 0)
+        self.assertRegex(self.state()['hold'], r'^\d+:\d+:\d+$')
+        self.by_hand()
+        (self.etc / 'PAUSE').write_text('operator pause: incident\n')
+        (self.root / 'agent.started').unlink()
+        again = self.upgrade(now=FORK_UNIX + 30 * 86_400)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn('already upgraded', again.stdout)
+        resumed = self.script('upgrade', '--resume', now=FORK_UNIX + 30 * 86_400)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertIn('nothing to resume, nothing changed', resumed.stdout)
+        self.assertEqual((self.etc / 'PAUSE').read_text(), 'operator pause: incident\n')
+        self.assertFalse((self.root / 'agent.started').exists(), '--resume started an agent the operator had stopped')
+        self.assertEqual(self.state()['phase'], 'done')
+        self.assertNotIn('start agent', (self.root / 'services.log').read_text())
+
+    def test_resume_after_no_unpause_leaves_a_running_agent_and_no_pause_alone(self):
+        self.assertEqual(self.upgrade('--no-unpause').returncode, 0)
+        self.by_hand()
+        resumed = self.script('upgrade', '--resume')
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertFalse((self.etc / 'PAUSE').exists())
+        self.assertEqual((self.root / 'agent.started').read_text(), 'started by the operator\n')
+        self.assertEqual(self.state()['phase'], 'done')
+
+    def test_resume_after_no_unpause_finishes_while_the_hold_is_untouched(self):
+        self.assertEqual(self.upgrade('--no-unpause').returncode, 0)
+        resumed = self.script('upgrade', '--resume')
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertFalse((self.etc / 'PAUSE').exists())
+        self.assertTrue((self.root / 'agent.started').exists())
+        self.assertEqual(self.state()['phase'], 'done')
+
+    def test_no_unpause_finished_by_hand_does_not_block_the_next_upgrade(self):
+        """A corrected build after an upgrade that ended with --no-unpause: accepted, and the operator's later
+        pause and stopped agent are what the new run remembers (not the record of the first run)."""
+        self.assertEqual(self.upgrade('--no-unpause').returncode, 0)
+        self.by_hand()
+        (self.etc / 'PAUSE').write_text('operator pause: incident\n')
+        (self.root / 'agent.started').unlink()
+        fixed = b'corrected follower\n'
+        (self.art / 'bloch-l2-native-follower').write_bytes(fixed)
+        (self.art / 'SHA256SUMS').unlink()
+        done = self.script('upgrade', '--artifacts', self.art, '--follower-sha256', sha(fixed),
+                           '--produce-sha256', sha(self.NEW_PRODUCE), '--tag', 'corrected')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((self.opt / 'bloch-l2-native-follower').read_bytes(), fixed)
+        self.assertEqual((self.etc / 'PAUSE').read_text(), 'operator pause: incident\n')
+        self.assertFalse((self.root / 'agent.started').exists())
+        self.assertEqual({k: self.state()[k] for k in ('phase', 'was_paused', 'was_active')},
+                         {'phase': 'done', 'was_paused': '1', 'was_active': '0'})
+
+    def test_rollback_after_no_unpause_undoes_only_an_untouched_hold(self):
+        """upgrade-rollback reads the same record: with the script's own hold still in place the agent comes
+        back as it ran before the upgrade; after the operator took over, his pause stays."""
+        self.assertEqual(self.upgrade('--no-unpause', now=FORK_UNIX - 86_400).returncode, 0)
+        back = self.script('upgrade-rollback', now=FORK_UNIX - 86_400)
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertFalse((self.etc / 'PAUSE').exists())
+        self.assertTrue((self.root / 'agent.started').exists())
+
+    def test_rollback_after_no_unpause_keeps_a_pause_set_later(self):
+        self.assertEqual(self.upgrade('--no-unpause', now=FORK_UNIX - 86_400).returncode, 0)
+        self.by_hand()
+        (self.etc / 'PAUSE').write_text('operator pause: incident\n')
+        back = self.script('upgrade-rollback', now=FORK_UNIX - 86_400)
+        self.assertEqual(back.returncode, 0, back.stdout + back.stderr)
+        self.assertEqual((self.etc / 'PAUSE').read_text(), 'operator pause: incident\n')
+        self.assertTrue((self.root / 'agent.started').exists(), 'the agent ran (paused) before the rollback')
+        self.assertEqual((self.opt / 'bloch-l2-native-follower').read_bytes(), self.OLD_FOLLOWER)
 
     def test_rehearsal_flags_need_prefix(self):
         done = self.script('upgrade', '--artifacts', self.art, '--service-cmd', 'true', rehearsal=False)

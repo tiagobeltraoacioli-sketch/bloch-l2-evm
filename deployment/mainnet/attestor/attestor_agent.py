@@ -76,6 +76,26 @@ REQUIRED = ('signer_index', 'bloch_pos', 'bloch_pos_sha256', 'produce', 'produce
             'attestors', 'sealed_key', 'follower_status', 'follower_native', 'state_dir', 'rpc_urls')
 
 
+def marker_exists(path):
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def fsync_dir(path):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 class Halt(Exception):
     """A pin or identity mismatch: the operator must look. Exit 3, no restart."""
 
@@ -105,6 +125,10 @@ class Agent:
         self.state_dir = Path(self.c['state_dir'])
         self.state_path = self.state_dir / 'state.json'
         self.outbox = self.state_dir / 'outbox'
+        # "This host has saved signing state before", kept twice: inside the state directory and in a sibling
+        # directory (`<state_dir>-marker`, made by install-attestor.sh) that outlives a lost or recreated one.
+        self.markers = (self.state_dir / 'state.initialized',
+                        Path(str(self.state_dir) + '-marker') / 'state.initialized')
 
     # ---------------------------------------------------------------- identity
     def check_identity(self, key='open'):
@@ -198,8 +222,7 @@ class Agent:
             return json.loads(self.state_path.read_text())
         # The signing memory (what was signed for which L2 block, today's capped amount) must not restart
         # from nothing: once this host has saved a state or holds a partial, a missing state.json is a halt.
-        marker = self.state_dir / 'state.initialized'
-        if marker.exists() or (self.outbox.is_dir() and any(self.outbox.rglob('*.partial'))):
+        if any(marker_exists(m) for m in self.markers) or (self.outbox.is_dir() and any(self.outbox.rglob('*.partial'))):
             raise Halt(f'{self.state_path} is missing on a host that has signed or saved state before: restore it '
                        f'from backup; never start again from an empty state (the daily cap and the signed roots are in it)')
         return {'signed': {}, 'skipped': {}, 'held': {}, 'leaves': {}, 'approved': {}, 'published': {}, 'refused': {}}
@@ -207,11 +230,27 @@ class Agent:
     def save_state(self, state):
         self.state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.state_path.with_suffix('.tmp')
-        tmp.write_text(json.dumps(state, sort_keys=True, indent=1) + '\n')
+        with open(tmp, 'w') as f:
+            f.write(json.dumps(state, sort_keys=True, indent=1) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.state_path)
-        marker = self.state_dir / 'state.initialized'
-        if not marker.exists():
-            marker.write_text('state.json has existed on this host; see load_state\n')
+        fsync_dir(self.state_dir)
+        for n, marker in enumerate(self.markers):
+            if marker_exists(marker):
+                continue
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text('state.json has existed on this host; see load_state\n')
+                fsync_dir(marker.parent)
+            except OSError as e:
+                if n == 0:
+                    raise
+                # A host installed before this kit has no sibling directory (and the unit no write access):
+                # the agent runs as before, with the in-directory marker only. `upgrade` creates it.
+                if not getattr(self, '_marker_warned', False):
+                    self._marker_warned = True
+                    log('marker-not-written', marker=str(marker), error=str(e))
 
     # ---------------------------------------------------------------- inputs
     def follower(self):
@@ -357,6 +396,9 @@ class Agent:
             if root in state['signed'] or root in state['skipped']:
                 continue
             other = [r for r, e in state['signed'].items() if e.get('l2_number') == number]
+            # `signing` is the intent saved (fsync) before a signature is made: a root this key may have
+            # signed and published although the process died before `signed` was saved.
+            other += [r for r in [state.get('signing', {}).get(str(number))] if r and r != root and r not in other]
             if other:
                 # One L2 block has one withdrawal root. A second root for a block this key already signed
                 # means the finalized view changed under the agent: stop, a person decides.
@@ -425,6 +467,14 @@ class Agent:
             return
         index = unclaimed[0]
         doc = docs.get(index) or self.own_proof(target, index, number, root, count)[0]
+        # The partial is public the moment sign() renames it into the outbox. The intent (L2 block -> root) is
+        # on disk before that, so a death between the two cannot lead to a second root for this block.
+        intent = state.setdefault('signing', {})
+        if intent.get(str(number)) not in (None, root):
+            raise Halt(f'L2 block {number}: a signature over {intent[str(number)]} was started before; refusing {root}')
+        if intent.get(str(number)) != root:
+            intent[str(number)] = root
+            self.save_state(state)
         partial = self.sign(doc, root)
         for i in new:
             state['approved'][str(i)] = {'day': today, 'sats': leaves[str(i)]['sats'], 'root': root,

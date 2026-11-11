@@ -24,7 +24,9 @@ class StaleVerified(t.UpgradeScriptTest):
         (self.etc / 'PAUSE').write_text('operator pause: incident\n')
         again = self.upgrade(now=t.FORK_UNIX + 30 * 86_400)
         print('  a new upgrade says:', (again.stdout + again.stderr).strip().splitlines()[-1])
-        self.assertNotEqual(again.returncode, 0)
+        # Adapted by the developer (fix of R308-2P-8): a finished --no-unpause upgrade no longer refuses the next
+        # `upgrade`; the reviewer's line was assertNotEqual(again.returncode, 0). The finding's assertion is below.
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         resumed = self.upgrade('--resume', now=t.FORK_UNIX + 30 * 86_400)
         print('  --resume ends with:', resumed.stdout.strip().splitlines()[-2:])
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)

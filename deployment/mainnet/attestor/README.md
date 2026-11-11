@@ -243,7 +243,7 @@ script does the manual procedure and stops at the first failure:
    that is already running is restarted. The key, the passphrase, `bloch-pos`, the other units and
    the state do not change. **The host now needs inbound TCP 8787**: open it, then run the
    `systemctl enable --now bloch-l2-attestor-feed` line the script prints. `upgrade-rollback` removes a
-   feed unit that the upgrade added.
+   feed unit that the upgrade added, and puts back a feed unit and a `feed.env` that the upgrade replaced.
 5. It re-hashes the installed files.
 6. It writes `produce_sha256`, `follower` and `follower_sha256` into `config.json` (atomically,
    keeping its owner and mode) and checks every pin against the disk.
@@ -253,6 +253,12 @@ script does the manual procedure and stops at the first failure:
    `check-not-ready` result is retried 10 times.
 9. It waits until `native_finalized_epoch` advances (`--advance-timeout`, default 40 min).
 10. It removes `PAUSE` and starts the agent (`--no-unpause` stops before this step).
+
+With `--no-unpause` the upgrade is finished and verified, and signing is yours to resume
+(`rm /etc/bloch-l2-attestor/PAUSE; systemctl start bloch-l2-attestor`). `upgrade --resume` does the
+same for you only while that `PAUSE` file and the stopped agent are untouched. Once you removed
+`PAUSE`, set it again or started the agent, the script treats both as yours: a later `--resume`
+changes nothing, and a later `upgrade` or `upgrade-rollback` keeps what it finds.
 
 At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower cdf5da5c, produce
 e3f1a290`. Post that line in the operators' group the coordinator set up; the next operator then starts.
