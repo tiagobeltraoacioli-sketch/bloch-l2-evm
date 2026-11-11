@@ -995,5 +995,95 @@ class Cli(unittest.TestCase):
         self.assertIn('-', text)
 
 
+class ReviewR15(unittest.TestCase):
+    """Review r15 (agent 308), R308-32 a to d: the demonstrations of review-r15-308/monitors.py as regression tests."""
+
+    # (a) an unreadable state file ends UNKNOWN with a report, never a traceback (exit 1 = WARN)
+    def test_r308_32a_unreadable_state_is_unknown_with_a_report_and_is_left_alone(self):
+        world = load('world_launch.json')
+        for content, why in (('', 'JSONDecodeError'), ('{"schema": 1, "cur', 'JSONDecodeError'), ('[]', 'not a JSON object'),
+                             ('{"schema": "other"}', 'state schema')):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'revenue.json').write_text(json.dumps(world['config']))
+                (root / 'state.json').write_text(content)
+                fake = FakeWorld(world)
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = m.main(['--config', str(root / 'revenue.json'), '--state', str(root / 'state.json'), '--json',
+                                   '--json-out', str(root / 'report.json')], transport=fake, now=world['now'])
+                self.assertEqual(code, m.UNKNOWN, content)
+                doc = json.loads(out.getvalue())
+                self.assertEqual((doc['level'], doc['exit_code']), ('UNKNOWN', m.UNKNOWN))
+                self.assertEqual([c['name'] for c in doc['checks']], ['revenue_state'])
+                self.assertIn(why, doc['checks'][0]['message'])
+                self.assertEqual(json.loads((root / 'report.json').read_text()), doc)
+                self.assertEqual((root / 'state.json').read_text(), content, 'the file is not replaced')
+                self.assertEqual(doc['rpc_calls'], 0)
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = m.main(['--config', str(root / 'revenue.json'), '--state', str(root / 'state.json')],
+                                  transport=fake, now=world['now'])
+                self.assertEqual(code, m.UNKNOWN)
+                self.assertIn('UNKNOWN revenue_state:', out.getvalue())
+
+    # (b) one "last increase" mark per vault
+    def test_r308_32b_a_vault_that_never_grows_is_not_hidden_by_the_other(self):
+        for flat, growing in ((m.BASE_FEE_VAULT, m.SEQUENCER_FEE_VAULT), (m.SEQUENCER_FEE_VAULT, m.BASE_FEE_VAULT)):
+            world = load('world_live.json')
+            report, state, _ = run_world(world)
+            for day in (1, 2, 3):
+                world['l2']['accounts'][growing]['balance'] += 10 ** 15
+                report, state, _ = run_world(world, state, world['now'] + day * DAY)
+            check = checks(report)['l2_accrual']
+            self.assertEqual(check['level'], 'WARN')
+            self.assertIn('base_fee vault did not grow' if flat == m.BASE_FEE_VAULT else 'sequencer_fee vault did not grow',
+                          check['message'])
+            self.assertIn('72 h', check['message'])
+            # Both grow: no check.
+            for vault in (flat, growing):
+                world['l2']['accounts'][vault]['balance'] += 10 ** 15
+            report, state, _ = run_world(world, state, world['now'] + 3 * DAY + 3600)
+            self.assertNotIn('l2_accrual', checks(report))
+
+    def test_r308_32b_a_state_with_the_single_mark_seeds_both_vaults(self):
+        world = load('world_live.json')
+        report, state, _ = run_world(world)
+        for name in ('base_fee', 'sequencer_fee'):
+            del state['marks'][f'l2_last_increase:{name}']
+        state['marks']['l2_last_increase'] = world['now'] - 30 * 3600
+        report, state, _ = run_world(world, state, world['now'] + 60)
+        self.assertIn('no L2 fee vault grew for 30 h', checks(report)['l2_accrual']['message'])
+
+    # (c) the treasury change is compared with records times the base surcharge
+    def test_r308_32c_forced_surcharges_below_the_minimum_owed_warn(self):
+        for records, paid, want in ((5, 1, 'WARN'), (5, 4999, 'WARN'), (5, 5000, 'OK'), (5, 9000, 'OK'), (0, 0, 'OK')):
+            world = load('world_live.json')
+            report, state, _ = run_world(world)
+            world['l1']['forced']['queued'] += records
+            world['l1']['balances'][world['l1']['forced']['treasury']] += paid
+            report, state, _ = run_world(world, state, world['now'] + 3600)
+            self.assertEqual(checks(report)['forced_route']['level'], want, (records, paid))
+        self.assertEqual(m.BASE_SURCHARGE_SAT, 1000)
+
+    # (d) a vault without code cannot be swept
+    def test_r308_32d_a_code_less_vault_losing_balance_is_crit_and_not_a_sweep(self):
+        world = load('world_launch.json')
+        world['l2']['accounts'] = {m.BASE_FEE_VAULT: {'balance': 5 * 10 ** 17}}
+        report, state, _ = run_world(world)
+        world['l2']['accounts'][m.BASE_FEE_VAULT]['balance'] = 10 ** 17
+        report, state, _ = run_world(world, state, world['now'] + 3600)
+        self.assertEqual(checks(report)['l2_vault_balance[base_fee]']['level'], 'CRIT')
+        self.assertNotIn('l2_swept_base_fee', state['totals'])
+        self.assertEqual(report['level'], 'CRIT')
+        # The earlier balance stays the baseline: still CRIT next run, and OK once the balance is back.
+        report, state, _ = run_world(world, state, world['now'] + 7200)
+        self.assertEqual(checks(report)['l2_vault_balance[base_fee]']['level'], 'CRIT')
+        world['l2']['accounts'][m.BASE_FEE_VAULT]['balance'] = 6 * 10 ** 17
+        report, state, _ = run_world(world, state, world['now'] + 10800)
+        self.assertNotIn('l2_vault_balance[base_fee]', checks(report))
+        self.assertEqual(state['totals']['l2_accrued_base_fee'], str(10 ** 17))
+
+
 if __name__ == '__main__':
     unittest.main()
