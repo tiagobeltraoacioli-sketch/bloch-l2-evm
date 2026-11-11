@@ -154,7 +154,7 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `a3264be0151e0d78e745b117eeb390434f09203d60c7ff88523b91eac7be3478` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `9cbc7768bc5639b4e3309891fa34e81d998c7a5ca753071e4d0e34ea0c5fea23` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` |
 | `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
@@ -167,13 +167,13 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 | `deployment/mainnet/follower-rpc/install.sh` | `dc0283ee826e63a106f0d6f882a1c928c1b3ffcfe35cb3ebc985c27993f86ae8` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
 | `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/l2_monitor.py` | `03a983d4c4af59d5a7e83d201d216e974880153243303ddc72c80ba516cbc0b5` (agents 157, 187 F1, 198) |
-| `deployment/mainnet/l1_monitor.py` | `d7dab752328f639882e732fa0609e6b224e7aa0b853f1002bcb4a7ac53f43b86` (agent 187) |
+| `deployment/mainnet/l2_monitor.py` | `26ab90461fe6c7bbe3ed50f09b15f0c3b859d13270347c0cff40079173d00fa4` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l1_monitor.py` | `583b3ce20cbaa0240c54a9154631b885da090226caf72fe1488b75f3d9786d8c` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `85855e2d7ce05e35199f1d116fca8191cf7a5284a4926847f857ab99ef1e4379` (agent 154 8d1c873; 201: subrequest size guard) |
-| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `891a7f101662167557cec31a5ec28d556865d7c6c40d5d9d8abcf011f92a2c33` (agent 154 8d1c873; 201: subrequest size guard) |
-| `deployment/mainnet/public-rpc/render.py` | `39ec028f46cf402802120c74f12dd7360c0185d0cf9cac49bd1d382a0e1f2975` (agent 154 8d1c873; 201: `--sub-answer-max`) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `1acd559623d468986db58a6b579412c5e4c404166c828eb6748a233f94769b75` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `47cfa512a118de8a244ffcea6644f5f6ea5b992d7aa7171ffe4b0dbc2ddbeeb9` (agent 154 8d1c873; 201: subrequest size guard) |
+| `deployment/mainnet/public-rpc/render.py` | `92a7cdd3c6291f5a7228083404ac10b7a0b215b7e9defa4c7579ae357698a522` (agent 154 8d1c873; 201: `--sub-answer-max`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `5661315056a73345a206966bd29876e7acaadeef48851dfb6c9375d4ba56616b` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `f4fbe82db9cb94ffdbc6cbf051df5a68dccb83b2e4aef5d03561c0ae5775d372` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
@@ -382,7 +382,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `a3264be0151e0d78e745b117eeb390434f09203d60c7ff88523b91eac7be3478` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `9cbc7768bc5639b4e3309891fa34e81d998c7a5ca753071e4d0e34ea0c5fea23` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 
