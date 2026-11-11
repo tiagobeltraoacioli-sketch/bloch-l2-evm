@@ -42,7 +42,7 @@ jobs:
       - name: Test the fail-closed L2 node provisioning preflight
         run: python3 tools/test-node-provisioning.py
       - name: Test the blocked production-node build request
-        run: python3 tools/test-production-node-build-request.py
+        run: python3 tools/run-audited-evidence-step.py production-node-build-request
       - name: Test the production entrypoint capability contract
         run: python3 tools/test-production-entrypoint-contract.py
       - name: Test synthetic production-entrypoint conformance isolation
@@ -50,13 +50,13 @@ jobs:
       - name: Test workspace production-node gap report
         run: python3 tools/test-workspace-production-node-gap.py
       - name: Test non-authorizing partial implementation evidence
-        run: python3 tools/test-partial-implementation-evidence.py
+        run: python3 tools/run-audited-evidence-step.py partial-implementation-evidence
       - name: Test frozen-genesis admission and offline ceremony
         run: node --test tools/test-frozen-genesis-admission.mjs tools/test-frozen-genesis-ceremony.mjs
       - name: Compile the non-authorizing production entrypoint API
         run: cargo test --locked --manifest-path integrations/production-entrypoint-api/Cargo.toml
       - name: Test source-bound production-node qualification packages
-        run: python3 tools/test-node-qualification-package.py
+        run: python3 tools/run-audited-evidence-step.py node-qualification-package
       - name: Test authenticated operational evidence intake
         run: python3 tools/test-operational-evidence-intake.py
       - name: Run the signed developer contract lifecycle
