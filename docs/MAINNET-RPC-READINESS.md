@@ -435,6 +435,22 @@ required tip, whichever is greater. `requiredMaxFeePerGas` is exactly that value
 Clients should bind the error to the hash they submitted and show the quote before requesting a new signature;
 they must not raise a budget, re-sign or retry automatically.
 
+**Admission quote before signing (candidate, round 15).** `bloch_admissionQuote(call)` is served by the same
+endpoint (`--txpool` with `--required-tip-file`; elsewhere it answers an error and the client keeps its own
+estimate). `call` is an object with `from` (required), `to` (absent for a creation), `data` or `input`, `value`
+and `gas` (optional, capped at the simulation gas cap); any other field is refused. The call is executed once as
+the sender's next transaction on the latest state, through the selector's own session and new-slot count, at the
+next base fee with tip zero, and priced by the rule the send path uses. The result is an object with
+`kind = "sequencer-admission-quote"`, `headHash`, `scope = "latest-state-next-block"` and the hex quantities
+`headNumber`, `nonce`, `baseFeePerGas`, `requiredPriorityFeePerGas`, `requiredMaxFeePerGas`,
+`minimumPriorityFeePerGas` (the published required tip), `gasUsed`, `freshSlots`, `chargedFreshSlots` and
+`freshSlotPriceWei`: field for field what a refused send of the same call reports, and a transaction that pays
+`requiredPriorityFeePerGas` is not refused for its fee on that head (tested both ways). It is refused when the
+sender cannot pay `gas` at the next base fee plus `value`, or when the call cannot execute. It takes one EVM
+simulation permit, the same wait and the same time limit as a send, writes nothing, and says nothing about the
+spool, other senders, waits or bans: it is not a promise of inclusion. A quote is for one head and one policy
+file; both are checked again before the answer is returned.
+
 That specific refusal is emitted before any spool write or eviction. An already spooled hash returns its hash,
 even if policy prices later rise. The head and policy are rechecked before using a measurement; drift, missing
 or malformed policy, and timeout produce retryable errors without a fee quote. RPC overload is `-32005`.
