@@ -20,8 +20,9 @@ class D4(unittest.TestCase):
         if literal:
             quorum = int(literal.group(1))   # what install-shadow.sh wrote before the round-15 fix
         else:   # round 15: the script writes $L1_QUORUM, a strict majority of the configured RPCs
-            self.assertIn('L1_QUORUM=$(( ${#L1_RPC_LIST[@]} / 2 + 1 ))', text)
-            self.assertIn('"rpc_quorum": $L1_QUORUM,', text)
+            # kit line: shell arithmetic; candidate line: the Python config writer
+            self.assertTrue(('L1_QUORUM=$(( ${#L1_RPC_LIST[@]} / 2 + 1 ))' in text and '"rpc_quorum": $L1_QUORUM,' in text)
+                            or "'rpc_quorum': len(rpcs.split()) // 2 + 1," in text)
             quorum = len(urls) // 2 + 1
         print('install-shadow.sh writes rpc_quorum =', quorum, 'for', len(urls), 'rpc_urls')
         d = tempfile.mkdtemp(dir=os.environ.get('TMPDIR'))
