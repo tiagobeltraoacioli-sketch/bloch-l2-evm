@@ -1217,7 +1217,10 @@ impl Spool {
         let written = std::fs::write(&partial, format!("{}\n", alloy_primitives::hex::encode(tx.raw())))
             .and_then(|()| {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o600))
+                // Group-readable: with the kit's own RPC user the producer is another user that reaches the spool
+                // through the read group of the setgid spool directory (mode 2770). At 0600 the settler could not
+                // read the file and proved empty blocks (agent 312, F312-5). A signed transaction is public data.
+                std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o640))
             })
             .and_then(|()| {
                 after_partial();

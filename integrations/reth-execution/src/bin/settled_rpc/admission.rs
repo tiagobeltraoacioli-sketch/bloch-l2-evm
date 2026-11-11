@@ -889,6 +889,15 @@ mod tests {
         // One wei below the quote is refused; the quote itself is admitted.
         assert!(world.send(&world.approve(1, 7, required - 1, cap)).is_err());
         world.send(&world.approve(1, 7, required, cap)).unwrap();
+        // F312-5: the spooled file is readable by the spool directory's group (the producer's way in).
+        use std::os::unix::fs::PermissionsExt;
+        let spooled: Vec<_> = std::fs::read_dir(&world.spool.dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "tx"))
+            .collect();
+        assert_eq!(spooled.len(), 1);
+        assert_eq!(std::fs::metadata(&spooled[0]).unwrap().permissions().mode() & 0o777, 0o640);
     }
 
     #[tokio::test]
