@@ -118,8 +118,8 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
     # is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': 'c9315484c992f121df700a22882406f920af687a260cf570b7047e1694139def',
-    'sequencer_policy_v2.py': 'c953ae840abc32cceb8c3f38a36dbd47ba160184b2b09e773299e1ce3a1bd924',
+    'settler_v3.py': '1f3f50d92a6dd823acff4f3db6d6fb8eabc15466c196c918f7b739bb5d80876e',
+    'sequencer_policy_v2.py': 'b896d1094db2ffb38615f21a352435a064b4710c1dfe2e43fbc7905466528f6e',
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
     # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
     'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,
