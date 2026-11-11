@@ -762,7 +762,7 @@ fn judged_alone<DB: DatabaseRef>(
 // The loop of `select_in_session`, with the write price judged before a transaction's changes land. A copy, not
 // a change of that function: it is compiled into the settlement guests and must keep its bytes and line numbers.
 #[cfg(feature = "std")]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn select_priced_in_session<DB: DatabaseRef>(
     spec: &ChainSpec,
     session: &mut BlockSession<DB>,
