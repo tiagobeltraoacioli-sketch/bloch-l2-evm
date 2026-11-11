@@ -489,7 +489,17 @@ is usable 12 times a week), an uncovered contract call of a sender with no credi
 probability about 30/(N+1) per block against N such keys; a sender with any credit is ahead of all of them. No
 honest transaction is ever penalised for not being judged.
 
-MEASURED-4P
+Measured on the real binary (debug build, shared build host under load), one `select` call each. Review
+R308-4P-1's scenario, 14 keys each sending a 5M-gas writer of 200 unpaid slots at 7.9 gwei ahead of 10 honest
+contract calls and 10 transfers at 3 gwei: on the third-pass producer the keys (with standing) wasted 62.3M gas
+and the 10 calls were not judged; now, with one-transfer credit per key, none of the writers is executed
+(`needs_credit`) and all 20 honest transactions are included in 0.2 to 0.3 s; with credit for the whole 5M at
+their bid (3.95e16 wei each, paid before) all 14 are executed and left out (62.3M gas, debited) and all 20
+honest transactions, with credit or without, are still included in 0.3 s. Floods of small non-payers at 3.9 gwei
+from N keys without credit against 30 honest transactions with credit at 3 gwei: N = 8: 0.17 s, N = 64: 0.5 s,
+N = 400: 4.2 s (346 executed and left out, each judged twice, 54 `not_judged` once the 15M pool was used; as
+independent writers and as a chain on one slot alike); all 30 honest transactions included in every run. The
+plan's allowance is 180 s.
 
 Tests: `tests/produce_txs.rs` (`large_non_payers_cannot_starve_contract_calls`,
 `a_transaction_made_unpaid_by_an_earlier_one_is_not_its_senders_doing`,
