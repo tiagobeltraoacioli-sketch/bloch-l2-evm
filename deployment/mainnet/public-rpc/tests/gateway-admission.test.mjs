@@ -415,3 +415,9 @@ test('a known unavailable sequencer refuses before reserving or submitting', asy
   assert.equal(r.subrequests.length, 0);
   assert.equal(h.slots().length, 0);
 });
+
+// nginx 1.24 with njs 0.8.2 refuses the module at load ("await in arguments not supported"); node accepts it.
+test('njs: no await inside call arguments', () => {
+  const hits = source.split('\n').map((line, i) => [i + 1, line]).filter(([, line]) => !/^\s*\/\//.test(line) && /[(,[]\s*await\b/.test(line));
+  assert.deepEqual(hits, []);
+});

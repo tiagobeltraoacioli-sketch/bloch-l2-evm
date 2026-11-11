@@ -654,7 +654,9 @@ async function handle(r) {
     w.calls.forEach((f) => { waveRoutes[f.route] = true; });
     const parts = Object.keys(waveRoutes).map((route) => ({ route: route, calls: w.calls.filter((f) => f.route === route) }));
     try {
-      forwarded = forwarded.concat(await forwardParts(r, parts, hold ? () => renewSlots(hold) : null));
+      // njs (0.8.2) does not take `await` inside call arguments.
+      const done = await forwardParts(r, parts, hold ? () => renewSlots(hold) : null);
+      forwarded = forwarded.concat(done);
     } finally {
       if (hold) releaseSlots(hold);
     }
