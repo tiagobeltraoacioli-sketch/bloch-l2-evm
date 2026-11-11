@@ -109,15 +109,18 @@ PY
 }
 
 # The IPv4 addresses of the L1 RPC hosts, for the unit's IPAddressAllow drop-in (the unit denies every other
-# address). A name is resolved now; if its address changes, run the install again after --rollback.
+# address). A name is resolved now, and EVERY address it has is allowed (a name with several A records answers
+# from any of them; review R308-2P-12). If its addresses change, run the install again after --rollback.
 l1_rpc_addresses() {
-  local url host ip out=
+  local url host ips ip out=
   for url in "$@"; do
     host=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "$url")
-    ip=$({ getent ahostsv4 "$host" || true; } | awk 'NR==1{print $1}')
-    [ -n "$ip" ] || { echo "cannot resolve the L1 RPC host $host" >&2; return 1; }
-    case " $out " in *" $ip "*) echo "L1 RPC hosts resolve to the same address $ip: they must be distinct hosts" >&2; return 1;; esac
-    out="$out $ip"
+    ips=$({ getent ahostsv4 "$host" || true; } | awk '!seen[$1]++ {print $1}')
+    [ -n "$ips" ] || { echo "cannot resolve the L1 RPC host $host" >&2; return 1; }
+    for ip in $ips; do
+      case " $out " in *" $ip "*) echo "L1 RPC hosts resolve to the same address $ip: they must be distinct hosts" >&2; return 1;; esac
+    done
+    out="$out $(echo $ips)"
   done
   echo "${out# }"
 }

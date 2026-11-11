@@ -91,6 +91,39 @@ class InstallShadowRpcs(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn('distinct hosts', p.stderr)
 
+    def addresses(self, records, *urls):
+        """l1_rpc_addresses() of the script with a stand-in `getent ahostsv4` (records: name -> addresses)."""
+        bin_dir = os.path.join(self.dir, 'bin')
+        os.makedirs(bin_dir, exist_ok=True)
+        lines = ''.join(f'  {name}) printf "%s STREAM x\\n%s DGRAM\\n" {" ".join(a + " " + a for a in addrs)} ;;\n'
+                        for name, addrs in records.items())
+        with open(os.path.join(bin_dir, 'getent'), 'w') as fh:
+            fh.write('#!/bin/bash\n[ "$1" = ahostsv4 ] || exit 2\ncase $2 in\n' + lines + '  *) exit 2 ;;\nesac\n')
+        os.chmod(os.path.join(bin_dir, 'getent'), 0o755)
+        with open(SCRIPT) as fh:
+            text = fh.read()
+        function = text[text.index('l1_rpc_addresses() {'):text.index('\n}\n', text.index('l1_rpc_addresses() {')) + 3]
+        return subprocess.run(['bash', '-c', function + 'l1_rpc_addresses "$@"', 'x', *urls],
+                              env={**os.environ, 'PATH': bin_dir + os.pathsep + os.environ['PATH']},
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+
+    def test_every_address_of_a_name_is_allowed(self):
+        """Review R308-2P-12: only the first A record of a name was allowed, so a name with several made the
+        quorum flaky under the unit's IPAddressDeny=any."""
+        p = self.addresses({'rpc-a.example': [A, D], 'rpc-b.example': [B], C: [C]},
+                           'https://rpc-a.example:443', 'http://rpc-b.example:8080', f'http://{C}:8080')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.split(), [A, D, B, C])
+
+    def test_two_names_sharing_an_address_are_one_host(self):
+        p = self.addresses({'rpc-a.example': [A, D], 'rpc-b.example': [D], C: [C]},
+                           'https://rpc-a.example:443', 'http://rpc-b.example:8080', f'http://{C}:8080')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(f'resolve to the same address {D}', p.stderr)
+        p = self.addresses({'rpc-a.example': [A]}, 'https://rpc-a.example:443', 'http://gone.example:8080')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('cannot resolve the L1 RPC host gone.example', p.stderr)
+
     def test_refuses_garbage(self):
         for bad in (f'ftp://{A}:8080', f'http://{A}', f'http://user@{A}:8080', f'http://{A}:8080/path', 'http://bad_host!:8080'):
             p = self.run_print(env_urls=f'{bad} http://{B}:8080 http://{C}:8080')

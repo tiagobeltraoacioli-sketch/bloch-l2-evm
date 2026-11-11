@@ -49,6 +49,17 @@ class Guards(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn('not the published', done.stderr)
 
+    def test_install_refuses_one_rpc_host_written_three_ways(self):
+        """Review R308-2P-12: the distinct-host rule compared names only, so a trailing dot, another case or the IP
+        literal of the same node counted as another host and one node could be the 2-of-3 quorum."""
+        cases = [['http://rpc-a.invalid:1', 'http://RPC-A.invalid.:2', 'http://198.51.100.3:3']]
+        if shutil.which('getent'):   # the IP literal and a name of the same node (needs the resolver)
+            cases.append(['http://127.0.0.1:1', 'http://localhost:2', 'http://198.51.100.3:3'])
+        for rpcs in cases:
+            done = self.install(self.artifacts(), '--dry-run', *sum((['--rpc', u] for u in rpcs), []))
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertIn('three distinct hosts', done.stderr, rpcs)
+
     def test_install_makes_a_copied_binary_executable(self):
         art = self.artifacts()
         for f in ('bloch-pos', 'bloch-l2-native-follower', 'bloch-l2-produce-dev'):
