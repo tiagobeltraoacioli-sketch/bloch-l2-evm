@@ -40,6 +40,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -205,6 +206,9 @@ _COMMON: Dict[str, Any] = {
     'status_settlements_warn': 15_000, 'status_settlements_crit': 22_500,
     'gate_warn_epochs': 96, 'gate_crit_epochs': 6,
     'attestors_n': 5, 'attestors_k': 3, 'attest_grace_blocks': 120,
+    # Withdrawn on L2 and not released on L1, in sat, from which an old root without any partial is WARN (the
+    # large-claim threshold: 100 BLCH).
+    'attest_unclaimed_warn_sat': 100 * 100_000_000,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
     'foreign_window_seconds': 86400, 'foreign_recovered_crit': 2,
     # settler reorg_recovery: every automatic rebuild after an L1 reorg is reported; two in a day is CRIT.
@@ -290,12 +294,23 @@ def subprocess_runner(argv: List[str]) -> Tuple[int, str]:
 
 
 def http_fetcher(timeout: float) -> Fetcher:
+    """None for anything that is not a 2xx body. `fetch.errors` keeps, per URL, why a fetch got no HTTP answer at all
+    (refused, timeout, DNS, TLS) or a 5xx: a missing partial (404) is normal and is not in it (review R308-30)."""
+    errors: Dict[str, str] = {}
+
     def fetch(url: str) -> Optional[bytes]:
+        errors.pop(url, None)
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 return resp.read(200_000)
-        except Exception:  # a missing partial is normal
+        except urllib.error.HTTPError as e:
+            if e.code >= 500:
+                errors[url] = f'HTTP {e.code}'
             return None
+        except Exception as e:  # noqa: BLE001
+            errors[url] = f'{type(e).__name__}: {e}'[:160]
+            return None
+    fetch.errors = errors  # type: ignore[attr-defined]
     return fetch
 
 
@@ -766,10 +781,25 @@ def check_settlement(l1_up: List[Dict[str, Any]], p: Dict[str, Any], phase: str,
         if phase == 'prelaunch':
             r.add('phase', WARN, 'settlements exist: run with --phase live')
         try:
-            age = max(0.0, now - slot_time(int(source['slot'])))
+            # The oldest view among the nodes within the tolerated height spread of the best one decides: one node
+            # a block ahead does not speak for the others (review R308-33a). A node further behind is reported by
+            # l1_height_spread and is not a witness here.
+            near = [n for n in with_l2 if head_node['height'] - n['height'] < p['l1_height_spread_warn']]
+            slots = []
+            for n in near:
+                try:
+                    slots.append((int((n['l2'].get('source') or {})['slot']), n))
+                except (KeyError, TypeError, ValueError):
+                    if n is head_node:
+                        raise
+            slot, witness = min(slots, key=lambda x: x[0])
+            age = max(0.0, now - slot_time(slot))
+            others = '' if slot == int(source['slot']) else (
+                f'; {witness["url"]} at height {witness["height"]} still reports this older settlement, the highest '
+                f'node (height {head_node["height"]}) reports source slot {source["slot"]}')
             r.graded('settlement_age', age, p['settlement_age_warn'], p['settlement_age_crit'],
-                     f'last settlement (L2 block {settled}) accepted about {minutes(age)} ago '
-                     f'(source slot {source["slot"]})')
+                     f'last settlement (L2 block {statement_l2_number(witness["l2"].get("accepted")) if others else settled}) '
+                     f'accepted about {minutes(age)} ago (source slot {slot}){others}')
         except (KeyError, TypeError, ValueError):
             r.add('settlement_age', WARN, 'getl2settlement.source has no slot')
     return with_l2
@@ -1204,25 +1234,66 @@ def partial_ok(data: bytes, index: int, chain_id: int, root: str) -> bool:
         return False
 
 
+def probe_drops(drops: List[str], fetch: Fetcher) -> Dict[str, str]:
+    """Why each unreachable drop is unreachable. A directory must exist. An HTTP feed is asked for /healthz (sigfeed.py
+    answers it): a body is reachable; so is a plain "not found" from a fetcher that reports its transport errors (a
+    static host with no health route). A fetcher that cannot tell the two apart counts None as no answer."""
+    down: Dict[str, str] = {}
+    for d in drops:
+        if d.startswith(('http://', 'https://')):
+            url = d.rstrip('/') + '/healthz'
+            if fetch(url) is not None:
+                continue
+            errors = getattr(fetch, 'errors', None)
+            if errors is None:
+                down[d] = 'no answer'
+            elif url in errors:
+                down[d] = errors[url]
+        elif not Path(d).is_dir():
+            down[d] = 'not a directory'
+    return down
+
+
 def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str, Any], fetch: Fetcher,
-                    r: Report) -> None:
+                    r: Report, phase: str = 'prelaunch') -> None:
     """Signatures per round. A round is a retained, FFG-finalized withdrawal root. An agent signs only roots
-    covering an unclaimed >= 100 BLCH withdrawal, so a round with no partial at all is not a fault; once
-    one attestor signed, every live attestor signs the same root within a cycle or two."""
-    if not drops or not with_l2:
+    covering an unclaimed >= 100 BLCH withdrawal, so a round with no partial at all is not a fault by itself; once
+    one attestor signed, every live attestor signs the same root within a cycle or two.
+
+    Review R308-30: "no partial" must not hide a drop that does not answer or attestors that are all stopped. So
+    the drops are probed and an unreachable one is reported; and a root past its grace with no partial at all is
+    WARN while the L2 ledger shows at least `attest_unclaimed_warn_sat` withdrawn and not yet released on L1 (the
+    monitor reads sums, not leaves: several small withdrawals adding up to that also raise it)."""
+    if not drops:
+        if phase == 'live' and p['chain_id'] == 700770:
+            r.add('attestors', WARN, 'attestors are not watched: no --attest-drop configured (one per attestor feed)')
+        return
+    n_att, k = p['attestors_n'], p['attestors_k']
+    down = probe_drops(drops, fetch)
+    reachable = len(drops) - len(down)
+    drop_level = OK
+    if down:
+        drop_level = CRIT if reachable == 0 or (len(drops) >= k and reachable < k) else WARN
+    drop_msg = ('; ' if down else '') + '; '.join(f'drop {d} unreachable ({why})' for d, why in down.items())
+    r.facts['attestation_drops'] = {'configured': len(drops), 'unreachable': sorted(down)}
+    if not with_l2:
+        if down:
+            r.add('attestors', drop_level, drop_msg[2:], threshold=k, n=n_att)
         return
     head = max(with_l2, key=lambda n: n['height'])['l2']
     native_height = int(head.get('native_height', 0))
     roots = [x for x in (head.get('withdrawals') or {}).get('roots') or [] if x.get('finalized')]
-    n_att, k = p['attestors_n'], p['attestors_k']
-    rounds, worst = [], OK
+    rounds, worst = [], drop_level
     missing_count: Dict[int, int] = {}
+    unsigned_old = 0
     for rec in roots:
         root = strip0x(rec.get('root'))
         signers = []
         for i in range(n_att):
             rel = f'{p["chain_id"]}/{root}/attestor-{i}.partial'
             for d in drops:
+                if d in down:
+                    continue
                 if d.startswith(('http://', 'https://')):
                     data = fetch(d.rstrip('/') + '/' + rel)
                 else:
@@ -1235,6 +1306,8 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
         entry = {'l2_number': rec.get('l2_number'), 'root': root[:16], 'signatures': len(signers),
                  'signers': signers, 'age_blocks': age_blocks}
         rounds.append(entry)
+        if not signers and age_blocks >= p['attest_grace_blocks']:
+            unsigned_old += 1
         if signers and age_blocks >= p['attest_grace_blocks']:
             for i in range(n_att):
                 if i not in signers:
@@ -1244,7 +1317,7 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
     r.facts['attestation_rounds'] = rounds[-10:]
     signed = [x for x in rounds if x['signatures']]
     if not roots:
-        r.add('attestors', OK, 'no finalized withdrawal root yet: nothing to sign')
+        r.add('attestors', drop_level, 'no finalized withdrawal root yet: nothing to sign' + drop_msg, threshold=k, n=n_att)
         return
     msg = (f'{len(signed)}/{len(roots)} finalized withdrawal roots signed; last signed round: '
            f'{signed[-1]["signatures"]}/{n_att} signatures' if signed else
@@ -1252,7 +1325,20 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
            f'withdrawal exists)')
     if missing_count:
         msg += '; silent attestors (rounds missed): ' + ', '.join(f'#{i} ({c})' for i, c in sorted(missing_count.items()))
-    r.add('attestors', worst, msg, threshold=k, n=n_att)
+    ledger = r.facts.get('l2_ledger')
+    if unsigned_old and ledger is not None:
+        try:
+            released = int((head.get('withdrawals') or {}).get('released_sat', 0))
+            unclaimed_sat = max(0, ledger['withdrawn_wei'] // ATOM_SCALE - released)
+        except (KeyError, TypeError, ValueError):
+            unclaimed_sat = 0
+        r.facts['withdrawn_unclaimed_sat'] = unclaimed_sat
+        if unclaimed_sat >= p['attest_unclaimed_warn_sat']:
+            worst = max(worst, WARN, key=lambda c: SEVERITY[c])
+            msg += (f'; {unsigned_old} root(s) past the grace of {p["attest_grace_blocks"]} blocks carry no partial while '
+                    f'{unclaimed_sat / 1e8:.8f} BLCH is withdrawn on L2 and not released on L1 (a withdrawal of 100 BLCH '
+                    f'or more may be waiting for attestors that do not sign; check the five agents)')
+    r.add('attestors', worst, msg + drop_msg, threshold=k, n=n_att)
 
 
 # ---------------------------------------------------------------------------- DA funding, disk
@@ -1506,11 +1592,20 @@ def check_units(specs: List[str], p: Dict[str, Any], now: float, run_cmd: Runner
         if code == 0:
             grade_events(name, parse_events(out, now - window), p, window, r)
             grade_spool_expired(name, out, p, window, r)
+        else:
+            # Never silence (review R308-29): halt, settlement-not-included and the other events are not graded.
+            r.add(f'events[{name}]', UNKNOWN, f'journal of {unit} unreadable (journalctl exit {code}'
+                                             f'{": " + out.strip()[:120] if code == 127 and out.strip() else ""}): its events '
+                                             f'are not graded; the monitor user needs the systemd-journal group')
         day = p['foreign_window_seconds']
         code, out = run_cmd(['journalctl', '-u', unit, '-o', 'cat', '--no-pager', '-q', '--since', f'@{int(now - day)}'])
         if code == 0:
             grade_foreign(name, parse_events(out, now - day), p, r)
             grade_reorg(name, parse_events(out, now - day), p, r)
+        else:
+            r.add(f'foreign_settlements[{name}]', UNKNOWN, f'journal of {unit} unreadable over '
+                                                           f'{day / 3600:.0f} h (journalctl exit {code}): foreign '
+                                                           f'settlements are not counted')
 
 
 def grade_spool_expired(name: str, text: str, p: Dict[str, Any], window: float, r: Report) -> None:
@@ -1841,18 +1936,22 @@ def write_alert_state(path: Path, doc: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report) -> None:
-    """`heartbeat_url`: fetched every run, whatever the status. A dead-man service (healthchecks.io style, or the
-    operator's own) alerts when the pings stop: a dead or hung monitor, a stopped timer or a host down. Nothing here
-    can report its own death."""
-    url = cfg.get('heartbeat_url')
+def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report, delivered: bool = True) -> None:
+    """`heartbeat_url`: fetched at the end of every run whose due alert, if any, was delivered, whatever the status.
+    A dead-man service (healthchecks.io style, or the operator's own) alerts when the pings stop: a dead or hung
+    monitor, a stopped timer or a host down. Nothing here can report its own death.
+
+    When a due alert could not be delivered the plain ping is NOT sent (review R308-31): `heartbeat_fail_url` is
+    fetched instead when configured (healthchecks.io: the ping URL plus /fail), so the dead-man service is the one
+    that tells the operator."""
+    url = cfg.get('heartbeat_url') if delivered else cfg.get('heartbeat_fail_url')
     if not configured(url) or args.alert_dry_run:
         return
     try:
         urllib.request.urlopen(urllib.request.Request(url, headers={'user-agent': 'bloch-l2-monitor'}),
                                timeout=args.timeout).read()
     except Exception as e:  # noqa: BLE001 - a missed ping is the dead-man's to alert on
-        r.add('heartbeat', WARN, f'heartbeat_url not reached: {e}')
+        r.add('heartbeat', WARN, f'{"heartbeat_url" if delivered else "heartbeat_fail_url"} not reached: {e}')
 
 
 def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_alert) -> Optional[str]:
@@ -1865,7 +1964,9 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
         state = {}
-    heartbeat(cfg, args, r)
+    if getattr(args, 'phase', 'live') == 'live' and not configured(cfg.get('heartbeat_url')):
+        r.add('heartbeat', WARN, 'no heartbeat_url configured: nothing reports a dead monitor, a stopped timer or '
+                                 'this host being down')
     decision = decide_alert(r, state, now, float(cfg.get('realert_seconds', 3600)), min_level,
                             int(cfg.get('recover_runs', 3)))
     if decision is None:
@@ -1873,6 +1974,7 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
             bad = {c['check']: c['level'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
             bad.update({k: LEVEL_NAMES[v] for k, v in state.get('held', {}).items()})
             write_alert_state(state_path, {'bad': bad, 'sent_at': state.get('sent_at', 0), 'clean': state.get('clean', {})})
+        heartbeat(cfg, args, r)
         return None
     text = alert_text(args.profile, r, min_level) if decision == 'raise' else \
         f'BLOCH L2 {args.profile}: RECOVERED, status {LEVEL_NAMES[r.status]} ({utc(now)})'
@@ -1882,6 +1984,7 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         sent = sender(cfg, text, payload, args.timeout, args.alert_dry_run)
     except Exception as e:  # noqa: BLE001 - an alert failure never hides the report
         r.add('alert_delivery', WARN, f'alert not delivered: {e}')
+        heartbeat(cfg, args, r, delivered=False)
         return decision
     if not sent:
         r.add('alert_delivery', WARN, 'alert due but no target configured (webhook_url / telegram are TBD-owner)')
@@ -1891,6 +1994,8 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         write_alert_state(state_path, {'bad': bad, 'sent_at': now if sent else state.get('sent_at', 0),
                                        'clean': state.get('clean', {}) if decision != 'recover' else {}})
     r.facts['alert'] = {'decision': decision, 'sent': sent}
+    # The ping goes out after the delivery: an alert that reached nobody is not "all is well".
+    heartbeat(cfg, args, r, delivered=bool(sent))
     return decision
 
 
@@ -1950,29 +2055,44 @@ def run(args: argparse.Namespace, transport: Transport, now: Optional[float] = N
     r = Report()
     r.facts.update({'profile': args.profile, 'phase': args.phase, 'checked_at': int(now)})
     backends = [named(s, f'rpc{i}') for i, s in enumerate(args.l2_rpc or [])]
-    views = check_l2(client, backends, p, args.phase, now, r)
-    l1_up = check_l1(client, args.l1_rpc or [], p, r)
-    check_l1_stuck(client, args.l1_stuck_node or [], args.l1_stuck_state, l1_up, p, fetch or http_fetcher(args.timeout), r)
-    with_l2 = check_settlement(l1_up, p, args.phase, now, r)
-    check_height_runway(r.facts.get('l2_settled_number'), l1_up, p, r)
-    check_rpc_vs_accepted(client, views, with_l2, r)
-    check_escrow_and_backlog(with_l2, p, r, now, args.backlog_state if args.max_idle_seconds else None)
-    check_followers(client, views, args.follower_status or [], l1_up, p, now, r)
-    check_da_balance(client, args.da_script or [], l1_up, p, r)
-    check_disks(args.disk or [], p, r)
-    check_gates(l1_up, p, compiled_gates(args), now, r)
-    check_attestors(args.attest_drop or [], with_l2, p, fetch or http_fetcher(args.timeout), r)
-    check_units(args.unit or [], p, now, run_cmd, r)
-    check_event_logs(args.event_log or [], p, now, r)
-    check_proof_time(p, r)
-    check_files(args.file or [], p, now, r)
-    check_reports(args.report or [], p, now, r)
-    check_memory(args.memory, p, r)
-    check_shm(args.shm or [], p, now, r)
-    check_http(args.http or [], probe or http_probe(args.timeout), r)
-    check_l1_progress(args.l1_progress_state, p, now, r)
-    check_guardian_health(args.guardian_health or [], p, now, r)
-    check_binaries(args.binary or [], r)
+    fetcher = fetch or http_fetcher(args.timeout)
+
+    def guarded(name: str, fn: Callable[..., Any], *a: Any, default: Any = None) -> Any:
+        """One check that raises (a null where a number is expected, a file cut short) becomes a CRIT of its own
+        and the other checks still run: the report, the alert and the heartbeat follow (review R308-31)."""
+        try:
+            return fn(*a)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
+            r.add(f'monitor[{name}]', CRIT, f'check failed with {type(e).__name__}: {str(e)[:200]} (a monitor fault or an '
+                                           f'answer of an unexpected shape; what this check watches is NOT watched)')
+            return default
+
+    views = guarded('l2', check_l2, client, backends, p, args.phase, now, r, default=[])
+    l1_up = guarded('l1', check_l1, client, args.l1_rpc or [], p, r, default=[])
+    guarded('l1_stuck', check_l1_stuck, client, args.l1_stuck_node or [], args.l1_stuck_state, l1_up, p, fetcher, r)
+    with_l2 = guarded('settlement', check_settlement, l1_up, p, args.phase, now, r,
+                      default=[n for n in l1_up if isinstance(n.get('l2'), dict)])
+    guarded('height_runway', check_height_runway, r.facts.get('l2_settled_number'), l1_up, p, r)
+    guarded('rpc_vs_accepted', check_rpc_vs_accepted, client, views, with_l2, r)
+    guarded('escrow_and_backlog', check_escrow_and_backlog, with_l2, p, r, now,
+            args.backlog_state if args.max_idle_seconds else None)
+    guarded('followers', check_followers, client, views, args.follower_status or [], l1_up, p, now, r)
+    guarded('da_balance', check_da_balance, client, args.da_script or [], l1_up, p, r)
+    guarded('disks', check_disks, args.disk or [], p, r)
+    guarded('gates', check_gates, l1_up, p, compiled_gates(args), now, r)
+    guarded('attestors', check_attestors, args.attest_drop or [], with_l2, p, fetcher, r, args.phase)
+    guarded('units', check_units, args.unit or [], p, now, run_cmd, r)
+    guarded('event_logs', check_event_logs, args.event_log or [], p, now, r)
+    guarded('proof_time', check_proof_time, p, r)
+    guarded('files', check_files, args.file or [], p, now, r)
+    guarded('reports', check_reports, args.report or [], p, now, r)
+    guarded('memory', check_memory, args.memory, p, r)
+    guarded('shm', check_shm, args.shm or [], p, now, r)
+    guarded('http', check_http, args.http or [], probe or http_probe(args.timeout), r)
+    guarded('l1_progress', check_l1_progress, args.l1_progress_state, p, now, r)
+    guarded('guardian_health', check_guardian_health, args.guardian_health or [], p, now, r)
+    guarded('binaries', check_binaries, args.binary or [], r)
     return r
 
 
@@ -2017,8 +2137,21 @@ def parse(argv: List[str]) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse(sys.argv[1:] if argv is None else argv)
     now = time.time()
-    r = run(args, http_transport(args.timeout), now=now)
-    handle_alerts(args, r, now)
+    # Anything that escapes run() or the alert path is a CRIT that still goes through the alerts, never a
+    # traceback whose exit status 1 reads as WARN and as a unit success (review R308-31).
+    try:
+        r = run(args, http_transport(args.timeout), now=now)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        r = Report()
+        r.facts.update({'profile': args.profile, 'phase': args.phase, 'checked_at': int(now)})
+        r.add('monitor', CRIT, f'the monitor run failed with {type(e).__name__}: {str(e)[:200]}; nothing was checked')
+    try:
+        handle_alerts(args, r, now)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        r.add('alert_delivery', CRIT, f'the alert path failed with {type(e).__name__}: {str(e)[:200]} (alert config or '
+                                      f'state unreadable?); no alert and no heartbeat were sent')
     if args.json:
         print(json.dumps({'status': LEVEL_NAMES[r.status], 'facts': r.facts, 'checks': r.checks}, indent=2,
                          default=str))

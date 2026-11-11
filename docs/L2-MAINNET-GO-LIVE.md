@@ -869,7 +869,9 @@ sed -e 's/--phase prelaunch/--phase live/' -e 's# --l2-rpc B=http://TBD-owner:18
 
 The added flags are D15 and D16: `--max-idle-seconds` adds the idle allowance to the age checks and needs `--backlog-state` for `deposit_wait`; `block_interval_seconds=1800` grades `l2_proof_cost` (WARN at 1,260 s, CRIT at 1,800 s). Add the D18 `--set` values the owner picks. The env example also carries `--report dex=…`: remove it if the DEX monitor does not run on A.
 
-**Alert destinations are `TBD-OWNER` (D11).** In `/etc/bloch-l2-monitor/alert.json` they are `webhook_url` (+ `webhook_bearer_file`), `telegram.bot_token_file` and `telegram.chat_id`, `alert_command`, and `heartbeat_url`; every one is `TBD-OWNER` in the example. Until D11 is decided, install the example unchanged: nothing is delivered and WARN `alert_delivery` is expected. Nobody but the owner fills these in.
+**Alert destinations are `TBD-OWNER` (D11).** In `/etc/bloch-l2-monitor/alert.json` they are `webhook_url` (+ `webhook_bearer_file`), `telegram.bot_token_file` and `telegram.chat_id`, `alert_command`, `heartbeat_url` and `heartbeat_fail_url`; every one is `TBD-OWNER` in the example. Until D11 is decided, install the example unchanged: nothing is delivered and WARN `alert_delivery` is expected. Nobody but the owner fills these in.
+
+Round 15 (review R308-29 to R308-31), what the live monitor now says about itself: WARN `heartbeat` while `heartbeat_url` is not set (nothing else reports a dead monitor, a stopped timer or host A down); the dead-man ping is sent only after a due alert was delivered, and `heartbeat_fail_url` (healthchecks.io style: the ping URL plus `/fail`), when set, is fetched instead when the delivery failed; a fault of the monitor itself is CRIT `monitor` or `monitor[CHECK]` through the same alerts; UNKNOWN `events[UNIT]` when `journalctl` cannot be read (the unit's `SupplementaryGroups=systemd-journal`); and WARN `attestors` ("not watched") until the attestor feeds are added in P10.
 
 ```
 sudo install -m 0644 /home/ubuntu/l2-golive-next/kit/monitor/alert.json.example /etc/bloch-l2-monitor/alert.json
@@ -932,7 +934,7 @@ Not needed for settlements, deposits or claims under 100 BLCH. It is **required 
 sha256sum /opt/bloch/l2-attestor/bloch-l2-native-follower /opt/bloch/l2-attestor/bloch-l2-produce-dev
 ```
 
-   Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Build the operator packages from this kit; `IDENTITY.txt` records the kit commit. Attestor followers stay on status schema v2 (P3).
+   Pass `--feed-port 8787`, open inbound TCP 8787, and enable `bloch-l2-attestor-feed`. Then, on A, append ` --attest-drop http://FEED_HOST:8787` to `MONITOR_ARGS` in `/etc/bloch-l2-monitor/monitor.env`, once per feed (five in the end): the monitor probes each feed (`/healthz`), reports one that does not answer (CRIT below three reachable feeds), and tells that apart from "nothing to sign". Build the operator packages from this kit; `IDENTITY.txt` records the kit commit. Attestor followers stay on status schema v2 (P3).
 4. Start the follower and wait about 65–80 min. Then run `attestor_agent.py check`, then start the
    agent. The printed `check` command and the agent unit pass the passphrase with systemd `LoadCredential` plus a private `RuntimeDirectory` (mode 0700): systemd 255 hands the credential to the `User=` service at mode 0440, which the attestor `bloch-pos` refuses, so the agent copies it once at 0400 into that tmpfs directory, which systemd removes when the unit stops (agent 204 F204-4, fix by agent 203). Verified as root under a real systemd 255 (container with shared mount propagation, `--network none`, throwaway keys): the unit starts and opens the key, the printed `check` reaches the follower step, and both the same check without `RuntimeDirectory` and the 141844f agent are refused at mode 0440 (agents/203-attestor-final.md).
 

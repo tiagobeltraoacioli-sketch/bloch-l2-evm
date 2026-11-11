@@ -41,6 +41,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 import types
 import urllib.parse
 import urllib.request
@@ -667,18 +668,22 @@ def write_alert_state(path: Path, doc: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report) -> None:
-    """`heartbeat_url`: fetched every run, whatever the status. A dead-man service (healthchecks.io style, or the
-    operator's own) alerts when the pings stop: a dead or hung monitor, a stopped timer or a host down. Nothing here
-    can report its own death."""
-    url = cfg.get('heartbeat_url')
+def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report, delivered: bool = True) -> None:
+    """`heartbeat_url`: fetched at the end of every run whose due alert, if any, was delivered, whatever the status.
+    A dead-man service (healthchecks.io style, or the operator's own) alerts when the pings stop: a dead or hung
+    monitor, a stopped timer or a host down. Nothing here can report its own death.
+
+    When a due alert could not be delivered the plain ping is NOT sent (review R308-31): `heartbeat_fail_url` is
+    fetched instead when configured (healthchecks.io: the ping URL plus /fail), so the dead-man service is the one
+    that tells the operator."""
+    url = cfg.get('heartbeat_url') if delivered else cfg.get('heartbeat_fail_url')
     if not configured(url) or args.alert_dry_run:
         return
     try:
         urllib.request.urlopen(urllib.request.Request(url, headers={'user-agent': 'bloch-l2-monitor'}),
                                timeout=args.timeout).read()
     except Exception as e:  # noqa: BLE001 - a missed ping is the dead-man's to alert on
-        r.add('heartbeat', WARN, f'heartbeat_url not reached: {e}')
+        r.add('heartbeat', WARN, f'{"heartbeat_url" if delivered else "heartbeat_fail_url"} not reached: {e}')
 
 
 def alert_text(r: Report, min_level: int, now: float) -> str:
@@ -707,7 +712,10 @@ def handle_alerts(alert_config: Optional[str], r: Report, now: float, dry_run: b
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
         state = {}
-    heartbeat(cfg, types.SimpleNamespace(alert_dry_run=dry_run, timeout=timeout), r)
+    ping = types.SimpleNamespace(alert_dry_run=dry_run, timeout=timeout)
+    if not configured(cfg.get('heartbeat_url')):
+        r.add('heartbeat', WARN, 'no heartbeat_url configured: nothing reports a dead monitor, a stopped timer or '
+                                 'this host being down')
     decision = decide_alert(r, state, now, float(cfg.get('realert_seconds', 3600)), min_level,
                             int(cfg.get('recover_runs', 3)))
 
@@ -720,6 +728,7 @@ def handle_alerts(alert_config: Optional[str], r: Report, now: float, dry_run: b
         if not dry_run:
             write_alert_state(state_path, {'bad': bad_now(), 'sent_at': state.get('sent_at', 0),
                                            'clean': state.get('clean', {})})
+        heartbeat(cfg, ping, r)
         return None
     text = alert_text(r, min_level, now) if decision == 'raise' else \
         f'BLOCH L1: RECOVERED, status {LEVEL_NAMES[r.status]} ({utc(now)})'
@@ -729,6 +738,7 @@ def handle_alerts(alert_config: Optional[str], r: Report, now: float, dry_run: b
         sent = sender(cfg, text, payload, timeout, dry_run)
     except Exception as e:  # noqa: BLE001 - an alert failure never hides the report
         r.add('alert_delivery', WARN, f'alert not delivered: {e}')
+        heartbeat(cfg, ping, r, delivered=False)
         return decision
     if not sent:
         r.add('alert_delivery', WARN, 'alert due but no target configured (webhook_url / alert_command / telegram are TBD-owner)')
@@ -736,6 +746,8 @@ def handle_alerts(alert_config: Optional[str], r: Report, now: float, dry_run: b
         write_alert_state(state_path, {'bad': bad_now(), 'sent_at': now if sent else state.get('sent_at', 0),
                                        'clean': state.get('clean', {}) if decision != 'recover' else {}})
     r.facts['alert'] = {'decision': decision, 'sent': sent}
+    # The ping goes out after the delivery: an alert that reached nobody is not "all is well" (review R308-31).
+    heartbeat(cfg, ping, r, delivered=bool(sent))
     return decision
 
 
@@ -783,9 +795,22 @@ def main(argv: Optional[List[str]] = None, transport: Optional[Transport] = None
     try:
         while True:
             now = clock()
-            r = run_once(cfg, transport, fetch, state, now)
-            save_json(state_path, state)
-            handle_alerts(None if args.no_alerts else cfg.get('alert_config'), r, now, args.alert_dry_run, timeout)
+            # A run that raises is a CRIT that still goes through the alerts, never a traceback whose exit status 1
+            # reads as WARN (review R308-31).
+            try:
+                r = run_once(cfg, transport, fetch, state, now)
+                save_json(state_path, state)
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc(file=sys.stderr)
+                r = Report()
+                r.facts['checked_at'] = int(now)
+                r.add('monitor', CRIT, f'the monitor run failed with {type(e).__name__}: {str(e)[:200]}; nothing was checked')
+            try:
+                handle_alerts(None if args.no_alerts else cfg.get('alert_config'), r, now, args.alert_dry_run, timeout)
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc(file=sys.stderr)
+                r.add('alert_delivery', CRIT, f'the alert path failed with {type(e).__name__}: {str(e)[:200]} (alert '
+                                              f'config or state unreadable?); no alert and no heartbeat were sent')
             save_json(cfg.get('report_file'), r.doc())
             print_report(r, args.json)
             worst = max(worst, r.status, key=lambda c: SEVERITY[c])

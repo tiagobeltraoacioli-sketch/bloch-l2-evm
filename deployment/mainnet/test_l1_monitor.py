@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -430,6 +431,14 @@ class Alerts(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.root = Path(self.dir.name)
+        self.pings = []
+
+        def urlopen(req, timeout=None):
+            self.pings.append(req.full_url)
+            return io.BytesIO(b'OK')
+        patch = mock.patch.object(m.urllib.request, 'urlopen', urlopen)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self):
         self.dir.cleanup()
@@ -445,6 +454,7 @@ class Alerts(unittest.TestCase):
         path = self.root / 'alert.json'
         path.write_text(json.dumps({'webhook_url': 'TBD-owner', 'telegram': {'bot_token_file': 'TBD-owner'},
                                     'min_level': 'WARN', 'realert_seconds': 3600, 'recover_runs': 2,
+                                    'heartbeat_url': 'https://hc.example/ping/l1',
                                     'state_file': str(self.root / 'alert.state'), **extra}))
         return str(path)
 
@@ -497,6 +507,69 @@ class Alerts(unittest.TestCase):
         r = self.report()
         m.handle_alerts(self.alert_config(alert_command=['/bin/false']), r, 1000, False, 5.0)
         self.assertEqual(r.checks[-1]['check'], 'alert_delivery')
+
+    # ---- review R308-31 (round 15)
+    def test_r308_31_no_plain_ping_when_a_due_alert_was_not_delivered(self):
+        r = self.report()
+        m.handle_alerts(self.alert_config(alert_command=['/bin/false']), r, 1000, False, 5.0)
+        self.assertEqual(self.pings, [])
+        m.handle_alerts(self.alert_config(), self.report(), 2000, False, 5.0)  # no target configured at all
+        self.assertEqual(self.pings, [])
+        cfg = self.alert_config(alert_command=['/bin/false'], heartbeat_fail_url='https://hc.example/ping/l1/fail',
+                                state_file=str(self.root / 'other.state'))
+        m.handle_alerts(cfg, self.report(), 3000, False, 5.0)
+        self.assertEqual(self.pings, ['https://hc.example/ping/l1/fail'])
+
+    def test_r308_31_the_ping_follows_a_delivered_alert_and_a_quiet_run(self):
+        order = []
+
+        def sender(c, text, payload, timeout, dry):
+            order.append('alert')
+            self.assertEqual(self.pings, [])
+            return ['stub']
+        cfg = self.alert_config()
+        m.handle_alerts(cfg, self.report(), 1000, False, 5.0, sender=sender)
+        self.assertEqual((order, self.pings), (['alert'], ['https://hc.example/ping/l1']))
+        m.handle_alerts(cfg, self.report(), 1060, False, 5.0, sender=sender)  # unchanged: quiet, still pinged
+        self.assertEqual((order, len(self.pings)), (['alert'], 2))
+
+    def test_r308_31_no_heartbeat_configured_is_warn(self):
+        for url in ('TBD-owner', None):
+            ok = m.Report()
+            ok.facts['checked_at'] = 1000
+            ok.add('l1_nodes', m.OK, 'fine')
+            sent = []
+            cfg = self.alert_config(heartbeat_url=url, state_file=str(self.root / f'hb-{url}.state'))
+            self.assertEqual(m.handle_alerts(cfg, ok, 1000, False, 5.0, sender=lambda c, text, *a: sent.append(text) or ['stub']), 'raise')
+            self.assertIn('WARN heartbeat: no heartbeat_url configured', sent[0])
+        self.assertEqual(self.pings, [])
+
+    def test_r308_31_a_run_that_raises_is_a_crit_through_the_alerts(self):
+        out = self.root / 'called.jsonl'
+        script = ('import json,sys; doc=json.load(sys.stdin); '
+                  f'open({str(out)!r},"a").write(json.dumps(doc)+"\\n")')
+        alert = self.alert_config(alert_command=[sys.executable, '-c', script])
+        config = self.root / 'l1.json'
+        config.write_text(json.dumps({'nodes': [{'name': 'a', 'rpc': 'http://a'}, {'name': 'b', 'rpc': 'http://b'}],
+                                      'alert_config': alert, 'report_file': str(self.root / 'report.json')}))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(m, 'run_once', side_effect=TypeError("int() argument must be a string, not 'NoneType'")), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            code = m.main(['--config', str(config), '--json'])
+        self.assertEqual(code, m.CRIT)
+        doc = json.loads(out.read_text().splitlines()[0])
+        self.assertEqual([(c['check'], c['level']) for c in doc['checks']], [('monitor', 'CRIT')])
+        self.assertIn('TypeError', doc['text'])
+        self.assertEqual(self.pings, ['https://hc.example/ping/l1'])
+        self.assertIn('Traceback', stderr.getvalue())
+        self.assertEqual(json.loads((self.root / 'report.json').read_text())['status'], 'CRIT')
+        # An unreadable alert config is a CRIT with exit 2 as well, not a traceback.
+        Path(alert).write_text('{')
+        stdout = io.StringIO()
+        with mock.patch.object(m, 'run_once', side_effect=TypeError('x')), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            code = m.main(['--config', str(config), '--json'])
+        self.assertEqual(code, m.CRIT)
+        self.assertIn('alert_delivery', [c['check'] for c in json.loads(stdout.getvalue())['checks']])
 
 
 class EndToEnd(unittest.TestCase):

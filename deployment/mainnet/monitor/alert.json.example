@@ -11,6 +11,7 @@
     "{status}"
   ],
   "heartbeat_url": "TBD-owner",
+  "heartbeat_fail_url": "TBD-owner",
   "min_level": "WARN",
   "realert_seconds": 3600,
   "recover_runs": 3,
