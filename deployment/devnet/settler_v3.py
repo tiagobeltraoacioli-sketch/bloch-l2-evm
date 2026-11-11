@@ -378,6 +378,11 @@ class ProducerError(RuntimeError):
     """bloch-l2-produce-dev refused a command: retryable (bounded), never a permanent halt."""
 
 
+class ProducerTimeout(ProducerError):
+    """The producer did not answer in time. A refusal for `extend` (the deposits-only block is still built, review
+    R308-2P-13); the kept-database scan tells it apart and waits (R308-22)."""
+
+
 def follower_verified_tip(status_path):
     """How far the follower has verified, to tell whether a rebuild has new input."""
     return json.loads(Path(status_path).read_text()).get('verified_tip')
@@ -1871,7 +1876,7 @@ class Settler:
         except subprocess.TimeoutExpired:
             # A producer that does not answer is a producer refusal (review R308-2P-13): with the spool, `extend`
             # then builds the deposits-only block instead of leaving through the retry loop that ends the unit.
-            raise ProducerError(f'producer timed out after {timeout} s for {args[0]}') from None
+            raise ProducerTimeout(f'producer timed out after {timeout} s for {args[0]}') from None
         if result.returncode:
             raise ProducerError(f'producer refused {args[0]}: {result.stderr.strip()[:400]}')
         try:
@@ -3460,7 +3465,7 @@ class Settler:
                 if head['number'] < number or self.produce('hash', '--target', str(candidate), '--number',
                                                            str(number))['hash'] != l2_hash:
                     continue
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, ProducerTimeout):
                 slow.append(candidate.name)
                 continue
             except (ProducerError, KeyError, ValueError):

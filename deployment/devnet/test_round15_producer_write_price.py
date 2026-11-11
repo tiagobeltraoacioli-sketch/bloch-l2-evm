@@ -140,5 +140,23 @@ class UnpaidWaitsEscalate(PricedWorld):
         return next(t['name'] for r, t in self.tx.items() if sp_hash(r) == name)
 
 
+class ProducerTimeoutIsARefusal(unittest.TestCase):
+    """Review R308-2P-13: a producer that does not answer is a ProducerError, which `extend` answers with the
+    deposits-only block; it stays distinguishable (ProducerTimeout) for the kept-database scan of R308-22."""
+
+    def test_a_timeout_of_the_producer_raises_the_refusal_class(self):
+        import subprocess
+        import settler_v3 as settler
+
+        def run(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs.get('timeout'))
+        worker = object.__new__(settler.Settler)
+        worker.c, worker.run, worker.network_args = {'produce': '/nonexistent/produce'}, run, []
+        with self.assertRaises(settler.ProducerError) as caught:
+            worker.produce('select', '--target', 'x')
+        self.assertIsInstance(caught.exception, settler.ProducerTimeout)
+        self.assertIn('timed out after 300 s for select', str(caught.exception))
+
+
 if __name__ == '__main__':
     unittest.main()
