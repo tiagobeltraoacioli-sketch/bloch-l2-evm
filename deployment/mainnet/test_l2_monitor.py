@@ -1904,5 +1904,134 @@ class ReviewR15Tests(unittest.TestCase):
         self.assertNotIn('still reports', next(c['message'] for c in report.checks if c['check'] == 'settlement_age'))
 
 
+
+class ReviewR15SecondPass(unittest.TestCase):
+    """Review r15 second pass (agent 308), R308-2P-10 and R308-2P-11: the demonstrations of
+    review-r15-308-2p/monitors2.py as regression tests. Real functions; only urlopen is replaced."""
+    FEEDS = [f'https://att{i}.example/attest' for i in range(5)]
+
+    def world(self, roots=1, age_blocks=500):
+        return [{'height': 10, 'url': 'l1', 'l2': {'native_height': 1000, 'withdrawals': {'released_sat': 0, 'roots': [
+            {'root': '0x' + f'{n + 0xa0:02x}' * 32, 'finalized': True, 'l2_number': 5 + n, 'height': 1000 - age_blocks}
+            for n in range(roots)]}}}]
+
+    def attestors(self, urlopen, world=None, **thresholds):
+        report = m.Report()
+        with mock.patch.object(m.urllib.request, 'urlopen', urlopen):
+            m.check_attestors(self.FEEDS, world or self.world(), {**m.PROFILES['mainnet'], **thresholds},
+                              m.http_fetcher(1.0), report, 'live')
+        return next(c for c in report.checks if c['check'] == 'attestors'), report
+
+    def test_r308_2p_10_feeds_that_refuse_the_monitor_are_unreachable(self):
+        for code in (401, 403, 429, 502):
+            def urlopen(url, timeout=None, code=code):
+                raise m.urllib.error.HTTPError(url, code, 'refused', {}, io.BytesIO(b''))
+            check, report = self.attestors(urlopen)
+            self.assertEqual(check['level'], 'CRIT', code)
+            self.assertIn(f'drop https://att0.example/attest unreachable (HTTP {code})', check['message'])
+            self.assertEqual(len(report.facts['attestation_drops']['unreachable']), 5)
+
+    def test_r308_2p_10_only_404_means_no_partial(self):
+        def urlopen(url, timeout=None):
+            raise m.urllib.error.HTTPError(url, 404, 'Not Found', {}, io.BytesIO(b''))
+        check, report = self.attestors(urlopen)   # static hosts without a health route and without partials
+        self.assertEqual(check['level'], 'OK')
+        self.assertEqual(report.facts['attestation_drops']['unreachable'], [])
+
+    def test_r308_2p_10_partials_that_fail_behind_a_healthy_healthz_are_unreachable(self):
+        asked = []
+
+        def urlopen(url, timeout=None):
+            asked.append(url)
+            if url.endswith('/healthz'):
+                return io.BytesIO(b'ok\n')
+            raise m.urllib.error.URLError('timed out')
+        check, report = self.attestors(urlopen, self.world(roots=3))
+        self.assertEqual(check['level'], 'CRIT')
+        self.assertIn('unreachable (partial request failed: URLError', check['message'])
+        self.assertEqual(len(report.facts['attestation_drops']['unreachable']), 5)
+        # a feed that failed one partial request is not asked again in this run: 5 health probes + 5 partials
+        self.assertEqual(len(asked), 10)
+
+    def test_r308_2p_10_one_feed_failing_its_partials_is_a_warn_and_the_others_still_count(self):
+        def urlopen(url, timeout=None):
+            if url.endswith('/healthz'):
+                return io.BytesIO(b'ok\n')
+            if 'att3.example' in url:
+                raise m.urllib.error.HTTPError(url, 503, 'Unavailable', {}, io.BytesIO(b''))
+            raise m.urllib.error.HTTPError(url, 404, 'Not Found', {}, io.BytesIO(b''))
+        check, report = self.attestors(urlopen)
+        self.assertEqual(check['level'], 'WARN')
+        self.assertEqual(report.facts['attestation_drops']['unreachable'], ['https://att3.example/attest'])
+
+    def test_r308_2p_10_the_probing_stops_at_its_time_budget(self):
+        clock = [0.0]
+
+        def urlopen(url, timeout=None):
+            clock[0] += 7.0   # every feed answers, slowly
+            if url.endswith('/healthz'):
+                return io.BytesIO(b'ok\n')
+            raise m.urllib.error.HTTPError(url, 404, 'Not Found', {}, io.BytesIO(b''))
+        with mock.patch.object(m.time, 'monotonic', lambda: clock[0]):
+            check, report = self.attestors(urlopen, self.world(roots=4))
+        self.assertLessEqual(clock[0], 60 + 7, 'one run asked the feeds for longer than the budget plus one request')
+        self.assertEqual(check['level'], 'WARN')
+        self.assertIn('probing stopped at the time budget of 60 s: 4 root(s) not looked at in full', check['message'])
+        with mock.patch.object(m.time, 'monotonic', lambda: clock[0]):
+            check, _ = self.attestors(urlopen, self.world(roots=4), attest_probe_budget_s=0)
+        self.assertEqual(check['level'], 'CRIT')
+        self.assertIn('not probed: the probing time budget was used up', check['message'])
+
+    def alerts(self, d, down=('telegram',)):
+        token = Path(d, 'token')
+        token.write_text('123:abc\n')
+        cfg = Path(d, 'alert.json')
+        cfg.write_text(json.dumps({'webhook_url': 'https://hooks.example/x', 'heartbeat_url': 'https://hc.example/ping',
+                                   'heartbeat_fail_url': 'https://hc.example/ping/fail',
+                                   'telegram': {'bot_token_file': str(token), 'chat_id': '1'},
+                                   'state_file': str(Path(d, 'alert.state'))}))
+        seen = []
+
+        def urlopen(req, timeout=None):
+            url = req if isinstance(req, str) else req.full_url
+            name = 'telegram' if 'telegram' in url else 'webhook' if 'hooks.example' in url else url
+            seen.append(name)
+            if name in down:
+                raise m.urllib.error.URLError(f'{url} unreachable')
+            return io.BytesIO(b'ok')
+        args = m.parse(['--alert-config', str(cfg), '--timeout', '1'])
+        return args, seen, urlopen
+
+    def crit(self):
+        report = m.Report()
+        report.facts['checked_at'] = 1_800_000_000
+        report.add('settlement_age', m.CRIT, 'no settlement for 3 h')
+        return report
+
+    def test_r308_2p_11_one_dead_target_does_not_undo_a_delivery(self):
+        with tempfile.TemporaryDirectory() as d:
+            args, seen, urlopen = self.alerts(d)
+            with mock.patch.object(m.urllib.request, 'urlopen', urlopen):
+                reports = [self.crit() for _ in range(3)]
+                for n, report in enumerate(reports):
+                    m.handle_alerts(args, report, 1_800_000_000 + 300 * n)
+        self.assertEqual(seen, ['webhook', 'telegram', 'https://hc.example/ping', 'https://hc.example/ping',
+                                'https://hc.example/ping'])
+        delivery = next(c for c in reports[0].checks if c['check'] == 'alert_delivery')
+        self.assertEqual(delivery['level'], 'WARN')
+        self.assertIn('alert delivered by webhook; failed: telegram', delivery['message'])
+        self.assertNotIn('123:abc', delivery['message'], 'the bot token (part of the URL) reached the report')
+        self.assertEqual(reports[0].facts['alert'], {'decision': 'raise', 'sent': ['webhook']})
+
+    def test_r308_2p_11_every_target_dead_is_still_not_delivered(self):
+        with tempfile.TemporaryDirectory() as d:
+            args, seen, urlopen = self.alerts(d, down=('telegram', 'webhook'))
+            report = self.crit()
+            with mock.patch.object(m.urllib.request, 'urlopen', urlopen):
+                m.handle_alerts(args, report, 1_800_000_000)
+                m.handle_alerts(args, self.crit(), 1_800_000_300)
+        self.assertEqual(seen, ['webhook', 'telegram', 'https://hc.example/ping/fail'] * 2)
+        self.assertIn('alert not delivered: webhook:', next(c['message'] for c in report.checks if c['check'] == 'alert_delivery'))
+
 if __name__ == '__main__':
     unittest.main()

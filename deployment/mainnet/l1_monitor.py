@@ -623,42 +623,65 @@ def decide_alert(r: Report, state: Dict[str, Any], now: float, realert: float, m
     return 'recover' if previous else None
 
 
-def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout: float, dry_run: bool) -> List[str]:
-    sent = []
+def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout: float, dry_run: bool,
+               failed: Optional[List[str]] = None) -> List[str]:
+    """Every configured target is tried; the names of those that took the alert are returned. A target that fails
+    does not stop the others and does not undo a delivery (review R308-2P-11): its reason goes to `failed`. Only
+    when targets failed and none delivered is the failure raised."""
+    sent: List[str] = []
+    failed = [] if failed is None else failed
+
+    def attempt(name: str, deliver: Callable[[], None]) -> None:
+        try:
+            deliver()
+        except Exception as e:  # noqa: BLE001 - one dead channel must not silence the others
+            failed.append(f'{name}: {type(e).__name__}: {e}'[:200])
+        else:
+            sent.append(name)
+
     hook = cfg.get('webhook_url')
     if configured(hook):
-        headers = {'content-type': 'application/json'}
-        if configured(cfg.get('webhook_bearer_file')):
-            headers['authorization'] = 'Bearer ' + Path(cfg['webhook_bearer_file']).read_text().strip()
-        body = json.dumps({'text': text, **payload}, default=str).encode()
+        def webhook() -> None:
+            headers = {'content-type': 'application/json'}
+            if configured(cfg.get('webhook_bearer_file')):
+                headers['authorization'] = 'Bearer ' + Path(cfg['webhook_bearer_file']).read_text().strip()
+            body = json.dumps({'text': text, **payload}, default=str).encode()
+            urllib.request.urlopen(urllib.request.Request(hook, data=body, headers=headers), timeout=timeout).read()
         if dry_run:
             sent.append(f'webhook (dry run) {hook}')
         else:
-            urllib.request.urlopen(urllib.request.Request(hook, data=body, headers=headers), timeout=timeout).read()
-            sent.append('webhook')
+            attempt('webhook', webhook)
     command = cfg.get('alert_command')
     if isinstance(command, list) and command and all(configured(str(a)) for a in command):
         argv = [str(a).replace('{event}', str(payload.get('event'))).replace('{status}', str(payload.get('status')))
                 .replace('{text}', text) for a in command]
-        if dry_run:
-            sent.append(f'command (dry run) {argv[0]}')
-        else:
+
+        def run_command() -> None:
             done = subprocess.run(argv, input=json.dumps({'text': text, **payload}, default=str), capture_output=True,
                                   text=True, timeout=timeout)
             if done.returncode:
                 raise RuntimeError(f'alert_command exit {done.returncode}: {done.stderr.strip()[-200:]}')
-            sent.append('command')
+        if dry_run:
+            sent.append(f'command (dry run) {argv[0]}')
+        else:
+            attempt('command', run_command)
     tg = cfg.get('telegram') or {}
     if configured(tg.get('bot_token_file')) and configured(str(tg.get('chat_id', ''))):
-        if dry_run:
-            sent.append(f'telegram (dry run) chat {tg["chat_id"]}')
-        else:
+        def telegram() -> None:
             token = Path(tg['bot_token_file']).read_text().strip()
             body = json.dumps({'chat_id': tg['chat_id'], 'text': text, 'disable_web_page_preview': True}).encode()
             url = f'https://api.telegram.org/bot{token}/sendMessage'
-            urllib.request.urlopen(urllib.request.Request(url, data=body, headers={'content-type': 'application/json'}),
-                                   timeout=timeout).read()
-            sent.append('telegram')
+            try:
+                urllib.request.urlopen(urllib.request.Request(url, data=body, headers={'content-type': 'application/json'}),
+                                       timeout=timeout).read()
+            except Exception as e:  # noqa: BLE001 - the URL holds the bot token: never let it reach a report
+                raise RuntimeError(str(e).replace(token, '<token>')) from None
+        if dry_run:
+            sent.append(f'telegram (dry run) chat {tg["chat_id"]}')
+        else:
+            attempt('telegram', telegram)
+    if failed and not sent:
+        raise RuntimeError('; '.join(failed))
     return sent
 
 
@@ -704,7 +727,6 @@ def handle_alerts(alert_config: Optional[str], r: Report, now: float, dry_run: b
     state_file from l2_monitor's, or leave alert_config out and feed report_file to `l2_monitor --report`."""
     if not alert_config:
         return None
-    sender = sender or send_alert
     cfg = json.loads(Path(alert_config).read_text())
     min_level = LEVEL_CODES[cfg.get('min_level', 'WARN')]
     state_path = Path(cfg.get('state_file') or alert_config + '.state')
@@ -734,14 +756,19 @@ def handle_alerts(alert_config: Optional[str], r: Report, now: float, dry_run: b
         f'BLOCH L1: RECOVERED, status {LEVEL_NAMES[r.status]} ({utc(now)})'
     payload = {'status': LEVEL_NAMES[r.status], 'event': decision, 'source': 'l1_monitor',
                'checks': [c for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]]}
+    failed: List[str] = []
     try:
-        sent = sender(cfg, text, payload, timeout, dry_run)
+        sent = sender(cfg, text, payload, timeout, dry_run) if sender else \
+            send_alert(cfg, text, payload, timeout, dry_run, failed)
     except Exception as e:  # noqa: BLE001 - an alert failure never hides the report
         r.add('alert_delivery', WARN, f'alert not delivered: {e}')
         heartbeat(cfg, ping, r, delivered=False)
         return decision
     if not sent:
         r.add('alert_delivery', WARN, 'alert due but no target configured (webhook_url / alert_command / telegram are TBD-owner)')
+    elif failed:
+        # Delivered = at least one target took it (review R308-2P-11); the dead target is a WARN of its own.
+        r.add('alert_delivery', WARN, f'alert delivered by {", ".join(sent)}; failed: {"; ".join(failed)}')
     if not dry_run:
         write_alert_state(state_path, {'bad': bad_now(), 'sent_at': now if sent else state.get('sent_at', 0),
                                        'clean': state.get('clean', {}) if decision != 'recover' else {}})

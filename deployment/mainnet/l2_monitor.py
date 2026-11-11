@@ -212,6 +212,8 @@ _COMMON: Dict[str, Any] = {
     # Withdrawn on L2 and not released on L1, in sat, from which an old root without any partial is WARN (the
     # large-claim threshold: 100 BLCH).
     'attest_unclaimed_warn_sat': 100 * 100_000_000,
+    # Seconds one run may spend asking the attestor feeds (the unit's TimeoutStartSec is 120).
+    'attest_probe_budget_s': 60,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
     'foreign_window_seconds': 86400, 'foreign_recovered_crit': 2,
     # settler reorg_recovery: every automatic rebuild after an L1 reorg is reported; two in a day is CRIT.
@@ -297,8 +299,9 @@ def subprocess_runner(argv: List[str]) -> Tuple[int, str]:
 
 
 def http_fetcher(timeout: float) -> Fetcher:
-    """None for anything that is not a 2xx body. `fetch.errors` keeps, per URL, why a fetch got no HTTP answer at all
-    (refused, timeout, DNS, TLS) or a 5xx: a missing partial (404) is normal and is not in it (review R308-30)."""
+    """None for anything that is not a 2xx body. `fetch.errors` keeps, per URL, why: no HTTP answer at all (refused,
+    timeout, DNS, TLS) or any status other than 404. Only 404 means "not there", which is normal for a partial;
+    401, 403, 429 and 5xx are a feed that does not serve the monitor (reviews R308-30, R308-2P-10)."""
     errors: Dict[str, str] = {}
 
     def fetch(url: str) -> Optional[bytes]:
@@ -307,7 +310,7 @@ def http_fetcher(timeout: float) -> Fetcher:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 return resp.read(200_000)
         except urllib.error.HTTPError as e:
-            if e.code >= 500:
+            if e.code != 404:
                 errors[url] = f'HTTP {e.code}'
             return None
         except Exception as e:  # noqa: BLE001
@@ -1237,13 +1240,17 @@ def partial_ok(data: bytes, index: int, chain_id: int, root: str) -> bool:
         return False
 
 
-def probe_drops(drops: List[str], fetch: Fetcher) -> Dict[str, str]:
+def probe_drops(drops: List[str], fetch: Fetcher, deadline: Optional[float] = None) -> Dict[str, str]:
     """Why each unreachable drop is unreachable. A directory must exist. An HTTP feed is asked for /healthz (sigfeed.py
-    answers it): a body is reachable; so is a plain "not found" from a fetcher that reports its transport errors (a
-    static host with no health route). A fetcher that cannot tell the two apart counts None as no answer."""
+    answers it): a body is reachable; so is a plain "not found" (404) from a fetcher that reports its errors (a
+    static host with no health route). A fetcher that cannot tell the two apart counts None as no answer. Past
+    `deadline` (time.monotonic) nothing more is asked and the rest counts as not probed."""
     down: Dict[str, str] = {}
     for d in drops:
         if d.startswith(('http://', 'https://')):
+            if deadline is not None and time.monotonic() >= deadline:
+                down[d] = 'not probed: the probing time budget was used up'
+                continue
             url = d.rstrip('/') + '/healthz'
             if fetch(url) is not None:
                 continue
@@ -1272,13 +1279,23 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
             r.add('attestors', WARN, 'attestors are not watched: no --attest-drop configured (one per attestor feed)')
         return
     n_att, k = p['attestors_n'], p['attestors_k']
-    down = probe_drops(drops, fetch)
-    reachable = len(drops) - len(down)
-    drop_level = OK
-    if down:
-        drop_level = CRIT if reachable == 0 or (len(drops) >= k and reachable < k) else WARN
-    drop_msg = ('; ' if down else '') + '; '.join(f'drop {d} unreachable ({why})' for d, why in down.items())
-    r.facts['attestation_drops'] = {'configured': len(drops), 'unreachable': sorted(down)}
+    # All probing of one run shares one time budget: a run that outlives the unit's start limit is killed with
+    # no alert and no ping (review R308-2P-10).
+    deadline = time.monotonic() + float(p.get('attest_probe_budget_s', 60))
+    down = probe_drops(drops, fetch, deadline)
+    errors = getattr(fetch, 'errors', None)
+    skipped_roots = 0
+
+    def drop_state() -> Tuple[str, str]:
+        reachable = len(drops) - len(down)
+        level = OK
+        if down:
+            level = CRIT if reachable == 0 or (len(drops) >= k and reachable < k) else WARN
+        text = ('; ' if down else '') + '; '.join(f'drop {d} unreachable ({why})' for d, why in down.items())
+        r.facts['attestation_drops'] = {'configured': len(drops), 'unreachable': sorted(down)}
+        return level, text
+
+    drop_level, drop_msg = drop_state()
     if not with_l2:
         if down:
             r.add('attestors', drop_level, drop_msg[2:], threshold=k, n=n_att)
@@ -1286,29 +1303,41 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
     head = max(with_l2, key=lambda n: n['height'])['l2']
     native_height = int(head.get('native_height', 0))
     roots = [x for x in (head.get('withdrawals') or {}).get('roots') or [] if x.get('finalized')]
-    rounds, worst = [], drop_level
+    rounds, worst = [], OK
     missing_count: Dict[int, int] = {}
     unsigned_old = 0
-    for rec in roots:
+    for rec in reversed(roots):  # newest first: when the time budget runs out, the old rounds are the ones left out
         root = strip0x(rec.get('root'))
-        signers = []
+        signers, cut = [], False
         for i in range(n_att):
             rel = f'{p["chain_id"]}/{root}/attestor-{i}.partial'
             for d in drops:
-                if d in down:
+                if d in down or cut:
                     continue
                 if d.startswith(('http://', 'https://')):
-                    data = fetch(d.rstrip('/') + '/' + rel)
+                    if time.monotonic() >= deadline:
+                        cut = True  # no verdict on a round that was not asked about in full
+                        continue
+                    url = d.rstrip('/') + '/' + rel
+                    data = fetch(url)
+                    if data is None and errors is not None and url in errors:
+                        # Not "no partial": the feed did not serve the request (anything but a 404). One such
+                        # answer and the feed counts as unreachable for this run and is not asked again.
+                        down[d] = f'partial request failed: {errors[url]}'
+                        continue
                 else:
                     q = Path(d) / rel
                     data = q.read_bytes() if q.is_file() else None
                 if data and partial_ok(data, i, p['chain_id'], root):
                     signers.append(i)
                     break
+        if cut:
+            skipped_roots += 1
+            continue
         age_blocks = max(0, native_height - int(rec.get('height', native_height)))
         entry = {'l2_number': rec.get('l2_number'), 'root': root[:16], 'signatures': len(signers),
                  'signers': signers, 'age_blocks': age_blocks}
-        rounds.append(entry)
+        rounds.insert(0, entry)
         if not signers and age_blocks >= p['attest_grace_blocks']:
             unsigned_old += 1
         if signers and age_blocks >= p['attest_grace_blocks']:
@@ -1318,6 +1347,12 @@ def check_attestors(drops: List[str], with_l2: List[Dict[str, Any]], p: Dict[str
             lvl = CRIT if len(signers) < k else WARN if len(signers) < n_att else OK
             worst = max(worst, lvl, key=lambda c: SEVERITY[c])
     r.facts['attestation_rounds'] = rounds[-10:]
+    drop_level, drop_msg = drop_state()
+    worst = max(worst, drop_level, key=lambda c: SEVERITY[c])
+    if skipped_roots:
+        worst = max(worst, WARN, key=lambda c: SEVERITY[c])
+        drop_msg += (f'; probing stopped at the time budget of {float(p.get("attest_probe_budget_s", 60)):g} s: '
+                     f'{skipped_roots} root(s) not looked at in full')
     signed = [x for x in rounds if x['signatures']]
     if not roots:
         r.add('attestors', drop_level, 'no finalized withdrawal root yet: nothing to sign' + drop_msg, threshold=k, n=n_att)
@@ -1894,42 +1929,65 @@ def decide_alert(r: Report, state: Dict[str, Any], now: float, realert: float, m
     return 'recover' if previous else None
 
 
-def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout: float, dry_run: bool) -> List[str]:
-    sent = []
+def send_alert(cfg: Dict[str, Any], text: str, payload: Dict[str, Any], timeout: float, dry_run: bool,
+               failed: Optional[List[str]] = None) -> List[str]:
+    """Every configured target is tried; the names of those that took the alert are returned. A target that fails
+    does not stop the others and does not undo a delivery (review R308-2P-11): its reason goes to `failed`. Only
+    when targets failed and none delivered is the failure raised."""
+    sent: List[str] = []
+    failed = [] if failed is None else failed
+
+    def attempt(name: str, deliver: Callable[[], None]) -> None:
+        try:
+            deliver()
+        except Exception as e:  # noqa: BLE001 - one dead channel must not silence the others
+            failed.append(f'{name}: {type(e).__name__}: {e}'[:200])
+        else:
+            sent.append(name)
+
     hook = cfg.get('webhook_url')
     if configured(hook):
-        headers = {'content-type': 'application/json'}
-        if configured(cfg.get('webhook_bearer_file')):
-            headers['authorization'] = 'Bearer ' + Path(cfg['webhook_bearer_file']).read_text().strip()
-        body = json.dumps({'text': text, **payload}, default=str).encode()
+        def webhook() -> None:
+            headers = {'content-type': 'application/json'}
+            if configured(cfg.get('webhook_bearer_file')):
+                headers['authorization'] = 'Bearer ' + Path(cfg['webhook_bearer_file']).read_text().strip()
+            body = json.dumps({'text': text, **payload}, default=str).encode()
+            urllib.request.urlopen(urllib.request.Request(hook, data=body, headers=headers), timeout=timeout).read()
         if dry_run:
             sent.append(f'webhook (dry run) {hook}')
         else:
-            urllib.request.urlopen(urllib.request.Request(hook, data=body, headers=headers), timeout=timeout).read()
-            sent.append('webhook')
+            attempt('webhook', webhook)
     command = cfg.get('alert_command')
     if isinstance(command, list) and command and all(configured(str(a)) for a in command):
         argv = [str(a).replace('{event}', str(payload.get('event'))).replace('{status}', str(payload.get('status')))
                 .replace('{text}', text) for a in command]
-        if dry_run:
-            sent.append(f'command (dry run) {argv[0]}')
-        else:
+
+        def run_command() -> None:
             done = subprocess.run(argv, input=json.dumps({'text': text, **payload}, default=str), capture_output=True,
                                   text=True, timeout=timeout)
             if done.returncode:
                 raise RuntimeError(f'alert_command exit {done.returncode}: {done.stderr.strip()[-200:]}')
-            sent.append('command')
+        if dry_run:
+            sent.append(f'command (dry run) {argv[0]}')
+        else:
+            attempt('command', run_command)
     tg = cfg.get('telegram') or {}
     if configured(tg.get('bot_token_file')) and configured(str(tg.get('chat_id', ''))):
-        if dry_run:
-            sent.append(f'telegram (dry run) chat {tg["chat_id"]}')
-        else:
+        def telegram() -> None:
             token = Path(tg['bot_token_file']).read_text().strip()
             body = json.dumps({'chat_id': tg['chat_id'], 'text': text, 'disable_web_page_preview': True}).encode()
             url = f'https://api.telegram.org/bot{token}/sendMessage'
-            urllib.request.urlopen(urllib.request.Request(url, data=body, headers={'content-type': 'application/json'}),
-                                   timeout=timeout).read()
-            sent.append('telegram')
+            try:
+                urllib.request.urlopen(urllib.request.Request(url, data=body, headers={'content-type': 'application/json'}),
+                                       timeout=timeout).read()
+            except Exception as e:  # noqa: BLE001 - the URL holds the bot token: never let it reach a report
+                raise RuntimeError(str(e).replace(token, '<token>')) from None
+        if dry_run:
+            sent.append(f'telegram (dry run) chat {tg["chat_id"]}')
+        else:
+            attempt('telegram', telegram)
+    if failed and not sent:
+        raise RuntimeError('; '.join(failed))
     return sent
 
 
@@ -1957,7 +2015,7 @@ def heartbeat(cfg: Dict[str, Any], args: argparse.Namespace, r: Report, delivere
         r.add('heartbeat', WARN, f'{"heartbeat_url" if delivered else "heartbeat_fail_url"} not reached: {e}')
 
 
-def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_alert) -> Optional[str]:
+def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=None) -> Optional[str]:
     if not args.alert_config:
         return None
     cfg = json.loads(Path(args.alert_config).read_text())
@@ -1983,14 +2041,20 @@ def handle_alerts(args: argparse.Namespace, r: Report, now: float, sender=send_a
         f'BLOCH L2 {args.profile}: RECOVERED, status {LEVEL_NAMES[r.status]} ({utc(now)})'
     payload = {'status': LEVEL_NAMES[r.status], 'event': decision,
                'checks': [c for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]]}
+    failed: List[str] = []
     try:
-        sent = sender(cfg, text, payload, args.timeout, args.alert_dry_run)
+        sent = sender(cfg, text, payload, args.timeout, args.alert_dry_run) if sender else \
+            send_alert(cfg, text, payload, args.timeout, args.alert_dry_run, failed)
     except Exception as e:  # noqa: BLE001 - an alert failure never hides the report
         r.add('alert_delivery', WARN, f'alert not delivered: {e}')
         heartbeat(cfg, args, r, delivered=False)
         return decision
     if not sent:
         r.add('alert_delivery', WARN, 'alert due but no target configured (webhook_url / telegram are TBD-owner)')
+    elif failed:
+        # Delivered = at least one target took it: the state is written and the dead-man ping goes out, so the
+        # working target is not sent the same alert on every run. The dead target is a WARN of its own.
+        r.add('alert_delivery', WARN, f'alert delivered by {", ".join(sent)}; failed: {"; ".join(failed)}')
     if not args.alert_dry_run:
         bad = {c['check']: c['level'] for c in r.checks if SEVERITY[c['code']] >= SEVERITY[min_level]}
         bad.update({k: LEVEL_NAMES[v] for k, v in state.get('held', {}).items()})
