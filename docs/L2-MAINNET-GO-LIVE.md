@@ -956,10 +956,10 @@ working against `https://l2rpc.blochl1.com/`.
 Prerequisites: P4 on both hosts, and the gateway package from the kit. On each host, as root:
 
 - `apt-get install nginx libnginx-mod-http-js`; nginx must be running, since `apply` reloads it.
-- Place `/etc/ssl/bloch-l2rpc/origin.pem` and `origin.key` (Cloudflare Origin CA) and `/etc/ssl/bloch-l2rpc/cloudflare-aop-ca.pem` (Authenticated Origin Pulls CA).
+- Place `/etc/ssl/bloch-l2rpc/origin.pem` and `origin.key` (Cloudflare Origin CA) and `/etc/ssl/bloch-l2rpc/aop-client-ca.pem`: the CA of the owner's own per-hostname Authenticated Origin Pulls certificate (owner decision of 2026-11-02; `public-rpc/README.md`). The shared Cloudflare CA `cloudflare-aop-ca.pem` is no longer used: `setup-gateway.sh plan` prints `MISSING: /etc/ssl/bloch-l2rpc/aop-client-ca.pem` (and exits 0) and `apply` exits 1 without it (agent 312, F312-3).
 - Run `setup-gateway.sh peer-cert`, then copy each host's `/etc/nginx/bloch-l2rpc/peer/self.crt` to the other host as `/etc/nginx/bloch-l2rpc/peer/peer.crt`.
 
-`setup-gateway.sh` renders with CORS open to any origin and `--backend-conns 400`, below the RPC's 1,024 HTTP connection limit. Gateway `l2rpc-gateway.js` `d1229ca1…`, with agent 118's fee routing to the sequencer and HTTP 503 for an unanswered split batch. The `plan` command only renders, and it exits 0 even when it prints `MISSING:` lines, so read its output. `apply` installs.
+`setup-gateway.sh` renders with CORS open to any origin and `--backend-conns 400`, below the RPC's 1,024 HTTP connection limit. Gateway `l2rpc-gateway.js` as pinned in §3.2 and `GO-LIVE-PINS.sha256` (`kit/public-rpc/l2rpc-gateway.js`), with agent 118's fee routing to the sequencer and HTTP 503 for an unanswered split batch. The `plan` command only renders, and it exits 0 even when it prints `MISSING:` lines, so read its output. `apply` installs.
 
 On A:
 
