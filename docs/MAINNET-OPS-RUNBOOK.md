@@ -292,3 +292,35 @@ does not silently reset or rebase accumulated revenue.
 These are RPC observations, not independent consensus or finality proofs. L2
 balance changes are net observations: fees arriving between sweeps can hide part
 of the gross flow. The report neither authorizes a deployment nor moves revenue.
+
+## Monitor drills (g) and (h): what was run and what the monitors said
+
+Written in round 15 from the records of the round-11 drills on real binaries (agent 205, 2026-11-03, private net of five validators with 2 s slots, real Groth16 through the kit's remote prover; alert sink and settler log kept as `alerts-and-indexer.txt` and `settler-01-03.jsonl`). The five monitor findings of those drills (F205-1 to F205-5) are fixed in `l2_monitor.py` and `l1_monitor.py` with tests. These two drills were run once, on the kit before those fixes, and were not re-run after them.
+
+### Drill (g): the operator's L1-6b steps after a split in which both sides finalized
+
+Starting point: a 2|3 validator split held for 15.5 minutes; after it healed each side kept finalizing its own branch (`l1_height_spread` CRIT, `l1_split`, `l1_stuck`, `l1_parked` on the monitors). The settler had produced L2 block 5 on the minority's view.
+
+| Step (as the operator runs it) | What happened | What the monitor showed |
+| --- | --- | --- |
+| 1. Stop the settler. 2. Leave RPC B on a replica that still holds block 5 of the minority view. 3. Re-verify the follower from a majority node (fresh state, new status file). 4. Point the settler's three L1 endpoints at majority nodes. | 02:31 UTC, about one minute of work. | - |
+| 5. Start the settler. | It halts at once, exit 3: `unsettled L2 block 5 has anchor 0f084d7c…, native now requests 874862fb…` (02:31:29). It never rebuilds on its own in a deposit-only kit without `reorg_recovery`. | `events[settler]` CRIT at 02:32:18, 49 s after the halt. |
+| 6. `l2_reorg_recover.py` dry run, then `--apply`. | Common ancestor block 4; two work directories moved aside (never deleted); the settler starts (02:32:33) and produces block 5' `204c0499…`. | `l2_backends_agree` CRIT from 02:33:18: "latest block 5 differs between backends" (RPC A has 5', RPC B the minority's 5). |
+| 7. Wait for the proof and the acceptance. | Block 5' submitted 02:50:04 to all three endpoints, accepted 02:50:19 (commitment `264b1d21…`): 17.5 minutes after the repair, the proof time of this rig behind a shared proving lock. | `l2_head_age` WARN (25.5 min) at 02:46 while the proof ran. After the acceptance RPC B, still on the old replica, reports `l2_finality_closed[B]` (WARN "usually a foreign settlement", then CRIT at 02:56). |
+
+What the drill teaches, and what the kit says about it:
+
+- The halt is the designed behaviour and its message names both anchors. The alert arrives within one monitor run.
+- The replica host must be refreshed (or its RPC taken out of the gateway) as part of the repair, not later: until then the monitor is right to stay CRIT on `l2_backends_agree` and then on `l2_finality_closed[B]`. The go-live plan's repair order is: settler repair, shadow `--rollback` and install again, replica refresh.
+- Not covered by this drill: a withdrawal root signed on the minority view (the attestor agents were not part of the rig), and the same steps with user transactions open.
+
+### Drill (h): an indexer built for another activation schedule
+
+The indexer binary was a control build with the L2 activation at epoch 2; the net activated at epoch 4.
+
+| Time (UTC) | What happened | What the monitor showed |
+| --- | --- | --- |
+| 01:04 | Indexer started beside the settler and the monitors. | - |
+| 01:05 | `sync halted: halted before height 1 (slot 64, epoch 2, block dcae192e…): replayed state root mismatch. Rebuild the indexer from the node release the network runs (bloch-indexer gates shows this build's activation schedule) and restart`. The read API keeps listening; `/health` answers 503. | `http[indexer]` CRIT in the 01:05:01 alert, the first monitor run after the halt. |
+
+What it teaches: the indexer fails closed at the first block whose replayed state differs, says which schedule to check, and never serves data past that block; the monitor's plain HTTP health check is enough to see it. The operator action is the one the message gives: `bloch-indexer gates`, compare with the node release, rebuild, restart. An indexer is not part of the L2 launch path; a halted one does not affect settlement, the RPC or withdrawals.

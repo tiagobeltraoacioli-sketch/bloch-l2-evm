@@ -1,0 +1,4 @@
+#!/bin/sh
+# git pre-push hook: refuses the push when publish_check.py finds a blocking hit.
+# Install per repository (worktrees share it): see README.md.
+exec python3 -I "$(git rev-parse --git-common-dir)/hooks/publish_check.py" pre-push "$@" --repo "$(git rev-parse --show-toplevel)"
