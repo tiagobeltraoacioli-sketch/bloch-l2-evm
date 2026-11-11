@@ -16,9 +16,9 @@ c4daeff7acee05cc72cb42244fba96540c9403b3698a4d65b08bfc31918f10e9  release-settle
 2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53  release-settler-v2/l2_reorg_recover.py
 829ecac3b2b573125fe036208aaa814f54baffa259d79c497e49a0fae6d94c6e  release-settler-v2/install-settler-mainnet.py
 b6dd7b729056c1e1c2441268c14feedfb04356279b77c42a999932d7fdd536af  kit/attestor/aggregate_attestation.py
-f4fbe82db9cb94ffdbc6cbf051df5a68dccb83b2e4aef5d03561c0ae5775d372  kit/attestor/attestor_agent.py
+f2684764064c43552ccc3925a00ad5b3358ea579c21cbaa55907aa46ae2ff72d  kit/attestor/attestor_agent.py
 b996845f0e77b82aea66a7d73d1ad46525ba868fdafefe06380e2a7ac91fcc78  kit/attestor/attestor_lib.py
-5661315056a73345a206966bd29876e7acaadeef48851dfb6c9375d4ba56616b  kit/attestor/install-attestor.sh
+19190b5557db0e1614d01025c6b6c8fe99d8f54229e263bf0dd10029597743b3  kit/attestor/install-attestor.sh
 40ae61186c2f874229f3a9ecbb17e63d2e1695a664bb223f111ff781fc7a6dd0  kit/attestor/keykit/check-operator-bundle.sh
 8d6382782948755743fb3765512f4ee52c752629d73cee2524286ac22d84b6ec  kit/attestor/keykit/make-operator-bundles.sh
 359892b706d936e9b30f0a57d97b85caee3b1d3c1b3d96bbbe2752d3ab9f914a  kit/attestor/keykit/operator-pins-v2.sha256
@@ -32,7 +32,7 @@ f48abb38d23c0d9e193a4858c481b6031e8b9f873f5f5130f6ffcd16b44730ba  kit/attestor/p
 5a4b3a7387a17164e9274764c0711ba3e488d15ed52d8e480980c6dcecdaac0e  kit/attestor/sigfeed.sha256
 341e3e380b351d28820faecf9c5536f043753080495dbef08f407b18e8ece2c6  kit/attestor/systemd/bloch-l2-attestor-feed.service
 995a100c85a5a122c752dc95806887efbf8aa6341d5c64158c7c9f875e10d2b6  kit/attestor/systemd/bloch-l2-attestor-follower.service
-bbcdf495e3657f6c3e20530edc546b48a56b1a1c78e24ea4ba193cdc503047b2  kit/attestor/systemd/bloch-l2-attestor.service
+01d7e35f9e2bc20f88de684780ee1cc15debb0a28e252dafe38e22b807c59d04  kit/attestor/systemd/bloch-l2-attestor.service
 aaa0eb2d2cd5758faa1de371e4c661ecacf511543bcb8319b77bc249b575a5fb  kit/bloch-l2-mainnet-shadow.service
 822a7939252aaa4a3c574e6aaa003c46fff91acbc78ac9fa689dbed841ee57ef  kit/build-program.sh
 26e42ad97a96428d8ec32d02ca6d3ef1a2748a2115471baef126a372db56e125  kit/build-release.sh
@@ -48,6 +48,7 @@ b0c38193e3706daa7738e92c11230b1a74ca73a43157b563bab5e8a04cec3a95  kit/follower-r
 c10a0767a6964c546f0e600493a76b098ad6496c9a01d0c148e332ad6cc913bf  kit/follower-rpc/settlement-recovery.mainnet.Cargo.lock
 ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa  kit/follower-rpc/settlement-recovery.native-27f195d7.Cargo.lock
 a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9  kit/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock
+<<<<<<< HEAD
 68514b1400c81f1b82da028635b796d97e5bddee6fa0d835b3ba05349e73c67c  kit/griefing/Griefer.sol
 034e4bb510235e2c12c02fc8374e03767f7e9c5991c0acbb26d5c6578e3b82f0  kit/griefing/griefsim.py
 15662a8499a91446a64fae65a91fac02cb7b0b83f8c35e9ea4472741611a0a23  kit/griefing/settler_check.py
@@ -65,6 +66,15 @@ b50928fe521f813b7c05456280a7df5bfa0a8e5b2ea16934c11ed7a4a7ea3a5d  kit/install-sh
 583b3ce20cbaa0240c54a9154631b885da090226caf72fe1488b75f3d9786d8c  kit/l1_monitor.py
 8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69  kit/l1_stuck_check.py
 5b053d7caead95f191fcea1960d2d0aa6116290904c8003fb544661d0a661be7  kit/l2_monitor.py
+=======
+53f67eff3069a69d8dd1a572adfc86fe616b258fd8c520a97c36930bc4cd913e  kit/install-settler-mainnet.py
+16e013e415fcdf6135b9e6f3780c08046510b0b3bd698a8b0e49d127f9ce8010  kit/install-shadow.sh
+219a3c8800f55ce9af402a77a4a82e2f02ee113c7dda754aa371e3566615d81b  kit/l1_finality_history.py
+a97bd02511ab78fd855ff0e7ecec2204e8fa73ca41309915f4bfdb42f8d3957d  kit/l1_gates.py
+b62c28f295ea93452152d7699c913fb9672c5b01957acd358472ec643790238a  kit/l1_monitor.py
+8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69  kit/l1_stuck_check.py
+4c49352dbe6103958ce3aba9f01329782175f7324e4b488fedac096bea247468  kit/l2_monitor.py
+>>>>>>> 2930f62 (Kit pins, the go-live plan's hash table and the public runbook variants follow the second-pass fixes (review R308-2P-6 to R308-2P-12))
 2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53  kit/l2_reorg_recover.py
 99189be2ef426b77ea8e43d25932f6368360b58288f785e7648fc15f72906a51  kit/l2_stuck_block.py
 74e2fefd984502d9e9f65185891b26bb8e2e12978f91662b2aa157b19f211716  kit/make_l2_config_mainnet.py
@@ -96,11 +106,15 @@ b6515628f38f3ea7d6eb3c6daa09aa447dc6b0b2a607778652ee70adbf3ba059  kit/public-rpc
 5ec6bc976786abb97bba43291170f825a91aac130db0a562fb94068c8cb513a5  kit/public-rpc/compat/package.json
 02ca60d97282589aec85dbfdd093842d6163be23345b9a359c83f7b4da2d8dbf  kit/public-rpc/compat/write.mjs
 47cfa512a118de8a244ffcea6644f5f6ea5b992d7aa7171ffe4b0dbc2ddbeeb9  kit/public-rpc/l2rpc-gateway.conf.in
+<<<<<<< HEAD
 4be2d9f4ae0d30c020ce715bf3ec2fba072048e8a0edbdf4457df5ca6c6997d0  kit/public-rpc/l2rpc-gateway.js
+=======
+14a4634d0538b79f57594499051c05074a56c5caf937464bfd0dfd7354405566  kit/public-rpc/l2rpc-gateway.js
+>>>>>>> 2930f62 (Kit pins, the go-live plan's hash table and the public runbook variants follow the second-pass fixes (review R308-2P-6 to R308-2P-12))
 54a2be7601d82a2c602f56c14842592be02d26e711b66092e73d2b4cbf08a5d9  kit/public-rpc/l2rpc-proxy.inc
-92a7cdd3c6291f5a7228083404ac10b7a0b215b7e9defa4c7579ae357698a522  kit/public-rpc/render.py
+c0d77915a6e8793d8fc7a41adb4874b474bb81484165070f62deffeb255d5f64  kit/public-rpc/render.py
 fbf195ab5e45277898e7ed5a9022a484d183cc703e27f27733e531dfe87d6914  kit/public-rpc/setup-gateway.sh
-6fa00a1fd1e2d8ae6c404e891d0c987017d977071ae0dc5161cefcca01da6110  kit/refresh_kit_pins.py
+95cb550907da85e622fc2a8275d75105c052dbdb5462185106f375700ff50f34  kit/refresh_kit_pins.py
 f75fd6f2831b531b82217f59fd4d97a8511ea50990c3517e22cc8e42825ed7a0  kit/rehearsal/build.sh
 73e5c0fb8237d090a9b6e1a71b54e7792059b844708cd7acc660cd17e1336cfb  kit/rehearsal/docker-shim.sh
 138e890cecc7bf7905af307fc4dbeee796484842eae630a5183fa5661996e813  kit/rehearsal/f3/f3_griefing.py
