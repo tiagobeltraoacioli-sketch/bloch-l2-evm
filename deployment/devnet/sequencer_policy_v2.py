@@ -83,6 +83,14 @@ DEFAULTS = {
     'unpaid_first_wait_seconds': 2400,
     'unpaid_max_wait_seconds': 86400,
     'unpaid_memory_seconds': 7 * 86400,
+    # Credit (agents/311 section 14): the priority fees a sender really paid in this window, less the fee value of
+    # its work the producer executed and left out. The producer treats a transaction as covered when the credit is at
+    # least its gas limit times its tip. A transaction made unpaid by an EARLIER transaction of the same block (the
+    # producer reports `own_doing: false`) costs its sender no wait; the third such report inside the unpaid memory
+    # counts as the sender's own doing (review R308-4P-2, and so that a paying accomplice cannot make a key waste
+    # the producer's work block after block for free).
+    'credit_memory_seconds': 7 * 86400,
+    'unpaid_other_doing_strikes': 3,
     # Places under `max_block_txs` that go by tip alone, whatever the group (agents/264 F264-5): a fresh sender's
     # large transaction at a high tip is not kept out for good by 64 small ones at the floor. They are tried last.
     'tip_reserved_txs': 8,
@@ -141,6 +149,7 @@ class Policy:
         self.path = Path(state_path) if state_path else None
         self.clock, self.log = clock, log
         self.state = self._fresh_state()
+        self._seen_unpaid = {}   # hash -> plan time of its last unpaid report: one debit and one strike per plan
         if self.path and self.path.exists():
             # Only limits live here: a torn or foreign file costs the counts, never a block (review r7 F7).
             try:
@@ -160,7 +169,8 @@ class Policy:
     def _fresh_state(self):
         return {'tip': self.c['min_tip_wei'], 'last_block_time': None, 'idle_since': None, 'empty_base': 0, 'bans': {}, 'waits': {},
                 'failures': {}, 'writes': {}, 'standing': {}, 'large_gas': int(self.c['max_tx_gas']),
-                'large_gas_at': None, 'exempt_offenders': {}}
+                'large_gas_at': None, 'exempt_offenders': {}, 'unpaid_senders': {}, 'credit': {},
+                'unpaid_other_doing': {}}
 
     # Bounds
 
@@ -346,13 +356,33 @@ class Policy:
         not in `tx_stats`; they wait like a gate refusal of their own payment, by sender, nonce and hash."""
         names = []
         for tx in report.get('unpaid') or []:
-            if (tx['hash'], 'below-write-price') not in held:
-                held.append((tx['hash'], 'below-write-price'))
-            self._unpaid_wait(tx, now)
             names.append(tx['hash'])
-        # Not judged: the producer's allowance for executing non-payers ran out before it reached them. Waiting: their
-        # sender waits out an earlier unpaid report. Both keep their files; neither gets a new wait.
-        for key, reason in (('not_judged', 'unpaid-allowance-exhausted'), ('waiting', 'unpaid-sender-wait')):
+            first_sight = self._seen_unpaid.get(tx['hash']) != now   # one report per block plan
+            self._seen_unpaid = {h: at for h, at in self._seen_unpaid.items() if at == now}
+            self._seen_unpaid[tx['hash']] = now
+            if first_sight:
+                self._debit(tx, now)
+            own = tx.get('own_doing', True)
+            if not own:
+                strikes = self.state.setdefault('unpaid_other_doing', {})
+                record = strikes.get(tx['sender'])
+                if not record or record['at'] < now - self.c['unpaid_memory_seconds']:
+                    record = {'count': 0, 'at': now}
+                if first_sight:
+                    record = {'count': record['count'] + 1, 'at': now}
+                strikes[tx['sender']] = record
+                own = record['count'] >= self.c['unpaid_other_doing_strikes']
+            reason = 'below-write-price' if own else 'unpaid-in-this-block'
+            if (tx['hash'], reason) not in held:
+                held.append((tx['hash'], reason))
+            if own:
+                self._unpaid_wait(tx, now)
+        # Not judged: the producer's allowance for executing non-payers of their class ran out before it reached them.
+        # Waiting: their sender waits out an earlier unpaid report. Over the gas cap: the gas LIMIT is above
+        # `max_tx_gas`, so the producer does not execute it. Needs credit: an uncovered transaction above the gas
+        # limit of uncovered ones. All keep their files; none gets a wait.
+        for key, reason in (('not_judged', 'unpaid-allowance-exhausted'), ('waiting', 'unpaid-sender-wait'),
+                            ('over_gas_cap', 'gas-limit-above-cap'), ('needs_credit', 'needs-credit')):
             for name in report.get(key) or []:
                 if (name, reason) not in held:
                     held.append((name, reason))
@@ -372,6 +402,20 @@ class Policy:
             record = {'count': count, 'at': now, 'until': now + wait}
         senders[tx['sender']] = record
         self.state['waits'][self.key(tx)] = {'until': record['until'], 'kind': 'unpaid-sender', 'hash': tx['hash']}
+
+    def _debit(self, tx, now):
+        """Work the producer executed for a sender and left out is taken from the sender's credit at the fee value the
+        transaction itself claimed (gas used times its tip): wasting covered work costs what was paid before."""
+        wasted = int(tx.get('gas_used') or 0) * int(tx.get('effective_tip') or 0)
+        record = self.state.setdefault('credit', {}).get(tx['sender'])
+        if wasted and record:
+            record['wei'] = max(0, int(record['wei']) - wasted)
+
+    def credits(self, now):
+        """{sender: wei} of the senders with credit inside the memory window."""
+        horizon = now - self.c['credit_memory_seconds']
+        return {sender: int(record['wei']) for sender, record in self.state.get('credit', {}).items()
+                if record['at'] > horizon and int(record['wei']) > 0}
 
     def waiting_senders(self, now):
         """Senders that wait out an unpaid report: the producer is told to leave their transactions unexecuted."""
@@ -775,6 +819,7 @@ class Policy:
         else:
             self.state['bans'][tx['sender']] = now + self.c['sender_ban_seconds']
             self.state['standing'].pop(tx['sender'], None)
+            self.state['credit'].pop(tx['sender'], None)
         self.state['waits'].pop(self.key(tx), None)
         self.log('tx-quarantined', hash=tx['hash'], sender=tx['sender'], reason=reason)
 
@@ -795,6 +840,11 @@ class Policy:
             if not tx:
                 continue
             self.state['standing'][tx['sender']] = now
+            paid = int(tx['gas_used']) * int(tx['effective_tip'])
+            credit = self.state.setdefault('credit', {}).setdefault(tx['sender'], {'wei': 0, 'at': now})
+            if credit['at'] <= now - self.c['credit_memory_seconds']:
+                credit['wei'] = 0
+            credit['wei'], credit['at'] = int(credit['wei']) + paid, now
             self.state['waits'].pop(self.key(tx), None)
             self.state['failures'].pop(self.key(tx), None)
             fresh = sum(int(n) for _, n in tx.get('fresh_slots', []))
@@ -807,6 +857,10 @@ class Policy:
         self.state['bans'] = {s: until for s, until in self.state['bans'].items() if until > now}
         self.state['exempt_offenders'] = {s: o for s, o in self.state['exempt_offenders'].items() if o['until'] > now}
         self.state['waits'] = {k: w for k, w in self.state['waits'].items() if w['until'] > now - 86400}
+        self.state['credit'] = {k: r for k, r in self.state.get('credit', {}).items()
+                                if r['at'] > now - self.c['credit_memory_seconds'] and int(r['wei']) > 0}
+        self.state['unpaid_other_doing'] = {k: r for k, r in self.state.get('unpaid_other_doing', {}).items()
+                                            if r['at'] > now - self.c['unpaid_memory_seconds']}
         self.state['unpaid_senders'] = {k: r for k, r in self.state.get('unpaid_senders', {}).items()
                                         if (r.get('at') or 0) > now - self.c['unpaid_memory_seconds'] or r['until'] > now}
         memory = self.c['failure_memory_seconds']

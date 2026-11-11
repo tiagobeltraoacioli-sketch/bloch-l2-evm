@@ -1027,7 +1027,8 @@ def check_policy_config(c):
     for key in ('max_tx_gas', 'exempt_max_tx_gas', 'fresh_slot_price_wei', 'min_tip_wei', 'congestion_max_tip_wei',
                 'preflight_execute_seconds', 'preflight_max_runs', 'preflight_max_seconds', 'sender_ban_seconds',
                 'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib', 'large_gas_floor',
-                'large_gas_recovery_seconds', 'gate_dependent_wait_seconds'):
+                'large_gas_recovery_seconds', 'gate_dependent_wait_seconds', 'unpaid_first_wait_seconds',
+                'unpaid_max_wait_seconds', 'unpaid_memory_seconds', 'credit_memory_seconds', 'unpaid_other_doing_strikes'):
         if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
             raise Halt(f'{key} must be a positive integer')
     reserved = c.get('tip_reserved_txs', 0)
@@ -1976,14 +1977,17 @@ class Settler:
             args += ['--fresh-slot-price-wei', str(policy.c['fresh_slot_price_wei'])]
             if policy.c['write_limit_exempt_senders']:
                 args += ['--write-exempt', ','.join(policy.c['write_limit_exempt_senders'])]
-            # Senders with standing are selected ahead of the others; senders that wait out an unpaid report are
-            # not executed at all (review R308-3P-2). Both lists are the policy's state, written beside the pool.
+            # The policy's credit ledger decides which transactions are covered (selected first, by tip); senders
+            # that wait out an unpaid report are not executed at all; nothing above the policy's gas cap is executed
+            # (reviews R308-3P-2, R308-4P-1; agents/311 section 14). The lists are written beside the pool.
+            args += ['--write-max-tx-gas', str(policy.c['max_tx_gas'])]
             lists = Path(pool).parent if Path(pool).is_file() else self.work
-            for flag, name, senders in (('--write-standing', 'write-standing.json', sorted(policy.state['standing'])),
-                                        ('--write-waiting', 'write-waiting.json', sorted(policy.waiting_senders(policy.clock())))):
-                if senders:
+            credits = {sender: str(wei) for sender, wei in sorted(policy.credits(policy.clock()).items())}
+            waiting = sorted(policy.waiting_senders(policy.clock()))
+            for flag, name, content in (('--write-credits', 'write-credits.json', credits), ('--write-waiting', 'write-waiting.json', waiting)):
+                if content:
                     path = Path(lists) / name
-                    atomic_write(path, json.dumps(senders))
+                    atomic_write(path, json.dumps(content))
                     args += [flag, str(path)]
         return args
 

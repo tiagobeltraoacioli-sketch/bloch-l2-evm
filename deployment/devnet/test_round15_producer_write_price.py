@@ -155,6 +155,85 @@ class UnpaidWaitsEscalate(PricedWorld):
         return next(t['name'] for r, t in self.tx.items() if sp_hash(r) == name)
 
 
+class CreditAndOwnDoing(PricedWorld):
+    """Review R308-4P-1 and R308-4P-2 (agents/311 section 14). Credit is what a sender really paid in priority fees
+    less the fee value of its work the producer executed and left out. A transaction the producer reports as made
+    unpaid by an earlier transaction of the block (`own_doing: false`) is held without any wait."""
+
+    def reporting(self, **fields):
+        inner = self.report
+
+        def report(raws):
+            answer = inner(raws)
+            for tx in answer['unpaid']:
+                tx.update(fields)
+            return answer
+        self.report = report
+
+    def test_credit_is_the_fees_paid_and_is_spent_by_wasted_work(self):
+        self.add('pay', 'alice', 0, 21_000, 1, tip=GWEI)
+        self.block(advance=0)
+        self.assertEqual(self.policy.credits(self.now), {'alice': 21_000 * GWEI})
+        self.spool.clear()
+        self.add_writer('np', 'alice', 1, 50_000, 1, ['own'], tip=GWEI)
+        self.reporting(gas_used=15_000, effective_tip=GWEI, own_doing=True)
+        self.block(advance=0)
+        self.assertEqual(self.policy.credits(self.now), {'alice': 6_000 * GWEI}, 'one debit per plan, whatever the passes')
+        self.assertEqual(self.policy.waiting_senders(self.now), {'alice'})
+        self.now += sp.DEFAULTS['credit_memory_seconds'] + 1
+        self.assertEqual(self.policy.credits(self.now), {})
+
+    def test_a_transaction_made_unpaid_by_another_one_does_not_wait_until_the_third_time(self):
+        self.reporting(gas_used=30_000, effective_tip=GWEI, own_doing=False)
+        for round_number in (1, 2):
+            self.spool.clear()
+            self.add_writer(f'v{round_number}', 'victim', 0, 50_000, 1, ['shared'], tip=GWEI)
+            self.block(advance=0)
+            self.assertIn('unpaid-in-this-block', dict(self.plans[-1].held).values())
+            self.assertEqual(self.policy.waiting_senders(self.now), set())
+            self.assertEqual(self.policy.state['waits'], {})
+            self.now += 60
+        self.spool.clear()
+        self.add_writer('v3', 'victim', 0, 50_000, 1, ['shared'], tip=GWEI)
+        self.block(advance=0)
+        self.assertEqual(self.policy.waiting_senders(self.now), {'victim'}, 'the third report in the window is its own doing')
+
+    def test_the_ledgers_survive_a_restart(self):
+        self.add('pay', 'alice', 0, 21_000, 1, tip=GWEI)
+        self.add_writer('np', 'mallory', 0, 50_000, 1, ['own'], tip=GWEI)
+        self.block(advance=0)
+        again = sp.Policy(self.policy.c, self.policy.path, clock=lambda: self.now)
+        self.assertEqual(again.credits(self.now), self.policy.credits(self.now))
+        self.assertEqual(again.waiting_senders(self.now), {'mallory'})
+
+
+class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
+    """The settler passes the policy's credit ledger, its waiting senders and its gas cap to the producer."""
+
+    def test_pool_arguments_carry_credits_waiting_and_the_gas_cap(self):
+        import json
+        import tempfile
+        import settler_v3 as settler
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            worker = object.__new__(settler.Settler)
+            worker.work, worker.policy_clock = work, lambda: 1_000_000
+            worker.c = {'user_transactions': True, 'max_block_sp1_gas': 90_000_000, 'producer_write_price': True,
+                        'max_block_gas': 15_000_000, 'max_block_bytes': 100_000, 'max_block_txs': 64, 'max_tx_gas': 5_000_000}
+            policy = worker.policy()
+            policy.state['credit'] = {'aa' * 20: {'wei': 42, 'at': 999_999}, 'bb' * 20: {'wei': 7, 'at': 1}}
+            policy.state['unpaid_senders'] = {'cc' * 20: {'count': 1, 'at': 999_000, 'until': 1_001_000}}
+            policy.save(1_000_000)
+            pool = work / 'pool'
+            pool.mkdir()
+            args = worker.pool_arguments(pool)
+            self.assertNotIn('--write-standing', args)
+            self.assertEqual(args[args.index('--write-max-tx-gas') + 1], '5000000')
+            self.assertEqual(json.loads(Path(args[args.index('--write-credits') + 1]).read_text()), {'aa' * 20: '42'},
+                             'credit older than the memory window is not handed over')
+            self.assertEqual(json.loads(Path(args[args.index('--write-waiting') + 1]).read_text()), ['cc' * 20])
+
+
 class ProducerTimeoutIsARefusal(unittest.TestCase):
     """Review R308-2P-13: a producer that does not answer is a ProducerError, which `extend` answers with the
     deposits-only block; it stays distinguishable (ProducerTimeout) for the kept-database scan of R308-22."""

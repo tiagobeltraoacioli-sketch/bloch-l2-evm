@@ -102,11 +102,17 @@ transaction whose gas used times effective tip is below N times the storage slot
 it adds. The price is judged inside the selection, one pass: such a transaction is
 left out where it stands, its changes dropped, and the transactions behind it run on
 the block without it, so a non-payer never displaces a payer. --write-exempt A,B
-names senders that pay no write price; --write-standing FILE (a JSON list) names
-senders that are selected ahead of all others, then by tip; --write-wasted-gas N
-bounds the gas spent executing transactions that are then left out (default twice
-the block gas limit): past it only plain transfers are still executed and the rest
-is reported as not_judged. --write-waiting FILE (a JSON list) names senders whose
+names senders that pay no write price. --write-credits FILE is the policy's ledger
+({sender: wei}): fees a sender really paid less the fee value of its work that was
+left out. A transaction is covered when the credit is at least its gas limit times
+its tip; covered ones are selected first, by tip, uncovered ones after them in an
+order seeded by the block's anchor, up to --write-uncovered-max-gas (500000) each.
+Gas spent on left-out transactions is counted per class: --write-wasted-gas for
+covered ones (default two blocks), --write-uncovered-gas for the others (half a
+block); a class whose pool is used up runs only plain transfers, reported as
+not_judged; one class cannot use up the other's pool. --write-max-tx-gas N is the
+gas cap above which nothing is executed. A left-out transaction is judged once
+more alone on the block's start state (own_doing in the report). --write-waiting FILE (a JSON list) names senders whose
 transactions are not executed at all in this call (reported as waiting). Left
 transactions keep their spool files (unpaid).
 select runs the same selection on the same parent, deposits and limits, and prints
@@ -368,7 +374,8 @@ fn run(args: &[String]) -> Result<String, String> {
             let allowed: &[&str] = &[
                 "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
                 "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
-                "--fresh-slot-price-wei", "--write-exempt", "--write-standing", "--write-wasted-gas", "--write-waiting",
+                "--fresh-slot-price-wei", "--write-exempt", "--write-credits", "--write-wasted-gas", "--write-waiting",
+                "--write-uncovered-gas", "--write-uncovered-max-gas", "--write-max-tx-gas",
             ];
             if selecting && rest.iter().any(|a| a == "--max-txs") {
                 // Sequencer policy v2: the policy applies its own count to its own try order.
@@ -469,7 +476,7 @@ fn run(args: &[String]) -> Result<String, String> {
             let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
             // Policy of this producer, not a block rule: a transaction that does not pay the write price for
             // the storage slots it adds is left pending, so no block of this producer creates an unpaid slot.
-            let price = write_price(rest, rules().gas_limit)?;
+            let price = write_price(rest, rules().gas_limit, anchor)?;
             // Senders that wait out an earlier refusal of their payment (the policy's escalating wait) are not
             // executed at all: their transactions stay pending and are reported.
             let (pool, waiting) = match option(rest, "--write-waiting") {
@@ -1122,35 +1129,49 @@ fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> 
 /// spool, not selected and not pruned, until the fee allows them or the settled RPC evicts them.
 /// Undecodable bytes pass through, for selection to drop them with a reason.
 /// The producer's write price (sequencer policy v2) from the command line: the price per added storage slot,
-/// the exempt senders, the senders with standing (a JSON list in a file) and the allowance for non-payers.
-fn write_price(args: &[String], block_gas_limit: u64) -> Result<Option<bloch_l2_evm::node_execution::select::WritePrice>, String> {
+/// the exempt senders, the policy's credit ledger (a JSON object `{sender: "wei"}` in a file), the gas cap and
+/// the two pools of wasted gas. The order of uncovered senders is seeded by the block's anchor.
+fn write_price(args: &[String], block_gas_limit: u64, anchor: B256) -> Result<Option<bloch_l2_evm::node_execution::select::WritePrice>, String> {
     let address = |text: &str, option: &str| {
         text.trim_start_matches("0x").parse::<Address>().map_err(|_| format!("{option}: {text} is not an address"))
+    };
+    let number = |name: &str, default: u64| match option(args, name) {
+        Ok(text) => text.parse::<u64>().map_err(|_| format!("{name} must be decimal")),
+        Err(_) => Ok(default),
     };
     let exempt = match option(args, "--write-exempt") {
         Ok(text) => text.split(',').filter(|a| !a.is_empty()).map(|a| address(a, "--write-exempt")).collect::<Result<_, _>>()?,
         Err(_) => Default::default(),
     };
-    let standing = match option(args, "--write-standing") {
+    let credits = match option(args, "--write-credits") {
         Ok(path) => {
-            let list: Vec<String> = serde_json::from_slice(&fs::read(path).map_err(|e| format!("--write-standing: {e}"))?)
-                .map_err(|e| format!("--write-standing: {e}"))?;
-            list.iter().map(|a| address(a, "--write-standing")).collect::<Result<_, _>>()?
+            let map: std::collections::BTreeMap<String, String> =
+                serde_json::from_slice(&fs::read(path).map_err(|e| format!("--write-credits: {e}"))?).map_err(|e| format!("--write-credits: {e}"))?;
+            map.iter()
+                .map(|(sender, wei)| Ok((address(sender, "--write-credits")?, wei.parse::<u128>().map_err(|_| format!("--write-credits: {wei} is not decimal wei"))?)))
+                .collect::<Result<_, String>>()?
         }
         Err(_) => Default::default(),
     };
-    // Default: two blocks' worth of execution may go to transactions that are then left out.
-    let wasted_gas_allowance = match option(args, "--write-wasted-gas") {
-        Ok(text) => text.parse::<u64>().map_err(|_| "--write-wasted-gas must be decimal")?,
-        Err(_) => block_gas_limit.saturating_mul(2),
+    let price = bloch_l2_evm::node_execution::select::WritePrice {
+        per_slot: 0,
+        exempt,
+        credits,
+        // Defaults: no transaction above the block; two blocks of covered waste; half a block of uncovered waste;
+        // uncovered transactions up to 500,000 gas.
+        max_tx_gas: number("--write-max-tx-gas", block_gas_limit)?,
+        covered_allowance: number("--write-wasted-gas", block_gas_limit.saturating_mul(2))?,
+        uncovered_allowance: number("--write-uncovered-gas", block_gas_limit / 2)?,
+        uncovered_max_gas: number("--write-uncovered-max-gas", 500_000)?,
+        seed: anchor,
     };
     match option(args, "--fresh-slot-price-wei") {
         Ok(text) => {
             let per_slot = text.parse::<u128>().map_err(|_| "--fresh-slot-price-wei must be decimal")?;
-            Ok((per_slot > 0).then_some(bloch_l2_evm::node_execution::select::WritePrice { per_slot, exempt, standing, wasted_gas_allowance }))
+            Ok((per_slot > 0).then_some(bloch_l2_evm::node_execution::select::WritePrice { per_slot, ..price }))
         }
         Err(_) if !args.chunks(2).any(|p| p[0].starts_with("--write-")) => Ok(None),
-        Err(_) => Err("--write-exempt/--write-standing/--write-wasted-gas/--write-waiting need --fresh-slot-price-wei".into()),
+        Err(_) => Err("the --write-* options need --fresh-slot-price-wei".into()),
     }
 }
 
@@ -1192,12 +1213,17 @@ fn report_unpaid(
         .iter()
         .map(|t| json!({"hash": hex::encode(t.hash), "sender": hex::encode(t.sender), "nonce": t.nonce,
                         "gas_used": t.gas_used, "effective_tip": t.effective_tip.to_string(), "fresh_slots": t.fresh_slots,
-                        "owed_wei": (U256::from(t.fresh_slots) * U256::from(price.per_slot)).to_string()}))
+                        "owed_wei": (U256::from(t.fresh_slots) * U256::from(price.per_slot)).to_string(),
+                        "covered": t.covered, "own_doing": t.own_doing}))
         .collect::<Vec<_>>());
     out["not_judged"] = json!(left.not_judged.iter().map(hex::encode).collect::<Vec<_>>());
+    out["over_gas_cap"] = json!(left.over_gas_cap.iter().map(hex::encode).collect::<Vec<_>>());
+    out["needs_credit"] = json!(left.needs_credit.iter().map(hex::encode).collect::<Vec<_>>());
     out["write_price"] = json!({"fresh_slot_price_wei": price.per_slot.to_string(), "passes": 1,
-                                "wasted_gas": left.wasted_gas, "wasted_gas_allowance": price.wasted_gas_allowance,
-                                "exhausted": left.exhausted, "standing_senders": price.standing.len()});
+                                "wasted_covered_gas": left.wasted_covered, "covered_allowance": price.covered_allowance,
+                                "wasted_uncovered_gas": left.wasted_uncovered, "uncovered_allowance": price.uncovered_allowance,
+                                "uncovered_max_gas": price.uncovered_max_gas, "max_tx_gas": price.max_tx_gas,
+                                "senders_with_credit": price.credits.len()});
 }
 
 fn hold_below_min_tip(

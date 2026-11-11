@@ -575,6 +575,9 @@ pub fn quote_node_transaction<DB: DatabaseRef>(
 }
 
 /// The producer's write price (sequencer policy v2), for [`select_node_transactions_priced`]. Host builds only.
+///
+/// The rule it is built on (agents/311 section 14): what a sender can claim for free (tip, gas limit, queued
+/// nonces) buys nothing; every allowance is bought with fees really paid (`credits`) and consumed by waste.
 #[cfg(feature = "std")]
 #[derive(Clone, Debug, Default)]
 pub struct WritePrice {
@@ -582,10 +585,51 @@ pub struct WritePrice {
     pub per_slot: u128,
     /// Senders that owe no write price.
     pub exempt: BTreeSet<Address>,
-    /// Senders with standing (they have paid before): selected ahead of every other sender, then by tip.
-    pub standing: BTreeSet<Address>,
-    /// Gas that may be spent executing transactions that are then left out; past it only plain transfers run.
-    pub wasted_gas_allowance: u64,
+    /// Per sender: priority fees it really paid, less the fee value of its work that was executed and left out
+    /// (the policy's ledger). A transaction is covered when this is at least `gas_limit * its tip`.
+    pub credits: BTreeMap<Address, u128>,
+    /// No transaction above this gas limit is executed (the policy's per-transaction cap).
+    pub max_tx_gas: u64,
+    /// Gas of covered transactions that may be executed and then left out; past it no covered transaction but a
+    /// plain transfer is executed.
+    pub covered_allowance: u64,
+    /// The same for uncovered transactions: their own pool.
+    pub uncovered_allowance: u64,
+    /// No uncovered transaction above this gas limit is executed, unless it is a plain transfer.
+    pub uncovered_max_gas: u64,
+    /// Seed of the order of uncovered senders (the block's own randomness: not known when they were funded).
+    pub seed: B256,
+}
+
+#[cfg(feature = "std")]
+impl WritePrice {
+    fn covers(&self, sender: Address, gas_limit: u64, tip: u128) -> bool {
+        self.exempt.contains(&sender)
+            || alloy_primitives::U256::from(self.credits.get(&sender).copied().unwrap_or(0))
+                >= alloy_primitives::U256::from(gas_limit) * alloy_primitives::U256::from(tip.max(1))
+    }
+
+    fn pays(&self, sender: Address, gas_used: u64, tip: u128, fresh: u64) -> bool {
+        fresh == 0
+            || self.exempt.contains(&sender)
+            || alloy_primitives::U256::from(gas_used) * alloy_primitives::U256::from(tip)
+                >= alloy_primitives::U256::from(fresh) * alloy_primitives::U256::from(self.per_slot)
+    }
+
+    /// Place of an uncovered sender in this block: senders with any credit left (they paid fees and have not
+    /// wasted them) before senders with none, and inside each group a hash of the block's seed and the sender.
+    /// Tip plays no part. A key that was only funded has no credit: the fee of its funding went to the funder.
+    fn rank(&self, sender: Address) -> u128 {
+        let mut input = [0u8; 52];
+        input[..32].copy_from_slice(self.seed.as_slice());
+        input[32..].copy_from_slice(sender.as_slice());
+        let place = u128::from_be_bytes(alloy_primitives::keccak256(input)[..16].try_into().expect("16 bytes")) >> 1;
+        if self.credits.get(&sender).is_some_and(|credit| *credit > 0) {
+            place | 1 << 127
+        } else {
+            place
+        }
+    }
 }
 
 /// A transaction left out for the write price.
@@ -604,6 +648,11 @@ pub struct UnpaidTransaction {
     pub effective_tip: u128,
     /// Storage slots it would have added.
     pub fresh_slots: u64,
+    /// Whether its sender's credit covered it.
+    pub covered: bool,
+    /// Whether it is unpaid on the block's start state too (its sender's own doing), or was made unpaid by an
+    /// earlier transaction of this block.
+    pub own_doing: bool,
 }
 
 /// What a priced selection left out, besides the usual deferred and dropped lists.
@@ -612,46 +661,30 @@ pub struct UnpaidTransaction {
 pub struct LeftUnpaid {
     /// Executed, would add slots it does not pay for, left out; in the order met.
     pub unpaid: Vec<UnpaidTransaction>,
-    /// Not executed because the allowance for non-payers was used up; they stay pending.
+    /// Not executed because the pool of wasted gas of its class was used up in this block; they stay pending.
     pub not_judged: Vec<B256>,
-    /// Gas spent on the transactions in `unpaid`.
-    pub wasted_gas: u64,
-    /// Whether the allowance ran out.
-    pub exhausted: bool,
+    /// Not executed because its gas limit is above the policy's cap per transaction (with its sender's later ones).
+    pub over_gas_cap: Vec<B256>,
+    /// Not executed because it is uncovered and above the gas limit of uncovered transactions (with its sender's
+    /// later ones): its sender needs credit first.
+    pub needs_credit: Vec<B256>,
+    /// Gas spent on covered transactions in `unpaid`.
+    pub wasted_covered: u64,
+    /// Gas spent on uncovered transactions in `unpaid`.
+    pub wasted_uncovered: u64,
 }
 
-/// [`select_node_transactions`] with the producer's write price judged inside the loop (review R308-3P-2, the
-/// remedy agents/304 named): a transaction that would add storage slots it does not pay for is left out, its
-/// changes dropped, and the selection goes on with the next candidate on the block WITHOUT it. One pass; no
-/// transaction is refused for what a refused one did; a non-payer never displaces a payer. Host builds only.
-#[cfg(feature = "std")]
-#[allow(clippy::too_many_arguments)]
-pub fn select_node_transactions_priced<DB: DatabaseRef>(
-    spec: &ChainSpec,
-    domain: B256,
-    db: DB,
-    previous_root: B256,
-    context: &BlockContext,
-    deposits: &[DepositMint],
-    candidates: &[Bytes],
-    limits: SelectionLimits,
-    price: &WritePrice,
-) -> Result<(BlockSelection, LeftUnpaid), BlockExecutionError> {
-    let mut session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
-        super::prepare_parent(spec, domain, db, previous_root, context)
-    })?;
-    let mut left = LeftUnpaid::default();
-    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left)?;
-    Ok((selection, left))
-}
-
-/// [`select_node_transactions_priced`] after the forced envelopes (see [`select_node_transactions_after_forced`]).
+/// [`select_node_transactions`] with the producer's write price judged inside the loop (reviews R308-3P-2 and
+/// R308-4P-1): a transaction that would add storage slots it does not pay for is left out, its changes dropped,
+/// and the selection goes on with the next candidate on the block WITHOUT it. One pass; a non-payer never
+/// displaces a payer; wasted work is accounted per class and per sender. `forced` runs first when given.
+/// `db` is read twice (the block, and each left-out transaction alone on the start state). Host builds only.
 #[cfg(all(feature = "std", feature = "forced-inclusion"))]
 #[allow(clippy::too_many_arguments)]
 pub fn select_node_transactions_priced_after_forced<DB: DatabaseRef>(
     spec: &ChainSpec,
     domain: B256,
-    db: DB,
+    db: &DB,
     previous_root: B256,
     context: &BlockContext,
     deposits: &[DepositMint],
@@ -671,14 +704,31 @@ pub fn select_node_transactions_priced_after_forced<DB: DatabaseRef>(
     } else {
         Default::default()
     };
+    // One transaction alone, after the deposits, on the parent state: (gas used, slots added), or None when it
+    // cannot run there (a queued nonce, funds). Nothing is kept.
+    let mut alone = |env: &TxEnv| -> Result<Option<(u64, u64)>, BlockExecutionError> {
+        let mut fresh_session = BlockSession::begin_with_header(spec, CacheDB::new(db), context, deposits, |db| {
+            super::prepare_parent(spec, domain, db, previous_root, context)
+        })?;
+        let mut seen = None;
+        match fresh_session.try_transaction_judged(env, |gas_used, fresh| {
+            seen = Some((gas_used, fresh));
+            false
+        }) {
+            Ok(_) => Ok(seen),
+            Err(BlockExecutionError::Database { detail }) => Err(BlockExecutionError::Database { detail }),
+            Err(_) => Ok(None),
+        }
+    };
     let mut left = LeftUnpaid::default();
-    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left)?;
+    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left, &mut alone)?;
     Ok((forced, selection, left))
 }
 
 // The loop of `select_in_session`, with the write price judged before a transaction's changes land. A copy, not
 // a change of that function: it is compiled into the settlement guests and must keep its bytes and line numbers.
 #[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
 fn select_priced_in_session<DB: DatabaseRef>(
     spec: &ChainSpec,
     session: &mut BlockSession<DB>,
@@ -687,6 +737,7 @@ fn select_priced_in_session<DB: DatabaseRef>(
     limits: SelectionLimits,
     price: &WritePrice,
     left: &mut LeftUnpaid,
+    alone: &mut dyn FnMut(&TxEnv) -> Result<Option<(u64, u64)>, BlockExecutionError>,
 ) -> Result<BlockSelection, BlockExecutionError> {
     let limits = limits.clamp(spec);
     let mut selection = BlockSelection::default();
@@ -740,11 +791,14 @@ fn select_priced_in_session<DB: DatabaseRef>(
         let Some(sender) = queues
             .iter()
             .filter_map(|(sender, queue)| queue.front().map(|c| (*sender, c.effective_tip(base_fee), c.hash)))
-            .max_by(|a, b| {
-                // Senders with standing first, then by tip: a sender that never paid cannot stand ahead of one that did.
-                price.standing.contains(&a.0).cmp(&price.standing.contains(&b.0)).then(a.1.cmp(&b.1)).then(b.2.cmp(&a.2))
+            .map(|(sender, tip, hash)| {
+                // Covered transactions first, by tip. Uncovered ones after them, in an order no claim can buy.
+                let front = queues[&sender].front().expect("filtered on a front");
+                let covered = price.covers(sender, front.env.gas_limit, tip);
+                (sender, covered, if covered { tip } else { price.rank(sender) }, hash)
             })
-            .map(|(sender, _, _)| sender)
+            .max_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(b.3.cmp(&a.3)))
+            .map(|(sender, _, _, _)| sender)
         else {
             break;
         };
@@ -815,32 +869,61 @@ fn select_priced_in_session<DB: DatabaseRef>(
             defer(reason, queue, &mut selection.deferred);
             continue;
         }
-        // The work spent on non-payers is bounded: past the allowance only plain transfers, which add no slot
-        // whatever ran before them, are still executed; everything else stays pending, unjudged.
-        if left.wasted_gas >= price.wasted_gas_allowance && (candidate.env.gas_limit != 21_000 || !candidate.env.data.is_empty()) {
-            left.exhausted = true;
-            left.not_judged.push(candidate.hash);
+        let (tip, before) = (candidate.effective_tip(base_fee), cached_storage(session.database()));
+        // What may be executed at all (review R308-4P-1). A plain transfer adds no slot whatever ran before it and
+        // is always executed. Anything else: within the policy's gas cap; covered by its sender's credit, or small;
+        // and only while a pool of wasted gas it may use has room. Uncovered senders never use the covered pool.
+        let plain = candidate.env.gas_limit == 21_000 && candidate.env.data.is_empty();
+        let covered = price.covers(sender, candidate.env.gas_limit, tip);
+        // A covered transaction that finds the covered pool used up is judged by the rules of the uncovered class
+        // instead (small, from the other pool), so paid-for waste ahead of it does not leave a small call unjudged.
+        let from_covered_pool = covered && left.wasted_covered < price.covered_allowance;
+        let unexecuted = if plain {
+            None
+        } else if candidate.env.gas_limit > price.max_tx_gas && !price.exempt.contains(&sender) {
+            Some(&mut left.over_gas_cap)
+        } else if from_covered_pool {
+            None
+        } else if candidate.env.gas_limit > price.uncovered_max_gas {
+            Some(if covered { &mut left.not_judged } else { &mut left.needs_credit })
+        } else if left.wasted_uncovered >= price.uncovered_allowance {
+            Some(&mut left.not_judged)
+        } else {
+            None
+        };
+        if let Some(list) = unexecuted {
+            list.push(candidate.hash);
             for rest in queue.drain(..) {
-                left.not_judged.push(rest.hash);
+                list.push(rest.hash);
             }
             continue;
         }
-        let (tip, before) = (candidate.effective_tip(base_fee), cached_storage(session.database()));
         let mut refused = None;
         let attempt = session.try_transaction_judged(&candidate.env, |gas_used, fresh| {
-            let pays = fresh == 0
-                || price.exempt.contains(&sender)
-                || alloy_primitives::U256::from(gas_used) * alloy_primitives::U256::from(tip)
-                    >= alloy_primitives::U256::from(fresh) * alloy_primitives::U256::from(price.per_slot);
+            let pays = price.pays(sender, gas_used, tip, fresh);
             if !pays {
                 refused = Some((gas_used, fresh));
             }
             pays
         });
         if let (Ok(None), Some((gas_used, fresh))) = (&attempt, refused) {
-            // Left out, its changes dropped: the transactions behind it run on the block without it.
-            left.wasted_gas = left.wasted_gas.saturating_add(gas_used);
-            left.unpaid.push(UnpaidTransaction { hash: candidate.hash, sender, nonce: candidate.env.nonce, gas_used, effective_tip: tip, fresh_slots: fresh });
+            // Left out, its changes dropped: the transactions behind it run on the block without it. Its sender's
+            // later nonces cannot run in this block, so one sender wastes at most this once per block.
+            if from_covered_pool {
+                left.wasted_covered = left.wasted_covered.saturating_add(gas_used);
+            } else {
+                left.wasted_uncovered = left.wasted_uncovered.saturating_add(gas_used);
+            }
+            // Whose doing: judged once more alone on the block's start state. Paying there means an earlier
+            // transaction of this block made it unpaid (review R308-4P-2). A queued nonce cannot run alone: its
+            // sender's own earlier transactions are its own doing.
+            let own_doing = match alone(&candidate.env)? {
+                Some((alone_gas, alone_fresh)) => !price.pays(sender, alone_gas, tip, alone_fresh),
+                None => true,
+            };
+            left.unpaid.push(UnpaidTransaction {
+                hash: candidate.hash, sender, nonce: candidate.env.nonce, gas_used, effective_tip: tip, fresh_slots: fresh, covered, own_doing,
+            });
             continue;
         }
         match attempt {

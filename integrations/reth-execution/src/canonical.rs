@@ -250,7 +250,7 @@ impl CanonicalCoordinator {
         bloch_l2_evm::node_execution::select::select_node_transactions_priced_after_forced(
             spec.execution_at(context.number),
             spec.domain(),
-            reth_revm::database::StateProviderDatabase::new(state.as_ref()),
+            &reth_revm::database::StateProviderDatabase::new(state.as_ref()),
             self.head.0.state_root,
             &context,
             &attributes.deposits,

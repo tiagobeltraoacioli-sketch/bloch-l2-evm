@@ -434,29 +434,70 @@ Residual of F264-2: closed in round 15, in the form agents/304 named as the comp
 judged INSIDE the producer's selection (`produce-dev select|extend --fresh-slot-price-wei N`, turned on by
 `producer_write_price`): after a transaction ran, if it would add storage slots it does not pay for, its changes are
 dropped and the selection goes on with the next candidate on the block without it. One pass; no transaction is
-refused for what a refused one did; **a non-payer never displaces a payer**, wherever it stands in tip order
-(review R308-3P-2 replaced the capped re-selection of the second pass, which kept only the transactions ahead of
-the eighth non-payer). `extend` builds exactly the judged block, so no block of this producer holds an unpaid slot.
-The work spent on non-payers is bounded: `--write-wasted-gas` (default twice the block gas limit) is the gas that
-may go to transactions that are then left out; past it only plain transfers, which add no slot whatever ran before
-them, are still executed and the rest is reported `not_judged` (held `unpaid-allowance-exhausted`, no wait).
-Non-paying is self-limiting: the SENDER of an unpaid transaction waits `unpaid_first_wait_seconds` (2,400 s, longer
-than a block interval), twice as long after each further report, up to a day, whatever bytes or nonce it sends
-next; while it waits the producer does not execute anything of that sender (`--write-waiting`, the demand check
-included). Senders with standing (they have paid before) are selected ahead of all others, then by tip
-(`--write-standing`), so keys that never paid, funded or not, are judged after every sender that has, and the
-allowance they can burn is spent behind those. A fresh key gets one judged attempt per 40 minutes; its funding
-transfer is a paying transaction. A producer call that times out is a producer refusal, so the deposits-only
-block is still built, as the last resort only. Measured on the real binary (debug build, shared build host),
-30 honest transactions at 3 gwei behind N non-payers at 3.9 gwei from N keys: N = 8: 0.17 s, N = 64: 0.22 s,
-N = 400: 0.52 s as independent writers; N = 64: 0.40 s, N = 400: 0.49 s as a chain on one slot (each refusal
-uncovers the next); in every run all 30 honest transactions are included, all N are reported unpaid, one pass;
-the unpriced selection of the same pools takes 0.20 to 0.84 s. With a 100,000-gas allowance the 20 plain transfers
-are still served, and with the honest senders in the standing list all 30. The plan's allowance is 180 s.
-Tests: `tests/produce_txs.rs` (`eight_non_payers_ahead_in_tip_order_do_not_empty_the_block`, which fails on the
-capped producer with the 30 honest transactions not judged; `many_non_payers_at_a_high_tip_cost_one_pass_and_serve_every_payer`;
-`write_price_leaves_a_whole_chain_of_non_payers_pending`), `test_round15_producer_write_price.py`,
-`review_r15_308_2p_u3_waits.py`, `review_r15_308_3p_cap_starves_users.py`.
+refused for what a refused one did; `extend` builds exactly the judged block, so no block of this producer holds an
+unpaid slot. A producer call that times out is a producer refusal, so the deposits-only block is still built, as
+the last resort only.
+
+The work spent on transactions that are then left out is what a non-payer can take for free, so it is governed by
+one rule (reviews R308-3P-2, R308-4P-1, R308-4P-2): **a claim (tip, gas limit, queued nonces) buys nothing; every
+allowance is bought with fees really paid and is used up by waste.**
+
+- *Credit.* Per sender, the policy keeps the priority fees it really paid in the last `credit_memory_seconds`
+  (7 days), less `gas used x its tip` of every transaction of its that the producer executed and left out. The
+  producer gets the ledger (`--write-credits`). A transaction is **covered** when its sender's credit is at least
+  `gas limit x its tip`. Wasting covered work therefore costs, in fees paid before, what that gas costs at the
+  waster's own bid; credit bought once is gone after the waste it covers. Quarantine removes it.
+- *Order.* Covered transactions first, by tip. Then uncovered ones: senders with any credit left before senders
+  with none, and inside each group by a hash of the block's L1 anchor and the sender, which no claim can buy and
+  nobody knows when a key is funded. The fee of funding a key is the funder's credit, not the key's.
+- *Per transaction.* Nothing whose gas limit is above `max_tx_gas` is executed (`--write-max-tx-gas`; reported
+  `over_gas_cap`, held `gas-limit-above-cap`; exempt senders are bound by the protocol limit only). An uncovered
+  transaction is executed only up to a gas limit of 500,000 (`--write-uncovered-max-gas`; above it `needs_credit`,
+  held `needs-credit`), unless it is a plain transfer. A plain transfer (21,000 gas, no data) adds no slot
+  whatever ran before it: it is always executed, and it earns credit.
+- *Per sender, per block.* One wasted transaction at most: after one is left out the sender's later nonces cannot
+  run in that block.
+- *Per sender, across blocks.* A sender whose transaction is unpaid by its own doing waits
+  `unpaid_first_wait_seconds` (2,400 s, longer than a block interval), twice as long after each further report, up
+  to a day, whatever bytes or nonce it sends next; while it waits the producer executes nothing of that sender
+  (`--write-waiting`, the demand check included).
+- *Per block.* Wasted gas is counted in two pools: one for covered transactions (`--write-wasted-gas`, two
+  blocks' gas) and one for the rest (`--write-uncovered-gas`, half a block). Uncovered senders never use the
+  covered pool. A covered transaction that finds the covered pool used up is judged like an uncovered one (up to
+  500,000 gas, from the other pool), so waste that was paid for does not leave a small covered call unjudged.
+  Past the pools only plain transfers are executed; the rest is reported `not_judged` (held
+  `unpaid-allowance-exhausted`, no wait, no penalty). A total has to exist, or the selection would have no time
+  bound: with the per-transaction cap it is 2.5 blocks of gas plus one transaction, and each left-out transaction
+  is executed a second time alone (see below), so at most twice that. What matters is who can reach it. The
+  covered pool is used up only by wasting credit worth two blocks of gas at a bid above the users' (more than
+  buying the block outright), and each of those senders then waits; to leave small covered calls unjudged as
+  well takes about 30 more senders with credit. The uncovered pool can be used up by about 30 keys per block
+  that have no credit; a sender with any credit is ahead of all of them.
+- *Whose doing (R308-4P-2).* A transaction that is left out is judged once more alone on the block's start state
+  (after the deposits). Unpaid there too: its sender's own doing (`own_doing: true`), the wait applies. Paid there:
+  an earlier transaction of this block made it unpaid; it is held `unpaid-in-this-block`, without any wait, and is
+  tried again in the next block. Its work is still taken from its sender's credit, and the third such report of
+  one sender inside `unpaid_memory_seconds` counts as its own doing (`unpaid_other_doing_strikes`), so a paying
+  accomplice cannot make a key waste the producer's work for free block after block.
+
+What a new sender gets (R308-4P-3), stated: uncovered transactions come after covered ones, so in a block that
+covered paying transactions fill (gas, bytes or the 64 places) a new sender waits, whatever its tip; the bound is
+the covered demand of that block. Its plain transfers are always executed, and every included transaction earns
+credit, so from its second block a sender competes by tip for anything up to the fees it has paid. Under a flood
+of funded keys that never pay (each costs its funder one paid transfer, waits 40 minutes after its first waste, and
+is usable 12 times a week), an uncovered contract call of a sender with no credit at all is judged with
+probability about 30/(N+1) per block against N such keys; a sender with any credit is ahead of all of them. No
+honest transaction is ever penalised for not being judged.
+
+MEASURED-4P
+
+Tests: `tests/produce_txs.rs` (`large_non_payers_cannot_starve_contract_calls`,
+`a_transaction_made_unpaid_by_an_earlier_one_is_not_its_senders_doing`,
+`eight_non_payers_ahead_in_tip_order_do_not_empty_the_block`,
+`many_non_payers_at_a_high_tip_cost_one_pass_and_serve_every_payer`,
+`write_price_leaves_a_whole_chain_of_non_payers_pending`), `test_round15_producer_write_price.py`
+(`CreditAndOwnDoing`, `UnpaidWaitsEscalate`), `review_r15_308_2p_u3_waits.py`,
+`review_r15_308_3p_cap_starves_users.py`.
 
 ## 7. Residual risks (accepted or open)
 
