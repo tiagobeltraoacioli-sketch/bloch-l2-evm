@@ -196,6 +196,12 @@ class Agent:
     def load_state(self):
         if self.state_path.exists():
             return json.loads(self.state_path.read_text())
+        # The signing memory (what was signed for which L2 block, today's capped amount) must not restart
+        # from nothing: once this host has saved a state or holds a partial, a missing state.json is a halt.
+        marker = self.state_dir / 'state.initialized'
+        if marker.exists() or (self.outbox.is_dir() and any(self.outbox.rglob('*.partial'))):
+            raise Halt(f'{self.state_path} is missing on a host that has signed or saved state before: restore it '
+                       f'from backup; never start again from an empty state (the daily cap and the signed roots are in it)')
         return {'signed': {}, 'skipped': {}, 'held': {}, 'leaves': {}, 'approved': {}, 'published': {}, 'refused': {}}
 
     def save_state(self, state):
@@ -203,6 +209,9 @@ class Agent:
         tmp = self.state_path.with_suffix('.tmp')
         tmp.write_text(json.dumps(state, sort_keys=True, indent=1) + '\n')
         os.replace(tmp, self.state_path)
+        marker = self.state_dir / 'state.initialized'
+        if not marker.exists():
+            marker.write_text('state.json has existed on this host; see load_state\n')
 
     # ---------------------------------------------------------------- inputs
     def follower(self):
@@ -347,6 +356,12 @@ class Agent:
             root, number, count = record['root'], record['l2_number'], record['count']
             if root in state['signed'] or root in state['skipped']:
                 continue
+            other = [r for r, e in state['signed'].items() if e.get('l2_number') == number]
+            if other:
+                # One L2 block has one withdrawal root. A second root for a block this key already signed
+                # means the finalized view changed under the agent: stop, a person decides.
+                raise Halt(f'L2 block {number} now shows withdrawal root {root}, but this attestor already signed '
+                           f'{other[0]} for it: refusing a second signature for the same L2 block')
             own = finals.get(number)
             if own is None:
                 log('awaiting-own-finality', l2_number=number, root=root)

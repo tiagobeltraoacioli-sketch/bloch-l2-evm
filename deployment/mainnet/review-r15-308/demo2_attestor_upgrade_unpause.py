@@ -12,7 +12,8 @@ class D2(t.UpgradeScriptTest):
     def test_upgrade_keeps_an_operator_pause_and_a_stopped_agent(self):
         # The operator paused this attestor for an incident and stopped the agent (README: "Rollback per host: touch PAUSE").
         (self.etc / 'PAUSE').write_text('operator pause: incident 2026-11-10\n')
-        self.assertFalse((self.root / 'agent.started').exists())          # the agent is NOT running
+        (self.root / 'agent.started').unlink(missing_ok=True)             # the agent is NOT running (r15: the harness now starts with it running)
+        self.assertFalse((self.root / 'agent.started').exists())
         done = self.upgrade(now=t.FORK_UNIX - 86_400)                       # no --no-unpause: the documented default
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         print('\n'.join(l for l in done.stdout.splitlines() if 'PAUSE' in l or 'agent' in l))

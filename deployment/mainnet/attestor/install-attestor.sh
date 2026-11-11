@@ -117,6 +117,8 @@ print(hashlib.sha3_256(b"BLOCH:L2:ATTESTOR-SET:1"+bytes([int(l[0]),len(k)])+b"".
   [[ $INDEX =~ ^[0-4]$ ]] || die "--index must be 0..4"
   [ ${#RPCS[@]} -gt 0 ] || RPCS=("${DEFAULT_RPCS[@]}")
   [ ${#RPCS[@]} -eq 3 ] || die "give exactly three --rpc URLs (quorum 2-of-3)"
+  local rpc_hosts; rpc_hosts=$(for u in "${RPCS[@]}"; do host_of "$u" | tr 'A-Z' 'a-z'; done | sort -u | wc -l)
+  [ "$rpc_hosts" -eq 3 ] || die "the three --rpc URLs must be on three distinct hosts (a quorum of 2 must not come from one node)"
   [[ $L1 =~ ^http://[A-Za-z0-9.-]+:[0-9]+/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
   [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$PREFIX" ] || die "run as root"
   [ -n "$PUB_URL$PUB_CMD$FEED_PORT" ] || echo "WARNING: no --feed-port/--publish-url/--publish-command: partials stay in $STATE/outbox only" >&2
@@ -315,6 +317,7 @@ L1_GENESIS_UNIX=1786656679 L1_EPOCH_SECONDS=960 HF1_EPOCH=7180
 ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF1 starts
 KIT_FILES=(attestor_agent.py attestor_lib.py aggregate_attestation.py sigfeed.py)
 FEED_UNIT=bloch-l2-attestor-feed.service FEED_PORT= FEED_BIND= NO_FEED=0
+WAS_PAUSED=0 WAS_ACTIVE=1   # what the operator had before this run: only what the script paused or stopped is undone
 SERVICE_CMD= CHECK_CMD= NOW_UNIX= TAG=pre-hf123 RESUME=0 UNPAUSE=1 WAIT_TIMEOUT=7200 ADVANCE_TIMEOUT=2400 POLL=30
 
 now() { echo "${NOW_UNIX:-$(date +%s)}"; }
@@ -333,8 +336,21 @@ run_check() {
   systemd-run --pipe --wait --quiet -p User=$USER_AGENT -p LoadCredential=passphrase:$ETC/keystore.passphrase \
     -p RuntimeDirectory=bloch-l2-attestor-check -p RuntimeDirectoryMode=0700 /usr/bin/python3 -I "$OPT/attestor_agent.py" check --config "$ETC/config.json"
 }
+pause_and_stop() {  # remember the operator's own pause and a stopped agent, then pause and stop
+  local phase; phase=$(read_state phase)
+  if [ -n "$phase" ] && [ "$phase" != done ] && [ -n "$(read_state was_paused)" ]; then
+    # An unfinished upgrade or rollback left its own PAUSE and a stopped agent: what counts is what it saw.
+    WAS_PAUSED=$(read_state was_paused) WAS_ACTIVE=$(read_state was_active)
+  else
+    WAS_PAUSED=0; [ ! -e "$ETC/PAUSE" ] || WAS_PAUSED=1
+    WAS_ACTIVE=0; ! svc is-active agent || WAS_ACTIVE=1
+  fi
+  [ $WAS_PAUSED = 0 ] || say "   PAUSE was already set by the operator: it will be kept"
+  [ $WAS_ACTIVE = 1 ] || say "   the agent was not running: it will not be started"
+  touch "$ETC/PAUSE"; svc stop agent || die "could not stop the agent"; svc stop follower || die "could not stop the follower"
+}
 write_state() {  # the resumable record of an upgrade / upgrade-rollback in progress
-  printf 'op=%s\ntag=%s\nphase=%s\nmoved_at=%s\n' "$OP" "$TAG" "$1" "$MOVED_AT" > "$ETC/upgrade.state.tmp"
+  printf 'op=%s\ntag=%s\nphase=%s\nmoved_at=%s\nwas_paused=%s\nwas_active=%s\n' "$OP" "$TAG" "$1" "$MOVED_AT" "$WAS_PAUSED" "$WAS_ACTIVE" > "$ETC/upgrade.state.tmp"
   mv "$ETC/upgrade.state.tmp" "$ETC/upgrade.state"
 }
 status_newer_than() {  # the follower wrote status.json at or after unix time $1 (it writes only after re-verify)
@@ -417,7 +433,8 @@ check_artifact() {  # check_artifact NAME EXPECTED: DIR/NAME has the published h
 upgrade_fail() {
   echo >&2
   echo "install-attestor: $OP STOPPED: $*" >&2
-  echo "  PAUSE stays in $ETC/PAUSE; the agent is stopped; the follower keeps running." >&2
+  if [ -e "$ETC/PAUSE" ]; then echo "  PAUSE stays in $ETC/PAUSE; the agent is stopped; the follower keeps running." >&2
+  else echo "  PAUSE was already removed and the agent did not stay up: nothing is signing. Set it again if in doubt: touch $ETC/PAUSE" >&2; fi
   echo "  Continue after fixing: $0 $OP --resume${TAG:+ --tag $TAG}" >&2
   [ "$OP" = upgrade-rollback ] || echo "  Or go back (only before HF1, epoch $HF1_EPOCH): $0 upgrade-rollback --tag $TAG" >&2
   exit 1
@@ -457,6 +474,17 @@ upgrade_tail() {  # follower start -> re-verify -> check -> finality advances ->
   if [ $UNPAUSE = 0 ]; then
     write_state verified
     say "--no-unpause: PAUSE kept, agent stopped. To resume signing: rm $ETC/PAUSE; systemctl start bloch-l2-attestor"
+  elif [ "$WAS_PAUSED" = 1 ] || [ "$WAS_ACTIVE" = 0 ]; then
+    # The operator had paused signing or stopped the agent before this run (an incident, a first install
+    # not yet enabled): the build is verified, and what the operator set stays as it was.
+    [ "$WAS_PAUSED" = 1 ] || rm -f "$ETC/PAUSE"
+    if [ "$WAS_ACTIVE" = 1 ]; then
+      svc start agent || upgrade_fail "the agent did not start"
+      sleep 5; svc is-active agent || upgrade_fail "the agent exited right after start (journalctl -u bloch-l2-attestor)"
+    fi
+    write_state done
+    [ "$WAS_PAUSED" = 0 ] || say "PAUSE was set before this $OP and is KEPT: the agent signs nothing until you remove it (rm $ETC/PAUSE)"
+    [ "$WAS_ACTIVE" = 1 ] || say "the agent was stopped before this $OP and stays stopped (systemctl start bloch-l2-attestor)"
   else
     rm -f "$ETC/PAUSE"; svc start agent || upgrade_fail "the agent did not start"
     sleep 5; svc is-active agent || upgrade_fail "the agent exited right after start (journalctl -u bloch-l2-attestor)"
@@ -471,6 +499,8 @@ resume_or_fresh() {  # a recorded unfinished operation must be resumed (or rolle
     [ "$op" = "$OP" ] && [ -n "$phase" ] && [ "$phase" != done ] || die "nothing to resume for $OP (state: ${op:-none} ${phase:-})"
     case $phase in installed|started|verified) ;; *) die "$OP stopped in phase '$phase' before the install finished: inspect, then run upgrade-rollback";; esac
     TAG=$(read_state tag) MOVED_AT=$(read_state moved_at)
+    WAS_PAUSED=$(read_state was_paused) WAS_ACTIVE=$(read_state was_active)
+    WAS_PAUSED=${WAS_PAUSED:-0} WAS_ACTIVE=${WAS_ACTIVE:-1}   # a state file of an older kit has neither
     say "resume $OP (tag $TAG, phase $phase): pins on disk"
     verify_pins_on_disk
     upgrade_tail; [ "$OP" != upgrade ] || feed_note; exit 0
@@ -519,7 +549,7 @@ cmd_upgrade() {
   for f in "$OPT.$TAG" "$ETC/config.json.$TAG"; do [ ! -e "$f" ] || die "$f exists (an earlier backup): choose another --tag"; done
   say "   installed now: follower $(sha "$OPT/bloch-l2-native-follower"), produce $(sha "$OPT/bloch-l2-produce-dev"), config produce_sha256 $(jget "$ETC/config.json" produce_sha256)"
   say "2. pause and stop the agent and the follower"
-  touch "$ETC/PAUSE"; svc stop agent || die "could not stop the agent"; svc stop follower || die "could not stop the follower"
+  pause_and_stop
   say "3. back up to $OPT.$TAG and config.json.$TAG; move status.json aside"
   cp -a "$OPT" "$OPT.$TAG"; cp -a "$ETC/config.json" "$ETC/config.json.$TAG"
   MOVED_AT=$(date +%s)
@@ -528,6 +558,14 @@ cmd_upgrade() {
   say "4. install the two binaries, the agent scripts and the feed unit (not enabled)"
   install -m 0755 "$ART/bloch-l2-native-follower" "$ART/bloch-l2-produce-dev" "$OPT/"
   for f in "${KIT_FILES[@]}"; do install -m 0644 "$HERE/$f" "$OPT/"; done
+  # The agent unit of this kit (RuntimeDirectory for the 0400 passphrase copy): an older unit would halt the
+  # new agent. The old unit is kept beside the binary backup and restored by upgrade-rollback.
+  if [ -f "$UNITS/bloch-l2-attestor.service" ] && ! cmp -s "$HERE/systemd/bloch-l2-attestor.service" "$UNITS/bloch-l2-attestor.service"; then
+    cp -a "$UNITS/bloch-l2-attestor.service" "$OPT.$TAG/bloch-l2-attestor.service.unit"
+    install -m 0644 "$HERE/systemd/bloch-l2-attestor.service" "$UNITS/"
+    [ -n "$SERVICE_CMD" ] || systemctl daemon-reload
+    say "   agent unit replaced by this kit's (old one kept in $OPT.$TAG)"
+  fi
   install_feed
   say "5. re-hash on disk"
   [ "$(sha "$OPT/bloch-l2-native-follower")" = "$FOLLOWER_SHA256" ] || upgrade_fail "installed follower hash differs"
@@ -563,7 +601,7 @@ cmd_upgrade_rollback() {
   [ -z "$f" ] || [ "$(sha "$OPT.$TAG/bloch-l2-native-follower")" = "$f" ] || die "backup follower does not match config.json.$TAG"
   say "   backup follower $(sha "$OPT.$TAG/bloch-l2-native-follower"), produce $(sha "$OPT.$TAG/bloch-l2-produce-dev")"
   say "2. pause and stop the agent and the follower"
-  touch "$ETC/PAUSE"; svc stop agent || die "could not stop the agent"; svc stop follower || die "could not stop the follower"
+  pause_and_stop
   say "3. restore the binaries, agent scripts and config.json from .$TAG; move status.json aside"
   install -m 0755 "$OPT.$TAG/bloch-l2-native-follower" "$OPT.$TAG/bloch-l2-produce-dev" "$OPT/"
   for f in "${KIT_FILES[@]}"; do
@@ -575,6 +613,10 @@ cmd_upgrade_rollback() {
     [ -n "$SERVICE_CMD" ] || systemctl daemon-reload
   elif [ -z "$SERVICE_CMD" ]; then
     systemctl try-restart "$FEED_UNIT" 2>/dev/null || true
+  fi
+  if [ -f "$OPT.$TAG/bloch-l2-attestor.service.unit" ]; then
+    install -m 0644 "$OPT.$TAG/bloch-l2-attestor.service.unit" "$UNITS/bloch-l2-attestor.service"
+    [ -n "$SERVICE_CMD" ] || systemctl daemon-reload
   fi
   cp -a "$ETC/config.json.$TAG" "$ETC/config.json"
   MOVED_AT=$(date +%s)

@@ -34,7 +34,10 @@ class D6(unittest.TestCase):
         self.root = 'aa' * 32; self.a.cycle()
         # the follower's finalized view of block 7 changes (binary swapped by upgrade / upgrade-rollback, state re-verified)
         self.root = 'bb' * 32; self.a.state_path.write_text(json.dumps({**self.a.load_state(), 'leaves': {}}))
-        self.a.cycle()
+        try:
+            self.a.cycle()
+        except agent_mod.Halt as e:   # r15 fix: the agent halts (exit 3) instead of signing
+            print('  halt:', e)
         st = self.a.load_state()
         print('signed roots for L2 block 7:', self.signed, '| state keys:', {r: v['l2_number'] for r, v in st['signed'].items()})
         self.assertEqual(self.signed, ['aa' * 32], 'two different roots signed for the same L2 block number')
@@ -45,7 +48,10 @@ class D6(unittest.TestCase):
         self.a.state_path.unlink()                               # state lost (disk, restore, reinstall of /var/lib)
         self.root = 'cc' * 32
         self.a.view = lambda: {'roots': [{'l2_number': 7, 'root': self.root, 'count': 1, 'height': 1}], 'claimed': {}}
-        self.a.cycle()
+        try:
+            self.a.cycle()
+        except agent_mod.Halt as e:   # r15 fix: a lost state.json halts
+            print('  halt:', e)
         print('signed:', self.signed)
         self.assertEqual(self.signed, ['aa' * 32], 'the per-day cap restarted from zero after state.json was lost')
 
