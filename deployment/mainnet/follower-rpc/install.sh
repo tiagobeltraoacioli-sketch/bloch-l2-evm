@@ -57,6 +57,10 @@ R=${BLOCH_L2_INSTALL_ROOT:-}
 OPT=$R/opt/bloch/l2-mainnet ETC=$R/etc/bloch-l2-mainnet UNITS=$R/etc/systemd/system
 
 MANIFEST_SHA256=7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd
+# The launch release this kit installs: SHA-256 of its signed SHA256SUMS (release bloch-l2-2026-11-03-next-native-78d4921c,
+# build 926d2cf). A release the same key signed earlier or later is refused (review R308-16); a later release ships
+# with a kit that names it here.
+RELEASE_SHA256SUMS_SHA256=6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
 CARRYOVER_GZ_SHA256=$(cut -d' ' -f1 "$ART/carryover.tsv.gz.sha256" 2>/dev/null || true)
 [[ $L1 =~ ^http://([A-Za-z0-9.-]+):([0-9]+)/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
 L1_HOST=${BASH_REMATCH[1]}
@@ -94,9 +98,13 @@ fi
 if [ $UNSIGNED = 1 ]; then
   echo "WARNING: --allow-unsigned: the release signature is NOT checked (private rehearsals only)" >&2
 else
-  python3 -I "$HERE/../verify_release_signature.py" --release-dir "$ART" \
-    || die "release signature check failed: $ART needs the owner's SHA256SUMS.minisig (docs/RELEASE-SIGNING.md)"
+  python3 -I "$HERE/../verify_release_signature.py" --release-dir "$ART" --expect-sha256 "$RELEASE_SHA256SUMS_SHA256" \
+    || die "release signature check failed: $ART needs the owner's SHA256SUMS.minisig over the launch release ${RELEASE_SHA256SUMS_SHA256:0:8}… (docs/RELEASE-SIGNING.md)"
 fi
+# What gets installed is what was checked: the two lines are taken once, now, and the copies are hashed in place.
+WANT_FOLLOWER=$(awk '$2 == "bloch-l2-native-follower" {print $1}' "$ART/SHA256SUMS")
+WANT_RPC=$(awk '$2 == "bloch-l2-settled-rpc" {print $1}' "$ART/SHA256SUMS")
+[[ $WANT_FOLLOWER$WANT_RPC =~ ^[0-9a-f]{128}$ ]] || die "$ART/SHA256SUMS has no line for the follower or the settled RPC"
 
 # 1. Artifacts and public inputs, by hash.
 (cd "$ART" && sha256sum -c --strict SHA256SUMS) || die "binary hashes do not match SHA256SUMS"
@@ -118,6 +126,10 @@ fi
 UNIT_USER=${RPC_USER:-$CANON_USER}
 run install -d -m 0755 $OPT $ETC $ETC/public
 run install -m 0755 "$ART/bloch-l2-native-follower" "$ART/bloch-l2-settled-rpc" $OPT/
+if [ $DRY = 0 ]; then
+  printf '%s  %s\n%s  %s\n' "$WANT_FOLLOWER" "$OPT/bloch-l2-native-follower" "$WANT_RPC" "$OPT/bloch-l2-settled-rpc" | sha256sum -c --strict --quiet \
+    || die "the installed copies in $OPT are not the files that were checked in $ART (changed during the install?)"
+fi
 run install -m 0755 "$HERE/l2_read_access.py" $OPT/
 run install -m 0644 "$ART/SHA256SUMS" $OPT/
 run install -m 0644 "$ART/mainnet.manifest" $ETC/public/mainnet.manifest

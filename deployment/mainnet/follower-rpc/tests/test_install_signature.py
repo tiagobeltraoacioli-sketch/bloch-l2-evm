@@ -64,6 +64,34 @@ class InstallSignature(unittest.TestCase):
         self.assertIn('is not the pinned key 1A5D96A5C4955EF7', done.stderr)
         self.assertIn('release signature check failed', done.stderr)
 
+    def test_another_release_signed_by_the_release_key_is_refused(self):
+        """Review R308-16: the installer names its release; the signature check gets --expect-sha256."""
+        text = INSTALL.read_text()
+        self.assertRegex(text, r'(?m)^RELEASE_SHA256SUMS_SHA256=6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19$')
+        self.assertIn('--expect-sha256 "$RELEASE_SHA256SUMS_SHA256"', text)
+        # A valid signature by the pinned key over ANOTHER SHA256SUMS: stand in for the key with a copy of the
+        # verifier that pins the test key, as an older signed release would verify under the real one.
+        key = Key(b'stands in for the release key')
+        t = Path(self.tmp.name)
+        kit = t / 'kit' / 'mainnet'
+        (kit / 'follower-rpc').mkdir(parents=True)
+        shutil.copy(INSTALL, kit / 'follower-rpc/install.sh')
+        verifier = (MAINNET / 'verify_release_signature.py').read_text()
+        line = key.pubkey().splitlines()[1]
+        key_id, _ = v.parse_pubkey(line)
+        self.assertEqual(verifier.count(f"RELEASE_PUBKEY = '{v.RELEASE_PUBKEY}'"), 1)
+        verifier = verifier.replace(f"RELEASE_PUBKEY = '{v.RELEASE_PUBKEY}'", f"RELEASE_PUBKEY = '{line}'")
+        verifier = verifier.replace(f"RELEASE_KEY_ID = '{v.RELEASE_KEY_ID}'", f"RELEASE_KEY_ID = '{key_id[::-1].hex().upper()}'")
+        (kit / 'verify_release_signature.py').write_text(verifier)
+        trusted = v.canonical_trusted_comment(self.release, hashlib.sha256(self.sums).hexdigest())
+        (self.art / 'SHA256SUMS.minisig').write_bytes(key.minisig(self.sums, trusted))
+        done = subprocess.run(['bash', str(kit / 'follower-rpc/install.sh'), '--artifacts', str(self.art), '--l1-rpc-url', 'http://127.0.0.1:1',
+                               '--canonical', str(self.canonical), '--canonical-user', getpass.getuser(),
+                               '--txpool', str(self.txpool), '--dry-run'], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn('expected 6d3bd62885ca269e', done.stderr)
+        self.assertIn('release signature check failed', done.stderr)
+
     def test_allow_unsigned_skips_check_loudly(self):
         done = self.run_install('--allow-unsigned')
         self.assertIn('WARNING: --allow-unsigned', done.stderr)
