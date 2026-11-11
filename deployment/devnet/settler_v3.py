@@ -1936,6 +1936,14 @@ class Settler:
             args += ['--max-txs', str(self.c['max_block_txs'])]
         if self.c.get('min_tip_wei'):
             args += ['--min-tip-wei', str(self.c['min_tip_wei'])]
+        if self.c.get('producer_write_price') and self.budget_on():
+            # The write price inside the producer's own selection (round 15, agents/304 U3): `select` and `extend`
+            # leave pending a transaction that adds storage slots it does not pay for, judged on the block as built,
+            # and report it under `unpaid`. No block of this producer then holds an unpaid slot, whatever the gate did.
+            policy = self.policy()
+            args += ['--fresh-slot-price-wei', str(policy.c['fresh_slot_price_wei'])]
+            if policy.c['write_limit_exempt_senders']:
+                args += ['--write-exempt', ','.join(policy.c['write_limit_exempt_senders'])]
         return args
 
     def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):

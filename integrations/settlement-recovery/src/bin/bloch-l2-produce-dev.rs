@@ -97,6 +97,13 @@ directory, files of included and dropped transactions are removed after the
 block is durably committed. Without --txs the block has no user transactions.
 --min-tip-wei N leaves pending the transactions whose effective priority fee at
 this block's base fee is below N (default 0, no minimum); reported as below_min_tip.
+--fresh-slot-price-wei N (with --txs; sequencer policy v2) leaves pending every
+transaction whose gas used times effective tip is below N times the storage slots
+it adds, measured on the block as it will be built: the first such transaction in
+block order is taken out and the selection runs again, so a transaction is judged
+after exactly the transactions it would run after (after 64 such passes every unpaid
+transaction of a pass goes at once). --write-exempt A,B names senders that pay no
+write price. Left transactions keep their spool files and are reported as unpaid.
 select runs the same selection on the same parent, deposits and limits, and prints
 the report extend would print (included, deferred, dropped, tx_stats with sender,
 nonce, gas used, effective tip and storage slots added and cleared per account),
@@ -356,6 +363,7 @@ fn run(args: &[String]) -> Result<String, String> {
             let allowed: &[&str] = &[
                 "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
                 "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
+                "--fresh-slot-price-wei", "--write-exempt",
             ];
             if selecting && rest.iter().any(|a| a == "--max-txs") {
                 // Sequencer policy v2: the policy applies its own count to its own try order.
@@ -412,6 +420,9 @@ fn run(args: &[String]) -> Result<String, String> {
                     if rest.chunks(2).any(|p| p[0].starts_with("--max-")) {
                         return Err("--max-gas/--max-bytes/--max-txs require --txs".into());
                     }
+                    if rest.chunks(2).any(|p| p[0] == "--fresh-slot-price-wei" || p[0] == "--write-exempt") {
+                        return Err("--fresh-slot-price-wei/--write-exempt require --txs".into());
+                    }
                     None
                 }
             };
@@ -451,6 +462,13 @@ fn run(args: &[String]) -> Result<String, String> {
             };
             let next_base_fee = u128::from(rules().next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
             let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
+            // Policy of this producer, not a block rule: a transaction that does not pay the write price for
+            // the storage slots it adds is left pending, so no block of this producer creates an unpaid slot.
+            let price = write_price(rest)?;
+            let (pool, unpaid) = match &price {
+                Some(price) => leave_unpaid(&coordinator, &attributes, &forced, pool, limits, price)?,
+                None => (pool, UnpaidReport::default()),
+            };
             let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
             if !forced.is_empty() {
                 let (forced_selection, selection) = coordinator
@@ -460,6 +478,7 @@ fn run(args: &[String]) -> Result<String, String> {
                     let mut out = selection_report(&selection, below_min_tip);
                     out["forced"] = forced_report(&forced, &forced_selection);
                     out["committed"] = json!(false);
+                    unpaid.report(&mut out, &price);
                     return Ok(out.to_string());
                 }
                 let body: Vec<_> = forced_selection.included.iter().chain(selection.transactions.iter()).cloned().collect();
@@ -479,6 +498,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 if let (Some(fields), serde_json::Value::Object(report)) = (out.as_object_mut(), selection_report(&selection, below_min_tip)) {
                     fields.extend(report);
                 }
+                unpaid.report(&mut out, &price);
                 report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
                 return Ok(out.to_string());
             }
@@ -487,6 +507,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 let selection = coordinator.select_pending(&attributes, &candidates, limits).map_err(|e| e.to_string())?;
                 let mut report = selection_report(&selection, below_min_tip);
                 report["committed"] = json!(false);
+                unpaid.report(&mut report, &price);
                 return Ok(report.to_string());
             }
             let (tip, selection) = coordinator
@@ -521,6 +542,7 @@ fn run(args: &[String]) -> Result<String, String> {
                                  "max_txs": limits.max_transactions},
                       "pruned": pruned});
             extend_report(&mut out, &selection, below_min_tip);
+            unpaid.report(&mut out, &price);
             report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
             Ok(out.to_string())
         }
@@ -1054,6 +1076,99 @@ fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> 
 /// Set aside entries whose effective tip at `next_base_fee` is below `min_tip`: they stay in the
 /// spool, not selected and not pruned, until the fee allows them or the settled RPC evicts them.
 /// Undecodable bytes pass through, for selection to drop them with a reason.
+/// The producer's write price (sequencer policy v2): wei per added storage slot, and the senders exempt from it.
+struct WritePrice {
+    per_slot: u128,
+    exempt: Vec<Address>,
+}
+
+fn write_price(args: &[String]) -> Result<Option<WritePrice>, String> {
+    let exempt = match option(args, "--write-exempt") {
+        Ok(text) => text
+            .split(',')
+            .filter(|a| !a.is_empty())
+            .map(|a| a.trim_start_matches("0x").parse::<Address>().map_err(|_| format!("--write-exempt: {a} is not an address")))
+            .collect::<Result<Vec<_>, _>>()?,
+        Err(_) => vec![],
+    };
+    match option(args, "--fresh-slot-price-wei") {
+        Ok(text) => {
+            let per_slot = text.parse::<u128>().map_err(|_| "--fresh-slot-price-wei must be decimal")?;
+            Ok((per_slot > 0).then_some(WritePrice { per_slot, exempt }))
+        }
+        Err(_) if exempt.is_empty() => Ok(None),
+        Err(_) => Err("--write-exempt needs --fresh-slot-price-wei".into()),
+    }
+}
+
+/// What [`leave_unpaid`] took out of the candidates.
+#[derive(Default)]
+struct UnpaidReport {
+    entries: Vec<serde_json::Value>,
+    passes: usize,
+    conservative: bool,
+}
+
+impl UnpaidReport {
+    fn report(&self, out: &mut serde_json::Value, price: &Option<WritePrice>) {
+        if let Some(price) = price {
+            out["unpaid"] = json!(self.entries);
+            out["write_price"] = json!({"fresh_slot_price_wei": price.per_slot.to_string(), "passes": self.passes,
+                                        "conservative": self.conservative});
+        }
+    }
+}
+
+/// Exact passes of [`leave_unpaid`] before it turns conservative.
+const WRITE_PRICE_EXACT_PASSES: usize = 64;
+
+/// Take out of `pool` every candidate that would be included without paying the write price.
+/// The slots a transaction adds depend on the transactions before it, so the selection runs on the candidates,
+/// the FIRST unpaid transaction in block order leaves, and the selection runs again: every transaction is then
+/// judged after exactly the transactions it runs after in the block that is built, and a transaction is never
+/// refused for what an earlier refused one did. Each pass removes at least one candidate, so it ends. After
+/// `WRITE_PRICE_EXACT_PASSES` passes every unpaid transaction of a pass leaves at once (bounded work under a
+/// long chain of non-payers; a payer can then wait one block more than needed, never the reverse).
+fn leave_unpaid(
+    coordinator: &CanonicalCoordinator,
+    attributes: &BlochNextBlockEnvCtx,
+    forced: &[ForcedTransaction],
+    mut pool: Vec<(Option<PathBuf>, alloy_primitives::Bytes)>,
+    limits: SelectionLimits,
+    price: &WritePrice,
+) -> Result<(Vec<(Option<PathBuf>, alloy_primitives::Bytes)>, UnpaidReport), String> {
+    let mut report = UnpaidReport::default();
+    loop {
+        let candidates: Vec<_> = pool.iter().map(|(_, raw)| raw.clone()).collect();
+        let selection = if forced.is_empty() {
+            coordinator.select_pending(attributes, &candidates, limits).map_err(|e| e.to_string())?
+        } else {
+            coordinator.select_pending_after_forced(attributes, forced, &candidates, limits).map_err(|e| e.to_string())?.1
+        };
+        report.passes += 1;
+        report.conservative = report.passes > WRITE_PRICE_EXACT_PASSES;
+        let mut leaving = Vec::new();
+        for stats in &selection.stats {
+            let slots = stats.fresh_slots.iter().fold(0u64, |total, (_, n)| total.saturating_add(*n));
+            let owed = U256::from(slots) * U256::from(price.per_slot);
+            if slots == 0 || price.exempt.contains(&stats.sender) || U256::from(stats.gas_used) * U256::from(stats.effective_tip) >= owed {
+                continue;
+            }
+            leaving.push(stats.hash);
+            report.entries.push(json!({"hash": hex::encode(stats.hash), "sender": hex::encode(stats.sender), "nonce": stats.nonce,
+                                       "gas_used": stats.gas_used, "effective_tip": stats.effective_tip.to_string(),
+                                       "fresh_slots": slots, "owed_wei": owed.to_string()}));
+            if !report.conservative {
+                break;
+            }
+        }
+        if leaving.is_empty() {
+            return Ok((pool, report));
+        }
+        pool.retain(|(_, raw)| !leaving.contains(&alloy_primitives::keccak256(raw)));
+    }
+}
+
 fn hold_below_min_tip(
     spec: &bloch_l2_evm::ChainSpec,
     pool: Vec<(Option<PathBuf>, alloy_primitives::Bytes)>,

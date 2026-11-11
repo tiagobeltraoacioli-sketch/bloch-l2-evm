@@ -147,6 +147,7 @@ POLICY_V2 = {
     'max_block_sp1_gas': 90_000_000, 'max_block_instructions': 90_000_000, 'max_block_txs': 64,
     'max_tx_gas': 5_000_000, 'exempt_max_tx_gas': 15_000_000,
     'fresh_slot_price_wei': 200 * 10**12, 'fresh_slots_per_block': 128, 'fresh_slots_per_sender': 256,
+    'producer_write_price': True,  # round 15: the candidate's produce-dev applies the write price itself
     'fresh_sender_window_seconds': 48 * 3600,
     'preflight_cycle_limit_factor': 2, 'preflight_execute_seconds': 90, 'preflight_max_runs': 24,
     'preflight_max_seconds': 180, 'sender_ban_seconds': 86400, 'standing_seconds': 7 * 86400,

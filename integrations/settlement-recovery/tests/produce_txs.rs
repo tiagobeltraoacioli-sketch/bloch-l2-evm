@@ -280,3 +280,117 @@ fn sign_tx_transfers_and_withdraws_from_a_development_key() {
     std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o640)).unwrap();
     assert!(produce(&["address", "--key", key_s]).unwrap_err().contains("owner only"));
 }
+
+fn signed_by(seed: u8, nonce: u64, to: TxKind, input: Vec<u8>, tip: u128) -> String {
+    let key = SigningKey::from_bytes((&[seed; 32]).into()).unwrap();
+    let tx = TxEip1559 {
+        chain_id: 700_771,
+        nonce,
+        to,
+        input: input.into(),
+        gas_limit: 200_000,
+        max_fee_per_gas: 200_000_000_000,
+        max_priority_fee_per_gas: tip,
+        ..Default::default()
+    };
+    let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+}
+
+fn address_of(seed: u8) -> Address {
+    Address::from_public_key(SigningKey::from_bytes((&[seed; 32]).into()).unwrap().verifying_key())
+}
+
+/// Round 15 (agents/304 U3, F264-2 residual): the write price inside the producer's own selection. A chain of
+/// senders that write the same slot at tips below the price for one new slot is taken out whole in one
+/// `select`, however long, and `extend` builds no block with an unpaid slot.
+#[test]
+fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
+    const GWEI: u128 = 1_000_000_000;
+    // One new slot costs 10^15 wei: about 23 gwei per gas for a 43.7k-gas store.
+    const PRICE: &str = "1000000000000000";
+    let root = tempfile::tempdir().unwrap();
+    let (db, pool) = (root.path().join("db"), root.path().join("pool"));
+    std::fs::create_dir(&pool).unwrap();
+    let (db_s, pool_s) = (db.to_str().unwrap(), pool.to_str().unwrap());
+    let genesis = produce(&["init", "--target", db_s]).unwrap();
+    let parent = genesis["hash"].as_str().unwrap().to_string();
+    let seeds: Vec<u8> = (21..=30).collect();
+    let deposits = root.path().join("deposits.json");
+    let mints: Vec<_> = seeds
+        .iter()
+        .enumerate()
+        .map(|(i, seed)| {
+            serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                               "sats": 100_000_000u64, "recipient": hex::encode(address_of(*seed))})
+        })
+        .collect();
+    std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
+    let anchor = "ab".repeat(32);
+    // Block 1: the deposits, and a contract whose only code is SSTORE(calldata[32..64], calldata[0..32]).
+    let init = hex::decode("67600035602035550060005260086018f3").unwrap();
+    std::fs::write(pool.join("deploy.tx"), signed_by(seeds[0], 0, TxKind::Create, init, 30 * GWEI)).unwrap();
+    let one = produce(&["extend", "--target", db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", pool_s]).unwrap();
+    assert_eq!(one["transactions"], 1, "{one}");
+    let head = one["hash"].as_str().unwrap().to_string();
+    let contract = address_of(seeds[0]).create(0);
+    let store = |value: u8, slot: u8| {
+        let mut data = vec![0u8; 64];
+        data[31] = value;
+        data[63] = slot;
+        data
+    };
+    let empty = root.path().join("empty.json");
+    std::fs::write(&empty, "[]").unwrap();
+    let select = |extra: &[&str]| {
+        let mut args = vec!["select", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(), "--txs", pool_s];
+        args.extend_from_slice(extra);
+        produce(&args).unwrap()
+    };
+    // Nine senders write slot 5, each at a lower tip, every tip below the price of one new slot.
+    for (i, seed) in seeds[1..].iter().enumerate() {
+        let raw = signed_by(*seed, 0, TxKind::Call(contract), store(1 + i as u8, 5), (9 - i as u128) * GWEI);
+        std::fs::write(pool.join(format!("chain-{i}.tx")), raw).unwrap();
+    }
+    let unpriced = select(&[]);
+    assert_eq!(unpriced["included"].as_array().unwrap().len(), 9);
+    assert!(unpriced.get("unpaid").is_none());
+    assert_eq!(unpriced["tx_stats"][0]["fresh_slots"][0][1], 1, "the first writer creates the slot");
+    assert_eq!(unpriced["tx_stats"][1]["fresh_slots"].as_array().unwrap().len(), 0);
+    // With the price: the first writer leaves, the second becomes the creator and leaves, and so on, in one call.
+    let priced = select(&["--fresh-slot-price-wei", PRICE]);
+    assert_eq!(priced["included"].as_array().unwrap().len(), 0, "{priced}");
+    assert_eq!(priced["unpaid"].as_array().unwrap().len(), 9);
+    assert_eq!(priced["write_price"]["passes"], 10);
+    assert_eq!(priced["write_price"]["conservative"], false);
+    assert_eq!(priced["unpaid"][0]["hash"], unpriced["included"][0], "refused in block order, highest tip first");
+    assert_eq!(priced["tx_stats"].as_array().unwrap().len(), 0);
+    // An exempt sender pays no write price: it creates the slot and the eight behind it add none.
+    let first = hex::encode(address_of(seeds[1]));
+    let exempt = select(&["--fresh-slot-price-wei", PRICE, "--write-exempt", &first]);
+    assert_eq!(exempt["included"].as_array().unwrap().len(), 9, "{exempt}");
+    assert_eq!(exempt["unpaid"].as_array().unwrap().len(), 0);
+    // A payer ahead of the chain creates the slot; nobody behind it owes anything.
+    std::fs::write(pool.join("payer.tx"), signed_by(seeds[0], 1, TxKind::Call(contract), store(77, 5), 30 * GWEI)).unwrap();
+    let paid = select(&["--fresh-slot-price-wei", PRICE]);
+    assert_eq!(paid["included"].as_array().unwrap().len(), 10, "{paid}");
+    assert_eq!(paid["unpaid"].as_array().unwrap().len(), 0);
+    assert_eq!(paid["write_price"]["passes"], 1);
+    std::fs::remove_file(pool.join("payer.tx")).unwrap();
+    // A non-payer is not refused for what an earlier non-payer did: an unpaid creator of slot 6 goes first, and
+    // the payer of slot 6 behind it is judged on the block without it.
+    std::fs::write(pool.join("other-unpaid.tx"), signed_by(seeds[0], 1, TxKind::Call(contract), store(1, 6), 20 * GWEI)).unwrap();
+    let mixed = select(&["--fresh-slot-price-wei", PRICE]);
+    assert_eq!(mixed["unpaid"].as_array().unwrap().len(), 10, "{mixed}");
+    std::fs::remove_file(pool.join("other-unpaid.tx")).unwrap();
+    // extend with the price builds the block without them and keeps their files; without --txs the flag is refused.
+    let err = produce(&["extend", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--fresh-slot-price-wei", PRICE]);
+    assert!(err.unwrap_err().contains("require --txs"));
+    let files_before = spool(&pool);
+    let two = produce(&["extend", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(),
+                        "--txs", pool_s, "--fresh-slot-price-wei", PRICE]).unwrap();
+    assert_eq!(two["transactions"], 0, "{two}");
+    assert_eq!(two["unpaid"].as_array().unwrap().len(), 9);
+    assert_eq!(two["pruned"], 0);
+    assert_eq!(spool(&pool), files_before, "an unpaid transaction keeps its spool file");
+}

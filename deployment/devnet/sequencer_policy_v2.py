@@ -42,6 +42,9 @@ DEFAULTS = {
     'max_tx_gas': 5_000_000,
     # Writes (3.3). Rates in seconds.
     'fresh_slot_price_wei': 200 * 10**12,  # 200 µBLCH per new slot
+    # The producer applies the write price itself (`produce-dev --fresh-slot-price-wei`, round 15) and reports the
+    # transactions it left pending under `unpaid`. Needs a producer built from round 15 on; the installer turns it on.
+    'producer_write_price': False,
     'fresh_slots_per_block': 128,
     'fresh_slots_per_sender': 256,
     'fresh_sender_window_seconds': 48 * 3600,
@@ -312,6 +315,7 @@ class Policy:
                 return {}, []
             plan.finished.extend(d['hash'] for d in report.get('dropped', []) if d.get('hash'))
             by_hash = {t['hash']: raw for t, raw in zip(stats, _in_block_order(report, raws))}
+            self._hold_unpaid(report, plan.held, now)
             passing, refused = self.gate(stats, now, has_mandatory)
             if not refused:
                 return by_hash, stats
@@ -327,6 +331,18 @@ class Policy:
         self.log('gate-did-not-settle', passes=self.c['gate_passes'], used=len(raws))
         plan.gate_settled = False  # the final gate decides on the block as chosen
         return {t['hash']: raw for t, raw in zip(stats, raws)}, stats
+
+    def _hold_unpaid(self, report, held, now):
+        """Transactions the producer itself left out for the write price (`unpaid` of a `--fresh-slot-price-wei`
+        report: judged on the block as built, one refusal at a time, so the list is complete and exact). They are
+        not in `tx_stats`; they wait like a gate refusal of their own payment, by sender, nonce and hash."""
+        names = []
+        for tx in report.get('unpaid') or []:
+            if (tx['hash'], 'below-write-price') not in held:
+                held.append((tx['hash'], 'below-write-price'))
+            self._dependent_wait(tx, now)
+            names.append(tx['hash'])
+        return names
 
     def _dependent_wait(self, tx, now):
         self.state['waits'][self.key(tx)] = {'until': now + self.c['gate_dependent_wait_seconds'],
@@ -549,19 +565,26 @@ class Policy:
         Otherwise the measured block stands as it is, with the unpaid slots of its remaining chain (logged
         `final-gate-unsettled`; `committed` books them against the sender's 48 h rate): senders that never pay must
         not be able to empty a block by spooling a chain longer than the passes (A243-12 comes first). Never an
-        unmeasured block. The complete remedy is the write price inside the producer's own selection loop, one pass
-        and no dependency (a compiled-producer change, listed as open in agents/304)."""
+        unmeasured block. Round 15: with `producer_write_price` the producer applies the write price inside its own
+        selection (`select` and `extend`), one refusal at a time on the block as built, so an unpaid chain of any
+        length leaves in one selection and the block that stands never holds an unpaid slot; what can still be
+        unsettled here is a per-block or per-sender write LIMIT, not a payment."""
         def refusals(names):
             report = dry([by_hash[h] for h in names])
             stats = report.get('tx_stats') or []
             passing, refused = self.gate(stats, now, has_mandatory)
+            # What the producer left out for the write price is refused here too: it is in no `tx_stats`, and the
+            # block the producer builds from `names` does not hold it (its senders' later nonces defer by themselves).
+            unpaid.clear()
+            unpaid.extend(self._hold_unpaid(report, [], now))
+            refused.update({name: ('below-write-price', False) for name in unpaid if name in set(names)})
             return stats, set(passing), refused
 
         def note(stats, refused):
             info = {t['hash']: t for t in stats}
             for name, (reason, _) in refused.items():
                 held.append((name, reason))
-                if reason in ('below-write-price', 'sender-write-limit'):
+                if reason in ('below-write-price', 'sender-write-limit') and name in info:
                     self._dependent_wait(info[name], now)
 
         def prefix(names, stats, refused):
@@ -571,13 +594,17 @@ class Policy:
                     break
                 before.add(tx['hash'])
             if 2 * len(before) < len(names):
-                self.log('final-gate-unsettled', kept=len(names), prefix=len(before), refused=len(refused))
+                # With `producer_write_price` the block built from `names` leaves the unpaid ones out by itself (they
+                # keep their spool files), so what stands here is over a write LIMIT at most, never an unpaid slot.
+                self.log('final-gate-unsettled', kept=len(names), prefix=len(before), refused=len(refused),
+                         unpaid_left_by_producer=len(unpaid))
                 return names
             plan.held.extend((h, 'behind-final-gate-refusal') for h in names if h not in before and h not in refused)
             self.log('final-gate-prefix', kept=len(before), of=len(names))
             return [h for h in names if h in before]
 
         held = []  # refusals of this pass: reported only for what really leaves the block
+        unpaid = []  # what the producer's own write price left out of the last selection of `best`
 
         def leave(names):
             plan.held.extend(item for item in held if item[0] not in set(names))
