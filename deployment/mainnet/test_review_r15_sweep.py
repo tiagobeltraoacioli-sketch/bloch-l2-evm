@@ -44,7 +44,10 @@ class FullTree(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.l2, self.native = self.tmp / 'l2', self.tmp / 'native'
         self.l2.mkdir()
-        archive = subprocess.run(['git', '-C', str(base.L2), 'archive', 'HEAD'], check=True, capture_output=True).stdout
+        done = subprocess.run(['git', '-C', str(base.L2), 'archive', 'HEAD'], capture_output=True)
+        if done.returncode:
+            self.skipTest('needs a git checkout (git archive HEAD): not available in a plain export')
+        archive = done.stdout
         subprocess.run(['tar', '-x', '-C', str(self.l2)], input=archive, check=True)
         (self.native / m.NATIVE_PINS).parent.mkdir(parents=True)
         (self.native / m.NATIVE_PINS).write_text(base.NATIVE)
