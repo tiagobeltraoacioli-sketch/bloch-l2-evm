@@ -79,7 +79,7 @@ class R308_5AuditNeverPasses(FullTree):
 
     def test_audit_exits_zero_after_the_whole_procedure(self):
         old = [v for pin in ('MAINNET_NEXT_SPARSE', 'MAINNET_NEXT') for v in m.settler_pin(self.l2, pin).values()]
-        self.assertEqual(call('set', '0x' + m.eip55(A)[2:], '--l2', self.l2, '--native', self.native)[0], 0)
+        self.assertEqual(call('set', m.eip55(A), '--l2', self.l2, '--native', self.native, '--confirm', m.eip55(A))[0], 0)
         cfg = m.tree_configuration(self.l2, A)
         args = []
         for kind, program in (('sparse', 'settlement_v3_mainnet_sparse'), ('complete', 'settlement_v3_mainnet')):
@@ -104,8 +104,8 @@ class R308_5AuditNeverPasses(FullTree):
         self.assertEqual((code, stale), (0, []))
 
     def test_a_second_set_leaves_no_text_naming_the_first_recipient(self):
-        self.assertEqual(call('set', '0x' + m.eip55(A)[2:], '--l2', self.l2, '--native', self.native)[0], 0)
-        self.assertEqual(call('set', '0x' + m.eip55(B)[2:], '--l2', self.l2, '--native', self.native)[0], 0)
+        self.assertEqual(call('set', m.eip55(A), '--l2', self.l2, '--native', self.native, '--confirm', m.eip55(A))[0], 0)
+        self.assertEqual(call('set', m.eip55(B), '--l2', self.l2, '--native', self.native, '--confirm', m.eip55(B))[0], 0)
         left = []
         for tree in (self.l2, self.native):
             found = subprocess.run(['grep', '-rIil', '--exclude-dir=.git', A, str(tree)], capture_output=True, text=True)
@@ -133,11 +133,14 @@ class R308_6GateReadsOneSpelling(unittest.TestCase):
         """`apply` writes a 126-column line; rustfmt.toml has max_width = 120, so `cargo fmt` (planned once at the audit
         freeze, together with the recipient rebuild: agents/304 U5) breaks it after the `=`. The gate, and with it
         build-release.sh, then refuses a correctly set tree."""
-        self.assertLessEqual(len(self.line), 120, 'the line apply writes is over rustfmt max_width')
+        written = m.recipient_constant(A).split('\n')
+        self.assertLessEqual(max(map(len, written)), 120, 'the line apply writes is over rustfmt max_width')
+        self.assertEqual(' '.join(part.strip() for part in written), self.line)
 
     def test_the_gate_reads_the_constant_as_rustfmt_formats_it(self):
         broken = self.line.replace(' = Some', ' =\n    Some')
-        self.assertEqual(self.gate(self.text.replace(self.unset, broken)), 0)
+        self.assertEqual(self.gate(m.set_constant(self.text, A)), 0)
+        self.assertEqual(self.gate(m.set_constant(self.text, A).replace(m.recipient_constant(A), broken)), 0)
 
     def test_a_comment_cannot_stand_in_for_the_constant(self):
         """The constant is `None` (no recipient), a comment above it carries the set form: the gate passes."""

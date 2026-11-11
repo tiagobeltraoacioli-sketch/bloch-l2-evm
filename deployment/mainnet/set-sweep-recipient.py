@@ -14,11 +14,18 @@ both guest build-container.sh scripts refuse the fork build (they call `gate`).
 The owner's one command (phase 1; validates, optionally reads the Safe on L2, edits both trees, re-checks the gate
 and commits both trees so the container builds can take the commit):
 
-  set      ADDRESS --l2 T --native N [--rpc URL [--allow-codeless]] [--no-commit] [--dry-run]
+  set      ADDRESS --l2 T --native N (--rpc URL | --confirm ADDRESS) [--allow-codeless] [--no-commit] [--dry-run]
+
+ADDRESS is always the EIP-55 mixed-case checksum form with its 0x prefix (R308-4): an all-lowercase, all-uppercase or
+prefix-less value carries no checksum and is refused, as is every burn or patterned (keyless) address. `set` also
+wants proof that the address is the intended one: `--rpc URL` (the address already holds code on the L2 at
+`finalized`), or the address typed a second time (`--confirm ADDRESS`, or at the prompt on a terminal). A
+counterfactual address (`--rpc URL --allow-codeless`) needs the second typing too.
 
 Steps (each refuses to run on a tree it does not recognise, and is idempotent):
 
-  gate     --l2 T | --chainspec FILE    exit 0 only if the tree carries a release recipient (used by the build scripts)
+  gate     --l2 T | --chainspec FILE    exit 0 only if the tree carries a release recipient, with its EIP-55
+                                        form in the doc line `apply` writes (used by the build scripts)
   check    ADDRESS                      validate the address, print the new configuration commitment
   apply    ADDRESS --l2 T --native N    phase 1: the recipient constant, the rehearsal constants and the
                                         configuration commitment in both trees
@@ -37,7 +44,9 @@ next configuration includes the base-fee floor (`MAINNET_MIN_BASE_FEE`, agent 19
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -159,27 +168,58 @@ def eip55(addr):
     return '0x' + ''.join(c.upper() if c.isalpha() and int(h[i], 16) >= 8 else c for i, c in enumerate(addr))
 
 
-def parse_address(text, allow_burn=False):
-    """Lowercase 40-hex recipient, or SystemExit with the reason."""
-    raw = text.strip()
-    body = raw[2:] if raw.lower().startswith('0x') else raw
-    if not re.fullmatch(r'[0-9a-fA-F]{40}', body):
-        raise SystemExit(f'not a 20-byte hex address: {text!r}')
-    low = body.lower()
-    if body != low and body != body.upper() and eip55(low)[2:] != body:
-        raise SystemExit(f'EIP-55 checksum mismatch: {text} (expected {eip55(low)})')
+def patterned(low):
+    """Why a 40-hex value looks hand-made (nobody holds a key for it), or None. A key-derived or CREATE2 address
+    has a run of 16 equal nibbles, or a period of 8 or fewer, with a probability far below 2^-50."""
+    run = best = 1
+    for i in range(1, 40):
+        run = run + 1 if low[i] == low[i - 1] else 1
+        best = max(best, run)
+    if best >= 16:
+        return f'a run of {best} equal hex digits'
+    for period in range(1, 9):
+        if all(low[i] == low[i % period] for i in range(40)):
+            return f'the {period}-digit pattern {low[:period]} repeated'
+    return None
+
+
+def refusal_of(low):
+    """Why this 40-lowercase-hex recipient may never be compiled into a release, or None."""
     if low in SYSTEM:
-        raise SystemExit(f'{eip55(low)} is the {SYSTEM[low]}: refused by ChainSpec::validate or a sweep loop')
+        return f'{eip55(low)} is the {SYSTEM[low]}: refused by ChainSpec::validate or a sweep loop'
     if low.startswith('42000000000000000000000000000000000'):
-        raise SystemExit(f'{eip55(low)} is in the OP-style predeploy range 0x4200...: refused')
-    if int(low, 16) <= 0xff and low not in BURN:
-        raise SystemExit(f'{eip55(low)} is in the precompile range: a precompile may revert on the empty call '
-                         '(0x09 blake2f does), and then no sweep ever succeeds')
-    if low in BURN and not allow_burn:
-        raise SystemExit(f'{eip55(low)} is a burn address: fees sent there are locked forever and stay in the L1 '
-                         'escrow. Pass --allow-burn only if that is the decision')
+        return f'{eip55(low)} is in the OP-style predeploy range 0x4200...: refused'
     if low == PLACEHOLDER:
-        raise SystemExit('that is the rehearsal placeholder (REHEARSAL_FEE_SWEEP_RECIPIENT), not a decision')
+        return 'that is the rehearsal placeholder (REHEARSAL_FEE_SWEEP_RECIPIENT), not a decision'
+    if low in BURN:
+        return (f'{eip55(low)} is a burn address: fees sent there are locked forever and stay in the L1 escrow. '
+                'Owner decision in force: never a burn address (there is no override)')
+    if int(low, 16) <= 0xff:
+        return (f'{eip55(low)} is in the precompile range: a precompile may revert on the empty call '
+                '(0x09 blake2f does), and then no sweep ever succeeds')
+    pattern = patterned(low)
+    if pattern:
+        return (f'{eip55(low)} is {pattern}: a hand-made value nobody holds a key or code for, so every fee swept '
+                'there is lost (never a burn address)')
+    return None
+
+
+def parse_address(text):
+    """Lowercase 40-hex recipient, or SystemExit with the reason. The text must be the EIP-55 mixed-case form with
+    its 0x prefix (R308-4): a single-case or prefix-less value has no checksum, so one wrong digit cannot be seen."""
+    raw = text.strip()
+    if not re.fullmatch(r'0x[0-9a-fA-F]{40}', raw):
+        raise SystemExit(f'not a 0x-prefixed 20-byte hex address: {text!r}')
+    low = raw[2:].lower()
+    if eip55(low) != raw:
+        if raw[2:] in (low, low.upper()):
+            raise SystemExit(f'{text} carries no checksum (single case): give the EIP-55 mixed-case form exactly as '
+                             'the Safe shows it. The tool does not print it for you: a wrong digit would get a valid '
+                             'checksum that way')
+        raise SystemExit(f'EIP-55 checksum mismatch: {text}: one or more characters are wrong; copy the address again')
+    refusal = refusal_of(low)
+    if refusal:
+        raise SystemExit(refusal)
     return low
 
 
@@ -197,8 +237,12 @@ SELF_FILES = {'set-sweep-recipient.py', 'test_set_sweep_recipient.py', 'SWEEP-RE
               'reset-target-fixture.json',
               # the audited sparse build f6eb456 (78c533fa, before forced inclusion and the floor): a record, never a pin
               'AUDIT-SCOPE-SPARSE.md'}
-RECIPIENT_RE = re.compile(r'pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = '
-                          r'(?:None|Some\(Address::new\(hex!\("([0-9a-f]{40})"\)\)\));')
+# The constant at the start of a line (never inside a `//` comment), with any white space after `=`: `apply` writes
+# the two-line form rustfmt keeps (max_width 120; the one-line form is 126 columns), and the one-line form is still
+# read (R308-6).
+RECIPIENT_RE = re.compile(r'^pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> =\s*'
+                          r'(?:None|Some\(Address::new\(hex!\("([0-9a-f]{40})"\)\)\));', re.M)
+OWNER_LINE_RE = re.compile(r'^/// rules, fixed by the owner: `(0x[0-9a-fA-F]{40})`\.$', re.M)
 FLOOR_RE = re.compile(r'pub const MAINNET_MIN_BASE_FEE: u64 = ([0-9_]+);')
 PLACEHOLDER_DOC = ('/// UNSET, `TBD-owner`: the immutable recipient of the fee-vault sweep under the\n'
                    "/// next mainnet rules, the Bloch Inc Safe's L2 address once the owner fixes it\n"
@@ -230,6 +274,18 @@ COMMENT_EDITS = (
      '- **The sweep recipient is a placeholder**, so the next-rules ELF and its keys move\n  once it is set.',
      '- **The sweep recipient is `{a}`** (set by the owner); the next-rules ELF and\n  its keys are built with it.'),
 )
+
+
+def recipient_constant(recipient):
+    """The constant as `apply` writes it: the form rustfmt keeps."""
+    return ('pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> =\n'
+            f'    Some(Address::new(hex!("{recipient}")));')
+
+
+def set_constant(text, recipient):
+    """A chainspec.rs text with the recipient constant and its doc (which carries the EIP-55 form the gate checks)."""
+    out = RECIPIENT_RE.sub(lambda _: recipient_constant(recipient), text).replace(PLACEHOLDER_DOC, owner_doc(recipient))
+    return OWNER_LINE_RE.sub(lambda _: owner_doc(recipient).split('\n')[1], out)
 
 
 def owner_doc(recipient):
@@ -265,11 +321,14 @@ def text_files(tree):
 
 def recipient_in(text, where):
     """The recipient a chainspec.rs text carries: 40 lowercase hex, or None while unset."""
-    m = RECIPIENT_RE.search(text)
-    if not m:
+    found = list(RECIPIENT_RE.finditer(text))
+    if not found:
         raise SystemExit(f'{where}: `MAINNET_FEE_SWEEP_RECIPIENT: Option<Address>` not found; not a gated fork-candidate '
                          'L2 tree (agent 217 gate)')
-    return m.group(1)
+    if len(found) > 1:
+        raise SystemExit(f'{where}: MAINNET_FEE_SWEEP_RECIPIENT is defined {len(found)} times (one may sit in a block '
+                         'comment); refusing to guess')
+    return found[0].group(1)
 
 
 def floor_in(text, where):
@@ -317,11 +376,23 @@ def gate_refusal(recipient):
     `is_release_fee_sweep_recipient`: burn addresses and the whole 0x00..00ff range are refused too."""
     if recipient is None:
         return 'MAINNET_FEE_SWEEP_RECIPIENT is unset (TBD-owner): run set-sweep-recipient.py set ADDRESS'
-    try:
-        parse_address(recipient)
-    except SystemExit as refusal:
-        return str(refusal)
-    return None
+    return refusal_of(recipient)
+
+
+def text_refusal(text, where):
+    """(recipient, why the chainspec.rs text may not be released or None). Beyond `gate_refusal`, the doc line `apply`
+    writes must carry the EIP-55 form of the constant (R308-4): a constant edited by hand, or one wrong digit in it,
+    does not match the checksum next to it."""
+    r = recipient_in(text, where)
+    refusal = gate_refusal(r)
+    if refusal:
+        return r, refusal
+    forms = OWNER_LINE_RE.findall(text)
+    if forms != [eip55(r)]:
+        return r, (f'the constant is {r} but the doc line "/// rules, fixed by the owner: `{eip55(r)}`." is '
+                   f'{"missing" if not forms else "not that: " + ", ".join(forms)}; the recipient must be written by '
+                   'set-sweep-recipient.py set/apply from the EIP-55 form, never by hand')
+    return r, None
 
 
 def settler_pin(l2, name):
@@ -383,24 +454,54 @@ def self_check(l2, native):
 
 
 class Editor:
+    """Collects every edit in memory; `report` writes them all to temporary files and renames those at the end
+    (R308-6), src/chainspec.rs last: an interruption before the renames leaves the trees untouched, and one between
+    them leaves the gate closed. Later edits of one run read the earlier ones through `read` / `files`."""
+
     def __init__(self, dry_run):
-        self.dry_run, self.changed = dry_run, {}
+        self.dry_run, self.changed, self.pending = dry_run, {}, {}
+
+    def read(self, path):
+        return self.pending[path] if path in self.pending else path.read_text()
+
+    def files(self, tree):
+        for path, text in text_files(tree):
+            yield path, self.pending.get(path, text)
 
     def write(self, path, before, after, why):
         if before == after:
             return
         self.changed.setdefault(str(path), []).append(why)
-        if not self.dry_run:
-            path.write_text(after)
+        self.pending[path] = after
 
-    def replace_everywhere(self, trees, old, new, why, bounded=True):
+    def replace_everywhere(self, trees, old, new, why, bounded=True, skip=()):
         pattern = re.compile(rf'(?<![0-9a-fA-F]){re.escape(old)}(?![0-9a-fA-F])' if bounded else re.escape(old))
         for tree in trees:
-            for path, text in text_files(tree):
-                if old in text and path.name not in SELF_FILES:
+            for path, text in list(self.files(tree)):
+                if old in text and path.name not in SELF_FILES and path not in skip:
                     self.write(path, text, pattern.sub(new, text), why)
 
+    def flush(self):
+        if self.dry_run or not self.pending:
+            return
+        order = sorted(self.pending, key=lambda p: (str(p).endswith(CHAINSPEC), str(p)))
+        temps = []
+        try:
+            for path in order:
+                tmp = path.with_name(f'.{path.name}.sweep-tmp')
+                tmp.write_text(self.pending[path])
+                shutil.copymode(path, tmp)
+                temps.append((tmp, path))
+            for tmp, path in temps:
+                os.replace(tmp, path)
+        finally:
+            for tmp, _ in temps:
+                if tmp.exists():
+                    tmp.unlink()
+        self.pending = {}
+
     def report(self):
+        self.flush()
         verb = 'would change' if self.dry_run else 'changed'
         for path, whys in sorted(self.changed.items()):
             print(f'{verb} {path}: {", ".join(sorted(set(whys)))}')
@@ -418,54 +519,66 @@ def refresh_installer_pins(l2, ed):
     p = l2 / INSTALLER
     if not p.is_file():
         return
-    t = p.read_text()
+    t = ed.read(p)
     t2 = t
     for name, rel in INSTALLER_PINNED:
-        if ed.dry_run and str(l2 / rel) in ed.changed:
-            print(f'would refresh {INSTALLER} PINS[{name!r}] after the edit of {rel}')
-            continue
-        digest = hashlib.sha256((l2 / rel).read_bytes()).hexdigest()
+        digest = hashlib.sha256(ed.read(l2 / rel).encode()).hexdigest()
         t2 = re.sub(rf"('{re.escape(name)}': ')[0-9a-f]{{64}}(')", lambda m: m.group(1) + digest + m.group(2), t2)
     ed.write(p, t, t2, 'installer pin of an edited file')
 
 
 # -------------------------------------------------------------------------------------------------- steps
 def cmd_check(args):
-    r = parse_address(args.address, args.allow_burn)
+    r = parse_address(args.address)
     print(json.dumps({'recipient': eip55(r), 'configuration (no floor, no forced inclusion)': configuration_commitment(r),
                       'configuration (0.1 gwei floor, forced inclusion)':
-                          configuration_commitment(r, 100_000_000, True),
-                      'burn': r in BURN}, indent=2))
+                          configuration_commitment(r, 100_000_000, True)}, indent=2))
+
+
+def short_forms(old, new):
+    """(old, new, bounded) for the short spellings of a 64-hex value in comments: `78c533fa…7bea`, `78c533fa...7bea`
+    and the bare `78c533fa`."""
+    return [(f'{old[:8]}{sep}{old[-4:]}', f'{new[:8]}{sep}{new[-4:]}', False) for sep in ('…', '...')] + [
+        (old[:8], new[:8], True)]
 
 
 def cmd_apply(args):
-    r = parse_address(args.address, args.allow_burn)
+    r = parse_address(args.address)
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     old, old_cfg = self_check(l2, native)
     new_cfg = tree_configuration(l2, r)
     ed = Editor(args.dry_run)
+    p = l2 / CHAINSPEC
+    t = p.read_text()
+    # Also on an unchanged recipient: an older tree carries the one-line constant, or lacks the EIP-55 doc line.
+    ed.write(p, t, set_constant(t, r), 'MAINNET_FEE_SWEEP_RECIPIENT')
     if current_recipient(l2) != r:
-        p = l2 / CHAINSPEC
-        t = p.read_text()
-        const = f'pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = Some(Address::new(hex!("{r}")));'
-        t2 = RECIPIENT_RE.sub(lambda _: const, t).replace(PLACEHOLDER_DOC, owner_doc(r))
-        if PLACEHOLDER_DOC not in t and owner_doc(r) not in t2:
-            t2 = re.sub(r'/// The immutable recipient of the fee-vault sweep under the next mainnet\n'
-                        r'/// rules, fixed by the owner: `0x[0-9a-fA-F]{40}`\.\n', owner_doc(r).split('/// It enters')[0], t2)
-        ed.write(p, t, t2, 'MAINNET_FEE_SWEEP_RECIPIENT')
         for rel in CROSSINGS:
             p = l2 / rel
             t = p.read_text()
             ed.write(p, t, t.replace(f"SWEEP_RECIPIENT = '{old}'", f"SWEEP_RECIPIENT = '{r}'"), 'rehearsal SWEEP_RECIPIENT')
         ed.replace_everywhere([l2, native], old_cfg, new_cfg, 'next configuration commitment')
+        # The short forms of the configuration in comments (R308-5); `pins` does the same for the guest hashes.
+        for before, after, bounded in short_forms(old_cfg, new_cfg):
+            ed.replace_everywhere([l2, native], before, after, 'next configuration commitment (short)', bounded=bounded)
         p = native / NATIVE_PINS
-        t = p.read_text()
+        t = ed.read(p)
         ed.write(p, t, t.replace(NATIVE_PLACEHOLDER_DOC, native_owner_doc(r)), 'PROGRAM_NEXT doc')
         for rel, before, after in COMMENT_EDITS:
             p = l2 / rel
             if p.is_file():
-                t = p.read_text()
+                t = ed.read(p)
                 ed.write(p, t, t.replace(before, after.format(a=eip55(r))), 'placeholder comment')
+        if old != PLACEHOLDER:
+            # A second `set` (R308-5): every text that names the previous recipient, in either spelling, follows.
+            # src/chainspec.rs is written above only (its Rust tests pin a throwaway address of their own).
+            for before, after in ((eip55(old)[2:], eip55(r)[2:]), (old, r)):
+                ed.replace_everywhere([l2, native], before, after, 'previous recipient', skip=(l2 / CHAINSPEC,))
+                for rel in sorted({rel for rel, _, _ in COMMENT_EDITS}):  # one of them is a record `SELF_FILES` skips
+                    p = l2 / rel
+                    if p.is_file():
+                        t = ed.read(p)
+                        ed.write(p, t, t.replace(before, after), 'previous recipient')
     refresh_installer_pins(l2, ed)
     ed.report()
     print(json.dumps({'old_recipient': eip55(old), 'recipient': eip55(r), 'old_configuration': old_cfg,
@@ -499,8 +612,7 @@ def elf_digest(arg):
 
 def cmd_pins(args):
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
-    r = current_recipient(l2)
-    refusal = gate_refusal(r)
+    r, refusal = text_refusal((l2 / CHAINSPEC).read_text(), l2 / CHAINSPEC)
     if refusal:
         raise SystemExit(f'pins: {refusal}')
     cfg = tree_configuration(l2, r)
@@ -524,13 +636,11 @@ def cmd_pins(args):
                 ed.replace_everywhere([l2, native], old[key], value, f'{kind} {key}')
         if old['guest_sha256'] != sha:
             o, n = old['guest_sha256'], sha
-            # Short forms in comments and docs: `78c533fa…7bea`, `78c533fa...7bea`, bare `78c533fa`.
-            for sep in ('…', '...'):
-                ed.replace_everywhere([l2, native], f'{o[:8]}{sep}{o[-4:]}', f'{n[:8]}{sep}{n[-4:]}', f'{kind} guest_sha256 (short)', bounded=False)
-            ed.replace_everywhere([l2, native], o[:8], n[:8], f'{kind} guest_sha256 (short)')
-            if size is not None and not args.dry_run:
+            for before, after, bounded in short_forms(o, n):
+                ed.replace_everywhere([l2, native], before, after, f'{kind} guest_sha256 (short)', bounded=bounded)
+            if size is not None:
                 p = native / NATIVE_PINS
-                t = p.read_text()
+                t = ed.read(p)
                 size_text = f'{size:,}'.replace(',', ' ')
                 t2 = re.sub(rf'(`{n[:8]}…{n[-4:]}`\s*(?:///\s*)?\()[\d ]+( bytes\))', lambda m: m.group(1) + size_text + m.group(2), t)
                 ed.write(p, t, t2, f'{kind} ELF size')
@@ -595,7 +705,7 @@ def rebuild_list():
 
 def cmd_audit(args):
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
-    r = current_recipient(l2)
+    r, refusal = text_refusal((l2 / CHAINSPEC).read_text(), l2 / CHAINSPEC)
     cfg = tree_configuration(l2, r) if r else None
     stale = {'placeholder recipient': PLACEHOLDER,
              'placeholder configuration': LEGACY_PLACEHOLDER_CONFIGURATION,
@@ -615,6 +725,9 @@ def cmd_audit(args):
                             'REHEARSAL_FEE_SWEEP_RECIPIENT' in line or 'REHEARSAL_CONFIGURATION' in line
                             or 'CONFIGURATION_FORCED' in line):
                         continue
+                    # The monitor's own constant: it must know the placeholder to alarm on it (R308-5).
+                    if path.name == 'revenue_monitor.py' and line.startswith('PLACEHOLDER_SWEEP_RECIPIENT = '):
+                        continue
                     if v in line and path.name not in SELF_FILES:
                         hits.append(f'{path}:{n}: {name}')
                 if 'TBD-owner' in line and re.search(r'sweep|recipient', line, re.I) and path.name not in SELF_FILES:
@@ -622,8 +735,8 @@ def cmd_audit(args):
     native_cfg = native_program(native, 'PROGRAM_NEXT')[0]
     gate_problems = [f'{l2 / g}: no compile-time release gate' for g in GUESTS
                      if (l2 / g).is_file() and GUEST_GATE not in (l2 / g).read_text()]
-    result = {'recipient': eip55(r) if r else None, 'gate': gate_refusal(r) or 'release recipient',
-              'placeholder': gate_refusal(r) is not None, 'configuration': cfg,
+    result = {'recipient': eip55(r) if r else None, 'gate': refusal or 'release recipient',
+              'placeholder': refusal is not None, 'configuration': cfg,
               'native_PROGRAM_NEXT_configuration_matches': native_cfg == cfg,
               'native_PROGRAM_NEXT_FINAL': 'pub const PROGRAM_NEXT_FINAL: bool = true;' in (native / NATIVE_PINS).read_text(),
               'stale_values': hits, 'tbd_owner_sweep_mentions': notes, 'gate_problems': gate_problems,
@@ -641,8 +754,7 @@ def cmd_gate(args):
     else:
         where = Path(args.l2).resolve() / CHAINSPEC
         text = where.read_text()
-    r = recipient_in(text, where)
-    refusal = gate_refusal(r)
+    r, refusal = text_refusal(text, where)
     if refusal:
         print(f'sweep-recipient gate: REFUSED: {refusal}', file=sys.stderr)
         sys.exit(3)
@@ -653,21 +765,32 @@ def cmd_gate(args):
 def cmd_set(args):
     """The owner's one command: check, optional on-chain read, apply to both trees, gate, commit."""
     r = parse_address(args.address)
+    if args.allow_codeless and not args.rpc:
+        raise SystemExit('--allow-codeless only makes sense with --rpc')
     if args.rpc:
-        cmd_onchain(argparse.Namespace(address=args.address, rpc=args.rpc, allow_burn=False,
-                                       allow_codeless=args.allow_codeless))
+        cmd_onchain(argparse.Namespace(address=args.address, rpc=args.rpc, allow_codeless=args.allow_codeless))
+    if not args.rpc or args.allow_codeless:
+        # No code on the L2 vouches for the address (R308-4): it must be typed a second time, checksum included.
+        again = args.confirm
+        if again is None and sys.stdin.isatty():
+            again = input('Type the recipient address again, from the Safe itself (EIP-55 form, do not paste the '
+                          'line above): ')
+        if again is None:
+            raise SystemExit('set needs proof that this is the intended address: --rpc URL (the address must hold '
+                             'code on the L2 at finalized), or the address a second time as --confirm ADDRESS')
+        if parse_address(again) != r:
+            raise SystemExit(f'the two addresses differ: {args.address} and {again.strip()}; nothing written')
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
     run = lambda tree, *a: subprocess.run(['git', '-C', str(tree), *a], capture_output=True, text=True)  # noqa: E731
     if not args.dry_run and not args.no_commit:
         for tree in (l2, native):
             if run(tree, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
                 raise SystemExit(f'{tree}: commit or stash local changes first (set commits its own edits)')
-    cmd_apply(argparse.Namespace(address=args.address, allow_burn=False, l2=args.l2, native=args.native,
-                                 dry_run=args.dry_run))
+    cmd_apply(argparse.Namespace(address=args.address, l2=args.l2, native=args.native, dry_run=args.dry_run))
     if args.dry_run:
         print('dry run: nothing written, nothing committed')
         return
-    refusal = gate_refusal(current_recipient(l2))
+    refusal = text_refusal((l2 / CHAINSPEC).read_text(), l2 / CHAINSPEC)[1]
     if refusal:
         raise SystemExit(f'internal: the gate still refuses after apply: {refusal}')
     if not args.no_commit:
@@ -697,7 +820,7 @@ def rpc(url, method, params):
 
 
 def cmd_onchain(args):
-    r = parse_address(args.address, args.allow_burn)
+    r = parse_address(args.address)
     a = '0x' + r
     if int(rpc(args.rpc, 'eth_chainId', []), 16) != CHAIN_ID:
         raise SystemExit(f'{args.rpc} is not chain {CHAIN_ID}')
@@ -716,7 +839,7 @@ def cmd_onchain(args):
         except (SystemExit, ValueError) as error:
             out['safe'] = f'not a Safe ({error})'
     print(json.dumps(out, indent=2))
-    if code == '0x' and not args.allow_codeless and r not in BURN:
+    if code == '0x' and not args.allow_codeless:
         raise SystemExit('no code at finalized: deploy the Safe on L2 first (or pass --allow-codeless for a '
                          'counterfactual address whose deployment is guaranteed)')
 
@@ -726,7 +849,6 @@ def main(argv=None):
     sub = ap.add_subparsers(dest='cmd', required=True)
     c = sub.add_parser('check')
     c.add_argument('address')
-    c.add_argument('--allow-burn', action='store_true')
     c.set_defaults(fn=cmd_check)
     g = sub.add_parser('gate')
     where = g.add_mutually_exclusive_group(required=True)
@@ -737,8 +859,11 @@ def main(argv=None):
     st.add_argument('address')
     st.add_argument('--l2', required=True, help='bloch-l2-evm checkout (fork candidate)')
     st.add_argument('--native', required=True, help='bloch-sis-pow checkout (fork candidate)')
-    st.add_argument('--rpc', help='optional L2 RPC: read the Safe at `finalized` first (`onchain`)')
-    st.add_argument('--allow-codeless', action='store_true', help='with --rpc: accept a counterfactual Safe address')
+    st.add_argument('--rpc', help='L2 RPC: the address must hold code at `finalized` (`onchain`)')
+    st.add_argument('--allow-codeless', action='store_true',
+                    help='with --rpc: accept a counterfactual Safe address (then --confirm is needed too)')
+    st.add_argument('--confirm', metavar='ADDRESS', help='the address typed a second time (EIP-55 form); needed '
+                    'without --rpc and with --allow-codeless; asked at the prompt on a terminal')
     st.add_argument('--no-commit', action='store_true')
     st.add_argument('--dry-run', action='store_true')
     st.set_defaults(fn=cmd_set)
@@ -746,7 +871,6 @@ def main(argv=None):
         p = sub.add_parser(name)
         if name == 'apply':
             p.add_argument('address')
-            p.add_argument('--allow-burn', action='store_true')
         p.add_argument('--l2', required=True, help='bloch-l2-evm checkout (fork candidate)')
         p.add_argument('--native', required=True, help='bloch-sis-pow checkout (fork candidate)')
         if name != 'audit':
@@ -761,7 +885,6 @@ def main(argv=None):
     o = sub.add_parser('onchain')
     o.add_argument('address')
     o.add_argument('--rpc', required=True)
-    o.add_argument('--allow-burn', action='store_true')
     o.add_argument('--allow-codeless', action='store_true')
     o.set_defaults(fn=cmd_onchain)
     args = ap.parse_args(argv)
