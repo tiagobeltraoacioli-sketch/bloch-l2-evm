@@ -430,12 +430,21 @@ def empty_state() -> Dict[str, Any]:
     return {'schema': STATE_SCHEMA, 'cursors': {}, 'last': {}, 'marks': {}, 'days': {}, 'totals': {}, 'anchors': {}}
 
 
+class StateUnreadable(Exception):
+    """The state file exists and cannot be used: empty or cut short, not JSON, not an object, another schema."""
+
+
 def load_state(path: Optional[Path]) -> Dict[str, Any]:
     if path is None or not path.exists():
         return empty_state()
-    state = json.loads(path.read_text())
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise StateUnreadable(f'{path}: unreadable state file ({type(e).__name__}: {e})') from e
+    if not isinstance(state, dict):
+        raise StateUnreadable(f'{path}: the state file is not a JSON object')
     if state.get('schema') != STATE_SCHEMA:
-        raise SystemExit(f'{path}: state schema {state.get("schema")!r} is not {STATE_SCHEMA}')
+        raise StateUnreadable(f'{path}: state schema {state.get("schema")!r} is not {STATE_SCHEMA}')
     for key, value in empty_state().items():
         state.setdefault(key, value)
     return state
@@ -800,19 +809,33 @@ def check_l2_fees(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: 
         total += bal
         info: Dict[str, Any] = {'address': vault, 'balance_wei': str(bal), 'code': 'none' if code in ('0x', '') else code}
         prev = state['last'].get(f'l2_vault:{name}')
+        # One "last increase" mark per vault (review R308-32b): a vault that never grows is not hidden by the other.
+        # A state written before this has the single mark `l2_last_increase`; it seeds both.
+        grew_key = f'l2_last_increase:{name}'
+        if grew_key not in state['marks']:
+            state['marks'][grew_key] = state['marks'].get('l2_last_increase', now)
+        impossible = False
         if prev is not None:
             delta = bal - int(prev)
             if delta > 0:
                 bump(state, today, f'l2_accrued_{name}', delta)
-                state['marks']['l2_last_increase'] = now
+                state['marks'][grew_key] = now
+            elif delta < 0 and code in ('0x', ''):
+                # Review R308-32d: a vault without code has no way to move value out, so a lower balance is not a
+                # sweep. Nothing is booked and the earlier balance stays the baseline until an operator looks.
+                impossible = True
+                r.add(f'l2_vault_balance[{name}]', CRIT, f'{vault} has no code and its balance fell from {prev} to {bal} wei: '
+                      'nothing can move value out of a keyless vault (wrong chain state or a lying endpoint); not '
+                      'counted as swept')
             elif delta < 0:
                 # Only the sweep program moves value out of a vault: a decrease is a sweep (fees that arrived between
                 # two runs are netted, so this is a lower bound of the swept amount).
                 bump(state, today, f'l2_swept_{name}', -delta)
                 state['marks'][f'l2_last_sweep:{name}'] = now
-        else:
-            state['marks'].setdefault('l2_last_increase', now)
-        state['last'][f'l2_vault:{name}'] = str(bal)
+                # What arrived before the sweep cannot be told from the balance: the flat time counts from here.
+                state['marks'][grew_key] = now
+        if not impossible:
+            state['last'][f'l2_vault:{name}'] = str(bal)
         put(state, today, f'l2_vault_{name}', bal)
         if code not in ('0x', ''):
             active.append(name)
@@ -861,10 +884,15 @@ def check_l2_fees(chain: Chain, cfg: Dict[str, Any], th: Dict[str, Any], state: 
         r.add('l2_base_fee_floor', WARN, f'finalized L2 block base fee {chain.base_fee} wei is below the '
               f'{th["l2_min_base_fee_wei"]} wei floor decided for the December fork')
     if user_txs:
-        last_inc = state['marks'].get('l2_last_increase', now)
-        hours = (now - last_inc) / 3600
-        if hours >= th['l2_no_accrual_hours']:
-            r.add('l2_accrual', WARN, f'user transactions are open but no L2 fee vault grew for {hours:.0f} h')
+        flat = {name: (now - state['marks'].get(f'l2_last_increase:{name}', now)) / 3600 for name in ('base_fee', 'sequencer_fee')}
+        stale = {name: hours for name, hours in flat.items() if hours >= th['l2_no_accrual_hours']}
+        if len(stale) == 2:
+            r.add('l2_accrual', WARN, f'user transactions are open but no L2 fee vault grew for {min(stale.values()):.0f} h')
+        elif stale:
+            name, hours = next(iter(stale.items()))
+            other = 'sequencer_fee' if name == 'base_fee' else 'base_fee'
+            r.add('l2_accrual', WARN, f'user transactions are open and the {other} vault grows, but the {name} vault did '
+                  f'not grow for {hours:.0f} h: that part of the fees is not collected there')
     if want_recipient is not None:
         rb = chain.balance(want_recipient)
         out['recipient'] = want_recipient
@@ -945,6 +973,12 @@ def check_forced(client: Client, cfg: Dict[str, Any], state: Dict[str, Any], r: 
         if new > 0 and delta <= 0:
             r.add('forced_route', WARN, f'{new} new forced records but the treasury balance did not grow '
                   f'({prev_bal} -> {bal} sat): surcharges are not reaching the treasury')
+            return out
+        # Each record pays at least BASE_SURCHARGE_SAT (review R308-32c): less than that in all is a shortfall.
+        if new > 0 and delta < new * BASE_SURCHARGE_SAT:
+            r.add('forced_route', WARN, f'{new} new forced records owe at least {new * BASE_SURCHARGE_SAT} sat but the '
+                  f'treasury grew by {delta} sat ({prev_bal} -> {bal}): surcharges are not all reaching the treasury '
+                  '(or the treasury was spent from in the same interval)')
             return out
     r.add('forced_route', OK, f'forced inclusion: {new} new records, treasury {fmt_units(bal, 8)} BLCH')
     return out
@@ -1175,11 +1209,34 @@ def main_locked(args: argparse.Namespace, transport: Optional[Transport], now: O
     # The state lock covers the read, every observation, and publication. Locking
     # only the atomic rename would still permit two runs to lose each other's data.
     config = json.loads(args.config.read_text())
-    state = load_state(args.state)
+    try:
+        state = load_state(args.state)
+    except StateUnreadable as e:
+        # Review R308-32a: never a traceback (exit status 1 reads as WARN). The run ends UNKNOWN with a report; the
+        # file is left as it is, for the operator to restore from a copy or to move aside (a new history starts then).
+        return unreadable_state_report(args, str(e), now)
     client = Client(transport or http_transport(args.timeout))
     report = run(config, state, client, now)
     if args.state:
         save_state(args.state, state)
+    return publish(args, report, state)
+
+
+def unreadable_state_report(args: argparse.Namespace, why: str, now: Optional[float]) -> int:
+    now = time.time() if now is None else now
+    message = (f'{why}. Nothing was read from the chains and the file was not replaced: restore it from a copy, or '
+               f'move it aside to start a new history')
+    report = {
+        'schema': SCHEMA, 'generated_at': int(now), 'generated_at_utc': datetime.datetime.fromtimestamp(
+            int(now), datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'level': LEVEL_NAMES[UNKNOWN], 'exit_code': UNKNOWN,
+        'checks': [{'name': 'revenue_state', 'level': LEVEL_NAMES[UNKNOWN], 'message': message}],
+        'products': {}, 'days': [], 'totals': {}, 'rpc_calls': 0,
+    }
+    return publish(args, report, None)
+
+
+def publish(args: argparse.Namespace, report: Dict[str, Any], state: Optional[Dict[str, Any]]) -> int:
     text = json.dumps(report, indent=1, sort_keys=True)
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -1190,8 +1247,9 @@ def main_locked(args: argparse.Namespace, transport: Optional[Transport], now: O
         print(text)
     else:
         print(f'Bloch protocol revenue - {report["generated_at_utc"]} - {report["level"]}')
-        print(render_table(day_rows(state, args.days)))
-        print()
+        if state is not None:
+            print(render_table(day_rows(state, args.days)))
+            print()
         for c in report['checks']:
             print(f'{c["level"]:7} {c["name"]}: {c["message"]}')
     return report['exit_code']
