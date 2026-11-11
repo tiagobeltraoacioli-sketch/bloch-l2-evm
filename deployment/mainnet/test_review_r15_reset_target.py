@@ -51,12 +51,21 @@ class R308_9ResetTargetIsNotStrict(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='r308-reset-'))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
+    PINS = dict(expect_config='00' * 32, expect_elf='00' * 32, forfeit=True)  # the helper leaves both fields zero
+
     def test_a_statement_of_another_network_is_refused(self):
         """No code compares identities 0..2 with anything: a rehearsal or devnet statement is written out. On mainnet
         `reset_head` then refuses it at the gate without a word, and the program still moves."""
         foreign = statement(42, identities=(b'\xde' * 32, b'\xad' * 32, b'\xbe' * 32))
-        with self.assertRaises((SystemExit, ValueError), msg='written without the pinned identities being checked'):
-            mrt.build(42, [entry(42, foreign), entry(42, foreign)], [settlement(foreign)])
+        followers = [entry(42, foreign, configuration='00' * 32)] * 2
+        with self.assertRaises((SystemExit, ValueError), msg='written without the pinned identities being checked') as stop:
+            mrt.build(42, followers, [settlement(foreign)], identities=('a0' * 32, 'a1' * 32, 'a2' * 32), **self.PINS)
+        self.assertIn('another network', str(stop.exception))
+        # the same statement under its own identities is taken: the refusal above is the identity check
+        self.assertEqual(mrt.build(42, followers, [settlement(foreign)], identities=('de' * 32, 'ad' * 32, 'be' * 32),
+                                   **self.PINS)['number'], 42)
+        with self.assertRaises(SystemExit):  # and the built-in (mainnet) identities are the default
+            mrt.build(42, followers, [settlement(foreign)], **self.PINS)
 
     def test_the_same_follower_file_twice_is_not_two_followers(self):
         text = statement(42)
@@ -64,6 +73,8 @@ class R308_9ResetTargetIsNotStrict(unittest.TestCase):
         (self.tmp / 'block.hex').write_text(settlement(text) + '\n')
         argv = ['make_reset_target.py', '--number', '42', '--follower-status', str(self.tmp / 'f.json'),
                 '--follower-status', str(self.tmp / 'f.json'), '--l1-block-hex', str(self.tmp / 'block.hex'),
+                '--reset-form', 'forfeit', '--expect-program-config', '00' * 32, '--expect-program-elf', '00' * 32,
+                '--rehearsal-identities', 'a0' * 32, 'a1' * 32, 'a2' * 32,
                 '--out', str(self.tmp / 'reset.json')]
         old = sys.argv
         sys.argv = argv
@@ -76,13 +87,20 @@ class R308_9ResetTargetIsNotStrict(unittest.TestCase):
         finally:
             sys.argv = old
         self.assertNotIn(stop.exception.code, (0, None))
+        self.assertIn('same file', str(stop.exception.code))
+        self.assertFalse((self.tmp / 'reset.json').exists())
 
     def test_the_output_states_the_reset_form(self):
         """G2a needs `forfeit: true`. The tool never writes the key and arm.py reads a missing key as false, so the
         forfeit form exists only as a hand edit of the file this tool is meant to make safe."""
         text = statement(42)
-        out = mrt.build(42, [entry(42, text), entry(42, text)], [settlement(text)])
+        followers = [entry(42, text, configuration='00' * 32)] * 2
+        ids = ('a0' * 32, 'a1' * 32, 'a2' * 32)
+        out = mrt.build(42, followers, [settlement(text)], identities=ids, **self.PINS)
         self.assertIn('forfeit', out)
+        self.assertIs(out['forfeit'], True)
+        with self.assertRaises(SystemExit):  # never defaulted
+            mrt.build(42, followers, [settlement(text)], identities=ids, expect_config='00' * 32, expect_elf='00' * 32)
 
     def test_two_log_entries_for_one_block_are_refused_or_the_newest_wins(self):
         """After a first reset the same L2 number is settled again; the log is append-only and the first match wins,
@@ -92,7 +110,7 @@ class R308_9ResetTargetIsNotStrict(unittest.TestCase):
                                                       + json.dumps(entry(50, new, l2_hash='02' * 32)) + '\n')
         (self.tmp / 's.json').write_text(json.dumps({'settlement_log': {'file': 's.settlements.jsonl'}}))
         try:
-            got = mrt.load_follower(str(self.tmp / 's.json'), 50)
+            got = mrt.load_follower(str(self.tmp / 's.json'), 50, lambda text: None)
         except SystemExit:
             return
         self.assertEqual(got['l2_hash'], '02' * 32)
