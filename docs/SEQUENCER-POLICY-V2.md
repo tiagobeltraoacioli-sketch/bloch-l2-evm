@@ -483,7 +483,10 @@ allowance is bought with fees really paid and is used up by waste.**
 What a new sender gets (R308-4P-3), stated: uncovered transactions come after covered ones, so in a block that
 covered paying transactions fill (gas, bytes or the 64 places) a new sender waits, whatever its tip; the bound is
 the covered demand of that block. Its plain transfers are always executed, and every included transaction earns
-credit, so from its second block a sender competes by tip for anything up to the fees it has paid. Under a flood
+credit, so from its second block a sender competes by tip for anything up to the fees it has paid. A new sender
+whose first transaction must be large (a deployment of 3M gas) buys the credit for it with one plain transfer
+at a higher tip: the credit needed is `gas limit x tip` of the large transaction (3M gas at 1 gwei: 0.003 BLCH,
+one transfer at 143 gwei), which is what the large transaction would pay in tips anyway; nothing is refunded. Under a flood
 of funded keys that never pay (each costs its funder one paid transfer, waits 40 minutes after its first waste, and
 is usable 12 times a week), an uncovered contract call of a sender with no credit at all is judged with
 probability about 30/(N+1) per block against N such keys; a sender with any credit is ahead of all of them. No
