@@ -165,8 +165,10 @@ def simulations(url):
     call_ = lambda i: {'jsonrpc': '2.0', 'id': i, 'method': 'eth_call', 'params': [{'to': '0x' + '00' * 19 + 'be', 'data': '0x'}, 'latest']}
     s, _, r = request(url, [call_(i) for i in range(SIM_PER_IP)], ip=ip)
     check(f'simulations: a batch of {SIM_PER_IP} eth_call is answered', s == 200 and len(r) == SIM_PER_IP and all('result' in x for x in r), r)
-    s, h, r = request(url, [call_(i) for i in range(SIM_PER_IP + 1)], ip=ip)
-    check(f'simulations: a batch of {SIM_PER_IP + 1} eth_call exceeds the per-client slots (429, -32005)', s == 429 and r[0]['error']['code'] == -32005, (s, r))
+    # Review R308-33b: a batch with more EVM calls than a client may have in flight runs them in waves.
+    s, h, r = request(url, [call_(i) for i in range(3 * SIM_PER_IP + 1)], ip=ip)
+    check(f'simulations: a batch of {3 * SIM_PER_IP + 1} eth_call is served in waves of {SIM_PER_IP} (200, every entry answered in order)',
+          s == 200 and [x.get('id') for x in r] == list(range(3 * SIM_PER_IP + 1)) and all('result' in x for x in r), (s, r))
     statuses = [request(url, call_(i), ip=ip)[0] for i in range(60)]
     check('simulations: slots are released (60 sequential eth_call all 200)', statuses == [200] * 60, statuses)
     import concurrent.futures as cf

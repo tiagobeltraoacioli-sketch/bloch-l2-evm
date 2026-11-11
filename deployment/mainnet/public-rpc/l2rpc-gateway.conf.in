@@ -5,13 +5,15 @@
 js_path "@JS_DIR@";
 js_import l2rpc from l2rpc-gateway.js;
 js_shared_dict_zone zone=l2rate:16m timeout=120s type=number evict;
+# EVM slots in flight: one key per call, its value the time it stops counting (l2rpc-gateway.js, "EVM slots").
+js_shared_dict_zone zone=l2slots:1m timeout=@SLOT_ZONE_TIMEOUT@s type=number evict;
 js_shared_dict_zone zone=l2state:1m;
 js_var $l2_failure;
 js_var $l2_methods "-";
 js_var $l2_guard;
 js_var $l2_guard_n;
 js_set $l2_failure_body l2rpc.failure;
-# Budget key: the IPv4 address, or the /64 of an IPv6 address (l2rpc.client).
+# Budget key: the IPv4 address, or the /64 of an IPv6 address (l2rpc.client). EVM slots are per /56.
 js_set $l2_client l2rpc.client;
 
 # 1 when the TCP peer is a Cloudflare edge (checked before realip rewrites it).
