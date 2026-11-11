@@ -58,47 +58,61 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 # L1 RPCs are configuration, not code. Source, in order: $L1_RPC_URLS (URLs separated by spaces or
 # commas), else "rpc_urls" of the settler config, so the shadow reads the same L1 view as the settler.
-# Needs at least 3 distinct http(s)://IPv4:port URLs (the quorum is 2) whose hosts are all listed in the
-# unit's IPAddressAllow (the unit denies every other address). Prints them space-separated.
+# The rule is the settler installer's (install-settler-mainnet.py l1_rpc_urls): http(s)://HOST:PORT, at
+# least 3, on distinct hosts (one failure domain each; a host named twice, with another port or a
+# trailing slash, is one host). Prints them space-separated. The unit ships with IPAddressAllow=localhost
+# and the install writes the hosts' addresses into a drop-in (as the follower and attestor installers do).
 resolve_l1_rpcs() {
-  python3 -I - "$SETTLER_CONFIG" "$HERE/$UNIT" "${L1_RPC_URLS:-}" <<'PY'
-import ipaddress, json, os, re, sys
-settler_config, unit, env = sys.argv[1:]
+  python3 -I - "$SETTLER_CONFIG" "${L1_RPC_URLS:-}" <<'PY'
+import json, os, re, sys, urllib.parse
+settler_config, env = sys.argv[1:]
 if env.strip():
     urls, source = [u for u in re.split(r'[\s,]+', env.strip()) if u], 'L1_RPC_URLS'
 elif os.path.exists(settler_config):
     urls, source = list(json.load(open(settler_config)).get('rpc_urls') or []), settler_config
 else:
     sys.exit(f'no L1 RPCs: set L1_RPC_URLS or install the settler first ({settler_config} has rpc_urls)')
-allow = set()
-if os.path.exists(unit):
-    for line in open(unit):
-        if line.strip().startswith('IPAddressAllow='):
-            allow.update(line.strip().split('=', 1)[1].split())
-seen, errors = [], []
+seen, hosts, errors = [], [], []
 for url in urls:
-    m = re.fullmatch(r'https?://([0-9.]+):([0-9]{1,5})/?', url)
-    if not m:
-        errors.append(f'{url}: not http(s)://IPv4:port')
-        continue
     try:
-        ipaddress.IPv4Address(m.group(1))
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
     except ValueError:
-        errors.append(f'{url}: bad IPv4 address')
+        parts, port = None, None
+    if not (parts and parts.scheme in ('http', 'https') and parts.hostname and port and '@' not in parts.netloc
+            and parts.path in ('', '/') and not parts.query and not parts.fragment
+            and re.fullmatch(r'[A-Za-z0-9.-]+', parts.hostname)):
+        errors.append(f'{url}: not an http(s)://HOST:PORT URL')
         continue
-    if allow and m.group(1) not in allow:
-        errors.append(f'{url}: host not in {os.path.basename(unit)} IPAddressAllow (add it with a drop-in first)')
-    if url not in seen:
-        seen.append(url)
+    host = parts.hostname.lower().rstrip('.')
+    if host in hosts:
+        errors.append(f'{url}: host {host} is named twice (the L1 RPCs must be on distinct hosts)')
+        continue
+    hosts.append(host)
+    seen.append(url)
 if len(seen) < 3:
-    errors.append(f'{len(seen)} distinct L1 RPCs from {source}; need at least 3 for the quorum of 2')
+    errors.append(f'{len(seen)} L1 RPCs on distinct hosts from {source}; need at least 3 (quorum 2 of 3)')
 if errors:
     sys.exit('L1 RPC configuration refused: ' + '; '.join(errors))
 print(' '.join(seen))
 PY
 }
 
-# Prints the accepted commitment when a quorum (2) of the L1 RPCs report the same accepted settlement,
+# The IPv4 addresses of the L1 RPC hosts, for the unit's IPAddressAllow drop-in (the unit denies every other
+# address). A name is resolved now; if its address changes, run the install again after --rollback.
+l1_rpc_addresses() {
+  local url host ip out=
+  for url in "$@"; do
+    host=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "$url")
+    ip=$({ getent ahostsv4 "$host" || true; } | awk 'NR==1{print $1}')
+    [ -n "$ip" ] || { echo "cannot resolve the L1 RPC host $host" >&2; return 1; }
+    case " $out " in *" $ip "*) echo "L1 RPC hosts resolve to the same address $ip: they must be distinct hosts" >&2; return 1;; esac
+    out="$out $ip"
+  done
+  echo "${out# }"
+}
+
+# Prints the accepted commitment when a strict majority of the L1 RPCs report the same accepted settlement,
 # "none" when a quorum reports none, and fails otherwise.
 accepted_number() {
   python3 -I - "$@" <<'PY'
@@ -113,8 +127,9 @@ for url in sys.argv[1:]:
     except Exception as why:
         print(f'{url}: {why}', file=sys.stderr)
 view, count = collections.Counter(views).most_common(1)[0] if views else (None, 0)
-if count < 2:
-    sys.exit('no quorum of 2 nodes agrees on the accepted settlement')
+need = len(sys.argv[1:]) // 2 + 1
+if count < need:
+    sys.exit(f'no quorum of {need} nodes agrees on the accepted settlement')
 accepted = json.loads(view)
 print('none' if accepted is None else 'commitment ' + str(accepted.get('commitment')))
 PY
@@ -166,7 +181,7 @@ fi
 if [ "${1:-}" = "--rollback" ]; then
   TS=$(date -u +%Y%m%dT%H%M%SZ)
   systemctl disable --now "$UNIT" 2>/dev/null || true
-  rm -f "/etc/systemd/system/$UNIT"
+  rm -rf "/etc/systemd/system/$UNIT" "/etc/systemd/system/$UNIT.d"
   systemctl daemon-reload
   [ -d "$OPT" ] && mv "$OPT" "$OPT.rollback-$TS"
   [ -d "$ETC" ] && mv "$ETC" "$ETC.rollback-$TS"
@@ -198,7 +213,9 @@ runuser -u "$USER_" -- test -r "$SETTLER_WORK" -a -x "$SETTLER_WORK" || {
 L1_RPCS=$(resolve_l1_rpcs) || { echo "unit NOT installed"; exit 1; }
 read -r -a L1_RPC_LIST <<< "$L1_RPCS"
 L1_RPCS_JSON=$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${L1_RPC_LIST[@]}")
-echo "L1 RPCs: $L1_RPCS"
+L1_ADDRESSES=$(l1_rpc_addresses "${L1_RPC_LIST[@]}") || { echo "unit NOT installed"; exit 1; }
+L1_QUORUM=$(( ${#L1_RPC_LIST[@]} / 2 + 1 ))   # a strict majority, as the settler's quorum and sequencer_mainnet.py require
+echo "L1 RPCs: $L1_RPCS (quorum $L1_QUORUM; addresses $L1_ADDRESSES)"
 install -d -m 0755 "$OPT"
 install -m 0755 "$OUT/bloch-l2-produce-dev" "$OPT/bloch-l2-produce-dev"
 install -m 0644 "$OUT/sequencer_mainnet.py" "$OPT/sequencer_mainnet.py"
@@ -214,7 +231,7 @@ cat > "$ETC/config.json" <<JSON
   "l2_db": "$VAR/canonical",
   "workdir": "$VAR/work",
   "rpc_urls": $L1_RPCS_JSON,
-  "rpc_quorum": 2,
+  "rpc_quorum": $L1_QUORUM,
   "poll_seconds": 15,
   "settler_workdir": "$SETTLER_WORK"
 }
@@ -234,6 +251,9 @@ else
 fi
 $S check || { echo "read-only check failed (see above); unit NOT installed"; exit 1; }
 install -m 0644 "$HERE/$UNIT" "/etc/systemd/system/$UNIT"
+install -d -m 0755 "/etc/systemd/system/$UNIT.d"
+printf '[Service]\nIPAddressAllow=%s\n' "$L1_ADDRESSES" > "/etc/systemd/system/$UNIT.d/l1-rpc.conf"
+chmod 0644 "/etc/systemd/system/$UNIT.d/l1-rpc.conf"
 systemctl daemon-reload
 if [ "$START" = "--start" ]; then
   systemctl enable --now "$UNIT"

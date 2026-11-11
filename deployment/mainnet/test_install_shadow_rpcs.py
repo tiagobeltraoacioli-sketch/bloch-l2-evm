@@ -19,18 +19,11 @@ class InstallShadowRpcs(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         shutil.copy(SCRIPT, self.dir)
-        self.write_unit(f'localhost {A} {B} {C}')
+        shutil.copy(UNIT, self.dir)   # the unit as shipped (review R308-13: no rewritten allow-list)
         self.settler = os.path.join(self.dir, 'settler.json')
 
     def tearDown(self):
         shutil.rmtree(self.dir)
-
-    def write_unit(self, allow):
-        with open(UNIT) as fh:
-            text = fh.read()
-        text = re.sub(r'(?m)^IPAddressAllow=.*$', 'IPAddressAllow=' + allow, text)
-        with open(os.path.join(self.dir, 'bloch-l2-mainnet-shadow.service'), 'w') as fh:
-            fh.write(text)
 
     def run_print(self, env_urls=None, settler=None):
         script = os.path.join(self.dir, 'install-shadow.sh')
@@ -75,15 +68,34 @@ class InstallShadowRpcs(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn('need at least 3', p.stderr)
 
-    def test_refuses_host_outside_unit_allow(self):
-        p = self.run_print(env_urls=f'http://{A}:8080 http://{B}:8080 http://{D}:8080')
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn('IPAddressAllow', p.stderr)
+    def test_shipped_unit_names_no_l1_host(self):
+        """Review R308-13: the unit ships with localhost only; the installer writes the drop-in."""
+        with open(UNIT) as fh:
+            allow = [line.strip() for line in fh if line.startswith('IPAddressAllow=')]
+        self.assertEqual(allow, ['IPAddressAllow=localhost'])
+        with open(SCRIPT) as fh:
+            text = fh.read()
+        self.assertIn('l1-rpc.conf', text)
+        self.assertNotIn('"rpc_quorum": 2', text)
 
-    def test_refuses_names_and_garbage(self):
-        p = self.run_print(env_urls=f'http://rpc.example:8080 http://{B}:8080 http://{C}:8080')
+    def test_any_third_host_and_names_as_the_settler_accepts(self):
+        for urls in (f'http://{A}:8080 http://{B}:8080 http://{D}:8080',
+                     'https://rpc-a.example:443 https://rpc-b.example:443 https://rpc-c.example:443'):
+            p = self.run_print(env_urls=urls)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout.split(), urls.split())
+
+    def test_one_host_spelled_three_ways_is_one_host(self):
+        """Review R308-20: a quorum must not come from one node."""
+        p = self.run_print(env_urls=f'http://{A}:8080 http://{A}:8080/ http://{A}:8081')
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn('not http(s)://IPv4:port', p.stderr)
+        self.assertIn('distinct hosts', p.stderr)
+
+    def test_refuses_garbage(self):
+        for bad in (f'ftp://{A}:8080', f'http://{A}', f'http://user@{A}:8080', f'http://{A}:8080/path', 'http://bad_host!:8080'):
+            p = self.run_print(env_urls=f'{bad} http://{B}:8080 http://{C}:8080')
+            self.assertNotEqual(p.returncode, 0, bad)
+            self.assertIn('not an http(s)://HOST:PORT URL', p.stderr)
 
     def test_refuses_missing_config(self):
         p = self.run_print(settler=os.path.join(self.dir, 'absent.json'))

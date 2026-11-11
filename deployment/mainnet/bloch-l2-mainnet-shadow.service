@@ -39,9 +39,10 @@ ReadOnlyPaths=/etc/bloch-l2-mainnet-shadow /opt/bloch/l2-mainnet-shadow /var/lib
 # SSH key and the Docker socket (a read-only mount does not stop a socket connect). The shadow needs none of them.
 InaccessiblePaths=-/run/docker.sock -/var/lib/bloch-l2-mainnet-da -/var/lib/bloch-l2-mainnet-settler/da.passphrase -/var/lib/bloch-l2-mainnet-settler/ssh -/etc/bloch-l2-mainnet-settler/da.passphrase -/run/bloch-l2-mainnet-settler
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-# Read-only getl2settlement on the three Genesis-4 mainnet nodes; nothing else.
+# Read-only getl2settlement on the configured L1 RPCs; nothing else. install-shadow.sh writes their addresses
+# into the drop-in bloch-l2-mainnet-shadow.service.d/l1-rpc.conf (no L1 host is named in the kit).
 IPAddressDeny=any
-IPAddressAllow=localhost 80.240.16.185 199.247.22.8 45.77.67.251
+IPAddressAllow=localhost
 LimitCORE=0
 Nice=5
 MemoryMax=4G
