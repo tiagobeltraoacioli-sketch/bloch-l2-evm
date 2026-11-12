@@ -109,7 +109,8 @@ its tip. Order: covered ones by tip while they leave one eighth of the block's g
 bytes and places free (--write-reserve-divisor 8; 0 for no reserve); then the plain
 transfers of uncovered senders by tip; then their other transactions, up to
 --write-uncovered-max-gas (1500000) each, senders with any credit first, in the order
-of --write-seed HEX32 (the settler's secret per block plan; default the anchor); then
+of the seed (--write-seed-file FILE, the settler's secret per block plan, or
+--write-seed HEX32 once it is public; default the anchor); then
 the covered ones that are left. The block's room (--max-gas) is counted in gas used.
 Gas spent on left-out transactions is counted per class: --write-wasted-gas for
 covered ones (default two blocks), --write-uncovered-gas for the others (half a
@@ -382,7 +383,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
                 "--fresh-slot-price-wei", "--write-exempt", "--write-credits", "--write-wasted-gas", "--write-waiting",
                 "--write-uncovered-gas", "--write-uncovered-max-gas", "--write-max-tx-gas", "--write-seed",
-                "--write-reserve-divisor", "--as-given", "--order-check",
+                "--write-reserve-divisor", "--as-given", "--order-check", "--write-seed-file",
             ];
             // `select --order-check yes` is the shadow's check of a finished block's order: it needs the block's
             // own limits, the transaction cap included (the reserve keeps one eighth of the places).
@@ -1209,9 +1210,17 @@ fn write_price(args: &[String], block_gas_limit: u64, anchor: B256) -> Result<Op
         uncovered_max_gas: number("--write-uncovered-max-gas", 1_500_000)?,
         // The settler draws the seed per block plan and publishes it with the block; without one (development)
         // the anchor stands in, which every sender can know beforehand (review R308-5P-3).
-        seed: match option(args, "--write-seed") {
-            Ok(text) => text.trim_start_matches("0x").parse::<B256>().map_err(|_| "--write-seed must be 32 bytes of hex")?,
-            Err(_) => anchor,
+        // `--write-seed-file` keeps it off the command line, where every local user could read it while the plan
+        // runs (review R308-6P-3); `--write-seed` is for a seed that is already public (the shadow's order check).
+        seed: match (option(args, "--write-seed-file"), option(args, "--write-seed")) {
+            (Ok(_), Ok(_)) => return Err("give --write-seed-file or --write-seed, not both".into()),
+            (Ok(path), _) => fs::read_to_string(path)
+                .map_err(|e| format!("--write-seed-file: {e}"))?
+                .trim()
+                .parse::<B256>()
+                .map_err(|_| "--write-seed-file must hold 32 bytes of hex")?,
+            (_, Ok(text)) => text.trim_start_matches("0x").parse::<B256>().map_err(|_| "--write-seed must be 32 bytes of hex")?,
+            _ => anchor,
         },
         reserve_divisor: number("--write-reserve-divisor", 8)?,
     };

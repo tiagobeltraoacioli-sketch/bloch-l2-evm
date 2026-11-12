@@ -971,5 +971,10 @@ fn the_order_of_uncovered_calls_follows_the_seed_not_the_anchor() {
     };
     let (a, b) = (order(&"11".repeat(32)), order(&"22".repeat(32)));
     assert_ne!(a, b);
+    // The settler passes its seed in a file, not on the command line (review R308-6P-3): the same order.
+    let file = Path::new(&world.db).parent().unwrap().join("seed");
+    std::fs::write(&file, "11".repeat(32) + "\n").unwrap();
+    let (by_file, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-seed-file", file.to_str().unwrap()]);
+    assert_eq!(by_file["included"], a);
     assert_eq!(a, order(&"11".repeat(32)), "one seed, one order: every call of a block plan and the shadow's check agree");
 }

@@ -268,7 +268,11 @@ class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
             policy.save(1_000_000)
             pool = work / 'pool.json'
             pool.write_text('[]')
-            seed = lambda args: args[args.index('--write-seed') + 1]
+            def seed(args):   # in a file of mode 0600, never on the command line (review R308-6P-3)
+                self.assertNotIn('--write-seed', args)
+                path = Path(args[args.index('--write-seed-file') + 1])
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                return path.read_text().strip()
             outside = [seed(worker.pool_arguments(pool)) for _ in range(2)]
             self.assertNotEqual(outside[0], outside[1])
             self.assertEqual(len(bytes.fromhex(outside[0])), 32)

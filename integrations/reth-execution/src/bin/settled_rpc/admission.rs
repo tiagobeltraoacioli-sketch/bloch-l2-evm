@@ -195,6 +195,7 @@ impl Policy {
             "uncovered_max_gas": rules.uncovered_max_gas,
             "credit_wei": verdict.credit.to_string(),
             "credit_needed_wei": verdict.credit_needed.to_string(),
+            "first_transfer_priority_fee_wei": first_transfer_tip(verdict.credit_needed).to_string(),
             "scope": "latest-state-next-block"
         });
         let message = if reason == "gas-limit-above-cap" {
@@ -203,8 +204,9 @@ impl Policy {
         } else {
             "transaction will not be executed: its gas limit is above the limit for a sender without enough fee \
              credit (error.data.uncovered_max_gas); a higher tip does not help, send it with a smaller gas limit, or \
-             first send a paid transaction (for example a plain transfer, which is always executed) so that the \
-             priority fees you have paid reach error.data.credit_needed_wei"
+             first send a plain transfer (always executed) with a priority fee per gas of \
+             error.data.first_transfer_priority_fee_wei, so that the priority fees you have paid reach \
+             error.data.credit_needed_wei"
         };
         Err(ErrorObjectOwned::owned(-32000, message, Some(data)))
     }
@@ -474,6 +476,11 @@ impl Snapshot {
             "gas_limit": gas_limit,
             "credit_wei": rules.map(|_| verdict.credit.to_string()),
             "credit_needed_wei": rules.map(|_| verdict.credit_needed.to_string()),
+            // Review R308-6P-1: the door of a sender that is not covered is a plain transfer first. One transfer
+            // at this priority fee earns the credit this call needs (null when it is covered or the rules are off).
+            "first_transfer_priority_fee_wei": rules
+                .filter(|_| !verdict.covered)
+                .map(|_| first_transfer_tip(verdict.credit_needed).to_string()),
             "uncovered_max_gas": rules.map(|rules| rules.uncovered_max_gas),
             "max_tx_gas": rules.map(|rules| rules.max_tx_gas),
             "scope": "latest-state-next-block"
@@ -488,6 +495,12 @@ pub(super) fn check_deadline(deadline: Instant) -> Result<(), ErrorObjectOwned> 
         ));
     }
     Ok(())
+}
+
+/// Priority fee per gas of ONE plain transfer (21,000 gas) that earns `credit_needed` (rounded up).
+fn first_transfer_tip(credit_needed: U256) -> U256 {
+    let gas = U256::from(21_000u64);
+    credit_needed / gas + U256::from(!(credit_needed % gas).is_zero())
 }
 
 #[cfg(test)]
@@ -1365,6 +1378,7 @@ mod tests {
             "not_executable_reason",
             "credit_wei",
             "credit_needed_wei",
+            "first_transfer_priority_fee_wei",
             "uncovered_max_gas",
             "max_tx_gas",
         ] {
@@ -1443,6 +1457,7 @@ mod tests {
                         "uncovered_max_gas",
                         "credit_wei",
                         "credit_needed_wei",
+                        "first_transfer_priority_fee_wei",
                         "scope",
                     ] {
                         assert_eq!(quote[field], refusal[field], "{case}: {field}");

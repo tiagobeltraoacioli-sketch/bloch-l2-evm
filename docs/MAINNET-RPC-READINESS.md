@@ -448,7 +448,11 @@ Both carry `gas_limit`, `max_tx_gas`, `uncovered_max_gas` (JSON numbers), `credi
 a smaller gas limit does, or credit, which is earned by any included transaction (`gas used x tip`); one plain
 transfer at a tip of `credit_needed_wei / 21,000` buys it in one step. `bloch_admissionQuote` returns the same
 verdict: `executable`, `not_executable_reason` (null, `"gas-limit-above-cap"`, `"needs-credit"`), `covered`,
-`gas_limit`, `credit_wei`, `credit_needed_wei`, `uncovered_max_gas`, `max_tx_gas`; the verdict is for a tip of
+`gas_limit`, `credit_wei`, `credit_needed_wei`, `first_transfer_priority_fee_wei`, `uncovered_max_gas`,
+`max_tx_gas`. `first_transfer_priority_fee_wei` (decimal string; null when the call is covered) is the priority
+fee per gas of ONE plain transfer that earns the credit this call needs: a wallet without credit should send
+that transfer first when blocks are full, because its first call cannot outbid plain transfers there (review
+R308-6P-1, docs/SEQUENCER-POLICY-V2.md "For wallets"); the refusal carries the same field. The verdict is for a tip of
 exactly `requiredPriorityFeePerGas` and for the `gas` given (always pass `gas`; without it the call is judged
 at `max_tx_gas`). With a version 1 file the rules are off (`executable: true`, the new fields null). For a
 sender that is not covered, the place in the block does not follow the tip (plain transfers excepted): raising

@@ -2003,8 +2003,15 @@ class Settler:
             inputs = self.selection_inputs(policy)
             args += ['--write-max-tx-gas', str(policy.c['max_tx_gas']),
                      '--write-uncovered-max-gas', str(policy.c['uncovered_max_gas']),
-                     '--write-reserve-divisor', str(policy.c['reserve_divisor']), '--write-seed', inputs['seed']]
+                     '--write-reserve-divisor', str(policy.c['reserve_divisor'])]
             lists = Path(pool).parent if Path(pool).is_file() else self.work
+            # The seed goes to the producer in a file only this user can read, never on the command line, where
+            # every local user could read it while the plan runs (review R308-6P-3).
+            seed = Path(lists) / 'write-seed'
+            seed.unlink(missing_ok=True)
+            with os.fdopen(os.open(seed, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as out:
+                out.write(inputs['seed'] + '\n')
+            args += ['--write-seed-file', str(seed)]
             for flag, name, content in (('--write-credits', 'write-credits.json', inputs['credits']),
                                         ('--write-waiting', 'write-waiting.json', inputs['waiting'])):
                 if content:

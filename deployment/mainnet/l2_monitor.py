@@ -176,7 +176,11 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'final-gate-unsettled', 'preflight-copy-discarded',
                          # Round 15 (review R308-5P-2): the shadow found the settler's block in another order than
                          # the policy inputs the settler published give, or could not run that check.
-                         'shadow-policy-mismatch'})
+                         'shadow-policy-mismatch',
+                         # Review R308-6P-2: the shadow could not check a block's order (no selection.json from the
+                         # settler, or a block with forced records). A warning; critical when it repeats
+                         # (`event_repeat_crit`), which is what a settler that stopped publishing looks like.
+                         'shadow-order-unchecked'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

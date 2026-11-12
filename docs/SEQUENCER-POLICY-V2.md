@@ -459,7 +459,8 @@ allowance is bought with fees really paid and is used up by waste.**
      to covered senders, and a block without newcomers sells every place by tip.
   In a full block at most one eighth of the room goes to a lower bid than the covered class offered.
 - *The seed (R308-5P-3).* The settler draws 32 random bytes per block plan (`selection_inputs`), gives them to
-  every producer call of that plan (`--write-seed`) and publishes them only with the finished block. No sender
+  every producer call of that plan in a file of mode 0600 (`--write-seed-file`; not on the command line, where
+  a local user could read it: R308-6P-3) and publishes them only with the finished block. No sender
   can compute its place from public data before it submits. (Before: the L1 anchor, public beforehand.)
 - *Block room (R308-5P-1).* The block's gas (`--max-gas`) is counted in gas really USED by what is included; a
   candidate needs its whole gas limit to fit in what is left, as on any EVM chain. Declared gas that is not used
@@ -506,8 +507,10 @@ allowance is bought with fees really paid and is used up by waste.**
   limits, price, exempt list); the shadow runs `select --order-check yes` on the block's own transactions with
   those inputs and compares the order: a transaction that was left out changes nothing for those that were
   included, so the orders are equal exactly when the settler followed the stated order. A difference, or a
-  change of the stated limits from one block to the next, is logged `shadow-policy-mismatch` (a warning of the
-  monitor); the block is still checked as a block. Not visible to the shadow: a transaction that was never
+  change of the stated limits from one block to the next, is logged `shadow-policy-mismatch`; a block whose
+  order could not be checked (no `selection.json`, forced records) is logged `shadow-order-unchecked`. The
+  monitor grades both: a warning, critical from the fifth in an hour (R308-6P-2). The block is still checked
+  as a block. Not visible to the shadow: a transaction that was never
   included (it has no spool; the censored sender's remedy is L1 forced inclusion), credits stated higher than
   the fees a sender paid, and a seed chosen with intent.
 
@@ -523,6 +526,16 @@ is usable 12 times a week), a CALL of a sender with no credit at all is judged w
 10/(N+1) per block in the worst case (every key wasting 1.5M gas); the keys cannot choose their place. A plain
 transfer is not affected, and after it the sender is ahead of every key without credit. No honest transaction
 is ever penalised for not being judged.
+
+**For wallets (R308-6P-1): a new wallet's first action should be a plain transfer.** In a block whose places
+are all taken by paying transactions (56 covered ones and 8 plain transfers from wallets without credit), a
+first CALL of a wallet without credit is not included at any tip: it comes after every uncovered plain transfer
+and cannot outbid them. The door is one plain transfer first (to itself is enough), at a priority fee of at
+least `credit needed / 21,000` = `gas limit of the call x its tip / 21,000` (about five times the tip for an
+approve of 100,000 gas): it competes by tip, is always executed, and makes the call covered, which then bids by
+tip like everyone's. The RPC returns that figure as `first_transfer_priority_fee_wei` in `bloch_admissionQuote`
+(for any call of a sender that is not covered) and in the `sequencer-needs-credit` refusal. When blocks are not
+full a first approve or swap of up to 1,500,000 gas is executed without this step.
 
 Measured on the real binary (debug build, shared build host under load), one `select` call each. Review
 R308-4P-1's scenario, 14 keys each sending a 5M-gas writer of 200 unpaid slots at 7.9 gwei ahead of 10 honest

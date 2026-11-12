@@ -159,11 +159,11 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `a83ccab9e1dbc7d76b03a7d8cf2c7f1689e769b68afe851e4fb76b840459dca2` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `ab2b471c9156b87a3d12cb636cfb6cd8ad25972ccc02d279b55a37401550fd45` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `480a513cd5e0305c0c2b909f405a0aea48eb02320314be597df1511490a8d77d` |
-| `deployment/devnet/settler_v3.py` | `bf5c2b9fc9b24ac0c6dad65df5682b005a289964e12c8064068d333c9fa8988d` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/devnet/settler_v3.py` | `e4406a3dd879c6a36bf7b26c2a261838342b25801d7744c2bce174eeaf2d01be` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `9e092fe70186d9826d5efd1b231f336ac2703f64e20b649b32645ddb1c762077` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `05b4d3b3d38a2c738dca0038d26429695730957ddf22f00b7ea8f2d1d3759a8e` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `d52b7086c7cdfed78ee71de58a4323b5ee9826fdec8fccc7bace09e37d5b40f7` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
 | `deployment/mainnet/install-shadow.sh` | `8920d4ec11f285e5aad3412d82eecd5571275343ef4e8ae8947229ce490be55d` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
@@ -172,7 +172,7 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 | `deployment/mainnet/follower-rpc/install.sh` | `3984e0edb591cfbc4c53390f6a414c61d88032dcd97154fa7d706519f0035854` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
 | `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/l2_monitor.py` | `4d3f51d3d4ccc84981a962f26e63b5c363683f5ccffda29bc00a9e4e5f7e984d` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l2_monitor.py` | `8dd8d758a23c5ed13df0b1d2a60539026b8202f1a6859692a4b03b0986a7847b` (agents 157, 187 F1, 198) |
 | `deployment/mainnet/l1_monitor.py` | `b62c28f295ea93452152d7699c913fb9672c5b01957acd358472ec643790238a` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `0d65038eba157b2025424adf69182dcd3860a4ac27af64fb2d40dc97ebde8730` |
@@ -387,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `a83ccab9e1dbc7d76b03a7d8cf2c7f1689e769b68afe851e4fb76b840459dca2` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `ab2b471c9156b87a3d12cb636cfb6cd8ad25972ccc02d279b55a37401550fd45` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 

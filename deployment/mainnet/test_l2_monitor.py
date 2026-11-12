@@ -2033,5 +2033,24 @@ class ReviewR15SecondPass(unittest.TestCase):
         self.assertEqual(seen, ['webhook', 'telegram', 'https://hc.example/ping/fail'] * 2)
         self.assertIn('alert not delivered: webhook:', next(c['message'] for c in report.checks if c['check'] == 'alert_delivery'))
 
+
+class ShadowOrderEvents(unittest.TestCase):
+    """Review R308-6P-2: the shadow's `shadow-order-unchecked` (no selection.json from the settler, or forced
+    records) is graded: a warning, critical when it repeats inside the window, like `shadow-policy-mismatch`."""
+
+    def grade(self, event, count):
+        report = m.Report()
+        events = [{'event': event, 'time': f'2026-11-12T00:00:{i:02d}Z', 'number': i} for i in range(count)]
+        m.grade_events('bloch-l2-mainnet-shadow', events, dict(m._COMMON), 3600, report)
+        return report.facts['events[bloch-l2-mainnet-shadow]']['failures'], max(c['code'] for c in report.checks)
+
+    def test_unchecked_order_warns_and_is_critical_when_it_persists(self):
+        for event in ('shadow-order-unchecked', 'shadow-policy-mismatch'):
+            counts, level = self.grade(event, 1)
+            self.assertEqual((counts, level), ({event: 1}, m.WARN))
+            repeat = m._COMMON['event_repeat_crit']
+            self.assertEqual(self.grade(event, repeat), ({event: repeat}, m.CRIT))
+        self.assertEqual(self.grade('shadow-order-ok', 9)[0], {})
+
 if __name__ == '__main__':
     unittest.main()
