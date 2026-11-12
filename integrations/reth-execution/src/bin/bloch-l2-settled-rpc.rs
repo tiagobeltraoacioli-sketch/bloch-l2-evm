@@ -65,6 +65,10 @@
 //! With `--required-tip-file`, policy v2's admission snapshot also checks the
 //! current nonce's measured storage price before publishing a spool entry.
 //! A transaction-specific fee refusal carries structured JSON-RPC error data;
+//! with `admission.version` 2 the file also carries the producer's execution
+//! rules (gas limits and per-sender credit), and a transaction the producer
+//! would never execute is refused with its own error kind before any EVM run
+//! (`settled_rpc/admission.rs`);
 //! future nonces retain spool semantics because their predecessors are unknown.
 //!
 //! EVM simulations (`eth_call`, `eth_estimateGas`, `eth_createAccessList`, ...)
@@ -121,7 +125,10 @@ ChainSpec::mainnet, chain id 700770, with the ceremony's --domain and wall-clock
 pending: latest state, next-block environment for calls/estimates, latest block for block queries.\n\
 --required-tip-file: the sequencer's current required priority fee (JSON, `required_tip_wei` or the `tip` of the\n\
 settler's sequencer-policy.json). The fee methods then suggest it plus --tip-headroom-percent, never below --min-tip-wei.\n\
-With --txpool, this file must also publish policy v2 admission.version=1 for transaction-specific storage-price preflight.\n";
+With --txpool, this file must also publish policy v2 admission.version=1 or 2 for transaction-specific storage-price preflight.\n\
+admission.version=2 adds the producer's execution rules (max_tx_gas, uncovered_max_gas, credit per sender in wei): what the\n\
+producer will not execute is refused before any EVM run with error.data.kind sequencer-gas-limit-above-cap or\n\
+sequencer-needs-credit, and bloch_admissionQuote reports the same verdict (executable, not_executable_reason, covered).\n";
 
 struct Options {
     data_dir: PathBuf,

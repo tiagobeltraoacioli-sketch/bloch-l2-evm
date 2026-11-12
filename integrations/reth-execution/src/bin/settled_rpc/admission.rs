@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Transaction-specific sequencer fee feedback. This is host admission policy;
 //! the selector runs against a disposable cache and never persists a block.
+//!
+//! With an `admission.version` 2 policy file the producer's rules of what it executes at all
+//! (`docs/SEQUENCER-POLICY-V2.md` section 6, `WritePrice` in `src/node_execution/select.rs`) are applied
+//! here too, before any EVM run (review R308-5P-4): a plain transfer (gas limit 21,000, no data) always
+//! passes; an exempt sender always passes; nothing else above `max_tx_gas` passes
+//! (`sequencer-gas-limit-above-cap`); and a transaction above `uncovered_max_gas` passes only when its
+//! sender's published credit is at least `gas limit x max(effective tip, 1)` (`sequencer-needs-credit`).
+//! `bloch_admissionQuote` reports the same verdict for an unsigned call. The producer's per-block pools
+//! and waits are not mirrored: they are states of one block, not properties of a transaction.
 use alloy_primitives::{Address, B256, U256};
 use bloch_l2_evm::{
     node_execution::select::{quote_node_transaction, select_node_transactions, QuoteCall, SelectionLimits, TxStats},
@@ -12,7 +21,7 @@ use reth_chainspec::ChainSpecProvider;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{AccountReader, BlockNumReader, HeaderProvider, StateProviderBox};
 use reth_revm::database::StateProviderDatabase;
-use std::{io::Read, path::Path, time::Instant};
+use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
 
 use super::{rpc_error, SIMULATION_GAS_CAP, TIP_FILE_MAX_BYTES};
 
@@ -23,6 +32,37 @@ pub(super) struct Policy {
     pub required_tip: u128,
     pub fresh_slot_price: u128,
     pub exempt: Vec<Address>,
+    /// The producer's execution rules (`admission.version` 2). `None` for a version 1 file: rules off.
+    pub rules: Option<ExecutionRules>,
+}
+
+/// What the producer executes at all, as published by the policy (`WritePrice` in the root crate).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ExecutionRules {
+    /// No transaction of a sender that is not exempt is executed above this gas limit.
+    pub max_tx_gas: u64,
+    /// A transaction that its sender's credit does not cover is executed only up to this gas limit.
+    pub uncovered_max_gas: u64,
+    /// Per sender: priority fees really paid, less the fee value of its wasted work (wei).
+    pub credit: BTreeMap<Address, u128>,
+}
+
+/// The producer's verdict on one transaction, before it runs. `rules` off: always executable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Executability {
+    /// `None`, `"gas-limit-above-cap"` or `"needs-credit"`: the producer's own names.
+    refusal: Option<&'static str>,
+    covered: bool,
+    credit: u128,
+    /// `gas limit x max(tip, 1)`: the credit that covers this transaction at this tip.
+    credit_needed: U256,
+}
+
+/// Priority fee per gas a transaction pays at `base_fee` (0 when its fee cap is below it): the figure the
+/// producer's selection uses, here at the next block's base fee of the admission head.
+fn effective_tip(fee_cap: u128, priority_fee: Option<u128>, base_fee: u64) -> u128 {
+    let cap = fee_cap.saturating_sub(u128::from(base_fee));
+    priority_fee.map_or(cap, |priority| priority.min(cap))
 }
 
 impl Policy {
@@ -36,7 +76,7 @@ impl Policy {
         }
         Self::parse(&text).ok_or_else(|| {
             rpc_error(
-                "sequencer admission policy is incomplete or malformed; policy v2 admission version 1 is required",
+                "sequencer admission policy is incomplete or malformed; policy v2 admission version 1 or 2 is required",
             )
         })
     }
@@ -44,7 +84,8 @@ impl Policy {
     fn parse(text: &str) -> Option<Self> {
         let value: serde_json::Value = serde_json::from_str(text).ok()?;
         let admission = value.get("admission")?.as_object()?;
-        if admission.get("version")?.as_u64()? != 1 {
+        let version = admission.get("version")?.as_u64()?;
+        if !(1..=2).contains(&version) {
             return None;
         }
         // Decimal strings preserve u128 exactly across JSON implementations.
@@ -62,11 +103,110 @@ impl Policy {
             .iter()
             .map(|v| v.as_str()?.parse::<Address>().ok())
             .collect::<Option<Vec<_>>>()?;
+        // Version 2 adds the producer's execution rules; every field is required and exactly typed. Gas limits
+        // are JSON unsigned integers; credit is an object of lower-case 0x addresses to decimal wei strings.
+        let rules = if version == 2 {
+            let credit = admission
+                .get("credit")?
+                .as_object()?
+                .iter()
+                .map(|(sender, wei)| {
+                    let lower = sender.len() == 42
+                        && sender.starts_with("0x")
+                        && sender[2..].bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
+                    Some((lower.then(|| sender.parse::<Address>().ok()).flatten()?, integer(wei)?))
+                })
+                .collect::<Option<BTreeMap<_, _>>>()?;
+            Some(ExecutionRules {
+                max_tx_gas: admission.get("max_tx_gas")?.as_u64()?,
+                uncovered_max_gas: admission.get("uncovered_max_gas")?.as_u64()?,
+                credit,
+            })
+        } else {
+            None
+        };
         Some(Self {
             required_tip,
             fresh_slot_price,
             exempt,
+            rules,
         })
+    }
+
+    /// The producer's decision of what it executes at all (`select_priced_in_session`, `unexecuted`), for a
+    /// transaction of `sender` with this gas limit, call data length and tip. The one rule both admission and
+    /// `bloch_admissionQuote` use. Pure arithmetic: nothing is executed.
+    fn executability(&self, sender: Address, gas_limit: u64, no_data: bool, tip: U256) -> Executability {
+        let credit_needed = U256::from(gas_limit) * tip.max(U256::from(1));
+        let Some(rules) = &self.rules else {
+            return Executability {
+                refusal: None,
+                covered: true,
+                credit: 0,
+                credit_needed,
+            };
+        };
+        let exempt = self.exempt.contains(&sender);
+        let credit = rules.credit.get(&sender).copied().unwrap_or(0);
+        let covered = exempt || U256::from(credit) >= credit_needed;
+        let plain = gas_limit == 21_000 && no_data;
+        let refusal = if plain {
+            None
+        } else if gas_limit > rules.max_tx_gas && !exempt {
+            Some("gas-limit-above-cap")
+        } else if !covered && gas_limit > rules.uncovered_max_gas {
+            Some("needs-credit")
+        } else {
+            None
+        };
+        Executability {
+            refusal,
+            covered,
+            credit,
+            credit_needed,
+        }
+    }
+
+    /// Refuse, before any EVM run, what the producer will not execute for this sender (review R308-5P-4).
+    fn check_executable(
+        &self,
+        tx: &AuthenticatedTransaction,
+        head: &SealedHeader<BlochNodeHeader>,
+        base_fee: u64,
+    ) -> Result<(), ErrorObjectOwned> {
+        let Some(rules) = &self.rules else {
+            return Ok(());
+        };
+        let env = tx.environment();
+        let tip = effective_tip(env.gas_price, env.gas_priority_fee, base_fee);
+        let verdict = self.executability(tx.sender(), env.gas_limit, env.data.is_empty(), U256::from(tip));
+        let Some(reason) = verdict.refusal else {
+            return Ok(());
+        };
+        let data = serde_json::json!({
+            "kind": format!("sequencer-{reason}"),
+            "transactionHash": tx.hash(),
+            "headHash": head.hash(),
+            "headNumber": format!("0x{:x}", head.0.number),
+            "baseFeePerGas": format!("0x{base_fee:x}"),
+            "effectivePriorityFeePerGas": format!("0x{tip:x}"),
+            "gas_limit": env.gas_limit,
+            "max_tx_gas": rules.max_tx_gas,
+            "uncovered_max_gas": rules.uncovered_max_gas,
+            "credit_wei": verdict.credit.to_string(),
+            "credit_needed_wei": verdict.credit_needed.to_string(),
+            "scope": "latest-state-next-block"
+        });
+        let message = if reason == "gas-limit-above-cap" {
+            "transaction will not be executed: its gas limit is above the sequencer's limit for one transaction \
+             (error.data.max_tx_gas); a higher tip does not help, send it with a smaller gas limit"
+        } else {
+            "transaction will not be executed: its gas limit is above the limit for a sender without enough fee \
+             credit (error.data.uncovered_max_gas); a higher tip does not help, send it with a smaller gas limit, or \
+             first send a paid transaction (for example a plain transfer, which is always executed) so that the \
+             priority fees you have paid reach error.data.credit_needed_wei"
+        };
+        Err(ErrorObjectOwned::owned(-32000, message, Some(data)))
     }
 
     pub fn verify(&self, path: &Path) -> Result<(), ErrorObjectOwned> {
@@ -202,6 +342,8 @@ impl Snapshot {
     }
 
     pub fn preflight(&self, tx: &AuthenticatedTransaction, policy: &Policy) -> Result<(), ErrorObjectOwned> {
+        // First, and for every nonce: what the producer will not execute needs no execution to be known.
+        policy.check_executable(tx, &self.header, self.context.base_fee_per_gas)?;
         if tx.environment().nonce != self.account(tx.sender())?.0 {
             // Earlier pending nonces can change every storage fact. Do not
             // pretend one isolated execution represents their sequence.
@@ -258,6 +400,11 @@ impl Snapshot {
     /// session, execution, new-slot count and fee rule as [`Snapshot::preflight`], on an unsigned call.
     /// Read-only. It says nothing about the spool, other senders, bans or waits, and nothing a refused
     /// `eth_sendRawTransaction` does not already say in `error.data`; inclusion is not promised.
+    ///
+    /// `executable` is the producer's verdict (see the module comment) for a transaction with the gas limit
+    /// in `gas_limit` and a priority fee of exactly `requiredPriorityFeePerGas`: the transaction a wallet
+    /// that follows the quote signs. A higher tip needs more credit (`gas_limit x tip`) to be covered. Without
+    /// `gas`, a version 2 policy runs the call at `max_tx_gas` for a sender that is not exempt.
     pub fn quote(&self, request: &QuoteRequest, policy: &Policy) -> Result<serde_json::Value, ErrorObjectOwned> {
         if request.data.is_some() && request.input.is_some() && request.data != request.input {
             return Err(rpc_error("admission quote: `data` and `input` differ"));
@@ -265,7 +412,13 @@ impl Snapshot {
         let (nonce, balance) = self.account(request.from)?;
         let base_fee = self.context.base_fee_per_gas;
         let cap = SIMULATION_GAS_CAP.min(self.spec.gas_limit);
-        let gas_limit = request.gas.map_or(cap, |gas| gas.to::<u64>().min(cap));
+        // No `gas`: the largest limit the producer may execute for this sender, so the verdict is not a refusal
+        // of a limit the caller never chose.
+        let unasked = match &policy.rules {
+            Some(rules) if !policy.exempt.contains(&request.from) => cap.min(rules.max_tx_gas),
+            _ => cap,
+        };
+        let gas_limit = request.gas.map_or(unasked, |gas| gas.to::<u64>().min(cap));
         // Measured at the lowest fee the block accepts (tip zero), so the balance needed for the quote is
         // the least a real transaction with this gas limit could need.
         let value = request.value.unwrap_or_default();
@@ -295,6 +448,8 @@ impl Snapshot {
         .map_err(|e| rpc_error(format!("admission quote unavailable: {e}")))?
         .map_err(|reason| rpc_error(format!("call cannot execute at admission head: {reason}")))?;
         let (slots, charged_slots, required) = policy.requirement(&stats)?;
+        let verdict = policy.executability(request.from, gas_limit, call.data.is_empty(), required);
+        let rules = policy.rules.as_ref();
         Ok(serde_json::json!({
             "kind": "sequencer-admission-quote",
             "headHash": self.header.hash(),
@@ -311,6 +466,16 @@ impl Snapshot {
             // The amount itself (review R308-2P-15): admission asks gasUsed x tip >= this, so a transaction that
             // uses less gas than this run (an access list, another gas limit) owes more per gas than the figure above.
             "writePriceOwedWei": format!("0x{:x}", U256::from(charged_slots) * U256::from(policy.fresh_slot_price)),
+            // The producer's execution rules (review R308-5P-4), for `gas_limit` at the quoted priority fee.
+            // Numeric fields are null under a version 1 policy (rules off).
+            "executable": verdict.refusal.is_none(),
+            "not_executable_reason": verdict.refusal,
+            "covered": verdict.covered,
+            "gas_limit": gas_limit,
+            "credit_wei": rules.map(|_| verdict.credit.to_string()),
+            "credit_needed_wei": rules.map(|_| verdict.credit_needed.to_string()),
+            "uncovered_max_gas": rules.map(|rules| rules.uncovered_max_gas),
+            "max_tx_gas": rules.map(|rules| rules.max_tx_gas),
             "scope": "latest-state-next-block"
         }))
     }
@@ -354,15 +519,41 @@ mod tests {
             required_tip: FLOOR,
             fresh_slot_price: PRICE,
             exempt,
+            rules: None,
+        }
+    }
+    const MAX_TX_GAS: u64 = 5_000_000;
+    const UNCOVERED_MAX_GAS: u64 = 1_500_000;
+    /// A version 2 policy with the deployment's limits and this credit for the test sender.
+    fn ruled(exempt: Vec<Address>, credit: Option<u128>) -> Policy {
+        Policy {
+            rules: Some(ExecutionRules {
+                max_tx_gas: MAX_TX_GAS,
+                uncovered_max_gas: UNCOVERED_MAX_GAS,
+                credit: credit.map(|wei| (sender(), wei)).into_iter().collect(),
+            }),
+            ..policy(exempt)
         }
     }
     fn document(policy: &Policy) -> String {
-        serde_json::json!({"admission": {
+        let mut document = serde_json::json!({"admission": {
             "version": 1, "required_tip_wei": policy.required_tip.to_string(),
             "fresh_slot_price_wei": policy.fresh_slot_price.to_string(),
             "write_limit_exempt_senders": policy.exempt,
-        }})
-        .to_string()
+        }});
+        if let Some(rules) = &policy.rules {
+            let admission = document["admission"].as_object_mut().unwrap();
+            admission.insert("version".into(), 2.into());
+            admission.insert("max_tx_gas".into(), rules.max_tx_gas.into());
+            admission.insert("uncovered_max_gas".into(), rules.uncovered_max_gas.into());
+            let credit: serde_json::Map<_, _> = rules
+                .credit
+                .iter()
+                .map(|(sender, wei)| (format!("{sender:#x}"), wei.to_string().into()))
+                .collect();
+            admission.insert("credit".into(), credit.into());
+        }
+        document.to_string()
     }
     fn signed(spec: &ChainSpec, nonce: u64, to: TxKind, input: Bytes, tip: u128, cap: u128) -> Bytes {
         let gas_limit = if matches!(to, TxKind::Create) {
@@ -370,6 +561,17 @@ mod tests {
         } else {
             200_000
         };
+        signed_with_gas(spec, nonce, to, input, tip, cap, gas_limit)
+    }
+    fn signed_with_gas(
+        spec: &ChainSpec,
+        nonce: u64,
+        to: TxKind,
+        input: Bytes,
+        tip: u128,
+        cap: u128,
+        gas_limit: u64,
+    ) -> Bytes {
         let tx = TxEip1559 {
             chain_id: spec.chain_id,
             nonce,
@@ -474,6 +676,22 @@ mod tests {
                 tip,
                 cap,
             )
+        }
+        /// `approve(0x22…, value)` on the token with a chosen gas limit, at a 20 gwei fee cap.
+        fn approve_with_gas(&self, nonce: u64, value: u64, tip: u128, gas_limit: u64) -> Bytes {
+            let request = approve_request(value, None);
+            signed_with_gas(
+                &self.spool.spec,
+                nonce,
+                TxKind::Call(request.to.unwrap()),
+                request.data.unwrap(),
+                tip,
+                FEE_CAP,
+                gas_limit,
+            )
+        }
+        fn publish(&self, policy: &Policy) {
+            std::fs::write(&self.file, document(policy)).unwrap();
         }
         fn send(&self, raw: &Bytes) -> Result<B256, ErrorObjectOwned> {
             self.spool.submit(
@@ -953,6 +1171,7 @@ mod tests {
             "{}",
             "null",
             r#"{"admission":{"version":2}}"#,
+            r#"{"admission":{"version":3,"required_tip_wei":"0","fresh_slot_price_wei":"0","write_limit_exempt_senders":[]}}"#,
             r#"{"admission":{"version":1,"required_tip_wei":"0","fresh_slot_price_wei":0,"write_limit_exempt_senders":[]}}"#,
         ] {
             assert!(Policy::parse(text).is_none());
@@ -971,6 +1190,7 @@ mod tests {
             required_tip: 0,
             fresh_slot_price: 10,
             exempt: vec![],
+            rules: None,
         };
         assert_eq!(
             quantity(&data(&p.check(&stats, &header, 1).unwrap_err())["requiredPriorityFeePerGas"]),
@@ -991,6 +1211,336 @@ mod tests {
             ..p
         };
         assert!(exact.check(&stats, &header, 1).is_ok());
+    }
+
+    const FEE_CAP: u128 = 20_000_000_000;
+    fn kind_of(result: Result<B256, ErrorObjectOwned>) -> serde_json::Value {
+        data(&result.unwrap_err())
+    }
+
+    /// Review R308-5P-4: nothing above the policy's gas cap is executed, so nothing above it is admitted,
+    /// whatever credit or tip it has. Exempt senders are not bound by it.
+    #[tokio::test]
+    async fn a_gas_limit_above_the_cap_is_refused_whatever_the_credit_or_tip() {
+        let world = World::new();
+        world.publish(&ruled(vec![], Some(u128::MAX)));
+        for tip in [FLOOR, FLOOR * 50] {
+            let error = world
+                .send(&world.approve_with_gas(1, 0, tip, MAX_TX_GAS + 1))
+                .unwrap_err();
+            assert!(
+                error.message().contains("a higher tip does not help"),
+                "{}",
+                error.message()
+            );
+            let refusal = data(&error);
+            assert_eq!(refusal["kind"], "sequencer-gas-limit-above-cap");
+            assert_eq!(refusal["gas_limit"], MAX_TX_GAS + 1);
+            assert_eq!(refusal["max_tx_gas"], MAX_TX_GAS);
+            assert_eq!(refusal["uncovered_max_gas"], UNCOVERED_MAX_GAS);
+            assert_eq!(refusal["credit_wei"], u128::MAX.to_string());
+            assert_eq!(
+                refusal["credit_needed_wei"],
+                (u128::from(MAX_TX_GAS + 1) * tip).to_string()
+            );
+            assert_eq!(quantity(&refusal["effectivePriorityFeePerGas"]), tip);
+        }
+        world.empty_pool();
+        // Exactly at the cap, covered: admitted.
+        world.send(&world.approve_with_gas(1, 0, FLOOR, MAX_TX_GAS)).unwrap();
+        let exempt = World::new();
+        exempt.publish(&ruled(vec![sender()], None));
+        exempt
+            .send(&exempt.approve_with_gas(1, 0, FLOOR, MAX_TX_GAS + 1))
+            .unwrap();
+    }
+
+    /// A sender whose credit does not cover `gas limit x tip` is executed only up to the uncovered limit.
+    #[tokio::test]
+    async fn an_uncovered_sender_above_the_uncovered_limit_needs_credit_and_a_covered_one_passes() {
+        let world = World::new();
+        let gas = UNCOVERED_MAX_GAS + 1;
+        let needed = u128::from(gas) * FLOOR;
+        for (credit, published) in [(None, 0), (Some(needed - 1), needed - 1)] {
+            world.publish(&ruled(vec![], credit));
+            let error = world.send(&world.approve_with_gas(1, 0, FLOOR, gas)).unwrap_err();
+            assert!(
+                error.message().contains("a higher tip does not help"),
+                "{}",
+                error.message()
+            );
+            assert!(error.message().contains("plain transfer"), "{}", error.message());
+            let refusal = data(&error);
+            assert_eq!(refusal["kind"], "sequencer-needs-credit");
+            assert_eq!(refusal["gas_limit"], gas);
+            assert_eq!(refusal["uncovered_max_gas"], UNCOVERED_MAX_GAS);
+            assert_eq!(refusal["max_tx_gas"], MAX_TX_GAS);
+            assert_eq!(refusal["credit_wei"], published.to_string());
+            assert_eq!(refusal["credit_needed_wei"], needed.to_string());
+        }
+        // A higher tip needs more credit; a future nonce (never simulated) is refused the same way; and a
+        // fee that is also too low for a new slot does not hide this refusal: it comes before any execution.
+        for raw in [
+            world.approve_with_gas(1, 0, FLOOR * 2, gas),
+            world.approve_with_gas(5, 0, FLOOR, gas),
+            world.approve_with_gas(1, 7, FLOOR, gas),
+        ] {
+            assert_eq!(kind_of(world.send(&raw))["kind"], "sequencer-needs-credit");
+        }
+        world.empty_pool();
+        // Exempt: covered whatever its credit.
+        world.publish(&ruled(vec![sender()], None));
+        world.send(&world.approve_with_gas(1, 0, FLOOR, gas)).unwrap();
+        // Exactly at the uncovered limit without credit, and above it with exactly the credit needed.
+        let small = World::new();
+        small.publish(&ruled(vec![], None));
+        small
+            .send(&small.approve_with_gas(1, 0, FLOOR, UNCOVERED_MAX_GAS))
+            .unwrap();
+        let covered = World::new();
+        covered.publish(&ruled(vec![], Some(needed)));
+        covered.send(&covered.approve_with_gas(1, 0, FLOOR, gas)).unwrap();
+    }
+
+    /// A plain transfer (21,000 gas, no data) is never refused by these rules, even under limits below it;
+    /// one more unit of gas, or one byte of data, makes it an ordinary transaction.
+    #[tokio::test]
+    async fn a_plain_transfer_always_passes_the_execution_rules() {
+        let world = World::new();
+        let mut tight = ruled(vec![], None);
+        tight.rules.as_mut().unwrap().max_tx_gas = 20_000;
+        tight.rules.as_mut().unwrap().uncovered_max_gas = 10_000;
+        world.publish(&tight);
+        let to = TxKind::Call(Address::repeat_byte(0x33));
+        let transfer = |nonce, input: &'static [u8], gas| {
+            signed_with_gas(
+                &world.spool.spec,
+                nonce,
+                to,
+                Bytes::from_static(input),
+                FLOOR,
+                FEE_CAP,
+                gas,
+            )
+        };
+        assert_eq!(
+            kind_of(world.send(&transfer(1, &[], 21_001)))["kind"],
+            "sequencer-gas-limit-above-cap"
+        );
+        // With data, 21,000 gas is below the intrinsic gas and never reaches these rules; the rule itself:
+        assert_eq!(
+            tight.executability(sender(), 21_000, false, U256::from(FLOOR)).refusal,
+            Some("gas-limit-above-cap")
+        );
+        assert_eq!(
+            tight.executability(sender(), 21_000, true, U256::from(FLOOR)).refusal,
+            None
+        );
+        tight.rules.as_mut().unwrap().max_tx_gas = MAX_TX_GAS;
+        world.publish(&tight);
+        assert_eq!(
+            kind_of(world.send(&transfer(1, &[], 21_001)))["kind"],
+            "sequencer-needs-credit"
+        );
+        world.empty_pool();
+        world.send(&transfer(1, &[], 21_000)).unwrap();
+    }
+
+    /// A version 1 policy file has no execution rules: admission and the quote are what they were.
+    #[tokio::test]
+    async fn a_version_1_policy_applies_no_execution_rule() {
+        let world = World::new();
+        assert!(document(&policy(vec![])).contains(r#""version":1"#));
+        let snapshot = Snapshot::read(&world.factory).unwrap();
+        let quote = snapshot
+            .quote(
+                &approve_request(0, Some(MAX_TX_GAS + 1)),
+                &Policy::read(&world.file).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(quote["executable"], true);
+        assert_eq!(quote["covered"], true);
+        assert_eq!(quote["gas_limit"], MAX_TX_GAS + 1);
+        for field in [
+            "not_executable_reason",
+            "credit_wei",
+            "credit_needed_wei",
+            "uncovered_max_gas",
+            "max_tx_gas",
+        ] {
+            assert!(quote[field].is_null(), "{field}");
+        }
+        assert_eq!(quantity(&quote["requiredPriorityFeePerGas"]), FLOOR);
+        world
+            .send(&world.approve_with_gas(1, 0, FLOOR, MAX_TX_GAS + 1))
+            .unwrap();
+    }
+
+    /// The quote's verdict is admission's: a call quoted executable, signed with the quoted gas limit and
+    /// fee, is admitted; one quoted not executable is refused with the matching kind and the same figures.
+    #[tokio::test]
+    async fn admission_quote_and_admission_agree_on_the_execution_rules() {
+        let credit = u128::from(UNCOVERED_MAX_GAS + 1) * FLOOR;
+        // (credit, exempt, gas limit, new-slot value) -> (reason, covered)
+        let cases: [(Option<u128>, bool, u64, u64, Option<&str>, bool); 8] = [
+            (None, false, 200_000, 7, None, false),
+            (None, false, UNCOVERED_MAX_GAS, 0, None, false),
+            (None, false, UNCOVERED_MAX_GAS + 1, 0, Some("needs-credit"), false),
+            (
+                Some(credit - 1),
+                false,
+                UNCOVERED_MAX_GAS + 1,
+                0,
+                Some("needs-credit"),
+                false,
+            ),
+            (Some(credit), false, UNCOVERED_MAX_GAS + 1, 0, None, true),
+            (Some(u128::MAX), false, MAX_TX_GAS, 0, None, true),
+            (
+                Some(u128::MAX),
+                false,
+                MAX_TX_GAS + 1,
+                0,
+                Some("gas-limit-above-cap"),
+                true,
+            ),
+            (None, true, MAX_TX_GAS + 1, 7, None, true),
+        ];
+        for (credit, exempt, gas, value, reason, covered) in cases {
+            let case = format!("credit {credit:?}, exempt {exempt}, gas {gas}, value {value}");
+            let world = World::new();
+            let policy = ruled(if exempt { vec![sender()] } else { vec![] }, credit);
+            world.publish(&policy);
+            let snapshot = Snapshot::read(&world.factory).unwrap();
+            let quote = snapshot.quote(&approve_request(value, Some(gas)), &policy).unwrap();
+            assert_eq!(quote["executable"], reason.is_none(), "{case}");
+            assert_eq!(quote["not_executable_reason"], serde_json::json!(reason), "{case}");
+            assert_eq!(quote["covered"], covered, "{case}");
+            assert_eq!(quote["gas_limit"], gas, "{case}");
+            assert_eq!(quote["max_tx_gas"], MAX_TX_GAS, "{case}");
+            assert_eq!(quote["uncovered_max_gas"], UNCOVERED_MAX_GAS, "{case}");
+            assert_eq!(quote["credit_wei"], credit.unwrap_or(0).to_string(), "{case}");
+            let tip = quantity(&quote["requiredPriorityFeePerGas"]);
+            assert_eq!(
+                quote["credit_needed_wei"],
+                (u128::from(gas) * tip).to_string(),
+                "{case}"
+            );
+            let sent = world.send(&world.approve_with_gas(1, value, tip, gas));
+            match reason {
+                None => {
+                    sent.unwrap_or_else(|error| panic!("{case}: {error}"));
+                }
+                Some(reason) => {
+                    let refusal = kind_of(sent);
+                    assert_eq!(refusal["kind"], format!("sequencer-{reason}"), "{case}");
+                    for field in [
+                        "headHash",
+                        "headNumber",
+                        "baseFeePerGas",
+                        "gas_limit",
+                        "max_tx_gas",
+                        "uncovered_max_gas",
+                        "credit_wei",
+                        "credit_needed_wei",
+                        "scope",
+                    ] {
+                        assert_eq!(quote[field], refusal[field], "{case}: {field}");
+                    }
+                    world.empty_pool();
+                }
+            }
+        }
+        // Without `gas` the call is run and judged at the largest limit the producer executes for the sender.
+        let world = World::new();
+        let snapshot = Snapshot::read(&world.factory).unwrap();
+        let unasked = snapshot.quote(&approve_request(0, None), &ruled(vec![], None)).unwrap();
+        assert_eq!(unasked["gas_limit"], MAX_TX_GAS);
+        assert_eq!(unasked["not_executable_reason"], "needs-credit");
+        let exempt = snapshot
+            .quote(&approve_request(0, None), &ruled(vec![sender()], None))
+            .unwrap();
+        assert_eq!(exempt["gas_limit"], SIMULATION_GAS_CAP);
+        assert_eq!(exempt["executable"], true);
+    }
+
+    #[test]
+    fn strict_version_2_schema() {
+        let good = ruled(vec![sender()], Some(u128::MAX));
+        assert_eq!(Policy::parse(&document(&good)), Some(good.clone()));
+        let empty = ruled(vec![], None);
+        assert_eq!(Policy::parse(&document(&empty)), Some(empty));
+        // A version 1 file is read without rules even if it carries the version 2 fields.
+        let mut legacy: serde_json::Value = serde_json::from_str(&document(&good)).unwrap();
+        legacy["admission"]["version"] = 1.into();
+        assert_eq!(Policy::parse(&legacy.to_string()), Some(policy(vec![sender()])));
+        let address = format!("{:#x}", sender());
+        let broken = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+            let mut value: serde_json::Value = serde_json::from_str(&document(&good)).unwrap();
+            edit(value["admission"].as_object_mut().unwrap());
+            Policy::parse(&value.to_string())
+        };
+        for field in ["max_tx_gas", "uncovered_max_gas", "credit"] {
+            assert!(broken(&|a| drop(a.remove(field))).is_none(), "missing {field}");
+        }
+        let bad_values: [(&str, serde_json::Value); 12] = [
+            ("max_tx_gas", "5000000".into()),
+            ("max_tx_gas", (-1).into()),
+            ("max_tx_gas", 5000000.5.into()),
+            ("uncovered_max_gas", serde_json::Value::Null),
+            ("uncovered_max_gas", "0x16e360".into()),
+            ("credit", serde_json::json!([])),
+            ("credit", serde_json::json!({ (address.clone()): 5 })),
+            ("credit", serde_json::json!({ (address.clone()): "0x5" })),
+            ("credit", serde_json::json!({ (address.clone()): "" })),
+            ("credit", serde_json::json!({ (address.clone()): "-1" })),
+            (
+                "credit",
+                serde_json::json!({ (address.clone()): "340282366920938463463374607431768211456" }),
+            ),
+            (
+                "credit",
+                serde_json::json!({ (address.to_uppercase().replace("0X", "0x")): "5" }),
+            ),
+        ];
+        for (field, value) in bad_values {
+            assert!(
+                broken(&|a| drop(a.insert(field.into(), value.clone()))).is_none(),
+                "{field} = {value}"
+            );
+        }
+        for key in [address[2..].to_string(), format!("{address}00"), "0x12".into()] {
+            assert!(
+                broken(&|a| drop(a.insert("credit".into(), serde_json::json!({ (key.clone()): "5" })))).is_none(),
+                "credit key {key}"
+            );
+        }
+    }
+
+    /// The tip the rules use is the one the producer's selection computes: the declared priority fee, capped
+    /// by the fee cap less the next base fee; a legacy gas price counts in full above the base fee.
+    #[test]
+    fn execution_rules_use_the_effective_tip_and_at_least_one_wei() {
+        let rules = ruled(vec![], Some(2_000_000));
+        let verdict = |gas, no_data, tip: u64| rules.executability(sender(), gas, no_data, U256::from(tip));
+        // Tip zero is counted as one wei: any credit of at least the gas limit covers it.
+        assert_eq!(verdict(2_000_000, false, 0).credit_needed, U256::from(2_000_000));
+        assert!(verdict(2_000_000, false, 0).covered);
+        assert_eq!(verdict(2_000_001, false, 0).refusal, Some("needs-credit"));
+        assert_eq!(verdict(2_000_000, false, 2).refusal, Some("needs-credit"));
+        assert_eq!(verdict(UNCOVERED_MAX_GAS, false, 2).refusal, None);
+        assert!(!verdict(UNCOVERED_MAX_GAS, false, 2).covered);
+        assert_eq!(verdict(21_000, true, u64::MAX).refusal, None);
+        let spec = ChainSpec::testnet();
+        let tip_of = |tip, cap, base_fee| {
+            let raw = signed(&spec, 0, TxKind::Call(Address::ZERO), Bytes::new(), tip, cap);
+            let tx = bloch_l2_evm::decode_signed_transaction(&spec, &raw).unwrap();
+            effective_tip(tx.environment().gas_price, tx.environment().gas_priority_fee, base_fee)
+        };
+        assert_eq!(tip_of(5, 100, 10), 5);
+        assert_eq!(tip_of(50, 100, 60), 40);
+        assert_eq!(tip_of(50, 100, 200), 0);
+        assert_eq!(effective_tip(100, None, 60), 40);
     }
 
     /// Opt-in cross-product rehearsal, always a fresh local chain and test key.
