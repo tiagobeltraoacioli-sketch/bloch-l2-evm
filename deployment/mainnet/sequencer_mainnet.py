@@ -484,8 +484,10 @@ class Sequencer:
         if self.c.get('next_elf_keccak'):
             args += ['--rule-set', self.rule_set]
         if shadow_txs is not None:
-            # Exactly the transactions the settler's DA batch carries; protocol limits.
-            args += ['--txs', str(shadow_txs)]
+            # Exactly the transactions the settler's DA batch carries, in the batch's order: a rebuild, not a
+            # selection, so the block depends on no policy input of the settler (review R308-5P-2). Whether the
+            # ORDER is the stated policy's is checked apart (`check_order`).
+            args += ['--txs', str(shadow_txs), '--as-given', 'yes']
         elif self.c['user_transactions']:
             args += ['--txs', self.c['txpool_dir'], '--max-gas', str(self.c['max_block_gas']),
                      '--max-bytes', str(self.c['max_block_bytes']), '--max-txs', str(self.c['max_block_txs'])]
@@ -510,6 +512,65 @@ class Sequencer:
             except RetryLater as wait:
                 log('waiting', reason=str(wait))
                 return None
+
+    def check_order(self, number, directory, settler_dir, settler_block, shadow_txs, base_args):
+        """Is the order of the settler's block the stated policy's? The settler publishes `selection.json` beside
+        the block: the seed of the plan, the credits of the block's senders and the limits. The producer's `select`
+        on the block's own transactions with those inputs must give the block's order (a transaction that was left
+        out changes nothing for the ones that were included). A difference is logged `shadow-policy-mismatch` (a
+        warning of the monitor) and the rebuild goes on: the block is still checked as a block. What this cannot
+        see: a transaction the settler never included (the shadow has no spool; the remedy of a censored sender
+        is L1 forced inclusion), and a seed chosen with intent."""
+        def unchecked(reason):
+            log('shadow-order-unchecked', number=number, reason=reason)
+        path = settler_dir / 'selection.json'
+        if not path.is_file():
+            return unchecked('the settler published no selection.json (no write price in its producer)')
+        if settler_block.get('forced'):
+            return unchecked('the block carries forced records')
+        try:
+            inputs = json.loads(path.read_text())
+            if inputs.get('hash') != settler_block.get('hash'):
+                return unchecked('selection.json is of another block')
+            args = ['select' if a == 'extend' else a for a in base_args]
+            del args[args.index('--as-given'):args.index('--as-given') + 2]   # the same call, as a selection
+            args += ['--order-check', 'yes', '--max-gas', str(int(inputs['max_gas'])),
+                     '--max-bytes', str(int(inputs['max_bytes'])), '--max-txs', str(int(inputs['max_txs'])),
+                     '--fresh-slot-price-wei', str(int(inputs['fresh_slot_price_wei'])),
+                     '--write-max-tx-gas', str(int(inputs['max_tx_gas'])),
+                     '--write-uncovered-max-gas', str(int(inputs['uncovered_max_gas'])),
+                     '--write-reserve-divisor', str(int(inputs['reserve_divisor'])), '--write-seed', bytes.fromhex(inputs['seed']).hex()]
+            if inputs.get('write_exempt'):
+                args += ['--write-exempt', ','.join(str(a) for a in inputs['write_exempt'])]
+            if inputs.get('credits'):
+                credits = directory / 'settler-credits.json'
+                credits.write_text(json.dumps({str(k): str(int(v)) for k, v in inputs['credits'].items()}))
+                args += ['--write-credits', str(credits)]
+            # The limits and prices are the settler's to state, but not to change from block to block without
+            # notice: a change against the previous checked block is reported once.
+            stated = {key: inputs[key] for key in ('max_gas', 'max_bytes', 'max_txs', 'max_tx_gas', 'uncovered_max_gas',
+                                                   'reserve_divisor', 'fresh_slot_price_wei', 'write_exempt')}
+            memory = self.work / 'settler-policy-stated.json'
+            before = json.loads(memory.read_text()) if memory.is_file() else None
+            if before is not None and before != stated:
+                changed = sorted(key for key in stated if stated[key] != before.get(key))
+                log('shadow-policy-mismatch', number=number, reason=f'the settler changed its stated policy: {changed}',
+                    before={key: before.get(key) for key in changed}, now={key: stated[key] for key in changed})
+            if before != stated:
+                memory.write_text(json.dumps(stated, sort_keys=True))
+            report = self.produce(*args)
+        except (Halt, KeyError, ValueError, TypeError) as error:
+            log('shadow-policy-mismatch', number=number, reason=f'the order check could not run: {str(error)[:300]}')
+            return
+        block_order = [keccak256(bytes.fromhex(raw)).hex() for raw in json.loads(shadow_txs.read_text())]
+        policy_order = [str(h).removeprefix('0x') for h in report.get('included', [])]
+        if policy_order != block_order:
+            first = next((i for i, (a, b) in enumerate(zip(policy_order, block_order)) if a != b), min(len(policy_order), len(block_order)))
+            log('shadow-policy-mismatch', number=number, reason='the block is not in the order of the published policy inputs',
+                position=first, block=block_order[first:first + 1], policy=policy_order[first:first + 1],
+                in_block=len(block_order), by_policy=len(policy_order))
+        else:
+            log('shadow-order-ok', number=number, transactions=len(block_order))
 
     def produce_job(self, view, number, parent, source, pending, anchor_slot):
         anchor = source['block']
@@ -551,6 +612,9 @@ class Sequencer:
         if head['number'] == number - 1:
             if head['hash'] != parent:
                 raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
+            if shadow_txs is not None:
+                self.check_order(number, directory, settler_dir, settler_block, shadow_txs,
+                                 self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs))
             block = self.produce(*self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs))
             if block['number'] != number or block['parent'] != parent or block['anchor'] != anchor:
                 raise Halt('producer extended a different block than requested')

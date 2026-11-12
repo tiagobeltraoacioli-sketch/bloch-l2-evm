@@ -435,6 +435,28 @@ required tip, whichever is greater. `requiredMaxFeePerGas` is exactly that value
 Clients should bind the error to the hash they submitted and show the quote before requesting a new signature;
 they must not raise a budget, re-sign or retry automatically.
 
+**What the producer will not execute (candidate, round 15, review R308-5P-4).** With a version 2 admission policy
+file (`admission.version = 2`: `max_tx_gas`, `uncovered_max_gas`, `credit` = the sequencer's ledger of fees each
+sender really paid, less wasted work) `eth_sendRawTransaction` refuses, before any simulation, what the producer
+would never execute for that sender (docs/SEQUENCER-POLICY-V2.md section 6), with code -32000 and
+`data.kind`:
+- `sequencer-gas-limit-above-cap`: the gas limit is above `max_tx_gas` (exempt senders excepted);
+- `sequencer-needs-credit`: the sender's credit is below `gas limit x tip` and the gas limit is above
+  `uncovered_max_gas` (1,500,000). A plain transfer (21,000 gas, no data) is never refused by these rules.
+Both carry `gas_limit`, `max_tx_gas`, `uncovered_max_gas` (JSON numbers), `credit_wei`, `credit_needed_wei`
+(decimal strings) beside the fields of `sequencer-fee-underpriced`. A higher tip does not help in either case:
+a smaller gas limit does, or credit, which is earned by any included transaction (`gas used x tip`); one plain
+transfer at a tip of `credit_needed_wei / 21,000` buys it in one step. `bloch_admissionQuote` returns the same
+verdict: `executable`, `not_executable_reason` (null, `"gas-limit-above-cap"`, `"needs-credit"`), `covered`,
+`gas_limit`, `credit_wei`, `credit_needed_wei`, `uncovered_max_gas`, `max_tx_gas`; the verdict is for a tip of
+exactly `requiredPriorityFeePerGas` and for the `gas` given (always pass `gas`; without it the call is judged
+at `max_tx_gas`). With a version 1 file the rules are off (`executable: true`, the new fields null). For a
+sender that is not covered, the place in the block does not follow the tip (plain transfers excepted): raising
+the fee of a pending call of such a sender changes nothing. Not mirrored by the RPC: the producer's per-block
+pools and sender waits, and a tip that changes with the base fee after admission (a transaction covered at
+admission can be just uncovered in its block; it is then executed if its gas limit is within
+`uncovered_max_gas`, and stays pending otherwise).
+
 **Admission quote before signing (candidate, round 15).** `bloch_admissionQuote(call)` is served by the same
 endpoint (`--txpool` with `--required-tip-file`; elsewhere it answers an error and the client keeps its own
 estimate). `call` is an object with `from` (required), `to` (absent for a creation), `data` or `input`, `value`

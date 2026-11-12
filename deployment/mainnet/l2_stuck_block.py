@@ -226,7 +226,7 @@ def measure(stuck, base, kept, workspace, tag):
     """Instructions of the block built on `base` from exactly these transactions (no proof, no lock)."""
     db = workspace / f'db-{tag}'
     shutil.rmtree(db, ignore_errors=True)
-    shutil.copytree(base, db, symlinks=True)
+    S.copy_database(base, db)  # no mode bits: the read-group database is setgid (F312-7, R308-5P-7)
     block_dir = workspace / f'block-{tag}'
     shutil.rmtree(block_dir, ignore_errors=True)
     block_dir.mkdir()

@@ -328,10 +328,15 @@ class Config(unittest.TestCase):
             policy.save()
             published = json.loads(path.read_text())
             self.assertEqual(published['admission'], {
-                'version': 1, 'required_tip_wei': str(published['required_tip_wei']),
+                'version': 2, 'required_tip_wei': str(published['required_tip_wei']),
                 'fresh_slot_price_wei': str(2**100 + 1),
                 'write_limit_exempt_senders': ['0x' + 'ab' * 20],
+                'max_tx_gas': 5_000_000, 'uncovered_max_gas': 1_500_000, 'credit': {},
             })
+            # Version 2 (review R308-5P-4): the ledger the producer gets, for the RPC's needs-credit refusal.
+            policy.state['credit'] = {'CD' * 20: {'wei': 7, 'at': 0}}
+            policy.save()
+            self.assertEqual(json.loads(path.read_text())['admission']['credit'], {'0x' + 'cd' * 20: '7'})
 
     def test_a_paced_mandatory_cycle_publishes_admission_before_skipping_the_spool(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,7 +365,7 @@ class Config(unittest.TestCase):
                 self.assertFalse(worker.cycle())
             path = worker.work / 'sequencer-policy.json'
             self.assertTrue(path.is_file(), 'admission must not wait for the first paced mandatory block')
-            self.assertEqual(json.loads(path.read_text())['admission']['version'], 1)
+            self.assertEqual(json.loads(path.read_text())['admission']['version'], 2)
             worker.prepare_block.assert_not_called()
             worker.spool_demand.assert_not_called()
 
@@ -377,7 +382,7 @@ class Config(unittest.TestCase):
             worker.produce = mock.Mock(side_effect=AssertionError('empty spool must not execute'))
             self.assertFalse(worker.spool_demand('head'))
             path = worker.work / 'sequencer-policy.json'
-            self.assertEqual(json.loads(path.read_text())['admission']['version'], 1)
+            self.assertEqual(json.loads(path.read_text())['admission']['version'], 2)
             # A legacy state is upgraded even though admission cannot accept
             # the first transaction until the new snapshot exists.
             path.write_text(json.dumps({'tip': 10**9, 'last_block_time': 0.0}))

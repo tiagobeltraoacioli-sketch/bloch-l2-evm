@@ -198,6 +198,21 @@ class CreditAndOwnDoing(PricedWorld):
         self.block(advance=0)
         self.assertEqual(self.policy.waiting_senders(self.now), {'victim'}, 'the third report in the window is its own doing')
 
+    def test_work_somebody_else_made_useless_is_not_debited_and_a_zero_tip_is_debited_at_the_floor(self):
+        """Reviews R308-5P-6 and R308-5P-5."""
+        self.add('pay', 'alice', 0, 21_000, 1, tip=GWEI)
+        self.block(advance=0)
+        before = self.policy.credits(self.now)['alice']
+        self.spool.clear()
+        self.add_writer('v', 'alice', 1, 50_000, 1, ['shared'], tip=GWEI)
+        self.reporting(gas_used=15_000, effective_tip=GWEI, own_doing=False)
+        self.block(advance=0)
+        self.assertEqual(self.policy.credits(self.now)['alice'], before, 'made unpaid by another transaction: no debit')
+        self.now += 60
+        self.reporting(effective_tip=0, own_doing=True)
+        self.block(advance=0)
+        self.assertEqual(self.policy.credits(self.now)['alice'], before - 15_000 * sp.DEFAULTS['min_tip_wei'])
+
     def test_the_ledgers_survive_a_restart(self):
         self.add('pay', 'alice', 0, 21_000, 1, tip=GWEI)
         self.add_writer('np', 'mallory', 0, 50_000, 1, ['own'], tip=GWEI)
@@ -232,6 +247,45 @@ class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
             self.assertEqual(json.loads(Path(args[args.index('--write-credits') + 1]).read_text()), {'aa' * 20: '42'},
                              'credit older than the memory window is not handed over')
             self.assertEqual(json.loads(Path(args[args.index('--write-waiting') + 1]).read_text()), ['cc' * 20])
+            self.assertEqual(args[args.index('--write-uncovered-max-gas') + 1], '1500000')
+            self.assertEqual(args[args.index('--write-reserve-divisor') + 1], '8')
+
+    def test_the_seed_is_drawn_per_plan_and_the_plan_uses_one_set_of_inputs(self):
+        """Review R308-5P-3: the seed is random, not the anchor; every producer call of one block plan gets the
+        same seed and the same ledger (the measured block and the built block are selected alike), and the next
+        plan gets another seed. Review R308-5P-2: what the block's order depended on is published beside it."""
+        import json
+        import tempfile
+        import settler_v3 as settler
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            worker = object.__new__(settler.Settler)
+            worker.work, worker.policy_clock = work, lambda: 1_000_000
+            worker.c = {'user_transactions': True, 'max_block_sp1_gas': 90_000_000, 'producer_write_price': True,
+                        'max_block_gas': 15_000_000, 'max_block_bytes': 100_000, 'max_block_txs': 64, 'max_tx_gas': 5_000_000}
+            policy = worker.policy()
+            policy.state['credit'] = {'aa' * 20: {'wei': 42, 'at': 999_999}, 'bb' * 20: {'wei': 9, 'at': 999_999}}
+            policy.save(1_000_000)
+            pool = work / 'pool.json'
+            pool.write_text('[]')
+            seed = lambda args: args[args.index('--write-seed') + 1]
+            outside = [seed(worker.pool_arguments(pool)) for _ in range(2)]
+            self.assertNotEqual(outside[0], outside[1])
+            self.assertEqual(len(bytes.fromhex(outside[0])), 32)
+            worker.plan_inputs = worker.selection_inputs(policy)
+            first = worker.pool_arguments(pool)
+            policy.state['credit']['aa' * 20]['wei'] = 1          # a debit inside the plan, saved
+            policy.save(1_000_000)
+            second = worker.pool_arguments(pool)
+            self.assertEqual(seed(first), seed(second))
+            self.assertEqual(json.loads(Path(second[second.index('--write-credits') + 1]).read_text())['aa' * 20], '42')
+            block = {'number': 7, 'hash': 'ee' * 32, 'tx_stats': [{'sender': 'aa' * 20}]}
+            worker.publish_selection(work, policy, block)
+            published = json.loads((work / 'selection.json').read_text())
+            self.assertEqual(published['seed'], seed(first))
+            self.assertEqual(published['credits'], {'aa' * 20: '42'}, 'only the senders of the block')
+            self.assertEqual((published['max_gas'], published['max_txs'], published['reserve_divisor'], published['uncovered_max_gas']),
+                             (15_000_000, 64, 8, 1_500_000))
 
 
 class DatabaseCopyCarriesNoModeBits(unittest.TestCase):

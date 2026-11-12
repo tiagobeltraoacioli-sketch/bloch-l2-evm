@@ -85,7 +85,8 @@ host_of() { [[ $1 =~ ^https?://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]] || die "bad 
 # network yet answered nothing even for a literal or for localhost, agent 312 F312-6) to the plain resolver.
 ip_of() {
   local ip
-  if [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then echo "$1"; return; fi
+  if [[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] && [ "${BASH_REMATCH[1]}" -le 255 ] && [ "${BASH_REMATCH[2]}" -le 255 ] \
+     && [ "${BASH_REMATCH[3]}" -le 255 ] && [ "${BASH_REMATCH[4]}" -le 255 ]; then echo "$1"; return; fi
   ip=$({ getent ahostsv4 "$1" || true; } | awk 'NR==1{print $1}')
   [ -n "$ip" ] || ip=$(python3 -I -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "$1" 2>/dev/null || true)
   echo "$ip"

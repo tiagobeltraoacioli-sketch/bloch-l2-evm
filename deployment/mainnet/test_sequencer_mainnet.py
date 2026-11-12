@@ -354,6 +354,71 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(seen['txs'], ['0200', '0201'])
         self.assertEqual(job['da']['commitment'], q.da_commitment(1, batch(2)).hex())
 
+    def shadow_with_order(self, policy_order, selection=True):
+        """A shadow whose producer answers `select` with `policy_order` (hashes); returns (seq, calls seen, logs)."""
+        producer = FakeProducer(txs=2)
+        seen = []
+        orig = producer.extend
+
+        def extend(o):
+            seen.append(('extend', dict(o)))
+            return orig(o)
+
+        def select(o):
+            seen.append(('select', dict(o)))
+            return {'included': policy_order, 'tx_stats': []}
+        producer.extend, producer.select = extend, select
+        seq, _, _ = self.make([view()] * 3, producer, settler_workdir=str(self.root / 'settler-work'))
+        d = self.settler_dir()
+        block = self.reference(txs=2)
+        (d / 'block.json').write_text(json.dumps(block))
+        (d / 'da-payload.hex').write_text(batch(2).hex() + '\n')
+        if selection:
+            (d / 'selection.json').write_text(json.dumps({
+                'version': 1, 'number': 1, 'hash': block['hash'], 'seed': '5e' * 32, 'credits': {'aa' * 20: '42'},
+                'fresh_slot_price_wei': '200000000000000', 'write_exempt': [], 'max_tx_gas': 5_000_000,
+                'uncovered_max_gas': 1_500_000, 'reserve_divisor': 8, 'min_tip_wei': 100_000_000,
+                'max_gas': 15_000_000, 'max_bytes': 114_688, 'max_txs': 64}))
+        logs = []
+        original = q.log
+        q.log = lambda event, **fields: logs.append((event, fields))
+        self.addCleanup(setattr, q, 'log', original)
+        return seq, seen, logs
+
+    def test_shadow_rebuilds_the_block_as_given_and_checks_its_order_against_the_published_policy(self):
+        """Review R308-5P-2: the rebuild takes the DA batch in its order (no selection, no policy input), and the
+        order is checked apart with the inputs the settler published."""
+        order = [q.keccak256(bytes.fromhex(raw)).hex() for raw in ('0200', '0201')]
+        seq, seen, logs = self.shadow_with_order(order)
+        job = seq.step()
+        self.assertEqual(job['status'], 'shadow-matched')
+        (kind, select), (_, extend) = seen
+        self.assertEqual(kind, 'select')
+        self.assertEqual(extend['--as-given'], 'yes')
+        self.assertNotIn('--write-seed', extend)
+        self.assertNotIn('--as-given', select)
+        self.assertEqual((select['--order-check'], select['--write-seed'], select['--max-txs'], select['--max-gas'],
+                          select['--write-reserve-divisor'], select['--write-uncovered-max-gas']),
+                         ('yes', '5e' * 32, '64', '15000000', '8', '1500000'))
+        self.assertEqual(json.loads(Path(select['--write-credits']).read_text()), {'aa' * 20: '42'})
+        self.assertEqual(select['--txs'], extend['--txs'])
+        self.assertIn('shadow-order-ok', [event for event, _ in logs])
+
+    def test_shadow_reports_a_block_in_another_order_than_the_policy_and_still_checks_the_block(self):
+        order = [q.keccak256(bytes.fromhex(raw)).hex() for raw in ('0201', '0200')]
+        seq, _, logs = self.shadow_with_order(order)
+        job = seq.step()
+        self.assertEqual(job['status'], 'shadow-matched', 'a valid block in the wrong order is still matched as a block')
+        mismatch = [fields for event, fields in logs if event == 'shadow-policy-mismatch']
+        self.assertEqual(len(mismatch), 1)
+        self.assertEqual(mismatch[0]['position'], 0)
+
+    def test_shadow_without_published_inputs_rebuilds_and_says_the_order_was_not_checked(self):
+        seq, seen, logs = self.shadow_with_order([], selection=False)
+        self.assertEqual(seq.step()['status'], 'shadow-matched')
+        self.assertEqual([kind for kind, _ in seen], ['extend'])
+        self.assertIn('shadow-order-unchecked', [event for event, _ in logs])
+
     def test_shadow_configuration_guards(self):
         with self.assertRaisesRegex(q.Halt, 'leave user_transactions false'):
             q.Sequencer({**self.config, 'settler_workdir': '/x', 'user_transactions': True,

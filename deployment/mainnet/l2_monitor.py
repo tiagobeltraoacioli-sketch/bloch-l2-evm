@@ -173,7 +173,10 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # nothing, an unreadable policy state, a gate that did not settle.
                          'mandatory-over-budget', 'budget-unavailable', 'policy-state-unreadable', 'gate-did-not-settle',
                          # Round 14: a block kept unpaid new slots (F264-2 residual); a preflight copy did not rewind.
-                         'final-gate-unsettled', 'preflight-copy-discarded'})
+                         'final-gate-unsettled', 'preflight-copy-discarded',
+                         # Round 15 (review R308-5P-2): the shadow found the settler's block in another order than
+                         # the policy inputs the settler published give, or could not run that check.
+                         'shadow-policy-mismatch'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

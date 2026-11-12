@@ -105,8 +105,12 @@ the block without it, so a non-payer never displaces a payer. --write-exempt A,B
 names senders that pay no write price. --write-credits FILE is the policy's ledger
 ({sender: wei}): fees a sender really paid less the fee value of its work that was
 left out. A transaction is covered when the credit is at least its gas limit times
-its tip; covered ones are selected first, by tip, uncovered ones after them in an
-order seeded by the block's anchor, up to --write-uncovered-max-gas (500000) each.
+its tip. Order: covered ones by tip while they leave one eighth of the block's gas,
+bytes and places free (--write-reserve-divisor 8; 0 for no reserve); then the plain
+transfers of uncovered senders by tip; then their other transactions, up to
+--write-uncovered-max-gas (1500000) each, senders with any credit first, in the order
+of --write-seed HEX32 (the settler's secret per block plan; default the anchor); then
+the covered ones that are left. The block's room (--max-gas) is counted in gas used.
 Gas spent on left-out transactions is counted per class: --write-wasted-gas for
 covered ones (default two blocks), --write-uncovered-gas for the others (half a
 block); a class whose pool is used up runs only plain transfers, reported as
@@ -115,6 +119,8 @@ gas cap above which nothing is executed. A left-out transaction is judged once
 more alone on the block's start state (own_doing in the report). --write-waiting FILE (a JSON list) names senders whose
 transactions are not executed at all in this call (reported as waiting). Left
 transactions keep their spool files (unpaid).
+extend --as-given yes --txs FILE builds exactly the JSON list of FILE in its order (a
+rebuild of a block from its own transactions); it takes no selection option.
 select runs the same selection on the same parent, deposits and limits, and prints
 the report extend would print (included, deferred, dropped, tx_stats with sender,
 nonce, gas used, effective tip and storage slots added and cleared per account),
@@ -375,9 +381,12 @@ fn run(args: &[String]) -> Result<String, String> {
                 "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
                 "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
                 "--fresh-slot-price-wei", "--write-exempt", "--write-credits", "--write-wasted-gas", "--write-waiting",
-                "--write-uncovered-gas", "--write-uncovered-max-gas", "--write-max-tx-gas",
+                "--write-uncovered-gas", "--write-uncovered-max-gas", "--write-max-tx-gas", "--write-seed",
+                "--write-reserve-divisor", "--as-given", "--order-check",
             ];
-            if selecting && rest.iter().any(|a| a == "--max-txs") {
+            // `select --order-check yes` is the shadow's check of a finished block's order: it needs the block's
+            // own limits, the transaction cap included (the reserve keeps one eighth of the places).
+            if selecting && rest.iter().any(|a| a == "--max-txs") && !rest.iter().any(|a| a == "--order-check") {
                 // Sequencer policy v2: the policy applies its own count to its own try order.
                 return Err("select runs without the per-block transaction cap: --max-txs is not accepted".into());
             }
@@ -466,6 +475,41 @@ fn run(args: &[String]) -> Result<String, String> {
                 report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
                 return Ok(out.to_string());
             };
+            if option(rest, "--as-given").is_ok() {
+                // A rebuild: exactly these transactions, in this order, after the forced ones. Nothing is selected,
+                // so the block depends on no policy input (review R308-5P-2: the shadow rebuilds the settler's
+                // block from its DA batch). A transaction that cannot run where it stands is an error.
+                if command == "select" {
+                    return Err("--as-given is for extend".into());
+                }
+                if rest.chunks(2).any(|p| p[0].starts_with("--max-") || p[0].starts_with("--write-") || p[0] == "--fresh-slot-price-wei" || p[0] == "--min-tip-wei") {
+                    return Err("--as-given builds the list as it is: it takes no selection option".into());
+                }
+                if pool.iter().any(|(file, _)| file.is_some()) {
+                    return Err("--as-given needs --txs FILE (a JSON list in block order), not a spool directory".into());
+                }
+                let forced_included = if forced.is_empty() {
+                    vec![]
+                } else {
+                    let (selection, _) = coordinator
+                        .select_pending_after_forced(&attributes, &forced, &[], SelectionLimits::protocol(&rules()))
+                        .map_err(|e| e.to_string())?;
+                    selection.included
+                };
+                let body: Vec<_> = forced_included.iter().cloned().chain(pool.iter().map(|(_, raw)| raw.clone())).collect();
+                let tip = coordinator.extend_raw(parent, attributes, &body).map_err(|e| e.to_string())?;
+                if !forced.is_empty() {
+                    write_forced_sidecar(&target, tip.0.number, &forced, forced_included.len())?;
+                }
+                let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
+                          "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
+                          "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
+                          "rules": if schedule.is_next(number) { "next" } else { "base" },
+                          "transactions": body.len(), "user_transactions": pool.len(), "as_given": true,
+                          "included": pool.iter().map(|(_, raw)| hex::encode(alloy_primitives::keccak256(raw))).collect::<Vec<_>>()});
+                report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
+                return Ok(out.to_string());
+            }
             let limits = limits(rest, SelectionLimits::protocol(&rules()))?;
             // Policy of this producer, not a block rule: replay never reads the pool.
             let min_tip = match option(rest, "--min-tip-wei") {
@@ -1158,12 +1202,18 @@ fn write_price(args: &[String], block_gas_limit: u64, anchor: B256) -> Result<Op
         exempt,
         credits,
         // Defaults: no transaction above the block; two blocks of covered waste; half a block of uncovered waste;
-        // uncovered transactions up to 500,000 gas.
+        // uncovered transactions up to 1,500,000 gas; one eighth of the block kept for uncovered senders.
         max_tx_gas: number("--write-max-tx-gas", block_gas_limit)?,
         covered_allowance: number("--write-wasted-gas", block_gas_limit.saturating_mul(2))?,
         uncovered_allowance: number("--write-uncovered-gas", block_gas_limit / 2)?,
-        uncovered_max_gas: number("--write-uncovered-max-gas", 500_000)?,
-        seed: anchor,
+        uncovered_max_gas: number("--write-uncovered-max-gas", 1_500_000)?,
+        // The settler draws the seed per block plan and publishes it with the block; without one (development)
+        // the anchor stands in, which every sender can know beforehand (review R308-5P-3).
+        seed: match option(args, "--write-seed") {
+            Ok(text) => text.trim_start_matches("0x").parse::<B256>().map_err(|_| "--write-seed must be 32 bytes of hex")?,
+            Err(_) => anchor,
+        },
+        reserve_divisor: number("--write-reserve-divisor", 8)?,
     };
     match option(args, "--fresh-slot-price-wei") {
         Ok(text) => {
@@ -1223,6 +1273,7 @@ fn report_unpaid(
                                 "wasted_covered_gas": left.wasted_covered, "covered_allowance": price.covered_allowance,
                                 "wasted_uncovered_gas": left.wasted_uncovered, "uncovered_allowance": price.uncovered_allowance,
                                 "uncovered_max_gas": price.uncovered_max_gas, "max_tx_gas": price.max_tx_gas,
+                                "reserve_divisor": price.reserve_divisor,
                                 "senders_with_credit": price.credits.len()});
 }
 

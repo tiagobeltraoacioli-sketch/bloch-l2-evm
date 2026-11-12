@@ -439,7 +439,7 @@ unpaid slot. A producer call that times out is a producer refusal, so the deposi
 the last resort only.
 
 The work spent on transactions that are then left out is what a non-payer can take for free, so it is governed by
-one rule (reviews R308-3P-2, R308-4P-1, R308-4P-2): **a claim (tip, gas limit, queued nonces) buys nothing; every
+one rule (reviews R308-3P-2, R308-4P-1, R308-4P-2, and the fifth pass R308-5P-1 to 5P-6): **a claim (tip, gas limit, queued nonces) buys nothing; every
 allowance is bought with fees really paid and is used up by waste.**
 
 - *Credit.* Per sender, the policy keeps the priority fees it really paid in the last `credit_memory_seconds`
@@ -447,14 +447,32 @@ allowance is bought with fees really paid and is used up by waste.**
   producer gets the ledger (`--write-credits`). A transaction is **covered** when its sender's credit is at least
   `gas limit x its tip`. Wasting covered work therefore costs, in fees paid before, what that gas costs at the
   waster's own bid; credit bought once is gone after the waste it covers. Quarantine removes it.
-- *Order.* Covered transactions first, by tip. Then uncovered ones: senders with any credit left before senders
-  with none, and inside each group by a hash of the block's L1 anchor and the sender, which no claim can buy and
-  nobody knows when a key is funded. The fee of funding a key is the funder's credit, not the key's.
+- *Order, and the reserve (R308-5P-1; coordinator decision).* Four classes, in this order:
+  1. covered transactions by tip, while they leave one eighth of the block's gas, bytes and places free
+     (`reserve_divisor` 8, `--write-reserve-divisor`);
+  2. the plain transfers of senders that are not covered, by tip. A plain transfer can never be left out for the
+     write price, so its bid is paid in full when it is included: ordering these by tip is the fee market, not a
+     free claim, and it is the one door into credit that nobody can close without outbidding it;
+  3. the other transactions of senders that are not covered: senders with any credit left before senders with
+     none, and inside each group by a hash of the plan's seed and the sender;
+  4. the covered transactions that did not fit beside the reserve. So what classes 2 and 3 do not use goes back
+     to covered senders, and a block without newcomers sells every place by tip.
+  In a full block at most one eighth of the room goes to a lower bid than the covered class offered.
+- *The seed (R308-5P-3).* The settler draws 32 random bytes per block plan (`selection_inputs`), gives them to
+  every producer call of that plan (`--write-seed`) and publishes them only with the finished block. No sender
+  can compute its place from public data before it submits. (Before: the L1 anchor, public beforehand.)
+- *Block room (R308-5P-1).* The block's gas (`--max-gas`) is counted in gas really USED by what is included; a
+  candidate needs its whole gas limit to fit in what is left, as on any EVM chain. Declared gas that is not used
+  takes nobody's place. (Before: three covered calls declaring 5M gas each filled a 15M block.)
 - *Per transaction.* Nothing whose gas limit is above `max_tx_gas` is executed (`--write-max-tx-gas`; reported
   `over_gas_cap`, held `gas-limit-above-cap`; exempt senders are bound by the protocol limit only). An uncovered
-  transaction is executed only up to a gas limit of 500,000 (`--write-uncovered-max-gas`; above it `needs_credit`,
-  held `needs-credit`), unless it is a plain transfer. A plain transfer (21,000 gas, no data) adds no slot
-  whatever ran before it: it is always executed, and it earns credit.
+  transaction is executed only up to a gas limit of `uncovered_max_gas`, 1,500,000 (`--write-uncovered-max-gas`;
+  above it `needs_credit`, held `needs-credit`), unless it is a plain transfer. The figure comes from the DEX
+  page (postern-dex a12cdd6: approve 100,000, swap 250,000 per hop, explicit limits): a route of six hops fits.
+  A plain transfer (21,000 gas, no data) adds no slot whatever ran before it: it is always executed, and it
+  earns credit. The settled RPC refuses at admission what these two limits exclude, and `bloch_admissionQuote`
+  says so (`executable`, `not_executable_reason`; admission policy file version 2 carries the limits and the
+  ledger; R308-5P-4).
 - *Per sender, per block.* One wasted transaction at most: after one is left out the sender's later nonces cannot
   run in that block.
 - *Per sender, across blocks.* A sender whose transaction is unpaid by its own doing waits
@@ -464,33 +482,47 @@ allowance is bought with fees really paid and is used up by waste.**
 - *Per block.* Wasted gas is counted in two pools: one for covered transactions (`--write-wasted-gas`, two
   blocks' gas) and one for the rest (`--write-uncovered-gas`, half a block). Uncovered senders never use the
   covered pool. A covered transaction that finds the covered pool used up is judged like an uncovered one (up to
-  500,000 gas, from the other pool), so waste that was paid for does not leave a small covered call unjudged.
+  `uncovered_max_gas`, from the other pool), so waste that was paid for does not leave a small covered call unjudged.
   Past the pools only plain transfers are executed; the rest is reported `not_judged` (held
   `unpaid-allowance-exhausted`, no wait, no penalty). A total has to exist, or the selection would have no time
   bound: with the per-transaction cap it is 2.5 blocks of gas plus one transaction, and each left-out transaction
   is executed a second time alone (see below), so at most twice that. What matters is who can reach it. The
   covered pool is used up only by wasting credit worth two blocks of gas at a bid above the users' (more than
   buying the block outright), and each of those senders then waits; to leave small covered calls unjudged as
-  well takes about 30 more senders with credit. The uncovered pool can be used up by about 30 keys per block
-  that have no credit; a sender with any credit is ahead of all of them.
+  well takes 10 or more further senders with credit. The uncovered pool can be used up by 10 keys per block that
+  have no credit (at 1.5M gas each; 30 at 500,000); a sender with any credit is ahead of all of them, and their
+  place among themselves is the seed's.
 - *Whose doing (R308-4P-2).* A transaction that is left out is judged once more alone on the block's start state
   (after the deposits). Unpaid there too: its sender's own doing (`own_doing: true`), the wait applies. Paid there:
   an earlier transaction of this block made it unpaid; it is held `unpaid-in-this-block`, without any wait, and is
-  tried again in the next block. Its work is still taken from its sender's credit, and the third such report of
-  one sender inside `unpaid_memory_seconds` counts as its own doing (`unpaid_other_doing_strikes`), so a paying
-  accomplice cannot make a key waste the producer's work for free block after block.
+  tried again in the next block, and nothing is taken from its sender's credit (R308-5P-6). The third such
+  report of one sender inside `unpaid_memory_seconds` counts as its own doing (`unpaid_other_doing_strikes`),
+  with the debit and the wait, so a paying accomplice cannot make a key waste the producer's work for free block
+  after block. A debit is `gas used x max(tip, min_tip_wei)` (R308-5P-5).
+- *Rebuilds (R308-5P-2).* The order depends on the settler's ledger and seed, so a second party cannot re-select
+  a block from its transactions alone. `extend --as-given yes --txs LIST` builds exactly a list in its order;
+  the shadow producer rebuilds the settler's block that way from the DA batch, so the block check depends on no
+  policy input. The settler writes `selection.json` beside each block (seed, the credits of the block's senders,
+  limits, price, exempt list); the shadow runs `select --order-check yes` on the block's own transactions with
+  those inputs and compares the order: a transaction that was left out changes nothing for those that were
+  included, so the orders are equal exactly when the settler followed the stated order. A difference, or a
+  change of the stated limits from one block to the next, is logged `shadow-policy-mismatch` (a warning of the
+  monitor); the block is still checked as a block. Not visible to the shadow: a transaction that was never
+  included (it has no spool; the censored sender's remedy is L1 forced inclusion), credits stated higher than
+  the fees a sender paid, and a seed chosen with intent.
 
-What a new sender gets (R308-4P-3), stated: uncovered transactions come after covered ones, so in a block that
-covered paying transactions fill (gas, bytes or the 64 places) a new sender waits, whatever its tip; the bound is
-the covered demand of that block. Its plain transfers are always executed, and every included transaction earns
-credit, so from its second block a sender competes by tip for anything up to the fees it has paid. A new sender
-whose first transaction must be large (a deployment of 3M gas) buys the credit for it with one plain transfer
-at a higher tip: the credit needed is `gas limit x tip` of the large transaction (3M gas at 1 gwei: 0.003 BLCH,
-one transfer at 143 gwei), which is what the large transaction would pay in tips anyway; nothing is refunded. Under a flood
-of funded keys that never pay (each costs its funder one paid transfer, waits 40 minutes after its first waste, and
-is usable 12 times a week), an uncovered contract call of a sender with no credit at all is judged with
-probability about 30/(N+1) per block against N such keys; a sender with any credit is ahead of all of them. No
-honest transaction is ever penalised for not being judged.
+What a new sender gets (R308-4P-3, R308-5P-1): one eighth of every block is open to it. Its plain transfers
+compete there by tip against other senders without credit only, so it can always buy its way in at the price of
+outbidding them, whatever the covered senders bid or declare; its other transactions (an approve, a swap of up
+to six hops) follow in the seed's order. Every included transaction earns credit. A new sender whose first
+transaction must be above 1,500,000 gas (a large deployment) buys the credit with one plain transfer at a higher
+tip: the credit needed is `gas limit x tip` of the large transaction (3M gas at 1 gwei: 0.003 BLCH, one transfer
+at 143 gwei), which is what that transaction would pay in tips anyway; nothing is refunded. Under a flood of N
+funded keys that never pay (each costs its funder one paid transfer, waits 40 minutes after its first waste and
+is usable 12 times a week), a CALL of a sender with no credit at all is judged with probability of about
+10/(N+1) per block in the worst case (every key wasting 1.5M gas); the keys cannot choose their place. A plain
+transfer is not affected, and after it the sender is ahead of every key without credit. No honest transaction
+is ever penalised for not being judged.
 
 Measured on the real binary (debug build, shared build host under load), one `select` call each. Review
 R308-4P-1's scenario, 14 keys each sending a 5M-gas writer of 200 unpaid slots at 7.9 gwei ahead of 10 honest
@@ -504,11 +536,25 @@ N = 400: 4.2 s (346 executed and left out, each judged twice, 54 `not_judged` on
 independent writers and as a chain on one slot alike); all 30 honest transactions included in every run. The
 plan's allowance is 180 s.
 
+Fifth pass, same binary and host. R308-5P-1's scenario (three covered calls declaring 5M gas each at 3 gwei + 1
+wei, five senders without credit at 100 gwei, `--max-gas` 15M): before, 3 of 8 included and the five deferred
+`gas-limit`; now 8 of 8. The reserve, with room for eight transfers and twelve covered senders at 5 gwei: eight
+covered when nobody else is there; seven covered and the 4-gwei transfer of a sender without credit when four
+such senders bid 1 to 4 gwei. R308-5P-2's scenario: the block rebuilt with `--as-given` from the settler's list
+has the settler's hash; `select --order-check` with the published inputs gives its order, and gives another
+order for the same transactions reordered. The fourth-pass figures stand (floods of 400 keys: 3.8 to 4.0 s).
+The settler's and the shadow's own code on one pool with the real producer:
+`deployment/mainnet/test_shadow_settler_real_binary.py` (needs `BLOCH_L2_PRODUCE_DEV`).
+
 Tests: `tests/produce_txs.rs` (`large_non_payers_cannot_starve_contract_calls`,
 `a_transaction_made_unpaid_by_an_earlier_one_is_not_its_senders_doing`,
 `eight_non_payers_ahead_in_tip_order_do_not_empty_the_block`,
 `many_non_payers_at_a_high_tip_cost_one_pass_and_serve_every_payer`,
-`write_price_leaves_a_whole_chain_of_non_payers_pending`), `test_round15_producer_write_price.py`
+`write_price_leaves_a_whole_chain_of_non_payers_pending`,
+`r308_5p_1_three_covered_calls_at_the_gas_cap_do_not_shut_out_every_sender_without_credit`,
+`r308_5p_2_a_rebuild_from_the_blocks_own_transactions_gives_the_same_block`,
+`one_eighth_of_the_block_is_kept_for_senders_without_credit_and_returns_when_unused`,
+`the_order_of_uncovered_calls_follows_the_seed_not_the_anchor`), `test_round15_producer_write_price.py`
 (`CreditAndOwnDoing`, `UnpaidWaitsEscalate`), `review_r15_308_2p_u3_waits.py`,
 `review_r15_308_3p_cap_starves_users.py`.
 
@@ -525,6 +571,13 @@ Tests: `tests/produce_txs.rs` (`large_non_payers_cannot_starve_contract_calls`,
 | R7 | Spool flooding at the RPC (4,096 entries, 16 per sender, eviction by fee) | Pre-existing; the planner reads at most 16,384 | RPC refusal of banned senders (R1); admission at `max_tx_gas` (3.2) |
 | R8 | The budget's memory margin rests on two 2c points and on load-noisy times | | Tests P1, P2 |
 | R9 | The sparse guest's empty-block cost at height 8191 is not measured | Complete guest: +37k SP1 gas per block of height (agent 82) | Test H3 |
+| R10 | Wasted work is not a congestion signal (R308-5P-5a) | At an idle chain, leaving the covered contract calls of a block unjudged costs credit worth two blocks of gas at the 0.1 gwei floor (about 0.0075 BLCH per block, 0.36 BLCH a day); the published tip does not move. Plain transfers, the reserve and senders without credit are not affected | Open: count the gas wasted in the covered pool into the congestion tip |
+| R11 | Credit earned in a block that a reorg recovery later drops is kept (R308-5P-8) | One dropped block's fees per recovery | Open: recompute the ledger from the blocks that remain |
+| R12 | A sender whose transactions are made unpaid by others three times within 7 days gets the sender wait (R308-5P-6) | 40 minutes, doubling; no debit before the third report | Accepted (without it a paying accomplice lets a key waste work for free); strikes per counterparty not built |
+| R13 | The shadow checks the block and the ORDER of what was included, not what was left out, and takes the published credits and seed as stated (R308-5P-2) | A settler can leave a transaction out, state more credit than a sender paid, or draw seeds until an order suits it; none of this can break a block or create an unpaid slot | L1 forced inclusion for a censored sender; open: the shadow keeping its own fee ledger and reading the spool; a seed committed before the candidates are known |
+| R14 | The reserve covers gas, bytes and places, not the SP1 proof budget | The budget cut is made by the planner in its own try order (section 3: 8 of the 64 places by tip alone), before the producer's order applies | Open: no measurement of a block whose budget covered senders use up |
+| R15 | Under a flood of N funded keys without credit, a first CALL (not a transfer) of a sender with no credit is judged with probability of about 10/(N+1) per block at worst | The keys cannot choose their place (secret seed); each waits 40 minutes, doubling, after one waste; a plain transfer is always executed and moves its sender ahead of them | Accepted; the uncovered pool (half a block) and the 1,500,000 limit are settings |
+| R16 | The 1,500,000 limit of uncovered transactions and the two pools are set from the DEX page's explicit limits, not from measured traffic | A route above six hops, or a first deployment, needs credit first; the RPC refuses it with `sequencer-needs-credit` and the quote says so | Revisit with real traffic |
 
 ## 8. Integration and pins
 

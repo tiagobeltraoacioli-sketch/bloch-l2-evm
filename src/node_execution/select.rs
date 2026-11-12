@@ -597,8 +597,13 @@ pub struct WritePrice {
     pub uncovered_allowance: u64,
     /// No uncovered transaction above this gas limit is executed, unless it is a plain transfer.
     pub uncovered_max_gas: u64,
-    /// Seed of the order of uncovered senders (the block's own randomness: not known when they were funded).
+    /// Seed of the order of uncovered senders' calls: a value the settler draws per block plan and publishes only
+    /// with the block, so no sender can know its place before it submits (review R308-5P-3).
     pub seed: B256,
+    /// Part of the block kept for senders without credit: covered transactions go first only while they leave
+    /// `1/reserve_divisor` of the block's gas, bytes and places free; then the uncovered ones; then the covered
+    /// ones that are left, so room the uncovered did not use goes back (review R308-5P-1). 0: no reserve.
+    pub reserve_divisor: u64,
 }
 
 #[cfg(feature = "std")]
@@ -820,16 +825,34 @@ fn select_priced_in_session<DB: DatabaseRef>(
         }
     };
 
+    // The block's room is counted in gas really used by what is included; a candidate needs its whole gas limit
+    // to fit in what is left, as on any EVM chain. Declared gas that is not used takes nobody's place (R308-5P-1).
+    let mut used_gas = 0u64;
     loop {
-        // Best next candidate across senders: highest effective tip, then lowest hash.
+        // Next candidate across senders: by class, then by the class's key, then lowest hash.
         let Some(sender) = queues
             .iter()
             .filter_map(|(sender, queue)| queue.front().map(|c| (*sender, c.effective_tip(base_fee), c.hash)))
             .map(|(sender, tip, hash)| {
-                // Covered transactions first, by tip. Uncovered ones after them, in an order no claim can buy.
+                // Order of classes (reviews R308-4P-1, R308-5P-1): covered transactions by tip while they leave
+                // the reserve free; then the plain transfers of uncovered senders by tip (a plain transfer is
+                // never left out for the write price, so its bid is always paid: that is the fee market, and
+                // the one door nobody can close without outbidding it); then the other uncovered transactions
+                // in an order no claim can buy; then the covered ones that did not fit beside the reserve.
                 let front = queues[&sender].front().expect("filtered on a front");
                 let covered = price.covers(sender, front.env.gas_limit, tip);
-                (sender, covered, if covered { tip } else { price.rank(sender) }, hash)
+                let (class, key) = if covered {
+                    let kept = |total: u64| if price.reserve_divisor == 0 { 0 } else { total / price.reserve_divisor };
+                    let beside_reserve = used_gas.saturating_add(front.env.gas_limit) <= limits.max_gas - kept(limits.max_gas)
+                        && (selection.bytes.saturating_add(front.raw.len()) as u64) <= limits.max_bytes as u64 - kept(limits.max_bytes as u64)
+                        && (selection.transactions.len() as u64) < limits.max_transactions as u64 - kept(limits.max_transactions as u64);
+                    (if beside_reserve { 3u8 } else { 0 }, tip)
+                } else if front.env.gas_limit == 21_000 && front.env.data.is_empty() {
+                    (2, tip)
+                } else {
+                    (1, price.rank(sender))
+                };
+                (sender, class, key, hash)
             })
             .max_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(b.3.cmp(&a.3)))
             .map(|(sender, _, _, _)| sender)
@@ -886,7 +909,7 @@ fn select_priced_in_session<DB: DatabaseRef>(
             Some(DeferReason::FeeBelowBaseFee)
         } else if selection.transactions.len() >= limits.max_transactions {
             Some(DeferReason::CountLimit)
-        } else if selection.declared_gas.saturating_add(candidate.env.gas_limit) > limits.max_gas {
+        } else if used_gas.saturating_add(candidate.env.gas_limit) > limits.max_gas {
             Some(DeferReason::GasLimit)
         } else if selection.bytes.saturating_add(candidate.raw.len()) > limits.max_bytes
             || selection
@@ -964,6 +987,7 @@ fn select_priced_in_session<DB: DatabaseRef>(
             Ok(_outcome) => {
                         {
                     let gas_used = _outcome.map_or(0, |outcome| outcome.gas_used);
+                    used_gas = used_gas.saturating_add(gas_used);
                     let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
                     selection.stats.push(TxStats {
                         hash: candidate.hash,

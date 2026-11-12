@@ -90,6 +90,13 @@ DEFAULTS = {
     # counts as the sender's own doing (review R308-4P-2, and so that a paying accomplice cannot make a key waste
     # the producer's work block after block for free).
     'credit_memory_seconds': 7 * 86400,
+    # A sender without credit gets a transaction that is not a plain transfer executed only up to this gas limit.
+    # From the DEX page (postern-dex a12cdd6): approve 100,000; swap 250,000 per hop; six hops fit (R308-5P-4).
+    'uncovered_max_gas': 1_500_000,
+    # One eighth of each block (gas, bytes, places) is kept for senders without credit: their plain transfers by
+    # tip, then their other transactions by the plan's seed; what they do not use goes back to covered senders
+    # (coordinator decision after review R308-5P-1). 0 turns the reserve off.
+    'reserve_divisor': 8,
     'unpaid_other_doing_strikes': 3,
     # Places under `max_block_txs` that go by tip alone, whatever the group (agents/264 F264-5): a fresh sender's
     # large transaction at a high tip is not kept out for good by 64 small ones at the floor. They are tried last.
@@ -360,8 +367,6 @@ class Policy:
             first_sight = self._seen_unpaid.get(tx['hash']) != now   # one report per block plan
             self._seen_unpaid = {h: at for h, at in self._seen_unpaid.items() if at == now}
             self._seen_unpaid[tx['hash']] = now
-            if first_sight:
-                self._debit(tx, now)
             own = tx.get('own_doing', True)
             if not own:
                 strikes = self.state.setdefault('unpaid_other_doing', {})
@@ -376,6 +381,10 @@ class Policy:
             if (tx['hash'], reason) not in held:
                 held.append((tx['hash'], reason))
             if own:
+                # Work somebody else made useless is not taken from the sender's credit (review R308-5P-6); the
+                # third such report is its own doing, with the debit and the wait.
+                if first_sight:
+                    self._debit(tx, now)
                 self._unpaid_wait(tx, now)
         # Not judged: the producer's allowance for executing non-payers of their class ran out before it reached them.
         # Waiting: their sender waits out an earlier unpaid report. Over the gas cap: the gas LIMIT is above
@@ -406,7 +415,9 @@ class Policy:
     def _debit(self, tx, now):
         """Work the producer executed for a sender and left out is taken from the sender's credit at the fee value the
         transaction itself claimed (gas used times its tip): wasting covered work costs what was paid before."""
-        wasted = int(tx.get('gas_used') or 0) * int(tx.get('effective_tip') or 0)
+        # At least the minimum tip: a transaction whose effective tip fell to zero (fee cap equal to the base fee)
+        # would otherwise waste for nothing (review R308-5P-5).
+        wasted = int(tx.get('gas_used') or 0) * max(int(tx.get('effective_tip') or 0), int(self.c['min_tip_wei']))
         record = self.state.setdefault('credit', {}).get(tx['sender'])
         if wasted and record:
             record['wei'] = max(0, int(record['wei']) - wasted)
@@ -878,7 +889,12 @@ class Policy:
         now = self.clock() if now is None else now
         required = self.required_tip(now)
         document = dict(self.state, required_tip_wei=required, admission={
-            'version': 1,
+            # Version 2 (review R308-5P-4): what the producer will not execute, so that the RPC refuses it and
+            # `bloch_admissionQuote` says so. `credit` is the ledger the producer gets.
+            'version': 2,
+            'max_tx_gas': int(self.c['max_tx_gas']),
+            'uncovered_max_gas': int(self.c['uncovered_max_gas']),
+            'credit': {'0x' + sender.removeprefix('0x').lower(): str(wei) for sender, wei in sorted(self.credits(now).items())},
             'required_tip_wei': str(required),
             'fresh_slot_price_wei': str(self.c['fresh_slot_price_wei']),
             'write_limit_exempt_senders': ['0x' + sender.removeprefix('0x')

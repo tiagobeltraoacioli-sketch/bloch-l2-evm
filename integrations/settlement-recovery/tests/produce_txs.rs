@@ -723,3 +723,253 @@ fn a_transaction_made_unpaid_by_an_earlier_one_is_not_its_senders_doing() {
     assert_eq!(report["unpaid"].as_array().unwrap().len(), 1);
     assert_eq!(report["included"].as_array().unwrap().len(), 3);
 }
+
+/// Review R308-5P-1 (agent 308, fifth pass) on the real binary. Covered transactions are selected before every
+/// uncovered one, and the selection stops a sender at the block's DECLARED gas (`--max-gas`, 15,000,000 in the
+/// mainnet settler configuration). Three covered calls that declare the policy's cap of 5,000,000 gas each and use
+/// about 25,000 fill the declared gas of the block: every sender without credit is then deferred, plain transfers
+/// included, whatever tip it offers, and a sender without credit can get credit only by being included. The three
+/// calls pay their real gas (a few µBLCH per block) and keep their credit, so the same three keys do it in every
+/// block. Before this design a new sender could outbid them.
+/// Expected: a sender without credit can always get a plain transfer in by paying (room kept for them, by tip).
+#[test]
+fn r308_5p_1_three_covered_calls_at_the_gas_cap_do_not_shut_out_every_sender_without_credit() {
+    const GWEI: u128 = 1_000_000_000;
+    let root = tempfile::tempdir().unwrap();
+    let (db, pool) = (root.path().join("db"), root.path().join("pool"));
+    std::fs::create_dir(&pool).unwrap();
+    let (db_s, pool_s) = (db.to_str().unwrap().to_string(), pool.to_str().unwrap().to_string());
+    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let key_of = |i: usize| {
+        let mut seed = [7u8; 32];
+        seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+        SigningKey::from_bytes((&seed).into()).unwrap()
+    };
+    let sign = |i: usize, nonce: u64, to: TxKind, input: Vec<u8>, value: u64, gas: u64, tip: u128| {
+        let tx = TxEip1559 { chain_id: 700_771, nonce, to, input: input.into(), value: U256::from(value), gas_limit: gas,
+                             max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
+        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+    };
+    let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
+    // 0..3 the three covered keys, 3..8 five senders without credit, 8 the deployer.
+    let deposits = root.path().join("deposits.json");
+    let mints: Vec<_> = (0..9)
+        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .collect();
+    std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
+    let anchor = "ab".repeat(32);
+    // SSTORE(calldata[32..64], calldata[0..32])
+    let init = hex::decode("67600035602035550060005260086018f3").unwrap();
+    std::fs::write(pool.join("deploy.tx"), sign(8, 0, TxKind::Create, init, 0, 200_000, 30 * GWEI)).unwrap();
+    let one = produce(&["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", &pool_s]).unwrap();
+    assert_eq!(one["transactions"], 1, "{one}");
+    let head = one["hash"].as_str().unwrap().to_string();
+    let contract = address(8).create(0);
+    let store_zero = |slot: u64| {
+        let mut data = vec![0u8; 64];
+        data[56..64].copy_from_slice(&slot.to_be_bytes());
+        data
+    };
+    // The three covered calls: they store zero (no new slot, so they pay and are included), declare 5M gas, and
+    // bid one wei over the users' 3 gwei.
+    for i in 0..3 {
+        std::fs::write(pool.join(format!("covered-{i}.tx")), sign(i, 0, TxKind::Call(contract), store_zero(500 + i as u64), 0, 5_000_000, 3 * GWEI + 1)).unwrap();
+    }
+    // Five senders without credit, at 100 gwei: three plain transfers and two small calls that add no slot.
+    for i in 3..6 {
+        std::fs::write(pool.join(format!("new-transfer-{i}.tx")), sign(i, 0, TxKind::Call(Address::repeat_byte(0x55)), vec![], 1_000, 21_000, 100 * GWEI)).unwrap();
+    }
+    for i in 6..8 {
+        std::fs::write(pool.join(format!("new-call-{i}.tx")), sign(i, 0, TxKind::Call(contract), store_zero(600 + i as u64), 0, 60_000, 100 * GWEI)).unwrap();
+    }
+    let empty = root.path().join("empty.json");
+    std::fs::write(&empty, "[]").unwrap();
+    let credits: serde_json::Map<String, Value> = (0..3)
+        .map(|i| (hex::encode(address(i)), Value::String((5_000_000u128 * (3 * GWEI + 1)).to_string())))
+        .collect();
+    let file = root.path().join("credits.json");
+    std::fs::write(&file, Value::Object(credits).to_string()).unwrap();
+    let report = produce(&["select", "--target", &db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(),
+                           "--txs", &pool_s, "--max-gas", "15000000", "--fresh-slot-price-wei", ADV_PRICE,
+                           "--write-credits", file.to_str().unwrap()]).unwrap();
+    let included: Vec<String> = report["tx_stats"].as_array().unwrap().iter()
+        .map(|t| t["sender"].as_str().unwrap().trim_start_matches("0x").to_lowercase()).collect();
+    let shut_out: Vec<usize> = (3..8).filter(|i| !included.contains(&hex::encode(address(*i)))).collect();
+    eprintln!("R308-5P-1: included {} of 8; senders without credit shut out: {shut_out:?}; deferred {}; write_price {}",
+              included.len(), report["deferred"], report["write_price"]);
+    assert!((0..3).all(|i| included.contains(&hex::encode(address(i)))), "the three covered calls are included and pay");
+    assert!(shut_out.is_empty(), "senders without credit at 100 gwei left out behind three covered calls at 3 gwei: {shut_out:?}; deferred: {}", report["deferred"]);
+}
+
+/// Review R308-5P-2 (agent 308, fifth pass) on the real binary. With the write price on, the producer's block
+/// order is "covered by tip, then the rest by a hash", which depends on the settler's credit ledger. The shadow
+/// producer (deployment/mainnet/sequencer_mainnet.py `extend_args`) rebuilds the settler's block with
+/// `extend --txs <the block's transactions>` and no write-price option, so it orders the same transactions by
+/// tip. One covered transaction at a lower tip than an uncovered one is enough for the two blocks to differ:
+/// the independent check then halts on an ordinary block.
+/// Expected: the block built from exactly the settler's transactions equals the settler's block.
+/// Fixed (agent 311): the shadow rebuilds with `extend --as-given yes` (the list in its order, no selection), and
+/// checks the ORDER against the policy separately: `select` on the block's own transactions with the inputs the
+/// settler publishes with the block (credits of its senders, the seed) must give the block's order.
+#[test]
+fn r308_5p_2_a_rebuild_from_the_blocks_own_transactions_gives_the_same_block() {
+    const GWEI: u128 = 1_000_000_000;
+    let root = tempfile::tempdir().unwrap();
+    let pool = root.path().join("pool");
+    std::fs::create_dir(&pool).unwrap();
+    let key_of = |i: usize| {
+        let mut seed = [5u8; 32];
+        seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+        SigningKey::from_bytes((&seed).into()).unwrap()
+    };
+    let transfer = |i: usize, tip: u128| {
+        let tx = TxEip1559 { chain_id: 700_771, nonce: 0, to: TxKind::Call(Address::repeat_byte(0x55)), value: U256::from(1_000u64),
+                             gas_limit: 21_000, max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
+        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+    };
+    let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
+    let deposits = root.path().join("deposits.json");
+    let mints: Vec<_> = (0..2)
+        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .collect();
+    std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
+    // Sender 0 has credit and bids 1 gwei; sender 1 has none and bids 5 gwei.
+    let raws = [transfer(0, GWEI), transfer(1, 5 * GWEI)];
+    for (i, raw) in raws.iter().enumerate() {
+        std::fs::write(pool.join(format!("t{i}.tx")), raw).unwrap();
+    }
+    let credits = root.path().join("credits.json");
+    std::fs::write(&credits, serde_json::json!({ hex::encode(address(0)): (21_000u128 * GWEI).to_string() }).to_string()).unwrap();
+    let anchor = "ab".repeat(32);
+    const SEED: &str = "5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed";
+    let build = |name: &str, txs: &str, priced: bool| {
+        let db = root.path().join(name);
+        let db_s = db.to_str().unwrap().to_string();
+        let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+        let mut args = vec!["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", txs];
+        let credits_s = credits.to_str().unwrap().to_string();
+        if priced {
+            args.extend_from_slice(&["--fresh-slot-price-wei", ADV_PRICE, "--write-credits", &credits_s, "--write-seed", SEED]);
+        } else {
+            args.extend_from_slice(&["--as-given", "yes"]);
+        }
+        produce(&args).unwrap()
+    };
+    let settler = build("settler-db", pool.to_str().unwrap(), true);
+    assert_eq!(settler["transactions"], 2, "{settler}");
+    // What the shadow is given: the block's transactions, in block order, as a list.
+    let order: Vec<String> = settler["included"].as_array().unwrap().iter().map(|h| h.as_str().unwrap().trim_start_matches("0x").to_string()).collect();
+    let by_hash = |raw: &String| hex::encode(alloy_primitives::keccak256(hex::decode(raw).unwrap()));
+    let in_block_order: Vec<&String> = order.iter().map(|h| raws.iter().find(|raw| &by_hash(raw) == h).expect("an included transaction")).collect();
+    let list = root.path().join("settler-transactions.json");
+    std::fs::write(&list, serde_json::to_string(&in_block_order).unwrap()).unwrap();
+    let shadow = build("shadow-db", list.to_str().unwrap(), false);
+    eprintln!("R308-5P-2: settler block {} order {:?}; rebuilt block {} order {}", settler["hash"], order, shadow["hash"], shadow["included"]);
+    assert_eq!(shadow["transactions"], 2, "{shadow}");
+    assert_eq!(shadow["hash"], settler["hash"], "the rebuild orders the same two transactions differently: settler {} rebuilt {}", settler["included"], shadow["included"]);
+    // A plain `extend --txs` of the same list still selects by tip: that was the defect, and it is why the option exists.
+    let by_tip = {
+        let db = root.path().join("tip-db");
+        let db_s = db.to_str().unwrap().to_string();
+        let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+        produce(&["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", list.to_str().unwrap()]).unwrap()
+    };
+    assert_ne!(by_tip["hash"], settler["hash"]);
+    // The policy check of the shadow: the published inputs reproduce the order; a settler that put the uncovered
+    // 5-gwei transfer first (against the policy) is caught, although that block is a valid block.
+    let check_db = root.path().join("check-db");
+    let check_s = check_db.to_str().unwrap().to_string();
+    let parent = produce(&["init", "--target", &check_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let reselect = |txs: &str| produce(&["select", "--target", &check_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(),
+                                         "--txs", txs, "--fresh-slot-price-wei", ADV_PRICE, "--write-credits", credits.to_str().unwrap(), "--write-seed", SEED]).unwrap();
+    assert_eq!(reselect(list.to_str().unwrap())["included"], settler["included"]);
+    let reordered: Vec<&String> = in_block_order.iter().rev().cloned().collect();
+    let bad = root.path().join("reordered.json");
+    std::fs::write(&bad, serde_json::to_string(&reordered).unwrap()).unwrap();
+    let cheat = build("cheat-db", bad.to_str().unwrap(), false);
+    assert_eq!(cheat["transactions"], 2, "a reordered block is still a valid block");
+    assert_ne!(cheat["hash"], settler["hash"]);
+    assert_ne!(reselect(bad.to_str().unwrap())["included"], cheat["included"], "the policy check sees the reordering");
+}
+
+/// The reserve (coordinator decision after R308-5P-1; agents/311 section 16): covered transactions go first only
+/// while they leave one eighth of the block free; then the plain transfers of senders without credit BY TIP; what
+/// they do not use goes back to the covered ones. The block's room is counted in gas used.
+#[test]
+fn one_eighth_of_the_block_is_kept_for_senders_without_credit_and_returns_when_unused() {
+    const GWEI: u128 = 1_000_000_000;
+    let root = tempfile::tempdir().unwrap();
+    let pool = root.path().join("pool");
+    std::fs::create_dir(&pool).unwrap();
+    let key_of = |i: usize| {
+        let mut seed = [6u8; 32];
+        seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+        SigningKey::from_bytes((&seed).into()).unwrap()
+    };
+    let transfer = |i: usize, tip: u128| {
+        let tx = TxEip1559 { chain_id: 700_771, nonce: 0, to: TxKind::Call(Address::repeat_byte(0x55)), value: U256::from(1_000u64),
+                             gas_limit: 21_000, max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
+        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
+    };
+    let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
+    // 0..12: senders with credit at 5 gwei. 12..16: senders without credit at 1, 2, 3 and 4 gwei.
+    let deposits = root.path().join("deposits.json");
+    let mints: Vec<_> = (0..16)
+        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .collect();
+    std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
+    for i in 0..12 {
+        std::fs::write(pool.join(format!("covered-{i:02}.tx")), transfer(i, 5 * GWEI)).unwrap();
+    }
+    let credits: serde_json::Map<String, Value> = (0..12).map(|i| (hex::encode(address(i)), Value::String((21_000u128 * 5 * GWEI).to_string()))).collect();
+    let file = root.path().join("credits.json");
+    std::fs::write(&file, Value::Object(credits).to_string()).unwrap();
+    let anchor = "ab".repeat(32);
+    let db = root.path().join("db");
+    let db_s = db.to_str().unwrap().to_string();
+    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    // Room for eight transfers; one eighth of it is one transfer.
+    let select = |extra: &[&str]| {
+        let mut args = vec!["select", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(),
+                            "--txs", pool.to_str().unwrap(), "--max-gas", "168000", "--fresh-slot-price-wei", ADV_PRICE, "--write-credits", file.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        produce(&args).unwrap()
+    };
+    let senders = |report: &Value| -> Vec<String> { report["tx_stats"].as_array().unwrap().iter().map(|t| t["sender"].as_str().unwrap().to_string()).collect() };
+    // No sender without credit in the pool: the covered ones take all eight places (nothing is left unsold).
+    let alone = select(&[]);
+    assert_eq!(senders(&alone).len(), 8, "{alone}");
+    // With them: seven covered, then the best bid among the senders without credit (4 gwei, below every covered bid).
+    for i in 12..16 {
+        std::fs::write(pool.join(format!("new-{i}.tx")), transfer(i, (i as u128 - 11) * GWEI)).unwrap();
+    }
+    let mixed = select(&[]);
+    let included = senders(&mixed);
+    assert_eq!(included.len(), 8, "{mixed}");
+    assert_eq!(included.iter().filter(|s| (0..12).any(|i| **s == hex::encode(address(i)))).count(), 7);
+    assert_eq!(included[7], hex::encode(address(15)), "the reserve goes by tip among plain transfers: {mixed}");
+    // Without the reserve (divisor 0) the covered ones take everything, which is what R308-5P-1 used.
+    let none = select(&["--write-reserve-divisor", "0"]);
+    assert!(senders(&none).iter().all(|s| (0..12).any(|i| *s == hex::encode(address(i)))), "{none}");
+}
+
+/// Review R308-5P-3: the order of the calls of senders without credit follows the settler's seed, not the anchor,
+/// so a sender cannot compute its place from public data: two seeds, two orders, same anchor.
+#[test]
+fn the_order_of_uncovered_calls_follows_the_seed_not_the_anchor() {
+    let world = adversarial(0, false, 0, 10);
+    let order = |seed: &str| {
+        let (report, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-seed", seed]);
+        assert_eq!(report["included"].as_array().unwrap().len(), 10, "{report}");
+        report["included"].clone()
+    };
+    let (a, b) = (order(&"11".repeat(32)), order(&"22".repeat(32)));
+    assert_ne!(a, b);
+    assert_eq!(a, order(&"11".repeat(32)), "one seed, one order: every call of a block plan and the shadow's check agree");
+}

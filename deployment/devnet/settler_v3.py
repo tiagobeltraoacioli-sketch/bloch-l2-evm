@@ -1046,7 +1046,8 @@ def check_policy_config(c):
                 'preflight_execute_seconds', 'preflight_max_runs', 'preflight_max_seconds', 'sender_ban_seconds',
                 'standing_seconds', 'band_max_wait_seconds', 'local_prove_max_memory_gib', 'large_gas_floor',
                 'large_gas_recovery_seconds', 'gate_dependent_wait_seconds', 'unpaid_first_wait_seconds',
-                'unpaid_max_wait_seconds', 'unpaid_memory_seconds', 'credit_memory_seconds', 'unpaid_other_doing_strikes'):
+                'unpaid_max_wait_seconds', 'unpaid_memory_seconds', 'credit_memory_seconds', 'unpaid_other_doing_strikes',
+                'uncovered_max_gas'):
         if key in c and (not isinstance(c[key], int) or isinstance(c[key], bool) or c[key] <= 0):
             raise Halt(f'{key} must be a positive integer')
     reserved = c.get('tip_reserved_txs', 0)
@@ -1995,19 +1996,52 @@ class Settler:
             args += ['--fresh-slot-price-wei', str(policy.c['fresh_slot_price_wei'])]
             if policy.c['write_limit_exempt_senders']:
                 args += ['--write-exempt', ','.join(policy.c['write_limit_exempt_senders'])]
-            # The policy's credit ledger decides which transactions are covered (selected first, by tip); senders
-            # that wait out an unpaid report are not executed at all; nothing above the policy's gas cap is executed
-            # (reviews R308-3P-2, R308-4P-1; agents/311 section 14). The lists are written beside the pool.
-            args += ['--write-max-tx-gas', str(policy.c['max_tx_gas'])]
+            # The policy's credit ledger decides which transactions are covered; senders that wait out an unpaid
+            # report are not executed at all; nothing above the policy's gas cap is executed; one eighth of the
+            # block is kept for senders without credit (reviews R308-3P-2, R308-4P-1, R308-5P-1; agents/311
+            # sections 14 and 16).
+            inputs = self.selection_inputs(policy)
+            args += ['--write-max-tx-gas', str(policy.c['max_tx_gas']),
+                     '--write-uncovered-max-gas', str(policy.c['uncovered_max_gas']),
+                     '--write-reserve-divisor', str(policy.c['reserve_divisor']), '--write-seed', inputs['seed']]
             lists = Path(pool).parent if Path(pool).is_file() else self.work
-            credits = {sender: str(wei) for sender, wei in sorted(policy.credits(policy.clock()).items())}
-            waiting = sorted(policy.waiting_senders(policy.clock()))
-            for flag, name, content in (('--write-credits', 'write-credits.json', credits), ('--write-waiting', 'write-waiting.json', waiting)):
+            for flag, name, content in (('--write-credits', 'write-credits.json', inputs['credits']),
+                                        ('--write-waiting', 'write-waiting.json', inputs['waiting'])):
                 if content:
                     path = Path(lists) / name
                     atomic_write(path, json.dumps(content))
                     args += [flag, str(path)]
         return args
+
+    def selection_inputs(self, policy):
+        """What the producer's order depends on besides the candidates: the credit ledger, the waiting senders and
+        the seed of the order of senders without credit. One set per block plan (`plan_inputs`, taken when the plan
+        opens and used by every producer call of it, the final `extend` included, so the measured block and the
+        built block are selected alike); outside a plan (the demand check) the ledger as it is and a seed of the
+        moment. The seed is drawn here, never derived from anything public, and leaves this process only in
+        `selection.json` beside the finished block (review R308-5P-3)."""
+        inputs = getattr(self, 'plan_inputs', None)
+        if inputs is None:
+            now = policy.clock()
+            inputs = {'seed': os.urandom(32).hex(), 'waiting': sorted(policy.waiting_senders(now)),
+                      'credits': {sender: str(wei) for sender, wei in sorted(policy.credits(now).items())}}
+        return inputs
+
+    def publish_selection(self, directory, policy, block):
+        """`selection.json` beside the block: what a second party needs to check that the block's ORDER is the
+        stated policy's (the shadow producer: `select` on the block's own transactions with these inputs must give
+        the block's order; review R308-5P-2). Credits only of the block's senders; the seed is public from here on."""
+        inputs = self.plan_inputs
+        senders = {tx['sender'] for tx in block.get('tx_stats') or []}
+        atomic_write(Path(directory) / 'selection.json', json.dumps({
+            'version': 1, 'number': block.get('number'), 'hash': block.get('hash'), 'seed': inputs['seed'],
+            'credits': {sender: wei for sender, wei in inputs['credits'].items() if sender in senders},
+            'fresh_slot_price_wei': str(policy.c['fresh_slot_price_wei']),
+            'write_exempt': list(policy.c['write_limit_exempt_senders']),
+            'max_tx_gas': policy.c['max_tx_gas'], 'uncovered_max_gas': policy.c['uncovered_max_gas'],
+            'reserve_divisor': policy.c['reserve_divisor'], 'min_tip_wei': self.c.get('min_tip_wei', 0),
+            'max_gas': self.c['max_block_gas'], 'max_bytes': self.c['max_block_bytes'], 'max_txs': self.c['max_block_txs'],
+        }, sort_keys=True) + '\n')
 
     def select_block(self, parent, anchor, deposits, anchor_slot, raws, directory):
         """What the producer's selection would do with these transactions on this parent and these deposits, per
@@ -2185,6 +2219,8 @@ class Settler:
         by_hash = {keccak256(bytes.fromhex(raw)).hex(): (path, raw) for path, raw in entries}
         self.preflight_shared = deposits.parent / 'preflight-db'
         shutil.rmtree(self.preflight_shared, ignore_errors=True)  # never a copy from an earlier plan or process
+        self.plan_inputs = None
+        self.plan_inputs = self.selection_inputs(policy)
         try:
             plan = policy.plan(
                 [raw for _, raw in entries],
@@ -2219,7 +2255,12 @@ class Settler:
         pool = deposits.parent / 'selected.json'
         atomic_write(pool, json.dumps(plan.raws))
         args = self.extend_arguments(parent, anchor, deposits, anchor_slot, spool=False)
-        block = self.produce(*args, *self.pool_arguments(pool))
+        try:
+            block = self.produce(*args, *self.pool_arguments(pool))
+            if self.c.get('producer_write_price'):
+                self.publish_selection(deposits.parent, policy, block)
+        finally:
+            self.plan_inputs = None
         for name in policy.committed(plan, block):  # committed: only what this block's own report names
             if name in by_hash:
                 by_hash[name][0].unlink(missing_ok=True)
