@@ -195,7 +195,8 @@ impl Policy {
             "uncovered_max_gas": rules.uncovered_max_gas,
             "credit_wei": verdict.credit.to_string(),
             "credit_needed_wei": verdict.credit_needed.to_string(),
-            "first_transfer_priority_fee_wei": first_transfer_tip(verdict.credit_needed).to_string(),
+            // Null for a covered sender (a refusal for the cap alone), as in the quote.
+            "first_transfer_priority_fee_wei": (!verdict.covered).then(|| first_transfer_tip(verdict.credit_needed).to_string()),
             "scope": "latest-state-next-block"
         });
         let message = if reason == "gas-limit-above-cap" {
