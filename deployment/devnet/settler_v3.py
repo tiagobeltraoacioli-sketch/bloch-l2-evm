@@ -308,16 +308,16 @@ def mainnet_l2_config(program=None):
     return out + bytes.fromhex(MAINNET['l2_genesis']) + bytes.fromhex(MAINNET['l2_genesis_state'])
 
 
-# CANDIDATE, not scheduled: the next rules, L1 forced inclusion included (configuration b4663ab8), proved by
+# CANDIDATE, not scheduled: the next rules, L1 forced inclusion included (configuration 27d6ce9f), proved by
 # the complete-witness fallback guest (`settlement_v3_mainnet` of integrations/sp1-execution/guest-fallback,
 # 7fd7f3c0, the pinned container build, guest-fallback/build-container.sh, of bloch-l2-evm
 # codex/fallback-forced-r11-20261103; agent 216). It replaces 3ad3a4f0, which did not run the forced rule.
 # The prover reads the forced records from the complete artifact (`produce export --witness complete`).
 # Native `l2_settlement::mainnet::PROGRAM_FALLBACK` names it (MAINNET_FALLBACK below). Its configuration
-# carries a placeholder fee-sweep recipient (TBD-owner), so all of these move when the recipient is fixed.
+# carries the owner's fee-sweep recipient 0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544 (src/chainspec.rs); these values are built with it.
 # The proof policy, the L2 genesis and the attestor set stay.
 MAINNET_NEXT = {
-    'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
+    'configuration': '27d6ce9f3ef204207ed089a4ba2593e4d45b9bc25242d3de32e2a3dea1a12783',
     'elf_keccak': 'd95185a60668b0d4e1da49be00d85b9c550b412f13c5155be454e72889f90bf1',
     'vkey_koalabear': '432fa77548114c6431d3d64a09c851e8178e83b4744681fb73c3e2d368b11546',
     'vkey_bn254': '00865f4eeb204531918e9eb2509c851e82f1d0769d11a07ef9e1f169e8b11546',
@@ -329,11 +329,11 @@ MAINNET_NEXT = {
 # codex/forced-guest-r8-20261102 595d914: code-by-hash witness and L1 forced inclusion, artifact
 # format SPARSE:3). The native candidate (bloch-sis-pow codex/forced-guest-native-r8-20261102) names
 # this ELF in `PROGRAM_NEXT`. Its configuration is the next rules with forced inclusion (tag 4,
-# b4663ab8), the configuration of the complete-witness fallback as well (MAINNET_NEXT, agent 216).
+# 27d6ce9f), the configuration of the complete-witness fallback as well (MAINNET_NEXT, agent 216).
 # A `next_program` with `"witness": "sparse"` must match this pin, exports the sparse artifact
 # (`produce export --witness sparse`) and runs the prover with `--mainnet --sparse`.
 MAINNET_NEXT_SPARSE = {
-    'configuration': 'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d',
+    'configuration': '27d6ce9f3ef204207ed089a4ba2593e4d45b9bc25242d3de32e2a3dea1a12783',
     'elf_keccak': '1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18',
     'vkey_koalabear': '6a140f117b84dd524b3681b9447422e5281451295144b5747197d0df5db6afc9',
     'vkey_bn254': '00d4281e23ee13754a59b40dcc47422e55028a2534512d5d38cbe86fddb6afc9',

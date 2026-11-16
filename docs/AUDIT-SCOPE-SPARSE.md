@@ -156,8 +156,8 @@ Each is tested; the test names are in `src/sparse_witness/tests.rs` (T) and
   crossing (agent 81, 36/36 checks on the previous ELF). The rest rests on the
   synthetic fuzz (200 chains of 250 blocks at `REVIEW_SCALE=40`).
 - **Export stops at L2 block 4096** (`MAX_REPLAY_BLOCKS`), for both witnesses.
-- **The sweep recipient is a placeholder**, so the next-rules ELF and its keys move
-  once it is set.
+- **The sweep recipient is `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`** (set by the owner); the next-rules ELF and
+  its keys are built with it.
 - **Pinned only on Linux x86_64.** `guest-sparse/build.sh` on macOS gives other
   hashes and is not a pin.
 

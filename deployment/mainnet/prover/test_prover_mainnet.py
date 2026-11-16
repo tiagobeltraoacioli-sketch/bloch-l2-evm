@@ -231,7 +231,7 @@ class InstallPlan(unittest.TestCase):
         # native requires (PROGRAM_FALLBACK.identities[0] == PROGRAM_NEXT.identities[0]).
         self.assertEqual(install.PINNED_FALLBACK['configuration'], install.PINNED_NEXT['configuration'])
         self.assertEqual(install.PINNED_FALLBACK['configuration'],
-                         'b4663ab88607a1ebf7d1801920365fdde276889e211e097011bf48fcd0f7a29d')
+                         '27d6ce9f3ef204207ed089a4ba2593e4d45b9bc25242d3de32e2a3dea1a12783')
 
     def test_install_refuses_an_unpinned_host_before_running_it(self):
         with tempfile.TemporaryDirectory() as tmp:

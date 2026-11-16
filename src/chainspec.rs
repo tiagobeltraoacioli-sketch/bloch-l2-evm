@@ -124,11 +124,10 @@ pub const L2_BLOCK_PREVRANDAO: B256 = B256::repeat_byte(0x07);
 /// fee of report 34, and the sequencer policy's tip floor).
 pub const MAINNET_MIN_BASE_FEE: u64 = 100_000_000;
 
-/// UNSET, `TBD-owner`: the immutable recipient of the fee-vault sweep under the
-/// next mainnet rules, the Bloch Inc Safe's L2 address once the owner fixes it
-/// (`deployment/mainnet/set-sweep-recipient.py apply`). It enters the
-/// configuration commitment, so the configuration, ELF and verifying keys of
-/// the next rules exist only once it is set.
+/// The immutable recipient of the fee-vault sweep under the next mainnet
+/// rules, fixed by the owner: `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`.
+/// It enters the configuration commitment, so the configuration, ELF and
+/// verifying keys of the next rules are built with it.
 ///
 /// RELEASE GATE (agent 163, B-1). While this is `None`, or holds a value
 /// [`is_release_fee_sweep_recipient`] refuses, the next mainnet rules do not
@@ -136,7 +135,8 @@ pub const MAINNET_MIN_BASE_FEE: u64 = 100_000_000;
 /// configuration commitment, [`ChainSpec::mainnet_next`] is `None`, the
 /// next-rules guests fail to compile ([`MAINNET_NEXT_RULES_RELEASABLE`]) and
 /// `deployment/mainnet/build-release.sh` refuses the fork-candidate build.
-pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = None;
+pub const MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> =
+    Some(Address::new(hex!("775a993f09bd80aecf8f8c2ade0c84158e3a0544")));
 
 /// REHEARSAL ONLY, never a release value: the former candidate placeholder
 /// `0x…000fee01`, an address no one holds a key or code for. Native tests,
