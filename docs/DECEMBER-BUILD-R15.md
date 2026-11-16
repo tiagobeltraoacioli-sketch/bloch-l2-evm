@@ -145,7 +145,23 @@ minutes per host), binary pins, `refresh_kit_pins.py --write`.
 
 ## 6. Tests on these tips
 
-@@TESTS@@
+Clean `git archive` exports on build host A, own build directories (2026-11-16, after the rebuild):
+- Rust, at the build commit c2938be (no Rust source, manifest or lock changed since b635566): root crate
+  `cargo fmt --all -- --check` 0, `cargo clippy --all-targets -D warnings` 0, the same with `--all-features` 0;
+  tests 282 / 287 (serde) / 282 (no default features), 2 ignored; release tests 24; reth-execution 223 passed,
+  1 ignored; settlement-recovery 66 (with the pinned native lock); escrow-journal 29; entrypoint API 2; SP1 host 37.
+- Python, at 9abc423 (the pins): devnet 529; mainnet 520 (33 skipped: the real-binary tests, run apart, and the
+  sweep tests that start from the unset tree); public-rpc 19; attestor 93 (35 skipped); withdraw 44.
+  `refresh_kit_pins.py` reports no difference.
+- With the December producer `63c9cdf8…`: `test_shadow_settler_real_binary` 5 of 5 (settler and shadow on one
+  pool, a reordered block, the full block with newcomers, a forced-only block and a forced-plus-user block under
+  the next rules).
+- `build-prover-host.sh` and `build-release.sh`: four times each (section 3), one result.
+
+Native 0861278c (unchanged since the first build of this document), clean export, same host:
+`cargo test -p bloch-pos-committee`: 1,007 passed, 0 failed, 15 ignored; `-p bloch-pos-node`: 842 passed, 0
+failed, 31 ignored (one of them, `native_passphrase_tty`, needs a terminal and was run in a foreground `ssh -tt`
+session).
 
 ## 7. Fixed in this build from the real-proof drills (agent 317, on e8f40c2) and the seventh review pass
 
