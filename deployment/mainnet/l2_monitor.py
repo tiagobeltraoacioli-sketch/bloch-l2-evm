@@ -180,7 +180,10 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # Review R308-6P-2: the shadow could not check a block's order (no selection.json from the
                          # settler, or a block with forced records). A warning; critical when it repeats
                          # (`event_repeat_crit`), which is what a settler that stopped publishing looks like.
-                         'shadow-order-unchecked'})
+                         'shadow-order-unchecked',
+                         # Agent 317 F317-1: a proof was killed for memory; the block falls back to the safer prover
+                         # settings and the worker halts after `prove_oom_max_attempts` kills at the safest ones.
+                         'prover-oom'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

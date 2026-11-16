@@ -99,8 +99,10 @@ RUNTIME = Path('/run/bloch-l2-mainnet-settler')
 DA_RUNTIME_PASSPHRASE = RUNTIME / 'da.passphrase'
 # Absolute: as_settler runs with PATH=/usr/bin:/bin, and on Ubuntu 24.04 runuser is only in /usr/sbin.
 RUNUSER = '/usr/sbin/runuser'
-# Not a SHA-256: no file matches it, so `prepare` refuses until the December host is pinned.
-CANDIDATE_HOST_PIN = 'unpinned-december-sp1-host'
+# The SP1 host of the December build (docs/DECEMBER-BUILD-R15.md): features source-settlement,node-artifact,
+# sparse-witness, built twice in separate target directories (at the guests' commit and at the pins' commit) with
+# one hash. Reproduced on ONE host so far: a second host must confirm it before the release is signed.
+CANDIDATE_HOST_PIN = '04fc2d32992ef7c9ada906542953b816c73968b31d44976835fe9b3e4c928439'
 # The L1 RPCs come from configure --rpc-urls or $L1_RPC_URLS, never from this file (reviews r11 235/240: no
 # operator or validator host is compiled into the kit, and choosing the third RPC is not a kit commit).
 RPC_URLS_ENV = 'L1_RPC_URLS'
@@ -118,13 +120,13 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
     # is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': 'ee08bc7d082e5cf23d30e38577477aada72b2565ab5816ec31749932d6f67b7a',
-    'sequencer_policy_v2.py': '31511e5580c7fa7e7a6c7877979f73f638b5b04efe12c5d27befda4ac716c552',
-    # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
-    # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
+    'settler_v3.py': '84bc90b785509c0d8b30324f9fc66ca1d25187d5d09a3a78ab215f3c3ec885de',
+    'sequencer_policy_v2.py': 'a4ac3b8948bdf7bdcfd0891ac3121bcb699d3c42a89df9c01496c2bd033af03e',
+    # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness).
     'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,
-    # CANDIDATE: fork candidate v2 out/ (agent 143, reproduced on two hosts) against the unreleased native f12b4113.
-    'bloch-l2-produce-dev': '425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78',
+    # CANDIDATE: the December build (docs/DECEMBER-BUILD-R15.md), build-release.sh against native 0861278c, twice with
+    # one hash on one host.
+    'bloch-l2-produce-dev': '96b09d1a6bb934af11c144abeec62d4c248704fd00d278cd0b324f4f491687a3',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544, fixed) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': '81813124c19b1a9bfe5755fc742fa36a48420134b71e18ef355e26e1c5f1b6d9',

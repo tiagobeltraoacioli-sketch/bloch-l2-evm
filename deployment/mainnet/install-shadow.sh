@@ -15,8 +15,8 @@
 #   install-shadow.sh --rollback
 #
 # FORK CANDIDATE (December program swap; native L2_NEXT_PROGRAM_EPOCH and L2_PROGRAM_ROLLBACK_EPOCH inert in this
-# tree). OUT_DIR is build-release.sh's OUT of the fork-candidate L2 build against native f12b4113 (agent 143's
-# candidate v2, settlement-recovery lock ab7b3a09...): bloch-l2-produce-dev 425d4fe8... (the --rule-set producer),
+# tree). OUT_DIR is build-release.sh's OUT of the December build against native 0861278c (docs/DECEMBER-BUILD-R15.md,
+# settlement-recovery lock ab7b3a09...): bloch-l2-produce-dev 96b09d1a... (the --rule-set producer),
 # the schedule-aware sequencer_mainnet.py pinned below, SHA256SUMS and build.json. CANDIDATE values against an
 # unreleased native: they move with the final December build, and the deposit-only launch kit keeps its own
 # install-shadow.sh (v2.1 pins). The producer RUNS the native transition, so a shadow built against another
@@ -40,11 +40,11 @@
 # /opt/bloch/l2-mainnet-shadow, its config and /var/lib/bloch-l2-mainnet-shadow aside with a
 # timestamp. The settler is not touched; nothing on L1 depends on the shadow.
 set -euo pipefail
-# Fork candidate v2 out/ (agent 143, reproduced on 136 and 45.77): produce-dev 425d4fe8... The launch kit's v2.1
+# December build (docs/DECEMBER-BUILD-R15.md): produce-dev 96b09d1a... The launch kit's v2.1
 # pins (produce e3f1a290..., sequencer 15daa26f...) have no --rule-set and no schedule: never use them for the fork.
-PRODUCE_SHA256=425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78
+PRODUCE_SHA256=96b09d1a6bb934af11c144abeec62d4c248704fd00d278cd0b324f4f491687a3
 # deployment/mainnet/sequencer_mainnet.py of this tree (schedule-aware shadow, agent 218).
-SEQUENCER_SHA256=ace4ab47da9a3f08794b35f6d2ab3d9d6845aeefe1040989122b485497c3bcb4
+SEQUENCER_SHA256=1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae
 NATIVE_COMMIT=0861278c531fdf150f0a94a13aa8a8ba64c5f762
 NATIVE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 # The programs that run the next rules: native PROGRAM_NEXT (forced sparse guest 81813124...) and PROGRAM_FALLBACK

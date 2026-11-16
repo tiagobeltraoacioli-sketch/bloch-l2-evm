@@ -82,7 +82,16 @@ Consequences:
   - above the budget (only a mandatory-only block can be): `mandatory-heavy`, 2c at a 96 GiB scope on the dedicated
     prover. **Unmeasured.** If it fails, the block goes to the operator's exit (`deposits-over-budget.json`, the stuck
     block runbook's export-job).
-  - The settler has no per-size switch today (agent 113). Section 8 lists the change.
+  - The profile reaches both provers (agent 317 F317-1, F317-2): the local one through its environment, the remote
+    one in the job itself (frame version 2 of `remote_prover.py`: the block's settings, checked against the remote
+    prover's own list of allowed names, on top of the settings of its config, which stay the default). The names
+    are the ones the SP1 host reads (`SP1_WORKER_…`). Measured on real proofs (agent 317, 64 GiB scope): a full
+    block of 64 plain transfers (12.85M SP1 gas) is killed with the `fast` settings and peaks at 34 to 40 GiB with
+    the two-core-worker settings.
+  - A proof killed for memory is not tried again as it was: the block falls back to `lowmem-2c` (recorded in
+    `prover-profile.json`, for blocks built without the policy too), the event is `prover-oom` (a warning of the
+    monitor, critical when it repeats), and after `prove_oom_max_attempts` (3) kills at the safest settings the
+    worker halts: the block needs a larger prover or the stuck-block procedure.
 - Cost of the lower budget: full blocks prove in 1,000-1,750 s with 2c, so about 50-86 full blocks a day (3,200-5,500
   swaps a day), as agent 113 measured. Small blocks keep the fast profile, about 220 a day.
 
@@ -500,15 +509,24 @@ allowance is bought with fees really paid and is used up by waste.**
   report of one sender inside `unpaid_memory_seconds` counts as its own doing (`unpaid_other_doing_strikes`),
   with the debit and the wait, so a paying accomplice cannot make a key waste the producer's work for free block
   after block. A debit is `gas used x max(tip, min_tip_wei)` (R308-5P-5).
+- *The reserve under the transaction cap (agent 317 F317-3).* The planner cuts the candidates to `max_block_txs`
+  before the producer orders them, so the producer's reserve only sees what the cut leaves. The last
+  `tip_reserved_txs` (8) places of that cut therefore go first to the plain transfers of senders whose credit does
+  not cover them, by tip; then to their other transactions; then to covered senders by tip. On the real producer:
+  128 plain transfers of eight senders with credit and ten of fresh keys give a block of 56 and 8 (before: 64 and
+  0).
 - *Rebuilds (R308-5P-2).* The order depends on the settler's ledger and seed, so a second party cannot re-select
   a block from its transactions alone. `extend --as-given yes --txs LIST` builds exactly a list in its order;
   the shadow producer rebuilds the settler's block that way from the DA batch, so the block check depends on no
   policy input. The settler writes `selection.json` beside each block (seed, the credits of the block's senders,
   limits, price, exempt list); the shadow runs `select --order-check yes` on the block's own transactions with
   those inputs and compares the order: a transaction that was left out changes nothing for those that were
-  included, so the orders are equal exactly when the settler followed the stated order. A difference, or a
+  included, so the orders are equal exactly when the settler followed the stated order. L1 forced records are
+  read by the shadow from L1 itself (`forced.due` of the native view) and passed with `--forced`; they are not in
+  the DA batch, which holds the user transactions only, so a block whose only transaction is a forced record is
+  rebuilt without a batch (agent 317 F317-4: the shadow waited for one and halted at the next block). A difference, or a
   change of the stated limits from one block to the next, is logged `shadow-policy-mismatch`; a block whose
-  order could not be checked (no `selection.json`, forced records) is logged `shadow-order-unchecked`. The
+  order could not be checked (no `selection.json`) is logged `shadow-order-unchecked`. The
   monitor grades both: a warning, critical from the fifth in an hour (R308-6P-2). The block is still checked
   as a block. Not visible to the shadow: a transaction that was never
   included (it has no spool; the censored sender's remedy is L1 forced inclusion), credits stated higher than
@@ -591,6 +609,7 @@ Tests: `tests/produce_txs.rs` (`large_non_payers_cannot_starve_contract_calls`,
 | R14 | The reserve covers gas, bytes and places, not the SP1 proof budget | The budget cut is made by the planner in its own try order (section 3: 8 of the 64 places by tip alone), before the producer's order applies | Open: no measurement of a block whose budget covered senders use up |
 | R15 | Under a flood of N funded keys without credit, a first CALL (not a transfer) of a sender with no credit is judged with probability of about 10/(N+1) per block at worst | The keys cannot choose their place (secret seed); each waits 40 minutes, doubling, after one waste; a plain transfer is always executed and moves its sender ahead of them | Accepted; the uncovered pool (half a block) and the 1,500,000 limit are settings |
 | R16 | The 1,500,000 limit of uncovered transactions and the two pools are set from the DEX page's explicit limits, not from measured traffic | A route above six hops, or a first deployment, needs credit first; the RPC refuses it with `sequencer-needs-credit` and the quote says so | Revisit with real traffic |
+| R17 | A proof killed for memory (agent 317 F317-1) | With the profile now passed to the remote prover, a full block of 64 plain transfers (12.85M SP1 gas) is proved with the two-core-worker settings: 34 to 40 GiB at peak inside the 64 GiB scope, 450 to 480 s (agent 317, real proofs). A kill is logged `prover-oom`, the block falls back to those settings, and three kills at the safest settings halt the worker | Not yet proven on real proofs: the fallback itself, and the 96 GiB block (`mandatory-heavy`) |
 
 ## 8. Integration and pins
 

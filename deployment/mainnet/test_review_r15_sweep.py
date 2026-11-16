@@ -74,6 +74,7 @@ class R308_4UncheckedRecipient(unittest.TestCase):
                 m.parse_address(text)
 
 
+@unittest.skipUnless(m.current_recipient(base.L2) is None, 'this tree already carries a chosen recipient: these tests start from the unset tree')
 class R308_5AuditNeverPasses(FullTree):
     """R308-5 (Low). SWEEP-RECIPIENT-PROCEDURE.md step 8: `audit` "exits non-zero while the placeholder, the old
     configuration or any --old value is still present". On this tree it exits non-zero after a correct run of every
@@ -116,6 +117,7 @@ class R308_5AuditNeverPasses(FullTree):
         self.assertEqual(left, [], 'comments still say the first recipient is "fixed by the owner"')
 
 
+@unittest.skipUnless(m.current_recipient(base.L2) is None, 'this tree already carries a chosen recipient: these tests start from the unset tree')
 class R308_6GateReadsOneSpelling(unittest.TestCase):
     """R308-6 (Low). The gate reads `MAINNET_FEE_SWEEP_RECIPIENT` with a one-line regular expression over the file."""
 

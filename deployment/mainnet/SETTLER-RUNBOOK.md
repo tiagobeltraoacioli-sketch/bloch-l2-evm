@@ -60,8 +60,8 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | --- | --- | --- |
 | `settler_v3.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` of this tree (fork candidate: it moves with every settler change; enforced since agent 155; also recorded in the `/opt` path) |
 | `sequencer_policy_v2.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` (enforced) |
-| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step with `sparse-witness` (serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | **not pinned yet (fork candidate)**: `prepare` refuses every host until the December release build is pinned; the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
-| `bloch-l2-produce-dev` | fork candidate v2 `out/` (agent 143, native f12b4113, reproduced on two hosts): `425d4fe8…`; it moves with the final December build | `425d4fe8…4cc78` (enforced) |
+| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step with `sparse-witness` (serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | `04fc2d32…8439` (enforced; December build, `docs/DECEMBER-BUILD-R15.md`); the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
+| `bloch-l2-produce-dev` | December build `out/` (`build-release.sh`, native 0861278c; `docs/DECEMBER-BUILD-R15.md`) | `96b09d1a…87a3` (enforced) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |

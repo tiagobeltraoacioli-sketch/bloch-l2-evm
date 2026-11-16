@@ -284,6 +284,64 @@ class Profiles(Harness):
         (self.dir / 'prover-profile.json').write_text(json.dumps({'profile': 'fast'}))
         self.assertEqual(self.settler.prover_profile(self.dir)['env'], {'ELEMENT_THRESHOLD': '268435456'})
 
+    def test_the_profile_names_are_the_ones_the_prover_reads_and_the_remote_allows(self):
+        """Agent 317 F317-2: four settings lacked the SP1_WORKER_ prefix; the SP1 host ignored them."""
+        import remote_prover as rp
+        for name, profile in sp.PROFILES.items():
+            self.assertLessEqual(set(profile['env']), rp.PROVER_ENV_ALLOWED, name)
+            self.assertEqual(rp.prover_env({'prover_env': profile['env']}), profile['env'])
+        self.assertEqual(sp.PROFILES['lowmem-2c']['env']['SP1_WORKER_GLOBAL_MEMORY_BUFFER_SIZE'], '2')
+
+    def test_the_remote_prover_gets_the_blocks_profile(self):
+        """Agent 317 F317-1: the profile went into the local prover's environment only; the remote prover proved a
+        full block with the fixed settings of its config and was killed at its 64 GiB cap."""
+        import io
+        import types
+        import remote_prover as rp
+        (self.dir / 'native-request.txt').write_text('a\nb\n')
+        (self.dir / 'block.artifact').write_bytes(b'artifact')
+        sent = []
+
+        def run(argv, **kwargs):
+            sent.append(kwargs['input'])
+            kwargs['stdout'].write(b'proof')
+            return types.SimpleNamespace(returncode=0)
+        self.settler.run = run
+        self.settler.program = {'remote_prover': {'key': 'k', 'known_hosts': 'h', 'target': 'prover@host'}}
+        profile = dict(sp.PROFILES['lowmem-2c'], name='lowmem-2c')
+        self.settler.prove_remote(self.dir, self.dir / 'settlement.proof', profile)
+        request, artifact, settings = rp.parse_job(io.BytesIO(sent[-1]))
+        self.assertEqual((request, artifact, settings), (b'a\nb\n', b'artifact', profile['env']))
+        # Without a profile (a block built without the policy) the job is the version 1 frame, settings {}.
+        self.settler.prove_remote(self.dir, self.dir / 'settlement.proof')
+        self.assertEqual(rp.parse_job(io.BytesIO(sent[-1]))[2], {})
+        self.assertTrue(sent[-1].startswith(rp.MAGIC))
+        # The remote refuses a setting outside its list, whoever sends it.
+        bad = rp.MAGIC_PROFILE + b'\x00\x10' + b'{"LD_PRELOAD":"1"}'[:16]
+        with self.assertRaises(ValueError):
+            rp.parse_job(io.BytesIO(bad + b'\x00' * 32))
+
+    def test_a_proof_killed_for_memory_falls_back_and_the_attempts_are_bounded(self):
+        """F317-1: no endless retry with the same settings. fast -> lowmem-2c, recorded for every later attempt;
+        three kills at the safest settings halt the worker."""
+        (self.dir / 'prover-profile.json').write_text(json.dumps({'profile': 'fast', 'number': 5}))
+        self.settler.proof_out_of_memory(self.dir, 'remote', self.settler.prover_profile(self.dir))
+        record = json.loads((self.dir / 'prover-profile.json').read_text())
+        self.assertEqual((record['profile'], record['oom_downgraded_from'], record['oom_kills'], record['number']),
+                         ('lowmem-2c', 'fast', 1, 5))
+        self.assertEqual(self.settler.prover_profile(self.dir)['name'], 'lowmem-2c')
+        for _ in range(2):
+            self.settler.proof_out_of_memory(self.dir, 'remote', self.settler.prover_profile(self.dir))
+        with self.assertRaisesRegex(s.Halt, 'killed for memory 3 times with the safest prover settings'):
+            self.settler.proof_out_of_memory(self.dir, 'remote', self.settler.prover_profile(self.dir))
+
+    def test_a_block_without_a_profile_also_falls_back_after_a_kill(self):
+        """A deposits-only block built without the policy has no profile; after a kill it gets the safer one."""
+        del self.settler.c['max_block_sp1_gas']
+        self.assertIsNone(self.settler.prover_profile(self.dir))
+        self.settler.proof_out_of_memory(self.dir, 'local', None)
+        self.assertEqual(self.settler.prover_profile(self.dir)['name'], 'lowmem-2c')
+
     def test_no_profile_without_the_budget(self):
         (self.dir / 'prover-profile.json').write_text(json.dumps({'profile': 'fast'}))
         del self.settler.c['max_block_sp1_gas']

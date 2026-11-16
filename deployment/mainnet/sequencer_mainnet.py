@@ -204,7 +204,47 @@ def http_rpc(url, method, params=(), timeout=15):
 
 
 def view_projection(view):
-    return {k: view[k] for k in VIEW_FIELDS if k in view} if isinstance(view, dict) else view
+    if not isinstance(view, dict):
+        return view
+    out = {k: view[k] for k in VIEW_FIELDS if k in view}
+    # L1 forced inclusion: the records the next settlement must consume, with their envelopes (the fields the
+    # settler reads; the rest of the object counts what is queued and moves between nodes).
+    if isinstance(view.get('forced'), dict):
+        out['forced'] = {k: view['forced'][k] for k in ('due', 'due_hash') if k in view['forced']}
+    return out
+
+
+def forced_due(view):
+    """The forced records the next settlement must consume, as the producer takes them (`--forced FILE`): the
+    settler's normal form (settler_v3.forced_due), read from L1 by this shadow itself. [] while the native queue is
+    not enabled or nothing is due. A record whose envelope the node does not have yet is a reason to wait."""
+    forced = view.get('forced') if isinstance(view, dict) else None
+    if not isinstance(forced, dict):
+        return []
+    due = forced.get('due')
+    if not isinstance(due, list):
+        raise Halt('native forced.due is malformed')
+    out = []
+    for r in due:
+        if isinstance(r, dict) and r.get('envelope') is None:
+            raise RetryLater(f'the node reports no envelope for forced record {r.get("l1_txid")}')
+        try:
+            strip = lambda value: str(value).removeprefix('0x').lower()
+            record = {'height': int(r['height']), 'l1_txid': strip(r['l1_txid']), 'envelope_hash': strip(r['envelope_hash']),
+                      'gas_limit': int(r['gas_limit']), 'envelope': strip(r['envelope'])}
+            envelope = bytes.fromhex(record['envelope'])
+        except (KeyError, TypeError, ValueError):
+            raise Halt('native forced record is malformed or carries no envelope') from None
+        if keccak256(envelope).hex() != record['envelope_hash']:
+            raise Halt('native forced record envelope does not hash to its envelope_hash')
+        out.append(record)
+    return out
+
+
+def user_count(block):
+    """The sequencer's transactions of a producer block report: `user_transactions` when the block ran forced
+    envelopes (they are on L1 already and are not in the DA batch), else `transactions`."""
+    return int(block.get('user_transactions', block.get('transactions', 0)))
 
 
 class Sequencer:
@@ -281,8 +321,8 @@ class Sequencer:
             raise RetryLater(f'settler block {number} has transactions but no da-payload.hex yet')
         payload = bytes.fromhex(path.read_text().strip())
         count = da_batch_count(payload)
-        if count != settler_block['transactions']:
-            raise Halt(f'settler DA batch of block {number} does not hold its {settler_block["transactions"]} transactions')
+        if count != user_count(settler_block):
+            raise Halt(f'settler DA batch of block {number} does not hold its {user_count(settler_block)} transactions')
         txs, at = [], 4
         for _ in range(count):
             size = int.from_bytes(payload[at:at + 4], 'big')
@@ -478,9 +518,13 @@ class Sequencer:
             self.produce('rewind', '--target', self.c['l2_db'], '--number', str(number), '--hash', head['hash'])
         self.supersede(self.job_dir(number, source))
 
-    def extend_args(self, parent, anchor, deposits, anchor_slot, shadow_txs=None):
+    def extend_args(self, parent, anchor, deposits, anchor_slot, shadow_txs=None, forced=None):
         args = ['extend', '--target', self.c['l2_db'], '--parent', parent, '--anchor', anchor,
                 '--deposits', str(deposits), '--timestamp-rule', TIMESTAMP_RULE, '--anchor-slot', str(anchor_slot)]
+        if forced is not None:
+            # L1 forced inclusion: the due records run first, after the deposits (agent 317 F317-4: a block whose
+            # only transaction is a forced record has no DA batch, and the shadow never rebuilt it).
+            args += ['--forced', str(forced)]
         if self.c.get('next_elf_keccak'):
             args += ['--rule-set', self.rule_set]
         if shadow_txs is not None:
@@ -526,8 +570,6 @@ class Sequencer:
         path = settler_dir / 'selection.json'
         if not path.is_file():
             return unchecked('the settler published no selection.json (no write price in its producer)')
-        if settler_block.get('forced'):
-            return unchecked('the block carries forced records')
         try:
             inputs = json.loads(path.read_text())
             if inputs.get('hash') != settler_block.get('hash'):
@@ -604,7 +646,12 @@ class Sequencer:
         directory.mkdir(parents=True, exist_ok=True)
         deposits = directory / 'deposits.json'
         self.write_once(deposits, json.dumps(pending, sort_keys=True))
-        if settler_block is not None and settler_block.get('transactions', 0):
+        # The forced records due for this settlement, read from L1 by this process (not from the settler's files).
+        due, forced = forced_due(view), None
+        if due:
+            forced = directory / 'forced.json'
+            self.write_once(forced, json.dumps(due, sort_keys=True))
+        if settler_block is not None and user_count(settler_block):
             shadow_txs = directory / 'settler-transactions.json'
             self.write_once(shadow_txs, json.dumps(self.settler_transactions(number, settler_dir, settler_block)))
         head = self.produce('head', '--target', self.c['l2_db'])
@@ -614,11 +661,11 @@ class Sequencer:
                 raise Halt(f'L2 head {head["hash"]} is not the accepted parent {parent}')
             if shadow_txs is not None:
                 self.check_order(number, directory, settler_dir, settler_block, shadow_txs,
-                                 self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs))
-            block = self.produce(*self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs))
+                                 self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs, forced))
+            block = self.produce(*self.extend_args(parent, anchor, deposits, anchor_slot, shadow_txs, forced))
             if block['number'] != number or block['parent'] != parent or block['anchor'] != anchor:
                 raise Halt('producer extended a different block than requested')
-            if block.get('transactions', 0) and not self.c['user_transactions'] and not self.shadow:
+            if user_count(block) and not self.c['user_transactions'] and not self.shadow:
                 raise Halt('producer included user transactions while user_transactions is false')
             if block['deposits'] != len(pending):
                 raise Halt('producer minted a different number of deposits than the native inbox lists')
@@ -652,14 +699,14 @@ class Sequencer:
             request_text += f"{source['inbox_count']}\n{source['consumed_start']}\n{source['consumed_end']}\n"
         self.write_once(directory / 'native-request.txt', request_text)
         da = None
-        if block.get('transactions', 0):
+        if user_count(block):   # forced envelopes are on L1 already: a forced-only block publishes no DA batch
             path = directory / 'da-payload.hex'
             if not path.exists():
                 info = self.produce('da', '--target', self.c['l2_db'], '--number', str(number), '--out', str(path))
                 if info.get('number') != number or info.get('chain_id') != CHAIN_ID:
                     raise Halt('producer exported the DA batch of another block or chain')
             payload = bytes.fromhex(path.read_text().strip())
-            if da_batch_count(payload) != block['transactions']:
+            if da_batch_count(payload) != user_count(block):
                 raise Halt('DA batch does not hold exactly the block transactions')
             da = {'payload_bytes': len(payload), 'commitment': da_commitment(number, payload).hex(),
                   'payload_sha256': hashlib.sha256(payload).hexdigest()}

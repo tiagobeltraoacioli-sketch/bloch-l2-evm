@@ -170,7 +170,7 @@ class Fake:
                 out_path.write_text(Path(argv[argv.index('--tx') + 1]).read_text())
             return out
         if name == 'ssh':
-            self.remote_jobs.append(rp.parse_job(__import__('io').BytesIO(kwargs['input'])))
+            self.remote_jobs.append(rp.parse_job(__import__('io').BytesIO(kwargs['input']))[:2])
             if self.remote_fail:
                 out.returncode = 255
             else:
@@ -624,7 +624,7 @@ class SettlerV3Test(unittest.TestCase):
     def test_remote_job_framing_is_exact(self):
         import io
         good = rp.MAGIC + struct.pack('>I', 3) + b'abc' + struct.pack('>Q', 2) + b'xy'
-        self.assertEqual(rp.parse_job(io.BytesIO(good)), (b'abc', b'xy'))
+        self.assertEqual(rp.parse_job(io.BytesIO(good)), (b'abc', b'xy', {}))
         for name, data in (('magic', b'X' + good[1:]), ('trailing', good + b'\0'), ('truncated', good[:-1]),
                            ('empty request', rp.MAGIC + struct.pack('>I', 0) + struct.pack('>Q', 2) + b'xy'),
                            ('long request', rp.MAGIC + struct.pack('>I', 701) + b'a' * 701 + struct.pack('>Q', 1) + b'x'),

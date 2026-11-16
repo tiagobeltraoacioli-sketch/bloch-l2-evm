@@ -279,11 +279,15 @@ class InstallPlan(unittest.TestCase):
 
     def test_the_launch_pins_are_not_the_december_host(self):
         # GO-LIVE-PINS-PROVER.sha256 is the deposit-only launch kit's. This fork candidate's host serves
-        # --mainnet-v1 and --mainnet --sparse and has no release build yet: its pin is a non-hash, so install refuses.
+        # --mainnet-v1 and --mainnet --sparse: the December build's pin, the same as the settler installer's.
         lines = dict(reversed(line.split()) for line in (HERE.parent / 'GO-LIVE-PINS-PROVER.sha256').read_text().splitlines())
         self.assertEqual(lines['release-prover-v2/settlement_v3_mainnet'], install.GUEST_SHA256)
         self.assertNotEqual(lines['release-prover-v2/bloch-evm-sp1-settlement-v3'], install.PROVER_SHA256)
-        self.assertEqual(install.PROVER_SHA256, 'unpinned-december-sp1-host')
+        self.assertRegex(install.PROVER_SHA256, '^[0-9a-f]{64}$')
+        spec = importlib.util.spec_from_file_location('install_settler_for_prover_pin', HERE.parent / 'install-settler-mainnet.py')
+        settler_installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(settler_installer)
+        self.assertEqual(install.PROVER_SHA256, settler_installer.CANDIDATE_HOST_PIN)
 
     def test_remote_prover_pin_is_the_file_in_this_tree(self):
         self.assertEqual(sha256(DEVNET / 'remote_prover.py'), install.REMOTE_PROVER_SHA256)

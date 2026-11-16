@@ -140,5 +140,153 @@ class SettlerAndShadowOnOnePool(unittest.TestCase):
         self.assertEqual(self.logs[0][1]['position'], 0)
 
 
+@unittest.skipUnless(BIN, 'BLOCH_L2_PRODUCE_DEV is not set')
+class ReserveOnAFullBlock(unittest.TestCase):
+    """Agent 317 F317-3 on the real producer, with the planner's own cut: eight senders with credit hold 128
+    plain transfers, ten fresh keys one each. A block has 64 places: 56 go to the covered senders and 8 to the
+    newcomers, although nobody among them bids more (before: 64 covered, no newcomer)."""
+
+    def test_eight_places_of_a_full_block_go_to_senders_without_credit(self):
+        import sequencer_policy_v2 as sp
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            keys, senders = [], []
+            for i in range(18):
+                key = root / f'k{i}.hex'
+                key.write_text(f'{i + 101:064x}\n')
+                key.chmod(0o600)
+                keys.append(key)
+                senders.append(produce('address', '--key', key)['address'])
+            deposits = root / 'deposits.json'
+            deposits.write_text(json.dumps([{'height': 3, 'tx_index': i, 'txid': f'{i + 1:064x}', 'vout': 0,
+                                             'sats': 100_000_000, 'recipient': sender} for i, sender in enumerate(senders)]))
+            raws, owner = [], {}
+            for i in range(18):
+                for nonce in range(16 if i < 8 else 1):
+                    out = root / f't{i}-{nonce}.tx'
+                    produce('sign-tx', '--key', keys[i], '--nonce', nonce, '--to', '55' * 20, '--value-wei', 1000, '--out', out)
+                    raws.append(out.read_text().strip())
+                    owner[raws[-1]] = i
+            self.assertEqual(len(raws), 138)
+            work = root / 'work'
+            work.mkdir()
+            worker = object.__new__(settler.Settler)
+            worker.work, worker.policy_clock = work, lambda: 1_000_000
+            worker.c = {'user_transactions': True, 'max_block_sp1_gas': 90_000_000, 'producer_write_price': True,
+                        'max_block_gas': 15_000_000, 'max_block_bytes': 100_000, 'max_block_txs': 64, 'max_tx_gas': 5_000_000}
+            policy = worker.policy()
+            policy.state['credit'] = {senders[i]: {'wei': 10**18, 'at': 999_999} for i in range(8)}
+            policy.save(1_000_000)
+            worker.plan_inputs = worker.selection_inputs(policy)
+            db = root / 'db'
+            genesis = produce('init', '--target', db)['hash']
+            base = ['--target', db, '--parent', genesis, '--anchor', ANCHOR, '--deposits', deposits]
+            # The planner's view: the producer's own selection of the whole pool, then the cut to 64.
+            dry = root / 'dry.json'
+            dry.write_text(json.dumps(raws))
+            report = produce('select', *base, *worker.pool_arguments(dry, selecting=True))
+            self.assertEqual(len(report['tx_stats']), 138, report.get('deferred'))
+            info = {tx['hash']: tx for tx in report['tx_stats']}
+            by_hash = {q.keccak256(bytes.fromhex(raw)).hex(): raw for raw in raws}
+            plan = sp.Plan()
+            chosen = policy._capped(policy.try_order(report['tx_stats'], 1_000_000), info, plan, 1_000_000)
+            self.assertEqual(len(chosen), 64)
+            pool = root / 'selected.json'
+            pool.write_text(json.dumps([by_hash[name] for name in chosen]))
+            block = produce('extend', *base, *worker.pool_arguments(pool))
+            self.assertEqual(block['transactions'], 64, block.get('deferred'))
+            newcomers = [tx for tx in block['tx_stats'] if tx['sender'] in senders[8:]]
+            self.assertEqual((len(newcomers), len(block['tx_stats']) - len(newcomers)), (8, 56))
+            self.assertTrue(all(tx['sender'] in senders[:8] for tx in block['tx_stats'][:56]), 'covered first, then the reserve')
+
+
+@unittest.skipUnless(BIN, 'BLOCH_L2_PRODUCE_DEV is not set')
+class ForcedBlocksUnderTheNextRules(unittest.TestCase):
+    """Agent 317 F317-4 on the real producer under the mainnet next rules (the only rules with L1 forced
+    inclusion): a block whose only transaction is a forced record, built with the settler's arguments and
+    rebuilt with the shadow's from the native view; then a block with a forced record and a user transaction."""
+    NET = q.NETWORK_ARGS
+    SLOT = 187200
+
+    def run_net(self, *args):
+        return produce(*args, *self.NET)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.keys, self.senders = [], []
+        for i in range(2):
+            key = self.root / f'k{i}.hex'
+            key.write_text(f'{i + 201:064x}\n')
+            key.chmod(0o600)
+            self.keys.append(key)
+            self.senders.append(self.run_net('address', '--key', key)['address'])
+        self.deposits = self.root / 'deposits.json'
+        self.deposits.write_text(json.dumps([{'height': 3, 'tx_index': i, 'txid': f'{i + 1:064x}', 'vout': 0,
+                                              'sats': 100_000_000, 'recipient': sender} for i, sender in enumerate(self.senders)]))
+        self.raws = []
+        for i in range(2):
+            out = self.root / f't{i}.tx'
+            self.run_net('sign-tx', '--key', self.keys[i], '--nonce', 0, '--to', '55' * 20, '--value-wei', 1000, '--out', out)
+            self.raws.append(out.read_text().strip())
+        envelope = self.raws[0]
+        self.record = {'height': 9, 'l1_txid': '1c' * 32, 'envelope_hash': q.keccak256(bytes.fromhex(envelope)).hex(),
+                       'gas_limit': 21_000, 'envelope': envelope}
+
+    def settler_side(self, users):
+        """The settler's own arguments for a block with the forced record and `users` user transactions."""
+        directory = self.root / 'settler-work' / f'{1:08d}-{ANCHOR[:16]}'
+        directory.mkdir(parents=True)
+        deposits = directory / 'deposits.json'
+        deposits.write_text(self.deposits.read_text())
+        (directory / 'forced.json').write_text(json.dumps([self.record], sort_keys=True))
+        worker = object.__new__(settler.Settler)
+        worker.c = {'l2_db': str(self.root / 'settler-db'), 'timestamp_rule': q.TIMESTAMP_RULE, 'user_transactions': True}
+        worker.next_program, worker.program, worker.spool_open = {'rules': 'next'}, {'rules': 'next'}, True
+        genesis = self.run_net('init', '--target', worker.c['l2_db'])['hash']
+        args = worker.extend_arguments(genesis, ANCHOR, deposits, self.SLOT, spool=False)
+        if users:
+            pool = directory / 'selected.json'
+            pool.write_text(json.dumps(self.raws[1:1 + users]))
+            args += ['--txs', pool]
+        block = self.run_net(*args)
+        (directory / 'block.json').write_text(json.dumps(block))
+        if users:
+            self.run_net('da', '--target', worker.c['l2_db'], '--number', 1, '--out', directory / 'da-payload.hex')
+        return directory, block, genesis
+
+    def shadow_side(self, directory, block):
+        """The shadow's own code: the due records from the native view, its arguments, the real producer."""
+        seq = object.__new__(q.Sequencer)
+        seq.c = {**q.DEFAULTS, 'l2_db': str(self.root / 'shadow-db'), 'next_elf_keccak': 'set'}
+        seq.rule_set = 'next'
+        genesis = self.run_net('init', '--target', seq.c['l2_db'])['hash']
+        view = {'forced': {'due': [dict(self.record, l1_txid='0x' + self.record['l1_txid'])], 'due_hash': 'ab' * 32, 'queued': 1}}
+        due = q.forced_due(q.view_projection(view))
+        forced = self.root / 'shadow-forced.json'
+        forced.write_text(json.dumps(due, sort_keys=True))
+        txs = None
+        if q.user_count(block):
+            txs = self.root / 'settler-transactions.json'
+            txs.write_text(json.dumps(seq.settler_transactions(1, directory, block)))
+        return self.run_net(*seq.extend_args(genesis, ANCHOR, self.deposits, self.SLOT, txs, forced))
+
+    def test_a_block_whose_only_transaction_is_a_forced_record_is_rebuilt(self):
+        directory, block, _ = self.settler_side(users=0)
+        self.assertEqual((block['transactions'], block.get('user_transactions')), (1, 0), block)
+        self.assertFalse((directory / 'da-payload.hex').exists(), 'a forced-only block has no DA batch')
+        rebuilt = self.shadow_side(directory, block)
+        self.assertEqual((rebuilt['hash'], rebuilt['state_root'], rebuilt['transactions']),
+                         (block['hash'], block['state_root'], 1))
+
+    def test_a_block_with_a_forced_record_and_a_user_transaction_is_rebuilt(self):
+        directory, block, _ = self.settler_side(users=1)
+        self.assertEqual((block['transactions'], block.get('user_transactions')), (2, 1), block)
+        rebuilt = self.shadow_side(directory, block)
+        self.assertEqual((rebuilt['hash'], rebuilt['state_root'], rebuilt['transactions']),
+                         (block['hash'], block['state_root'], 2))
+
+
 if __name__ == '__main__':
     unittest.main()

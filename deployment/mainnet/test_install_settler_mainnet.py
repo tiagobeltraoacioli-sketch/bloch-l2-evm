@@ -179,8 +179,9 @@ class Installer(unittest.TestCase):
                 golive[name.split('/', 1)[1]] = value
         for name in ('settlement_v3_mainnet', 'bloch-pos', 'mainnet.manifest'):
             self.assertEqual(golive[name], m.PINS[name], name)
+        # The December build pinned the SP1 host (docs/DECEMBER-BUILD-R15.md); the prover installer pins the same one.
         self.assertEqual(m.PINS['bloch-evm-sp1-settlement-v3'], m.CANDIDATE_HOST_PIN)
-        self.assertNotRegex(m.CANDIDATE_HOST_PIN, '^[0-9a-f]{64}$')
+        self.assertRegex(m.CANDIDATE_HOST_PIN, '^[0-9a-f]{64}$')
 
     def test_units_running_as_the_settler_user_hide_its_secrets(self):
         hidden = {'/run/docker.sock', str(DA_DIR), str(STATE / 'da.passphrase'), str(STATE / 'ssh'), str(DA_PASSPHRASE),

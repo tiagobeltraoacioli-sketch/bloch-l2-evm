@@ -82,13 +82,12 @@ GUEST_SHA256 = '203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473
 # Stops the prover group on client disconnect. The older 99bbc1bc... does not, and sits in staging with a passing SHA256SUMS.
 # Agent 93's measured low-memory setting, used unless --prover-env is given.
 DEFAULT_PROVER_ENV = ['ELEMENT_THRESHOLD=268435456']
-REMOTE_PROVER_SHA256 = 'fb47f00850713b10fbb43cf6efbd6e4b8d77b72d3a5bf43f979660968884f135'
+REMOTE_PROVER_SHA256 = '40f954601a94d9ce2f237af37211cbba1c3e0e0c0a4944cc2ad40714584381c5'
 # The SP1 host. Pinned so that root never executes an unpinned binary: the `identity` check below runs it, and
 # its output is only as honest as the binary. CANDIDATE: the December host (features source-settlement,
-# node-artifact,sparse-witness) has no release build yet, and the launch host 3a24c36d... (GO-LIVE-PINS-PROVER.sha256)
-# does not serve --mainnet-v1 / --mainnet --sparse. This value is no SHA-256, so install refuses every host until
-# the December build pins it (fail closed).
-PROVER_SHA256 = 'unpinned-december-sp1-host'
+# node-artifact,sparse-witness; docs/DECEMBER-BUILD-R15.md), the same pin as the settler installer's. The launch
+# host 3a24c36d... (GO-LIVE-PINS-PROVER.sha256) does not serve --mainnet-v1 / --mainnet --sparse.
+PROVER_SHA256 = '04fc2d32992ef7c9ada906542953b816c73968b31d44976835fe9b3e4c928439'
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
 # codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
 # recipient is 0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544 (fixed by the owner); the configuration and every value below are built with it.

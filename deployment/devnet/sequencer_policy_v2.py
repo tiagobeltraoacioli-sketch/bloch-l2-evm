@@ -108,15 +108,20 @@ DEFAULTS = {
 }
 
 # Prover profiles by the preflight SP1 gas of the block to prove (agent 93's settings, agent 113's measurements).
+# The names are the ones the SP1 host reads and the remote prover allows (`SP1_WORKER_…`; agent 317 F317-2: four
+# of them lacked the prefix and were ignored). Measured by agent 317 on real proofs, 64 GiB scope: a full block of
+# 64 plain transfers (12.85M SP1 gas) is OOM-killed with the `fast` settings and peaks at 34 to 40 GiB with the
+# two-core-worker settings (450 to 480 s).
+LOWMEM_ENV = {'ELEMENT_THRESHOLD': '268435456', 'SP1_WORKER_NUM_CORE_WORKERS': '2', 'SP1_WORKER_CORE_BUFFER_SIZE': '1',
+              'SP1_WORKER_NUM_SPLICING_WORKERS': '1', 'SP1_WORKER_SPLICING_BUFFER_SIZE': '1',
+              'SP1_WORKER_GLOBAL_MEMORY_BUFFER_SIZE': '2'}
 PROFILES = {
     'fast': {'threads': 32, 'env': {'ELEMENT_THRESHOLD': '268435456'}, 'memory_max_gib': 48},
-    'lowmem-2c': {'threads': 32, 'env': {'SP1_WORKER_NUM_CORE_WORKERS': '2', 'CORE_BUFFER_SIZE': '1',
-                                         'NUM_SPLICING_WORKERS': '1', 'SPLICING_BUFFER_SIZE': '1',
-                                         'GLOBAL_MEMORY_BUFFER_SIZE': '2'}, 'memory_max_gib': 64},
-    'mandatory-heavy': {'threads': 32, 'env': {'SP1_WORKER_NUM_CORE_WORKERS': '2', 'CORE_BUFFER_SIZE': '1',
-                                               'NUM_SPLICING_WORKERS': '1', 'SPLICING_BUFFER_SIZE': '1',
-                                               'GLOBAL_MEMORY_BUFFER_SIZE': '2'}, 'memory_max_gib': 96},
+    'lowmem-2c': {'threads': 32, 'env': dict(LOWMEM_ENV), 'memory_max_gib': 64},
+    'mandatory-heavy': {'threads': 32, 'env': dict(LOWMEM_ENV), 'memory_max_gib': 96},
 }
+# What a proof killed for memory is tried with next (F317-1): the two-core-worker settings.
+SAFER_PROFILE = {None: 'lowmem-2c', 'fast': 'lowmem-2c'}
 
 
 class Cost:

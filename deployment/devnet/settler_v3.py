@@ -240,6 +240,10 @@ WITHDRAWAL_DOMAIN = b'BLOCH:L2:WITHDRAW:1'
 WITHDRAWAL_TREE_DEPTH = 32
 # remote_prover.py framing: magic, u32 request length, request, u64 artifact length, artifact.
 REMOTE_MAGIC = b'BLOCH:L2:PROVE:1\n'
+# Version 2 of the job frame carries this block's prover settings (remote_prover.py MAGIC_PROFILE; F317-1).
+REMOTE_MAGIC_PROFILE = b'BLOCH:L2:PROVE:2\n'
+# A prover the kernel killed: SIGKILL locally (-9, or 137 through a shell), remote_prover.EXIT_KILLED remotely.
+KILLED_EXITS = (-9, 137)
 REMOTE_MAX_PROOF_BYTES = 1 << 20
 RPC_BACKOFF_SECONDS, RPC_MAX_BACKOFF_SECONDS = 10, 300
 RPC_DIVERGED_LOG_AFTER = 3  # consecutive reads outside the quorum before an endpoint is reported
@@ -2598,7 +2602,7 @@ class Settler:
                 timed_out = False
                 try:
                     if where == 'remote':
-                        result = self.prove_remote(directory, proof)
+                        result = self.prove_remote(directory, proof, profile)
                     elif name == 'prove' and not (self.local_proof_fits(directory)
                                                   and self.local_profile_fits(directory, profile)):
                         result = types.SimpleNamespace(returncode=75)
@@ -2614,6 +2618,8 @@ class Settler:
                 if name == 'prove':
                     log('prover-failed', directory=str(directory), where=where, exit_code=result.returncode,
                         **({'timeout': True} if timed_out else {}))
+                    if result.returncode in KILLED_EXITS:
+                        self.proof_out_of_memory(directory, where, profile)
             steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
@@ -2628,15 +2634,46 @@ class Settler:
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps), program=self.program['name'])
         return proof
 
+    def proof_out_of_memory(self, directory, where, profile):
+        """A proof attempt was killed for memory (agent 317 F317-1: the settler proved the same block again with
+        the same settings for ever). The block falls back to the safer settings (`SAFER_PROFILE`), recorded in
+        `prover-profile.json` so that every later attempt, local or remote, uses them; it is logged `prover-oom`
+        (a warning of the monitor, critical when it repeats); and once the safest settings were killed
+        `prove_oom_max_attempts` times (default 3) the worker halts instead of trying again: the block needs the
+        operator (a larger prover, or STUCK-BLOCK-RUNBOOK.md)."""
+        import sequencer_policy_v2 as policy_v2
+        path = directory / 'prover-profile.json'
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            record = {}
+        name = profile['name'] if profile else None
+        safer = policy_v2.SAFER_PROFILE.get(name)
+        kills = int(record.get('oom_kills', 0)) + 1
+        record.update(oom_kills=kills, oom=True)
+        if safer:
+            record.update(profile=safer, oom_downgraded_from=name, oom_kills_at_safest=0)
+        else:
+            record['oom_kills_at_safest'] = int(record.get('oom_kills_at_safest', 0)) + 1
+        atomic_write(path, json.dumps(record, sort_keys=True) + '\n')
+        log('prover-oom', directory=str(directory), where=where, profile=name, next_profile=safer or name, kills=kills)
+        limit = int(self.c.get('prove_oom_max_attempts', 3))
+        if not safer and record['oom_kills_at_safest'] >= limit:
+            raise Halt(f'the proof of {directory.name} was killed for memory {record["oom_kills_at_safest"]} times with '
+                       f'the safest prover settings ({name}): not trying again; it needs a larger prover or the '
+                       'stuck-block procedure (STUCK-BLOCK-RUNBOOK.md)')
+
     def prover_profile(self, directory):
         """The prover settings sequencer policy v2 chose for this block by its preflight SP1 gas (`prover-profile.json`,
         written when the block was built): `fast`, `lowmem-2c` or `mandatory-heavy` (sequencer_policy_v2.PROFILES). None
-        without a budget or for a block built without the policy."""
-        if not self.budget_on():
-            return None
+        without a budget or for a block built without the policy, unless a proof of this block was killed for memory:
+        the fallback written by `proof_out_of_memory` holds for every block."""
         try:
-            name = json.loads((directory / 'prover-profile.json').read_text())['profile']
+            record = json.loads((directory / 'prover-profile.json').read_text())
+            name = record['profile']
         except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not self.budget_on() and not record.get('oom'):
             return None
         import sequencer_policy_v2 as policy_v2
         profile = policy_v2.PROFILES.get(name)
@@ -2737,12 +2774,17 @@ class Settler:
         except (ProcessLookupError, PermissionError):
             pass
 
-    def prove_remote(self, directory, proof):
-        """Groth16 on the remote prover; the caller still verifies it locally."""
+    def prove_remote(self, directory, proof, profile=None):
+        """Groth16 on the remote prover; the caller still verifies it locally. With a profile, the job carries the
+        block's prover settings (frame version 2): the remote prover's fixed settings are only its default."""
         r = self.program['remote_prover']
         request = (directory / 'native-request.txt').read_bytes()
         artifact = (directory / 'block.artifact').read_bytes()
-        frame = (REMOTE_MAGIC + struct.pack('>I', len(request)) + request
+        head = REMOTE_MAGIC
+        if profile:
+            settings = json.dumps(profile['env'], sort_keys=True).encode('ascii')
+            head = REMOTE_MAGIC_PROFILE + struct.pack('>H', len(settings)) + settings
+        frame = (head + struct.pack('>I', len(request)) + request
                  + struct.pack('>Q', len(artifact)) + artifact)
         argv = [r.get('ssh', '/usr/bin/ssh'), '-i', r['key'], '-p', str(r.get('port', 22)),
                 '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',

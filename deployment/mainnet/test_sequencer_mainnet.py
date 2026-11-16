@@ -419,6 +419,64 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual([kind for kind, _ in seen], ['extend'])
         self.assertIn('shadow-order-unchecked', [event for event, _ in logs])
 
+    # ---- L1 forced inclusion in the shadow (agent 317 F317-4) ----
+    FORCED_ENVELOPE = '02f86c01'
+
+    def forced_view(self):
+        record = {'height': 9, 'l1_txid': '1c' * 32, 'envelope_hash': q.keccak256(bytes.fromhex(self.FORCED_ENVELOPE)).hex(),
+                  'gas_limit': 21_000, 'envelope': self.FORCED_ENVELOPE}
+        return view(forced={'due': [record], 'due_hash': 'ab' * 32, 'queued': 1})
+
+    def forced_shadow(self, users):
+        """A shadow facing a settler block with one forced envelope and `users` sequencer transactions."""
+        producer = FakeProducer(txs=users)
+        seen = []
+        orig = producer.extend
+
+        def extend(o):
+            seen.append(dict(o))
+            block = orig(o)
+            forced = json.loads(Path(o['--forced']).read_text()) if '--forced' in o else []
+            return {**block, 'transactions': block['transactions'] + len(forced), 'user_transactions': block['transactions']}
+        producer.extend = extend
+        producer.select = lambda o: {'included': [q.keccak256(bytes.fromhex(raw)).hex() for raw in json.loads(Path(o['--txs']).read_text())]}
+        seq, _, _ = self.make([self.forced_view()] * 3, producer, settler_workdir=str(self.root / 'settler-work'))
+        d = self.settler_dir()
+        block = {**self.reference(txs=users), 'transactions': users + 1, 'user_transactions': users,
+                 'forced': {'due': 1, 'included': 1, 'skipped': []}}
+        (d / 'block.json').write_text(json.dumps(block))
+        return seq, seen, d
+
+    def test_shadow_rebuilds_a_block_whose_only_transaction_is_a_forced_record(self):
+        """The block has `transactions: 1`, `user_transactions: 0` and no DA batch. The shadow waited for a
+        da-payload.hex that never comes and halted at the settler's next block."""
+        seq, seen, _ = self.forced_shadow(users=0)
+        job = seq.step()
+        self.assertEqual((job['status'], job['number']), ('shadow-matched', 1))
+        (extend,) = seen
+        self.assertNotIn('--txs', extend)
+        forced = json.loads(Path(extend['--forced']).read_text())
+        self.assertEqual([(r['l1_txid'], r['envelope']) for r in forced], [('1c' * 32, self.FORCED_ENVELOPE)])
+        self.assertIsNone(job['da'], 'a forced-only block publishes no DA batch')
+
+    def test_shadow_rebuilds_a_block_with_a_forced_record_and_user_transactions(self):
+        seq, seen, d = self.forced_shadow(users=2)
+        self.assertIsNone(seq.step())   # the DA batch of the two user transactions is not written yet
+        (d / 'da-payload.hex').write_text(batch(2).hex() + '\n')
+        job = seq.step()
+        self.assertEqual(job['status'], 'shadow-matched')
+        extend = seen[-1]
+        self.assertEqual(json.loads(Path(extend['--txs']).read_text()), ['0200', '0201'], 'the DA batch holds the user transactions only')
+        self.assertEqual((extend['--as-given'], '--forced' in extend), ('yes', True))
+
+    def test_shadow_refuses_a_forced_record_whose_envelope_is_not_the_hashed_one(self):
+        seq, _, _ = self.forced_shadow(users=0)
+        broken = self.forced_view()
+        broken['forced']['due'][0]['envelope'] = '02f86c02'
+        seq.rpc.views = [broken] * 3
+        with self.assertRaisesRegex(q.Halt, 'does not hash to its envelope_hash'):
+            seq.step()
+
     def test_shadow_configuration_guards(self):
         with self.assertRaisesRegex(q.Halt, 'leave user_transactions false'):
             q.Sequencer({**self.config, 'settler_workdir': '/x', 'user_transactions': True,

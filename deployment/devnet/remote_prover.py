@@ -52,6 +52,14 @@ import time
 
 CONFIG = Path(os.environ.get('BLOCH_REMOTE_PROVER_CONFIG', '/etc/bloch-l2-devnet4-prover/config.json'))
 MAGIC = b'BLOCH:L2:PROVE:1\n'
+# Version 2 carries the settler's prover settings for this block before the request (agent 317 F317-1: the
+# profile the sequencer policy chose per block never reached this prover, and a full block was killed for memory
+# with the fixed settings of the config). Same names, same rules as `prover_env` of the config, which they extend.
+MAGIC_PROFILE = b'BLOCH:L2:PROVE:2\n'
+MAX_PROFILE_BYTES = 1024
+# Exit code for a prover the kernel killed (SIGKILL: the memory cap of the unit). The settler reads it as
+# "out of memory", falls back to the safer settings and bounds its attempts.
+EXIT_KILLED = 137
 MAX_REQUEST_BYTES = 700  # the V3 host refuses longer native requests
 MAX_ARTIFACT_BYTES = 64 << 20
 MAX_PROOF_BYTES = 1 << 20
@@ -81,8 +89,19 @@ def read_exact(stream, size):
 
 
 def parse_job(stream):
-    """Return (request, artifact) from one framed job; refuse anything else."""
-    if read_exact(stream, len(MAGIC)) != MAGIC:
+    """Return (request, artifact, settings) from one framed job; refuse anything else. `settings` is the
+    prover environment the settler asks for this block ({} for a version 1 job)."""
+    magic = read_exact(stream, len(MAGIC))
+    settings = {}
+    if magic == MAGIC_PROFILE:
+        (profile_len,) = struct.unpack('>H', read_exact(stream, 2))
+        if profile_len > MAX_PROFILE_BYTES:
+            raise ValueError('prover settings out of bounds')
+        try:
+            settings = prover_env({'prover_env': json.loads(read_exact(stream, profile_len).decode('ascii'))})
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f'prover settings are not an ASCII JSON object: {error}') from None
+    elif magic != MAGIC:
         raise ValueError('bad magic')
     (request_len,) = struct.unpack('>I', read_exact(stream, 4))
     if not 0 < request_len <= MAX_REQUEST_BYTES:
@@ -95,7 +114,7 @@ def parse_job(stream):
     if stream.read(1):
         raise ValueError('trailing bytes after the job')
     request.decode('ascii')
-    return request, artifact
+    return request, artifact, settings
 
 
 def cgroup_memory_cap(proc_cgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
@@ -428,9 +447,11 @@ def serve():
     except BlockingIOError:
         fail(75, 'another proof is running')
     try:
-        request, artifact = parse_job(sys.stdin.buffer)
+        request, artifact, settings = parse_job(sys.stdin.buffer)
     except (ValueError, UnicodeDecodeError) as error:
         fail(64, str(error))
+    # The settler's settings for this block extend the config's (the config stays the default for a version 1 job).
+    tuning = {**tuning, **settings}
     job = Path(tempfile.mkdtemp(prefix='job-', dir=work))
     try:
         (job / 'native-request.txt').write_bytes(request)
@@ -452,6 +473,8 @@ def serve():
             returncode = run_while_client_connected(argv, env, log, c.get('timeout_seconds', 3500))
         if returncode or not proof.is_file() or not 0 < proof.stat().st_size <= MAX_PROOF_BYTES:
             tail = (work / 'last-prove.log').read_text(errors='replace')[-2000:]
+            if returncode in (-9, 137):
+                fail(EXIT_KILLED, f'prover killed (exit {returncode}): out of memory inside this unit\'s cap?\n{tail}')
             fail(70, f'prover exited {returncode}:\n{tail}')
         sys.stdout.buffer.write(proof.read_bytes())
         sys.stdout.buffer.flush()
