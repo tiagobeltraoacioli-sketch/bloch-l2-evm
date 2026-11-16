@@ -2623,6 +2623,8 @@ class Settler:
             steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
+                if name == 'prove':
+                    self.proof_failed(directory, self.clock() - start, result.returncode)
                 raise RuntimeError(f'prover {name} failed: see {directory}/{name}.log')
             if name == 'execute' and view is not None and self.request_moved(view):
                 log('request-moved-before-proof', directory=str(directory))
@@ -2662,6 +2664,30 @@ class Settler:
             raise Halt(f'the proof of {directory.name} was killed for memory {record["oom_kills_at_safest"]} times with '
                        f'the safest prover settings ({name}): not trying again; it needs a larger prover or the '
                        'stuck-block procedure (STUCK-BLOCK-RUNBOOK.md)')
+
+    def proof_failed(self, directory, seconds, exit_code):
+        """Review R308-7P-2: only a kill of the SP1 host was bounded (`proof_out_of_memory`); a proof that fails the
+        same way every time in another way (the Gnark container killed inside Docker's own memory accounting, a
+        prover error, a timeout) was proved again for ever, each attempt costing minutes. Every failed proof of this
+        block that took at least `prove_failed_min_seconds` (default 60) is counted in `prove-failures.json`,
+        whatever its exit code, and at `prove_failed_max_attempts` (default 5; 0: no bound) the worker halts. A
+        failure faster than that (the remote prover not reachable, a local proof refused for its size) costs no
+        proving and stays with the ordinary retry. The count survives a restart: after a halt each restart buys
+        one more attempt; removing the file starts the count again."""
+        if seconds < float(self.c.get('prove_failed_min_seconds', 60)):
+            return
+        path = directory / 'prove-failures.json'
+        try:
+            count = int(json.loads(path.read_text())['count'])
+        except (OSError, ValueError, KeyError, TypeError):
+            count = 0
+        count += 1
+        atomic_write(path, json.dumps({'count': count, 'last_exit_code': exit_code}, sort_keys=True) + '\n')
+        limit = int(self.c.get('prove_failed_max_attempts', 5))
+        if limit and count >= limit:
+            raise Halt(f'the proof of {directory.name} failed {count} times (last exit code {exit_code}): not trying '
+                       f'again; see {directory}/prove.log, then a larger or repaired prover or the stuck-block '
+                       'procedure (STUCK-BLOCK-RUNBOOK.md)')
 
     def prover_profile(self, directory):
         """The prover settings sequencer policy v2 chose for this block by its preflight SP1 gas (`prover-profile.json`,

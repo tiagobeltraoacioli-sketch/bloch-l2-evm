@@ -498,7 +498,7 @@ class Policy:
             order.append(queues[sender].pop(0)[1]['hash'])
         return order
 
-    def _capped(self, order, info, plan, now=None):
+    def _capped(self, order, info, plan, now=None, by_hash=None):
         """Apply `max_block_txs` to the try order. The last `tip_reserved_txs` places go to the highest tips among
         everything behind the first cut, whatever the group, and are tried last in try order (agents/264 F264-5).
         A sender's later nonce never takes a place its earlier nonce lost.
@@ -508,7 +508,13 @@ class Policy:
         F317-3, a full block of covered senders at a higher tip left no newcomer in). So among everything behind
         the first cut they go first to the plain transfers of senders whose credit does not cover them, by tip;
         then to their other transactions, by tip (what is here already passed the producer's selection, so it
-        pays); then to covered senders by tip, so places newcomers do not use are sold as before."""
+        pays); then to covered senders by tip, so places newcomers do not use are sold as before.
+
+        "Covered" is the producer's own rule (select.rs `covers`): credit of at least the gas LIMIT the transaction
+        declares times its tip. The producer's report carries the gas used only, so the limit is read from the
+        signed bytes (`by_hash`); review R308-7P-3: with the gas used, a sender whose credit lies between the two
+        was covered here and uncovered in the producer, and lost the reserved places meant for it. Bytes that do
+        not parse (the producer would not have selected them) fall back to the gas used."""
         cap = int(self.c['max_block_txs'])
         if len(order) <= cap:
             return order
@@ -523,7 +529,9 @@ class Policy:
                 return 0
             tx = info[name]
             gas, tip = int(tx['gas_used']), max(int(tx['effective_tip']), 1)
-            if tx['sender'] in set(self.c['write_limit_exempt_senders']) or credits.get(tx['sender'], 0) >= gas * tip:
+            limit = raw_gas_limit(by_hash[name]) if by_hash and name in by_hash else None
+            if tx['sender'] in set(self.c['write_limit_exempt_senders']) \
+                    or credits.get(tx['sender'], 0) >= (gas if limit is None else limit) * tip:
                 return 2
             return 0 if gas == 21_000 else 1
         for name in sorted(rest, key=lambda h: (group(h), -int(info[h]['effective_tip']), position[h])):
@@ -613,7 +621,7 @@ class Policy:
         # `dry` runs without the block's transaction cap, so that the producer's tip order cannot push a sender with
         # standing out of the candidates before the tiers apply; the cap applies here, to the try order.
         large = self.large_gas(now)  # this block's threshold: also lowered by runs without cost, which persist nothing
-        remaining = self._capped(self.try_order(stats, now, large), info, plan, now)
+        remaining = self._capped(self.try_order(stats, now, large), info, plan, now, by_hash)
         best = []
         degraded = False
         while remaining and not out_of_work():
@@ -958,3 +966,45 @@ def set_hash(function):
 
 def _hash_raw(raw):
     return _hash(bytes.fromhex(raw)).hex()
+
+
+def _rlp_item(data, at):
+    """(payload start, payload end, is a list) of the RLP item at `at`; ValueError when it runs past the data."""
+    if at >= len(data):
+        raise ValueError('rlp: no item')
+    first = data[at]
+    if first < 0x80:
+        start, size, is_list = at, 1, False
+    else:
+        is_list, base = first >= 0xc0, 0xc0 if first >= 0xc0 else 0x80
+        if first - base <= 55:
+            start, size = at + 1, first - base
+        else:
+            width = first - base - 55
+            if at + 1 + width > len(data):
+                raise ValueError('rlp: length past the data')
+            start, size = at + 1 + width, int.from_bytes(data[at + 1:at + 1 + width], 'big')
+    if start + size > len(data):
+        raise ValueError('rlp: item past the data')
+    return start, start + size, is_list
+
+
+def raw_gas_limit(raw):
+    """The gas limit a signed transaction declares (legacy, EIP-2930 or EIP-1559; hex), or None when the bytes do
+    not parse as one. Read only to rank candidates as the producer does (`_capped`); nothing is authenticated."""
+    try:
+        data = bytes.fromhex(raw)
+        index = {1: 3, 2: 4}.get(data[0]) if data and data[0] < 0x80 else 2
+        if index is None:
+            return None
+        at, end, is_list = _rlp_item(data, 1 if data[0] < 0x80 else 0)
+        if not is_list or end != len(data):
+            return None
+        for _ in range(index):
+            at = _rlp_item(data[:end], at)[1]
+        start, stop, is_list = _rlp_item(data[:end], at)
+        if is_list or stop - start > 8:
+            return None
+        return int.from_bytes(data[start:stop], 'big')
+    except (ValueError, IndexError, TypeError):
+        return None

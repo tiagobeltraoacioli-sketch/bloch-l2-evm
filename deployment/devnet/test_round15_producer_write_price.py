@@ -249,6 +249,52 @@ class ReserveHoldsOnAFullBlock(PricedWorld):
         self.assertEqual(len(served), 64)
 
 
+def signed_bytes(kind, gas_limit, tag):
+    """Hex of bytes shaped as a signed transaction of `kind` (0 legacy, 1 EIP-2930, 2 EIP-1559) that declares
+    `gas_limit`; the signature is a filler, the planner reads the limit only."""
+    import settler_v3 as settler
+    n = lambda v: v.to_bytes((v.bit_length() + 7) // 8, 'big')  # noqa: E731
+    tail = [b'\x11' * 20, n(1), tag.encode()]
+    sig = [n(1), b'\x22' * 32, b'\x33' * 32]
+    if kind == 0:
+        return settler.rlp_encode([n(7), n(GWEI), n(gas_limit), *tail, *sig]).hex()
+    head = [n(700770), n(7), n(GWEI)] + ([n(2 * GWEI)] if kind == 2 else [])
+    return (bytes([kind]) + settler.rlp_encode([*head, n(gas_limit), *tail, [], *sig])).hex()
+
+
+class CoveredIsTheProducersRule(PricedWorld):
+    """Review R308-7P-3: the producer calls a transaction covered when the sender's credit reaches its gas LIMIT
+    times its tip; the planner used the gas USED, so a sender between the two lost the reserved places."""
+
+    def test_the_declared_gas_limit_is_read_from_the_three_envelopes(self):
+        for kind in (0, 1, 2):
+            for limit in (21_000, 100_000, 5_000_000):
+                self.assertEqual(sp.raw_gas_limit(signed_bytes(kind, limit, 'x' * 60)), limit, (kind, limit))
+        for bad in ('', '00', 'c0', '02c0', '03' + signed_bytes(2, 21_000, 'x')[2:], 'new0'.encode().hex(),
+                    signed_bytes(2, 21_000, 'x')[:-2], signed_bytes(0, 21_000, 'x') + '00', 'f8'):
+            self.assertIsNone(sp.raw_gas_limit(bad), bad)
+
+    def full_block_with(self, credit):
+        for sender in range(8):
+            self.policy.state['credit'][f'rich{sender}'] = {'wei': 10**18, 'at': self.now}
+            for nonce in range(16):
+                self.add(f'r{sender}-{nonce}', f'rich{sender}', nonce, 21_000, 1, tip=12 * GWEI // 10)
+        raw = signed_bytes(2, 100_000, 'between')   # a plain transfer (21,000 used) that declares 100,000
+        tip = 5 * GWEI // 10
+        self.tx[raw] = dict(name='between', sender='mid', nonce=0, gas=21_000, cost=1, tip=tip, fresh=[], fail_first=0)
+        self.spool.append(raw)
+        self.policy.state['credit']['mid'] = {'wei': credit(tip), 'at': self.now}
+        served = self.block(advance=0)
+        self.assertEqual(len(served), 64)
+        return served
+
+    def test_credit_between_gas_used_and_gas_limit_is_uncovered_and_gets_a_reserved_place(self):
+        self.assertIn('between', self.full_block_with(lambda tip: 2 * 21_000 * tip))
+
+    def test_credit_for_the_whole_gas_limit_is_covered_and_bids_by_tip(self):
+        self.assertNotIn('between', self.full_block_with(lambda tip: 100_000 * tip))
+
+
 class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
     """The settler passes the policy's credit ledger, its waiting senders and its gas cap to the producer."""
 

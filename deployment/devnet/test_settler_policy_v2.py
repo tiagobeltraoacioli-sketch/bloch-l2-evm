@@ -335,6 +335,48 @@ class Profiles(Harness):
         with self.assertRaisesRegex(s.Halt, 'killed for memory 3 times with the safest prover settings'):
             self.settler.proof_out_of_memory(self.dir, 'remote', self.settler.prover_profile(self.dir))
 
+    def failing_prover(self, seconds, exit_code=1):
+        """A prover whose execute passes and whose proof fails with `exit_code` after `seconds`."""
+        def run(argv, **kwargs):
+            if 'prove-groth16' in argv:
+                self.now += seconds
+                return types.SimpleNamespace(returncode=exit_code)
+            return types.SimpleNamespace(returncode=0)
+        self.settler.run = run
+        self.settler.c.update(prover_threads=8, gnark_image='image')
+        del self.settler.c['max_block_sp1_gas']   # no profile: the test is about the count, not the settings
+
+    def test_a_proof_that_fails_every_time_halts_whatever_its_exit_code(self):
+        """Review R308-7P-2: only a kill of the SP1 host was bounded; any other repeated failure was proved again
+        for ever. Five failed proofs of one block that each cost proving time halt the worker."""
+        self.failing_prover(seconds=400)
+        for attempt in range(1, 5):
+            with self.assertRaisesRegex(RuntimeError, 'prover prove failed'):
+                self.settler.prove(self.dir)
+            self.assertEqual(json.loads((self.dir / 'prove-failures.json').read_text()), {'count': attempt, 'last_exit_code': 1})
+        with self.assertRaisesRegex(s.Halt, 'failed 5 times .last exit code 1.: not trying again'):
+            self.settler.prove(self.dir)
+        with self.assertRaises(s.Halt):   # a restart buys one more attempt, not another five
+            self.settler.prove(self.dir)
+
+    def test_a_failure_that_cost_no_proving_is_not_counted(self):
+        """The remote prover not reachable, or a local proof refused for its size: the ordinary retry, no halt."""
+        self.failing_prover(seconds=2, exit_code=255)
+        for _ in range(8):
+            with self.assertRaisesRegex(RuntimeError, 'prover prove failed'):
+                self.settler.prove(self.dir)
+        self.assertFalse((self.dir / 'prove-failures.json').exists())
+
+    def test_the_bound_can_be_changed_or_turned_off(self):
+        self.failing_prover(seconds=400)
+        self.settler.c['prove_failed_max_attempts'] = 0
+        for _ in range(7):
+            with self.assertRaises(RuntimeError):
+                self.settler.prove(self.dir)
+        self.settler.c['prove_failed_max_attempts'] = 2
+        with self.assertRaises(s.Halt):
+            self.settler.prove(self.dir)
+
     def test_a_block_without_a_profile_also_falls_back_after_a_kill(self):
         """A deposits-only block built without the policy has no profile; after a kill it gets the safer one."""
         del self.settler.c['max_block_sp1_gas']
