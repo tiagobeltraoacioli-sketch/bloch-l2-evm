@@ -33,7 +33,7 @@
 #
 # FORK CANDIDATE v3 (codex/fork-candidate-l2-r11-20261103, agent 219): the default native is
 # codex/fork-candidate-native-r11-20261103 = node release A 4f34d87e + v2 f12b4113 + qualify kit + rollback kit and
-# runbook v3 + agent 215 forced final + agent 216 forced fallback (PROGRAM_FALLBACK 7fd7f3c0) + agent 221 + agent 222
+# runbook v3 + agent 215 forced final + agent 216 forced fallback (PROGRAM_FALLBACK 7528e26d) + agent 221 + agent 222
 # (G2 forfeit, brake off) + agent 233 L2 revenue fee + one protocol treasury. Every L2 gate is inert (forced inclusion and
 # the L2 revenue fee are aliases of L2_NEXT_PROGRAM_EPOCH). No native Cargo.lock change since f12b4113 (one comment in
 # tools/bloch-indexer/Cargo.toml), so the same settlement-recovery lock still resolves it. The next-rules release is
@@ -54,7 +54,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-CANDIDATE_NATIVE_COMMIT=a2fc3d0fb140e1011196bee78ed0057acba072c1
+CANDIDATE_NATIVE_COMMIT=0861278c531fdf150f0a94a13aa8a8ba64c5f762
 CANDIDATE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 NATIVE_COMMIT=${NATIVE_COMMIT:-$CANDIDATE_NATIVE_COMMIT}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a

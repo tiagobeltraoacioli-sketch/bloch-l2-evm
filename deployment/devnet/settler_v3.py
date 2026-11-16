@@ -310,7 +310,7 @@ def mainnet_l2_config(program=None):
 
 # CANDIDATE, not scheduled: the next rules, L1 forced inclusion included (configuration 27d6ce9f), proved by
 # the complete-witness fallback guest (`settlement_v3_mainnet` of integrations/sp1-execution/guest-fallback,
-# 7fd7f3c0, the pinned container build, guest-fallback/build-container.sh, of bloch-l2-evm
+# 7528e26d, the pinned container build, guest-fallback/build-container.sh, of bloch-l2-evm
 # codex/fallback-forced-r11-20261103; agent 216). It replaces 3ad3a4f0, which did not run the forced rule.
 # The prover reads the forced records from the complete artifact (`produce export --witness complete`).
 # Native `l2_settlement::mainnet::PROGRAM_FALLBACK` names it (MAINNET_FALLBACK below). Its configuration
@@ -318,14 +318,14 @@ def mainnet_l2_config(program=None):
 # The proof policy, the L2 genesis and the attestor set stay.
 MAINNET_NEXT = {
     'configuration': '27d6ce9f3ef204207ed089a4ba2593e4d45b9bc25242d3de32e2a3dea1a12783',
-    'elf_keccak': 'd95185a60668b0d4e1da49be00d85b9c550b412f13c5155be454e72889f90bf1',
-    'vkey_koalabear': '432fa77548114c6431d3d64a09c851e8178e83b4744681fb73c3e2d368b11546',
-    'vkey_bn254': '00865f4eeb204531918e9eb2509c851e82f1d0769d11a07ef9e1f169e8b11546',
-    'guest_sha256': '7fd7f3c0fb572ca1d9cfc1caa70ba4be09f306bb6d7274782ae517b59b1b5303',
+    'elf_keccak': 'b6d6d128b0585ec6b24cec3261ccca348ee8e7cbc3e15eb51ed5fd838ac9baf1',
+    'vkey_koalabear': '020138086276433f0bfc354c43e493a50400999706ba3ca061ae34d4162f4765',
+    'vkey_bn254': '000402701189d90cfc5fe1aa643e493a50801332e1ae8f2830d71a6a162f4765',
+    'guest_sha256': '7528e26da4076499e0fabcc621836aae396d0ddcb1cbf567436273c820c7c3e1',
 }
 
 # CANDIDATE, not scheduled: the same next rules proved by the sparse-witness guest
-# (`settlement_v3_mainnet_sparse` bc35e838, the pinned container build of bloch-l2-evm
+# (`settlement_v3_mainnet_sparse` 81813124, the pinned container build of bloch-l2-evm
 # codex/forced-guest-r8-20261102 595d914: code-by-hash witness and L1 forced inclusion, artifact
 # format SPARSE:3). The native candidate (bloch-sis-pow codex/forced-guest-native-r8-20261102) names
 # this ELF in `PROGRAM_NEXT`. Its configuration is the next rules with forced inclusion (tag 4,
@@ -334,10 +334,10 @@ MAINNET_NEXT = {
 # (`produce export --witness sparse`) and runs the prover with `--mainnet --sparse`.
 MAINNET_NEXT_SPARSE = {
     'configuration': '27d6ce9f3ef204207ed089a4ba2593e4d45b9bc25242d3de32e2a3dea1a12783',
-    'elf_keccak': '1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18',
-    'vkey_koalabear': '6a140f117b84dd524b3681b9447422e5281451295144b5747197d0df5db6afc9',
-    'vkey_bn254': '00d4281e23ee13754a59b40dcc47422e55028a2534512d5d38cbe86fddb6afc9',
-    'guest_sha256': 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048',
+    'elf_keccak': 'd6b33a99dc9329b2ca75aa0b4b7b3116e5334ee9edc9cb5e20491eaa926ceb74',
+    'vkey_koalabear': '5dc306572d2df6a31f8c59c3114859500ba2af783ffaca8e473258c273d98584',
+    'vkey_bn254': '00bb860caeb4b7da8cfc62ce19148595017455ef0ffeb2a3a3992c6173d98584',
+    'guest_sha256': '81813124c19b1a9bfe5755fc742fa36a48420134b71e18ef355e26e1c5f1b6d9',
 }
 
 # CANDIDATE, not scheduled: native `PROGRAM_FALLBACK`, which `L2_PROGRAM_ROLLBACK_EPOCH` (inert) installs

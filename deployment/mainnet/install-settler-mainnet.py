@@ -10,8 +10,8 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       settlement_v3_mainnet (SHA-256 203114bf...), bloch-pos (the armed mainnet release
       78d4921c, SHA-256 700631b0...), mainnet.manifest (SHA-256 7eef82a7...) and
       l2_reorg_recover.py (SHA-256 2a648b31...) and, for the program swap (CANDIDATE, native
-      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 bc35e838...) and, for the
-      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 7fd7f3c0...),
+      L2_NEXT_PROGRAM_EPOCH inert), settlement_v3_mainnet_sparse (SHA-256 81813124...) and, for the
+      inert rollback (L2_PROGRAM_ROLLBACK_EPOCH), settlement_v3_mainnet_fallback (SHA-256 7528e26d...),
       plus sequencer_policy_v2.py; every file is pinned in PINS below and is hashed after it is copied
       into /opt (the copies run, not the source).
       The host of this kit serves both programs: the activated one with --mainnet-v1, the
@@ -118,7 +118,7 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its sequencer policy, its SP1 host and its producer. Every file this installer copies
     # is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': 'e5dd7cd5a7c87fb95868e2ef6dac179f8651db8abe8900593e219387453bef7f',
+    'settler_v3.py': 'ee08bc7d082e5cf23d30e38577477aada72b2565ab5816ec31749932d6f67b7a',
     'sequencer_policy_v2.py': '31511e5580c7fa7e7a6c7877979f73f638b5b04efe12c5d27befda4ac716c552',
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness)
     # has no release build yet. Until it is pinned here prepare refuses every host (fail closed).
@@ -127,11 +127,11 @@ PINS = {
     'bloch-l2-produce-dev': '425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544, fixed) and with the audit's fixes.
-    'settlement_v3_mainnet_sparse': 'bc35e8383e08dbe86376564387ab98a903a188cbc2f4c686051b6cd560a7b048',
+    'settlement_v3_mainnet_sparse': '81813124c19b1a9bfe5755fc742fa36a48420134b71e18ef355e26e1c5f1b6d9',
     # CANDIDATE, not scheduled: the complete-witness guest that native PROGRAM_FALLBACK names (the next rules
     # WITH forced inclusion, configuration 27d6ce9f; installed by the inert rollback gate). Pinned container
     # build of guest-fallback, bloch-l2-evm codex/fallback-forced-r11-20261103 (agent 216).
-    'settlement_v3_mainnet_fallback': '7fd7f3c0fb572ca1d9cfc1caa70ba4be09f306bb6d7274782ae517b59b1b5303',
+    'settlement_v3_mainnet_fallback': '7528e26da4076499e0fabcc621836aae396d0ddcb1cbf567436273c820c7c3e1',
 }
 # This kit's host takes --mainnet for the NEXT rules; the activated program is --mainnet-v1.
 ACTIVATED_PROVER_ARGS = ['--mainnet-v1']

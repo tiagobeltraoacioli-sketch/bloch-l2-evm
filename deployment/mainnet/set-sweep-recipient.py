@@ -718,12 +718,15 @@ def cmd_audit(args):
     hits, notes = [], []
     for tree in (l2, native):
         for path, text in text_files(tree):
-            for n, line in enumerate(text.splitlines(), 1):
+            lines = text.splitlines()
+            for n, line in enumerate(lines, 1):
+                # A constant rustfmt wrapped over two lines (`const NAME: B256 =` / `B256::new(hex!(..));`) is one item.
+                item = (lines[n - 2] + ' ' + line) if n > 1 and lines[n - 2].rstrip().endswith('=') else line
                 for name, v in stale.items():
                     # The rehearsal constant itself and the Rust tests that pin it stay by design.
                     if path.match('*/src/chainspec.rs') and (
-                            'REHEARSAL_FEE_SWEEP_RECIPIENT' in line or 'REHEARSAL_CONFIGURATION' in line
-                            or 'CONFIGURATION_FORCED' in line):
+                            'REHEARSAL_FEE_SWEEP_RECIPIENT' in item or 'REHEARSAL_CONFIGURATION' in item
+                            or 'CONFIGURATION_FORCED' in item):
                         continue
                     # The monitor's own constant: it must know the placeholder to alarm on it (R308-5).
                     if path.name == 'revenue_monitor.py' and line.startswith('PLACEHOLDER_SWEEP_RECIPIENT = '):

@@ -45,13 +45,13 @@ set -euo pipefail
 PRODUCE_SHA256=425d4fe84cde5833070dcd05f7b18edcf912fdd214a478aa5bf9c5241144cc78
 # deployment/mainnet/sequencer_mainnet.py of this tree (schedule-aware shadow, agent 218).
 SEQUENCER_SHA256=ace4ab47da9a3f08794b35f6d2ab3d9d6845aeefe1040989122b485497c3bcb4
-NATIVE_COMMIT=a2fc3d0fb140e1011196bee78ed0057acba072c1
+NATIVE_COMMIT=0861278c531fdf150f0a94a13aa8a8ba64c5f762
 NATIVE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
-# The programs that run the next rules: native PROGRAM_NEXT (forced sparse guest bc35e838...) and PROGRAM_FALLBACK
-# (forced complete guest 7fd7f3c0...), i.e. settler_v3.py MAINNET_NEXT_SPARSE and MAINNET_FALLBACK. CANDIDATE: they move with
+# The programs that run the next rules: native PROGRAM_NEXT (forced sparse guest 81813124...) and PROGRAM_FALLBACK
+# (forced complete guest 7528e26d...), i.e. settler_v3.py MAINNET_NEXT_SPARSE and MAINNET_FALLBACK. CANDIDATE: they move with
 # the fee-sweep recipient (TBD-owner) and the final ELFs.
-NEXT_ELF_KECCAK=1f744da8d3e0302cd39152e24e91071d7f0cfec7639245566a471cd6083a6b18
-FALLBACK_ELF_KECCAK=d95185a60668b0d4e1da49be00d85b9c550b412f13c5155be454e72889f90bf1
+NEXT_ELF_KECCAK=d6b33a99dc9329b2ca75aa0b4b7b3116e5334ee9edc9cb5e20491eaa926ceb74
+FALLBACK_ELF_KECCAK=b6d6d128b0585ec6b24cec3261ccca348ee8e7cbc3e15eb51ed5fd838ac9baf1
 SETTLER_CONFIG=/etc/bloch-l2-mainnet-settler/config.json
 UNIT=bloch-l2-mainnet-shadow.service
 OPT=/opt/bloch/l2-mainnet-shadow
