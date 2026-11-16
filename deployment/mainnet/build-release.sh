@@ -63,6 +63,12 @@ JOBS=${JOBS:-8}
 export PATH=$HOME/.cargo/bin:/usr/bin:/bin
 export VERGEN_GIT_SHA=$RETH_COMMIT VERGEN_GIT_DESCRIBE=v2.4.1 VERGEN_GIT_DIRTY=true VERGEN_IDEMPOTENT=1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$W/l2-target} CARGO_BUILD_JOBS=$JOBS
+# The binaries must not depend on WHERE they are built. Without this they embed the absolute paths of the sources,
+# of the cargo registry and of the target directory (panic locations): the December build of round 15 gave other
+# hashes on a second host for no other reason than the directory name (docs/DECEMBER-BUILD-R15.md). Each prefix is
+# mapped to a fixed name. A caller's own RUSTFLAGS would change the binaries, so it is refused.
+[ -z "${RUSTFLAGS:-}" ] || { echo "build-release: unset RUSTFLAGS (the build sets its own)" >&2; exit 2; }
+export RUSTFLAGS="--remap-path-prefix=$W/src=/bloch-build/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/bloch-build/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/bloch-build/target"
 L2=$W/src/bloch-l2-evm
 N=$W/src/bloch-validator-payout
 RETH=$W/src/reth-bloch-rpc-snapshot

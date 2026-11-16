@@ -27,6 +27,8 @@ export VERGEN_GIT_SHA=8eb210175687c9f0c889a3b6795c16781d830e3a VERGEN_GIT_DESCRI
 jobs=${CARGO_BUILD_JOBS:-8}
 
 log "settlement V3 prover host (source-settlement, node-artifact)"
+# Path independence, as in build-release.sh: sources, cargo registry and target directory under fixed names.
+RUSTFLAGS="--remap-path-prefix=$work/src=/bloch-build/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/bloch-build/cargo --remap-path-prefix=$work/sp1-target=/bloch-build/target" \
 PROTOC=${PROTOC:-/usr/bin/protoc} CARGO_TARGET_DIR=$work/sp1-target CARGO_BUILD_JOBS=$jobs cargo +1.98.1 build --release --locked \
   --manifest-path "$l2/integrations/sp1-execution/host/Cargo.toml" \
   --features source-settlement,node-artifact --bin bloch-evm-sp1-settlement-v3 >&2
