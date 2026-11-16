@@ -21,7 +21,8 @@
 #   * Cargo lock: the release pins exactly one lock, follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock
 #     (sha256 a3c38a46...). It is the only committed lock that resolves native 78d4921c, and the build
 #     refuses any other lock for that commit. integrations/settlement-recovery/Cargo.lock is a byte copy.
-# Env: JOBS (default 8), TOOLCHAIN (default 1.98.1), CARGO_TARGET_DIR (default WORK/l2-target).
+# Env: JOBS (default 8), TOOLCHAIN (default 1.98.1). The build itself runs in the fixed directory of build-root.sh
+# (/var/tmp/bloch-l2-build), with its target directory there, so that the binaries are the same wherever WORK is.
 #
 # L1 hard forks (docs/L2-HARD-FORK-OPERATOR-STEPS.md): the follower and the producer RUN the native
 # transition, so they must be rebuilt against the native release that arms a fork BEFORE its epoch,
@@ -61,13 +62,25 @@ RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
 TOOLCHAIN=${TOOLCHAIN:-1.98.1}
 JOBS=${JOBS:-8}
 export PATH=$HOME/.cargo/bin:/usr/bin:/bin
+# The binaries must not depend on WHERE they are built or by whom. Two things made them:
+#   1. cargo hashes the absolute paths of the path dependencies into every symbol name, so the build runs in the
+#      one fixed directory of build-root.sh: WORK/src is copied there (the caller's trees are not modified) and
+#      this script runs again from the copy;
+#   2. the binaries embedded the paths of the sources, the cargo registry and the target directory (panic
+#      locations); each prefix is mapped to a fixed name below. A caller's own RUSTFLAGS would change the
+#      binaries, so it is refused.
+# The December build of round 15 gave other hashes in another directory for these two reasons alone
+# (docs/DECEMBER-BUILD-R15.md section 3).
+[ -z "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" ] || { echo "build-release: unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS (the build sets its own)" >&2; exit 2; }
+. "$W/src/bloch-l2-evm/deployment/mainnet/build-root.sh"
+if [ "${BLOCH_BUILD_STAGED:-}" != "$BLOCH_BUILD_ROOT" ]; then
+  case "$OUT" in /*) ;; *) OUT=$PWD/$OUT ;; esac
+  [ ! -e "$OUT" ] || { echo "build-release: $OUT exists; choose a new OUT" >&2; exit 2; }
+  stage_build_root "$W"
+  BLOCH_BUILD_STAGED=$BLOCH_BUILD_ROOT CARGO_TARGET_DIR=$BLOCH_BUILD_ROOT/l2-target exec bash "$BLOCH_BUILD_ROOT/src/bloch-l2-evm/deployment/mainnet/build-release.sh" "$BLOCH_BUILD_ROOT" "$OUT"
+fi
 export VERGEN_GIT_SHA=$RETH_COMMIT VERGEN_GIT_DESCRIBE=v2.4.1 VERGEN_GIT_DIRTY=true VERGEN_IDEMPOTENT=1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$W/l2-target} CARGO_BUILD_JOBS=$JOBS
-# The binaries must not depend on WHERE they are built. Without this they embed the absolute paths of the sources,
-# of the cargo registry and of the target directory (panic locations): the December build of round 15 gave other
-# hashes on a second host for no other reason than the directory name (docs/DECEMBER-BUILD-R15.md). Each prefix is
-# mapped to a fixed name. A caller's own RUSTFLAGS would change the binaries, so it is refused.
-[ -z "${RUSTFLAGS:-}" ] || { echo "build-release: unset RUSTFLAGS (the build sets its own)" >&2; exit 2; }
 export RUSTFLAGS="--remap-path-prefix=$W/src=/bloch-build/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/bloch-build/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/bloch-build/target"
 L2=$W/src/bloch-l2-evm
 N=$W/src/bloch-validator-payout
