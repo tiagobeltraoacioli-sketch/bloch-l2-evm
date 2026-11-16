@@ -94,12 +94,20 @@ fn b_two_account_removals_cascade_onto_an_untouched_account() {
         let used = used_first_nibbles(&chain);
         // The beneficiary 0x77.. and the fee vaults may appear later; skip their nibbles.
         let mut reserved = used.clone();
-        for extra in [Address::with_last_byte(0x77), chain.spec.base_fee_vault, chain.spec.sequencer_fee_vault] {
+        for extra in [
+            Address::with_last_byte(0x77),
+            chain.spec.base_fee_vault,
+            chain.spec.sequencer_fee_vault,
+        ] {
             reserved.insert(keccak256(extra)[0] >> 4);
         }
         let x = (0u8..16).find(|n| !reserved.contains(n)).expect("a free first nibble");
         let (salt_a, salt_b, salt_c) = mine_cascade(factory, &initcode, x);
-        let (a, b, c) = (factory.create2(salt_a, hash), factory.create2(salt_b, hash), factory.create2(salt_c, hash));
+        let (a, b, c) = (
+            factory.create2(salt_a, hash),
+            factory.create2(salt_b, hash),
+            factory.create2(salt_c, hash),
+        );
 
         let pays = vec![chain.pay(a, 5), chain.pay(b, 6), chain.pay(c, 7)];
         let body = chain.body(pays);
@@ -125,7 +133,10 @@ fn b_two_account_removals_cascade_onto_an_untouched_account() {
 
         // c must be exposed as a leaf of the account proof: the guest needs its path.
         let view = IndexedTrieView::from_proof(witness.prev_state_root, &witness.proof).unwrap();
-        assert!(view.lookup(&account_key(&c)).unwrap().is_some(), "the survivor c is exposed");
+        assert!(
+            view.lookup(&account_key(&c)).unwrap().is_some(),
+            "the survivor c is exposed"
+        );
 
         // A prover that hides c's node (keeping its hash in the parent) must be
         // refused, never given a root.
@@ -169,7 +180,11 @@ fn b_a_deletion_block_cannot_claim_another_root() {
     let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
     let factory = chain.deploy_script();
     let target = chain.deploy_script();
-    let fill = vec![(SSTORE, u(pair[0]), u(1)), (SSTORE, u(pair[1]), u(2)), (SSTORE, u(77), u(3))];
+    let fill = vec![
+        (SSTORE, u(pair[0]), u(1)),
+        (SSTORE, u(pair[1]), u(2)),
+        (SSTORE, u(77), u(3)),
+    ];
     let tx = chain.call(target, script(&fill));
     let initcode = destroying_initcode(0x77);
     let salt = B256::repeat_byte(0x31);
@@ -189,7 +204,10 @@ fn b_a_deletion_block_cannot_claim_another_root() {
         lying.new_state_root = claim;
         match chain.verify(&lying, &context, &body) {
             Err(SparseNodeError::Verify(SparseVerifyError::ClaimedRootMismatch { derived, .. })) => {
-                assert_eq!(derived, honest, "the guest derives the honest root regardless of the claim");
+                assert_eq!(
+                    derived, honest,
+                    "the guest derives the honest root regardless of the claim"
+                );
             }
             other => panic!("claim {claim} not refused as a mismatch: {other:?}"),
         }
@@ -215,8 +233,14 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
         chain.check(&body, "v1 fees");
     }
     let (base, sequencer) = (chain.spec.base_fee_vault, chain.spec.sequencer_fee_vault);
-    let before: Vec<U256> = [base, sequencer].iter().map(|vault| chain.state.balance_of(vault)).collect();
-    assert!(before.iter().any(|balance| !balance.is_zero()), "v1 fees reached a vault");
+    let before: Vec<U256> = [base, sequencer]
+        .iter()
+        .map(|vault| chain.state.balance_of(vault))
+        .collect();
+    assert!(
+        before.iter().any(|balance| !balance.is_zero()),
+        "v1 fees reached a vault"
+    );
     for vault in [base, sequencer] {
         if let Some(account) = chain.state.account(&vault) {
             assert_eq!(account.code_hash, revm::primitives::KECCAK_EMPTY, "no code under v1");
@@ -227,12 +251,20 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
     // The first next-rules block: a deposit, a sweep of each vault, and a payment to one.
     let a = chain.call(base, Bytes::new());
     let b = chain.call(sequencer, Bytes::new());
-    let c = chain.call(script_address, script(&[(BALANCE, word_of(base), u(0)), (CALL, word_of(sequencer), u(5))]));
+    let c = chain.call(
+        script_address,
+        script(&[(BALANCE, word_of(base), u(0)), (CALL, word_of(sequencer), u(5))]),
+    );
     let body = chain.body(vec![a, b, c]);
     let (witness, canonical, _) = chain.differential(&body, "first next-rules block");
-    assert!(canonical.transactions.iter().all(|tx| tx.success), "every sweep succeeds in the install block");
+    assert!(
+        canonical.transactions.iter().all(|tx| tx.success),
+        "every sweep succeeds in the install block"
+    );
     // The vault code is installed by the protocol, not loaded from the witness.
-    let sweep_hash = keccak256(fee_vault_sweep_code(chain.spec.fee_vault_sweep.expect("the next rules sweep")));
+    let sweep_hash = keccak256(fee_vault_sweep_code(
+        chain.spec.fee_vault_sweep.expect("the next rules sweep"),
+    ));
     assert!(
         witness.codes.iter().all(|code| keccak256(code) != sweep_hash),
         "the install block needs no sweep code in the witness"
@@ -249,7 +281,10 @@ fn b_the_first_next_rules_block_over_a_v1_state_installs_and_sweeps() {
     let a = chain.call(base, Bytes::new());
     let body = chain.body(vec![a]);
     let (witness, _, _) = chain.differential(&body, "second next-rules block");
-    assert!(witness.codes.iter().any(|code| keccak256(code) == sweep_hash), "the sweep code is witnessed by hash");
+    assert!(
+        witness.codes.iter().any(|code| keccak256(code) == sweep_hash),
+        "the sweep code is witnessed by hash"
+    );
     chain.commit(&body);
 }
 
@@ -290,7 +325,10 @@ fn gate_validate_refuses_a_burning_sweep_recipient() {
             accepted.push(recipient);
         }
     }
-    assert!(accepted.is_empty(), "validate accepts burning sweep recipients: {accepted:?}");
+    assert!(
+        accepted.is_empty(),
+        "validate accepts burning sweep recipients: {accepted:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -334,8 +372,13 @@ fn b_two_slot_deletions_cascade_onto_an_untouched_slot() {
         let mut chain = Chain::new(spec);
         let target = chain.deploy_script();
         let filler: Vec<u64> = (1..=40).collect();
-        let used: BTreeSet<u8> = filler.iter().map(|slot| keccak256(U256::from(*slot).to_be_bytes::<32>())[0] >> 4).collect();
-        let x = (0u8..16).find(|n| !used.contains(n)).expect("40 slots leave a first nibble free");
+        let used: BTreeSet<u8> = filler
+            .iter()
+            .map(|slot| keccak256(U256::from(*slot).to_be_bytes::<32>())[0] >> 4)
+            .collect();
+        let x = (0u8..16)
+            .find(|n| !used.contains(n))
+            .expect("40 slots leave a first nibble free");
         let (a, b, c) = mine_storage_cascade(x, &filler.iter().copied().collect());
         let mut fill: Vec<(u64, U256, U256)> = filler.iter().map(|slot| (SSTORE, u(*slot), u(9))).collect();
         fill.extend([(SSTORE, u(a), u(1)), (SSTORE, u(b), u(2)), (SSTORE, u(c), u(3))]);
@@ -350,10 +393,17 @@ fn b_two_slot_deletions_cascade_onto_an_untouched_slot() {
         let index = account(&witness, target);
         let storage = &witness.pre_accounts[index];
         let view = IndexedTrieView::from_proof(storage.storage_root, &storage.storage_proof).unwrap();
-        assert!(view.lookup(&storage_key(&u(c))).unwrap().is_some(), "the surviving slot c is exposed");
+        assert!(
+            view.lookup(&storage_key(&u(c))).unwrap().is_some(),
+            "the surviving slot c is exposed"
+        );
         let c_key = storage_key(&u(c));
-        let c_paths: Vec<Nibbles> =
-            storage.storage_proof.keys().copied().filter(|path| path.len() >= 2 && c_key.starts_with(path)).collect();
+        let c_paths: Vec<Nibbles> = storage
+            .storage_proof
+            .keys()
+            .copied()
+            .filter(|path| path.len() >= 2 && c_key.starts_with(path))
+            .collect();
         assert!(!c_paths.is_empty(), "c has a node of its own in the storage proof");
         for path in c_paths {
             let mut hidden = witness.clone();
@@ -370,7 +420,11 @@ fn b_two_slot_deletions_cascade_onto_an_untouched_slot() {
 }
 
 fn account(witness: &SparseBatchWitness, address: Address) -> usize {
-    witness.pre_accounts.iter().position(|entry| entry.address == address).expect("account in the witness")
+    witness
+        .pre_accounts
+        .iter()
+        .position(|entry| entry.address == address)
+        .expect("account in the witness")
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +474,14 @@ fn b_sweep_failure_paths_agree() {
     );
     let body = chain.body(vec![direct, via]);
     let (_, canonical, _) = chain.differential(&body, "sweep failures");
-    assert!(!canonical.transactions[0].success, "a direct sweep to a reverting recipient reverts");
-    assert!(canonical.transactions[1].success, "the script survives its inner failures");
+    assert!(
+        !canonical.transactions[0].success,
+        "a direct sweep to a reverting recipient reverts"
+    );
+    assert!(
+        canonical.transactions[1].success,
+        "the script survives its inner failures"
+    );
     for log in 0..3 {
         assert_eq!(Chain::logged_word(&canonical, 1, log), u(0), "inner sweep {log} fails");
     }

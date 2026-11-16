@@ -29,7 +29,14 @@ impl Chain {
         state.commit_root();
         let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
         let sender = Address::from_public_key(key.verifying_key());
-        let mut chain = Self { spec, state, key, sender, nonce: 0, deposits: 0 };
+        let mut chain = Self {
+            spec,
+            state,
+            key,
+            sender,
+            nonce: 0,
+            deposits: 0,
+        };
         let body = chain.body(vec![]);
         chain.commit(&body);
         chain
@@ -50,7 +57,10 @@ impl Chain {
     }
 
     fn body(&mut self, transactions: Vec<Bytes>) -> NodeBodyV2 {
-        NodeBodyV2 { deposits: vec![self.deposit()], transactions }
+        NodeBodyV2 {
+            deposits: vec![self.deposit()],
+            transactions,
+        }
     }
 
     fn tx(&mut self, to: TxKind, value: U256, gas_limit: u64) -> Bytes {
@@ -65,8 +75,14 @@ impl Chain {
             ..Default::default()
         };
         self.nonce += 1;
-        let signature: Signature = self.key.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
-        TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()
+        let signature: Signature = self
+            .key
+            .sign_prehash_recoverable(transaction.signature_hash().as_slice())
+            .unwrap()
+            .into();
+        TxEnvelope::from(transaction.into_signed(signature))
+            .encoded_2718()
+            .into()
     }
 
     fn context(&self) -> BlockContext {
@@ -109,8 +125,13 @@ fn signed(spec: &ChainSpec, key: &SigningKey, nonce: u64, to: Address, gas_limit
         max_priority_fee_per_gas: 0,
         ..Default::default()
     };
-    let signature: Signature = key.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
-    TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()
+    let signature: Signature = key
+        .sign_prehash_recoverable(transaction.signature_hash().as_slice())
+        .unwrap()
+        .into();
+    TxEnvelope::from(transaction.into_signed(signature))
+        .encoded_2718()
+        .into()
 }
 
 fn record(height: u64, envelope: Bytes, declared: u64) -> ForcedTransaction {
@@ -177,20 +198,55 @@ fn fixture() -> Fixture {
         // Valid after the first.
         record(12, signed(&spec, &censored, 1, to, 21_000), 21_000),
     ];
-    Fixture { chain, censored, unfunded, queue }
+    Fixture {
+        chain,
+        censored,
+        unfunded,
+        queue,
+    }
 }
 
 fn honest_body(f: &mut Fixture) -> NodeBodyV2 {
-    let sequencer = f.chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), 21_000);
-    f.chain.body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone(), sequencer])
+    let sequencer = f
+        .chain
+        .tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), 21_000);
+    f.chain.body(vec![
+        f.queue[0].envelope.clone(),
+        f.queue[5].envelope.clone(),
+        sequencer,
+    ])
 }
 
-fn generate(f: &Fixture, body: &NodeBodyV2, forced: &[ForcedTransaction]) -> Result<(BatchWitness, NodeExecutionOutcome), NodeWitnessError> {
-    generate_node_batch_witness_forced(&f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &f.chain.context(), body, forced)
+fn generate(
+    f: &Fixture,
+    body: &NodeBodyV2,
+    forced: &[ForcedTransaction],
+) -> Result<(BatchWitness, NodeExecutionOutcome), NodeWitnessError> {
+    generate_node_batch_witness_forced(
+        &f.chain.state,
+        &f.chain.spec,
+        MAINNET_DOMAIN,
+        &f.chain.context(),
+        body,
+        forced,
+    )
 }
 
-fn statement(f: &Fixture, witness: &BatchWitness, body: &NodeBodyV2, forced: &[ForcedTransaction]) -> Result<SettlementStatementV3, SettlementStatementV2Error> {
-    execute_settlement_statement_v3_forced(&f.chain.spec, MAINNET_DOMAIN, witness, &f.chain.context(), body, settlement(1), forced)
+fn statement(
+    f: &Fixture,
+    witness: &BatchWitness,
+    body: &NodeBodyV2,
+    forced: &[ForcedTransaction],
+) -> Result<SettlementStatementV3, SettlementStatementV2Error> {
+    execute_settlement_statement_v3_forced(
+        &f.chain.spec,
+        MAINNET_DOMAIN,
+        witness,
+        &f.chain.context(),
+        body,
+        settlement(1),
+        forced,
+    )
 }
 
 #[test]
@@ -198,7 +254,8 @@ fn forced_records_run_first_bind_the_statement_and_cover_skipped_senders() {
     let mut f = fixture();
     let body = honest_body(&mut f);
     let context = f.chain.context();
-    let (witness, canonical) = generate(&f, &body, &f.queue).expect("an honest forced block generates and self-verifies");
+    let (witness, canonical) =
+        generate(&f, &body, &f.queue).expect("an honest forced block generates and self-verifies");
     // The skipped unfunded sender was read only by the probe; the witness proves it absent.
     assert!(witness.absent_accounts.contains(&f.unfunded));
     let censored = Address::from_public_key(f.censored.verifying_key());
@@ -209,7 +266,12 @@ fn forced_records_run_first_bind_the_statement_and_cover_skipped_senders() {
     assert_eq!(outcome.header, canonical.header);
     assert!(outcome.transactions.iter().all(|t| t.success));
     let mut full = f.chain.state.clone();
-    assert_eq!(execute_node_block(&f.chain.spec, MAINNET_DOMAIN, &mut full, &context, &body).unwrap().header, canonical.header);
+    assert_eq!(
+        execute_node_block(&f.chain.spec, MAINNET_DOMAIN, &mut full, &context, &body)
+            .unwrap()
+            .header,
+        canonical.header
+    );
 
     let s = statement(&f, &witness, &body, &f.queue).unwrap();
     let records: Vec<ForcedRecord> = f.queue.iter().map(|q| q.record).collect();
@@ -219,7 +281,8 @@ fn forced_records_run_first_bind_the_statement_and_cover_skipped_senders() {
     assert_eq!(s.user_tx_count, 1, "only the sequencer's transaction counts");
     assert_eq!(
         s.da_commitment,
-        crate::data_availability::block_da_commitment(f.chain.spec.chain_id, context.number, &body.transactions[2..]).unwrap()
+        crate::data_availability::block_da_commitment(f.chain.spec.chain_id, context.number, &body.transactions[2..])
+            .unwrap()
     );
     assert_eq!(configuration_commitment(&f.chain.spec).unwrap(), s.base.configuration);
     if !crate::chainspec::MAINNET_NEXT_RULES_RELEASABLE {
@@ -230,7 +293,9 @@ fn forced_records_run_first_bind_the_statement_and_cover_skipped_senders() {
         );
     }
     // The plain complete statement of the same block differs: it does not bind the records.
-    let plain = execute_settlement_statement_v3(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1)).unwrap();
+    let plain =
+        execute_settlement_statement_v3(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1))
+            .unwrap();
     assert_ne!(plain.encode(), s.encode());
 }
 
@@ -243,15 +308,32 @@ fn a_body_that_omits_reorders_or_delays_a_due_forced_transaction_is_refused() {
     let bodies = [
         vec![f.queue[5].envelope.clone(), sequencer.clone()],
         vec![sequencer.clone()],
-        vec![f.queue[5].envelope.clone(), f.queue[0].envelope.clone(), sequencer.clone()],
-        vec![sequencer.clone(), f.queue[0].envelope.clone(), f.queue[5].envelope.clone()],
+        vec![
+            f.queue[5].envelope.clone(),
+            f.queue[0].envelope.clone(),
+            sequencer.clone(),
+        ],
+        vec![
+            sequencer.clone(),
+            f.queue[0].envelope.clone(),
+            f.queue[5].envelope.clone(),
+        ],
     ];
     for transactions in bodies {
-        let body = NodeBodyV2 { deposits: honest.deposits.clone(), transactions };
-        assert!(generate(&f, &body, &f.queue).is_err(), "a body without the exact forced prefix must not generate");
+        let body = NodeBodyV2 {
+            deposits: honest.deposits.clone(),
+            transactions,
+        };
+        assert!(
+            generate(&f, &body, &f.queue).is_err(),
+            "a body without the exact forced prefix must not generate"
+        );
     }
     let (witness, _) = generate(&f, &honest, &f.queue).unwrap();
-    let dropped = NodeBodyV2 { deposits: honest.deposits.clone(), transactions: vec![sequencer] };
+    let dropped = NodeBodyV2 {
+        deposits: honest.deposits.clone(),
+        transactions: vec![sequencer],
+    };
     assert!(verify_node_batch_forced(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, &dropped, &f.queue).is_err());
     assert!(statement(&f, &witness, &dropped, &f.queue).is_err());
 }
@@ -270,8 +352,19 @@ fn a_witness_without_a_skipped_or_included_sender_fails_the_block() {
     let censored = Address::from_public_key(f.censored.verifying_key());
     let mut missing = witness.clone();
     missing.pre_accounts.retain(|a| a.address != censored);
-    let without_forced = NodeBodyV2 { deposits: body.deposits.clone(), transactions: vec![body.transactions[2].clone()] };
-    assert!(verify_node_batch_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &without_forced, &f.queue).is_err());
+    let without_forced = NodeBodyV2 {
+        deposits: body.deposits.clone(),
+        transactions: vec![body.transactions[2].clone()],
+    };
+    assert!(verify_node_batch_forced(
+        &f.chain.spec,
+        MAINNET_DOMAIN,
+        &missing,
+        &context,
+        &without_forced,
+        &f.queue
+    )
+    .is_err());
     assert!(verify_node_batch_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &body, &f.queue).is_err());
 }
 
@@ -284,20 +377,35 @@ fn a_funded_skipped_sender_is_witnessed_and_cannot_be_left_out() {
     let body = chain.body(vec![fund]);
     assert!(chain.commit(&body).transactions[0].success);
     // A nonce gap: skipped, but the sender's account decides it, and nothing else touches it.
-    let forced = vec![record(5, signed(&chain.spec, &other, 9, Address::repeat_byte(0x55), 21_000), 21_000)];
+    let forced = vec![record(
+        5,
+        signed(&chain.spec, &other, 9, Address::repeat_byte(0x55), 21_000),
+        21_000,
+    )];
     let body = chain.body(vec![]);
     let context = chain.context();
     let (witness, _) =
-        generate_node_batch_witness_forced(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, &forced).unwrap();
-    assert!(witness.pre_accounts.iter().any(|a| a.address == other_address), "the skipped sender is witnessed");
-    let (_, included) = verify_node_batch_forced(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, &forced).unwrap();
+        generate_node_batch_witness_forced(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, &forced)
+            .unwrap();
+    assert!(
+        witness.pre_accounts.iter().any(|a| a.address == other_address),
+        "the skipped sender is witnessed"
+    );
+    let (_, included) =
+        verify_node_batch_forced(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, &forced).unwrap();
     assert_eq!(included, 0);
     let mut missing = witness.clone();
     missing.pre_accounts.retain(|a| a.address != other_address);
     let result = verify_node_batch_forced(&chain.spec, MAINNET_DOMAIN, &missing, &context, &body, &forced);
-    assert!(result.is_err(), "accepted: {:?}", result.map(|(o, n)| (o.header.state_root, n)));
+    assert!(
+        result.is_err(),
+        "accepted: {:?}",
+        result.map(|(o, n)| (o.header.state_root, n))
+    );
     // The plain generator does not see the probe's read: its witness would fail the forced verifier.
-    let (plain, _) = crate::node_execution::generate_node_batch_witness(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body).unwrap();
+    let (plain, _) =
+        crate::node_execution::generate_node_batch_witness(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body)
+            .unwrap();
     assert!(!plain.pre_accounts.iter().any(|a| a.address == other_address));
     assert!(verify_node_batch_forced(&chain.spec, MAINNET_DOMAIN, &plain, &context, &body, &forced).is_err());
 }
@@ -337,15 +445,38 @@ fn forced_records_are_refused_under_rules_without_forced_inclusion_and_none_is_t
     let body = chain.body(vec![tx.clone()]);
     let context = chain.context();
     let queue = vec![record(3, tx, 21_000)];
-    assert!(generate_node_batch_witness_forced(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, &queue).is_err());
+    assert!(
+        generate_node_batch_witness_forced(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, &queue).is_err()
+    );
     let (witness, _) =
         generate_node_batch_witness_forced(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, &[]).unwrap();
-    let (plain, _) = crate::node_execution::generate_node_batch_witness(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body).unwrap();
+    let (plain, _) =
+        crate::node_execution::generate_node_batch_witness(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body)
+            .unwrap();
     assert_eq!(witness, plain, "with no forced record the witness is the plain one");
-    let forced = execute_settlement_statement_v3_forced(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), &[]).unwrap();
-    let plain = execute_settlement_statement_v3(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1)).unwrap();
+    let forced = execute_settlement_statement_v3_forced(
+        &chain.spec,
+        MAINNET_DOMAIN,
+        &witness,
+        &context,
+        &body,
+        settlement(1),
+        &[],
+    )
+    .unwrap();
+    let plain =
+        execute_settlement_statement_v3(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1)).unwrap();
     assert_eq!(forced.encode(), plain.encode());
-    assert!(execute_settlement_statement_v3_forced(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), &queue).is_err());
+    assert!(execute_settlement_statement_v3_forced(
+        &chain.spec,
+        MAINNET_DOMAIN,
+        &witness,
+        &context,
+        &body,
+        settlement(1),
+        &queue
+    )
+    .is_err());
 }
 
 #[test]
@@ -356,8 +487,18 @@ fn with_nothing_due_the_next_rules_statement_is_the_plain_one() {
     let context = chain.context();
     let (witness, _) =
         generate_node_batch_witness_forced(&chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, &[]).unwrap();
-    let forced = execute_settlement_statement_v3_forced(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), &[]).unwrap();
-    let plain = execute_settlement_statement_v3(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1)).unwrap();
+    let forced = execute_settlement_statement_v3_forced(
+        &chain.spec,
+        MAINNET_DOMAIN,
+        &witness,
+        &context,
+        &body,
+        settlement(1),
+        &[],
+    )
+    .unwrap();
+    let plain =
+        execute_settlement_statement_v3(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1)).unwrap();
     assert_eq!(forced.encode(), plain.encode());
     assert_eq!(forced.user_tx_count, 1);
 }
@@ -365,7 +506,9 @@ fn with_nothing_due_the_next_rules_statement_is_the_plain_one() {
 #[test]
 fn a_forced_only_block_has_no_user_transactions_and_no_da() {
     let mut f = fixture();
-    let body = f.chain.body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
+    let body = f
+        .chain
+        .body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
     let (witness, _) = generate(&f, &body, &f.queue).unwrap();
     let s = statement(&f, &witness, &body, &f.queue).unwrap();
     assert_eq!(s.user_tx_count, 0);
@@ -377,16 +520,32 @@ fn a_forced_only_block_has_no_user_transactions_and_no_da() {
 #[cfg(feature = "sparse-witness")]
 mod against_sparse {
     use super::*;
-    use crate::sparse_witness::{execute_settlement_statement_v3_sparse, generate_sparse_node_witness_forced, BlockHashes};
+    use crate::sparse_witness::{
+        execute_settlement_statement_v3_sparse, generate_sparse_node_witness_forced, BlockHashes,
+    };
 
     fn sparse_statement(f: &Fixture, body: &NodeBodyV2, forced: &[ForcedTransaction]) -> SettlementStatementV3 {
         let context = f.chain.context();
         let (witness, _) = generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, body, BlockHashes::Lazy, forced,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            body,
+            BlockHashes::Lazy,
+            forced,
         )
         .unwrap();
-        execute_settlement_statement_v3_sparse(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, body, settlement(1), BlockHashes::Lazy)
-            .unwrap()
+        execute_settlement_statement_v3_sparse(
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &witness,
+            &context,
+            body,
+            settlement(1),
+            BlockHashes::Lazy,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -398,9 +557,16 @@ mod against_sparse {
             transactions: vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()],
         };
         let skips_only: Vec<ForcedTransaction> = [1usize, 2, 3, 4].iter().map(|i| f.queue[*i].clone()).collect();
-        let sequencer_only = NodeBodyV2 { deposits: honest.deposits.clone(), transactions: vec![honest.transactions[2].clone()] };
-        let cases: [(&NodeBodyV2, &[ForcedTransaction]); 4] =
-            [(&honest, &f.queue), (&forced_only, &f.queue), (&sequencer_only, &skips_only), (&sequencer_only, &[])];
+        let sequencer_only = NodeBodyV2 {
+            deposits: honest.deposits.clone(),
+            transactions: vec![honest.transactions[2].clone()],
+        };
+        let cases: [(&NodeBodyV2, &[ForcedTransaction]); 4] = [
+            (&honest, &f.queue),
+            (&forced_only, &f.queue),
+            (&sequencer_only, &skips_only),
+            (&sequencer_only, &[]),
+        ];
         for (body, forced) in cases {
             let (witness, _) = generate(&f, body, forced).unwrap();
             let complete = statement(&f, &witness, body, forced).unwrap();

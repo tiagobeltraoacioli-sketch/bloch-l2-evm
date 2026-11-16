@@ -51,9 +51,9 @@
 //! `BLOCKHASH` asks for it, through the same authenticated lookup. The value served
 //! is the one the eager path would cache, and the generator rejects any difference.
 
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec::Vec};
-use alloc::collections::{BTreeMap, BTreeSet};
 use core::cell::RefCell;
 use core::ops::Range;
 
@@ -67,10 +67,14 @@ use revm::state::{AccountInfo, Bytecode};
 use revm::DatabaseRef;
 
 use crate::executor::{BlockExecutionError, BlockSession};
-use crate::node_execution::{head, outcome_record, prepare_parent, NodeExecutionError, NodeExecutionOutcome, PendingOutcome};
 use crate::node_execution::{generate_node_batch_witness, NodeWitnessError};
+use crate::node_execution::{
+    head, outcome_record, prepare_parent, NodeExecutionError, NodeExecutionOutcome, PendingOutcome,
+};
 use crate::node_primitives::NodeBodyV2;
-use crate::proof_statement::{configuration_commitment, SettlementContextV2, SettlementStatementV2Error, SettlementStatementV3};
+use crate::proof_statement::{
+    configuration_commitment, SettlementContextV2, SettlementStatementV2Error, SettlementStatementV3,
+};
 use crate::state::{account_exists, block_hash_slot, info_exists, BLOCK_HASH_HISTORY};
 use crate::stateroot::{account_key, account_leaf, account_leaf_with_root, storage_key, IndexedTrieView, WitnessError};
 use crate::{BlockContext, ChainSpec, L2State};
@@ -497,9 +501,12 @@ fn derive_post_root(
                 let written = account.storage.iter().map(|(slot, value)| (*slot, *value));
                 let root = match (db.db.storage.get(address), pre_storage_roots.get(address)) {
                     (Some(view), Some(pre_root)) => post_storage_root(*address, view, *pre_root, written)?,
-                    _ if db.db.absent.contains(address) => {
-                        post_storage_root(*address, &IndexedTrieView::empty(), alloy_trie::EMPTY_ROOT_HASH, written)?
-                    }
+                    _ if db.db.absent.contains(address) => post_storage_root(
+                        *address,
+                        &IndexedTrieView::empty(),
+                        alloy_trie::EMPTY_ROOT_HASH,
+                        written,
+                    )?,
                     _ => return Err(SparseVerifyError::UnknownAccount(*address)),
                 };
                 account_leaf_with_root(&account.info, root)
@@ -728,13 +735,16 @@ pub fn execute_settlement_statement_v3_sparse(
     settlement: SettlementContextV2,
     block_hashes: BlockHashes,
 ) -> Result<SettlementStatementV3, SparseStatementError> {
-    let (outcome, included_forced) = verify_node_batch_sparse_forced(spec, domain, witness, context, body, block_hashes)
-        .map_err(SparseStatementError::Node)?;
+    let (outcome, included_forced) =
+        verify_node_batch_sparse_forced(spec, domain, witness, context, body, block_hashes)
+            .map_err(SparseStatementError::Node)?;
     if let Some(rule) = spec.block_derivation {
         if rule.timestamp(outcome.parent_timestamp, settlement.l1_slot) != Some(context.timestamp)
             || context.prevrandao != rule.prevrandao
         {
-            return Err(SparseStatementError::Statement(SettlementStatementV2Error::BlockDerivation));
+            return Err(SparseStatementError::Statement(
+                SettlementStatementV2Error::BlockDerivation,
+            ));
         }
     }
     let configuration = configuration_commitment(spec).map_err(|error| {
@@ -852,7 +862,8 @@ pub fn generate_sparse_node_witness_forced(
     block_hashes: BlockHashes,
     forced: &[crate::forced_inclusion::ForcedTransaction],
 ) -> Result<(SparseBatchWitness, NodeExecutionOutcome), SparseNodeError> {
-    let (_, canonical) = generate_node_batch_witness(pre, spec, domain, context, body).map_err(SparseNodeError::Canonical)?;
+    let (_, canonical) =
+        generate_node_batch_witness(pre, spec, domain, context, body).map_err(SparseNodeError::Canonical)?;
     let trie = pre.warm_commitment().ok_or(SparseNodeError::ColdCommitment)?;
     let previous_root = pre.state_root();
 
@@ -863,9 +874,17 @@ pub fn generate_sparse_node_witness_forced(
         slots: RefCell::new(BTreeMap::new()),
         codes: RefCell::new(BTreeSet::new()),
     };
-    let (db, _, _) =
-        run_sparse_block(spec, domain, CacheDB::new(recording), previous_root, context, body, block_hashes, forced)
-            .map_err(SparseNodeError::Execution)?;
+    let (db, _, _) = run_sparse_block(
+        spec,
+        domain,
+        CacheDB::new(recording),
+        previous_root,
+        context,
+        body,
+        block_hashes,
+        forced,
+    )
+    .map_err(SparseNodeError::Execution)?;
 
     let mut addresses: BTreeSet<Address> = db.cache.accounts.keys().copied().collect();
     addresses.extend(db.db.accounts.borrow().iter().copied());
@@ -876,7 +895,12 @@ pub fn generate_sparse_node_witness_forced(
     let mut targets: BTreeSet<Nibbles> = BTreeSet::new();
     let mut restructured: Vec<Nibbles> = Vec::new();
     for address in &addresses {
-        let base = pre.db().cache.accounts.get(address).filter(|account| account_exists(account));
+        let base = pre
+            .db()
+            .cache
+            .accounts
+            .get(address)
+            .filter(|account| account_exists(account));
         let overlay = db.cache.accounts.get(address);
         let exists_after = match overlay {
             Some(entry) => entry.account_state != AccountState::NotExisting && info_exists(&entry.info),
@@ -989,11 +1013,18 @@ pub struct SparseWitnessSize {
 impl SparseBatchWitness {
     /// Count the witness's parts.
     pub fn size(&self) -> SparseWitnessSize {
-        let storage = self.pre_accounts.iter().flat_map(|account| account.storage_proof.values());
+        let storage = self
+            .pre_accounts
+            .iter()
+            .flat_map(|account| account.storage_proof.values());
         SparseWitnessSize {
             accounts: self.pre_accounts.len(),
             account_nodes: self.proof.len(),
-            storage_nodes: self.pre_accounts.iter().map(|account| account.storage_proof.len()).sum(),
+            storage_nodes: self
+                .pre_accounts
+                .iter()
+                .map(|account| account.storage_proof.len())
+                .sum(),
             node_bytes: self.proof.values().chain(storage).map(|node| node.len()).sum(),
         }
     }
@@ -1080,7 +1111,9 @@ fn vec_prefix(len: usize) -> Vec<u8> {
     let (high, low) = ((len >> 8) as u8, len as u8);
     // PUSH2 len; PUSH1 14; PUSH1 0; CODECOPY; PUSH2 len; PUSH1 0; RETURN
     let mut prefix = Vec::with_capacity(14);
-    prefix.extend_from_slice(&[0x61, high, low, 0x60, 14, 0x60, 0x00, 0x39, 0x61, high, low, 0x60, 0x00, 0xf3]);
+    prefix.extend_from_slice(&[
+        0x61, high, low, 0x60, 14, 0x60, 0x00, 0x39, 0x61, high, low, 0x60, 0x00, 0xf3,
+    ]);
     prefix
 }
 
@@ -1091,12 +1124,12 @@ pub fn slot_trie_key(slot: u64) -> Nibbles {
 
 /// Benchmark tamper support: a storage leaf node holding `value` at path `rest`.
 pub fn forged_storage_leaf(rest: Nibbles, value: U256) -> Bytes {
-    alloy_rlp::encode(&alloy_trie::nodes::LeafNode::new(rest, alloy_rlp::encode(value))).into()
+    alloy_rlp::encode(alloy_trie::nodes::LeafNode::new(rest, alloy_rlp::encode(value))).into()
 }
 
-#[cfg(test)]
-mod tests;
 #[cfg(test)]
 mod review;
 #[cfg(test)]
 mod review_a;
+#[cfg(test)]
+mod tests;

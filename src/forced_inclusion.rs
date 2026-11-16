@@ -40,9 +40,9 @@ use alloy_primitives::{keccak256, Bytes, B256};
 use revm::DatabaseRef;
 
 use crate::transactions::{decode_signed_transaction, SignedBlockBuilder, SignedInputError};
+use crate::{BlockContext, BlockExecutionError, ChainSpec, DepositMint};
 #[allow(unused_imports)]
 use alloc::string::String;
-use crate::{BlockContext, BlockExecutionError, ChainSpec, DepositMint};
 
 /// Forced records one settlement consumes at most (native `forced::MAX_PER_SETTLEMENT`).
 pub const MAX_PER_SETTLEMENT: usize = 16;
@@ -249,7 +249,11 @@ pub(crate) fn run_forced_prefix<DB: DatabaseRef>(
     body: &[Bytes],
 ) -> Result<usize, ForcedRuleError> {
     if !spec.forced_inclusion {
-        return if forced.is_empty() { Ok(0) } else { Err(ForcedRuleError::NotEnabled) };
+        return if forced.is_empty() {
+            Ok(0)
+        } else {
+            Err(ForcedRuleError::NotEnabled)
+        };
     }
     let selection = run_forced(spec, session, forced)?;
     for (position, envelope) in selection.included.iter().enumerate() {
@@ -393,9 +397,15 @@ mod tests {
         };
         let d = B256::repeat_byte(9);
         assert_eq!(statement_fields(d, &[], 3, 0), Some((d, 3)));
-        assert_eq!(statement_fields(d, &[record], 3, 1), Some((inbox_hash(d, &[record]), 2)));
+        assert_eq!(
+            statement_fields(d, &[record], 3, 1),
+            Some((inbox_hash(d, &[record]), 2))
+        );
         // A skipped record is consumed but not in the body.
-        assert_eq!(statement_fields(d, &[record, record], 1, 0), Some((inbox_hash(d, &[record, record]), 1)));
+        assert_eq!(
+            statement_fields(d, &[record, record], 1, 0),
+            Some((inbox_hash(d, &[record, record]), 1))
+        );
         assert_eq!(statement_fields(d, &[record], 0, 1), None);
     }
 
@@ -404,14 +414,20 @@ mod tests {
         let forced = Bytes::from_static(&[0x02, 0xc1, 0x01]);
         let sequencer = Bytes::from_static(&[0x02, 0xc0]);
         // Forced only: zero, like a block without user transactions.
-        assert_eq!(sequencer_da_commitment(7, 3, &[forced.clone()], 1), Some(B256::ZERO));
+        assert_eq!(
+            sequencer_da_commitment(7, 3, core::slice::from_ref(&forced), 1),
+            Some(B256::ZERO)
+        );
         // Mixed: the batch of the sequencer's part, exactly.
         let mixed = [forced.clone(), sequencer.clone()];
         assert_eq!(
             sequencer_da_commitment(7, 3, &mixed, 1),
             crate::data_availability::block_da_commitment(7, 3, &[sequencer]).ok()
         );
-        assert_ne!(sequencer_da_commitment(7, 3, &mixed, 1), sequencer_da_commitment(7, 3, &mixed, 0));
+        assert_ne!(
+            sequencer_da_commitment(7, 3, &mixed, 1),
+            sequencer_da_commitment(7, 3, &mixed, 0)
+        );
         assert_eq!(sequencer_da_commitment(7, 3, &[forced], 2), None);
     }
 }

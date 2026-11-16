@@ -393,7 +393,8 @@ fn select_in_session<DB: DatabaseRef>(
                     let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
                     selection.stats.push(TxStats {
                         hash: candidate.hash,
-                        sender, nonce: candidate.env.nonce,
+                        sender,
+                        nonce: candidate.env.nonce,
                         gas_used,
                         effective_tip: tip,
                         fresh_slots,
@@ -478,7 +479,9 @@ fn storage_growth<DB: DatabaseRef>(
                 None => db
                     .db
                     .storage_ref(*address, *slot)
-                    .map_err(|_| BlockExecutionError::Database { detail: "parent storage read failed".to_string() })?,
+                    .map_err(|_| BlockExecutionError::Database {
+                        detail: "parent storage read failed".to_string(),
+                    })?,
             };
             match (previous.is_zero(), value.is_zero()) {
                 (true, false) => added += 1,
@@ -711,7 +714,16 @@ pub fn select_node_transactions_priced_after_forced<DB: DatabaseRef>(
     };
     let mut alone = |env: &TxEnv| judged_alone(spec, domain, db, previous_root, context, deposits, env);
     let mut left = LeftUnpaid::default();
-    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left, &mut alone)?;
+    let selection = select_priced_in_session(
+        spec,
+        &mut session,
+        context,
+        candidates,
+        limits,
+        price,
+        &mut left,
+        &mut alone,
+    )?;
     Ok((forced, selection, left))
 }
 
@@ -734,7 +746,16 @@ pub fn select_node_transactions_priced<DB: DatabaseRef>(
     })?;
     let mut alone = |env: &TxEnv| judged_alone(spec, domain, db, previous_root, context, deposits, env);
     let mut left = LeftUnpaid::default();
-    let selection = select_priced_in_session(spec, &mut session, context, candidates, limits, price, &mut left, &mut alone)?;
+    let selection = select_priced_in_session(
+        spec,
+        &mut session,
+        context,
+        candidates,
+        limits,
+        price,
+        &mut left,
+        &mut alone,
+    )?;
     Ok((selection, left))
 }
 
@@ -842,10 +863,19 @@ fn select_priced_in_session<DB: DatabaseRef>(
                 let front = queues[&sender].front().expect("filtered on a front");
                 let covered = price.covers(sender, front.env.gas_limit, tip);
                 let (class, key) = if covered {
-                    let kept = |total: u64| if price.reserve_divisor == 0 { 0 } else { total / price.reserve_divisor };
-                    let beside_reserve = used_gas.saturating_add(front.env.gas_limit) <= limits.max_gas - kept(limits.max_gas)
-                        && (selection.bytes.saturating_add(front.raw.len()) as u64) <= limits.max_bytes as u64 - kept(limits.max_bytes as u64)
-                        && (selection.transactions.len() as u64) < limits.max_transactions as u64 - kept(limits.max_transactions as u64);
+                    let kept = |total: u64| {
+                        if price.reserve_divisor == 0 {
+                            0
+                        } else {
+                            total / price.reserve_divisor
+                        }
+                    };
+                    let beside_reserve = used_gas.saturating_add(front.env.gas_limit)
+                        <= limits.max_gas - kept(limits.max_gas)
+                        && (selection.bytes.saturating_add(front.raw.len()) as u64)
+                            <= limits.max_bytes as u64 - kept(limits.max_bytes as u64)
+                        && (selection.transactions.len() as u64)
+                            < limits.max_transactions as u64 - kept(limits.max_transactions as u64);
                     (if beside_reserve { 3u8 } else { 0 }, tip)
                 } else if front.env.gas_limit == 21_000 && front.env.data.is_empty() {
                     (2, tip)
@@ -942,7 +972,11 @@ fn select_priced_in_session<DB: DatabaseRef>(
         } else if from_covered_pool {
             None
         } else if candidate.env.gas_limit > price.uncovered_max_gas {
-            Some(if covered { &mut left.not_judged } else { &mut left.needs_credit })
+            Some(if covered {
+                &mut left.not_judged
+            } else {
+                &mut left.needs_credit
+            })
         } else if left.wasted_uncovered >= price.uncovered_allowance {
             Some(&mut left.not_judged)
         } else {
@@ -979,19 +1013,27 @@ fn select_priced_in_session<DB: DatabaseRef>(
                 None => true,
             };
             left.unpaid.push(UnpaidTransaction {
-                hash: candidate.hash, sender, nonce: candidate.env.nonce, gas_used, effective_tip: tip, fresh_slots: fresh, covered, own_doing,
+                hash: candidate.hash,
+                sender,
+                nonce: candidate.env.nonce,
+                gas_used,
+                effective_tip: tip,
+                fresh_slots: fresh,
+                covered,
+                own_doing,
             });
             continue;
         }
         match attempt {
             Ok(_outcome) => {
-                        {
+                {
                     let gas_used = _outcome.map_or(0, |outcome| outcome.gas_used);
                     used_gas = used_gas.saturating_add(gas_used);
                     let (fresh_slots, cleared_slots) = storage_growth(session.database(), &before)?;
                     selection.stats.push(TxStats {
                         hash: candidate.hash,
-                        sender, nonce: candidate.env.nonce,
+                        sender,
+                        nonce: candidate.env.nonce,
                         gas_used,
                         effective_tip: tip,
                         fresh_slots,

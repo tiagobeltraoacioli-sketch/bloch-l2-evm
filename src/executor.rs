@@ -1261,7 +1261,9 @@ pub(crate) fn install_fee_vault_sweep<DB: DatabaseRef>(
     let Some(recipient) = spec.fee_vault_sweep else {
         return Ok(());
     };
-    let code = Bytecode::new_raw(Bytes::copy_from_slice(&crate::chainspec::fee_vault_sweep_code(recipient)));
+    let code = Bytecode::new_raw(Bytes::copy_from_slice(&crate::chainspec::fee_vault_sweep_code(
+        recipient,
+    )));
     for vault in [spec.base_fee_vault, spec.sequencer_fee_vault] {
         ensure_system_account(db, vault, Some(&code)).map_err(db_error)?;
     }
@@ -1327,6 +1329,70 @@ pub fn execute_block(
     // only what this block touched.
     let state_root = state.commit_root();
     Ok(run.into_outcome(spec.chain_id, &input.context, state_root))
+}
+
+// Kept at the end of the file: code above keeps its line numbers, which the guest's panic locations include.
+#[cfg(feature = "std")]
+impl<DB> BlockSession<DB> {
+    /// The session's database, for reports of a producer's selection (host builds only).
+    pub(crate) fn database(&self) -> &CacheDB<DB> {
+        &self.db
+    }
+}
+
+// Round 15 (review R308-3P-2), host builds only and at the end of the file for the same reason as above: the
+// write price judged before a transaction's changes land, so a producer can leave a non-payer out in the same
+// pass and go on with the transactions behind it.
+#[cfg(feature = "std")]
+impl<DB: DatabaseRef> BlockSession<DB> {
+    /// [`BlockSession::try_transaction`], with the decision taken on what the transaction would do:
+    /// `commit(gas_used, fresh_slots)` sees the gas it used and the non-zero storage slots it would add to the
+    /// session's state. `Ok(None)`: `commit` refused, nothing changed.
+    pub(crate) fn try_transaction_judged(
+        &mut self,
+        tx: &TxEnv,
+        commit: impl FnOnce(u64, u64) -> bool,
+    ) -> Result<Option<&TxOutcome>, BlockExecutionError> {
+        let spec = &self.spec;
+        let i = self.run.tx_outcomes.len();
+        validate_transaction(spec, tx, i)?;
+        let base_fee = self.context.base_fee_per_gas;
+        let mut evm = block_context(spec, &self.context, CacheDB::new(&self.db)).build_mainnet();
+        if self.run.gas_used.saturating_add(tx.gas_limit) > spec.gas_limit {
+            return Err(BlockExecutionError::BlockGasLimitExceeded { tx_index: i });
+        }
+        let res = evm.transact(tx.clone()).map_err(|e| BlockExecutionError::Evm {
+            tx_index: i,
+            detail: format!("{e:?}"),
+        })?;
+        let prepared = prepare_transaction_effects(spec, base_fee, tx, i, res, &mut evm.ctx.journaled_state.database)?;
+        let gas_used = prepared.outcome().gas_used;
+        let committed = prepared.commit(&mut evm.ctx.journaled_state.database);
+        let cache = evm.ctx.journaled_state.database.cache;
+        let mut fresh = 0u64;
+        for (address, account) in &cache.accounts {
+            for (slot, value) in &account.storage {
+                if value.is_zero() {
+                    continue;
+                }
+                let previous = self
+                    .db
+                    .storage_ref(*address, *slot)
+                    .map_err(|_| BlockExecutionError::Database {
+                        detail: "parent storage read failed".to_string(),
+                    })?;
+                if previous.is_zero() {
+                    fresh += 1;
+                }
+            }
+        }
+        if !commit(gas_used, fresh) {
+            return Ok(None);
+        }
+        merge_candidate(&mut self.db, cache);
+        self.run.record(committed);
+        Ok(self.run.tx_outcomes.last())
+    }
 }
 
 #[cfg(test)]
@@ -2648,66 +2714,5 @@ mod tests {
         let mut h3 = h;
         h3.chain_id += 1;
         assert_ne!(h.hash(), h3.hash(), "chain id is part of the domain");
-    }
-}
-
-// Kept at the end of the file: code above keeps its line numbers, which the guest's panic locations include.
-#[cfg(feature = "std")]
-impl<DB> BlockSession<DB> {
-    /// The session's database, for reports of a producer's selection (host builds only).
-    pub(crate) fn database(&self) -> &CacheDB<DB> {
-        &self.db
-    }
-}
-
-// Round 15 (review R308-3P-2), host builds only and at the end of the file for the same reason as above: the
-// write price judged before a transaction's changes land, so a producer can leave a non-payer out in the same
-// pass and go on with the transactions behind it.
-#[cfg(feature = "std")]
-impl<DB: DatabaseRef> BlockSession<DB> {
-    /// [`BlockSession::try_transaction`], with the decision taken on what the transaction would do:
-    /// `commit(gas_used, fresh_slots)` sees the gas it used and the non-zero storage slots it would add to the
-    /// session's state. `Ok(None)`: `commit` refused, nothing changed.
-    pub(crate) fn try_transaction_judged(
-        &mut self,
-        tx: &TxEnv,
-        commit: impl FnOnce(u64, u64) -> bool,
-    ) -> Result<Option<&TxOutcome>, BlockExecutionError> {
-        let spec = &self.spec;
-        let i = self.run.tx_outcomes.len();
-        validate_transaction(spec, tx, i)?;
-        let base_fee = self.context.base_fee_per_gas;
-        let mut evm = block_context(spec, &self.context, CacheDB::new(&self.db)).build_mainnet();
-        if self.run.gas_used.saturating_add(tx.gas_limit) > spec.gas_limit {
-            return Err(BlockExecutionError::BlockGasLimitExceeded { tx_index: i });
-        }
-        let res = evm.transact(tx.clone()).map_err(|e| BlockExecutionError::Evm {
-            tx_index: i,
-            detail: format!("{e:?}"),
-        })?;
-        let prepared = prepare_transaction_effects(spec, base_fee, tx, i, res, &mut evm.ctx.journaled_state.database)?;
-        let gas_used = prepared.outcome().gas_used;
-        let committed = prepared.commit(&mut evm.ctx.journaled_state.database);
-        let cache = evm.ctx.journaled_state.database.cache;
-        let mut fresh = 0u64;
-        for (address, account) in &cache.accounts {
-            for (slot, value) in &account.storage {
-                if value.is_zero() {
-                    continue;
-                }
-                let previous = self.db.storage_ref(*address, *slot).map_err(|_| BlockExecutionError::Database {
-                    detail: "parent storage read failed".to_string(),
-                })?;
-                if previous.is_zero() {
-                    fresh += 1;
-                }
-            }
-        }
-        if !commit(gas_used, fresh) {
-            return Ok(None);
-        }
-        merge_candidate(&mut self.db, cache);
-        self.run.record(committed);
-        Ok(self.run.tx_outcomes.last())
     }
 }

@@ -14,7 +14,7 @@ use crate::node_execution::{execute_node_block, genesis_v2, node_head};
 use crate::proof_statement::execute_settlement_statement_v3;
 use crate::state::{DepositMint, DepositProvenance};
 use crate::stateroot::SparseTrieView;
-use crate::withdrawal::{L2_TO_L1_MESSAGE_PASSER, INITIATE_WITHDRAWAL_SELECTOR};
+use crate::withdrawal::{INITIATE_WITHDRAWAL_SELECTOR, L2_TO_L1_MESSAGE_PASSER};
 use alloc::collections::BTreeMap;
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
@@ -47,7 +47,10 @@ impl Rng {
 
 /// `REVIEW_SCALE` multiplies the randomized rounds.
 fn scale() -> u64 {
-    std::env::var("REVIEW_SCALE").ok().and_then(|text| text.parse().ok()).unwrap_or(1)
+    std::env::var("REVIEW_SCALE")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +75,11 @@ fn random_key_set(rng: &mut Rng, count: u64) -> Vec<Nibbles> {
     let mut base = [0u8; 64];
     let seed = rng.word();
     for (index, nibble) in base.iter_mut().enumerate() {
-        *nibble = if index % 2 == 0 { seed[index / 2] >> 4 } else { seed[index / 2] & 0xf };
+        *nibble = if index % 2 == 0 {
+            seed[index / 2] >> 4
+        } else {
+            seed[index / 2] & 0xf
+        };
     }
     const DEPTHS: [usize; 12] = [0, 1, 2, 3, 8, 9, 20, 40, 56, 60, 62, 63];
     let mut keys = BTreeSet::new();
@@ -217,7 +224,12 @@ fn property_round(rng: &mut Rng, stats: &mut PropertyStats) {
         }
         match indexed {
             Ok(derived) => {
-                assert_eq!(derived, expected, "a partial trie derived a wrong root; {} changes", changes.len());
+                assert_eq!(
+                    derived,
+                    expected,
+                    "a partial trie derived a wrong root; {} changes",
+                    changes.len()
+                );
                 stats.accepted += 1;
                 if deletes > 0 {
                     stats.accepted_deletes += 1;
@@ -242,7 +254,10 @@ fn any_exposure_of_any_trie_answers_truly_or_refuses() {
         property_round(&mut rng, &mut stats);
     }
     std::println!("{stats:?}");
-    assert!(stats.accepted > 2000 && stats.accepted_deletes > 500 && stats.needs_expansion > 50, "{stats:?}");
+    assert!(
+        stats.accepted > 2000 && stats.accepted_deletes > 500 && stats.needs_expansion > 50,
+        "{stats:?}"
+    );
 }
 
 /// `IndexedTrieView` relies on this order for its range query, and `apply` for its sort.
@@ -357,7 +372,9 @@ fn script_runtime() -> Vec<u8> {
         B(&[0x56]),
         L("extcodecopy"),
         // POP op; [i b a]; EXTCODECOPY(a, 0, 0, 32); log mem[0]
-        B(&[0x50, 0x60, 0x20, 0x60, 0x00, 0x60, 0x00, 0x83, 0x3c, 0x50, 0x60, 0x00, 0x51, 0x90, 0x50]),
+        B(&[
+            0x50, 0x60, 0x20, 0x60, 0x00, 0x60, 0x00, 0x83, 0x3c, 0x50, 0x60, 0x00, 0x51, 0x90, 0x50,
+        ]),
         J("emit"),
         B(&[0x56]),
         L("call"),
@@ -386,13 +403,17 @@ fn script_runtime() -> Vec<u8> {
         B(&[0x50, 0xff]),
         L("create2"),
         // POP op; [i b a]; offset = i + 96; len = size - offset; CALLDATACOPY(0, offset, len)
-        B(&[0x50, 0x82, 0x60, 0x60, 0x01, 0x80, 0x36, 0x03, 0x90, 0x81, 0x90, 0x60, 0x00, 0x37]),
+        B(&[
+            0x50, 0x82, 0x60, 0x60, 0x01, 0x80, 0x36, 0x03, 0x90, 0x81, 0x90, 0x60, 0x00, 0x37,
+        ]),
         // [i b a len]; 0; DUP4 value; CREATE2(value, 0, len, salt = a)
         B(&[0x60, 0x00, 0x83, 0xf5, 0x90, 0x50]),
         J("emitstop"),
         B(&[0x56]),
         L("forward"),
-        B(&[0x50, 0x82, 0x60, 0x60, 0x01, 0x80, 0x36, 0x03, 0x90, 0x81, 0x90, 0x60, 0x00, 0x37]),
+        B(&[
+            0x50, 0x82, 0x60, 0x60, 0x01, 0x80, 0x36, 0x03, 0x90, 0x81, 0x90, 0x60, 0x00, 0x37,
+        ]),
         // [i b a len]; 0 0; DUP3 len; 0 0; DUP7 address; DUP9 gas; CALL
         B(&[0x60, 0, 0x60, 0, 0x82, 0x60, 0, 0x60, 0, 0x86, 0x88, 0xf1]),
         J("emitstop"),
@@ -447,7 +468,11 @@ fn word_of(address: Address) -> U256 {
 }
 
 fn script(entries: &[(u64, U256, U256)]) -> Bytes {
-    entries.iter().flat_map(|(op, a, b)| entry(*op, *a, *b)).collect::<Vec<u8>>().into()
+    entries
+        .iter()
+        .flat_map(|(op, a, b)| entry(*op, *a, *b))
+        .collect::<Vec<u8>>()
+        .into()
 }
 
 fn u(value: u64) -> U256 {
@@ -552,7 +577,9 @@ impl Chain {
             .sign_prehash_recoverable(transaction.signature_hash().as_slice())
             .unwrap()
             .into();
-        TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()
+        TxEnvelope::from(transaction.into_signed(signature))
+            .encoded_2718()
+            .into()
     }
 
     fn call(&mut self, to: Address, input: Bytes) -> Bytes {
@@ -625,10 +652,21 @@ impl Chain {
                 generate_sparse_node_witness(&self.state, &self.spec, MAINNET_DOMAIN, &context, body, mode)
                     .unwrap_or_else(|error| panic!("{what}: sparse witness {mode:?}: {error}"));
             if let Some(expected) = &expected {
-                let statement =
-                    execute_settlement_statement_v3_sparse(&self.spec, MAINNET_DOMAIN, &witness, &context, body, settlement, mode)
-                        .unwrap_or_else(|error| panic!("{what}: sparse statement {mode:?}: {error}"));
-                assert_eq!(statement.encode(), expected.encode(), "{what}: statement differs {mode:?}");
+                let statement = execute_settlement_statement_v3_sparse(
+                    &self.spec,
+                    MAINNET_DOMAIN,
+                    &witness,
+                    &context,
+                    body,
+                    settlement,
+                    mode,
+                )
+                .unwrap_or_else(|error| panic!("{what}: sparse statement {mode:?}: {error}"));
+                assert_eq!(
+                    statement.encode(),
+                    expected.encode(),
+                    "{what}: statement differs {mode:?}"
+                );
             } else {
                 let verified = verify_node_batch_sparse(&self.spec, MAINNET_DOMAIN, &witness, &context, body, mode)
                     .unwrap_or_else(|error| panic!("{what}: sparse verify {mode:?}: {error}"));
@@ -645,19 +683,28 @@ impl Chain {
     /// Differential, then commit.
     fn check(&mut self, body: &NodeBodyV2, what: &str) -> NodeExecutionOutcome {
         self.differential(body, what);
-        let outcome = self.commit(body);
         // The state after the commit must be the root the witness derived, checked
         // by the differential through the header. Warm again for the next block.
-        outcome
+        self.commit(body)
     }
 
-    fn verify(&self, witness: &SparseBatchWitness, context: &BlockContext, body: &NodeBodyV2) -> Result<NodeExecutionOutcome, SparseNodeError> {
+    fn verify(
+        &self,
+        witness: &SparseBatchWitness,
+        context: &BlockContext,
+        body: &NodeBodyV2,
+    ) -> Result<NodeExecutionOutcome, SparseNodeError> {
         verify_node_batch_sparse(&self.spec, MAINNET_DOMAIN, witness, context, body, BlockHashes::Lazy)
     }
 
     fn deploy_script(&mut self) -> Address {
         let address = self.sender.create(self.nonce);
-        let tx = self.tx(TxKind::Create, U256::ZERO, deploy_code(&script_runtime()).into(), 3_000_000);
+        let tx = self.tx(
+            TxKind::Create,
+            U256::ZERO,
+            deploy_code(&script_runtime()).into(),
+            3_000_000,
+        );
         let body = self.body(vec![tx]);
         let outcome = self.commit(&body);
         assert!(outcome.transactions[0].success, "script deployment failed");
@@ -699,7 +746,14 @@ fn the_script_contract_does_what_it_says() {
     let mut chain = Chain::new(ChainSpec::mainnet_v1());
     let script_a = chain.deploy_script();
     let script_b = chain.deploy_script();
-    let tx = chain.call(script_a, script(&[(SSTORE, u(7), u(11)), (SLOAD, u(7), u(0)), (BALANCE, word_of(chain.sender), u(0))]));
+    let tx = chain.call(
+        script_a,
+        script(&[
+            (SSTORE, u(7), u(11)),
+            (SLOAD, u(7), u(0)),
+            (BALANCE, word_of(chain.sender), u(0)),
+        ]),
+    );
     let body = chain.body(vec![tx]);
     let outcome = chain.check(&body, "sstore+sload");
     assert!(outcome.transactions[0].success);
@@ -724,7 +778,10 @@ fn the_script_contract_does_what_it_says() {
     let outcome = chain.check(&body, "reads");
     assert!(outcome.transactions[0].success);
     assert_eq!(Chain::logged_word(&outcome, 0, 0), u(runtime_len));
-    assert_eq!(Chain::logged_word(&outcome, 0, 1), U256::from_be_bytes(keccak256(script_runtime()).0));
+    assert_eq!(
+        Chain::logged_word(&outcome, 0, 1),
+        U256::from_be_bytes(keccak256(script_runtime()).0)
+    );
     assert_ne!(Chain::logged_word(&outcome, 0, 3), u(0));
     for log in 4..8 {
         assert_eq!(Chain::logged_word(&outcome, 0, log), u(1), "call op log {log}");
@@ -802,14 +859,30 @@ fn inline_storage_nodes_read_update_delete_and_exclude() {
             let body = chain.body(vec![tx]);
             let (witness, _, _) = chain.differential(&body, "delete inline, sibling untouched");
             let view = IndexedTrieView::from_proof(
-                witness.pre_accounts.iter().find(|acc| acc.address == target).unwrap().storage_root,
-                &witness.pre_accounts.iter().find(|acc| acc.address == target).unwrap().storage_proof,
+                witness
+                    .pre_accounts
+                    .iter()
+                    .find(|acc| acc.address == target)
+                    .unwrap()
+                    .storage_root,
+                &witness
+                    .pre_accounts
+                    .iter()
+                    .find(|acc| acc.address == target)
+                    .unwrap()
+                    .storage_proof,
             )
             .unwrap();
-            assert!(view.lookup(&storage_key(&u(b))).unwrap().is_some(), "the embedded sibling is exposed");
+            assert!(
+                view.lookup(&storage_key(&u(b))).unwrap().is_some(),
+                "the embedded sibling is exposed"
+            );
             chain.commit(&body);
             // Exclusion at the old position, then back again.
-            let tx = chain.call(target, script(&[(SLOAD, u(a), u(0)), (SSTORE, u(a), u(1)), (SSTORE, u(b), u(0))]));
+            let tx = chain.call(
+                target,
+                script(&[(SLOAD, u(a), u(0)), (SSTORE, u(a), u(1)), (SSTORE, u(b), u(0))]),
+            );
             let body = chain.body(vec![tx]);
             let outcome = chain.check(&body, "exclude, reinsert, delete sibling");
             assert_eq!(Chain::logged_word(&outcome, 0, 0), u(0));
@@ -847,7 +920,11 @@ fn collapses_onto_untouched_siblings_at_every_shape() {
     chain.check(&body, "delete one of each pair");
 
     // Now a big drain in random order, block after block, down to the empty trie.
-    let mut live: Vec<u64> = deep.iter().map(|pair| pair[1]).chain((0..60).map(|slot| slot + 500_000_000)).collect();
+    let mut live: Vec<u64> = deep
+        .iter()
+        .map(|pair| pair[1])
+        .chain((0..60).map(|slot| slot + 500_000_000))
+        .collect();
     let mut rng = Rng::new(b"drain");
     while !live.is_empty() {
         let count = 1 + rng.next(9.min(live.len() as u64));
@@ -872,12 +949,21 @@ fn delete_and_insert_in_one_block() {
     let (a, b) = (pair[0], pair[1]);
     let mut chain = Chain::new(ChainSpec::mainnet_v1());
     let target = chain.deploy_script();
-    let tx = chain.call(target, script(&[(SSTORE, u(a), u(1)), (SSTORE, u(b), u(2)), (SSTORE, u(1234), u(3))]));
+    let tx = chain.call(
+        target,
+        script(&[(SSTORE, u(a), u(1)), (SSTORE, u(b), u(2)), (SSTORE, u(1234), u(3))]),
+    );
     let body = chain.body(vec![tx]);
     chain.check(&body, "fill");
     let first = chain.call(target, script(&[(SSTORE, u(a), u(0))]));
-    let second = chain.call(target, script(&[(SLOAD, u(a), u(0)), (SSTORE, u(a), u(5)), (SSTORE, u(b), u(0))]));
-    let third = chain.call(target, script(&[(SLOAD, u(b), u(0)), (SSTORE, u(4321), u(6)), (SSTORE, u(1234), u(0))]));
+    let second = chain.call(
+        target,
+        script(&[(SLOAD, u(a), u(0)), (SSTORE, u(a), u(5)), (SSTORE, u(b), u(0))]),
+    );
+    let third = chain.call(
+        target,
+        script(&[(SLOAD, u(b), u(0)), (SSTORE, u(4321), u(6)), (SSTORE, u(1234), u(0))]),
+    );
     let body = chain.body(vec![first, second, third]);
     let outcome = chain.check(&body, "mixed block");
     assert_eq!(Chain::logged_word(&outcome, 1, 0), u(0));
@@ -917,7 +1003,10 @@ fn destroying_an_account_that_is_already_in_the_trie() {
         let mut data = entry(CREATE2, U256::from_be_bytes(salt.0), u(0));
         data.extend_from_slice(&initcode);
         let destroy = chain.call(factory, data.into());
-        let reader = chain.call(factory, script(&[(BALANCE, word_of(doomed), u(0)), (EXTCODEHASH, word_of(doomed), u(0))]));
+        let reader = chain.call(
+            factory,
+            script(&[(BALANCE, word_of(doomed), u(0)), (EXTCODEHASH, word_of(doomed), u(0))]),
+        );
         let body = chain.body(vec![destroy, reader]);
         let outcome = chain.check(&body, "destroy in the same transaction as the creation");
         assert!(outcome.transactions[0].success);
@@ -968,12 +1057,18 @@ fn destroyed_paid_and_recreated_in_one_block() {
     let mut data = entry(CREATE2, U256::from_be_bytes(salt.0), u(0));
     data.extend_from_slice(&storing);
     let create = chain.call(factory, data.into());
-    let read = chain.call(target, script(&[(SLOAD, u(1), u(0)), (SLOAD, u(2), u(0)), (SSTORE, u(2), u(8))]));
+    let read = chain.call(
+        target,
+        script(&[(SLOAD, u(1), u(0)), (SLOAD, u(2), u(0)), (SSTORE, u(2), u(8))]),
+    );
     let body = chain.body(vec![create, read]);
     let outcome = chain.check(&body, "create over a balance and use it");
     assert_eq!(Chain::logged_word(&outcome, 1, 0), u(5));
     assert_eq!(Chain::logged_word(&outcome, 1, 1), u(0));
-    let read = chain.call(target, script(&[(SLOAD, u(1), u(0)), (SLOAD, u(2), u(0)), (SSTORE, u(1), u(0))]));
+    let read = chain.call(
+        target,
+        script(&[(SLOAD, u(1), u(0)), (SLOAD, u(2), u(0)), (SSTORE, u(1), u(0))]),
+    );
     let clear = chain.call(target, script(&[(SSTORE, u(2), u(0))]));
     let body = chain.body(vec![read, clear]);
     let outcome = chain.check(&body, "read through the view, then empty the storage trie");
@@ -1045,7 +1140,10 @@ fn assert_fails_fatally(result: Result<NodeExecutionOutcome, SparseNodeError>, w
     match result {
         Err(SparseNodeError::Execution(_)) | Err(SparseNodeError::Verify(_)) => {}
         Err(other) => panic!("{what}: unexpected failure: {other}"),
-        Ok(outcome) => panic!("{what}: an uncovered read was accepted, root {}", outcome.header.state_root),
+        Ok(outcome) => panic!(
+            "{what}: an uncovered read was accepted, root {}",
+            outcome.header.state_root
+        ),
     }
 }
 
@@ -1084,7 +1182,11 @@ fn every_state_opcode_under_a_catching_frame_fails_the_block_when_its_account_is
         let mut omitted = witness.clone();
         let before = omitted.pre_accounts.len();
         omitted.pre_accounts.retain(|account| account.address != victim);
-        assert_eq!(omitted.pre_accounts.len() + 1, before, "{name}: the victim is in the witness");
+        assert_eq!(
+            omitted.pre_accounts.len() + 1,
+            before,
+            "{name}: the victim is in the witness"
+        );
         assert_fails_fatally(chain.verify(&omitted, &context, &body), name);
 
         // Claimed absent instead: must fail on the exclusion proof.
@@ -1109,18 +1211,33 @@ fn an_omitted_slot_under_a_catching_frame_at_any_gas() {
     chain.commit(&body);
 
     let (mut survived, mut refused, mut skipped) = (0u64, 0u64, 0u64);
-    for gas in [40_000u64, 3_000, 2_900, 2_500, 2_300, 2_200, 2_150, 2_100, 2_000, 1_000, 200, 50, 10] {
-        for (op, a, b) in [(SLOAD, u(7), u(0)), (SSTORE, u(7), u(0)), (SSTORE, u(7), u(100)), (SLOAD, u(9999), u(0))] {
+    for gas in [
+        40_000u64, 3_000, 2_900, 2_500, 2_300, 2_200, 2_150, 2_100, 2_000, 1_000, 200, 50, 10,
+    ] {
+        for (op, a, b) in [
+            (SLOAD, u(7), u(0)),
+            (SSTORE, u(7), u(0)),
+            (SSTORE, u(7), u(100)),
+            (SLOAD, u(9999), u(0)),
+        ] {
             let mut data = entry(FORWARD, word_of(inner), u(gas));
             data.extend_from_slice(&entry(op, a, b));
             let tx = chain.call(outer, data.into());
             let body = chain.body(vec![tx]);
             let (witness, canonical, context) = chain.differential(&body, "catching frame");
-            let index = witness.pre_accounts.iter().position(|account| account.address == inner).unwrap();
+            let index = witness
+                .pre_accounts
+                .iter()
+                .position(|account| account.address == inner)
+                .unwrap();
             let key = storage_key(&a);
             let mut stripped = witness.clone();
             let proof = &mut stripped.pre_accounts[index].storage_proof;
-            let deepest = proof.keys().filter(|path| key.starts_with(path)).max_by_key(|path| path.len()).copied();
+            let deepest = proof
+                .keys()
+                .filter(|path| key.starts_with(path))
+                .max_by_key(|path| path.len())
+                .copied();
             let deepest = deepest.unwrap();
             if deepest.is_empty() {
                 // Only the root: at this gas revm skipped the cold load, and no read
@@ -1143,7 +1260,10 @@ fn an_omitted_slot_under_a_catching_frame_at_any_gas() {
         }
     }
     std::println!("catching frame: refused {refused}, cold load skipped {skipped}, not needed {survived}");
-    assert!(refused > 0 && skipped > 0, "both must occur: refused {refused}, skipped {skipped}");
+    assert!(
+        refused > 0 && skipped > 0,
+        "both must occur: refused {refused}, skipped {skipped}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,11 +1281,22 @@ fn the_beacon_ring_deletes_a_slot_on_a_zero_anchor() {
     chain.anchor = B256::ZERO;
     let body = NodeBodyV2::default();
     let (witness, _, context) = chain.differential(&body, "zero anchor at the same timestamp deletes the root slot");
-    let index = witness.pre_accounts.iter().position(|account| account.address == BEACON_ROOTS_ADDRESS).unwrap();
+    let index = witness
+        .pre_accounts
+        .iter()
+        .position(|account| account.address == BEACON_ROOTS_ADDRESS)
+        .unwrap();
     let ts = U256::from(context.timestamp);
     let root_slot = ts % U256::from(8191u64) + U256::from(8191u64);
-    let view = IndexedTrieView::from_proof(witness.pre_accounts[index].storage_root, &witness.pre_accounts[index].storage_proof).unwrap();
-    assert!(view.lookup(&storage_key(&root_slot)).unwrap().is_some(), "the root slot existed");
+    let view = IndexedTrieView::from_proof(
+        witness.pre_accounts[index].storage_root,
+        &witness.pre_accounts[index].storage_proof,
+    )
+    .unwrap();
+    assert!(
+        view.lookup(&storage_key(&root_slot)).unwrap().is_some(),
+        "the root slot existed"
+    );
     chain.commit(&body);
     assert_eq!(chain.state.storage_of(&BEACON_ROOTS_ADDRESS, root_slot), U256::ZERO);
     chain.timestamp_step = 1;
@@ -1183,7 +1314,11 @@ fn the_beacon_ring_wraps_and_user_reads_agree() {
     chain.timestamp_step = 8191;
     for round in 0..4u64 {
         let context = chain.context();
-        chain.anchor = if round == 2 { B256::ZERO } else { keccak256(round.to_be_bytes()) };
+        chain.anchor = if round == 2 {
+            B256::ZERO
+        } else {
+            keccak256(round.to_be_bytes())
+        };
         let call = |chain: &mut Chain, timestamp: u64| {
             let mut data = entry(FORWARD, word_of(BEACON_ROOTS_ADDRESS), u(100_000));
             data.extend_from_slice(&U256::from(timestamp).to_be_bytes::<32>());
@@ -1237,8 +1372,14 @@ fn blockhash_in_all_positions_agrees_and_stays_a_proof_obligation() {
         forward.extend_from_slice(&script(&[probe(number.saturating_sub(100))]));
         let nested = chain.call(outer, forward.into());
         let body = chain.body(vec![tx, nested]);
-        let check_this = number % 37 == 0 || !(250..=262).contains(&number) && number % 7 == 0 || (250..=262).contains(&number);
-        let outcome = if check_this { chain.check(&body, "blockhash") } else { chain.commit(&body) };
+        let check_this = number.is_multiple_of(37)
+            || !(250..=262).contains(&number) && number.is_multiple_of(7)
+            || (250..=262).contains(&number);
+        let outcome = if check_this {
+            chain.check(&body, "blockhash")
+        } else {
+            chain.commit(&body)
+        };
         // The values themselves, against a record kept outside the state.
         for (log, n) in [
             (2usize, number - 1),
@@ -1286,16 +1427,32 @@ fn deposits_on_every_kind_of_recipient() {
             chain.deposit_to(upcoming, 1_000_000),
             chain.deposit_to(Address::repeat_byte(0x55), 1_000_000),
         ];
-        let create = chain.tx(TxKind::Create, U256::from(1u64), deploy_code(&script_runtime()).into(), 3_000_000);
-        let read = chain.call(upcoming, script(&[(BALANCE, word_of(upcoming), u(0)), (SLOAD, u(1), u(0))]));
+        let create = chain.tx(
+            TxKind::Create,
+            U256::from(1u64),
+            deploy_code(&script_runtime()).into(),
+            3_000_000,
+        );
+        let read = chain.call(
+            upcoming,
+            script(&[(BALANCE, word_of(upcoming), u(0)), (SLOAD, u(1), u(0))]),
+        );
         let body = NodeBodyV2 {
             deposits,
             transactions: vec![create, read],
         };
         let (witness, canonical, context) = chain.differential(&body, "deposits");
         assert!(canonical.transactions.iter().all(|tx| tx.success));
-        let index = witness.pre_accounts.iter().position(|account| account.address == inflated).unwrap();
-        assert_eq!(witness.pre_accounts[index].storage_proof.len(), 1, "only the root node of the inflated contract");
+        let index = witness
+            .pre_accounts
+            .iter()
+            .position(|account| account.address == inflated)
+            .unwrap();
+        assert_eq!(
+            witness.pre_accounts[index].storage_proof.len(),
+            1,
+            "only the root node of the inflated contract"
+        );
         // The inflated contract left out: refused, not credited from nothing.
         let mut omitted = witness.clone();
         omitted.pre_accounts.remove(index);
@@ -1304,9 +1461,15 @@ fn deposits_on_every_kind_of_recipient() {
         claimed.absent_accounts.push(inflated);
         assert_fails_fatally(chain.verify(&claimed, &context, &body), "recipient claimed absent");
         // The deposit's ledger cursor cannot be hidden either.
-        let ledger = witness.pre_accounts.iter().position(|account| account.address == chain.spec.supply_ledger).unwrap();
+        let ledger = witness
+            .pre_accounts
+            .iter()
+            .position(|account| account.address == chain.spec.supply_ledger)
+            .unwrap();
         let mut stale = witness.clone();
-        stale.pre_accounts[ledger].storage_proof.retain(|path, _| path.is_empty());
+        stale.pre_accounts[ledger]
+            .storage_proof
+            .retain(|path, _| path.is_empty());
         assert_fails_fatally(chain.verify(&stale, &context, &body), "ledger hidden");
         chain.commit(&body);
     }
@@ -1331,7 +1494,12 @@ fn withdrawals_frontier_root_and_count_agree() {
         let mut txs = Vec::new();
         for leaf in 0..count {
             let recipient = keccak256(leaf.to_be_bytes());
-            txs.push(chain.tx(TxKind::Call(L2_TO_L1_MESSAGE_PASSER), wei, withdrawal_input(recipient), 200_000));
+            txs.push(chain.tx(
+                TxKind::Call(L2_TO_L1_MESSAGE_PASSER),
+                wei,
+                withdrawal_input(recipient),
+                200_000,
+            ));
             total += 1;
         }
         if block % 2 == 0 {
@@ -1345,8 +1513,17 @@ fn withdrawals_frontier_root_and_count_agree() {
         let summary = canonical.withdrawals.as_ref().unwrap();
         assert_eq!(summary.commitment.count, total);
         // Every storage node of the outbox is necessary or harmless.
-        let index = witness.pre_accounts.iter().position(|account| account.address == L2_TO_L1_MESSAGE_PASSER).unwrap();
-        for path in witness.pre_accounts[index].storage_proof.keys().copied().collect::<Vec<_>>() {
+        let index = witness
+            .pre_accounts
+            .iter()
+            .position(|account| account.address == L2_TO_L1_MESSAGE_PASSER)
+            .unwrap();
+        for path in witness.pre_accounts[index]
+            .storage_proof
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
             let mut stripped = witness.clone();
             stripped.pre_accounts[index].storage_proof.remove(&path);
             if let Ok(outcome) = chain.verify(&stripped, &context, &body) {
@@ -1368,7 +1545,10 @@ fn fee_vault_sweeps_agree() {
     for _ in 0..3 {
         let a = chain.call(base, Bytes::new());
         let b = chain.call(sequencer, Bytes::new());
-        let c = chain.call(script_address, script(&[(BALANCE, word_of(base), u(0)), (CALL, word_of(sequencer), u(5))]));
+        let c = chain.call(
+            script_address,
+            script(&[(BALANCE, word_of(base), u(0)), (CALL, word_of(sequencer), u(5))]),
+        );
         let body = chain.body(vec![a, b, c]);
         let outcome = chain.check(&body, "sweep");
         assert!(outcome.transactions.iter().all(|tx| tx.success));
@@ -1415,9 +1595,29 @@ fn every_witness_part_attacked_on_a_rich_block() {
 
     let wei = U256::from(10_000_000_000_000_000u64);
     let txs = vec![
-        chain.call(target, script(&[(SLOAD, u(1001), u(0)), (SSTORE, u(a), u(0)), (SSTORE, u(9_000_000), u(7)), (SLOAD, u(8_000_000), u(0))])),
-        chain.call(other, script(&[(BLOCKHASH, u(2), u(0)), (BALANCE, word_of(target), u(0)), (CALL, word_of(Address::repeat_byte(0x66)), u(1))])),
-        chain.tx(TxKind::Call(L2_TO_L1_MESSAGE_PASSER), wei, withdrawal_input(B256::repeat_byte(1)), 200_000),
+        chain.call(
+            target,
+            script(&[
+                (SLOAD, u(1001), u(0)),
+                (SSTORE, u(a), u(0)),
+                (SSTORE, u(9_000_000), u(7)),
+                (SLOAD, u(8_000_000), u(0)),
+            ]),
+        ),
+        chain.call(
+            other,
+            script(&[
+                (BLOCKHASH, u(2), u(0)),
+                (BALANCE, word_of(target), u(0)),
+                (CALL, word_of(Address::repeat_byte(0x66)), u(1)),
+            ]),
+        ),
+        chain.tx(
+            TxKind::Call(L2_TO_L1_MESSAGE_PASSER),
+            wei,
+            withdrawal_input(B256::repeat_byte(1)),
+            200_000,
+        ),
     ];
     let body = chain.body(txs);
     let (witness, canonical, context) = chain.differential(&body, "rich");
@@ -1487,7 +1687,12 @@ fn every_witness_part_attacked_on_a_rich_block() {
             }
         }
         // Stale: this account as the witness of the previous block had it.
-        if let Some(old) = old_body_witness_context.0.pre_accounts.iter().find(|old| old.address == account.address) {
+        if let Some(old) = old_body_witness_context
+            .0
+            .pre_accounts
+            .iter()
+            .find(|old| old.address == account.address)
+        {
             let mut changed = witness.clone();
             changed.pre_accounts[index] = old.clone();
             attempts += 1;
@@ -1507,10 +1712,16 @@ fn every_witness_part_attacked_on_a_rich_block() {
             let mut changed = witness.clone();
             let target = &mut changed.pre_accounts[index];
             match change {
-                0 => target.balance = target.balance + U256::from(1u64),
+                0 => target.balance += U256::from(1u64),
                 1 => target.nonce += 1,
                 2 => target.storage_root = rng.word(),
-                3 => target.code_hash = if target.code_hash == KECCAK_EMPTY { keccak256([0x00]) } else { KECCAK_EMPTY },
+                3 => {
+                    target.code_hash = if target.code_hash == KECCAK_EMPTY {
+                        keccak256([0x00])
+                    } else {
+                        KECCAK_EMPTY
+                    }
+                }
                 _ => {
                     // The code itself: corrupt the entry this account's hash names.
                     let hash = target.code_hash;
@@ -1537,7 +1748,11 @@ fn every_witness_part_attacked_on_a_rich_block() {
         changed.pre_accounts.remove(index);
         assert_fails_fatally(chain.verify(&changed, &context, &body), "dropped account");
         // Proof of another account (real nodes of another storage trie).
-        for other in witness.pre_accounts.iter().filter(|other| other.address != account.address) {
+        for other in witness
+            .pre_accounts
+            .iter()
+            .filter(|other| other.address != account.address)
+        {
             let mut changed = witness.clone();
             changed.pre_accounts[index].storage_proof = other.storage_proof.clone();
             if account.storage_root != other.storage_root {
@@ -1571,7 +1786,10 @@ fn every_witness_part_attacked_on_a_rich_block() {
 
     // A whole old witness for the next block: refused by the head number or the root.
     let (old_witness, _, _) = &old_body_witness_context;
-    assert_fails_fatally(chain.verify(old_witness, &context, &body), "the previous block's witness");
+    assert_fails_fatally(
+        chain.verify(old_witness, &context, &body),
+        "the previous block's witness",
+    );
     // An old witness with its own old context and a new body: the old root is genuine,
     // the old block is real, so only the body differs: that is a different block on an
     // older head, and the statement names the parent, so it cannot pass as this block.
@@ -1588,7 +1806,13 @@ fn every_witness_part_attacked_on_a_rich_block() {
 // Fuzz
 // ---------------------------------------------------------------------------
 
-fn fuzz_entries(rng: &mut Rng, chain: &Chain, targets: &[Address], slots: &[u64], addresses: &[Address]) -> Vec<(u64, U256, U256)> {
+fn fuzz_entries(
+    rng: &mut Rng,
+    chain: &Chain,
+    targets: &[Address],
+    slots: &[u64],
+    addresses: &[Address],
+) -> Vec<(u64, U256, U256)> {
     let mut entries = Vec::new();
     let count = 1 + rng.next(10);
     let number = chain.context().number;
@@ -1623,8 +1847,20 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
     let destroying = destroying_initcode(0x77);
     let storing = storing_initcode(5, &script_runtime());
     let mut addresses: Vec<Address> = targets.clone();
-    addresses.extend([chain.sender, Address::repeat_byte(0x77), BEACON_ROOTS_ADDRESS, L2_TO_L1_MESSAGE_PASSER, chain.spec.block_info, chain.spec.base_fee_vault, chain.spec.supply_ledger]);
-    addresses.extend((1..=9u8).map(|byte| { let mut raw = [0u8; 20]; raw[19] = byte; Address::from(raw) }));
+    addresses.extend([
+        chain.sender,
+        Address::repeat_byte(0x77),
+        BEACON_ROOTS_ADDRESS,
+        L2_TO_L1_MESSAGE_PASSER,
+        chain.spec.block_info,
+        chain.spec.base_fee_vault,
+        chain.spec.supply_ledger,
+    ]);
+    addresses.extend((1..=9u8).map(|byte| {
+        let mut raw = [0u8; 20];
+        raw[19] = byte;
+        Address::from(raw)
+    }));
     let salts: Vec<B256> = (0..6u8).map(|byte| B256::repeat_byte(byte + 1)).collect();
     for salt in &salts {
         addresses.push(factory.create2(*salt, keccak256(&destroying)));
@@ -1673,7 +1909,12 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
         }
         if rng.chance(20) {
             let wei = U256::from(10_000_000_000_000_000u64);
-            transactions.push(chain.tx(TxKind::Call(L2_TO_L1_MESSAGE_PASSER), wei, withdrawal_input(rng.word()), 200_000));
+            transactions.push(chain.tx(
+                TxKind::Call(L2_TO_L1_MESSAGE_PASSER),
+                wei,
+                withdrawal_input(rng.word()),
+                200_000,
+            ));
         }
         if chain.spec.block_derivation.is_none() {
             chain.anchor = if rng.chance(15) { B256::ZERO } else { rng.word() };
@@ -1705,7 +1946,10 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
         let outcome = chain.commit(&body);
         coverage.txs += outcome.transactions.len() as u64;
         coverage.failed_txs += outcome.transactions.iter().filter(|tx| !tx.success).count() as u64;
-        coverage.withdrawals += outcome.withdrawals.as_ref().map_or(0, |summary| summary.withdrawals.len() as u64);
+        coverage.withdrawals += outcome
+            .withdrawals
+            .as_ref()
+            .map_or(0, |summary| summary.withdrawals.len() as u64);
         for account in &witness.pre_accounts {
             if chain.state.account(&account.address).is_none() {
                 coverage.accounts_removed += 1;
@@ -1718,7 +1962,12 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
                     }
                 }
             }
-            if chain.state.account(&account.address).is_some_and(|after| after.code_hash != KECCAK_EMPTY) && account.code_hash == KECCAK_EMPTY {
+            if chain
+                .state
+                .account(&account.address)
+                .is_some_and(|after| after.code_hash != KECCAK_EMPTY)
+                && account.code_hash == KECCAK_EMPTY
+            {
                 coverage.created_over_a_leaf += 1;
             }
         }
@@ -1728,9 +1977,16 @@ fn fuzz_chain(seed: &[u8], spec: ChainSpec, blocks: u64) {
             .filter(|address| chain.state.account(address).is_some())
             .count() as u64;
     }
-    std::println!("seed {seed:?}: node removals {}, harmless survivors {}, {coverage:?}", stats.0, stats.1);
+    std::println!(
+        "seed {seed:?}: node removals {}, harmless survivors {}, {coverage:?}",
+        stats.0,
+        stats.1
+    );
     assert!(
-        coverage.accounts_removed > 0 && coverage.accounts_created > 0 && coverage.slots_deleted > 0 && coverage.withdrawals > 0,
+        coverage.accounts_removed > 0
+            && coverage.accounts_created > 0
+            && coverage.slots_deleted > 0
+            && coverage.withdrawals > 0,
         "{coverage:?}"
     );
 }
@@ -1756,7 +2012,11 @@ fn fuzz_rich_blocks_v1_rules() {
 #[test]
 fn fuzz_rich_blocks_next_rules() {
     for round in 0..2 * scale() {
-        fuzz_chain(alloc::format!("n{round}").as_bytes(), ChainSpec::mainnet_next_or_rehearsal(), 250);
+        fuzz_chain(
+            alloc::format!("n{round}").as_bytes(),
+            ChainSpec::mainnet_next_or_rehearsal(),
+            250,
+        );
     }
 }
 
@@ -1771,7 +2031,12 @@ fn fuzz_rich_blocks_next_rules() {
 fn a_deposit_does_not_carry_the_code_of_its_recipient() {
     let mut chain = Chain::new(ChainSpec::mainnet_v1());
     // PUSH2 24576 PUSH1 0 RETURN: 24,576 zero bytes of runtime.
-    let tx = chain.tx(TxKind::Create, U256::ZERO, vec![0x61, 0x60, 0x00, 0x60, 0x00, 0xf3].into(), 6_000_000);
+    let tx = chain.tx(
+        TxKind::Create,
+        U256::ZERO,
+        vec![0x61, 0x60, 0x00, 0x60, 0x00, 0xf3].into(),
+        6_000_000,
+    );
     let target = chain.sender.create(chain.nonce - 1);
     let body = chain.body(vec![tx]);
     assert!(chain.commit(&body).transactions[0].success);
@@ -1780,7 +2045,11 @@ fn a_deposit_does_not_carry_the_code_of_its_recipient() {
         transactions: vec![],
     };
     let (witness, _, _) = chain.differential(&body, "deposit to a large contract");
-    let account = witness.pre_accounts.iter().find(|account| account.address == target).unwrap();
+    let account = witness
+        .pre_accounts
+        .iter()
+        .find(|account| account.address == target)
+        .unwrap();
     assert_ne!(account.code_hash, KECCAK_EMPTY, "the recipient is a contract");
     let code_bytes: usize = witness.codes.iter().map(|code| code.len()).sum();
     assert!(
@@ -1808,7 +2077,12 @@ fn every_code_load_is_witnessed_and_fails_the_block_when_left_out() {
     let outer = chain.deploy_script();
     let inner = chain.deploy_script();
     let victim = chain.sender.create(chain.nonce);
-    let tx = chain.tx(TxKind::Create, U256::ZERO, deploy_code(&victim_runtime()).into(), 3_000_000);
+    let tx = chain.tx(
+        TxKind::Create,
+        U256::ZERO,
+        deploy_code(&victim_runtime()).into(),
+        3_000_000,
+    );
     let body = chain.body(vec![tx]);
     assert!(chain.commit(&body).transactions[0].success);
     let victim_hash = keccak256(victim_runtime());
@@ -1832,7 +2106,11 @@ fn every_code_load_is_witnessed_and_fails_the_block_when_left_out() {
         let body = chain.body(vec![tx]);
         let (witness, canonical, context) = chain.differential(&body, name);
         assert!(canonical.transactions[0].success, "{name}");
-        let account = witness.pre_accounts.iter().find(|account| account.address == victim).unwrap();
+        let account = witness
+            .pre_accounts
+            .iter()
+            .find(|account| account.address == victim)
+            .unwrap();
         assert_eq!(account.code_hash, victim_hash, "{name}: the leaf's code hash");
         let position = witness.codes.iter().position(|code| keccak256(code) == victim_hash);
         if let Some(position) = position {
@@ -1853,7 +2131,11 @@ fn every_code_load_is_witnessed_and_fails_the_block_when_left_out() {
             assert_fails_fatally(chain.verify(&swapped, &context, &body), name);
             // The account claims the other code's hash: the leaf refuses it.
             let mut claimed = swapped.clone();
-            let index = claimed.pre_accounts.iter().position(|account| account.address == victim).unwrap();
+            let index = claimed
+                .pre_accounts
+                .iter()
+                .position(|account| account.address == victim)
+                .unwrap();
             claimed.pre_accounts[index].code_hash = keccak256(&other_code);
             assert!(
                 matches!(
@@ -1867,7 +2149,14 @@ fn every_code_load_is_witnessed_and_fails_the_block_when_left_out() {
     }
     std::println!("victim code carried for: {carried:?}");
     assert!(!carried.contains(&"BALANCE"), "BALANCE does not load code");
-    for name in ["EXTCODESIZE", "EXTCODECOPY", "CALL", "STATICCALL", "DELEGATECALL", "CALLCODE"] {
+    for name in [
+        "EXTCODESIZE",
+        "EXTCODECOPY",
+        "CALL",
+        "STATICCALL",
+        "DELEGATECALL",
+        "CALLCODE",
+    ] {
         assert!(carried.contains(&name), "{name} loads code: {carried:?}");
     }
 }
@@ -1882,11 +2171,20 @@ fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
     let body = chain.body(vec![tx]);
     let (witness, canonical, context) = chain.differential(&body, "base");
     let script_hash = keccak256(script_runtime());
-    let script_entries = witness.codes.iter().filter(|code| keccak256(code) == script_hash).count();
+    let script_entries = witness
+        .codes
+        .iter()
+        .filter(|code| keccak256(code) == script_hash)
+        .count();
     assert_eq!(script_entries, 1, "the script's code, once");
 
     let mut changed = witness.clone();
-    let script_code = changed.codes.iter().find(|code| keccak256(code) == script_hash).unwrap().clone();
+    let script_code = changed
+        .codes
+        .iter()
+        .find(|code| keccak256(code) == script_hash)
+        .unwrap()
+        .clone();
     changed.codes.push(script_code);
     assert!(matches!(
         chain.verify(&changed, &context, &body),
@@ -1899,13 +2197,21 @@ fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
         Err(SparseNodeError::Verify(SparseVerifyError::InvalidCode(_)))
     ));
     let mut changed = witness.clone();
-    let index = changed.pre_accounts.iter().position(|account| account.address == target).unwrap();
+    let index = changed
+        .pre_accounts
+        .iter()
+        .position(|account| account.address == target)
+        .unwrap();
     changed.pre_accounts[index].code_hash = B256::ZERO;
     assert!(matches!(
         chain.verify(&changed, &context, &body),
         Err(SparseNodeError::Verify(SparseVerifyError::ZeroCodeHash(_)))
     ));
-    let sender = changed.pre_accounts.iter().position(|account| account.address == chain.sender).unwrap();
+    let sender = changed
+        .pre_accounts
+        .iter()
+        .position(|account| account.address == chain.sender)
+        .unwrap();
     let mut changed = witness.clone();
     changed.pre_accounts[sender].code_hash = B256::ZERO;
     assert!(matches!(
@@ -1927,7 +2233,10 @@ fn the_code_list_refuses_duplicates_empty_and_zero_hash() {
     // Without the script's code: the call loads it and fails the block.
     let mut changed = witness.clone();
     changed.codes.retain(|code| keccak256(code) != script_hash);
-    assert!(matches!(chain.verify(&changed, &context, &body), Err(SparseNodeError::Execution(_))));
+    assert!(matches!(
+        chain.verify(&changed, &context, &body),
+        Err(SparseNodeError::Execution(_))
+    ));
 }
 
 /// Not a finding: the witness is malleable, and the statement does not depend on it.
@@ -1944,8 +2253,16 @@ fn witness_malleability_does_not_reach_the_statement() {
     let body = chain.body(vec![tx]);
     let (witness, _, context) = chain.differential(&body, "base");
     let settlement = Chain::settlement(&body);
-    let expected =
-        execute_settlement_statement_v3_sparse(&chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement, BlockHashes::Lazy).unwrap();
+    let expected = execute_settlement_statement_v3_sparse(
+        &chain.spec,
+        MAINNET_DOMAIN,
+        &witness,
+        &context,
+        &body,
+        settlement,
+        BlockHashes::Lazy,
+    )
+    .unwrap();
 
     let trie = chain.state.warm_commitment().unwrap();
     let mut changed = witness.clone();
@@ -1966,8 +2283,16 @@ fn witness_malleability_does_not_reach_the_statement() {
     let unrelated = Address::repeat_byte(0xab);
     changed.proof.extend(trie.proof([account_key(&unrelated)]).unwrap());
     changed.absent_accounts.push(unrelated);
-    let got =
-        execute_settlement_statement_v3_sparse(&chain.spec, MAINNET_DOMAIN, &changed, &context, &body, settlement, BlockHashes::Lazy).unwrap();
+    let got = execute_settlement_statement_v3_sparse(
+        &chain.spec,
+        MAINNET_DOMAIN,
+        &changed,
+        &context,
+        &body,
+        settlement,
+        BlockHashes::Lazy,
+    )
+    .unwrap();
     assert_eq!(got.encode(), expected.encode());
 }
 #[cfg(test)]

@@ -128,8 +128,13 @@ fn prepare_start<DB: Database>(
         let (parent_hash, parent_timestamp) = match header_policy {
             HeaderPolicy::V1 => (apply_header_rules(spec, overlay, previous_root, &input.context)?, 0),
             HeaderPolicy::Node { domain, previous_root } => {
-                let timestamp = crate::node_execution::head::read_head_v2(overlay, spec.block_info)?.base.timestamp;
-                (crate::node_execution::prepare_parent(spec, domain, overlay, previous_root, &input.context)?, timestamp)
+                let timestamp = crate::node_execution::head::read_head_v2(overlay, spec.block_info)?
+                    .base
+                    .timestamp;
+                (
+                    crate::node_execution::prepare_parent(spec, domain, overlay, previous_root, &input.context)?,
+                    timestamp,
+                )
             }
         };
         let start = input.context.number.saturating_sub(BLOCK_HASH_HISTORY);

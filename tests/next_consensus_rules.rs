@@ -42,7 +42,10 @@ fn transfer(spec: &ChainSpec, nonce: u64, to: Address, value: U256) -> Bytes {
         max_priority_fee_per_gas: 1_000_000_000,
         ..Default::default()
     };
-    let signature: Signature = key().sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    let signature: Signature = key()
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .unwrap()
+        .into();
     TxEnvelope::from(tx.into_signed(signature)).encoded_2718().into()
 }
 
@@ -88,21 +91,34 @@ fn settle(
     slot: u64,
 ) -> Result<B256, SettlementStatementV2Error> {
     let (witness, _) = generate_node_batch_witness(state, spec, MAINNET_DOMAIN, ctx, body).unwrap();
-    let statement =
-        execute_settlement_statement_v3(spec, MAINNET_DOMAIN, &witness, ctx, body, settlement(slot, body.deposits.len() as u64))?;
+    let statement = execute_settlement_statement_v3(
+        spec,
+        MAINNET_DOMAIN,
+        &witness,
+        ctx,
+        body,
+        settlement(slot, body.deposits.len() as u64),
+    )?;
     let outcome = execute_node_block(spec, MAINNET_DOMAIN, state, ctx, body).unwrap();
     assert_eq!(statement.base.l2_header_hash, outcome.header.hash());
     Ok(statement.base.configuration)
 }
 
 fn balance(state: &L2State, who: Address) -> U256 {
-    state.db().basic_ref(who).unwrap().map(|i| i.balance).unwrap_or_default()
+    state
+        .db()
+        .basic_ref(who)
+        .unwrap()
+        .map(|i| i.balance)
+        .unwrap_or_default()
 }
 
 fn code_len(state: &L2State, who: Address) -> usize {
     let info = state.db().basic_ref(who).unwrap().unwrap_or_default();
     let hash = info.code_hash;
-    info.code.map(|c| c.len()).unwrap_or_else(|| state.db().code_by_hash_ref(hash).map_or(0, |c| c.len()))
+    info.code
+        .map(|c| c.len())
+        .unwrap_or_else(|| state.db().code_by_hash_ref(hash).map_or(0, |c| c.len()))
 }
 
 fn supply(state: &L2State, who: &[Address]) -> U256 {
@@ -111,10 +127,16 @@ fn supply(state: &L2State, who: &[Address]) -> U256 {
 
 #[test]
 fn the_activated_configuration_and_genesis_are_untouched() {
-    assert_eq!(configuration_commitment(&ChainSpec::mainnet_v1()).unwrap(), V1_CONFIGURATION);
+    assert_eq!(
+        configuration_commitment(&ChainSpec::mainnet_v1()).unwrap(),
+        V1_CONFIGURATION
+    );
     let next = configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap();
     assert_ne!(next, V1_CONFIGURATION);
-    assert_eq!(ChainSpec::mainnet_rules_for(V1_CONFIGURATION), Some(ChainSpec::mainnet_v1()));
+    assert_eq!(
+        ChainSpec::mainnet_rules_for(V1_CONFIGURATION),
+        Some(ChainSpec::mainnet_v1())
+    );
     // Only the release rules are ever looked up from an L1 configuration: the
     // rehearsal recipient's configuration is not a mainnet rule set.
     if MAINNET_NEXT_RULES_RELEASABLE {
@@ -128,8 +150,12 @@ fn the_activated_configuration_and_genesis_are_untouched() {
     let mut new = genesis_v2(&ChainSpec::mainnet_next_or_rehearsal(), MAINNET_GENESIS_TIMESTAMP).unwrap();
     assert_eq!(old.commit_root(), new.commit_root());
     assert_eq!(
-        node_head(&ChainSpec::mainnet_v1(), MAINNET_DOMAIN, &old).unwrap().hash(),
-        node_head(&ChainSpec::mainnet_next_or_rehearsal(), MAINNET_DOMAIN, &new).unwrap().hash()
+        node_head(&ChainSpec::mainnet_v1(), MAINNET_DOMAIN, &old)
+            .unwrap()
+            .hash(),
+        node_head(&ChainSpec::mainnet_next_or_rehearsal(), MAINNET_DOMAIN, &new)
+            .unwrap()
+            .hash()
     );
 }
 
@@ -185,7 +211,10 @@ fn settlements_cross_the_boundary_and_recover_the_fees() {
         deposits: vec![deposit],
         transactions: vec![transfer(&old, 0, friend, U256::from(1_000))],
     };
-    assert_eq!(settle(&old, &mut state, &ctx, &body, FIRST_SLOT).unwrap(), V1_CONFIGURATION);
+    assert_eq!(
+        settle(&old, &mut state, &ctx, &body, FIRST_SLOT).unwrap(),
+        V1_CONFIGURATION
+    );
     let (base_fees, tips) = (balance(&state, BASE_FEE_VAULT), balance(&state, SEQUENCER_FEE_VAULT));
     assert!(base_fees > U256::ZERO && tips > U256::ZERO);
     assert_eq!(code_len(&state, BASE_FEE_VAULT), 0);
@@ -203,7 +232,10 @@ fn settlements_cross_the_boundary_and_recover_the_fees() {
     for vault in [BASE_FEE_VAULT, SEQUENCER_FEE_VAULT] {
         assert_eq!(code_len(&state, vault), fee_vault_sweep_code(recipient).len());
     }
-    assert_eq!((balance(&state, BASE_FEE_VAULT), balance(&state, SEQUENCER_FEE_VAULT)), (base_fees, tips));
+    assert_eq!(
+        (balance(&state, BASE_FEE_VAULT), balance(&state, SEQUENCER_FEE_VAULT)),
+        (base_fees, tips)
+    );
     assert_eq!(supply(&state, &accounts), total);
 
     // Anyone calling a vault sends its whole balance to the compiled recipient.
@@ -217,9 +249,15 @@ fn settlements_cross_the_boundary_and_recover_the_fees() {
     };
     settle(&new, &mut state, &ctx, &body, FIRST_SLOT + 2).unwrap();
     let swept = balance(&state, recipient);
-    assert!(swept >= base_fees + tips, "recipient holds the fees accumulated under the old rules");
+    assert!(
+        swept >= base_fees + tips,
+        "recipient holds the fees accumulated under the old rules"
+    );
     assert_eq!(supply(&state, &accounts), total, "supply is conserved across the sweep");
     // The sweep block's own fees reach the vaults after its calls and stay there.
     let vaults = balance(&state, BASE_FEE_VAULT) + balance(&state, SEQUENCER_FEE_VAULT);
-    assert_eq!(swept + vaults + balance(&state, sender()) + balance(&state, friend), total);
+    assert_eq!(
+        swept + vaults + balance(&state, sender()) + balance(&state, friend),
+        total
+    );
 }

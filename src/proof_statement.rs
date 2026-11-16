@@ -1298,18 +1298,30 @@ mod forced_configuration_tests {
         let next = ChainSpec::mainnet_next_or_rehearsal();
         assert!(next.forced_inclusion);
         let forced = configuration_commitment(&next).unwrap();
-        let plain = configuration_commitment(&ChainSpec { forced_inclusion: false, ..next.clone() }).unwrap();
+        let plain = configuration_commitment(&ChainSpec {
+            forced_inclusion: false,
+            ..next.clone()
+        })
+        .unwrap();
         // While the owner's recipient is unset these are the rehearsal rules (placeholder recipient, 0.1 gwei
         // floor): tag 4 with the forced bounds, and without forced inclusion 217's rehearsal value.
         if !crate::chainspec::MAINNET_NEXT_RULES_RELEASABLE {
             assert_eq!(forced, crate::chainspec::REHEARSAL_CONFIGURATION_FORCED);
             assert_eq!(plain, crate::chainspec::REHEARSAL_CONFIGURATION_PLAIN);
-            assert_eq!(ChainSpec::mainnet_rules_for(forced), None, "the rehearsal rules are not a mainnet rule set");
+            assert_eq!(
+                ChainSpec::mainnet_rules_for(forced),
+                None,
+                "the rehearsal rules are not a mainnet rule set"
+            );
         } else {
             assert_eq!(ChainSpec::mainnet_rules_for(forced), Some(next));
         }
         assert_ne!(forced, plain);
         // Forced inclusion needs the next rules.
-        assert!(configuration_commitment(&ChainSpec { forced_inclusion: true, ..ChainSpec::mainnet_v1() }).is_err());
+        assert!(configuration_commitment(&ChainSpec {
+            forced_inclusion: true,
+            ..ChainSpec::mainnet_v1()
+        })
+        .is_err());
     }
 }

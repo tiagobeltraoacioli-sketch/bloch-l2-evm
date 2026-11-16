@@ -6,8 +6,8 @@ use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use bloch_l2_evm::forced_inclusion::{
-    check_forced_prefix, push_forced, statement_fields, ForcedInputError, ForcedRecord, ForcedSkip,
-    ForcedTransaction, MAX_GAS, MAX_PER_SETTLEMENT,
+    check_forced_prefix, push_forced, statement_fields, ForcedInputError, ForcedRecord, ForcedSkip, ForcedTransaction,
+    MAX_GAS, MAX_PER_SETTLEMENT,
 };
 use bloch_l2_evm::{
     execute_signed_block, BlockContext, ChainSpec, DepositMint, DepositProvenance, L2State, SignedBlockBuilder,
@@ -106,7 +106,10 @@ fn forced_envelopes_run_first_and_invalid_ones_are_skipped_not_blocking() {
         SignedBlockBuilder::new(&spec, state.db(), root, BlockContext::next(&spec, &state), vec![]).unwrap();
     let queue = queue(&spec);
     let selection = push_forced(&spec, &mut builder, &queue).unwrap();
-    assert_eq!(selection.included, vec![queue[0].envelope.clone(), queue[7].envelope.clone()]);
+    assert_eq!(
+        selection.included,
+        vec![queue[0].envelope.clone(), queue[7].envelope.clone()]
+    );
     let skipped: Vec<usize> = selection.skipped.iter().map(|(i, _)| *i).collect();
     assert_eq!(skipped, vec![1, 2, 3, 4, 5, 6]);
     assert!(matches!(selection.skipped[1].1, ForcedSkip::Authentication(_)));
@@ -116,7 +119,10 @@ fn forced_envelopes_run_first_and_invalid_ones_are_skipped_not_blocking() {
     ));
     assert_eq!(
         selection.skipped[3].1,
-        ForcedSkip::GasAboveDeclared { envelope: 50_000, declared: 21_000 }
+        ForcedSkip::GasAboveDeclared {
+            envelope: 50_000,
+            declared: 21_000
+        }
     );
     assert!(matches!(selection.skipped[0].1, ForcedSkip::Execution(_)));
     assert!(matches!(selection.skipped[4].1, ForcedSkip::Execution(_)));
@@ -162,11 +168,19 @@ fn the_verifier_accepts_exactly_the_forced_prefix() {
         // Only the first one.
         ("partial", vec![queue[0].envelope.clone(), sequencer.clone()], 1),
         // Reordered behind a sequencer transaction.
-        ("behind", vec![sequencer.clone(), queue[0].envelope.clone(), queue[7].envelope.clone()], 0),
+        (
+            "behind",
+            vec![sequencer.clone(), queue[0].envelope.clone(), queue[7].envelope.clone()],
+            0,
+        ),
         // Swapped.
         ("swapped", vec![queue[7].envelope.clone(), queue[0].envelope.clone()], 0),
         // A skipped envelope in place of an included one.
-        ("skipped one", vec![queue[0].envelope.clone(), queue[1].envelope.clone()], 1),
+        (
+            "skipped one",
+            vec![queue[0].envelope.clone(), queue[1].envelope.clone()],
+            1,
+        ),
     ];
     for (name, body, position) in cases {
         assert_eq!(
@@ -197,8 +211,9 @@ fn forced_input_must_match_its_records_and_the_cap() {
         check_forced_prefix(&spec, state.db(), root, context.clone(), vec![], &[empty], &[]),
         Err(ForcedInputError::Envelope { index: 0 })
     );
-    let many: Vec<ForcedTransaction> =
-        (0..=MAX_PER_SETTLEMENT as u64).map(|n| forced(1, transfer(&spec, 3, n), 21_000)).collect();
+    let many: Vec<ForcedTransaction> = (0..=MAX_PER_SETTLEMENT as u64)
+        .map(|n| forced(1, transfer(&spec, 3, n), 21_000))
+        .collect();
     assert_eq!(
         check_forced_prefix(&spec, state.db(), root, context.clone(), vec![], &many, &[]),
         Err(ForcedInputError::TooMany)
@@ -242,11 +257,21 @@ fn forced_envelopes_run_after_the_deposits_of_the_same_block() {
     let body = vec![queue[0].envelope.clone()];
     let context = BlockContext::next(&spec, &state);
     let selection =
-        check_forced_prefix(&spec, state.db(), root, context.clone(), vec![deposit.clone()], &queue, &body).unwrap();
+        check_forced_prefix(&spec, state.db(), root, context.clone(), vec![deposit], &queue, &body).unwrap();
     assert_eq!(selection.included.len(), 1);
     let mut replay = state.clone();
-    let input = SignedBlockInput { context, deposits: vec![deposit], transactions: body };
-    assert_eq!(execute_signed_block(&spec, &mut replay, &input).unwrap().tx_outcomes.len(), 1);
+    let input = SignedBlockInput {
+        context,
+        deposits: vec![deposit],
+        transactions: body,
+    };
+    assert_eq!(
+        execute_signed_block(&spec, &mut replay, &input)
+            .unwrap()
+            .tx_outcomes
+            .len(),
+        1
+    );
     // Without the deposit the same envelope is skipped, not fatal.
     let context = BlockContext::next(&spec, &state);
     let alone = check_forced_prefix(&spec, state.db(), root, context, vec![], &queue, &[]).unwrap();

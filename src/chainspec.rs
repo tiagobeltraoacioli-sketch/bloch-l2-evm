@@ -102,8 +102,7 @@ pub const MAINNET_DOMAIN_TAG: &[u8] = b"BLOCH:L2:MAINNET-DOMAIN:1";
 /// Derived from public values only (no ceremony secret): it binds the L2 to
 /// its chain id and to the L1 network it settles on, and differs from the
 /// development domain `0xd3…d3` and from zero.
-pub const MAINNET_DOMAIN: B256 =
-    B256::new(hex!("1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733"));
+pub const MAINNET_DOMAIN: B256 = B256::new(hex!("1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733"));
 
 /// L2 mainnet genesis timestamp (unix seconds): the Genesis-4 slot-0 time
 /// (`genesis_time_ms / 1000` of `genesis/mainnet.manifest`). A fixed public
@@ -231,7 +230,9 @@ pub struct BlockDerivation {
 impl BlockDerivation {
     /// `max(parent + 1, start of native slot l1_slot)`; `None` on overflow.
     pub fn timestamp(&self, parent_timestamp: u64, l1_slot: u64) -> Option<u64> {
-        let slot_time = self.l1_genesis_time.checked_add(l1_slot.checked_mul(self.l1_slot_millis)? / 1000)?;
+        let slot_time = self
+            .l1_genesis_time
+            .checked_add(l1_slot.checked_mul(self.l1_slot_millis)? / 1000)?;
         Some(parent_timestamp.checked_add(1)?.max(slot_time))
     }
 }
@@ -371,10 +372,16 @@ impl core::fmt::Display for ChainSpecError {
             ChainSpecError::DepositGasAboveGasLimit => write!(f, "deposit_gas must not exceed gas_limit"),
             ChainSpecError::SystemAddressCollision(a) => write!(f, "system address {a} is used twice"),
             ChainSpecError::PartialNextRules => {
-                write!(f, "block derivation and the fee-vault sweep ship together, with the outbox")
+                write!(
+                    f,
+                    "block derivation and the fee-vault sweep ship together, with the outbox"
+                )
             }
             ChainSpecError::BurningSweepRecipient(a) => {
-                write!(f, "fee-vault sweep recipient {a} is the zero address or a precompile: the fees would burn")
+                write!(
+                    f,
+                    "fee-vault sweep recipient {a} is the zero address or a precompile: the fees would burn"
+                )
             }
         }
     }
@@ -492,9 +499,9 @@ impl ChainSpec {
     /// commitment (the field L1 compares with the policy of that moment).
     /// `None` for a commitment that is neither of the two.
     pub fn mainnet_rules_for(configuration: B256) -> Option<Self> {
-        [Self::mainnet_v1(), Self::mainnet()].into_iter().find(|rules| {
-            crate::proof_statement::configuration_commitment(rules).is_ok_and(|c| c == configuration)
-        })
+        [Self::mainnet_v1(), Self::mainnet()]
+            .into_iter()
+            .find(|rules| crate::proof_statement::configuration_commitment(rules).is_ok_and(|c| c == configuration))
     }
 
     /// Check every knob for consistency. The executor calls this before any
@@ -587,7 +594,10 @@ impl ChainSpec {
     /// invalid spec, see [`Self::validate`]) the base fee is left unchanged
     /// rather than dividing by zero.
     pub fn next_base_fee(&self, parent_base_fee: u64, parent_gas_used: u64) -> u64 {
-        core::cmp::max(self.min_base_fee, self.next_base_fee_unfloored(parent_base_fee, parent_gas_used))
+        core::cmp::max(
+            self.min_base_fee,
+            self.next_base_fee_unfloored(parent_base_fee, parent_gas_used),
+        )
     }
 
     /// The EIP-1559 step alone, before [`Self::min_base_fee`].
@@ -619,6 +629,12 @@ impl Default for ChainSpec {
         Self::testnet()
     }
 }
+
+/// REHEARSAL ONLY: [`ChainSpec::mainnet_rehearsal`] without forced inclusion
+/// (tag 3, floor included). Kept at the end of the file so that no line of the
+/// guests' code moves.
+#[rustfmt::skip]
+pub const REHEARSAL_CONFIGURATION_PLAIN: B256 = B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));
 
 #[cfg(test)]
 mod tests {
@@ -748,7 +764,7 @@ mod tests {
         // Genesis-4 clock (manifest genesis_time_ms 1786656679962, slot_ms
         // 30000): wall-clock seconds, after the 2020-01-01 floor.
         assert_eq!(MAINNET_GENESIS_TIMESTAMP, 1_786_656_679_962 / 1000);
-        assert!(MAINNET_GENESIS_TIMESTAMP >= 1_577_836_800);
+        const { assert!(MAINNET_GENESIS_TIMESTAMP >= 1_577_836_800) };
         assert_eq!(GENESIS4_SLOT_MS, 30_000);
     }
 
@@ -789,21 +805,40 @@ mod tests {
         }
         assert_eq!(old, 249, "today's rules: the rounding fixed point of report 34");
         assert_eq!(new, MAINNET_MIN_BASE_FEE, "next rules: the floor");
-        assert_eq!(next.next_base_fee(1, 0), MAINNET_MIN_BASE_FEE, "a parent below the floor is lifted at once");
+        assert_eq!(
+            next.next_base_fee(1, 0),
+            MAINNET_MIN_BASE_FEE,
+            "a parent below the floor is lifted at once"
+        );
         let target = next.gas_target();
-        for (parent, used) in [(1_000_000_000, 0), (1_000_000_000, target), (1_000_000_000, 2 * target), (MAINNET_MIN_BASE_FEE, 2 * target)] {
+        for (parent, used) in [
+            (1_000_000_000, 0),
+            (1_000_000_000, target),
+            (1_000_000_000, 2 * target),
+            (MAINNET_MIN_BASE_FEE, 2 * target),
+        ] {
             let step = v1.next_base_fee(parent, used);
             assert_eq!(next.next_base_fee(parent, used), step.max(MAINNET_MIN_BASE_FEE));
         }
-        assert!(next.next_base_fee(MAINNET_MIN_BASE_FEE, 2 * target) > MAINNET_MIN_BASE_FEE, "congestion still raises it");
+        assert!(
+            next.next_base_fee(MAINNET_MIN_BASE_FEE, 2 * target) > MAINNET_MIN_BASE_FEE,
+            "congestion still raises it"
+        );
     }
 
     #[test]
     fn a_floor_outside_the_next_rules_is_refused_by_the_commitment() {
-        let floored_v1 = ChainSpec { min_base_fee: 1, ..ChainSpec::mainnet_v1() };
+        let floored_v1 = ChainSpec {
+            min_base_fee: 1,
+            ..ChainSpec::mainnet_v1()
+        };
         assert!(crate::proof_statement::configuration_commitment(&floored_v1).is_err());
         let a = crate::proof_statement::configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap();
-        let b = crate::proof_statement::configuration_commitment(&ChainSpec { min_base_fee: 1, ..ChainSpec::mainnet_next_or_rehearsal() }).unwrap();
+        let b = crate::proof_statement::configuration_commitment(&ChainSpec {
+            min_base_fee: 1,
+            ..ChainSpec::mainnet_next_or_rehearsal()
+        })
+        .unwrap();
         assert_ne!(a, b, "the floor is committed");
     }
 
@@ -876,6 +911,7 @@ mod tests {
     /// configuration, `mainnet_next()` is `None`, and the guests' compile-time
     /// gate is false. Once it is set, all three agree the other way.
     #[test]
+    #[allow(clippy::assertions_on_constants)] // one arm is dead by construction; both must compile
     fn gate_the_next_rules_exist_only_with_a_release_recipient() {
         let next = ChainSpec::mainnet();
         let commitment = crate::proof_statement::configuration_commitment(&next);
@@ -889,7 +925,9 @@ mod tests {
             }
             _ => {
                 assert!(!MAINNET_NEXT_RULES_RELEASABLE);
-                assert!(next.fee_vault_sweep.is_none() || !is_release_fee_sweep_recipient(next.fee_vault_sweep.unwrap()));
+                assert!(
+                    next.fee_vault_sweep.is_none() || !is_release_fee_sweep_recipient(next.fee_vault_sweep.unwrap())
+                );
                 assert_eq!(ChainSpec::mainnet_next(), None);
                 assert_eq!(ChainSpec::mainnet_next_or_rehearsal(), ChainSpec::mainnet_rehearsal());
                 if next.fee_vault_sweep.is_none() {
@@ -901,7 +939,13 @@ mod tests {
         // The rehearsal rules are the release rules but for the recipient.
         let rehearsal = ChainSpec::mainnet_rehearsal();
         rehearsal.validate().expect("the rehearsal rules are valid");
-        assert_eq!(ChainSpec { fee_vault_sweep: next.fee_vault_sweep, ..rehearsal.clone() }, next);
+        assert_eq!(
+            ChainSpec {
+                fee_vault_sweep: next.fee_vault_sweep,
+                ..rehearsal.clone()
+            },
+            next
+        );
         assert!(!is_release_fee_sweep_recipient(REHEARSAL_FEE_SWEEP_RECIPIENT));
         // L1 never selects the rehearsal rules from a configuration.
         let rehearsal_configuration = crate::proof_statement::configuration_commitment(&rehearsal).unwrap();
@@ -927,7 +971,10 @@ mod tests {
             BEACON_ROOTS_ADDRESS,
         ];
         for recipient in refused {
-            assert!(!is_release_fee_sweep_recipient(recipient), "{recipient} accepted as a release recipient");
+            assert!(
+                !is_release_fee_sweep_recipient(recipient),
+                "{recipient} accepted as a release recipient"
+            );
         }
         for recipient in [
             Address::with_last_byte(0x0b),
@@ -936,7 +983,12 @@ mod tests {
             Address::repeat_byte(0xff),
         ] {
             assert!(is_release_fee_sweep_recipient(recipient), "{recipient} refused");
-            ChainSpec { fee_vault_sweep: Some(recipient), ..ChainSpec::mainnet_rehearsal() }.validate().unwrap();
+            ChainSpec {
+                fee_vault_sweep: Some(recipient),
+                ..ChainSpec::mainnet_rehearsal()
+            }
+            .validate()
+            .unwrap();
         }
     }
 
@@ -947,7 +999,10 @@ mod tests {
         for last in 0u8..=0x0a {
             let recipient = Address::with_last_byte(last);
             assert!(is_burning_fee_sweep_recipient(recipient));
-            let spec = ChainSpec { fee_vault_sweep: Some(recipient), ..ChainSpec::mainnet_rehearsal() };
+            let spec = ChainSpec {
+                fee_vault_sweep: Some(recipient),
+                ..ChainSpec::mainnet_rehearsal()
+            };
             assert_eq!(spec.validate(), Err(ChainSpecError::BurningSweepRecipient(recipient)));
             assert_eq!(
                 crate::proof_statement::configuration_commitment(&spec),
@@ -955,7 +1010,9 @@ mod tests {
             );
         }
         assert!(!is_burning_fee_sweep_recipient(Address::with_last_byte(0x0b)));
-        assert!(!is_burning_fee_sweep_recipient(address!("0100000000000000000000000000000000000000")));
+        assert!(!is_burning_fee_sweep_recipient(address!(
+            "0100000000000000000000000000000000000000"
+        )));
     }
 
     /// The configuration layout `deployment/mainnet/set-sweep-recipient.py`
@@ -966,7 +1023,8 @@ mod tests {
         // Built with the `forced-inclusion` feature the next rules carry forced inclusion (tag 4, the forced
         // bounds after the floor); the script computes both layouts (fork candidate v3).
         #[cfg(not(feature = "forced-inclusion"))]
-        const REHEARSAL_CONFIGURATION: B256 = B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));
+        const REHEARSAL_CONFIGURATION: B256 =
+            B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));
         #[cfg(feature = "forced-inclusion")]
         const REHEARSAL_CONFIGURATION: B256 = REHEARSAL_CONFIGURATION_FORCED;
         let configuration = |spec: &ChainSpec| crate::proof_statement::configuration_commitment(spec).unwrap();
@@ -976,9 +1034,15 @@ mod tests {
             ..ChainSpec::mainnet_rehearsal()
         };
         #[cfg(not(feature = "forced-inclusion"))]
-        assert_eq!(configuration(&throwaway), B256::new(hex!("7df770a35ce805982f12f552490337a77e842788ed3ab444fe42e35e6b3c1618")));
+        assert_eq!(
+            configuration(&throwaway),
+            B256::new(hex!("7df770a35ce805982f12f552490337a77e842788ed3ab444fe42e35e6b3c1618"))
+        );
         #[cfg(feature = "forced-inclusion")]
-        assert_eq!(configuration(&throwaway), B256::new(hex!("aa153f4ba3a4d1a60809b9701bf3e0ebec0046cbfd6882397442426d2227ae2e")));
+        assert_eq!(
+            configuration(&throwaway),
+            B256::new(hex!("aa153f4ba3a4d1a60809b9701bf3e0ebec0046cbfd6882397442426d2227ae2e"))
+        );
     }
 
     /// Block derivation without the sweep, or either without the outbox, is
@@ -987,17 +1051,20 @@ mod tests {
     fn validate_refuses_partial_next_rules() {
         let next = ChainSpec::mainnet_rehearsal();
         for spec in [
-            ChainSpec { fee_vault_sweep: None, ..next.clone() },
-            ChainSpec { block_derivation: None, ..next.clone() },
-            ChainSpec { withdrawal_outbox: None, ..next.clone() },
+            ChainSpec {
+                fee_vault_sweep: None,
+                ..next.clone()
+            },
+            ChainSpec {
+                block_derivation: None,
+                ..next.clone()
+            },
+            ChainSpec {
+                withdrawal_outbox: None,
+                ..next.clone()
+            },
         ] {
             assert_eq!(spec.validate(), Err(ChainSpecError::PartialNextRules));
         }
     }
 }
-
-/// REHEARSAL ONLY: [`ChainSpec::mainnet_rehearsal`] without forced inclusion
-/// (tag 3, floor included). Kept at the end of the file so that no line of the
-/// guests' code moves.
-#[rustfmt::skip]
-pub const REHEARSAL_CONFIGURATION_PLAIN: B256 = B256::new(hex!("9d06fe0c95e743c08d482e6460831071f7be6288ce0fd8c05a769a0fa8518764"));

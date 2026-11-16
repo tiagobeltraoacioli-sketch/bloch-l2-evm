@@ -200,18 +200,27 @@ fn relocated_copied_and_foreign_nodes_never_give_a_wrong_answer() {
                     }
                 }
                 (Err(_), Err(_)) => refused += 1,
-                (a, b) => panic!("{what}: indexed {:?} and plain {:?} disagree on acceptance", a.is_ok(), b.is_ok()),
+                (a, b) => panic!(
+                    "{what}: indexed {:?} and plain {:?} disagree on acceptance",
+                    a.is_ok(),
+                    b.is_ok()
+                ),
             }
         }
     }
     std::println!("relocation: {views} views answered truly, {refused} refused");
-    assert!(views > 1000 && refused > 1000, "both outcomes must be exercised: {views} {refused}");
+    assert!(
+        views > 1000 && refused > 1000,
+        "both outcomes must be exercised: {views} {refused}"
+    );
 }
 
 #[test]
 fn degenerate_roots_answer_truly_or_refuse() {
     let mut rng = Rng::new(b"review-a degenerate");
-    let probes: Vec<Nibbles> = (0..32).map(|_| Nibbles::from_nibbles_unchecked(nibbles_of(rng.word()))).collect();
+    let probes: Vec<Nibbles> = (0..32)
+        .map(|_| Nibbles::from_nibbles_unchecked(nibbles_of(rng.word())))
+        .collect();
 
     // Empty trie, empty proof: every key is absent.
     let empty = IndexedTrieView::from_proof(alloy_trie::EMPTY_ROOT_HASH, &BTreeMap::new()).unwrap();
@@ -221,7 +230,10 @@ fn degenerate_roots_answer_truly_or_refuse() {
     // Empty trie, the root given as 0x80 plus junk elsewhere: still empty.
     let mut junk = BTreeMap::new();
     junk.insert(Nibbles::default(), Bytes::from_static(&[0x80]));
-    junk.insert(Nibbles::from_nibbles_unchecked([1]), Bytes::from_static(&[0xc2, 0x01, 0x02]));
+    junk.insert(
+        Nibbles::from_nibbles_unchecked([1]),
+        Bytes::from_static(&[0xc2, 0x01, 0x02]),
+    );
     let view = IndexedTrieView::from_proof(alloy_trie::EMPTY_ROOT_HASH, &junk).unwrap();
     assert!(probes.iter().all(|key| matches!(view.lookup(key), Ok(None))));
 
@@ -246,7 +258,10 @@ fn degenerate_roots_answer_truly_or_refuse() {
     let proof = one.proof([key]).unwrap();
     assert_eq!(proof.len(), 1, "a one-leaf trie is its root");
     let view = IndexedTrieView::from_proof(root, &proof).unwrap();
-    assert_eq!(view.lookup(&key).unwrap(), Some(alloy_rlp::encode(U256::from(7)).as_slice()));
+    assert_eq!(
+        view.lookup(&key).unwrap(),
+        Some(alloy_rlp::encode(U256::from(7)).as_slice())
+    );
     let mut neighbour = nibbles_of(B256::ZERO);
     for (index, nibble) in neighbour.iter_mut().enumerate() {
         *nibble = key.get_unchecked(index);
@@ -261,8 +276,14 @@ fn degenerate_roots_answer_truly_or_refuse() {
     // Wrong key lengths refuse, never panic.
     for length in [0usize, 1, 32, 63] {
         let short = Nibbles::from_nibbles_unchecked(&nibbles_of(rng.word())[..length]);
-        assert!(matches!(view.lookup(&short), Err(WitnessError::InvalidKeyLength { .. })));
-        assert!(matches!(empty.lookup(&short), Err(WitnessError::InvalidKeyLength { .. })));
+        assert!(matches!(
+            view.lookup(&short),
+            Err(WitnessError::InvalidKeyLength { .. })
+        ));
+        assert!(matches!(
+            empty.lookup(&short),
+            Err(WitnessError::InvalidKeyLength { .. })
+        ));
     }
 }
 
@@ -294,7 +315,11 @@ fn an_extension_root_proves_absence_only_off_its_path() {
         let mut on_path = 0;
         let mut off_path = 0;
         for attempt in 0..96 {
-            let depth = if attempt % 3 == 0 { shared } else { rng.next(shared as u64 + 1) as usize };
+            let depth = if attempt % 3 == 0 {
+                shared
+            } else {
+                rng.next(shared as u64 + 1) as usize
+            };
             let probe = near(&mut rng, &base, depth);
             let result = view.lookup(&probe);
             if probe.starts_with(&prefix) {
@@ -305,12 +330,18 @@ fn an_extension_root_proves_absence_only_off_its_path() {
                 );
             } else {
                 off_path += 1;
-                assert!(matches!(result, Ok(None)), "shared {shared}: a key off the extension: {result:?}");
+                assert!(
+                    matches!(result, Ok(None)),
+                    "shared {shared}: a key off the extension: {result:?}"
+                );
                 assert!(!truth.contains_key(&probe));
             }
         }
         for key in truth.keys() {
-            assert!(view.lookup(key).is_err(), "shared {shared}: a live key under the opaque branch");
+            assert!(
+                view.lookup(key).is_err(),
+                "shared {shared}: a live key under the opaque branch"
+            );
         }
         assert!(on_path > 0 && off_path > 0, "shared {shared}: {on_path} {off_path}");
     }
@@ -353,14 +384,18 @@ impl World {
             storage.insert(storage_key(slot), alloy_rlp::encode(*word));
         }
         let root = storage.root();
-        self.trie.insert(account_key(&address), account_leaf_with_root(&info, root));
+        self.trie
+            .insert(account_key(&address), account_leaf_with_root(&info, root));
         self.accounts.insert(address, (info, storage));
     }
 
     /// A witness for `present` (with proofs of `slots`) and `absent`.
     fn witness(&mut self, present: &[(Address, Vec<U256>)], absent: &[Address], codes: Vec<Bytes>) -> Built {
         let prev_state_root = self.trie.root();
-        let targets = present.iter().map(|(a, _)| account_key(a)).chain(absent.iter().map(account_key));
+        let targets = present
+            .iter()
+            .map(|(a, _)| account_key(a))
+            .chain(absent.iter().map(account_key));
         let proof = self.trie.proof(targets).unwrap();
         let pre_accounts = present
             .iter()
@@ -408,7 +443,9 @@ fn runtime() -> Bytes {
 fn world(spec: &ChainSpec, number: u64) -> World {
     let mut world = World::new();
     let code_hash = keccak256(runtime());
-    let slots: Vec<(U256, U256)> = (1..=200u64).map(|slot| (U256::from(slot), U256::from(slot * 3))).collect();
+    let slots: Vec<(U256, U256)> = (1..=200u64)
+        .map(|slot| (U256::from(slot), U256::from(slot * 3)))
+        .collect();
     world.put(CONTRACT, info(5, 1, code_hash), &slots);
     world.put(EOA, info(1_000, 4, KECCAK_EMPTY), &[]);
     world.put(STRANGER, info(9, 0, KECCAK_EMPTY), &[]);
@@ -426,9 +463,17 @@ fn the_guest_database_answers_every_read_truly_or_refuses() {
     let number = 1_000u64;
     let mut world = world(&spec, number);
     let exposed: Vec<U256> = vec![U256::from(1), U256::from(77), U256::from(5_000)];
-    let ring_reads: Vec<U256> = vec![block_hash_slot(number - 1), block_hash_slot(number - 256), block_hash_slot(number - 100)];
+    let ring_reads: Vec<U256> = vec![
+        block_hash_slot(number - 1),
+        block_hash_slot(number - 256),
+        block_hash_slot(number - 100),
+    ];
     let built = world.witness(
-        &[(CONTRACT, exposed.clone()), (EOA, vec![]), (spec.block_info, ring_reads)],
+        &[
+            (CONTRACT, exposed.clone()),
+            (EOA, vec![]),
+            (spec.block_info, ring_reads),
+        ],
         &[NOBODY],
         vec![runtime()],
     );
@@ -438,10 +483,16 @@ fn the_guest_database_answers_every_read_truly_or_refuses() {
     // Accounts: hydrated ones as in the trie (without code), absent ones absent,
     // every other address an error, including one that exists in the trie.
     let contract = db.basic_ref(CONTRACT).unwrap().unwrap();
-    assert_eq!((contract.balance, contract.nonce, contract.code_hash), (U256::from(5), 1, keccak256(runtime())));
+    assert_eq!(
+        (contract.balance, contract.nonce, contract.code_hash),
+        (U256::from(5), 1, keccak256(runtime()))
+    );
     assert!(contract.code.is_none());
     assert_eq!(db.basic_ref(NOBODY).unwrap(), None);
-    assert_eq!(db.basic_ref(STRANGER), Err(SparseAccessError::UnwitnessedAccount(STRANGER)));
+    assert_eq!(
+        db.basic_ref(STRANGER),
+        Err(SparseAccessError::UnwitnessedAccount(STRANGER))
+    );
     assert_eq!(
         db.basic_ref(Address::repeat_byte(0x77)),
         Err(SparseAccessError::UnwitnessedAccount(Address::repeat_byte(0x77)))
@@ -463,8 +514,16 @@ fn the_guest_database_answers_every_read_truly_or_refuses() {
         }
     }
     assert!(refused > 150, "most live slots are opaque: {refused}");
-    assert_eq!(db.storage_ref(EOA, U256::from(1)).unwrap(), U256::ZERO, "an account with the empty storage root");
-    assert_eq!(db.storage_ref(NOBODY, U256::from(1)).unwrap(), U256::ZERO, "a proven-absent account");
+    assert_eq!(
+        db.storage_ref(EOA, U256::from(1)).unwrap(),
+        U256::ZERO,
+        "an account with the empty storage root"
+    );
+    assert_eq!(
+        db.storage_ref(NOBODY, U256::from(1)).unwrap(),
+        U256::ZERO,
+        "a proven-absent account"
+    );
     assert_eq!(
         db.storage_ref(STRANGER, U256::from(1)),
         Err(SparseAccessError::UnknownStorageAccount(STRANGER, U256::from(1)))
@@ -474,7 +533,10 @@ fn the_guest_database_answers_every_read_truly_or_refuses() {
     let code = db.code_by_hash_ref(keccak256(runtime())).unwrap();
     assert_eq!(code.original_bytes(), runtime());
     let other = keccak256([0x00]);
-    assert_eq!(db.code_by_hash_ref(other), Err(SparseAccessError::UnwitnessedCode(other)));
+    assert_eq!(
+        db.code_by_hash_ref(other),
+        Err(SparseAccessError::UnwitnessedCode(other))
+    );
 
     // Block hashes: the window is [number - 256, number); inside it, exposed ring
     // slots only.
@@ -483,7 +545,11 @@ fn the_guest_database_answers_every_read_truly_or_refuses() {
     assert_eq!(db.db.block_hash_ref(number - 256).unwrap(), ring(number - 256));
     assert_eq!(db.db.block_hash_ref(number - 100).unwrap(), ring(number - 100));
     for n in [number, number + 1, number - 257, 0, u64::MAX] {
-        assert_eq!(db.db.block_hash_ref(n), Err(SparseAccessError::UnwitnessedBlockHash(n)), "block {n}");
+        assert_eq!(
+            db.db.block_hash_ref(n),
+            Err(SparseAccessError::UnwitnessedBlockHash(n)),
+            "block {n}"
+        );
     }
     let mut ring_refused = 0;
     for n in number - 256..number {
@@ -506,7 +572,11 @@ fn hydration_refuses_every_account_lie() {
     let number = 1_000u64;
     let mut world = world(&spec, number);
     let honest = world
-        .witness(&[(CONTRACT, vec![U256::from(1)]), (EOA, vec![])], &[NOBODY], vec![runtime()])
+        .witness(
+            &[(CONTRACT, vec![U256::from(1)]), (EOA, vec![])],
+            &[NOBODY],
+            vec![runtime()],
+        )
         .witness;
     hydrate_sparse(&spec, &honest, number).unwrap();
     let refuse = |witness: &SparseBatchWitness, what: &str| -> SparseVerifyError {
@@ -521,7 +591,9 @@ fn hydration_refuses_every_account_lie() {
     w.absent_accounts.push(STRANGER);
     let stranger_proof = world.witness(&[], &[STRANGER], vec![]).witness.proof;
     w.proof.extend(stranger_proof);
-    assert!(matches!(refuse(&w, "existing claimed absent"), SparseVerifyError::AccountNotProvenAbsent(a) if a == STRANGER));
+    assert!(
+        matches!(refuse(&w, "existing claimed absent"), SparseVerifyError::AccountNotProvenAbsent(a) if a == STRANGER)
+    );
 
     // An absent address claimed absent with no proof of its path: opaque, refused.
     let mut w = honest.clone();
@@ -535,7 +607,10 @@ fn hydration_refuses_every_account_lie() {
         probe += 1;
     };
     w.absent_accounts.push(hidden);
-    assert!(matches!(refuse(&w, "absent under opaque"), SparseVerifyError::Witness(WitnessError::KeyInOpaqueSubtree { .. })));
+    assert!(matches!(
+        refuse(&w, "absent under opaque"),
+        SparseVerifyError::Witness(WitnessError::KeyInOpaqueSubtree { .. })
+    ));
 
     // A pre-account with one field changed, or listed with another's storage.
     for field in 0..4 {
@@ -550,7 +625,10 @@ fn hydration_refuses_every_account_lie() {
                 account.storage_proof = BTreeMap::new();
             }
         }
-        assert!(matches!(refuse(&w, "changed field"), SparseVerifyError::AccountNotProven(a) if a == CONTRACT), "field {field}");
+        assert!(
+            matches!(refuse(&w, "changed field"), SparseVerifyError::AccountNotProven(a) if a == CONTRACT),
+            "field {field}"
+        );
     }
 
     // The storage root is bound, the storage proof is not: a proof of another trie.
@@ -561,15 +639,29 @@ fn hydration_refuses_every_account_lie() {
         trie.root();
         trie.proof([storage_key(&U256::from(1))]).unwrap()
     };
-    w.pre_accounts.iter_mut().find(|a| a.address == CONTRACT).unwrap().storage_proof = foreign;
-    assert!(matches!(refuse(&w, "foreign storage proof"), SparseVerifyError::Storage(a, WitnessError::RootMismatch { .. }) if a == CONTRACT));
+    w.pre_accounts
+        .iter_mut()
+        .find(|a| a.address == CONTRACT)
+        .unwrap()
+        .storage_proof = foreign;
+    assert!(
+        matches!(refuse(&w, "foreign storage proof"), SparseVerifyError::Storage(a, WitnessError::RootMismatch { .. }) if a == CONTRACT)
+    );
 
     // A pre-account whose leaf is behind an opaque node of the account proof.
     let mut w = honest.clone();
     let path = account_key(&CONTRACT);
-    let deepest = *w.proof.keys().filter(|p| path.starts_with(p) && !p.is_empty()).max_by_key(|p| p.len()).unwrap();
+    let deepest = *w
+        .proof
+        .keys()
+        .filter(|p| path.starts_with(p) && !p.is_empty())
+        .max_by_key(|p| p.len())
+        .unwrap();
     w.proof.remove(&deepest);
-    assert!(matches!(refuse(&w, "leaf behind opaque"), SparseVerifyError::Witness(WitnessError::KeyInOpaqueSubtree { .. })));
+    assert!(matches!(
+        refuse(&w, "leaf behind opaque"),
+        SparseVerifyError::Witness(WitnessError::KeyInOpaqueSubtree { .. })
+    ));
 
     // An address in both lists, and twice in one list.
     let mut w = honest.clone();
@@ -611,7 +703,10 @@ fn hydration_refuses_every_account_lie() {
     assert!(matches!(refuse(&w, "empty code"), SparseVerifyError::InvalidCode(_)));
     let mut w = honest.clone();
     w.codes.push(runtime());
-    assert!(matches!(refuse(&w, "duplicate code"), SparseVerifyError::DuplicateCode(_)));
+    assert!(matches!(
+        refuse(&w, "duplicate code"),
+        SparseVerifyError::DuplicateCode(_)
+    ));
     let mut w = honest.clone();
     w.codes = vec![Bytes::from_static(&[0x60, 0x02, 0x60, 0x00, 0x55, 0x00])];
     let hydrated = hydrate_sparse(&spec, &w, number).unwrap();
@@ -628,7 +723,9 @@ fn hydration_refuses_every_account_lie() {
 fn the_guest_decoder_refuses_malformed_witnesses_without_panicking() {
     let spec = ChainSpec::mainnet_next_or_rehearsal();
     let mut world = world(&spec, 300);
-    let honest = world.witness(&[(CONTRACT, vec![U256::from(1)])], &[NOBODY], vec![runtime()]).witness;
+    let honest = world
+        .witness(&[(CONTRACT, vec![U256::from(1)])], &[NOBODY], vec![runtime()])
+        .witness;
     let json = serde_json::to_value(&honest).unwrap();
     let back: SparseBatchWitness = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(back, honest);
@@ -637,20 +734,33 @@ fn the_guest_decoder_refuses_malformed_witnesses_without_panicking() {
         no_panic(what, || serde_json::from_value::<SparseBatchWitness>(value)).is_err()
     };
     // A path of 65 nibbles, a non-hex path, a path without 0x.
-    for bad in ["0x00000000000000000000000000000000000000000000000000000000000000000", "0xzz", "00"] {
+    for bad in [
+        "0x00000000000000000000000000000000000000000000000000000000000000000",
+        "0xzz",
+        "00",
+    ] {
         let mut value = json.clone();
-        value["proof"].as_object_mut().unwrap().insert(bad.into(), serde_json::Value::String("0x80".into()));
+        value["proof"]
+            .as_object_mut()
+            .unwrap()
+            .insert(bad.into(), serde_json::Value::String("0x80".into()));
         assert!(decode(value, bad), "path {bad} accepted");
     }
     // A node over 1,024 bytes.
     let mut value = json.clone();
     let big = format!("0x{}", "00".repeat(1025));
-    value["proof"].as_object_mut().unwrap().insert("0x1".into(), serde_json::Value::String(big));
+    value["proof"]
+        .as_object_mut()
+        .unwrap()
+        .insert("0x1".into(), serde_json::Value::String(big));
     assert!(decode(value, "big node"));
     // A code over EIP-170.
     let mut value = json.clone();
     let big = format!("0x{}", "00".repeat(24_577));
-    value["codes"].as_array_mut().unwrap().push(serde_json::Value::String(big));
+    value["codes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::Value::String(big));
     assert!(decode(value, "big code"));
 }
 
@@ -690,6 +800,7 @@ fn proof_pairs(proof: &BTreeMap<Nibbles, Bytes>) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+#[allow(clippy::type_complexity)]
 struct WireWitness {
     head: Vec<u8>,
     proof: Vec<(String, Vec<u8>)>,
@@ -752,7 +863,13 @@ impl WireWitness {
 fn the_guest_wire_format_refuses_malformed_witnesses_without_panicking() {
     let spec = ChainSpec::mainnet_next_or_rehearsal();
     let mut world = world(&spec, 300);
-    let honest = world.witness(&[(CONTRACT, vec![U256::from(1), U256::from(2)])], &[NOBODY], vec![runtime()]).witness;
+    let honest = world
+        .witness(
+            &[(CONTRACT, vec![U256::from(1), U256::from(2)])],
+            &[NOBODY],
+            vec![runtime()],
+        )
+        .witness;
     assert!(!honest.pre_accounts.is_empty() && !honest.codes.is_empty());
 
     // The hand-written framing is the guest's framing: byte-identical to bincode's
@@ -778,23 +895,35 @@ fn the_guest_wire_format_refuses_malformed_witnesses_without_panicking() {
     let mut w = WireWitness::of(&honest);
     let first = w.proof[0].clone();
     w.proof.push(first);
-    assert!(refused(&w.encode(), "duplicate path"), "duplicate account proof path accepted");
+    assert!(
+        refused(&w.encode(), "duplicate path"),
+        "duplicate account proof path accepted"
+    );
 
     // Node bytes: 1,024 is the limit, 1,025 is refused (both tries).
     let mut w = WireWitness::of(&honest);
     w.proof.push(("0x1".into(), vec![0u8; 1024]));
-    assert!(no_panic("node at limit", || guest_decode(&w.encode())).is_ok(), "a 1,024-byte node was refused");
+    assert!(
+        no_panic("node at limit", || guest_decode(&w.encode())).is_ok(),
+        "a 1,024-byte node was refused"
+    );
     let mut w = WireWitness::of(&honest);
     w.proof.push(("0x1".into(), vec![0u8; 1025]));
     assert!(refused(&w.encode(), "big node"), "a 1,025-byte node accepted");
     let mut w = WireWitness::of(&honest);
     w.accounts[0].1.push(("0x1".into(), vec![0u8; 1025]));
-    assert!(refused(&w.encode(), "big storage node"), "a 1,025-byte storage node accepted");
+    assert!(
+        refused(&w.encode(), "big storage node"),
+        "a 1,025-byte storage node accepted"
+    );
 
     // Code: EIP-170 is the limit.
     let mut w = WireWitness::of(&honest);
     w.codes.push(vec![0u8; revm::primitives::eip170::MAX_CODE_SIZE]);
-    assert!(no_panic("code at limit", || guest_decode(&w.encode())).is_ok(), "an EIP-170-size code was refused");
+    assert!(
+        no_panic("code at limit", || guest_decode(&w.encode())).is_ok(),
+        "an EIP-170-size code was refused"
+    );
     let mut w = WireWitness::of(&honest);
     w.codes.push(vec![0u8; revm::primitives::eip170::MAX_CODE_SIZE + 1]);
     assert!(refused(&w.encode(), "big code"), "a code over EIP-170 accepted");
@@ -841,7 +970,11 @@ fn the_guest_wire_format_refuses_malformed_witnesses_without_panicking() {
 
     // Every truncation of the honest encoding is refused.
     for cut in 0..typed.len() {
-        assert!(refused(&typed[..cut], "truncation"), "truncation at {cut} of {} accepted", typed.len());
+        assert!(
+            refused(&typed[..cut], "truncation"),
+            "truncation at {cut} of {} accepted",
+            typed.len()
+        );
     }
 
     // Random byte corruption: never a panic. A corrupted witness that still decodes

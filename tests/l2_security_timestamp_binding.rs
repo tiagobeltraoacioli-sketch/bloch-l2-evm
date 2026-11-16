@@ -51,7 +51,10 @@ fn statement_accepts_with(timestamp: u64, prevrandao: B256) -> bool {
         prevrandao,
         anchor_root: B256::repeat_byte(9),
     };
-    let body = NodeBodyV2 { deposits: vec![], transactions: vec![] };
+    let body = NodeBodyV2 {
+        deposits: vec![],
+        transactions: vec![],
+    };
     let (witness, _) = generate_node_batch_witness(&pre, &spec, MAINNET_DOMAIN, &context, &body).unwrap();
     execute_settlement_statement_v3(&spec, MAINNET_DOMAIN, &witness, &context, &body, settlement()).is_ok()
 }

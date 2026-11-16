@@ -122,9 +122,16 @@ pub fn verify_node_batch_forced(
     forced: &[ForcedTransaction],
 ) -> Result<(NodeExecutionOutcome, usize), NodeWitnessError> {
     let hydrated = crate::proving::hydrate_and_verify(witness).map_err(NodeWitnessError::Verify)?;
-    let (db, pending, included) =
-        run_node_block_forced(spec, domain, hydrated.state, witness.prev_state_root, context, body, forced)
-            .map_err(NodeWitnessError::Execution)?;
+    let (db, pending, included) = run_node_block_forced(
+        spec,
+        domain,
+        hydrated.state,
+        witness.prev_state_root,
+        context,
+        body,
+        forced,
+    )
+    .map_err(NodeWitnessError::Execution)?;
     let root = crate::proving::verify_overlay_root(witness, hydrated.pre_leaves, hydrated.view, &db)
         .map_err(NodeWitnessError::Verify)?;
     Ok((pending.finalize(spec, domain, root), included))
@@ -142,9 +149,9 @@ pub fn execute_statement_forced(
 ) -> Result<ExecutionStatement, NodeWitnessError> {
     let (outcome, _) = verify_node_batch_forced(spec, domain, witness, context, body, forced)?;
     let configuration = configuration_commitment(spec).map_err(|error| {
-        NodeWitnessError::Execution(NodeExecutionError::Execution(crate::BlockExecutionError::InvalidChainSpec(
-            error,
-        )))
+        NodeWitnessError::Execution(NodeExecutionError::Execution(
+            crate::BlockExecutionError::InvalidChainSpec(error),
+        ))
     })?;
     Ok(ExecutionStatement {
         configuration,
@@ -251,9 +258,16 @@ pub fn generate_node_batch_witness_forced(
         inner: pre.db(),
         addresses: RefCell::new(BTreeSet::new()),
     };
-    let (mut db, pending, _) =
-        run_node_block_forced(spec, domain, CacheDB::new(&recording), previous_root, context, body, forced)
-            .map_err(NodeWitnessError::Execution)?;
+    let (mut db, pending, _) = run_node_block_forced(
+        spec,
+        domain,
+        CacheDB::new(&recording),
+        previous_root,
+        context,
+        body,
+        forced,
+    )
+    .map_err(NodeWitnessError::Execution)?;
     // Accounts read only by the admissibility probe: load them into the
     // overlay unchanged, so that the witness carries them.
     let probed: Vec<Address> = recording.addresses.borrow().iter().copied().collect();
@@ -266,8 +280,8 @@ pub fn generate_node_batch_witness_forced(
             })?;
         }
     }
-    let witness = crate::proving::witness_from_overlay(pre, previous_root, &db.cache)
-        .map_err(NodeWitnessError::Generate)?;
+    let witness =
+        crate::proving::witness_from_overlay(pre, previous_root, &db.cache).map_err(NodeWitnessError::Generate)?;
     let outcome = pending.finalize(spec, domain, witness.new_state_root);
     let (verified, _) = verify_node_batch_forced(spec, domain, &witness, context, body, forced)?;
     if verified.header != outcome.header

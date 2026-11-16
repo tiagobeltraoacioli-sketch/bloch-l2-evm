@@ -95,7 +95,9 @@ impl Chain {
             .sign_prehash_recoverable(transaction.signature_hash().as_slice())
             .unwrap()
             .into();
-        TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()
+        TxEnvelope::from(transaction.into_signed(signature))
+            .encoded_2718()
+            .into()
     }
 
     fn call(&mut self, to: Address, input: Bytes) -> Bytes {
@@ -136,7 +138,11 @@ impl Chain {
     }
 
     /// Witness, canonical outcome and context for `body` as the next block.
-    fn witness(&self, body: &NodeBodyV2, mode: BlockHashes) -> (SparseBatchWitness, NodeExecutionOutcome, BlockContext) {
+    fn witness(
+        &self,
+        body: &NodeBodyV2,
+        mode: BlockHashes,
+    ) -> (SparseBatchWitness, NodeExecutionOutcome, BlockContext) {
         let context = self.context();
         let (witness, canonical) =
             generate_sparse_node_witness(&self.state, &self.spec, MAINNET_DOMAIN, &context, body, mode)
@@ -181,7 +187,11 @@ fn omit_slot(witness: &mut SparseBatchWitness, address: Address, slot: u64) {
     let key = storage_key(&U256::from(slot));
     let index = account(witness, address);
     let proof = &mut witness.pre_accounts[index].storage_proof;
-    let deepest = proof.keys().filter(|path| key.starts_with(path)).max_by_key(|path| path.len()).copied();
+    let deepest = proof
+        .keys()
+        .filter(|path| key.starts_with(path))
+        .max_by_key(|path| path.len())
+        .copied();
     let deepest = deepest.expect("the slot is covered");
     assert!(!deepest.is_empty(), "the test needs a slot below the root node");
     proof.remove(&deepest);
@@ -192,7 +202,9 @@ fn assert_not_covered(result: Result<NodeExecutionOutcome, SparseNodeError>) {
         Err(SparseNodeError::Execution(error)) => {
             let text = error.to_string();
             assert!(
-                text.contains("UnwitnessedStorage") || text.contains("UnwitnessedBlockHash") || text.contains("not covered"),
+                text.contains("UnwitnessedStorage")
+                    || text.contains("UnwitnessedBlockHash")
+                    || text.contains("not covered"),
                 "unexpected failure: {text}"
             );
         }
@@ -289,7 +301,10 @@ fn an_empty_storage_proof_opens_only_the_empty_root() {
     stripped.pre_accounts[index].storage_proof.clear();
     assert!(matches!(
         chain.verify(&stripped, &context, &body, BlockHashes::Lazy),
-        Err(SparseNodeError::Verify(SparseVerifyError::Storage(_, WitnessError::EmptyProofForNonEmptyRoot { .. })))
+        Err(SparseNodeError::Verify(SparseVerifyError::Storage(
+            _,
+            WitnessError::EmptyProofForNonEmptyRoot { .. }
+        )))
     ));
 
     // The claim "this account has no storage": the account leaf refuses it.
@@ -373,19 +388,32 @@ fn a_forged_slot_value_is_refused_at_every_level_of_the_chain_of_trust() {
     let index = account(&witness, contract);
     let key = storage_key(&U256::from(42));
     let proof = &witness.pre_accounts[index].storage_proof;
-    let leaf_path = *proof.keys().filter(|path| key.starts_with(path)).max_by_key(|p| p.len()).unwrap();
+    let leaf_path = *proof
+        .keys()
+        .filter(|path| key.starts_with(path))
+        .max_by_key(|p| p.len())
+        .unwrap();
     let forged_leaf: Bytes = {
         let rest = key.slice(leaf_path.len()..);
-        alloy_rlp::encode(&alloy_trie::nodes::LeafNode::new(rest, alloy_rlp::encode(U256::from(777)))).into()
+        alloy_rlp::encode(alloy_trie::nodes::LeafNode::new(
+            rest,
+            alloy_rlp::encode(U256::from(777)),
+        ))
+        .into()
     };
     assert_ne!(proof[&leaf_path], forged_leaf, "the honest leaf holds 43");
 
     // 1. The leaf alone: its parent's reference refuses it.
     let mut forged = witness.clone();
-    forged.pre_accounts[index].storage_proof.insert(leaf_path, forged_leaf.clone());
+    forged.pre_accounts[index]
+        .storage_proof
+        .insert(leaf_path, forged_leaf.clone());
     assert!(matches!(
         chain.verify(&forged, &context, &body, BlockHashes::Lazy),
-        Err(SparseNodeError::Verify(SparseVerifyError::Storage(_, WitnessError::UnanchoredNode { .. })))
+        Err(SparseNodeError::Verify(SparseVerifyError::Storage(
+            _,
+            WitnessError::UnanchoredNode { .. }
+        )))
     ));
 
     // 2. A whole valid trie holding the forged value: the account leaf refuses its root.
@@ -407,7 +435,10 @@ fn a_forged_slot_value_is_refused_at_every_level_of_the_chain_of_trust() {
     forged.pre_accounts[index].storage_proof = witness.pre_accounts[info_index].storage_proof.clone();
     assert!(matches!(
         chain.verify(&forged, &context, &body, BlockHashes::Lazy),
-        Err(SparseNodeError::Verify(SparseVerifyError::Storage(_, WitnessError::RootMismatch { .. })))
+        Err(SparseNodeError::Verify(SparseVerifyError::Storage(
+            _,
+            WitnessError::RootMismatch { .. }
+        )))
     ));
 
     // 4. The account fields, and a wrong prev_state_root with an honest proof.
@@ -427,7 +458,9 @@ fn a_forged_slot_value_is_refused_at_every_level_of_the_chain_of_trust() {
     forged.prev_state_root = B256::repeat_byte(0x42);
     assert!(matches!(
         chain.verify(&forged, &context, &body, BlockHashes::Lazy),
-        Err(SparseNodeError::Verify(SparseVerifyError::Witness(WitnessError::RootMismatch { .. })))
+        Err(SparseNodeError::Verify(SparseVerifyError::Witness(
+            WitnessError::RootMismatch { .. }
+        )))
     ));
 
     // 5. A wrong claim about the result.
@@ -547,10 +580,15 @@ fn a_blind_write_under_an_opaque_subtree_is_an_error_even_when_it_is_zero() {
             pre_leaves,
             pre_storage_roots,
         } = hydrated;
-        state.insert_account_storage(contract, U256::from(hidden), value).unwrap();
+        state
+            .insert_account_storage(contract, U256::from(hidden), value)
+            .unwrap();
         let result = derive_post_root(&witness, &account_view, &pre_leaves, &pre_storage_roots, &state);
         assert!(
-            matches!(result, Err(SparseVerifyError::Slot(SparseAccessError::UnwitnessedStorage(..)))),
+            matches!(
+                result,
+                Err(SparseVerifyError::Slot(SparseAccessError::UnwitnessedStorage(..)))
+            ),
             "write of {value} under an opaque subtree: {result:?}"
         );
     }
@@ -575,7 +613,10 @@ fn a_deletion_that_needs_an_opaque_sibling_is_an_error() {
     assert!(stripped.pre_accounts[index].storage_proof.len() < before);
     assert!(matches!(
         chain.verify(&stripped, &context, &body, BlockHashes::Lazy),
-        Err(SparseNodeError::Verify(SparseVerifyError::Storage(_, WitnessError::OpaqueChildNeedsExpansion { .. })))
+        Err(SparseNodeError::Verify(SparseVerifyError::Storage(
+            _,
+            WitnessError::OpaqueChildNeedsExpansion { .. }
+        )))
     ));
 }
 
@@ -585,7 +626,13 @@ fn a_deletion_that_needs_an_opaque_sibling_is_an_error() {
 #[test]
 fn a_malformed_or_zero_leaf_is_not_a_value() {
     let good = U256::from(9);
-    for bad in [vec![0x80u8], vec![0x82, 0x00, 0x01], vec![0xc0], vec![0x09, 0x09], Vec::new()] {
+    for bad in [
+        vec![0x80u8],
+        vec![0x82, 0x00, 0x01],
+        vec![0xc0],
+        vec![0x09, 0x09],
+        Vec::new(),
+    ] {
         let mut trie = Mpt::new();
         let key = storage_key(&U256::from(1));
         trie.insert(key, bad.clone());
@@ -724,12 +771,18 @@ fn no_single_node_removed_or_corrupted_changes_the_outcome() {
             for path in account.storage_proof.keys() {
                 let mut forged = witness.clone();
                 forged.pre_accounts[index].storage_proof.remove(path);
-                check(&forged, format!("removing storage node {path:?} of {}", account.address));
+                check(
+                    &forged,
+                    format!("removing storage node {path:?} of {}", account.address),
+                );
                 let mut forged = witness.clone();
                 let mut node = forged.pre_accounts[index].storage_proof[path].to_vec();
                 node[0] ^= 1;
                 forged.pre_accounts[index].storage_proof.insert(*path, node.into());
-                check(&forged, format!("corrupting first byte {path:?} of {}", account.address));
+                check(
+                    &forged,
+                    format!("corrupting first byte {path:?} of {}", account.address),
+                );
                 let mut forged = witness.clone();
                 let mut node = forged.pre_accounts[index].storage_proof[path].to_vec();
                 let last = node.len() - 1;
@@ -765,7 +818,9 @@ fn extra_unreachable_nodes_change_nothing() {
     let mut padded = witness.clone();
     // Nothing hash-links this node, so a walk never reaches it.
     let path = Nibbles::from_nibbles([0xf; 40]);
-    padded.pre_accounts[index].storage_proof.insert(path, vec![0xc0; 40].into());
+    padded.pre_accounts[index]
+        .storage_proof
+        .insert(path, vec![0xc0; 40].into());
     let outcome = chain.verify(&padded, &context, &body, BlockHashes::Lazy).unwrap();
     assert_eq!(outcome.header, canonical.header);
 }
@@ -775,7 +830,11 @@ fn extra_unreachable_nodes_change_nothing() {
 /// itself fails on any difference from the canonical outcome.
 #[test]
 fn random_blocks_match_the_canonical_path() {
-    for (seed, spec) in [(1u8, ChainSpec::mainnet_next_or_rehearsal()), (2, ChainSpec::mainnet_v1()), (3, ChainSpec::mainnet_next_or_rehearsal())] {
+    for (seed, spec) in [
+        (1u8, ChainSpec::mainnet_next_or_rehearsal()),
+        (2, ChainSpec::mainnet_v1()),
+        (3, ChainSpec::mainnet_next_or_rehearsal()),
+    ] {
         let mut chain = Chain::new(spec);
         let contract = chain.deploy(&storage_ops_runtime());
         let catcher = chain.deploy(&catcher_runtime(contract));
@@ -791,7 +850,7 @@ fn random_blocks_match_the_canonical_path() {
                 let start = next(400);
                 let count = 1 + next(40);
                 let tx = match next(9) {
-                    0 | 1 | 2 => chain.call(contract, ops(OP_WRITE, start, count)),
+                    0..=2 => chain.call(contract, ops(OP_WRITE, start, count)),
                     3 => chain.call(contract, ops(OP_READ, start, count)),
                     4 => chain.call(contract, ops(OP_UPDATE, start, count)),
                     5 | 6 => chain.call(contract, ops(OP_ZERO, start, count)),
@@ -853,7 +912,12 @@ fn created_and_destroyed_accounts_match_the_canonical_path() {
     // Keep a value on the address the destroyed one was funded from.
     let a = chain.tx(TxKind::Create, U256::from(3u64), plain.into(), 500_000);
     let b = chain.tx(TxKind::Create, U256::from(3u64), destroyed.into(), 500_000);
-    let c = chain.tx(TxKind::Call(Address::repeat_byte(0x77)), U256::from(1u64), Bytes::new(), 21_000);
+    let c = chain.tx(
+        TxKind::Call(Address::repeat_byte(0x77)),
+        U256::from(1u64),
+        Bytes::new(),
+        21_000,
+    );
     let body = chain.body(vec![a, b, c]);
     let (witness, canonical, context) = chain.witness(&body, BlockHashes::Lazy);
     assert!(canonical.transactions.iter().all(|tx| tx.success));
@@ -962,9 +1026,16 @@ fn the_statement_is_byte_identical_to_the_complete_witness() {
             execute_settlement_statement_v3(&spec, MAINNET_DOMAIN, &complete, &context, &body, settlement).unwrap();
         for mode in [BlockHashes::Eager, BlockHashes::Lazy] {
             let (sparse, _, _) = chain.witness(&body, mode);
-            let got =
-                execute_settlement_statement_v3_sparse(&spec, MAINNET_DOMAIN, &sparse, &context, &body, settlement, mode)
-                    .unwrap();
+            let got = execute_settlement_statement_v3_sparse(
+                &spec,
+                MAINNET_DOMAIN,
+                &sparse,
+                &context,
+                &body,
+                settlement,
+                mode,
+            )
+            .unwrap();
             assert_eq!(got.encode(), expected.encode(), "{mode:?}");
         }
     }
@@ -991,8 +1062,13 @@ mod forced {
             max_priority_fee_per_gas: 0,
             ..Default::default()
         };
-        let signature: Signature = key.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
-        TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into()
+        let signature: Signature = key
+            .sign_prehash_recoverable(transaction.signature_hash().as_slice())
+            .unwrap()
+            .into();
+        TxEnvelope::from(transaction.into_signed(signature))
+            .encoded_2718()
+            .into()
     }
 
     fn record(height: u64, envelope: Bytes, declared: u64) -> ForcedTransaction {
@@ -1038,7 +1114,12 @@ mod forced {
         assert!(chain.spec.forced_inclusion);
         let censored = key(0x33);
         let censored_address = Address::from_public_key(censored.verifying_key());
-        let fund = chain.tx(TxKind::Call(censored_address), U256::from(10u128.pow(18)), Bytes::new(), 21_000);
+        let fund = chain.tx(
+            TxKind::Call(censored_address),
+            U256::from(10u128.pow(18)),
+            Bytes::new(),
+            21_000,
+        );
         let body = chain.body(vec![fund]);
         assert!(chain.commit(&body).transactions[0].success);
         let unfunded_key = key(0x44);
@@ -1059,12 +1140,26 @@ mod forced {
             // Valid after the first.
             record(12, signed(&spec, &censored, 1, to, 21_000), 21_000),
         ];
-        Fixture { chain, censored, unfunded, queue }
+        Fixture {
+            chain,
+            censored,
+            unfunded,
+            queue,
+        }
     }
 
     fn honest_body(f: &mut Fixture) -> NodeBodyV2 {
-        let sequencer = f.chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), Bytes::new(), 21_000);
-        f.chain.body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone(), sequencer])
+        let sequencer = f.chain.tx(
+            TxKind::Call(Address::repeat_byte(0x66)),
+            U256::from(5u64),
+            Bytes::new(),
+            21_000,
+        );
+        f.chain.body(vec![
+            f.queue[0].envelope.clone(),
+            f.queue[5].envelope.clone(),
+            sequencer,
+        ])
     }
 
     #[test]
@@ -1073,7 +1168,13 @@ mod forced {
         let body = honest_body(&mut f);
         let context = f.chain.context();
         let (witness, canonical) = generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &f.queue,
         )
         .expect("an honest forced block generates and self-verifies");
         assert_eq!(witness.forced, f.queue);
@@ -1082,7 +1183,12 @@ mod forced {
         let censored = Address::from_public_key(f.censored.verifying_key());
         assert!(witness.pre_accounts.iter().any(|a| a.address == censored));
         let (outcome, included) = verify_node_batch_sparse_forced(
-            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &witness,
+            &context,
+            &body,
+            BlockHashes::Lazy,
         )
         .unwrap();
         assert_eq!(included, 2);
@@ -1090,10 +1196,21 @@ mod forced {
         assert!(outcome.transactions.iter().all(|t| t.success));
         // The complete path executes the same body to the same header.
         let mut full = f.chain.state.clone();
-        assert_eq!(execute_node_block(&f.chain.spec, MAINNET_DOMAIN, &mut full, &context, &body).unwrap().header, canonical.header);
+        assert_eq!(
+            execute_node_block(&f.chain.spec, MAINNET_DOMAIN, &mut full, &context, &body)
+                .unwrap()
+                .header,
+            canonical.header
+        );
 
         let statement = execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &witness,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .unwrap();
         let records: Vec<ForcedRecord> = f.queue.iter().map(|q| q.record).collect();
@@ -1103,7 +1220,8 @@ mod forced {
         assert_eq!(statement.user_tx_count, 1, "only the sequencer's transaction counts");
         assert_eq!(
             statement.da_commitment,
-            crate::data_availability::block_da_commitment(context_chain(&f), context.number, &body.transactions[2..]).unwrap()
+            crate::data_availability::block_da_commitment(context_chain(&f), context.number, &body.transactions[2..])
+                .unwrap()
         );
         assert_eq!(
             configuration_commitment(&f.chain.spec).unwrap(),
@@ -1132,24 +1250,61 @@ mod forced {
             vec![f.queue[5].envelope.clone(), sequencer.clone()],
             vec![sequencer.clone()],
             // Swapped.
-            vec![f.queue[5].envelope.clone(), f.queue[0].envelope.clone(), sequencer.clone()],
+            vec![
+                f.queue[5].envelope.clone(),
+                f.queue[0].envelope.clone(),
+                sequencer.clone(),
+            ],
             // Behind a sequencer transaction.
-            vec![sequencer.clone(), f.queue[0].envelope.clone(), f.queue[5].envelope.clone()],
+            vec![
+                sequencer.clone(),
+                f.queue[0].envelope.clone(),
+                f.queue[5].envelope.clone(),
+            ],
         ];
         for transactions in bodies {
-            let body = NodeBodyV2 { deposits: honest.deposits.clone(), transactions };
+            let body = NodeBodyV2 {
+                deposits: honest.deposits.clone(),
+                transactions,
+            };
             let result = generate_sparse_node_witness_forced(
-                &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+                &f.chain.state,
+                &f.chain.spec,
+                MAINNET_DOMAIN,
+                &context,
+                &body,
+                BlockHashes::Lazy,
+                &f.queue,
             );
-            assert!(result.is_err(), "a body without the exact forced prefix must not generate");
+            assert!(
+                result.is_err(),
+                "a body without the exact forced prefix must not generate"
+            );
         }
         // The honest witness against a body that drops the forced prefix.
         let (witness, _) = generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &honest, BlockHashes::Lazy, &f.queue,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &honest,
+            BlockHashes::Lazy,
+            &f.queue,
         )
         .unwrap();
-        let dropped = NodeBodyV2 { deposits: honest.deposits.clone(), transactions: vec![sequencer] };
-        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &witness, &context, &dropped, BlockHashes::Lazy).is_err());
+        let dropped = NodeBodyV2 {
+            deposits: honest.deposits.clone(),
+            transactions: vec![sequencer],
+        };
+        assert!(verify_node_batch_sparse_forced(
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &witness,
+            &context,
+            &dropped,
+            BlockHashes::Lazy
+        )
+        .is_err());
     }
 
     #[test]
@@ -1158,20 +1313,53 @@ mod forced {
         let body = honest_body(&mut f);
         let context = f.chain.context();
         let (witness, _) = generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &f.queue,
         )
         .unwrap();
         // Remove the unfunded (skipped) sender's absence proof: a database error, never a skip.
         let mut missing = witness.clone();
         missing.absent_accounts.retain(|a| *a != f.unfunded);
-        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy).is_err());
+        assert!(verify_node_batch_sparse_forced(
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &missing,
+            &context,
+            &body,
+            BlockHashes::Lazy
+        )
+        .is_err());
         // Remove the censored (included) sender: the forced transaction cannot be skipped instead.
         let censored = Address::from_public_key(f.censored.verifying_key());
         let mut missing = witness.clone();
         missing.pre_accounts.retain(|a| a.address != censored);
-        let without_forced = NodeBodyV2 { deposits: body.deposits.clone(), transactions: vec![body.transactions[2].clone()] };
-        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &without_forced, BlockHashes::Lazy).is_err());
-        assert!(verify_node_batch_sparse_forced(&f.chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy).is_err());
+        let without_forced = NodeBodyV2 {
+            deposits: body.deposits.clone(),
+            transactions: vec![body.transactions[2].clone()],
+        };
+        assert!(verify_node_batch_sparse_forced(
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &missing,
+            &context,
+            &without_forced,
+            BlockHashes::Lazy
+        )
+        .is_err());
+        assert!(verify_node_batch_sparse_forced(
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &missing,
+            &context,
+            &body,
+            BlockHashes::Lazy
+        )
+        .is_err());
     }
 
     #[test]
@@ -1180,18 +1368,36 @@ mod forced {
         let body = honest_body(&mut f);
         let context = f.chain.context();
         let (witness, _) = generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &f.queue,
         )
         .unwrap();
         let honest = execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &witness,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .unwrap();
         // Dropping a skipped record: still executes, but the slot no longer matches L1's queue.
         let mut fewer = witness.clone();
         fewer.forced.remove(3);
         let statement = execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &fewer, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &fewer,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .unwrap();
         assert_ne!(statement.deposits_hash, honest.deposits_hash);
@@ -1199,7 +1405,13 @@ mod forced {
         let mut none = witness.clone();
         none.forced.clear();
         let statement = execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &none, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &none,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .unwrap();
         assert_eq!(statement.deposits_hash, body.deposits_hash());
@@ -1208,7 +1420,13 @@ mod forced {
         let mut swapped = witness.clone();
         swapped.forced[1].envelope = swapped.forced[5].envelope.clone();
         assert!(execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &swapped, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &swapped,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .is_err());
         // More than the per-settlement bounds.
@@ -1217,7 +1435,13 @@ mod forced {
             many.forced.push(many.forced[2].clone());
         }
         assert!(execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &many, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &many,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .is_err());
     }
@@ -1226,17 +1450,34 @@ mod forced {
     fn forced_records_are_refused_under_rules_without_forced_inclusion() {
         let mut chain = Chain::new(ChainSpec::mainnet_v1());
         assert!(!chain.spec.forced_inclusion);
-        let tx = chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), Bytes::new(), 21_000);
+        let tx = chain.tx(
+            TxKind::Call(Address::repeat_byte(0x66)),
+            U256::from(5u64),
+            Bytes::new(),
+            21_000,
+        );
         let body = chain.body(vec![tx.clone()]);
         let context = chain.context();
         let queue = vec![record(3, tx, 21_000)];
         assert!(generate_sparse_node_witness_forced(
-            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &queue,
+            &chain.state,
+            &chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &queue,
         )
         .is_err());
         // And with none, the block is exactly the 115 path: an empty list in the witness.
         let (witness, _) = generate_sparse_node_witness_forced(
-            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &[],
+            &chain.state,
+            &chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &[],
         )
         .unwrap();
         assert!(witness.forced.is_empty());
@@ -1245,14 +1486,28 @@ mod forced {
     #[test]
     fn a_forced_only_block_has_no_user_transactions_and_no_da() {
         let mut f = fixture();
-        let body = f.chain.body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
+        let body = f
+            .chain
+            .body(vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
         let context = f.chain.context();
         let (witness, _) = generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &f.queue,
         )
         .unwrap();
         let statement = execute_settlement_statement_v3_sparse(
-            &f.chain.spec, MAINNET_DOMAIN, &witness, &context, &body, settlement(1), BlockHashes::Lazy,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &witness,
+            &context,
+            &body,
+            settlement(1),
+            BlockHashes::Lazy,
         )
         .unwrap();
         assert_eq!(statement.user_tx_count, 0);
@@ -1264,7 +1519,12 @@ mod forced {
         let mut f = fixture();
         let context = f.chain.context();
         let deposits = vec![f.chain.deposit()];
-        let sequencer = f.chain.tx(TxKind::Call(Address::repeat_byte(0x66)), U256::from(5u64), Bytes::new(), 21_000);
+        let sequencer = f.chain.tx(
+            TxKind::Call(Address::repeat_byte(0x66)),
+            U256::from(5u64),
+            Bytes::new(),
+            21_000,
+        );
         // The censored user's own pool transaction duplicates its forced one: dropped there.
         let candidates = vec![f.queue[0].envelope.clone(), sequencer.clone()];
         let (forced, selection) = crate::node_execution::select::select_node_transactions_after_forced(
@@ -1279,15 +1539,27 @@ mod forced {
             crate::node_execution::select::SelectionLimits::protocol(&f.chain.spec),
         )
         .unwrap();
-        assert_eq!(forced.included, vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]);
-        assert_eq!(forced.skipped.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            forced.included,
+            vec![f.queue[0].envelope.clone(), f.queue[5].envelope.clone()]
+        );
+        assert_eq!(
+            forced.skipped.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
         assert_eq!(selection.transactions, vec![sequencer]);
         let body = NodeBodyV2 {
             deposits,
             transactions: forced.included.iter().chain(&selection.transactions).cloned().collect(),
         };
         generate_sparse_node_witness_forced(
-            &f.chain.state, &f.chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &f.queue,
+            &f.chain.state,
+            &f.chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &f.queue,
         )
         .expect("the producer's body is the one the verifier accepts");
     }
@@ -1302,7 +1574,12 @@ mod forced_funded_skip {
         let mut chain = Chain::new(ChainSpec::mainnet_next_or_rehearsal());
         let other = SigningKey::from_bytes((&[0x77u8; 32]).into()).unwrap();
         let other_address = Address::from_public_key(other.verifying_key());
-        let fund = chain.tx(TxKind::Call(other_address), U256::from(10u128.pow(18)), Bytes::new(), 21_000);
+        let fund = chain.tx(
+            TxKind::Call(other_address),
+            U256::from(10u128.pow(18)),
+            Bytes::new(),
+            21_000,
+        );
         let body = chain.body(vec![fund]);
         assert!(chain.commit(&body).transactions[0].success);
         // A nonce gap: skipped, but its sender's account decides it.
@@ -1315,22 +1592,52 @@ mod forced_funded_skip {
             max_fee_per_gas: 200_000_000_000,
             ..Default::default()
         };
-        let signature: Signature = other.sign_prehash_recoverable(transaction.signature_hash().as_slice()).unwrap().into();
-        let envelope: Bytes = TxEnvelope::from(transaction.into_signed(signature)).encoded_2718().into();
+        let signature: Signature = other
+            .sign_prehash_recoverable(transaction.signature_hash().as_slice())
+            .unwrap()
+            .into();
+        let envelope: Bytes = TxEnvelope::from(transaction.into_signed(signature))
+            .encoded_2718()
+            .into();
         let forced = vec![ForcedTransaction {
-            record: ForcedRecord { l1_height: 5, l1_txid: [5; 32], envelope_hash: keccak256(&envelope), gas_limit: 21_000 },
+            record: ForcedRecord {
+                l1_height: 5,
+                l1_txid: [5; 32],
+                envelope_hash: keccak256(&envelope),
+                gas_limit: 21_000,
+            },
             envelope,
         }];
         let body = chain.body(vec![]);
         let context = chain.context();
         let (witness, _) = generate_sparse_node_witness_forced(
-            &chain.state, &chain.spec, MAINNET_DOMAIN, &context, &body, BlockHashes::Lazy, &forced,
+            &chain.state,
+            &chain.spec,
+            MAINNET_DOMAIN,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+            &forced,
         )
         .unwrap();
-        assert!(witness.pre_accounts.iter().any(|a| a.address == other_address), "the skipped sender is witnessed");
+        assert!(
+            witness.pre_accounts.iter().any(|a| a.address == other_address),
+            "the skipped sender is witnessed"
+        );
         let mut missing = witness.clone();
         missing.pre_accounts.retain(|a| a.address != other_address);
-        let result = verify_node_batch_sparse_forced(&chain.spec, MAINNET_DOMAIN, &missing, &context, &body, BlockHashes::Lazy);
-        assert!(result.is_err(), "accepted: {:?}", result.map(|(o, n)| (o.header.state_root, n)));
+        let result = verify_node_batch_sparse_forced(
+            &chain.spec,
+            MAINNET_DOMAIN,
+            &missing,
+            &context,
+            &body,
+            BlockHashes::Lazy,
+        );
+        assert!(
+            result.is_err(),
+            "accepted: {:?}",
+            result.map(|(o, n)| (o.header.state_root, n))
+        );
     }
 }

@@ -125,10 +125,10 @@ pub mod proving;
 pub mod scale;
 #[cfg(feature = "serde")]
 pub mod serde_bounded;
-pub mod state;
-pub mod stateroot;
 #[cfg(feature = "sparse-witness")]
 pub mod sparse_witness;
+pub mod state;
+pub mod stateroot;
 pub mod stubs;
 pub mod transactions;
 pub mod withdrawal;
