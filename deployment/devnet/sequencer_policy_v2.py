@@ -493,10 +493,17 @@ class Policy:
             order.append(queues[sender].pop(0)[1]['hash'])
         return order
 
-    def _capped(self, order, info, plan):
+    def _capped(self, order, info, plan, now=None):
         """Apply `max_block_txs` to the try order. The last `tip_reserved_txs` places go to the highest tips among
         everything behind the first cut, whatever the group, and are tried last in try order (agents/264 F264-5).
-        A sender's later nonce never takes a place its earlier nonce lost."""
+        A sender's later nonce never takes a place its earlier nonce lost.
+
+        With the producer's write price those places are the block's reserve for senders without credit (the
+        producer keeps one eighth of the places for them, but it only sees what this cut leaves: agent 317
+        F317-3, a full block of covered senders at a higher tip left no newcomer in). So among everything behind
+        the first cut they go first to the plain transfers of senders whose credit does not cover them, by tip;
+        then to their other transactions, by tip (what is here already passed the producer's selection, so it
+        pays); then to covered senders by tip, so places newcomers do not use are sold as before."""
         cap = int(self.c['max_block_txs'])
         if len(order) <= cap:
             return order
@@ -504,7 +511,17 @@ class Policy:
         head, rest = order[:cap - reserve], order[cap - reserve:]
         position = {name: index for index, name in enumerate(rest)}
         taken, cut = [], set()
-        for name in sorted(rest, key=lambda h: (-int(info[h]['effective_tip']), position[h])):
+        credits = self.credits(self.clock() if now is None else now) if self.c.get('producer_write_price') and self.c.get('reserve_divisor') else None
+
+        def group(name):
+            if credits is None:
+                return 0
+            tx = info[name]
+            gas, tip = int(tx['gas_used']), max(int(tx['effective_tip']), 1)
+            if tx['sender'] in set(self.c['write_limit_exempt_senders']) or credits.get(tx['sender'], 0) >= gas * tip:
+                return 2
+            return 0 if gas == 21_000 else 1
+        for name in sorted(rest, key=lambda h: (group(h), -int(info[h]['effective_tip']), position[h])):
             sender = info[name]['sender']
             earlier = [h for h in rest[:position[name]] if info[h]['sender'] == sender]
             if len(taken) < reserve and sender not in cut and all(h in taken for h in earlier):
@@ -591,7 +608,7 @@ class Policy:
         # `dry` runs without the block's transaction cap, so that the producer's tip order cannot push a sender with
         # standing out of the candidates before the tiers apply; the cap applies here, to the try order.
         large = self.large_gas(now)  # this block's threshold: also lowered by runs without cost, which persist nothing
-        remaining = self._capped(self.try_order(stats, now, large), info, plan)
+        remaining = self._capped(self.try_order(stats, now, large), info, plan, now)
         best = []
         degraded = False
         while remaining and not out_of_work():

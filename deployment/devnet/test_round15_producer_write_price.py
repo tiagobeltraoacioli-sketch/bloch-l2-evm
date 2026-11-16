@@ -222,6 +222,33 @@ class CreditAndOwnDoing(PricedWorld):
         self.assertEqual(again.waiting_senders(self.now), {'mallory'})
 
 
+class ReserveHoldsOnAFullBlock(PricedWorld):
+    """Agent 317 F317-3 (real stack, block 9): 128 plain transfers of eight senders with credit at 1.2 gwei and ten
+    plain transfers of fresh keys at 0.2 to 1.1 gwei: the planner cut to 64 by tip before the producer's reserve
+    saw anything, so 64 covered and no newcomer. Now the reserved places go to senders without credit first."""
+
+    def test_newcomers_below_the_covered_tip_get_the_reserved_places_of_a_full_block(self):
+        for sender in range(8):
+            self.policy.state['credit'][f'rich{sender}'] = {'wei': 10**18, 'at': self.now}
+            for nonce in range(16):
+                self.add(f'r{sender}-{nonce}', f'rich{sender}', nonce, 21_000, 1, tip=12 * GWEI // 10)
+        for i in range(10):
+            self.add(f'new{i}', f'fresh{i}', 0, 21_000, 1, tip=(2 + i) * GWEI // 10)
+        served = self.block(advance=0)
+        self.assertEqual(len(served), 64)
+        newcomers = sorted(n for n in served if n.startswith('new'))
+        self.assertEqual(newcomers, sorted(f'new{i}' for i in range(2, 10)), 'the eight best bids among the newcomers')
+        self.assertEqual(sum(n.startswith('r') for n in served), 56)
+
+    def test_without_newcomers_every_place_goes_by_tip_as_before(self):
+        for sender in range(8):
+            self.policy.state['credit'][f'rich{sender}'] = {'wei': 10**18, 'at': self.now}
+            for nonce in range(16):
+                self.add(f'r{sender}-{nonce}', f'rich{sender}', nonce, 21_000, 1, tip=(12 + sender) * GWEI // 10)
+        served = self.block(advance=0)
+        self.assertEqual(len(served), 64)
+
+
 class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
     """The settler passes the policy's credit ledger, its waiting senders and its gas cap to the producer."""
 
