@@ -92,6 +92,12 @@ Consequences:
     `prover-profile.json`, for blocks built without the policy too), the event is `prover-oom` (a warning of the
     monitor, critical when it repeats), and after `prove_oom_max_attempts` (3) kills at the safest settings the
     worker halts: the block needs a larger prover or the stuck-block procedure.
+  - A proof that fails in any other way is bounded too (review R308-7P-2: the Gnark container killed inside
+    Docker's memory accounting, a prover error, a timeout). Every failed proof of a block that took at least
+    `prove_failed_min_seconds` (60) is counted in the block's `prove-failures.json`, whatever the exit code, and
+    at `prove_failed_max_attempts` (5; 0 turns the bound off) the worker halts. A failure that cost no proving
+    (the remote prover not reachable, a local proof refused for its size) stays with the ordinary retry. After
+    the halt each restart buys one more attempt; removing the file starts the count again.
 - Cost of the lower budget: full blocks prove in 1,000-1,750 s with 2c, so about 50-86 full blocks a day (3,200-5,500
   swaps a day), as agent 113 measured. Small blocks keep the fast profile, about 220 a day.
 
@@ -514,7 +520,10 @@ allowance is bought with fees really paid and is used up by waste.**
   `tip_reserved_txs` (8) places of that cut therefore go first to the plain transfers of senders whose credit does
   not cover them, by tip; then to their other transactions; then to covered senders by tip. On the real producer:
   128 plain transfers of eight senders with credit and ten of fresh keys give a block of 56 and 8 (before: 64 and
-  0).
+  0). "Covered" is the producer's rule here too: credit of at least the declared gas LIMIT times the tip. The
+  producer's report carries the gas used only, so the planner reads the limit from the signed bytes (review
+  R308-7P-3: with the gas used, a sender whose credit lay between the two was covered for the planner, uncovered
+  for the producer, and lost the reserved places).
 - *Rebuilds (R308-5P-2).* The order depends on the settler's ledger and seed, so a second party cannot re-select
   a block from its transactions alone. `extend --as-given yes --txs LIST` builds exactly a list in its order;
   the shadow producer rebuilds the settler's block that way from the DA batch, so the block check depends on no

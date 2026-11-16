@@ -87,7 +87,7 @@ REMOTE_PROVER_SHA256 = '40f954601a94d9ce2f237af37211cbba1c3e0e0c0a4944cc2ad40714
 # its output is only as honest as the binary. CANDIDATE: the December host (features source-settlement,
 # node-artifact,sparse-witness; docs/DECEMBER-BUILD-R15.md), the same pin as the settler installer's. The launch
 # host 3a24c36d... (GO-LIVE-PINS-PROVER.sha256) does not serve --mainnet-v1 / --mainnet --sparse.
-PROVER_SHA256 = '04fc2d32992ef7c9ada906542953b816c73968b31d44976835fe9b3e4c928439'
+PROVER_SHA256 = '3d89f5c3f5d8f8453eb38983d273feab0001c965a1c2c4206a06ef5b24d2c849'
 # CANDIDATE, not scheduled: native `l2_settlement::mainnet::PROGRAM_NEXT` (bloch-sis-pow
 # codex/fork-candidate-native-r7-20261102): the next rules proved by the sparse-witness guest. The fee-sweep
 # recipient is 0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544 (fixed by the owner); the configuration and every value below are built with it.

@@ -60,8 +60,8 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | --- | --- | --- |
 | `settler_v3.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` of this tree (fork candidate: it moves with every settler change; enforced since agent 155; also recorded in the `/opt` path) |
 | `sequencer_policy_v2.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` (enforced) |
-| `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step with `sparse-witness` (serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | `04fc2d32…8439` (enforced; December build, `docs/DECEMBER-BUILD-R15.md`); the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
-| `bloch-l2-produce-dev` | December build `out/` (`build-release.sh`, native 0861278c; `docs/DECEMBER-BUILD-R15.md`) | `96b09d1a…87a3` (enforced) |
+| `bloch-evm-sp1-settlement-v3` | `build-prover-host.sh` (features `source-settlement,node-artifact,sparse-witness`; serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | `3d89f5c3…c849` (enforced; December build, `docs/DECEMBER-BUILD-R15.md`); the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
+| `bloch-l2-produce-dev` | December build `out/` (`build-release.sh`, native 0861278c; `docs/DECEMBER-BUILD-R15.md`) | `63c9cdf8…5a23` (enforced) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |
@@ -287,6 +287,7 @@ the private stub has no native source to build a block from.
 | `reorg-behind-floor-waiting` | A partial quorum shows an accepted settlement below the highest one seen, and the database does not hold unsettled blocks above it: the worker waits, as without `reorg_recovery`. |
 | `reorg-limit` (then `halt`) | Too many automatic recoveries in the window: run `l2_reorg_recover.py` and find out why L1 keeps reorging. |
 | `prover-failed` `timeout: true` | A prover attempt ran out of time (exit 124 recorded). The next location in `remote_prover.order` is tried (review r10 L6). |
+| `halt` "the proof of N failed 5 times" | Five failed proofs of one block that each took a minute or more, whatever the exit code (`prove_failed_max_attempts`, `prove_failed_min_seconds`; the count is the block's `prove-failures.json`; review R308-7P-2). Read `prove.log` in the block's directory; repair or enlarge the prover, or use STUCK-BLOCK-RUNBOOK.md. Each restart buys one more attempt; removing the file starts the count again. |
 | `da-funding-low` | Top up the DA fee key. |
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements": the settler needs no action, the SHADOW must be reinstalled each time. Otherwise no action unless they repeat. |
 | `halt` (exit 3, no auto-restart) | Operator review. Causes: a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
