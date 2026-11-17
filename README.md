@@ -1,6 +1,9 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # bloch-l2-evm
 
+
+**Branches pushed on 2026-11-17** (which line is what, audited, reviewed or work in progress, and how to verify it): [BRANCHES.md](BRANCHES.md).
+
 > **Experimental developer EVM; production L2 delivery remains incomplete.**
 > This repository contains the signed Cancun execution core, an isolated
 > synthetic Reth developer node, wallet acceptance tests and SP1 core-proof
@@ -239,4 +242,19 @@ cargo test --release --test audit_regressions -- --ignored c27  # C27 benchmark 
 CI (`.github/workflows/ci.yml`) runs all of the above with the committed
 lockfile and the pinned toolchain.
 
-License: MIT OR Apache-2.0. `publish = false`, version `0.0.0-scaffold`.
+`publish = false`, version `0.0.0-scaffold`.
+
+## License
+
+Not one licence for the whole tree; the `SPDX-License-Identifier` line of each file (and `license` in each
+crate's `Cargo.toml`) governs it.
+
+| Path | Licence | Text |
+|---|---|---|
+| everything not listed below (the root crate, `docs/`, the other integrations and tools) | MIT OR Apache-2.0 | `LICENSE-MIT`, `LICENSE-APACHE` |
+| `integrations/native-escrow-pq/`, `integrations/native-state-proof/`, `integrations/settlement-recovery/` (separate crates that link the AGPL native Bloch crates), and the files under `deployment/mainnet/` whose header says so (the attestor, replica and `l1_gates.py` tools) | AGPL-3.0-or-later | `LICENSE-AGPL-3.0` |
+| files whose header says `MIT` only (for example `deployment/mainnet/public-rpc/compat/foundry.sh`) | MIT | `LICENSE-MIT` |
+| `tests/fixtures/kzg/` | its own licence | `tests/fixtures/kzg/LICENSE` |
+
+The AGPL crates stay outside the portable EVM workspace on purpose, so the root crate keeps its permissive
+licence and dependency set. Find every AGPL file with `git grep -l 'SPDX-License-Identifier: AGPL'`.
