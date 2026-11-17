@@ -129,3 +129,55 @@ impl FullConsensus<BlochNodePrimitives> for BlochConsensus {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod next_rules_parent_tests {
+    use super::*;
+    use bloch_l2_evm::ChainSpec;
+
+    /// F387-1, second half (agent 387's re-test of f694f88, agent 382 fix): once the
+    /// producer builds the header with the next rules' floored base fee (block 575),
+    /// every validator of the parent link must use the same rules. Agent 387's
+    /// block 576 was refused with "V2 parent linkage or context mismatch" because
+    /// `validate_header_against_parent` still judged the base fee on the BASE rules.
+    /// Sequence: parent 574 (base fee 100,218,107, empty) -> 575 at the floor
+    /// (100,000,000, empty) -> 576 at the floor again.
+    #[test]
+    fn f387_1_the_parent_link_is_judged_on_the_rules_of_the_child() {
+        let base = ChainSpec::mainnet_v1();
+        let next = ChainSpec::mainnet_next_or_rehearsal();
+        let floor = next.min_base_fee;
+        let rules = crate::RuleSchedule::new(base.clone(), next.clone()).unwrap();
+        let chain = Arc::new(BlochChainSpec::scheduled(rules.clone(), B256::repeat_byte(0x70), 1_786_656_679).unwrap());
+        rules.switch_at(1).unwrap();
+        let consensus = BlochConsensus::new(chain.clone());
+        let child_of = |parent: &BlochNodeHeader| {
+            let mut h = parent.clone();
+            h.0.number = parent.0.number + 1;
+            h.0.parent_hash = parent.0.hash();
+            h.0.parent_state_root = parent.0.state_root;
+            h.0.base_fee_per_gas = chain.execution_at(h.0.number).next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used);
+            h.0.gas_used = 0;
+            h
+        };
+        let mut b574 = chain.genesis_header().clone();
+        b574.0.number = 574;
+        b574.0.base_fee_per_gas = 100_218_107;
+        b574.0.gas_used = 0;
+        let b575 = child_of(&b574);
+        let b576 = child_of(&b575);
+        assert_eq!((b575.0.base_fee_per_gas, b576.0.base_fee_per_gas), (floor, floor));
+        assert!(base.next_base_fee(floor, 0) < floor, "the base rules would step under the floor");
+        let seal = |h: &BlochNodeHeader| SealedHeader::seal_slow(h.clone());
+        consensus
+            .validate_header_against_parent(&seal(&b575), &seal(&b574))
+            .expect("575 at the floor follows 574");
+        consensus
+            .validate_header_against_parent(&seal(&b576), &seal(&b575))
+            .expect("576 at the floor follows 575 (387's refused block)");
+        // A header that took the base rules' unfloored step is refused under the next rules.
+        let mut stepped = b576.clone();
+        stepped.0.base_fee_per_gas = base.next_base_fee(floor, 0);
+        assert!(consensus.validate_header_against_parent(&seal(&stepped), &seal(&b575)).is_err());
+    }
+}
