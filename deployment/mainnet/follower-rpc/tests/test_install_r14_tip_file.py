@@ -25,9 +25,13 @@ def sed_expression():
     return match[1]
 
 
+def floor():
+    return re.search(r'(?m)^MIN_TIP_WEI=([0-9]+)$', SCRIPT.read_text())[1]
+
+
 def render(tip_file):
-    out = subprocess.run(['bash', '-c', f'TIP_FILE="$1"; sed -e "{sed_expression()}" "$2"', 'render', tip_file, str(UNIT)],
-                         check=True, capture_output=True, text=True).stdout
+    out = subprocess.run(['bash', '-c', f'TIP_FILE="$1"; MIN_TIP_WEI="$3"; sed -e "{sed_expression()}" "$2"', 'render',
+                          tip_file, str(UNIT), floor()], check=True, capture_output=True, text=True).stdout
     return next(line for line in out.splitlines() if line.startswith('ExecStart='))
 
 
@@ -38,8 +42,13 @@ def install(*extra):
 
 
 class RequiredTipFile(unittest.TestCase):
-    def test_without_the_option_the_command_line_is_the_launch_one(self):
-        self.assertEqual(render(''), LAUNCH)
+    def test_without_the_option_the_command_line_is_the_launch_one_with_the_tip_floor(self):
+        # Restated (review R384-2, agent 382): it was the launch line exactly, so an RPC installed without
+        # --required-tip-file kept the compiled 0.1 gwei floor and suggested it. The launch line is still the
+        # whole prefix; the December floor is the only addition, on every install.
+        self.assertEqual(floor(), '1000000000')
+        self.assertEqual(render(''), f'{LAUNCH} --min-tip-wei {floor()}')
+        self.assertTrue(render('').startswith(LAUNCH))
 
     def test_with_the_option_the_tip_file_and_the_tip_floor_are_added(self):
         # The floor is install.sh's MIN_TIP_WEI; the settler installer's equality with it is tested beside that

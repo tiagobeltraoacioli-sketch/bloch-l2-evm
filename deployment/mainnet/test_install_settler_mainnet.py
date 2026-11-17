@@ -188,13 +188,29 @@ class Installer(unittest.TestCase):
         self.assertEqual(m.PINS['bloch-evm-sp1-settlement-v3'], m.CANDIDATE_HOST_PIN)
         self.assertRegex(m.CANDIDATE_HOST_PIN, '^[0-9a-f]{64}$')
 
+    def test_every_settled_rpc_unit_carries_the_producers_tip_floor(self):
+        # Review R384-2 (agent 382): the sequencer's RPC got the floor only with --required-tip-file and the
+        # replica RPCs never, so they suggested the compiled 0.1 gwei through the gateway. Every unit of this kit
+        # that runs bloch-l2-settled-rpc must pass the producer's floor, literally or through install.sh's
+        # unconditional @REQUIRED_TIP@ substitution.
+        import re
+        units = sorted(p for p in HERE.rglob('*.service') if 'bloch-l2-settled-rpc' in p.read_text())
+        self.assertEqual({p.name for p in units}, {'bloch-l2-mainnet-rpc.service', 'bloch-l2-replica-rpc.service'})
+        install = (HERE / 'follower-rpc' / 'install.sh').read_text()
+        for unit in units:
+            line = next(l for l in unit.read_text().splitlines() if l.startswith('ExecStart=') and 'bloch-l2-settled-rpc' in l)
+            if line.endswith('@REQUIRED_TIP@'):
+                self.assertIn('${TIP_FILE:+ --required-tip-file $TIP_FILE} --min-tip-wei $MIN_TIP_WEI#g', install, unit)
+            else:
+                self.assertEqual(re.findall(r'--min-tip-wei ([0-9]+)', line), [str(m.MIN_TIP_WEI)], unit)
+
     def test_the_rpc_door_and_the_producer_have_one_tip_floor(self):
         # The producer leaves pending what tips below the settler's min_tip_wei; an RPC that admitted less would
         # fill its spool with transactions nobody includes. One number in both installers.
         self.assertEqual(m.MIN_TIP_WEI, 1_000_000_000)
         rpc = (HERE / 'follower-rpc' / 'install.sh').read_text()
         self.assertIn(f'\nMIN_TIP_WEI={m.MIN_TIP_WEI}\n', rpc)
-        self.assertIn('--required-tip-file $TIP_FILE --min-tip-wei $MIN_TIP_WEI}', rpc)
+        self.assertIn('${TIP_FILE:+ --required-tip-file $TIP_FILE} --min-tip-wei $MIN_TIP_WEI#g', rpc)
         self.assertIn("'min_tip_wei': MIN_TIP_WEI,", (HERE / 'install-settler-mainnet.py').read_text())
         # The congestion ceiling of sequencer policy v2 stays above the floor (the settler halts otherwise).
         self.assertGreaterEqual(m.POLICY_V2.get('congestion_max_tip_wei', m.MIN_TIP_WEI), m.MIN_TIP_WEI)
