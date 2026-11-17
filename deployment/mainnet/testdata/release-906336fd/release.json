@@ -1,0 +1,21 @@
+{
+  "release": "bloch-l2-2026-11-17-launch-native-906336fd",
+  "chain_id": 700770,
+  "l2_commit": "3d35a0f42f9b5f1a8657ee892dc3239a789a50ae",
+  "native_commit": "906336fd35f157dac380523b59dee8a5a325175a",
+  "compatible_l1_fleet": [
+    "906336fd35f157dac380523b59dee8a5a325175a",
+    "0067547f1cd8f740fa1b814361526a80be178885"
+  ],
+  "platform": "linux-x86_64",
+  "binaries": {
+    "bloch-l2-native-follower": "d4d2b99a20f6093cbaf2b9cebead41b3c6b4bf5aad37f2a091752746a659fe96",
+    "bloch-l2-produce-dev": "598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db",
+    "bloch-l2-settled-rpc": "53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d",
+    "sequencer_mainnet.py": "15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2"
+  },
+  "build_manifest": "build.json",
+  "checksum_manifest": "SHA256SUMS",
+  "checksum_signature": "SHA256SUMS.minisig",
+  "signed": false
+}
