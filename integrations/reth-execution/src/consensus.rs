@@ -46,9 +46,10 @@ impl HeaderValidator<BlochNodeHeader> for BlochConsensus {
     ) -> Result<(), ConsensusError> {
         self.validate_header(header)?;
         self.validate_header(parent)?;
+        // The rules of the child block (F387-1): under the next rules its base fee has the floor.
         header
             .0
-            .validate_parent(self.spec.execution(), &parent.0)
+            .validate_parent(self.spec.execution_at(header.0.number), &parent.0)
             .map_err(ConsensusError::other)
     }
 }

@@ -242,7 +242,7 @@ fn load_snapshot(
         block
             .header
             .0
-            .validate_parent(spec.execution(), &blocks[number as usize - 1].header)
+            .validate_parent(spec.execution_at(number), &blocks[number as usize - 1].header)
             .map_err(BlockExecutionError::other)?;
         let body = block.body.as_core();
         body.validate(spec.execution()).map_err(BlockExecutionError::other)?;

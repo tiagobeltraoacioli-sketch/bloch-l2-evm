@@ -69,6 +69,7 @@ impl BlochEvmConfig {
         let mut config = Self::new(chain.execution(), chain.domain());
         config.factory = config.factory.with_rules(chain.rules().clone());
         config.rules = Some(chain.rules().clone());
+        config.assembler.rules = Some(chain.rules().clone());
         config
     }
     /// Only RPC construction enables provider ancestry and explicit block overrides.
@@ -223,6 +224,9 @@ impl ConfigureEvm for BlochEvmConfig {
 pub struct BlochNodeBlockAssembler {
     spec: ChainSpec,
     domain: B256,
+    /// The chain's rule schedule ([`BlochEvmConfig::for_chain`]): the parent link of an
+    /// assembled block is judged on the rules of that block, as its header was built (F387-1).
+    rules: Option<crate::RuleSchedule>,
 }
 impl BlochNodeBlockAssembler {
     /// Bind assembly to the same trusted configuration as execution.
@@ -230,7 +234,12 @@ impl BlochNodeBlockAssembler {
         Self {
             spec: spec.clone(),
             domain,
+            rules: None,
         }
+    }
+    /// The rules block `number` runs: the schedule's, else the single configured rule set.
+    pub(crate) fn rules_at(&self, number: u64) -> &ChainSpec {
+        self.rules.as_ref().map_or(&self.spec, |rules| rules.at(number))
     }
 }
 /// Final bundle values shadow original provider state, including storage wipes.
@@ -326,7 +335,7 @@ impl BlockAssembler<BlochRethBlockExecutorFactory> for BlochNodeBlockAssembler {
             ));
         }
         header
-            .validate_parent(&self.spec, &input.parent.0)
+            .validate_parent(self.rules_at(header.number), &input.parent.0)
             .map_err(BlockExecutionError::other)?;
         let receipts = input
             .output
@@ -389,6 +398,9 @@ mod next_rules_base_fee_tests {
         let context = config.next_context(&parent, &attributes).unwrap();
         assert_eq!(context.base_fee_per_gas, chain.execution_at(575).next_base_fee(parent.0.base_fee_per_gas, 0));
         assert_eq!(context.base_fee_per_gas, floor, "the floor, not the step");
+        // The assembler judges the parent link on the same rules (F387-1, second half).
+        assert_eq!(config.assembler.rules_at(575).min_base_fee, floor);
+        assert_eq!(BlochNodeBlockAssembler::new(&base, B256::repeat_byte(0x70)).rules_at(575).min_base_fee, 0);
         // Above the floor both rule sets agree.
         parent.0.base_fee_per_gas = 2 * floor;
         let context = config.next_context(&parent, &attributes).unwrap();
