@@ -32,6 +32,15 @@
 # (43be49f5..., native 78b7343a) is kept for the historical rehearsal/build.sh only and cannot build
 # this release.
 #
+# FORK CANDIDATE v4.1 (round 18, agent 382): the default native is codex/native-l2-dec-merge-r17-20261117 711e60ba = the
+# line below (19aa156d) with bloch-sis-pow main 857a10ac merged in (the DEPLOYED node release 0067547f = 906336fd + 49
+# node commits), one restated test and notes. Between 19aa156d and 711e60ba no native Cargo.toml of a crate this tree
+# builds changed; the native root Cargo.lock moved (gossipsub 0.49.5, tokio 1.53.3, rustix 1.1.6) and
+# services/pq-shield-api's manifest and lock changed. This tree builds with its own settlement-recovery lock
+# (ab7b3a09..., unchanged), so those bumps do NOT reach the L2 binaries; `cargo build --locked` below stops if the lock
+# would have to change. `set-sweep-recipient.py native-commit` refuses any Cargo.toml/Cargo.lock difference by rule
+# (kept as it is), so the two commit pins were moved by hand again, to what that command writes.
+#
 # FORK CANDIDATE v4 (round 17, agent 339): the default native is codex/native-l2-dec-merge-r17-20261117 19aa156d =
 # the RELEASED node 906336fd (release/node-906336fd-20261113: HF1 to HF3, KES enforcement and its two follow-up rules at
 # epoch 8620, the mempool state preflight of the L2 kinds) merged with the December native line 189f3178 (0861278c: the
@@ -65,7 +74,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-CANDIDATE_NATIVE_COMMIT=19aa156d1d8ab72e5b07d8b5860049e325c42c8b
+CANDIDATE_NATIVE_COMMIT=711e60baeb40419e045783b104661fec308e7654
 CANDIDATE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 NATIVE_COMMIT=${NATIVE_COMMIT:-$CANDIDATE_NATIVE_COMMIT}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
