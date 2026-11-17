@@ -30,8 +30,8 @@ disagree on an identity, the rebuilt line's `deployment/mainnet/GO-LIVE-PINS.sha
 (`agents/348-l2-launch-rebuild-r17.md`) win, and this document must be fixed.
 
 Conventions: every command is one block with no comment inside it. `THIRD_L1_RPC_URL` is the third L1 RPC the owner
-chooses (`http://HOST:8080`), `IP_OF_B` is host B, `TBD-383-…` is a value of the rebuilt release that agent 383
-publishes (section 1); replace every placeholder before running a command. The settler installer refuses any
+chooses (`http://HOST:8080`), `IP_OF_B` is host B, the rebuilt release's values are filled in from agent 383's commit `716a9e9` (section 1); replace every remaining placeholder before
+running a command. The settler installer refuses any
 `--rpc-urls` value that still contains `TBD`, `THIRD_L1` or `IP_OF` (measured in the dry run, section 13), so a
 forgotten placeholder in that command fails closed.
 
@@ -39,8 +39,9 @@ forgotten placeholder in that command fails closed.
 
 Source of each value: `agents/348-l2-launch-rebuild-r17.md` (agents 348 and 383), measured on 45.77.142.123 and
 136.244.93.186; the rebuilt kit's `deployment/mainnet/GO-LIVE-PINS.sha256` once 383 commits it. State at
-2026-11-17 05:00 UTC: the binaries are built and byte-equal on both hosts; the release folder, the signing target
-and the kit pins are **not yet published** by 383.
+2026-11-17 05:30 UTC: 383 published the release and the re-pinned kit in commit `716a9e9` (branch
+`codex/l2-launch-rebuild-r17-20261117`, pushed); 383's real-proof rehearsal, its mainnet replay past e8620 and
+reviewer 384's verdict are still to come (section 11, gates 1 and 2).
 
 | Item | Value | Source / state |
 | --- | --- | --- |
@@ -52,29 +53,25 @@ and the kit pins are **not yet published** by 383.
 | `bloch-l2-settled-rpc` | `53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d` | 383 report 1.2 (unchanged) |
 | `sequencer_mainnet.py` | `15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2` | 383 report 1.2 (unchanged) |
 | `build.json` | `9131838921a728fe3a03f0d2b7bd28e6a48d24fda2041fa49b95b5ea7a0d8693` | 383 report 1.2; names L2 genesis `632e45ae…f468` and the two new L1 gates at 8620 |
-| Release name | `TBD-383-RELEASE` | 383 |
-| Release `SHA256SUMS` (signing target) | `TBD-383-TARGET` | 383 |
-| Kit tip (frozen, detached checkout) | `TBD-383-KIT-TIP` (bloch-l2-evm `main` after 383's merge) | 383 |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `TBD-383-PINS` | 383 |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `TBD-383-PROVER-PINS` (at `521a538`: `b0fd684c…cf57`) | 383 |
-| Guest `settlement_v3_mainnet`, SP1 host, program identity, proof policy | must be unchanged: `203114bf…c473`, `3a24c36d…973a`, ELF keccak `6e4c8440…c073`, policy `154869964f…747d` | 383 must prove it (report section 2 item 1). The dry run of section 13 read these from the 10-30 staging on 136 |
+| Release name | `bloch-l2-2026-11-17-launch-native-906336fd`, folder `~/l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd` on 45.77 and 136 (byte-identical, `diff -r` empty on the Mac, 2026-11-17) | 383 `716a9e9` |
+| Release `SHA256SUMS` (signing target) | `4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb` | 383 `716a9e9`; re-measured on both copies |
+| Kit tip (frozen, detached checkout) | `716a9e9b1af607187d1dce0022f41ac859c0f746`, or bloch-l2-evm `main` once 383 merges it, provided `deployment/` is identical to `716a9e9` (section 6.1) | 383 |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca` | 383 `716a9e9`; re-measured |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` (unchanged by the rebuild) | re-measured at `716a9e9` |
+| Guest `settlement_v3_mainnet`, SP1 host, program identity, proof policy | unchanged: `203114bf…c473`, `3a24c36d…973a`, ELF keccak `6e4c8440…c073`, policy `154869964f…747d` | 383 `716a9e9` states them unchanged; the dry run on the rebuild read the same identity from the prover installer (section 13) |
 | L2 genesis / state root | `632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468` / `2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d` | unchanged; re-measured by `produce-dev init`/`head` in the dry run |
-| Settler DA signer `bloch-pos` | `700631b0…` (78d4921c) at kit `521a538` | **open for 383 / 384**: the settler installer pins it (`install-settler-mainnet.py` `PINS['bloch-pos']`); say whether it stays or moves to a `906336fd` build |
+| Settler DA signer `bloch-pos` | `700631b0…` (78d4921c) | unchanged by 383 `716a9e9` (decision recorded in its commit); reviewer 384 to confirm it signs DA after e8620 |
 | Attestor `bloch-pos` | `093909a2…` (rehearsal pin; production hash `TBD-OWNER`) | unchanged by the rebuild |
 
-**Pins that the rebuild must move** (inventory by `git grep` of the old hashes at `521a538`, outside tests; a
-cross-check for 383, not a change made here). Every file below names `cdf5da5c`, `e3f1a290`, `6d3bd628`, `926d2cf5`,
-`78d4921c` or `a3c38a46`: `GO-LIVE-PINS.sha256`, `follower-rpc/install.sh` (`RELEASE_SHA256SUMS_SHA256`),
-`install-settler-mainnet.py` (`bloch-l2-produce-dev`), `install-shadow.sh`, `l2_monitor.py`, `replica/PINS.sha256`,
-`attestor/install-attestor.sh`, `attestor/keykit/operator-pins-v2.sha256`, the operator texts
-(`attestor/README.md`, `keykit/KEY-HANDOFF-CHECKLIST.md`, `keykit/OPERATOR-INSTALL.template.md`,
-`keykit/OWNER-SEND-LIST.md`), `SETTLER-RUNBOOK.md`, `KNOWN-ISSUES.md`, `build-release.sh`, `l1_monitor.py`,
-`prover/install-prover-mainnet.py`. A file that still names an old value after 383's rebuild either refuses the new
-release (fail closed) or prints stale text to an operator.
-
-**Filling this document.** When 383 publishes, replace `TBD-383-RELEASE`, `TBD-383-TARGET`, `TBD-383-KIT-TIP`,
-`TBD-383-PINS` and `TBD-383-PROVER-PINS` everywhere, rerun the dry runs of section 13 on the rebuilt release and
-kit, and record the result in section 13.
+**Pins the rebuild had to move**: inventory by `git grep` of the old hashes (`cdf5da5c`, `e3f1a290`, `6d3bd628`,
+`926d2cf5`, `a3c38a46`) outside tests, at `521a538` and again at `716a9e9`. At `521a538` they were in
+`GO-LIVE-PINS.sha256`, `follower-rpc/install.sh`, `install-settler-mainnet.py`, `install-shadow.sh`, `l2_monitor.py`,
+`replica/PINS.sha256`, `attestor/install-attestor.sh`, `attestor/keykit/operator-pins-v2.sha256`, the operator texts
+and the runbooks. At `716a9e9` every remaining occurrence is a comment or text naming the earlier build as the one
+that halts after the KES bind, plus the 78d4921c lock line that `build-release.sh` and the pin list keep for the
+earlier native commit; no installer or pin list accepts the earlier release. Demonstrated the other way round as
+well: kit `521a538` given the rebuilt binaries refuses them at P2 (four pin lines), at `install-shadow.sh --verify`
+and at the settler's `prepare` (`bloch-l2-produce-dev differs from its pin e3f1a290…`) (section 13).
 
 ## 2. Owner decisions and inputs
 
@@ -89,7 +86,7 @@ section 1; only what changed since 2026-11-03 or what production adds is written
 | D4 | L1 RPC per follower | A reads 80.240.16.185, B reads 199.247.22.8 (unchanged). The replica kit refuses B reading the settler's first L1 host (measured, section 13) | P3 |
 | D5 | Five attestor operators: people, hosts, index each, feed URLs | `TBD-OWNER`. One key per operator, no shared host with a validator, the settler or another attestor | P10 |
 | D6 | Test deposit wallet and L2 recipient | `TBD-OWNER` | P12 |
-| D7 | Release signature | Sign `TBD-383-TARGET` with key `1A5D96A5C4955EF7` (section 4) after G0 gates 1 to 5 and 7 | P2 |
+| D7 | Release signature | Sign `4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb` with key `1A5D96A5C4955EF7` (section 4) after G0 gates 1 to 5 and 7 | P2 |
 | D8 | Retire the 10-18 scratch RPC on 45.77 | `ps -o pid,cmd -p 1452988` first, then `kill 1452988` (its follower is dead since HF1: agent 340) | none |
 | D9 | Public gateway | nginx + njs on A (role `sequencer`) and B (role `replica`), no Worker. DNS and Authenticated Origin Pulls: section 9 | P11 |
 | D10 | User transactions | **Off** for this launch (K13, F312-5 unchanged by the rebuild) | P12 |
@@ -149,18 +146,24 @@ owner's Mac is `~/.cargo/bin/rsign` (`rsign2 0.6.7`, checked 2026-11-17). The ke
 `verify_release_signature.py`. Run in Terminal (rsign reads the password from the terminal: it fails with "Device
 not configured" when there is none). `KIT` below is the frozen kit checkout of section 6.1.
 
-Fetch both copies and compare (online). The release directory is the one 383 names; `REL_DIR` stands for it.
+Fetch both copies and compare (online). The release directory is the one 383 names; `l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd` stands for it.
 
 ```
 mkdir -p ~/bloch-l2-signing-r18
 ```
 
+Neither copy may exist yet (`scp -r` would nest into an existing folder); this must say "No such file" twice:
+
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@45.77.142.123:REL_DIR ~/bloch-l2-signing-r18/from-4577
+ls -d ~/bloch-l2-signing-r18/from-4577 ~/bloch-l2-signing-r18/from-136
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186:REL_DIR ~/bloch-l2-signing-r18/from-136
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@45.77.142.123:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd ~/bloch-l2-signing-r18/from-4577
+```
+
+```
+scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd ~/bloch-l2-signing-r18/from-136
 ```
 
 Must print nothing:
@@ -179,7 +182,7 @@ Every line `OK`:
 shasum -a 256 -c SHA256SUMS
 ```
 
-Must print `TBD-383-TARGET  SHA256SUMS`:
+Must print `4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb  SHA256SUMS`:
 
 ```
 shasum -a 256 SHA256SUMS
@@ -237,7 +240,7 @@ Verify, still offline. Must print `Signature and comment signature verified`:
 Must end with `signature OK`:
 
 ```
-python3 -I ~/worktrees/l2-prod-kit-r18/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing-r18/from-4577 --expect-sha256 TBD-383-TARGET
+python3 -I ~/worktrees/l2-prod-kit-r18/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing-r18/from-4577 --expect-sha256 4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb
 ```
 
 ```
@@ -245,7 +248,7 @@ cp SHA256SUMS.minisig ~/bloch-l2-signing-r18/from-136/
 ```
 
 ```
-python3 -I ~/worktrees/l2-prod-kit-r18/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing-r18/from-136 --expect-sha256 TBD-383-TARGET
+python3 -I ~/worktrees/l2-prod-kit-r18/deployment/mainnet/verify_release_signature.py --release-dir ~/bloch-l2-signing-r18/from-136 --expect-sha256 4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb
 ```
 
 Record this hash next to D7:
@@ -257,11 +260,11 @@ shasum -a 256 SHA256SUMS.minisig
 Then, online again, put the signature next to both build-host copies (`docs/RELEASE-SIGNING.md` section 5):
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing-r18/from-4577/SHA256SUMS.minisig ubuntu@45.77.142.123:REL_DIR/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing-r18/from-4577/SHA256SUMS.minisig ubuntu@45.77.142.123:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing-r18/from-4577/SHA256SUMS.minisig ubuntu@136.244.93.186:REL_DIR/
+scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing-r18/from-4577/SHA256SUMS.minisig ubuntu@136.244.93.186:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/
 ```
 
 Keep `~/bloch-l2-signing-r18/from-4577` as the archive copy; sections 6 and 7 stage from it.
@@ -326,14 +329,22 @@ git -C ~/worktrees/l2-prod-deploy-r18-20261117 fetch origin
 ```
 
 ```
-git -C ~/worktrees/l2-prod-deploy-r18-20261117 worktree add --detach ~/worktrees/l2-prod-kit-r18 TBD-383-KIT-TIP
+git -C ~/worktrees/l2-prod-deploy-r18-20261117 worktree add --detach ~/worktrees/l2-prod-kit-r18 716a9e9b1af607187d1dce0022f41ac859c0f746
 ```
 
 ```
 git -C ~/worktrees/l2-prod-kit-r18 status --porcelain -- deployment docs
 ```
 
-GO: empty output. Never build a release from the kit tip; binaries come only from the signed release.
+Must print `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca`:
+
+```
+shasum -a 256 ~/worktrees/l2-prod-kit-r18/deployment/mainnet/GO-LIVE-PINS.sha256
+```
+
+GO: empty `status` output and that hash. If you check out bloch-l2-evm `main` instead (after 383 merges), then
+`git -C ~/worktrees/l2-prod-kit-r18 diff --stat 716a9e9b1af607187d1dce0022f41ac859c0f746 HEAD -- deployment` must
+print nothing. Never build a release from the kit tip; binaries come only from the signed release.
 
 ### 6.2 P1: the host
 
@@ -387,7 +398,7 @@ scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-prod-kit-r
 On a second run remove `l2-golive-next/kit` on A first (`scp -r` nests into an existing directory). Then on A:
 
 ```
-python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 TBD-383-TARGET
+python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb
 ```
 
 ```
@@ -410,9 +421,10 @@ cd /home/ubuntu/l2-golive-next && sha256sum kit/GO-LIVE-PINS.sha256 artifacts/SH
 bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-golive-next/artifacts
 ```
 
-GO: `signature OK`; every line `OK`; `kit/GO-LIVE-PINS.sha256` = `TBD-383-PINS`; `artifacts/SHA256SUMS` =
-`TBD-383-TARGET`; `install-shadow.sh --verify` prints `build.json OK: …` naming the rebuilt commit and native
-`906336fd`, then `verify OK`. The `settler-v2` staging and the release folders sit in agent scratch: copy them to a
+GO: `signature OK`; every line `OK`; `kit/GO-LIVE-PINS.sha256` = `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca`; `artifacts/SHA256SUMS` =
+`4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb`; `install-shadow.sh --verify` prints `build.json OK: L2 3d35a0f4, native 906336fd, HF1 7180/7186, HF2
+7270, HF3 7360, KES enforce, slot-epoch binding and first-key floor 8620` and `verify OK (nothing installed)`
+(measured in the dry run on the rebuild). The `settler-v2` staging and the release folders sit in agent scratch: copy them to a
 kept location before go-live. NO-GO: any mismatch. Rollback: `rm -rf /home/ubuntu/l2-golive-next` on A.
 
 ### 6.4 P6 step 1: prepare the settler (creates the DA fee key; nothing on L1)
@@ -754,7 +766,7 @@ scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-prod-ki
 On B:
 
 ```
-python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 TBD-383-TARGET
+python3 -I /home/ubuntu/l2-golive-next/kit/verify_release_signature.py --release-dir /home/ubuntu/l2-golive-next/artifacts --expect-sha256 4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb
 ```
 
 ```
@@ -842,7 +854,7 @@ never travel unsealed and are never handled by an agent.
    `bloch-pos`, `mainnet.manifest`, `carryover.tsv.gz` and its `.sha256`, `SHA256SUMS` over the three binaries; the
    package step refuses binaries that are not the pins of 383's rebuilt `operator-pins-v2.sha256`), `backup-check`
    on two media, `shred-originals`. Each package's `IDENTITY.txt` records the kit commit: it must be
-   `TBD-383-KIT-TIP`.
+   `716a9e9b1af607187d1dce0022f41ac859c0f746`.
 2. **Send** each operator their `operator-I.tar` over one channel and its passphrase over a different one
    (`keykit/OWNER-SEND-LIST.md`); send the `PACKAGES.sha256` line for that tar over a third, or read it out.
 3. **Each operator**, on their own host (section 3.3): `check-operator-bundle.sh --open`, then
@@ -982,7 +994,7 @@ heartbeat arrive.
 
 | # | Gate | GO | Section |
 | --- | --- | --- | --- |
-| 1 | Rebuilt release identity published by 383 and reviewed by 384 | `TBD-383-*` filled; 384's verdict "fit" for the rebuild; guest and program identity unchanged by rebuild | 1 |
+| 1 | Rebuilt release identity published by 383 and reviewed by 384 | 383 `716a9e9` (done) and 384's verdict "fit" for the rebuild (pending); if 383 moves the kit again, section 1 and the dry runs are redone first | 1 |
 | 2 | 383's mainnet replay with the rebuilt follower past e8620 | PASS, recorded in 383's report | 1 |
 | 3 | Dry runs of section 13 on the rebuilt release and kit | every step PASS | 13 |
 | 4 | G0 after D1 (≥ e8710) | all conditions of section 5 | 5 |
@@ -1039,8 +1051,9 @@ refusals are what is verified; the prover dry run takes a throwaway SSH public k
 creates; `docker` is a shim answering only the pinned gnark image check; the gateway's backend check is answered by a
 stub returning `0xab162`; the certificates are throwaway self-signed files.
 
-The signing step itself was dry-run on the Mac with the throwaway key: both release copies fetched (45.77: 49 s,
-136: 39 s), `diff -r` empty, 8 `OK`, target `6d3bd628…`; sign, `rsign verify`, the kit verifier with the throwaway
+The signing step itself was dry-run on the Mac with the throwaway key, on both releases: both copies fetched (45.77:
+49 s, 136: 39 s for `926d2cf`), `diff -r` empty, 8 `OK`, target `6d3bd628…` and, for the rebuild, `4039f26a…`, which
+the kit `716a9e9` pins; sign, `rsign verify`, the kit verifier with the throwaway
 key (`signature OK`, both copies) and against the pinned key (`signature key ID 025480D2EC383A03 is not the pinned
 key 1A5D96A5C4955EF7`); signing with a different secret key than `-p` names is refused ("Could not verify signature
 with the provided public key ID") and leaves an empty `SHA256SUMS.minisig`, as `docs/RELEASE-SIGNING.md` says.
@@ -1049,9 +1062,11 @@ with the provided public key ID") and leaves an empty `SHA256SUMS.minisig`, as `
 | --- | --- | --- | --- |
 | host A, 2026-11-17 04:29 UTC | kit `521a538`, release `bloch-l2-2026-11-03-next-native-78d4921c` (`6d3bd628…`) | 84 | **84 PASS, 0 FAIL** (5 INFO records: recorded, not graded) |
 | host B + gateway, 04:33 UTC | same | 46 | **46 PASS, 0 FAIL** |
-| host A and B on the rebuilt release | `TBD-383-KIT-TIP` / `TBD-383-TARGET` | | **NOT RUN**: waits for 383 |
+| host A, 2026-11-17 04:53 UTC | **kit `716a9e9`, release `bloch-l2-2026-11-17-launch-native-906336fd` (`4039f26a…`)** | 84 | **84 PASS, 0 FAIL** (5 INFO) |
+| host B + gateway, 04:57 UTC | **same (rebuild)** | 46 | **46 PASS, 0 FAIL** |
+| negative control, 04:48 UTC | kit `521a538` with the rebuilt binaries (a scratch release `DRYRUN-385-rebuild-NOT-A-RELEASE`, throwaway-signed) | 84 | 60 PASS, 24 FAIL, as intended: refused at P2 (4 pin lines), `install-shadow.sh --verify`, `prepare` (`bloch-l2-produce-dev differs from its pin e3f1a290…`); every later step then fails for lack of the settler user |
 
-What the 130 steps covered: P2 (signature refusal and acceptance, wrong target refused, every `SHA256SUMS` and pin
+What the 130 steps of each pair of runs covered (the same on both releases): P2 (signature refusal and acceptance, wrong target refused, every `SHA256SUMS` and pin
 line, the pin-list hash, a one-byte kit change caught, `install-shadow.sh --verify`); P6 prepare (a second prepare
 refused, passphrase `400 root`, DA directory `700`, both `gpg` backups made and read back); P3 (genesis
 `632e45ae…`/`2ad7e807…` from `init`/`head`; `install.sh` refused without the owner's signature, dry run, install, a
@@ -1067,7 +1082,8 @@ identity preflight; gateway `plan` with missing files, `apply` refused without a
 certificate as peer refused, shared-AOP-marked CA refused, `plan` clean, `apply` renders and passes `nginx -t`, the
 unix hop `750 root www-data`, `/health` not ok with a headless backend, rollback removes the include.
 
-Evidence: `~/Desktop/BLOCH-L2-DEX-BRIDGE-20261030/agents/385-evidence/dryrun-{a,b}-926d2cf/` (`steps.jsonl` one line
+Evidence: `~/Desktop/BLOCH-L2-DEX-BRIDGE-20261030/agents/385-evidence/dryrun-{a,b}-926d2cf/`, `dryrun-{a,b}-716a9e9/` (the
+rebuild) and `dryrun-a-rebuild-oldkit/` (the negative control) (`steps.jsonl` one line
 per step with exit code, verdict and output tail; `log.txt` full output; `container-env.txt`).
 
 To repeat on a host (as `ubuntu`, from a checkout of this branch copied to the host):
@@ -1098,9 +1114,8 @@ bash deployment/prod-dryrun/harness.sh run b STAGE_DIR OUT_DIR_B
 
 Not done / not proven:
 
-- **The dry runs on the rebuilt release and kit** (383 has not published the release folder, signing target or kit
-  pins); this document carries `TBD-383-*` placeholders until then. The 130 PASS steps prove the procedure and the
-  installers of kit `521a538` with release `926d2cf`, not the rebuild.
+- The dry runs on the rebuild used 383's `716a9e9`, before 384's review and before 383's real-proof rehearsal and
+  mainnet replay past e8620; a later kit change needs them run again (section 13).
 - Nothing ran with network: `configure`'s RPC check and dry run, the shadow's `check`, the replica preflight, the
   gateway behind a real backend, the follower's replay, a real proof, P8. Those are covered by the real-proof
   launch rehearsal (task 250; agent 202 in round 11, 312 in round 15, and 383's rehearsal of the rebuild on a private
