@@ -522,9 +522,9 @@ systemctl show -p ExecStart -p LimitNOFILE -p User -p SupplementaryGroups bloch-
 sudo systemctl enable --now bloch-l2-mainnet-follower
 ```
 
-Note on 383's pin change: the rebuilt follower links `906336fd`; the 1 gwei tip floor of the coordinator's decision
-(`3855ec2`, cross-area line of 339) is a December-line change and is **not** part of the deposit-only launch kit
-unless 383's kit carries it; with the txpool off it has no effect on A or B.
+Note: the 1 gwei tip floor of the coordinator's decision (`3855ec2`, cross-area line of agent 339) belongs to the
+December line; the launch kit `716a9e9` carries no `--min-tip-wei` in `follower-rpc/install.sh`, the RPC unit or the
+settler installer (checked by `git show`). With the txpool off (D10) no tip floor applies on A or B.
 
 ### 6.6 P3 GO (after about 65 to 80 minutes; both hosts)
 
