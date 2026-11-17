@@ -30,7 +30,7 @@ disagree on an identity, the rebuilt line's `deployment/mainnet/GO-LIVE-PINS.sha
 (`agents/348-l2-launch-rebuild-r17.md`) win, and this document must be fixed.
 
 Conventions: every command is one block with no comment inside it. `THIRD_L1_RPC_URL` is the third L1 RPC the owner
-chooses (`http://HOST:8080`), `IP_OF_B` is host B, the rebuilt release's values are filled in from agent 383's commit `716a9e9` (section 1); replace every remaining placeholder before
+chooses (`http://HOST:8080`), `IP_OF_B` is host B, the rebuilt release's values are filled in from bloch-l2-evm `main` `b17b3ae` (383's final launch line, reviewed by 384) (section 1); replace every remaining placeholder before
 running a command. The settler installer refuses any
 `--rpc-urls` value that still contains `TBD`, `THIRD_L1` or `IP_OF` (measured in the dry run, section 13), so a
 forgotten placeholder in that command fails closed.
@@ -39,9 +39,10 @@ forgotten placeholder in that command fails closed.
 
 Source of each value: `agents/348-l2-launch-rebuild-r17.md` (agents 348 and 383), measured on 45.77.142.123 and
 136.244.93.186; the rebuilt kit's `deployment/mainnet/GO-LIVE-PINS.sha256` once 383 commits it. State at
-2026-11-17 05:30 UTC: 383 published the release and the re-pinned kit in commit `716a9e9` (branch
-`codex/l2-launch-rebuild-r17-20261117`, pushed); 383's real-proof rehearsal, its mainnet replay past e8620 and
-reviewer 384's verdict are still to come (section 11, gates 1 and 2).
+2026-11-17 19:40 UTC: install from bloch-l2-evm `main` `b17b3ae` (coordinator); 383 published the release and the
+re-pinned kit in commit `716a9e9` (branch
+`codex/l2-launch-rebuild-r17-20261117`), reviewed by 384 and merged into `main`. Check 383's report for its real-proof
+rehearsal and mainnet replay past e8620 before G0 (section 11, gate 2).
 
 | Item | Value | Source / state |
 | --- | --- | --- |
@@ -55,9 +56,9 @@ reviewer 384's verdict are still to come (section 11, gates 1 and 2).
 | `build.json` | `9131838921a728fe3a03f0d2b7bd28e6a48d24fda2041fa49b95b5ea7a0d8693` | 383 report 1.2; names L2 genesis `632e45ae…f468` and the two new L1 gates at 8620 |
 | Release name | `bloch-l2-2026-11-17-launch-native-906336fd`, folder `~/l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd` on 45.77 and 136 (byte-identical, `diff -r` empty on the Mac, 2026-11-17) | 383 `716a9e9` |
 | Release `SHA256SUMS` (signing target) | `4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb` | 383 `716a9e9`; re-measured on both copies |
-| Kit tip (frozen, detached checkout) | `716a9e9b1af607187d1dce0022f41ac859c0f746`, or bloch-l2-evm `main` once 383 merges it, provided `deployment/` is identical to `716a9e9` (section 6.1) | 383 |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca` | 383 `716a9e9`; re-measured |
-| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` (unchanged by the rebuild) | re-measured at `716a9e9` |
+| Kit tip (frozen, detached checkout) | `b17b3ae44051d6c7676606476adf28caf21c3698` (bloch-l2-evm `main`: 383's launch line `716a9e9` reviewed by 384, plus the publication-hygiene merge: attestor custody tool needs `--keys-dir`, runbook host placeholders, licences) | 383 |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `38a0d1b499fc8ef646fd00717a6cd4f98358a4aa080408c93f8407bdff6f7511` | `main` `b17b3ae`; re-measured (`26df766b…` at `716a9e9`: moved by the hygiene commits, no binary pin moved) |
+| `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` (unchanged by the rebuild) | re-measured at `b17b3ae`; was `716a9e9` |
 | Guest `settlement_v3_mainnet`, SP1 host, program identity, proof policy | unchanged: `203114bf…c473`, `3a24c36d…973a`, ELF keccak `6e4c8440…c073`, policy `154869964f…747d` | 383 `716a9e9` states them unchanged; the dry run on the rebuild read the same identity from the prover installer (section 13) |
 | L2 genesis / state root | `632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468` / `2ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d` | unchanged; re-measured by `produce-dev init`/`head` in the dry run |
 | Settler DA signer `bloch-pos` | `700631b0…` (78d4921c) | unchanged by 383 `716a9e9` (decision recorded in its commit); reviewer 384 to confirm it signs DA after e8620 |
@@ -92,7 +93,7 @@ section 1; only what changed since 2026-11-03 or what production adds is written
 | D10 | User transactions | **Off** for this launch (K13, F312-5 unchanged by the rebuild) | P12 |
 | D11 | Alert destinations | `TBD-OWNER`: webhook URL and bearer file, or Telegram bot token file and chat id, or an `alert_command`; plus `heartbeat_url` and `heartbeat_fail_url` | P9 |
 | D13, D15 to D19 | As in the plan | `--skip-idle-blocks --max-idle-seconds 86400 --min-block-interval 1800`; `block_interval_seconds=1800`; foreign recovery on; D18 `deposit_wait_warn=5400`, `deposit_wait_crit=10800` | P6, P9 |
-| **D20** | **The `r202-*` containers on 136** (agent 202's round-11 rehearsal rig: a private L1 and L2 running since 2026-11-03) | Stop and remove them before P5, after the coordinator confirms nobody needs them: they hold host memory and the prover gate needs MemAvailable ≥ 120 GiB (section 3.1). Agents never touch them | P5 |
+| **D20** | **The `r202-*` containers on 136** (agent 202's round-11 rehearsal rig: a private L1 and L2 running since 2026-11-03) | **Done 2026-11-17**: removed by the coordinator on the owner's authorization (inspect output and last logs in `~/l2dexbridge-20261030/r202-removed-20261117/` on 136); MemAvailable 122 GiB afterwards | P5 |
 | **D21** | **KES registration (the bind at 90% of stake)** | Keep to the agreed order (`KES bind plan`: fixed releases, then externals, then register). The rebuilt follower is what makes a late first registration safe for the L2 (agent 340: the 926d2cf follower halts at it); never install an older L2 release on any host | all |
 | **D22** | Explorer site | Which explorer tree blochl1.com is deployed from (section 9.3): the live site serves `index-DU1i6x2j.js` and has no `/l2rpc` or `/l2status` Function today (read 2026-11-17 05:00 UTC) | P11 |
 | **D23** | `l2rpc.blochl1.com` DNS | A proxied record to A, Full (strict), per-hostname AOP (section 9). No record exists today (`dig` empty, 2026-11-17) | P11 |
@@ -111,9 +112,10 @@ because the prover's peak and gnark do not overlap (one measurement) and blocks 
 no user transactions on A (D10).
 
 **Measured in the dry run (section 13): `install-prover-mainnet.py install --memory-gib 100 … --dry-run` on 136
-printed `mem_available_gib: 119`, `memory_ok: false`.** The real install refuses below `cap + 20 GiB` = 120 GiB. With
-the `r202-*` containers stopped (D20) the host returns to about 123 GiB available (BRIEF.md, "idle, about 123 GiB
-free"). Do not lower the cap to fit: the plan's cap is what lets block 8,191 prove (agent 93: 84.2 to 85.4 GiB with
+printed `mem_available_gib: 119`, `memory_ok: false` while the `r202-*` containers ran; after their removal (D20,
+done) the host read 122 GiB available and the same dry run (kit `b17b3ae`) printed `mem_available_gib: 121`,
+`memory_ok: true` (the dry-run container itself holds about 1 GiB).** The real install refuses below `cap + 20 GiB` =
+120 GiB, so the margin is 1 to 2 GiB: start nothing else on A before P5, and re-read `free -g` right before it. Do not lower the cap to fit: the plan's cap is what lets block 8,191 prove (agent 93: 84.2 to 85.4 GiB with
 `ELEMENT_THRESHOLD=268435456`). Rule kept from the 2026-10-12 incident: no validator on A; the 30 `bloch-expansion@`
 units on 136 stay disabled.
 
@@ -329,22 +331,22 @@ git -C ~/worktrees/l2-prod-deploy-r18-20261117 fetch origin
 ```
 
 ```
-git -C ~/worktrees/l2-prod-deploy-r18-20261117 worktree add --detach ~/worktrees/l2-prod-kit-r18 716a9e9b1af607187d1dce0022f41ac859c0f746
+git -C ~/worktrees/l2-prod-deploy-r18-20261117 worktree add --detach ~/worktrees/l2-prod-kit-r18 b17b3ae44051d6c7676606476adf28caf21c3698
 ```
 
 ```
 git -C ~/worktrees/l2-prod-kit-r18 status --porcelain -- deployment docs
 ```
 
-Must print `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca`:
+Must print `38a0d1b499fc8ef646fd00717a6cd4f98358a4aa080408c93f8407bdff6f7511`:
 
 ```
 shasum -a 256 ~/worktrees/l2-prod-kit-r18/deployment/mainnet/GO-LIVE-PINS.sha256
 ```
 
-GO: empty `status` output and that hash. If you check out bloch-l2-evm `main` instead (after 383 merges), then
-`git -C ~/worktrees/l2-prod-kit-r18 diff --stat 716a9e9b1af607187d1dce0022f41ac859c0f746 HEAD -- deployment` must
-print nothing. Never build a release from the kit tip; binaries come only from the signed release.
+GO: empty `status` output and that hash. The kit is `main` `b17b3ae`, not `716a9e9` (same release, same signing
+target; `main` adds the reviewed hygiene changes: the attestor custody tool's `--keys-dir`, host placeholders in the
+runbooks, licences). Never build a release from the kit tip; binaries come only from the signed release.
 
 ### 6.2 P1: the host
 
@@ -421,7 +423,7 @@ cd /home/ubuntu/l2-golive-next && sha256sum kit/GO-LIVE-PINS.sha256 artifacts/SH
 bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-golive-next/artifacts
 ```
 
-GO: `signature OK`; every line `OK`; `kit/GO-LIVE-PINS.sha256` = `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca`; `artifacts/SHA256SUMS` =
+GO: `signature OK`; every line `OK`; `kit/GO-LIVE-PINS.sha256` = `38a0d1b499fc8ef646fd00717a6cd4f98358a4aa080408c93f8407bdff6f7511`; `artifacts/SHA256SUMS` =
 `4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb`; `install-shadow.sh --verify` prints `build.json OK: L2 3d35a0f4, native 906336fd, HF1 7180/7186, HF2
 7270, HF3 7360, KES enforce, slot-epoch binding and first-key floor 8620` and `verify OK (nothing installed)`
 (measured in the dry run on the rebuild). The `settler-v2` staging and the release folders sit in agent scratch: copy them to a
@@ -523,7 +525,7 @@ sudo systemctl enable --now bloch-l2-mainnet-follower
 ```
 
 Note: the 1 gwei tip floor of the coordinator's decision (`3855ec2`, cross-area line of agent 339) belongs to the
-December line; the launch kit `716a9e9` carries no `--min-tip-wei` in `follower-rpc/install.sh`, the RPC unit or the
+December line; the launch kit (`716a9e9`, unchanged there in `b17b3ae`) carries no `--min-tip-wei` in `follower-rpc/install.sh`, the RPC unit or the
 settler installer (checked by `git show`). With the txpool off (D10) no tip floor applies on A or B.
 
 ### 6.6 P3 GO (after about 65 to 80 minutes; both hosts)
@@ -849,12 +851,13 @@ real systemd 255 in `--network none` containers; `agents/203-attestor-final.md`,
 never travel unsealed and are never handled by an agent.
 
 1. **Owner, on the Mac or an air-gapped machine, offline**, in `KEY-HANDOFF-CHECKLIST.md` order:
-   `make-operator-bundles.sh preflight`, `seal` (one distinct passphrase per operator, 6+ random words), `verify`,
+   `make-operator-bundles.sh` with `--keys-dir DIR` on every mode (or `BLOCH_ATTESTOR_KEYS_DIR=DIR`; since `b17b3ae`
+   the tool names no key folder and refuses without one): `preflight`, `seal` (one distinct passphrase per operator, 6+ random words), `verify`,
    `package --artifacts DIR` (DIR holds the rebuilt follower `d4d2b99a…` and producer `598873ae…`, the attestor
    `bloch-pos`, `mainnet.manifest`, `carryover.tsv.gz` and its `.sha256`, `SHA256SUMS` over the three binaries; the
    package step refuses binaries that are not the pins of 383's rebuilt `operator-pins-v2.sha256`), `backup-check`
    on two media, `shred-originals`. Each package's `IDENTITY.txt` records the kit commit: it must be
-   `716a9e9b1af607187d1dce0022f41ac859c0f746`.
+   `b17b3ae44051d6c7676606476adf28caf21c3698`.
 2. **Send** each operator their `operator-I.tar` over one channel and its passphrase over a different one
    (`keykit/OWNER-SEND-LIST.md`); send the `PACKAGES.sha256` line for that tar over a third, or read it out.
 3. **Each operator**, on their own host (section 3.3): `check-operator-bundle.sh --open`, then
@@ -994,7 +997,7 @@ heartbeat arrive.
 
 | # | Gate | GO | Section |
 | --- | --- | --- | --- |
-| 1 | Rebuilt release identity published by 383 and reviewed by 384 | 383 `716a9e9` (done) and 384's verdict "fit" for the rebuild (pending); if 383 moves the kit again, section 1 and the dry runs are redone first | 1 |
+| 1 | Rebuilt release identity published by 383 and reviewed by 384 | `main` `b17b3ae` (383's line reviewed by 384); if `main`'s `deployment/` moves again, section 1 and the dry runs are redone first | 1 |
 | 2 | 383's mainnet replay with the rebuilt follower past e8620 | PASS, recorded in 383's report | 1 |
 | 3 | Dry runs of section 13 on the rebuilt release and kit | every step PASS | 13 |
 | 4 | G0 after D1 (≥ e8710) | all conditions of section 5 | 5 |
@@ -1062,7 +1065,9 @@ with the provided public key ID") and leaves an empty `SHA256SUMS.minisig`, as `
 | --- | --- | --- | --- |
 | host A, 2026-11-17 04:29 UTC | kit `521a538`, release `bloch-l2-2026-11-03-next-native-78d4921c` (`6d3bd628…`) | 84 | **84 PASS, 0 FAIL** (5 INFO records: recorded, not graded) |
 | host B + gateway, 04:33 UTC | same | 46 | **46 PASS, 0 FAIL** |
-| host A, 2026-11-17 04:53 UTC | **kit `716a9e9`, release `bloch-l2-2026-11-17-launch-native-906336fd` (`4039f26a…`)** | 84 | **84 PASS, 0 FAIL** (5 INFO) |
+| host A, 2026-11-17 19:35 UTC | **kit `main` `b17b3ae`, release `bloch-l2-2026-11-17-launch-native-906336fd` (`4039f26a…`), after the `r202-*` removal** | 84 | **84 PASS, 0 FAIL**; `memory_ok: true` (121 GiB) |
+| host B + gateway, 19:38 UTC | same (`b17b3ae`) | 46 | **46 PASS, 0 FAIL** |
+| host A, 2026-11-17 04:53 UTC | kit `716a9e9`, release `bloch-l2-2026-11-17-launch-native-906336fd` (`4039f26a…`) | 84 | **84 PASS, 0 FAIL** (5 INFO) |
 | host B + gateway, 04:57 UTC | **same (rebuild)** | 46 | **46 PASS, 0 FAIL** |
 | negative control, 04:48 UTC | kit `521a538` with the rebuilt binaries (a scratch release `DRYRUN-385-rebuild-NOT-A-RELEASE`, throwaway-signed) | 84 | 60 PASS, 24 FAIL, as intended: refused at P2 (4 pin lines), `install-shadow.sh --verify`, `prepare` (`bloch-l2-produce-dev differs from its pin e3f1a290…`); every later step then fails for lack of the settler user |
 
@@ -1082,8 +1087,8 @@ identity preflight; gateway `plan` with missing files, `apply` refused without a
 certificate as peer refused, shared-AOP-marked CA refused, `plan` clean, `apply` renders and passes `nginx -t`, the
 unix hop `750 root www-data`, `/health` not ok with a headless backend, rollback removes the include.
 
-Evidence: `~/Desktop/BLOCH-L2-DEX-BRIDGE-20261030/agents/385-evidence/dryrun-{a,b}-926d2cf/`, `dryrun-{a,b}-716a9e9/` (the
-rebuild) and `dryrun-a-rebuild-oldkit/` (the negative control) (`steps.jsonl` one line
+Evidence: `~/Desktop/BLOCH-L2-DEX-BRIDGE-20261030/agents/385-evidence/dryrun-{a,b}-926d2cf/`, `dryrun-{a,b}-716a9e9/` and
+`dryrun-{a,b}-b17b3ae/` (the rebuild) and `dryrun-a-rebuild-oldkit/` (the negative control) (`steps.jsonl` one line
 per step with exit code, verdict and output tail; `log.txt` full output; `container-env.txt`).
 
 To repeat on a host (as `ubuntu`, from a checkout of this branch copied to the host):
@@ -1108,14 +1113,13 @@ bash deployment/prod-dryrun/harness.sh run b STAGE_DIR OUT_DIR_B
 | ID | Severity | Where | Finding | Demonstration |
 | --- | --- | --- | --- | --- |
 | F385-1 | Low | `docs/L2-MAINNET-GO-LIVE.md` section 2 (D3, attestor row: 8 GB) vs `follower-rpc/bloch-l2-mainnet-follower.service:41`, `follower-rpc/bloch-l2-mainnet-rpc.service:48`, `attestor/systemd/bloch-l2-attestor.service:57`, `attestor/systemd/bloch-l2-attestor-follower.service:39` | The recommended 8 GB hosts are smaller than the sum of their units' memory caps (B about 10 GiB plus refresh and nginx; attestor 14.1 GiB). Measured use is low, but a host smaller than its caps can be driven into a global OOM, the failure of 2026-10-12. Fixed here by recommendation (16 GiB), no kit change | Argument (file:line) |
-| F385-2 | Medium (operational) | host 136, 2026-11-17 | The prover install refuses the plan's 100 GiB cap today: `mem_available_gib: 119`, `memory_ok: false` with the five `r202-*` containers running. Owner decision D20 | Test: dry-run step `P5.memory-gate` |
+| F385-2 | Medium (operational), **resolved** | host 136, 2026-11-17 | The prover install refused the plan's 100 GiB cap: `mem_available_gib: 119`, `memory_ok: false` with the five `r202-*` containers running. Resolved: containers removed (owner authorization, coordinator); rerun 19:35 UTC: `121`, `memory_ok: true` | Test: dry-run step `P5.memory-gate` |
 | F385-3 | Info | `public-rpc/setup-gateway.sh` `apply` | `apply` installs and reloads nginx, then exits 22 when `/health` is not ok; the include stays in place. Correct fail-loud behaviour, but an operator must read it as "installed, not healthy" (section 9.2 says so) | Test: dry-run steps `B7.apply`, `B7.health-not-ok` |
 | F385-4 | Info | live explorer | blochl1.com has no `/l2rpc` or `/l2status` Function and no `l2rpc` DNS record (2026-11-17); the explorer hookup is a deploy of the explorer tree, not a configuration change (section 9.3) | Read-only `curl`, `dig` |
 
 Not done / not proven:
 
-- The dry runs on the rebuild used 383's `716a9e9`, before 384's review and before 383's real-proof rehearsal and
-  mainnet replay past e8620; a later kit change needs them run again (section 13).
+- The final dry runs used `main` `b17b3ae`; a later kit change needs them run again (section 13).
 - Nothing ran with network: `configure`'s RPC check and dry run, the shadow's `check`, the replica preflight, the
   gateway behind a real backend, the follower's replay, a real proof, P8. Those are covered by the real-proof
   launch rehearsal (task 250; agent 202 in round 11, 312 in round 15, and 383's rehearsal of the rebuild on a private
