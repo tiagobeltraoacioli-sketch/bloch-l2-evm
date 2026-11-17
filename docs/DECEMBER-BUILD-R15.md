@@ -357,5 +357,10 @@ Also in this tree since section 12: every settled-RPC unit passes the 1 gwei tip
 monitor carries agent 340's fix (an armed L1 gate missing from the L2 build is critical) and its build constants
 name this build (review R384-6: `V2_BUILD`, `V2_SHA256`, the two 8620 gates in `V2_COMPILED_GATES`).
 
+Reproduction: built twice from nothing on build host A from two directories (`…/l2-merge-r18/work3` and
+`…/l2-merge-r18/p3/elsewhere`): every file of the two release outputs is byte-equal, `build.json` included.
+Python suites at `161553e` (host, clean clone): devnet 531, mainnet 527 (33 skipped), gateway 19, attestor 93
+(35 skipped), withdraw 44, replica 46 (16 skipped), follower-rpc 21, publish-safety 18; `refresh_kit_pins.py` exit 0.
+
 Not done: a second host; the end-to-end `extend` across the floor with the rebuilt producer (agent 387's D1 rig);
 the real-proof drills on these binaries.
