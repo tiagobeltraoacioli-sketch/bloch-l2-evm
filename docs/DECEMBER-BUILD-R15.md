@@ -31,8 +31,11 @@ epoch remains an owner input.
 
 | Repo | Branch | Tip | From |
 |---|---|---|---|
-| bloch-sis-pow | `codex/l2-r15-recipients-20261116` | `0861278c` | a2fc3d0f |
-| bloch-l2-evm | `codex/l2-r15-recipients-20261116` | see `git log` (this file is in the tip; the binaries were built at c2938be, the later commits move pins and documents only) | e8f40c2 |
+| bloch-sis-pow | `codex/native-l2-dec-merge-r17-20261117` | `19aa156d` | the released node `906336fd` merged with `codex/l2-r17-20261117` `189f3178` (= `0861278c` plus scripts and a runbook); section 11 |
+| bloch-l2-evm | `codex/l2-dec-merge-r17-20261117` | see `git log` (this file is in the tip; the follower, producer and settled RPC were built at `3cbc421`, the later commits move pins and documents only) | `codex/l2-r17-pins-20261117` `99da262` |
+
+Before the merge (rounds 15 to 17, sections 3 to 8 where they say so): native `codex/l2-r15-recipients-20261116`
+`0861278c` (from a2fc3d0f) and bloch-l2-evm `codex/l2-r15-recipients-20261116` (binaries built at c2938be).
 
 Native commits: 1650b36d treasury; 36885a1a `set` (configuration); 613ba4d0 one test; 0861278c `pins`.
 L2 commits: f32d400 `set`; b635566 root crate rustfmt and clippy clean (item U5; the guests were built here);
@@ -53,31 +56,39 @@ L2 genesis `632e45ae…f468`, the activated program and its configuration `8ec1c
 | `settlement_v3_mainnet_v1_sparse` (activated rules, no recipient) | `ff34a548bc6d2632761dd53ab10e8462c88f7137f9606480fd4a2ccbf8da7098` | its identity reproduces the activated configuration `8ec1c804…` |
 | `settlement_v3_mainnet_sparse_eager` (measurement only) | `84adfc2ca90dbc8d3f2fb010d89c4a98a618e587b5cc5efb5c3c39c29dfd45e4` | |
 | `bloch-evm-sp1-settlement-v3` (SP1 host; features `source-settlement,node-artifact,sparse-witness`) | `3d89f5c3f5d8f8453eb38983d273feab0001c965a1c2c4206a06ef5b24d2c849` | `CANDIDATE_HOST_PIN` (settler installer), `PROVER_SHA256` (prover installer) |
-| `bloch-l2-produce-dev` | `63c9cdf8dee8cbb0440c6b701d196fb551a2dbb3f4afe0a903ee5b9f14215a23` | settler installer `PINS`, `install-shadow.sh` `PRODUCE_SHA256` |
-| `bloch-l2-native-follower` | `051ebfe579f3b6e6be54dc9329a9325abe59c9dad0bfa2a37c49a1d185a80ee3` | |
+| `bloch-l2-produce-dev` | `c6b7ce1b921134b73da4a85d0944e630f26e44dce604a4e10f2c0db7622e4d61` (native `19aa156d`; before the merge `63c9cdf8…5a23`) | settler installer `PINS`, `install-shadow.sh` `PRODUCE_SHA256` |
+| `bloch-l2-native-follower` | `ee1b2c8ac780c0803dcdeda97ce143627c7c3b4556334f44588080bd3c1fd581` (native `19aa156d`; before the merge `051ebfe5…0ee3`) | |
 | `bloch-l2-settled-rpc` | `3d116e378616ee8c88e8a93d97514df745ef23ba323040ebefe4f5d54c91351d` | |
 | `sequencer_mainnet.py` (shadow) | `1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae` | `install-shadow.sh` `SEQUENCER_SHA256` |
 | `remote_prover.py` | `40f954601a94d9ce2f237af37211cbba1c3e0e0c0a4944cc2ad40714584381c5` | prover installer `REMOTE_PROVER_SHA256` |
 
 The candidate's `GO-LIVE-PINS.sha256` is printed by `python3 deployment/mainnet/refresh_kit_pins.py`.
 
-**`GO-LIVE-PINS.sha256` of this branch is NOT the December pin list (review R335-4).** Its source lines (the
-`kit/` files, the Python files of the settler and prover releases) follow this tree; its BINARY lines do not:
-`artifacts/*`, `release-settler-v2/` and `release-prover-v2/` binaries and guests are still those of earlier
-builds (the launch release and the 2026-11-02 candidate), and `follower-rpc/install.sh` still accepts only the
-signed launch release (`RELEASE_SHA256SUMS_SHA256` `6d3bd628…`). The December binaries and guests are pinned
-only in the table above and inside three installers (`install-settler-mainnet.py` `PINS`,
-`install-prover-mainnet.py`, `install-shadow.sh`). A December pin list, its signing target and its own plan
-section do not exist yet. They cannot be completed today: the list also names the L1 node binary of the fork
-(`release-settler-v2/bloch-pos`), which has not been built (the native line is not yet merged onto the released
-node), and that merge moves the three L2 binaries once more. They belong to the rebuild that follows it.
+**`GO-LIVE-PINS.sha256` and `GO-LIVE-PINS-PROVER.sha256` of this branch are the December pin lists (review
+R335-4, round 17).** Their binary lines are the build of section 11: `artifacts/` (follower, producer, settled
+RPC, `build.json` `e88a0836…ef05`, the build's `SHA256SUMS` `b89b5879…957f`), the settler's producer and SP1
+host, the prover's SP1 host, and one line for each December guest (`settlement_v3_mainnet_sparse`,
+`settlement_v3_mainnet_fallback`) beside the activated guest, which the settler proves with until the swap.
+`release-settler-v2/bloch-pos` stays the released node binary the settler host uses as DA key tool (the
+installer's pin). `test_install_settler_mainnet` and `test_prover_mainnet` compare every installer pin with its
+line. What is still the launch's on this branch:
+- `follower-rpc/install.sh` accepts only the signed launch release (`RELEASE_SHA256SUMS_SHA256` `6d3bd628…`).
+  A December release folder (the build output plus manifest, carryover and `build.json`, as
+  `docs/RELEASE-SIGNING.md` assembles it) and its signing target do not exist; until they do, the
+  `artifacts/SHA256SUMS` line holds the BUILD's `SHA256SUMS`, and the follower installer refuses the December
+  artifacts.
+- `docs/L2-MAINNET-GO-LIVE.md` is the launch plan with this tree's hashes in its table; a December plan
+  section is not written.
 
 **How far each identity is reproduced.**
 - The four guest ELFs: built from b635566 in the pinned container on **two hosts** (build host A, image
   `sha256:b2badcc6…45ca`, twice in separate scratch directories with an empty crate registry; build host B, image
   `sha256:4cec7b91…a83b`, once): the three `SHA256SUMS` files are identical.
-- The SP1 host and the three L2 binaries (follower, producer, settled RPC): **reproduced on two hosts and two
-  paths.** Four builds of c2938be, each compiled from nothing (`/var/tmp/bloch-l2-build` removed first), with
+- After the merge (native `19aa156d`): the SP1 host and the three binaries were built ONCE more from nothing on
+  build host A (`build-prover-host.sh`, `build-release.sh`, L2 `3cbc421`). The SP1 host and the settled RPC came
+  out as before the merge; the follower and the producer are new and are **not yet reproduced on a second host**.
+- Before the merge, the SP1 host and the three L2 binaries (follower, producer, settled RPC): **reproduced on two
+  hosts and two paths.** Four builds of c2938be, each compiled from nothing (`/var/tmp/bloch-l2-build` removed first), with
   `build-prover-host.sh` and `build-release.sh`: build host A from the source directories `…/l2-r15/dec` and
   `…/l2-r15/p2/another-place`, build host B from `…/l2-r15/dec-b1` and `…/l2-r15/elsewhere/dec-b2` (2026-11-16,
   21:06 to 21:43 UTC). The four SP1 hosts are one file and the four `SHA256SUMS` of `build-release.sh` are
@@ -121,7 +132,7 @@ node), and that merge moves the three L2 binaries once more. They belong to the 
    `source-settlement,node-artifact,sparse-witness`). Compare `OUT-HOST/SHA256SUMS` with section 3.
 3. Identities: `bloch-evm-sp1-settlement-v3 --mainnet --sparse identity OUT/settlement_v3_mainnet_sparse` and
    `--mainnet identity OUT2/settlement_v3_mainnet`; they must print the values of section 3.
-4. Binaries: `JOBS=6 deployment/mainnet/build-release.sh WORK OUT` with native at `0861278c` (the script checks
+4. Binaries: `JOBS=6 deployment/mainnet/build-release.sh WORK OUT` with native at `19aa156d` (the script checks
    the sources, applies the inert feature shim and refuses another native commit or lock).
 
 `WORK` may be any directory and the builder any user: steps 2 and 4 copy `WORK/src` to `/var/tmp/bloch-l2-build`
@@ -239,3 +250,44 @@ on the host against `SHA256SUMS`). The kit's plan names that path (`docs/L2-MAIN
 built at exactly that path, as user `ubuntu` with the cargo home `/home/ubuntu/.cargo` (the registry path is
 embedded too), on Ubuntu 24.04; the public copy of the plan replaces the user name by a placeholder
 (`/home/<operator>/…`), so a third party cannot read the path from it and the release notes must give it literally.
+
+## 11. The native line merged onto the released node (round 17)
+
+The December native line branched from the release line at `4f34d87e`. The node the fleet was given is
+`release/node-906336fd-20261113`, 117 commits further on that line: the security fixes of 2026-11-10 to 11-13,
+the vote slot-epoch binding and the KES first-key floor armed at epoch 8620, and the state preflight of L2
+deposits, DA batches and claims in the mempool. A December fork node must be that node plus the L2 changes.
+
+**Native `codex/native-l2-dec-merge-r17-20261117` `19aa156d`** = merge `a49c5bbb` of `906336fd` and `189f3178`,
+plus one test and two notes. Every L2 gate is still `u64::MAX`: `scripts/hf-release/hf-gates.py discover --base
+906336fd --candidate 19aa156d` lists exactly the five L2 gates, all inert, and no other difference. What the
+merge decided, file by file, is in the merge commit's message and in `docs/L2-MEMPOOL-ADMISSION.md` of the
+native tree (the mempool door: the released preflight judges the deposit, the DA batch and the claim; the
+fork's own check remains for the forced envelope).
+
+**What moved in this tree.** Only what links the native transition:
+
+| Artifact | Before the merge (native `0861278c`) | After (native `19aa156d`) |
+|---|---|---|
+| `bloch-l2-native-follower` | `051ebfe5…0ee3` | `ee1b2c8ac780c0803dcdeda97ce143627c7c3b4556334f44588080bd3c1fd581` |
+| `bloch-l2-produce-dev` | `63c9cdf8…5a23` | `c6b7ce1b921134b73da4a85d0944e630f26e44dce604a4e10f2c0db7622e4d61` |
+| `bloch-l2-settled-rpc` | `3d116e37…351d` | the same |
+| `bloch-evm-sp1-settlement-v3` (SP1 host) | `3d89f5c3…c849` | the same |
+| `sequencer_mainnet.py`, `remote_prover.py` | | the same |
+| Guest ELFs, their keys, the configuration `27d6ce9f…2783`, the proof policy | | the same: no file a guest is built from changed (the guests do not link the native crates), so they were not rebuilt |
+| Build `SHA256SUMS` / `build.json` | `22a662e9…0729` (reviewer 335's build) | `b89b58791506835579fcfd59464a73eef9081edb40372920d02928545ea3957f` / `e88a0836526b74be97fa62b059ed72c114aaa0552be979e75e44ead0c43def05` (`l2_commit` `3cbc421`) |
+| Source pins | `install-settler-mainnet.py` `a31bdb83…96bb`, `install-shadow.sh` `a7276be6…5e7e`, `build-release.sh` `87d0ce99…7482`, `GO-LIVE-PINS.sha256` `4a6a0b61…f738`, `GO-LIVE-PINS-PROVER.sha256` `149189a6…0cde` | `96cf074d…d2f4`, `0c630ba3…b07d`, `135ff8f0…8555`, `f8321b66119e9f6bf5a1dd61d453cc16bfcedec5aa602e3c9d3f6075662db831`, `b974e5cf…2ee7` |
+
+The settlement-recovery lock is unchanged (`ab7b3a09…`): between `0861278c` and `19aa156d` three native
+`Cargo.toml` files differ in comments and in two features without dependencies, and the native `Cargo.lock`
+does not; `cargo build --locked` accepted it. `set-sweep-recipient.py native-commit` refuses any native
+`Cargo.toml` difference, so the two commit pins were moved by hand to what it writes.
+
+**What the followers gain.** The follower and the producer verify L1 blocks with the native code they link.
+Built against `19aa156d` they carry the two rules the released node arms at epoch 8620; the build against
+`0861278c` did not (open item N2). No follower of this build was run against a chain across 8620.
+
+**Real-proof drills.** Agent 333's results of round 17 are for the identities before the merge. The guests and
+the SP1 host are the same files, so its proving results stand for them; every result that ran the follower or
+the producer of `0861278c` must be repeated with the two new binaries (list in the coordination folder's
+cross-area log, 2026-11-17).

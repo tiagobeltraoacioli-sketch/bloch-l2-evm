@@ -419,6 +419,14 @@ below it at the spool, evicts older spool entries below it at the sweep, and flo
 spool; the mainnet settler installer sets `min_tip_wei`. This is operator policy, not a consensus rule: blocks with a
 lower tip stay valid, and replay never consults it. Priority fees stay in the keyless vault until a later program change.
 
+**December line (2026-11-17): the floor is 1 gwei, set in two installers that must agree.** The settler installer
+writes `min_tip_wei` 1,000,000,000 (`install-settler-mainnet.py` `MIN_TIP_WEI`), which the producer applies. The
+RPC's compiled default stays 0.1 gwei, so `follower-rpc/install.sh` passes `--min-tip-wei 1000000000` whenever it
+installs the RPC for user transactions (`--required-tip-file`); without that flag the RPC would spool transactions
+tipping between 0.1 and 1 gwei that the producer never includes, until they expire. An RPC started by hand, and
+any replica that is ever given a spool, must carry the same flag. The base-fee floor (0.1 gwei) is compiled into
+the next rules and is unchanged. No binary, guest or program identity depends on the tip floor.
+
 **Transaction-specific storage price (candidate, local validation).** With both `--txpool` and
 `--required-tip-file`, `eth_sendRawTransaction` reads the policy v2 file's versioned `admission` object. For the
 sender's current canonical nonce, it runs the producer's selector against a disposable state cache and checks

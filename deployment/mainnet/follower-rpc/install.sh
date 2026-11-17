@@ -18,6 +18,9 @@
 # settler's policy state, which carries the required tip and the admission snapshot. The RPC then suggests that tip
 # and refuses a transaction that underpays its new storage slots. The file is group-readable through the settler's
 # read group, so this needs --rpc-user/--read-group. Without the option the unit's command line is unchanged.
+# With the option the RPC also gets --min-tip-wei MIN_TIP_WEI (below): the tip floor the settler's producer applies
+# (install-settler-mainnet.py MIN_TIP_WEI, the same number). The RPC's compiled default is 0.1 gwei; without the
+# flag it would spool transactions between the two floors that the producer never includes.
 #
 # DIR must hold the owner's SHA256SUMS.minisig and release.json: the release signature is checked
 # against the pinned release key (../verify_release_signature.py) before anything else.
@@ -56,6 +59,8 @@ die() { trap - ERR; echo "install.sh: $*" >&2; exit 1; }
 R=${BLOCH_L2_INSTALL_ROOT:-}
 OPT=$R/opt/bloch/l2-mainnet ETC=$R/etc/bloch-l2-mainnet UNITS=$R/etc/systemd/system
 
+# The L2 tip floor, 1 gwei: equal to install-settler-mainnet.py MIN_TIP_WEI (a test compares them).
+MIN_TIP_WEI=1000000000
 MANIFEST_SHA256=7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd
 # The launch release this kit installs: SHA-256 of its signed SHA256SUMS (release bloch-l2-2026-11-03-next-native-78d4921c,
 # build 926d2cf). A release the same key signed earlier or later is refused (review R308-16); a later release ships
@@ -154,7 +159,7 @@ if [ $DRY = 1 ]; then echo "+ write follower.env, units, drop-in"; else
   printf '[Service]\nIPAddressAllow=localhost %s\n' "$L1_IP" > $UNITS/bloch-l2-mainnet-follower.service.d/l1-rpc.conf
   if [ -n "$RPC_USER" ]; then KEEP=(-e "s#@READ_GROUP@#$READ_GROUP#g"); else KEEP=(-e '/@READ_GROUP@/d'); fi
   sed "${KEEP[@]}" -e "s#@RPC_USER@#$UNIT_USER#g" -e "s#@CANONICAL_USER@#$CANON_USER#g" -e "s#@CANONICAL@#$CANONICAL#g" \
-    -e "s#@STATE@#$STATE#g" -e "s#@TXPOOL@#$TXPOOL#g" -e "s#@REQUIRED_TIP@#${TIP_FILE:+ --required-tip-file $TIP_FILE}#g" "$HERE/bloch-l2-mainnet-rpc.service" > $UNITS/bloch-l2-mainnet-rpc.service
+    -e "s#@STATE@#$STATE#g" -e "s#@TXPOOL@#$TXPOOL#g" -e "s#@REQUIRED_TIP@#${TIP_FILE:+ --required-tip-file $TIP_FILE --min-tip-wei $MIN_TIP_WEI}#g" "$HERE/bloch-l2-mainnet-rpc.service" > $UNITS/bloch-l2-mainnet-rpc.service
   install -m 0644 "$HERE/bloch-l2-mainnet-rpc-restart.path" "$HERE/bloch-l2-mainnet-rpc-restart.service" $UNITS/
   systemctl daemon-reload
 fi

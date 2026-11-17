@@ -251,7 +251,7 @@ its alone run), about 20 s with the cycle limit. Each offender behind p fitting 
 
 | Setting | Value | Was |
 |---|---|---|
-| `min_tip_wei` | 0.1 gwei (the RPC floor) | same |
+| `min_tip_wei` | policy default 0.1 gwei; **the December mainnet installer sets 1 gwei** (2026-11-17), and the RPC installer gives the RPC the same floor (`docs/MAINNET-RPC-READINESS.md`, "Minimum tip") | 0.1 gwei |
 | `congestion_max_tip_wei` | 100 gwei | same |
 | `congestion_target_share` | 0.5 of the room above the mandatory base (and of the write rate) | same |
 | Step per committed block | up by at most 1/8 when over the target (ratio capped at 2); down by (1 − ratio)/16 otherwise | up by ≤ 1/8 per block; down by time (half-life 1,800 s) |
@@ -279,6 +279,9 @@ the grace:
 - 1 gwei back to the 0.1 gwei floor: 4,500 + 1,200 × log2(10) ≈ 8,500 s (2.4 h). That is inside the RPC's 3 h TTL
   (r7 F6).
 - 100 gwei back to the floor: about 16,500 s (4.6 h). A floor-tip wallet transaction sent at the peak expires first.
+- With the December floor of 1 gwei (and the installer's ceiling of 3 gwei) the longest decay is 3 gwei back to
+  the floor: 4,500 + 1,200 × log2(3) ≈ 6,400 s (1.8 h), inside the RPC's 3 h TTL. The two lines above are the
+  figures for the policy defaults.
   Wallets that read the published tip (below) are not affected.
 
 `required_tip(now)` applies the idle decay at read time. The gate, the demand check and the RPC's published tip all

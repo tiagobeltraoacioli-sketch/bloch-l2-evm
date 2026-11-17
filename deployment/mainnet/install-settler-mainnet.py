@@ -166,6 +166,14 @@ POLICY_V2 = {
 }
 # DA fee budget: one max-size batch (114,688 B) costs 20,489 sat at the 10 msat/gas floor.
 LOW_BALANCE_SAT = 100_000_000  # 1 BLCH: alert (log da-funding-low) below this
+# The L2 priority-fee (tip) floor: 1 gwei (coordinator decision of 2026-11-17 on the fee review; was 0.1 gwei).
+# Operator policy, no consensus rule and no part of any program identity: the producer leaves pending what offers
+# less (`produce-dev --min-tip-wei`, from this value in the settler's config). The settled RPC must refuse the same
+# transactions at its door, or its spool fills with entries the producer never takes: follower-rpc/install.sh
+# passes the SAME number as `--min-tip-wei` whenever it installs the RPC for user transactions
+# (--required-tip-file); `test_install_settler_mainnet` compares the two. The base-fee floor (0.1 gwei) is compiled
+# into the next rules and is not this value.
+MIN_TIP_WEI = 1_000_000_000
 # The local fallback runs in this unit (MemoryMax=32G). Measured proof RSS at 8 threads (2026-10-30):
 # 25.5 GiB at 1.57M instructions, 45.2 GiB at 8.86M, so 32 GiB is about 4M. Larger blocks need the prover.
 LOCAL_PROVE_MAX_INSTRUCTIONS = 3_000_000
@@ -349,7 +357,7 @@ def configure(args):
         'acceptance_timeout_seconds': 1800, 'poll_seconds': 15, 'resubmit_seconds': 300,
         'idle_seconds': 30, 'max_consecutive_failures': 8,
         'user_transactions': '--user-transactions' in args, 'txpool_dir': str(STATE / 'txpool'),
-        'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128, 'min_tip_wei': 100_000_000,
+        'max_block_gas': 15_000_000, 'max_block_bytes': 114_688, 'max_block_txs': 128, 'min_tip_wei': MIN_TIP_WEI,
         **(POLICY_V2 if '--sequencer-policy-v2' in args else {}),
         **({'skip_idle_blocks': True, 'max_idle_seconds': int(option(args, '--max-idle-seconds', '86400')),
             'min_block_interval_seconds': int(option(args, '--min-block-interval', '0'))}

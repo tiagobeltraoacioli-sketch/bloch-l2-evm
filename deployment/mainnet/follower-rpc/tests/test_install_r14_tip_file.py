@@ -41,8 +41,15 @@ class RequiredTipFile(unittest.TestCase):
     def test_without_the_option_the_command_line_is_the_launch_one(self):
         self.assertEqual(render(''), LAUNCH)
 
-    def test_with_the_option_only_the_flag_is_added(self):
-        self.assertEqual(render(TIP), f'{LAUNCH} --required-tip-file {TIP}')
+    def test_with_the_option_the_tip_file_and_the_tip_floor_are_added(self):
+        # The floor is install.sh's MIN_TIP_WEI; the settler installer's equality with it is tested beside that
+        # installer (test_install_settler_mainnet).
+        floor = re.search(r'(?m)^MIN_TIP_WEI=([0-9]+)$', SCRIPT.read_text())[1]
+        self.assertEqual(floor, '1000000000')
+        out = subprocess.run(['bash', '-c', f'TIP_FILE="$1"; MIN_TIP_WEI="$3"; sed -e "{sed_expression()}" "$2"', 'render',
+                              TIP, str(UNIT), floor], check=True, capture_output=True, text=True).stdout
+        line = next(line for line in out.splitlines() if line.startswith('ExecStart='))
+        self.assertEqual(line, f'{LAUNCH} --required-tip-file {TIP} --min-tip-wei {floor}')
 
     def test_a_path_systemd_or_sed_would_expand_or_split_is_refused_before_anything_else(self):
         for bad in ('relative/policy.json', '/var/lib/x y.json', '/var/lib/%h/p.json', '/var/lib/$HOME/p.json',

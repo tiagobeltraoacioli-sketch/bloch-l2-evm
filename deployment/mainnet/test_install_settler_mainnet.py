@@ -188,6 +188,17 @@ class Installer(unittest.TestCase):
         self.assertEqual(m.PINS['bloch-evm-sp1-settlement-v3'], m.CANDIDATE_HOST_PIN)
         self.assertRegex(m.CANDIDATE_HOST_PIN, '^[0-9a-f]{64}$')
 
+    def test_the_rpc_door_and_the_producer_have_one_tip_floor(self):
+        # The producer leaves pending what tips below the settler's min_tip_wei; an RPC that admitted less would
+        # fill its spool with transactions nobody includes. One number in both installers.
+        self.assertEqual(m.MIN_TIP_WEI, 1_000_000_000)
+        rpc = (HERE / 'follower-rpc' / 'install.sh').read_text()
+        self.assertIn(f'\nMIN_TIP_WEI={m.MIN_TIP_WEI}\n', rpc)
+        self.assertIn('--required-tip-file $TIP_FILE --min-tip-wei $MIN_TIP_WEI}', rpc)
+        self.assertIn("'min_tip_wei': MIN_TIP_WEI,", (HERE / 'install-settler-mainnet.py').read_text())
+        # The congestion ceiling of sequencer policy v2 stays above the floor (the settler halts otherwise).
+        self.assertGreaterEqual(m.POLICY_V2.get('congestion_max_tip_wei', m.MIN_TIP_WEI), m.MIN_TIP_WEI)
+
     def test_units_running_as_the_settler_user_hide_its_secrets(self):
         hidden = {'/run/docker.sock', str(DA_DIR), str(STATE / 'da.passphrase'), str(STATE / 'ssh'), str(DA_PASSPHRASE),
                   str(m.RUNTIME)}
