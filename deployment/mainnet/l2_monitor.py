@@ -107,6 +107,11 @@ GATE_CONSTANTS = {
     'l2_da_reserved_slot': 'L2_DA_RESERVED_SLOT_EPOCH',
     # L1 forced inclusion (candidate, inert; native params::L2_FORCED_INCLUSION_EPOCH, = L2_NEXT_PROGRAM_EPOCH).
     'l2_forced_inclusion': 'L2_FORCED_INCLUSION_EPOCH',
+    # Armed at 8620 by node release 906336fd (2026-11-13); native 78d4921c, which release 926d2cf links, has
+    # neither constant, so they are not in V2_COMPILED_GATES and check_gates reports them as not built in.
+    'hf3_kes_vote_slot_epoch_binding': 'ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH',
+    'hf3_kes_first_key_floor': 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH',
+    'hf3_kes_register_epoch_binding': 'KES_REGISTER_EPOCH_BINDING_EPOCH',
 }
 V2_COMPILED_GATES: Dict[str, Any] = {
     'HF1_CLAIM_FINALITY_EPOCH': 7180, 'HF1_FROZEN_FINALITY_SET_EPOCH': 7180, 'HF1_OWN_TARGET_VOTES_EPOCH': 7186,
@@ -652,6 +657,11 @@ def check_gates(l1_up: List[Dict[str, Any]], p: Dict[str, Any], compiled: Dict[s
             allowed = {str(x) for x in want} if isinstance(want, list) else {str(want)}
             if str(act) not in allowed:
                 mismatched.append(f'{name}: L1 e{act}, L2 build {want}')
+        elif compiled:
+            # The L1 arms a rule at an epoch and the L2 build's gate list does not have it: the native code the
+            # follower and the producer link predates the rule, so from that epoch they replay other rules than
+            # the fleet. An inert gate (no epoch) never reaches this line.
+            mismatched.append(f'{name}: L1 e{act}, not built into the L2 binaries')
         if not gate.get('active') and act >= epoch:
             upcoming.append((act - epoch, name, act))
     r.facts['l1_gates_upcoming'] = [{'gate': n, 'epoch': a, 'in_epochs': d, 'at': utc(epoch_start(a))}

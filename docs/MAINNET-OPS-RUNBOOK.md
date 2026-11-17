@@ -146,7 +146,7 @@ mainnet L1 epochs are 16 min (32 × 30 s).
 | `deposit_wait` | only with `--max-idle-seconds` (settler `skip_idle_blocks`): time since deposits began to wait with no consumption. That flag also adds the interval to `settlement_age`, `l2_head_age` and `l2_finalized_age` | 45 min | 90 min | an idle settler that misses a deposit is otherwise silent until the interval ends |
 | `l1_l2_identity` | network, genesis, chain id and attestor set of `getl2settlement` | – | differs | pins |
 | `l1_gates` | epochs to the next pending L1 gate (`getchaininfo.hard_forks`) | 96 (≈ 1 day) | 6 | upgrades must land before the gate |
-| `l1_gates_vs_l2_build` | L1 gate epochs = epochs compiled into the L2 build | – | differs | a follower/producer built for other epochs halts at the gate |
+| `l1_gates_vs_l2_build` | L1 gate epochs = epochs compiled into the L2 build | – | differs, or the L1 arms a gate the L2 build does not have at all | a follower/producer built for other epochs, or without the rule, halts at the gate or at the first block that uses the rule |
 | `attestors` | per finalized withdrawal root with at least one partial, older than 120 L1 blocks: signatures | < 5 | < 3 | agents sign only roots covering a ≥ 100 BLCH withdrawal; once one signs, all live agents sign within a few cycles. The message names silent signers |
 | `unit[*]`, `events[*]` | unit state; failure events in the last hour | warn events; ≥ 5 restarts | `halt`, refusals, a stopped unit; any warn event ≥ 5 times | |
 | `l2_finality_closed[*]` | backend answers `-32001` for `safe`/`finalized`: it lost a valid follower status | – | any | the backend is up; `l2_rpc` stays OK |
