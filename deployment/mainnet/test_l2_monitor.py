@@ -549,6 +549,32 @@ class MonitorTests(unittest.TestCase):
             node['info']['hard_forks']['hf2_growth_cap']['activation_epoch'] = 7300
         self.assertEqual(level(run(w)[0], 'l1_gates_vs_l2_build'), 'CRIT')
 
+    def test_an_armed_l1_gate_the_l2_build_was_not_built_with_is_critical(self):
+        """Node release 906336fd arms two consensus rules at epoch 8620 (the vote slot-epoch binding and the KES
+        first-key floor) and reports them in getchaininfo. Release 926d2cf was built against native 78d4921c, which
+        has neither: its follower and producer replay other rules from that epoch on. An inert gate is nothing a
+        build needs to know."""
+        w = healthy()
+        for node in w['l1'].values():
+            forks = node['info']['hard_forks']
+            forks['hf3_kes_vote_slot_epoch_binding'] = {'activation_epoch': 8620, 'active': False}
+            forks['hf3_kes_first_key_floor'] = {'activation_epoch': 8620, 'active': False}
+            forks['hf3_kes_register_epoch_binding'] = {'activation_epoch': None, 'active': False}
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
+        message = next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build')
+        self.assertIn('hf3_kes_first_key_floor', message)
+        self.assertIn('hf3_kes_vote_slot_epoch_binding', message)
+        self.assertNotIn('hf3_kes_register_epoch_binding', message)
+        # A build that names the two gates at the L1's epochs is in agreement again.
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': dict(
+                m.V2_COMPILED_GATES, ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH=8620,
+                KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH=8620, KES_REGISTER_EPOCH_BINDING_EPOCH='inert')}))
+            r, _ = run(w, '--build-json', str(bj))
+        self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'OK')
+
     def test_gate_check_reads_build_json(self):
         with tempfile.TemporaryDirectory() as d:
             bj = Path(d, 'build.json')
