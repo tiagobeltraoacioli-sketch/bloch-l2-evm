@@ -32,6 +32,16 @@
 # (43be49f5..., native 78b7343a) is kept for the historical rehearsal/build.sh only and cannot build
 # this release.
 #
+# FORK CANDIDATE v4 (round 17, agent 339): the default native is codex/native-l2-dec-merge-r17-20261117 19aa156d =
+# the RELEASED node 906336fd (release/node-906336fd-20261113: HF1 to HF3, KES enforcement and its two follow-up rules at
+# epoch 8620, the mempool state preflight of the L2 kinds) merged with the December native line 189f3178 (0861278c: the
+# owner's recipients and the December program pins). Every L2 gate is inert. Between 0861278c and this commit three native
+# Cargo.toml files differ (comments in bloch-crypto and fips205; two features without dependencies in bloch-pos-node:
+# ws-release-anchor, ws-auto-checkpoint) and the native Cargo.lock does not, so the same settlement-recovery lock
+# (ab7b3a09...) still resolves it: `cargo build --locked` below is the check, it stops if the lock would change.
+# `set-sweep-recipient.py native-commit` refuses any native Cargo.toml difference by rule, so CANDIDATE_NATIVE_COMMIT
+# here and NATIVE_COMMIT in install-shadow.sh were moved by hand for this step, to what that command writes.
+#
 # FORK CANDIDATE v3 (codex/fork-candidate-l2-r11-20261103, agent 219): the default native is
 # codex/fork-candidate-native-r11-20261103 = node release A 4f34d87e + v2 f12b4113 + qualify kit + rollback kit and
 # runbook v3 + agent 215 forced final + agent 216 forced fallback (PROGRAM_FALLBACK 7528e26d) + agent 221 + agent 222
@@ -55,7 +65,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-CANDIDATE_NATIVE_COMMIT=0861278c531fdf150f0a94a13aa8a8ba64c5f762
+CANDIDATE_NATIVE_COMMIT=19aa156d1d8ab72e5b07d8b5860049e325c42c8b
 CANDIDATE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 NATIVE_COMMIT=${NATIVE_COMMIT:-$CANDIDATE_NATIVE_COMMIT}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a

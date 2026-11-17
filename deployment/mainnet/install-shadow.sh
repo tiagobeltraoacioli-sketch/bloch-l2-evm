@@ -15,7 +15,7 @@
 #   install-shadow.sh --rollback
 #
 # FORK CANDIDATE (December program swap; native L2_NEXT_PROGRAM_EPOCH and L2_PROGRAM_ROLLBACK_EPOCH inert in this
-# tree). OUT_DIR is build-release.sh's OUT of the December build against native 0861278c (docs/DECEMBER-BUILD-R15.md,
+# tree). OUT_DIR is build-release.sh's OUT of the December build against native 19aa156d (docs/DECEMBER-BUILD-R15.md,
 # settlement-recovery lock ab7b3a09...): bloch-l2-produce-dev 63c9cdf8... (the --rule-set producer),
 # the schedule-aware sequencer_mainnet.py pinned below, SHA256SUMS and build.json. CANDIDATE values against an
 # unreleased native: they move with the final December build, and the deposit-only launch kit keeps its own
@@ -45,7 +45,7 @@ set -euo pipefail
 PRODUCE_SHA256=63c9cdf8dee8cbb0440c6b701d196fb551a2dbb3f4afe0a903ee5b9f14215a23
 # deployment/mainnet/sequencer_mainnet.py of this tree (schedule-aware shadow, agent 218).
 SEQUENCER_SHA256=1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae
-NATIVE_COMMIT=0861278c531fdf150f0a94a13aa8a8ba64c5f762
+NATIVE_COMMIT=19aa156d1d8ab72e5b07d8b5860049e325c42c8b
 NATIVE_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 # The programs that run the next rules: native PROGRAM_NEXT (forced sparse guest 81813124...) and PROGRAM_FALLBACK
 # (forced complete guest 7528e26d...), i.e. settler_v3.py MAINNET_NEXT_SPARSE and MAINNET_FALLBACK. CANDIDATE: they move with
