@@ -295,6 +295,39 @@ class CoveredIsTheProducersRule(PricedWorld):
         self.assertNotIn('between', self.full_block_with(lambda tip: 100_000 * tip))
 
 
+class PlainTransferIsTheProducersRule(PricedWorld):
+    """Review R335-3 (agent 335; its demonstration `review_r17_335_planner.py`, branch commit 187e110, made a
+    regression): the producer calls a transaction a plain transfer when it DECLARES 21,000 gas; the planner's cut
+    looked at the gas USED. A value transfer declaring a larger limit was a plain transfer of a sender without
+    credit for the planner (first claim on the reserved places of a full block) and an uncovered call for the
+    producer."""
+
+    def test_a_declared_limit_above_21000_is_not_a_plain_transfer_for_the_reserved_places(self):
+        for sender in range(8):
+            self.policy.state['credit'][f'rich{sender}'] = {'wei': 10**18, 'at': self.now}
+            for nonce in range(16):
+                self.add(f'r{sender}-{nonce}', f'rich{sender}', nonce, 21_000, 1, tip=12 * GWEI // 10)
+        # Eight real newcomers: plain transfers (21,000 declared and used) at 0.5 gwei.
+        for i in range(8):
+            self.add(f'new{i}', f'fresh{i}', 0, 21_000, 1, tip=5 * GWEI // 10)
+        # One established sender: eight value transfers that declare 1,500,000 gas (the uncovered limit) and use
+        # 21,000, at 0.6 gwei. Its credit covers forty transfers; covered needs 1,500,000 x tip.
+        tip = 6 * GWEI // 10
+        self.policy.state['credit']['poser'] = {'wei': 40 * 21_000 * tip, 'at': self.now}
+        for nonce in range(8):
+            raw = signed_bytes(2, 1_500_000, f'poser-{nonce}')
+            self.tx[raw] = dict(name=f'p{nonce}', sender='poser', nonce=nonce, gas=21_000, cost=1, tip=tip, fresh=[],
+                                fail_first=0)
+            self.spool.append(raw)
+        served = self.block(advance=0)
+        self.assertEqual(len(served), 64)
+        self.assertEqual(sum(n.startswith('r') for n in served), 56)
+        newcomers = sorted(n for n in served if n.startswith('new'))
+        self.assertEqual(newcomers, sorted(f'new{i}' for i in range(8)),
+                         'the reserved places went to transactions the producer does not call plain transfers: '
+                         + ', '.join(sorted(n for n in served if n.startswith('p'))))
+
+
 class SettlerHandsTheLedgerToTheProducer(unittest.TestCase):
     """The settler passes the policy's credit ledger, its waiting senders and its gas cap to the producer."""
 

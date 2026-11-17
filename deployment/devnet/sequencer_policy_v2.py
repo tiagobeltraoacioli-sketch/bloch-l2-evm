@@ -514,7 +514,8 @@ class Policy:
         declares times its tip. The producer's report carries the gas used only, so the limit is read from the
         signed bytes (`by_hash`); review R308-7P-3: with the gas used, a sender whose credit lies between the two
         was covered here and uncovered in the producer, and lost the reserved places meant for it. Bytes that do
-        not parse (the producer would not have selected them) fall back to the gas used."""
+        not parse (the producer would not have selected them) fall back to the gas used. The same declared limit
+        decides what a plain transfer is (review R335-3)."""
         cap = int(self.c['max_block_txs'])
         if len(order) <= cap:
             return order
@@ -533,7 +534,10 @@ class Policy:
             if tx['sender'] in set(self.c['write_limit_exempt_senders']) \
                     or credits.get(tx['sender'], 0) >= (gas if limit is None else limit) * tip:
                 return 2
-            return 0 if gas == 21_000 else 1
+            # A plain transfer is what the PRODUCER calls one: 21,000 gas DECLARED (select.rs: `gas_limit == 21_000
+            # && data.is_empty()`; with that limit no data fits). Review R335-3: by the gas used, a value transfer
+            # declaring a large limit took the reserved places here and was an uncovered call for the producer.
+            return 0 if (gas if limit is None else limit) == 21_000 else 1
         for name in sorted(rest, key=lambda h: (group(h), -int(info[h]['effective_tip']), position[h])):
             sender = info[name]['sender']
             earlier = [h for h in rest[:position[name]] if info[h]['sender'] == sender]
