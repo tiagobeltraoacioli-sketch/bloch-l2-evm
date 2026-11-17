@@ -377,6 +377,29 @@ class Profiles(Harness):
         with self.assertRaises(s.Halt):
             self.settler.prove(self.dir)
 
+    def test_after_a_remote_kill_the_local_proof_of_the_same_pass_uses_the_fallback_settings(self):
+        """Agent 317, Part B, block 6: the remote prover was killed at `fast`; the same pass then proved locally
+        with the settings that had just been killed, because the environment was built before the kill."""
+        (self.dir / 'prover-profile.json').write_text(json.dumps({'profile': 'fast', 'number': 6}))
+        local_envs = []
+
+        def run(argv, **kwargs):
+            if 'prove-groth16' in argv:
+                local_envs.append(dict(kwargs['env']))
+            return types.SimpleNamespace(returncode=0)
+        self.settler.run = run
+        self.settler.c.update(prover_threads=8, gnark_image='image')
+        self.settler.program = dict(self.settler.program, remote_prover={'order': ['remote', 'local']})
+        self.settler.prove_remote = lambda directory, proof, profile=None: types.SimpleNamespace(returncode=137)
+        self.settler.local_proof_fits = lambda directory: True
+        (self.dir / 'settlement.proof').write_bytes(b'proof')
+        self.settler.prove(self.dir, stages=('execute', 'prove'))
+        self.assertEqual(len(local_envs), 1)
+        self.assertEqual(local_envs[0].get('SP1_WORKER_NUM_CORE_WORKERS'), '2')
+        self.assertEqual({k: v for k, v in local_envs[0].items() if k in sp.PROFILES['lowmem-2c']['env']},
+                         sp.PROFILES['lowmem-2c']['env'])
+        self.assertEqual(json.loads((self.dir / 'prover-profile.json').read_text())['profile'], 'lowmem-2c')
+
     def test_a_block_without_a_profile_also_falls_back_after_a_kill(self):
         """A deposits-only block built without the policy has no profile; after a kill it gets the safer one."""
         del self.settler.c['max_block_sp1_gas']

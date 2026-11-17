@@ -2583,6 +2583,7 @@ class Settler:
                'SP1_GNARK_IMAGE': self.c['gnark_image'],
                'BLOCH_NATIVE_L2_REQUEST': str(directory / 'native-request.txt'),
                'BLOCH_NATIVE_L2_ARTIFACT': str(directory / 'block.artifact')}
+        base_env = dict(env)
         profile = self.prover_profile(directory)
         if profile:
             env.update(profile['env'])
@@ -2620,6 +2621,11 @@ class Settler:
                         **({'timeout': True} if timed_out else {}))
                     if result.returncode in KILLED_EXITS:
                         self.proof_out_of_memory(directory, where, profile)
+                        # The next location of THIS pass proves with the fallback settings too (agent 317, Part B,
+                        # block 6: after the remote kill at `fast` the local proof of the same pass still ran with
+                        # the killed settings, in the smaller unit). `env` and `profile` were read before the kill.
+                        profile = self.prover_profile(directory)
+                        env = dict(base_env, **(profile['env'] if profile else {}))
             steps.append({'name': name, 'where': where, 'exit_code': result.returncode,
                           'seconds': round(self.clock() - start, 1)})
             if result.returncode:
