@@ -277,12 +277,16 @@ class InstallPlan(unittest.TestCase):
             self.assertFalse(seen[0][0].startswith(str(here)), seen)
             self.assertFalse(Path(seen[0][0]).exists(), 'the staging directory is removed')
 
-    def test_the_launch_pins_are_not_the_december_host(self):
-        # GO-LIVE-PINS-PROVER.sha256 is the deposit-only launch kit's. This fork candidate's host serves
-        # --mainnet-v1 and --mainnet --sparse: the December build's pin, the same as the settler installer's.
+    def test_the_prover_pin_list_is_the_december_build(self):
+        # GO-LIVE-PINS-PROVER.sha256 of this branch is the December pin list (review R335-4): the host that serves
+        # --mainnet-v1 and --mainnet --sparse, the activated guest and the two December guests, each equal to
+        # this installer's pin; the host is the settler installer's too.
         lines = dict(reversed(line.split()) for line in (HERE.parent / 'GO-LIVE-PINS-PROVER.sha256').read_text().splitlines())
         self.assertEqual(lines['release-prover-v2/settlement_v3_mainnet'], install.GUEST_SHA256)
-        self.assertNotEqual(lines['release-prover-v2/bloch-evm-sp1-settlement-v3'], install.PROVER_SHA256)
+        self.assertEqual(lines['release-prover-v2/bloch-evm-sp1-settlement-v3'], install.PROVER_SHA256)
+        self.assertEqual(lines['release-prover-v2/settlement_v3_mainnet_sparse'], install.NEXT_GUEST_SHA256)
+        self.assertEqual(lines['release-prover-v2/settlement_v3_mainnet_fallback'], install.FALLBACK_GUEST_SHA256)
+        self.assertEqual(lines['release-prover-v2/remote_prover.py'], install.REMOTE_PROVER_SHA256)
         self.assertRegex(install.PROVER_SHA256, '^[0-9a-f]{64}$')
         spec = importlib.util.spec_from_file_location('install_settler_for_prover_pin', HERE.parent / 'install-settler-mainnet.py')
         settler_installer = importlib.util.module_from_spec(spec)

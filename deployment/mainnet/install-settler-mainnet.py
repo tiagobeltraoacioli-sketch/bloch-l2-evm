@@ -124,9 +124,10 @@ PINS = {
     'sequencer_policy_v2.py': 'faffbb1313b6bad30861334267eb04eaf9467bd3a7b457c18b5163a3cba622bd',
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness).
     'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,
-    # CANDIDATE: the December build (docs/DECEMBER-BUILD-R15.md), build-release.sh against native 0861278c, reproduced
-    # on two hosts and two paths.
-    'bloch-l2-produce-dev': '63c9cdf8dee8cbb0440c6b701d196fb551a2dbb3f4afe0a903ee5b9f14215a23',
+    # CANDIDATE: the December build (docs/DECEMBER-BUILD-R15.md), build-release.sh against native 19aa156d (the line merged onto the
+    # released node 906336fd), built once on one host; the build before the merge (63c9cdf8..., native 0861278c)
+    # was reproduced on two hosts and two paths.
+    'bloch-l2-produce-dev': 'c6b7ce1b921134b73da4a85d0944e630f26e44dce604a4e10f2c0db7622e4d61',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544, fixed) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': '81813124c19b1a9bfe5755fc742fa36a48420134b71e18ef355e26e1c5f1b6d9',

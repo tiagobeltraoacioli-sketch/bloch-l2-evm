@@ -165,8 +165,8 @@ class Installer(unittest.TestCase):
             self.assertIn(f'\n{line}\n', text)
 
     def test_every_installed_file_is_pinned(self):
-        # Fork candidate: the kit files are pinned to this tree; the launch kit's GO-LIVE-PINS.sha256 still names
-        # the activated guest, bloch-pos and the manifest; the December SP1 host is not pinned yet (refused).
+        # Fork candidate: GO-LIVE-PINS.sha256 of this branch is the December pin list (review R335-4). Every file
+        # this installer copies has a `release-settler-v2/` line there, and the line equals the installer's pin.
         self.assertEqual(set(m.PINS), set(m.FILES))
         for name, path in (('settler_v3.py', HERE.parent / 'devnet' / 'settler_v3.py'),
                            ('sequencer_policy_v2.py', HERE.parent / 'devnet' / 'sequencer_policy_v2.py'),
@@ -177,8 +177,13 @@ class Installer(unittest.TestCase):
             value, name = line.split()
             if name.startswith('release-settler-v2/'):
                 golive[name.split('/', 1)[1]] = value
-        for name in ('settlement_v3_mainnet', 'bloch-pos', 'mainnet.manifest'):
-            self.assertEqual(golive[name], m.PINS[name], name)
+        for name in m.FILES:
+            self.assertEqual(golive.get(name), m.PINS[name], name)
+        # The producer the settler runs is the one the release artifacts and the shadow installer carry.
+        artifacts = dict(reversed(line.split()) for line in (HERE / 'GO-LIVE-PINS.sha256').read_text().splitlines())
+        self.assertEqual(artifacts['artifacts/bloch-l2-produce-dev'], m.PINS['bloch-l2-produce-dev'])
+        shadow = (HERE / 'install-shadow.sh').read_text()
+        self.assertIn(f"\nPRODUCE_SHA256={m.PINS['bloch-l2-produce-dev']}\n", shadow)
         # The December build pinned the SP1 host (docs/DECEMBER-BUILD-R15.md); the prover installer pins the same one.
         self.assertEqual(m.PINS['bloch-evm-sp1-settlement-v3'], m.CANDIDATE_HOST_PIN)
         self.assertRegex(m.CANDIDATE_HOST_PIN, '^[0-9a-f]{64}$')
