@@ -18,8 +18,9 @@ Checks made before anything was written:
   which `transition::owns` opens for the holder of that key (the rule of every carried Genesis-3 balance; 160 bits
   of preimage resistance). A spend from a treasury output was not exercised on a rehearsal net.
 - The EVM address has a valid EIP-55 checksum exactly as given, is not zero, not in the precompile range and not a
-  known burn address; `set-sweep-recipient.py set … --confirm …` accepted it. It holds no code (an EOA), so the
-  tool's Safe checks do not apply.
+  known burn address; `set-sweep-recipient.py set … --confirm …` accepted it. The owner states it is an externally
+  owned address; code at it on the L2 could not be checked (no L2 at that state yet) and is to be confirmed on
+  chain at the first sweep. For an externally owned address the tool's Safe checks do not apply (review R335-6).
 
 Naming the treasury arms nothing: `L2_NEXT_PROGRAM_EPOCH`, `L2_REVENUE_EPOCH`, `L2_FORCED_INCLUSION_EPOCH` and
 `L2_PROGRAM_ROLLBACK_EPOCH` stay `u64::MAX`, and `PROGRAM_NEXT_FINAL` stays false. With the treasury named the
@@ -59,6 +60,17 @@ L2 genesis `632e45ae…f468`, the activated program and its configuration `8ec1c
 | `remote_prover.py` | `40f954601a94d9ce2f237af37211cbba1c3e0e0c0a4944cc2ad40714584381c5` | prover installer `REMOTE_PROVER_SHA256` |
 
 The candidate's `GO-LIVE-PINS.sha256` is printed by `python3 deployment/mainnet/refresh_kit_pins.py`.
+
+**`GO-LIVE-PINS.sha256` of this branch is NOT the December pin list (review R335-4).** Its source lines (the
+`kit/` files, the Python files of the settler and prover releases) follow this tree; its BINARY lines do not:
+`artifacts/*`, `release-settler-v2/` and `release-prover-v2/` binaries and guests are still those of earlier
+builds (the launch release and the 2026-11-02 candidate), and `follower-rpc/install.sh` still accepts only the
+signed launch release (`RELEASE_SHA256SUMS_SHA256` `6d3bd628…`). The December binaries and guests are pinned
+only in the table above and inside three installers (`install-settler-mainnet.py` `PINS`,
+`install-prover-mainnet.py`, `install-shadow.sh`). A December pin list, its signing target and its own plan
+section do not exist yet. They cannot be completed today: the list also names the L1 node binary of the fork
+(`release-settler-v2/bloch-pos`), which has not been built (the native line is not yet merged onto the released
+node), and that merge moves the three L2 binaries once more. They belong to the rebuild that follows it.
 
 **How far each identity is reproduced.**
 - The four guest ELFs: built from b635566 in the pinned container on **two hosts** (build host A, image
@@ -109,7 +121,9 @@ The candidate's `GO-LIVE-PINS.sha256` is printed by `python3 deployment/mainnet/
 
 `WORK` may be any directory and the builder any user: steps 2 and 4 copy `WORK/src` to `/var/tmp/bloch-l2-build`
 and build there (section 3 says why), one build at a time per machine; the trees under `WORK` are not modified.
-Remove `/var/tmp/bloch-l2-build` before a release build so that everything is compiled. `RUSTFLAGS` must be unset.
+Each run of either script empties `/var/tmp/bloch-l2-build` first, target directories included, so everything is
+compiled every time (review R335-2: until round 17 this was a sentence here, and a build after another tree's
+build could reuse that tree's compiled crates). `RUSTFLAGS` must be unset.
 The machine: x86_64 Linux with the toolchains of `rust-toolchain` files (rustup 1.98.1), `protoc`, and the C
 toolchain of Ubuntu 24.04 (gcc 13.3.0; its start files and the C code some crates compile are part of the
 binaries). Another distribution is not expected to give the same bytes and was not tried.

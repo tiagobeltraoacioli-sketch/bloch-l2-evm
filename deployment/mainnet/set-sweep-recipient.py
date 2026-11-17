@@ -686,7 +686,9 @@ def rebuild_list():
     return [
         'Guests (pinned container, two Linux x86_64 hosts, SHA256SUMS identical): settlement_v3_mainnet_sparse '
         '(PROGRAM_NEXT), settlement_v3_mainnet (PROGRAM_FALLBACK); settlement_v3_mainnet_sparse_eager (measurement '
-        'only) also moves; settlement_v3_mainnet_v1_sparse (mainnet_v1, no recipient) must stay b1b09c1f, stop if not',
+        'only) also moves; settlement_v3_mainnet_v1_sparse (mainnet_v1, no recipient) does not depend on the recipient: '
+        'its identity must still reproduce the activated configuration, stop if not (its ELF hash follows the '
+        'root crate, see docs/DECEMBER-BUILD-R15.md section 3)',
         'Identities: `bloch-evm-sp1-settlement-v3 --mainnet --sparse identity settlement_v3_mainnet_sparse` and '
         '`--mainnet identity settlement_v3_mainnet` from the host built from this tree; feed them to `pins`',
         'Native (bloch-sis-pow): commit l2_settlement.rs; bloch-pos release build on two hosts, qualify (forced '

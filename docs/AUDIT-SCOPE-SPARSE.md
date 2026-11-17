@@ -163,6 +163,12 @@ Each is tested; the test names are in `src/sparse_witness/tests.rs` (T) and
 
 ## Programs
 
+**The table below is three builds old (review R335-9): commit `b772f2d`, before the owner's recipient was
+compiled. The programs of the December build, with the owner's recipient, are in `docs/DECEMBER-BUILD-R15.md`
+section 3 (`settlement_v3_mainnet_sparse` `81813124…b6d9`, `settlement_v3_mainnet` of the fallback crate
+`7528e26d…c3e1`, `settlement_v3_mainnet_v1_sparse` `ff34a548…7098`). The table is kept for the real-proof record
+that follows it.**
+
 Commit `b772f2d`, built by `build-container.sh` on two hosts (136.244.93.186 and
 45.77.142.123, Linux 6.8.0 x86_64, separately built images) with identical
 output:
