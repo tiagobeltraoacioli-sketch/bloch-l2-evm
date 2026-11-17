@@ -182,6 +182,19 @@ have (the gate is in the December fork). Neither is a launch-line item.
 
 ## 8. Not yet proven (for the next real-proof run on this build)
 
+**Round 17 update (2026-11-17).** The first real-proof run on this build exists: agent 317, Part B, continued by
+agent 333 (`agents/317-l2-proof-drills-r15.md`, `agents/333-l2-proof-drills-r17.md` in the coordination folder),
+on a private net with the real SP1 host, settled RPC and both guests of section 3 and the compiled recipients;
+the L1 node, follower and producer there are forced builds (gate epochs and a throwaway attestor set only).
+Proven there so far: a real Groth16 proof under the new `PROGRAM_NEXT` key and the swap; the documented install
+with user transactions; the full block of 64 transfers with the profile reaching the remote prover (439.0 s, SP1
+host peak 39.9 GiB, no rig workaround); the bound on memory kills (three kills, halt); the reserve on a full
+block (56 covered, 8 newcomers); the crossing fee and a forced surcharge paid to the treasury script; a
+forced-only block matched by the shadow. One defect seen there is fixed on `codex/l2-r17-pins-20261117` (the
+local proof after a remote memory kill used the killed settings). The list below is what was open before that
+run; the items it does not name above are still open.
+
+
 - A real Groth16 proof under the new program keys; the native fixture test under them.
 - The memory fallback of F317-1 on a real proof, and the full block of 64 transfers without the rig's workaround.
 - S7 on the sparse guest; the clock and step-restart spool drills.
