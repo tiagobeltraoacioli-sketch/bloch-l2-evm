@@ -334,3 +334,54 @@ impl BlockAssembler<BlochRethBlockExecutorFactory> for BlochNodeBlockAssembler {
         })
     }
 }
+
+#[cfg(test)]
+mod next_rules_base_fee_tests {
+    use super::*;
+    use reth_chainspec::EthChainSpec;
+
+    /// Agent 387's F387-1 (High; agent 382 fix, round 18). Under the next rules
+    /// the executor validates every block against `RuleSchedule::at(number)`,
+    /// which adds the base-fee floor (`min_base_fee`, agent 197). The header the
+    /// producer builds must take its base fee from the same rules: before the
+    /// fix it took the base rules' unfloored EIP-1559 step, and the first block
+    /// whose step fell below the floor was refused by the producer itself
+    /// ("block base fee 99817235, EIP-1559 rule requires 100000000"), so the
+    /// settler could never build another block.
+    #[test]
+    fn f387_1_the_next_header_base_fee_is_the_rules_of_the_block_being_built() {
+        let base = ChainSpec::mainnet_v1();
+        let next = ChainSpec::mainnet_next_or_rehearsal();
+        let floor = next.min_base_fee;
+        assert!(floor > 0 && base.min_base_fee == 0, "the floor is a next-rules addition");
+        let rules = crate::RuleSchedule::new(base.clone(), next.clone()).unwrap();
+        let chain = crate::BlochChainSpec::scheduled(rules.clone(), B256::repeat_byte(0x70), 1_786_656_679).unwrap();
+        let config = BlochEvmConfig::for_chain(&chain);
+        // Agent 387's block 574: an empty block whose successor's step falls under the floor.
+        let mut parent = chain.genesis_header().clone();
+        parent.0.number = 574;
+        parent.0.base_fee_per_gas = 100_218_107;
+        parent.0.gas_used = 0;
+        let step = base.next_base_fee(parent.0.base_fee_per_gas, 0);
+        assert!(step < floor, "the case crosses the floor: step {step}");
+        let attributes = BlochNextBlockEnvCtx {
+            timestamp: parent.0.timestamp,
+            prevrandao: B256::ZERO,
+            anchor_root: B256::ZERO,
+            deposits: Vec::new(),
+        };
+        // Before the switch block 575 runs the base rules: the step, unfloored.
+        let context = config.next_context(&parent, &attributes).unwrap();
+        assert_eq!(context.number, 575);
+        assert_eq!(context.base_fee_per_gas, step);
+        // From the switch on it runs the next rules: exactly what the executor requires.
+        rules.switch_at(1).unwrap();
+        let context = config.next_context(&parent, &attributes).unwrap();
+        assert_eq!(context.base_fee_per_gas, chain.execution_at(575).next_base_fee(parent.0.base_fee_per_gas, 0));
+        assert_eq!(context.base_fee_per_gas, floor, "the floor, not the step");
+        // Above the floor both rule sets agree.
+        parent.0.base_fee_per_gas = 2 * floor;
+        let context = config.next_context(&parent, &attributes).unwrap();
+        assert_eq!(context.base_fee_per_gas, base.next_base_fee(2 * floor, 0));
+    }
+}
