@@ -52,7 +52,8 @@ Changed on this branch after the review's last read (1b55ce1): R308-6P-2 (the mo
 The table above is the list as the review wrote it (26 items) and is kept unchanged. The seventh review pass added
 C10, C11 and D6. This section says, for each of the 29, what round 17 found or did. "Closes it" names the one
 thing still missing. Tips of round 17: bloch-l2-evm `codex/l2-r17-20261117` (documents only on top of f73131f;
-binaries of build commit c2938be) and `codex/l2-r17-pins-20261117` (one settler change and its pins); native
+binaries of build commit c2938be) and `codex/l2-r17-pins-20261117` (Python and build-script fixes and their pins; no
+binary pin); native
 bloch-sis-pow `codex/l2-r17-20261117` (scripts and one runbook on top of 0861278c; no crate source changed);
 native `codex/native-l2-admission-r17-20261117` (the released node line 906336fd plus one test and one note).
 
@@ -94,6 +95,21 @@ New in round 17:
 | N1 | fork, node | **The December native line is not on top of the released node.** `codex/l2-r15-recipients-20261116` (0861278c) branches from the release line at 4f34d87e; the released node 906336fd is 164 commits further (the security fixes of 2026-11-10 to 11-13, two consensus gates at epoch 8620, the L2 preflight of B1, changes in `l2_settlement.rs`, `transition/l2_*.rs`, `state_root.rs`). A trial merge (`git merge-tree`) conflicts in eight files: `hard_forks.rs`, `l2_settlement.rs`, `l2_settlement_tests.rs`, `wire_alloc.rs`, `engine.rs`, `engine/admission.rs`, `rpc/consensus_gates.rs`, `rpc/tests.rs`. The December node cannot be released from 0861278c as it is, and the three L2 binaries link the native transition, so the merge moves their identity | The merge on a native branch of its own, its suites, then one rebuild of the three binaries and their pins. Not done in round 17 |
 | N2 | launch and candidate | **Not verified: that an L2 follower built against an older native commit follows a chain run by release 906336fd past epoch 8620.** The follower verifies L1 blocks with the native code it links (78d4921c for release 926d2cf, 0861278c for the December build); neither has the two rules release 906336fd arms at 8620 | One follower run of each build against a private chain produced by 906336fd across 8620 |
 | N3 | candidate | After a memory kill of the remote prover the local proof of the same pass still used the killed settings (seen by agent 317, Part B, block 6) | Fixed on `codex/l2-r17-pins-20261117` (settler, Python; its pin moves) |
+
+From the round-17 review (agent 335, `R335-n`) and the real-proof run (agent 333, `F333-n`), on `codex/l2-r17-pins-20261117`:
+
+| Finding | State | Closes it |
+|---|---|---|
+| R335-2 (Medium): a release build could reuse another tree's compiled crates in the fixed build directory | **fixed**: every build empties the directory, the lock lies beside it (`build-root.sh`, `test_build_root.py`) | Done |
+| R335-4 (Medium): the pin lists' binary lines are not the December build's | open, **stated** in `docs/DECEMBER-BUILD-R15.md` section 3 | The December pin list, signing target and plan section, with the rebuild that follows item N1 |
+| R335-3 (Low): planner and producer disagreed on "plain transfer" | **fixed** (planner reads the declared limit) | Done |
+| R335-1 (Low): `audit` is green between `set` and `pins` | open | A pins-pending marker that `pins` removes and `audit`, `native-commit` and the build refuse |
+| R335-5 (Low): release binaries accept `--rules mainnet-rehearsal` | text corrected; the flag itself is open (a compiled change: moves the producer and the settled RPC) | A cargo feature or a refusal of the mainnet domain, in the next rebuild of the binaries |
+| R335-6 (Low), R335-9 (Info): texts | corrected on the L2 side; the two native comments (R335-9) wait for the next native change | The native comments |
+| R335-7 (Low): 27 sweep-tool tests are skipped on a tree that carries the recipient | open | Fixtures independent of the committed constant |
+| R335-8 (Info): the shadow omits three checks the settler makes on forced records | open | One shared function |
+| R335-10 (Info): a negative test that the list did not decide | **fixed** | Done |
+| F333-1 (Low): the build recipe did not say the reth snapshot must be prepared | **fixed** (document) | Done |
 
 ## B1, and what an operator of the released node can do today
 
