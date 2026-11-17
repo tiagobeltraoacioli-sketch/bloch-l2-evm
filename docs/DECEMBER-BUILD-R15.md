@@ -292,3 +292,70 @@ Built against `19aa156d` they carry the two rules the released node arms at epoc
 the SP1 host are the same files, so its proving results stand for them; every result that ran the follower or
 the producer of `0861278c` must be repeated with the two new binaries (list in the coordination folder's
 cross-area log, 2026-11-17).
+
+## 12. The merged line brought up to date with `main` (round 18)
+
+bloch-sis-pow `main` moved after section 11 was written: `857a10ac` is PR #35, the deployed node release
+`0067547f` (= `906336fd` + 49 node commits: the KES half of the block door, the Sentinel hooks, mempool source
+budgets for funded delegation and commission updates, the `--reject-block-root` residues, supply-chain bumps)
+merged into `main`. The native line took it by a merge commit, so nothing published was rewritten:
+
+**Native `codex/native-l2-dec-merge-r17-20261117` `711e60ba`** = `f596fb78` (merge of `main` `857a10ac` into
+`19aa156d`) + `8ba38c14` (a restated test, test-only) + `711e60ba` (notes). Of the files changed on either side
+since `906336fd`, the 132 only `main` changed are byte-equal to `main`, the 39 only the L2 line changed are
+byte-equal to `19aa156d`, and of the 6 both changed only `bloch-pos-node/src/rpc/tests.rs` conflicted (both
+appended tests; both kept). `hf-gates.py discover --repo . --base 857a10ac --candidate 711e60ba` lists exactly the
+five L2 gates, all inert. The suites, the CI-equivalent run and the mainnet replay of both trees are in the
+coordination report of agent 382 (`agents/339-l2-native-merge-r17.md`, section R18).
+
+| Artifact | Native `19aa156d` (section 11) | Native `711e60ba` |
+|---|---|---|
+| `bloch-l2-native-follower` | `ee1b2c8a…d581` | `989bae69debf8e0cac0962594c13dbd41f4a4e6d78453b66ea5fb0db5b81fc3e` |
+| `bloch-l2-produce-dev` | `c6b7ce1b…4d61` | `779850edebbbb6033266909170c8e17f62b2b47d7c360f29426175e2d1cb7f75` |
+| `bloch-l2-settled-rpc` | `3d116e37…351d` | the same |
+| `bloch-evm-sp1-settlement-v3` (SP1 host) | `3d89f5c3…c849` | the same (rebuilt) |
+| `sequencer_mainnet.py` | `1ff6349b…a8ae` | the same |
+| Guest ELFs, keys, configuration `27d6ce9f…2783`, proof policy | | the same, not rebuilt (no guest input changed; the guests do not link the native crates) |
+| Build `SHA256SUMS` / `build.json` | `b89b5879…957f` / `e88a0836…ef05` (`l2_commit` `3cbc421`) | `f7451834c7fa19635586a38b2718d7ce0a90525d66943b13470dfc9fe759b23d` / `ed14d087360f9f6738fef400420c3a95a8b1913e44c9db81ea650c0f39ae3d5a` (`l2_commit` `904e6d4`) |
+| `GO-LIVE-PINS.sha256` | `741828a3…f00e` | `6b0dbee2fdc995fcaf664f2b408656359831fd9a117c645c4e353124028a030b` |
+
+**The lock.** The settlement-recovery lock is unchanged (`ab7b3a09…`). Between `19aa156d` and `711e60ba` no
+`Cargo.toml` of a native crate this tree builds changed; the native ROOT `Cargo.lock` moved (gossipsub 0.49.5,
+tokio 1.53.3, rustix 1.1.6, the release's supply-chain fix L1M-17) and so did `services/pq-shield-api`. This tree
+builds with its own lock, so **those bumps do not reach the three L2 binaries**: they keep the versions of
+`ab7b3a09…`. Taking them would be a new lock and a new identity of every binary, the settled RPC included; it is
+listed as open, not done. `set-sweep-recipient.py native-commit` refuses by rule ("native lock inputs changed")
+and was not weakened; the two commit pins were moved by hand to what it writes (`build-release.sh` header).
+
+**What the followers gain.** Built against `711e60ba` the follower and the producer link the deployed release's
+native code (`0067547f`), including its KES attribution change (`kes.rs`, audit L1-17). Not run: a follower of
+this build against a chain across epoch 8620 or across a late KES registration (agent 340's case).
+
+**Reproduction.** Built three times from nothing on build host A, each byte-equal (all of `SHA256SUMS`, and
+`build.json` between the two builds of the same commit): agent 382 from `…/l2-merge-r18/work` and from
+`…/l2-merge-r18/p2/elsewhere` (L2 `904e6d4`), and reviewer 384 independently (`rel-dec71`). Not on a second host.
+
+**Superseded by section 13** (the F387-1 fix moves the producer and the settled RPC).
+
+## 13. Native `b7cd752b` and the F387-1 fix (round 18)
+
+The native pin is `b7cd752b` (= `711e60ba` + test-only commits; bloch-sis-pow PR #37 merged it into `main` as
+`c8a088cb`). The L2 tree carries the fix of agent 387's F387-1 (High): the producer's next header, reth's
+`next_block_base_fee`, the settled RPC's spool head and `eth_gasPrice` floor, and the producer's tip hold take the
+base fee of the rules of the block being built (`RuleSchedule::at`), so the next rules' base-fee floor (0.1 gwei)
+is applied where the executor requires it. Under the base rules nothing changes. Build commit `7a3b695`:
+
+| Artifact | Section 12 (native `711e60ba`, no fix) | Native `b7cd752b`, F387-1 fixed |
+|---|---|---|
+| `bloch-l2-native-follower` | `989bae69…fc3e` | `c4bf512e5ad0f5ef4ab8c132c6dc2d6e7a23a1e21dcaee6b232fa1e70ea79e28` |
+| `bloch-l2-produce-dev` | `779850ed…7f75` | `364df3a3e5cb991f87d614676675448b08456ad8ad4bbd9af1425a3a925e0bc0` |
+| `bloch-l2-settled-rpc` | `3d116e37…351d` | `304a9f5823bfae7cc59ff3799a7c4131c008f2c57255bfe9a49bf3aae07c898f` |
+| SP1 host, `sequencer_mainnet.py`, guests, keys, configuration | | unchanged (`3d89f5c3…c849`, `1ff6349b…a8ae`; the guests do not link the changed crates) |
+| Build `SHA256SUMS` / `build.json` | `f7451834…b23d` / `ed14d087…3d5a` | `27cfa4a34f9abcc68e47795b63f386e705b84747908a37e358415a2c677da2cf` / `94c3e3d2b005b3ff56573b93be6811eb940979754c3fc9355e10bfaa4daf688e` |
+
+Also in this tree since section 12: every settled-RPC unit passes the 1 gwei tip floor (review R384-2); the
+monitor carries agent 340's fix (an armed L1 gate missing from the L2 build is critical) and its build constants
+name this build (review R384-6: `V2_BUILD`, `V2_SHA256`, the two 8620 gates in `V2_COMPILED_GATES`).
+
+Not done: a second host; the end-to-end `extend` across the floor with the rebuilt producer (agent 387's D1 rig);
+the real-proof drills on these binaries.

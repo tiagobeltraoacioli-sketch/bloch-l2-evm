@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read-only health monitor for the Bloch L2 mainnet (chain id 700770; devnet4 700771).
 
-Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the next L2 build, provisional and unsigned (L2 926d2cf5, native
-78d4921c, follower cdf5da5c, produce-dev e3f1a290, settled-rpc 53e88565).
+Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the December L2 build, provisional and unsigned (L2 7a3b695a, native
+b7cd752b = the merged December line on node release 0067547f, follower c4bf512e, produce-dev 364df3a3,
+settled-rpc 304a9f58).
 
 What it reads (it never writes to a chain, holds no key and opens no keystore):
   * every L2 settled-RPC backend (`--l2-rpc NAME=URL`, repeat): eth_chainId, the `latest`, `safe` and
@@ -72,17 +73,17 @@ MAINNET_PINS = {
     'attestor_set': '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b',
 }
 
-# ---- The v2.1 L2 build (bloch-l2-2026-10-30-v21-native-78d4921c: SHA256SUMS and build.json) ----
+# ---- The December L2 build (docs/DECEMBER-BUILD-R15.md section 12: SHA256SUMS and build.json; round 18) ----
 V2_BUILD = {
-    'l2_commit': '926d2cf50af11f389ad1ffa91c0b7720178b3472',
-    'native': '78d4921c3ec6ba41829f3878eed47f8d3bb96230',
-    'native_lock_sha256': 'a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9',
+    'l2_commit': '7a3b695adb8b43e119371b08649d8217a40b4d6b',
+    'native': 'b7cd752ba1d1e8b8861b51a083310242bd6270cf',
+    'native_lock_sha256': 'ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa',
 }
 V2_SHA256 = {
-    'bloch-l2-native-follower': 'cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2',
-    'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
-    'bloch-l2-settled-rpc': '53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d',
-    'sequencer_mainnet.py': '15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2',
+    'bloch-l2-native-follower': 'c4bf512e5ad0f5ef4ab8c132c6dc2d6e7a23a1e21dcaee6b232fa1e70ea79e28',
+    'bloch-l2-produce-dev': '364df3a3e5cb991f87d614676675448b08456ad8ad4bbd9af1425a3a925e0bc0',
+    'bloch-l2-settled-rpc': '304a9f5823bfae7cc59ff3799a7c4131c008f2c57255bfe9a49bf3aae07c898f',
+    'sequencer_mainnet.py': '1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae',
 }
 # getchaininfo.hard_forks name -> the params.rs constant the v2 follower/producer were compiled with,
 # and its value in the v2 build.json (`l1_activation_epochs`). A list means "any of" (cfg variants).
@@ -107,8 +108,8 @@ GATE_CONSTANTS = {
     'l2_da_reserved_slot': 'L2_DA_RESERVED_SLOT_EPOCH',
     # L1 forced inclusion (candidate, inert; native params::L2_FORCED_INCLUSION_EPOCH, = L2_NEXT_PROGRAM_EPOCH).
     'l2_forced_inclusion': 'L2_FORCED_INCLUSION_EPOCH',
-    # Armed at 8620 by node release 906336fd (2026-11-13); native 78d4921c, which release 926d2cf links, has
-    # neither constant, so they are not in V2_COMPILED_GATES and check_gates reports them as not built in.
+    # Armed at 8620 by node release 906336fd (2026-11-13); the December build links the merged line on 0067547f and
+    # has both (the launch build 926d2cf / 78d4921c had neither, and check_gates reported them as not built in).
     'hf3_kes_vote_slot_epoch_binding': 'ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH',
     'hf3_kes_first_key_floor': 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH',
     'hf3_kes_register_epoch_binding': 'KES_REGISTER_EPOCH_BINDING_EPOCH',
@@ -118,6 +119,7 @@ V2_COMPILED_GATES: Dict[str, Any] = {
     'HF2_SLASHING_V2_EPOCH': 7270, 'HF2_GROWTH_CAP_EPOCH': 7270, 'SIG_CANONICAL_ACTIVATION_EPOCH': 7270,
     'MLDSA_PIN_ACTIVATION_EPOCH': ['0', '7270'], 'HF3_KES_EPOCH': 7360, 'HF3_KES_ENFORCE_EPOCH': 8620,
     'HF3_SLH_SUITE_EPOCH': 7360, 'HF3_PQ_MIGRATION_EPOCH': 7360,
+    'ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH': 8620, 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH': 8620,
     # Absent before the program-swap build, which is the same as inert: an L2 build without them halts at an armed swap.
     'L2_NEXT_PROGRAM_EPOCH': 'inert', 'L2_PROGRAM_ROLLBACK_EPOCH': 'inert',
     'L2_DA_RESERVED_SLOT_EPOCH': 'inert', 'L2_FORCED_INCLUSION_EPOCH': 'inert',

@@ -574,14 +574,22 @@ class MonitorTests(unittest.TestCase):
         """Node release 906336fd arms two consensus rules at epoch 8620 (the vote slot-epoch binding and the KES
         first-key floor) and reports them in getchaininfo. Release 926d2cf was built against native 78d4921c, which
         has neither: its follower and producer replay other rules from that epoch on. An inert gate is nothing a
-        build needs to know."""
+        build needs to know. Round 18 (agent 382, review R384-6): the December build links the merged line on node
+        release 0067547f, so the monitor's compiled list has both gates; the earlier build is given as its own
+        build.json (its gate list without the two) and must still be CRIT."""
         w = healthy()
         for node in w['l1'].values():
             forks = node['info']['hard_forks']
             forks['hf3_kes_vote_slot_epoch_binding'] = {'activation_epoch': 8620, 'active': False}
             forks['hf3_kes_first_key_floor'] = {'activation_epoch': 8620, 'active': False}
             forks['hf3_kes_register_epoch_binding'] = {'activation_epoch': None, 'active': False}
-        r, _ = run(w)
+        earlier = {k: v for k, v in m.V2_COMPILED_GATES.items()
+                   if k not in ('ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH', 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH')}
+        self.assertEqual(len(earlier), len(m.V2_COMPILED_GATES) - 2)
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': earlier}))
+            r, _ = run(w, '--build-json', str(bj))
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
         message = next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build')
         self.assertIn('hf3_kes_first_key_floor', message)
@@ -595,6 +603,9 @@ class MonitorTests(unittest.TestCase):
                 KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH=8620, KES_REGISTER_EPOCH_BINDING_EPOCH='inert')}))
             r, _ = run(w, '--build-json', str(bj))
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'OK')
+        # The December build's own compiled list (no --build-json) agrees with the fleet's gates.
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'OK')
 
     def test_gate_check_reads_build_json(self):
         with tempfile.TemporaryDirectory() as d:
@@ -604,19 +615,23 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
 
     def test_an_armed_program_swap_the_l2_build_holds_inert_is_critical(self):
+        # Round 18 (agent 382): the build.json carries the compiled list too; the December build has the two
+        # 8620 gates the fleet arms, and a build.json without them is CRIT for them (340's check), not for this gate.
         w = healthy()
         for node in w['l1'].values():
             node['info']['hard_forks']['l2_next_program'] = {'activation_epoch': 10060, 'active': False}
         with tempfile.TemporaryDirectory() as d:
             bj = Path(d, 'build.json')
-            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_NEXT_PROGRAM_EPOCH': 'inert'}}))
+            bj.write_text(json.dumps({'l1_activation_epochs': {**m.V2_COMPILED_GATES, 'L2_NEXT_PROGRAM_EPOCH': 'inert'}}))
             r, _ = run(w, '--build-json', str(bj))
             self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
             self.assertIn('l2_next_program', next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build'))
-            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_NEXT_PROGRAM_EPOCH': 10060}}))
+            bj.write_text(json.dumps({'l1_activation_epochs': {**m.V2_COMPILED_GATES, 'L2_NEXT_PROGRAM_EPOCH': 10060}}))
             self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
 
     def test_an_armed_da_slot_or_forced_inclusion_the_l2_build_holds_inert_is_critical(self):
+        # Round 18 (agent 382): the build.json carries the compiled list too; the December build has the two
+        # 8620 gates the fleet arms, and a build.json without them is CRIT for them (340's check), not for this gate.
         for gate, const in (('l2_da_reserved_slot', 'L2_DA_RESERVED_SLOT_EPOCH'),
                             ('l2_forced_inclusion', 'L2_FORCED_INCLUSION_EPOCH')):
             w = healthy()
@@ -624,11 +639,11 @@ class MonitorTests(unittest.TestCase):
                 node['info']['hard_forks'][gate] = {'activation_epoch': 10060, 'active': False}
             with tempfile.TemporaryDirectory() as d:
                 bj = Path(d, 'build.json')
-                bj.write_text(json.dumps({'l1_activation_epochs': {const: 'inert'}}))
+                bj.write_text(json.dumps({'l1_activation_epochs': {**m.V2_COMPILED_GATES, const: 'inert'}}))
                 r, _ = run(w, '--build-json', str(bj))
                 self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
                 self.assertIn(gate, next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build'))
-                bj.write_text(json.dumps({'l1_activation_epochs': {const: 10060}}))
+                bj.write_text(json.dumps({'l1_activation_epochs': {**m.V2_COMPILED_GATES, const: 10060}}))
                 self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
 
     def test_forced_queue_is_reported_once_enabled_and_warns_above_the_doubling(self):
@@ -657,15 +672,17 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual((m.FORCED_UNITS_PER_SETTLEMENT, m.FORCED_MAX_PENDING_WEIGHT, m.FORCED_SURCHARGE_DOUBLING), (14, 256, 24))
 
     def test_the_forced_inclusion_gate_is_compared_with_the_l2_build(self):
+        # Round 18 (agent 382): the build.json carries the compiled list too; the December build has the two
+        # 8620 gates the fleet arms, and a build.json without them is CRIT for them (340's check), not for this gate.
         self.assertEqual(m.GATE_CONSTANTS['l2_forced_inclusion'], 'L2_FORCED_INCLUSION_EPOCH')
         w = healthy()
         for node in w['l1'].values():
             node['info']['hard_forks']['l2_forced_inclusion'] = {'activation_epoch': 10060, 'active': False}
         with tempfile.TemporaryDirectory() as d:
             bj = Path(d, 'build.json')
-            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_FORCED_INCLUSION_EPOCH': 'inert'}}))
+            bj.write_text(json.dumps({'l1_activation_epochs': {**m.V2_COMPILED_GATES, 'L2_FORCED_INCLUSION_EPOCH': 'inert'}}))
             self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'CRIT')
-            bj.write_text(json.dumps({'l1_activation_epochs': {'L2_FORCED_INCLUSION_EPOCH': 10060}}))
+            bj.write_text(json.dumps({'l1_activation_epochs': {**m.V2_COMPILED_GATES, 'L2_FORCED_INCLUSION_EPOCH': 10060}}))
             self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
 
     def test_l1_gates_resolves_a_gate_defined_as_another_gate(self):
@@ -1302,7 +1319,7 @@ class StuckNode(unittest.TestCase):
         self.assertTrue([c for c in r.checks if c['check'] == 'l1_stuck' and c['code'] == m.UNKNOWN])
 
     def test_identity_pins_untouched(self):
-        self.assertEqual(m.V2_BUILD['l2_commit'], '926d2cf50af11f389ad1ffa91c0b7720178b3472')
+        self.assertEqual(m.V2_BUILD['l2_commit'], '7a3b695adb8b43e119371b08649d8217a40b4d6b')  # round 18: the December build commit (review R384-6)
         self.assertEqual(m.MAINNET_PINS['attestor_set'], '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b')
 
 

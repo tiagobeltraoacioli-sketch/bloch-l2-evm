@@ -125,9 +125,10 @@ PINS = {
     # CANDIDATE: the SP1 host of the December release (features source-settlement,node-artifact,sparse-witness).
     'bloch-evm-sp1-settlement-v3': CANDIDATE_HOST_PIN,
     # CANDIDATE: the December build (docs/DECEMBER-BUILD-R15.md), build-release.sh against native b7cd752b (the line merged onto the
-    # released node 906336fd, then brought up to date with bloch-sis-pow main = deployed release 0067547f), built on one
-    # host from two paths; c6b7ce1b... (native 19aa156d) and 63c9cdf8... (native 0861278c) are superseded.
-    'bloch-l2-produce-dev': '779850edebbbb6033266909170c8e17f62b2b47d7c360f29426175e2d1cb7f75',
+    # released node 906336fd, then brought up to date with bloch-sis-pow main = deployed release 0067547f) with the
+    # F387-1 fix (base-fee floor of the next rules); 779850ed... (no fix), c6b7ce1b... (native 19aa156d) and
+    # 63c9cdf8... (native 0861278c) are superseded.
+    'bloch-l2-produce-dev': '364df3a3e5cb991f87d614676675448b08456ad8ad4bbd9af1425a3a925e0bc0',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544, fixed) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': '81813124c19b1a9bfe5755fc742fa36a48420134b71e18ef355e26e1c5f1b6d9',

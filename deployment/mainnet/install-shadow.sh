@@ -16,7 +16,7 @@
 #
 # FORK CANDIDATE (December program swap; native L2_NEXT_PROGRAM_EPOCH and L2_PROGRAM_ROLLBACK_EPOCH inert in this
 # tree). OUT_DIR is build-release.sh's OUT of the December build against native b7cd752b (docs/DECEMBER-BUILD-R15.md,
-# settlement-recovery lock ab7b3a09...): bloch-l2-produce-dev 779850ed... (the --rule-set producer),
+# settlement-recovery lock ab7b3a09...): bloch-l2-produce-dev 364df3a3... (the --rule-set producer),
 # the schedule-aware sequencer_mainnet.py pinned below, SHA256SUMS and build.json. CANDIDATE values against an
 # unreleased native: they move with the final December build, and the deposit-only launch kit keeps its own
 # install-shadow.sh (v2.1 pins). The producer RUNS the native transition, so a shadow built against another
@@ -40,9 +40,9 @@
 # /opt/bloch/l2-mainnet-shadow, its config and /var/lib/bloch-l2-mainnet-shadow aside with a
 # timestamp. The settler is not touched; nothing on L1 depends on the shadow.
 set -euo pipefail
-# December build (docs/DECEMBER-BUILD-R15.md): produce-dev 779850ed... The launch kit's v2.1
+# December build (docs/DECEMBER-BUILD-R15.md): produce-dev 364df3a3... The launch kit's v2.1
 # pins (produce e3f1a290..., sequencer 15daa26f...) have no --rule-set and no schedule: never use them for the fork.
-PRODUCE_SHA256=779850edebbbb6033266909170c8e17f62b2b47d7c360f29426175e2d1cb7f75
+PRODUCE_SHA256=364df3a3e5cb991f87d614676675448b08456ad8ad4bbd9af1425a3a925e0bc0
 # deployment/mainnet/sequencer_mainnet.py of this tree (schedule-aware shadow, agent 218).
 SEQUENCER_SHA256=1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae
 NATIVE_COMMIT=b7cd752ba1d1e8b8861b51a083310242bd6270cf
