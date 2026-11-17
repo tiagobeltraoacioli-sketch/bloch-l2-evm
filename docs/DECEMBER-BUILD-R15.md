@@ -112,6 +112,11 @@ node), and that merge moves the three L2 binaries once more. They belong to the 
    `DOCKER=… DOWNLOADS=… WORK=/tmp/x integrations/sp1-execution/guest-sparse/build-container.sh OUT b635566`
    and the same with `guest-fallback`. Compare `OUT/SHA256SUMS` with section 3.
 2. SP1 host, with the sibling layout `WORK/src/{bloch-l2-evm,bloch-validator-payout,reth-bloch-rpc-snapshot}`:
+   The sibling `reth-bloch-rpc-snapshot` is the pinned commit `8eb21017` PLUS the recorded patch: after cloning
+   it, run `python3 integrations/reth-execution/prepare-reth.py` once in the L2 tree (it applies
+   `reth-snapshot.patch` to the sibling; `--check` then passes). With a clean clone of the pinned commit alone
+   `build-release.sh` stops at once with "Prepared Reth differs from the recorded patch" (agent 333, F333-1).
+   `bloch-validator-payout` is bloch-sis-pow at exactly the native commit of section 2, clean.
    `JOBS=6 deployment/mainnet/build-prover-host.sh WORK OUT-HOST` (features
    `source-settlement,node-artifact,sparse-witness`). Compare `OUT-HOST/SHA256SUMS` with section 3.
 3. Identities: `bloch-evm-sp1-settlement-v3 --mainnet --sparse identity OUT/settlement_v3_mainnet_sparse` and

@@ -317,9 +317,16 @@ class Profiles(Harness):
         self.assertEqual(rp.parse_job(io.BytesIO(sent[-1]))[2], {})
         self.assertTrue(sent[-1].startswith(rp.MAGIC))
         # The remote refuses a setting outside its list, whoever sends it.
-        bad = rp.MAGIC_PROFILE + b'\x00\x10' + b'{"LD_PRELOAD":"1"}'[:16]
-        with self.assertRaises(ValueError):
+        # The whole object, so that it is the LIST that refuses it (review R335-10: the object used to be cut to
+        # 16 bytes and was refused as malformed JSON, which a parser without the list would also do).
+        body = b'{"LD_PRELOAD":"1"}'
+        bad = rp.MAGIC_PROFILE + len(body).to_bytes(2, 'big') + body
+        with self.assertRaisesRegex(ValueError, 'prover_env LD_PRELOAD is not allowed'):
             rp.parse_job(io.BytesIO(bad + b'\x00' * 32))
+        # An allowed name with a value that is not a positive decimal is refused too.
+        body = b'{"ELEMENT_THRESHOLD":"1;id"}'
+        with self.assertRaisesRegex(ValueError, 'must be a positive decimal string'):
+            rp.parse_job(io.BytesIO(rp.MAGIC_PROFILE + len(body).to_bytes(2, 'big') + body + b'\x00' * 32))
 
     def test_a_proof_killed_for_memory_falls_back_and_the_attempts_are_bounded(self):
         """F317-1: no endless retry with the same settings. fast -> lowmem-2c, recorded for every later attempt;
