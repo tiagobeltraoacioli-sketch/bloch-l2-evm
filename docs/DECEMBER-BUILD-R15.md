@@ -276,7 +276,7 @@ fork's own check remains for the forced envelope).
 | `sequencer_mainnet.py`, `remote_prover.py` | | the same |
 | Guest ELFs, their keys, the configuration `27d6ce9f…2783`, the proof policy | | the same: no file a guest is built from changed (the guests do not link the native crates), so they were not rebuilt |
 | Build `SHA256SUMS` / `build.json` | `22a662e9…0729` (reviewer 335's build) | `b89b58791506835579fcfd59464a73eef9081edb40372920d02928545ea3957f` / `e88a0836526b74be97fa62b059ed72c114aaa0552be979e75e44ead0c43def05` (`l2_commit` `3cbc421`) |
-| Source pins | `install-settler-mainnet.py` `a31bdb83…96bb`, `install-shadow.sh` `a7276be6…5e7e`, `build-release.sh` `87d0ce99…7482`, `GO-LIVE-PINS.sha256` `4a6a0b61…f738`, `GO-LIVE-PINS-PROVER.sha256` `149189a6…0cde` | `96cf074d…d2f4`, `0c630ba3…b07d`, `135ff8f0…8555`, `f8321b66119e9f6bf5a1dd61d453cc16bfcedec5aa602e3c9d3f6075662db831`, `b974e5cf…2ee7` |
+| Source pins | `install-settler-mainnet.py` `a31bdb83…96bb`, `install-shadow.sh` `a7276be6…5e7e`, `build-release.sh` `87d0ce99…7482`, `GO-LIVE-PINS.sha256` `4a6a0b61…f738`, `GO-LIVE-PINS-PROVER.sha256` `149189a6…0cde` | `136a081a…df76`, `0c630ba3…b07d`, `135ff8f0…8555`, `741828a328c3835980b8acf563128b5cfbf6f469bfbb3d252b94ac38058bf00e`, `b974e5cf…2ee7`; `follower-rpc/install.sh` `d2a41ac1…8ab1` (was `3984e0ed…5854`: the tip floor of 2026-11-17, `docs/MAINNET-RPC-READINESS.md`) |
 
 The settlement-recovery lock is unchanged (`ab7b3a09…`): between `0861278c` and `19aa156d` three native
 `Cargo.toml` files differ in comments and in two features without dependencies, and the native `Cargo.lock`
