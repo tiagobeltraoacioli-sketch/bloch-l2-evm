@@ -46,6 +46,10 @@ pub struct BlochEvmConfig {
     factory: BlochRethBlockExecutorFactory,
     assembler: BlochNodeBlockAssembler,
     rpc_block_hashes: bool,
+    /// The chain's rule schedule, when it has one ([`Self::for_chain`]): the
+    /// header of the block being built takes its base fee from the rules of
+    /// that block, as the executor validates it (F387-1).
+    rules: Option<crate::RuleSchedule>,
 }
 impl BlochEvmConfig {
     /// Bind execution to a trusted specification and nonzero V2 domain.
@@ -56,6 +60,7 @@ impl BlochEvmConfig {
             factory: BlochRethBlockExecutorFactory::new(spec, domain),
             assembler: BlochNodeBlockAssembler::new(spec, domain),
             rpc_block_hashes: false,
+            rules: None,
         }
     }
     /// The configuration of a provider's chain: the base rules for everything a
@@ -63,6 +68,7 @@ impl BlochEvmConfig {
     pub fn for_chain(chain: &crate::BlochChainSpec) -> Self {
         let mut config = Self::new(chain.execution(), chain.domain());
         config.factory = config.factory.with_rules(chain.rules().clone());
+        config.rules = Some(chain.rules().clone());
         config
     }
     /// Only RPC construction enables provider ancestry and explicit block overrides.
@@ -83,14 +89,18 @@ impl BlochEvmConfig {
         if attributes.timestamp < parent.0.timestamp {
             return Err(BlockExecutionError::msg("V2 timestamp precedes parent"));
         }
+        let number = parent
+            .0
+            .number
+            .checked_add(1)
+            .ok_or_else(|| BlockExecutionError::msg("V2 block number overflow"))?;
+        // The base fee of the rules this block runs (F387-1): the next rules add
+        // the base-fee floor, and the executor validates the header against them.
+        let rules = self.rules.as_ref().map_or(&self.spec, |rules| rules.at(number));
         Ok(BlockContext {
-            number: parent
-                .0
-                .number
-                .checked_add(1)
-                .ok_or_else(|| BlockExecutionError::msg("V2 block number overflow"))?,
+            number,
             timestamp: attributes.timestamp,
-            base_fee_per_gas: self.spec.next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used),
+            base_fee_per_gas: rules.next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used),
             prevrandao: attributes.prevrandao,
             anchor_root: attributes.anchor_root,
         })

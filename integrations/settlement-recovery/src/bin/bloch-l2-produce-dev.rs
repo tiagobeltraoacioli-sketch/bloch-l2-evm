@@ -517,7 +517,8 @@ fn run(args: &[String]) -> Result<String, String> {
                 Ok(text) => text.parse::<u128>().map_err(|_| "--min-tip-wei must be decimal")?,
                 Err(_) => 0,
             };
-            let next_base_fee = u128::from(rules().next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
+            // The block being built runs `schedule.at(number)`: its base fee has the next rules' floor (F387-1).
+            let next_base_fee = u128::from(schedule.at(number).next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
             let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
             // Policy of this producer, not a block rule: a transaction that does not pay the write price for
             // the storage slots it adds is left pending, so no block of this producer creates an unpaid slot.

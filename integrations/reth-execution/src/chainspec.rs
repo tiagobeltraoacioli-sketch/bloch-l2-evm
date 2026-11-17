@@ -173,8 +173,10 @@ impl EthChainSpec for BlochChainSpec {
         Some(U256::ZERO)
     }
     fn next_block_base_fee(&self, parent: &Self::Header, _: u64) -> Option<u64> {
+        // The rules of the block after `parent` (F387-1: the next rules floor it).
+        let number = parent.0.number.checked_add(1)?;
         Some(
-            self.execution
+            self.execution_at(number)
                 .next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used),
         )
     }

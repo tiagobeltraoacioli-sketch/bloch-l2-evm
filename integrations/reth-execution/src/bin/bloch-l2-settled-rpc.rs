@@ -97,6 +97,7 @@ use bloch_reth_execution::{
 };
 use capped_api::build_eth_api_capped;
 use eyre::{bail, ensure, Result};
+use reth_chainspec::ChainSpecProvider;
 use reth_db::mdbx::{open_db_read_only, DatabaseArguments};
 use reth_network_api::noop::NoopNetwork;
 use reth_provider::{
@@ -1073,7 +1074,9 @@ impl Spool {
             .sealed_header(best)
             .map_err(|e| format!("state unavailable: {e}"))?
             .ok_or("state unavailable: head header missing")?;
-        let next_base_fee = u128::from(self.spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used));
+        // The rules of the block after the head (F387-1: the next rules floor its base fee).
+        let next_rules = provider.chain_spec().execution_at(header.0.number.saturating_add(1)).clone();
+        let next_base_fee = u128::from(next_rules.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used));
         let state = provider.latest().map_err(|e| format!("state unavailable: {e}"))?;
         let mut cache = std::collections::HashMap::new();
         let mut account = |address| {
@@ -1499,14 +1502,13 @@ fn floor_fee_suggestions(
     module: &mut jsonrpsee::RpcModule<()>,
     tip: Arc<RequiredTip>,
     factory: BlochProviderFactory,
-    spec: ChainSpec,
 ) -> Result<()> {
     let original: jsonrpsee::Methods = module.clone().into();
     for method in ["eth_maxPriorityFeePerGas", "eth_gasPrice", "eth_feeHistory"] {
         ensure!(module.remove_method(method).is_some(), "eth API lacks {method}");
-        let (original, factory, spec, tip) = (original.clone(), factory.clone(), spec.clone(), tip.clone());
+        let (original, factory, tip) = (original.clone(), factory.clone(), tip.clone());
         module.register_async_method(method, move |params, _, _| {
-            let (original, factory, spec, tip) = (original.clone(), factory.clone(), spec.clone(), tip.clone());
+            let (original, factory, tip) = (original.clone(), factory.clone(), tip.clone());
             async move {
                 let min_tip = tip.suggested();
                 let values: Vec<serde_json::Value> = if params.as_str().is_none() {
@@ -1528,8 +1530,10 @@ fn floor_fee_suggestions(
                                 .sealed_header(best)
                                 .map_err(|e| e.to_string())?
                                 .ok_or("head header missing")?;
+                            // The rules of the block after the head (F387-1).
+                            let next_rules = factory.chain_spec().execution_at(header.0.number.saturating_add(1)).clone();
                             Ok(u128::from(
-                                spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
+                                next_rules.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
                             ))
                         })
                         .await
@@ -2468,7 +2472,7 @@ async fn main() -> Result<()> {
         options.required_tip_file.clone(),
         options.tip_headroom_percent,
     ));
-    floor_fee_suggestions(&mut module, tip, factory.clone(), rules())?;
+    floor_fee_suggestions(&mut module, tip, factory.clone())?;
     limit_simulations_with_gate(&mut module, simulation_gate, SIMULATION_WAIT, SIMULATION_TIME_LIMIT)?;
     let levels_closed = Arc::new(ClosedLevels::new(true));
     refuse_closed_levels(&mut module, levels_closed.clone())?;
