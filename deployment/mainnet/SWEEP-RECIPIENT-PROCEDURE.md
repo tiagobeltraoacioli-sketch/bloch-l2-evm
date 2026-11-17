@@ -17,7 +17,12 @@ The fork-candidate L2 tree ships with `MAINNET_FEE_SWEEP_RECIPIENT: Option<Addre
 
 `ChainSpec::validate` also refuses the zero address and the precompiles `0x01`-`0x0a` as a recipient (B-2),
 for every rule set. The old placeholder `0x…000fee01` survives only as `REHEARSAL_FEE_SWEEP_RECIPIENT`
-(`ChainSpec::mainnet_rehearsal`, `--rules mainnet-rehearsal`) for native tests; no release can carry it.
+(`ChainSpec::mainnet_rehearsal`, `--rules mainnet-rehearsal`) for native tests. No guest and no L1 pin carries
+it, so nothing built with it can settle; but the release producer and settled RPC do accept the flag `--rules
+mainnet-rehearsal` with the mainnet domain (review R335-5: an earlier version of this text said no release can
+carry it). Never put that flag into a unit or a command on a mainnet host: such a process looks correct until the
+first block under the next rules and then stops following. Removing the flag from release binaries is a compiled
+change and waits for the next rebuild of the binaries.
 A private crossing rehearsal that needs a next-rules ELF runs `set` with a throwaway address on a
 throwaway branch.
 
