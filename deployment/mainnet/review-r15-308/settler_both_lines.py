@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Review a308: demonstrations that apply to BOTH lines (kit 6e12ab6 and candidate 6b75a4c).
 Run (WT = the worktree to test; nothing is written into it):
-  WT=/Users/tiagobulhoes/worktrees/l2-release-review-r15-20261110 PYTHONDONTWRITEBYTECODE=1 nice -n 10 \
+  WT=$HOME/worktrees/l2-release-review-r15-20261110 PYTHONDONTWRITEBYTECODE=1 nice -n 10 \
     python3 -B -m unittest -v test_a308_both_lines.py
 """
 import itertools
