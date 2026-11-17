@@ -1,6 +1,7 @@
 #!/bin/bash
 # THE pinned build of the Bloch L2 MAINNET binaries (chain 700770) against the native release that
-# runs Genesis-4 mainnet (bloch-sis-pow 78d4921c armed release, L2 activation at epoch 5850). One recipe for:
+# runs Genesis-4 mainnet (bloch-sis-pow node release 906336fd, which arms the vote slot-epoch binding and the KES
+# first-key floor at epoch 8620 on top of the armed release 78d4921c; L2 activation at epoch 5850). One recipe for:
 #   bloch-l2-native-follower   (settlement-recovery, no features)
 #   bloch-l2-produce-dev       (settlement-recovery, no features; settler producer + shadow)
 #   bloch-l2-settled-rpc       (reth-execution)
@@ -18,9 +19,12 @@
 #   * native feature shim: settlement-recovery forwards devnet-kes / devnet-lc-roster, which the
 #     mainnet release does not define; follower-rpc/native-feature-shim.py adds them as EMPTY
 #     features (no code) to the scratch native checkout. They are never enabled.
-#   * Cargo lock: the release pins exactly one lock, follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock
-#     (sha256 a3c38a46...). It is the only committed lock that resolves native 78d4921c, and the build
-#     refuses any other lock for that commit. integrations/settlement-recovery/Cargo.lock is a byte copy.
+#   * Cargo lock: the release pins exactly one lock per native commit and refuses any other for it:
+#     follower-rpc/settlement-recovery.native-906336fd.Cargo.lock (sha256 ab7b3a09...) for the default, node
+#     release 906336fd; follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock (sha256 a3c38a46...) for
+#     78d4921c, the native commit of the earlier, never published build 926d2cf (kept so that build can be
+#     reproduced). integrations/settlement-recovery/Cargo.lock is a byte copy of the 78d4921c lock; the build
+#     replaces it for its own duration and restores it.
 # Env: JOBS (default 8), TOOLCHAIN (default 1.98.1), CARGO_TARGET_DIR (default WORK/l2-target).
 #
 # L1 hard forks (docs/L2-HARD-FORK-OPERATOR-STEPS.md): the follower and the producer RUN the native
@@ -35,7 +39,7 @@
 set -euo pipefail
 W=$(cd "${1:?usage: build-release.sh WORK [OUT]}" && pwd)
 OUT=${2:-$W/out}
-NATIVE_COMMIT=${NATIVE_COMMIT:-78d4921c3ec6ba41829f3878eed47f8d3bb96230}
+NATIVE_COMMIT=${NATIVE_COMMIT:-906336fd35f157dac380523b59dee8a5a325175a}
 RETH_COMMIT=8eb210175687c9f0c889a3b6795c16781d830e3a
 TOOLCHAIN=${TOOLCHAIN:-1.98.1}
 JOBS=${JOBS:-8}
@@ -51,8 +55,8 @@ SR=$L2/integrations/settlement-recovery
 # vote slot-epoch binding and the KES first-key floor), so the release built against 78d4921c halts on the fleet's
 # chain once a validator registers its first KES key after KES binds (docs/L2-FOLLOWER-NODE-906336FD.md). The L2
 # sources build against 906336fd unchanged; its one pinned lock is follower-rpc/settlement-recovery.native-906336fd.Cargo.lock
-# (sha256 ab7b3a09..., the 78d4921c lock plus pqcrypto-mlkem and the mesh transport's dependencies). The default stays
-# 78d4921c, the signed release: NATIVE_COMMIT=906336fd35f157dac380523b59dee8a5a325175a selects the next one.
+# (sha256 ab7b3a09..., the 78d4921c lock plus pqcrypto-mlkem and the mesh transport's dependencies). 906336fd is the
+# default and the launch release; NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230 reproduces the earlier build.
 NODE_906336FD_COMMIT=906336fd35f157dac380523b59dee8a5a325175a
 NODE_906336FD_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
 if [ "$NATIVE_COMMIT" = "$NODE_906336FD_COMMIT" ]; then
