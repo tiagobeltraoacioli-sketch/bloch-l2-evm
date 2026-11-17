@@ -36,7 +36,7 @@ def block(number, age, h=None):
 def hard_forks():
     return {name: {'activation_epoch': (m.V2_COMPILED_GATES[c] if not isinstance(m.V2_COMPILED_GATES[c], list)
                                         else 7270), 'active': False}
-            for name, c in m.GATE_CONSTANTS.items()} | {'hf3_lattice_emergency': {'activation_epoch': None,
+            for name, c in m.GATE_CONSTANTS.items() if c in m.V2_COMPILED_GATES} | {'hf3_lattice_emergency': {'activation_epoch': None,
                                                                                    'active': False}}
 
 
