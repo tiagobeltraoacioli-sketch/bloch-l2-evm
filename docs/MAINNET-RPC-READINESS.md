@@ -1,5 +1,7 @@
 # Bloch L2 mainnet: execution and RPC readiness
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Status on 2026-10-14, branch `feat/l2-mainnet-rpc-20261014` (from `bacd9d2`,
 which already contains the devnet4 settled RPC `888b62a` and the
 Ethereum-client header fields `a86708f`).
@@ -351,7 +353,7 @@ native feature shim and the mainnet `settlement-recovery` lock).
   devnet feature names added empty (`native-feature-shim.py`) and a lock with
   three extra entries (`settlement-recovery.mainnet.Cargo.lock`).
 
-Live run on 45.77.142.123 (scratch, loopback 19145, L1 source
+Live run on HOST_B (scratch, loopback 19145, L1 source
 `http://80.240.16.185:8080`): genesis + carryover load 59 s; 154,767 blocks
 fetched (~3 ms/block) and verified from Genesis-4 in ~56 min (~2.7–5.5k
 blocks/min), RSS < 0.6 GB; activation `618c9b80…` at slot 187200 matched the

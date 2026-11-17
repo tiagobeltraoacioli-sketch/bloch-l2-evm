@@ -7,7 +7,7 @@ l2rpc-gateway.js, l2rpc-config.js and, with --standalone, nginx.conf (a full
 main config for a private test instance run as an unprivileged user).
 
 Production (Cloudflare in front, two hosts; see README.md):
-  render.py --role sequencer --name l2rpc-136 --peer 45.77.142.123:18956 --peer-allow 45.77.142.123 \
+  render.py --role sequencer --name l2rpc-136 --peer HOST_B:18956 --peer-allow HOST_B \
             --out /etc/nginx/bloch-l2rpc
 
 The outbound hop to the peer's mTLS listener is a unix socket in --hop-dir, a

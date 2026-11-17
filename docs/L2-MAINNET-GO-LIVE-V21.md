@@ -1,5 +1,7 @@
 # Bloch L2 mainnet (chain 700770): go-live plan for the v2.1 build
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 > **Kept for reference (2026-11-02).** This is the plan for the closed v2.1 build (`a39b04e`, signing target `dded10b9…`). The launch plan for the next build (`17383fe`) is `docs/L2-MAINNET-GO-LIVE.md`. The kit pins at this branch name the next build, so `GO-LIVE-PINS.sha256` and `install-shadow.sh --verify` from this tree refuse v2.1 artifacts: stage v2.1 only from `codex/kit-integration-r5-20261102` 9007df8, where these steps were walked.
 
 Status: **plan only, updated for v2.1 on 2026-10-30 (L1 epoch ~7030).** Nothing in this document has been installed,
@@ -41,8 +43,8 @@ Related documents:
 
   | Host | vCPU | RAM | Free disk | Notes |
   | --- | --- | --- | --- | --- |
-  | 136.244.93.186 | 32 (Cascade Lake) | 125 GiB, 123 GiB available | 2.7 TB | Idle. No `bloch-l2*` units. The pinned gnark image `e1a1cd62…` is present. The 10-19 staging dir `~/l2-mainnet-install-20261019` is present, including the SP1 circuits (7.9 GB). |
-  | 45.77.142.123 | 32 | 125 GiB | 2.2 TB | Shared build host. It still runs the 10-18 scratch follower and RPC (127.0.0.1:19145, pre-HF build, PIDs 1304666 and 1452988). The unsigned v2.1 release is in `~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c`. `manifest` and `carryover` come from `~/hf-release-kit-20261020/l2-agents/07-rpc/artifacts`. |
+  | HOST_A | 32 (Cascade Lake) | 125 GiB, 123 GiB available | 2.7 TB | Idle. No `bloch-l2*` units. The pinned gnark image `e1a1cd62…` is present. The 10-19 staging dir `~/l2-mainnet-install-20261019` is present, including the SP1 circuits (7.9 GB). |
+  | HOST_B | 32 | 125 GiB | 2.2 TB | Shared build host. It still runs the 10-18 scratch follower and RPC (127.0.0.1:19145, pre-HF build, PIDs 1304666 and 1452988). The unsigned v2.1 release is in `~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c`. `manifest` and `carryover` come from `~/hf-release-kit-20261020/l2-agents/07-rpc/artifacts`. |
 
 ## 1. Owner decisions (all open)
 
@@ -52,8 +54,8 @@ the value.
 | # | Decision | Recommendation | Blocks phase |
 | --- | --- | --- | --- |
 | **D1** | Go-live start epoch | Not before G0 (§4) holds. Earliest e7365 (2026-11-03 17:31 UTC). Recommended **e7450 (2026-11-04 16:11 UTC)**, after one full day (90 epochs) of clean finality following HF3. | all |
-| **D2** | **Prover host** | While user transactions are off, 136.244.93.186 co-located with the settler works (blocks are empty or deposit-only). Before user transactions (D10), a dedicated prover host is recommended: the worst-case caps do not fit on 136 (§2). `TBD-owner`. | P5, D10 |
-| **D3** | Follower B / replica RPC host | 45.77.142.123 works (light load) but it is the shared build host. Recommended: a small dedicated VPS (§2, "follower B"). `TBD-owner`. | P3, P4, P11 |
+| **D2** | **Prover host** | While user transactions are off, HOST_A co-located with the settler works (blocks are empty or deposit-only). Before user transactions (D10), a dedicated prover host is recommended: the worst-case caps do not fit on 136 (§2). `TBD-owner`. | P5, D10 |
+| **D3** | Follower B / replica RPC host | HOST_B works (light load) but it is the shared build host. Recommended: a small dedicated VPS (§2, "follower B"). `TBD-owner`. | P3, P4, P11 |
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8 (different sources on purpose). | P3 |
 | **D5** | **Attestor operators**: five people, five hosts, one index each, plus each operator's feed URL | `TBD-owner` (none chosen). No operator may hold more than one key or share a host with a validator, the settler or another attestor. | P10 |
 | **D6** | **Bloch Inc addresses** | **None is needed for the L2 core.** L2 fees go to the predeploy `0x4200…0011`, settlements pay no L1 fee, and the DA key is generated on the host. Still `TBD-owner`: (a) the L1 wallet that funds the DA key (5 BLCH, only when user transactions are enabled); (b) the L1 wallet and L2 recipient for the test deposit and test withdrawal; (c) the Bloch Inc Safe and bridge guardian addresses, which the DEX and bridge need later. Those are not part of this plan. | P12 |
@@ -104,10 +106,10 @@ on restart and about 65–80 min for a fresh install**, more on a busy host.
 
 | Role | Host | vCPU | RAM | Disk (SSD) | Memory budget |
 | --- | --- | --- | --- | --- | --- |
-| **A: settler + prover + follower A + RPC A + shadow + monitor + nginx origin** (user transactions off) | 136.244.93.186 (D2) | **32** (min 24) | **125 GiB** (136's real size) | **≥ 200 GB** (circuits 7.9 GB, settler about 50 GB, follower about 3.5 GB growing about 16 GB a year, Docker). 136 has 2.7 TB. | See the cap check below. |
+| **A: settler + prover + follower A + RPC A + shadow + monitor + nginx origin** (user transactions off) | HOST_A (D2) | **32** (min 24) | **125 GiB** (136's real size) | **≥ 200 GB** (circuits 7.9 GB, settler about 50 GB, follower about 3.5 GB growing about 16 GB a year, Docker). 136 has 2.7 TB. | See the cap check below. |
 | **Dedicated prover** (recommended before D10) | `TBD-owner` | **32** (24 threads in the slice) | **128 GB** (100 G slice + 18.5 G gnark outside it + OS) | ≥ 200 GB NVMe, Docker | 118.5 G worst case |
 | Settler alone (prover remote) | 136 | 8 | 32 GB, or 56 GB if the local proof fallback stays enabled (32 G unit + about 20 G gnark) | ≥ 100 GB | |
-| **B: follower B + replica RPC + nginx origin** | 45.77.142.123 or a dedicated VPS (D3) | **4** | **8 GB** | **≥ 80 GB** | Follower 6 G cap (0.6 GB used) + RPC 4 G cap. Replica rebuild about 110 MB. |
+| **B: follower B + replica RPC + nginx origin** | HOST_B or a dedicated VPS (D3) | **4** | **8 GB** | **≥ 80 GB** | Follower 6 G cap (0.6 GB used) + RPC 4 G cap. Replica rebuild about 110 MB. |
 | **Attestor host** (×5, one per operator; **inbound TCP 8787 open to everyone** for the read-only feed) | `TBD-owner` (D5) | **4** (kit minimum 2) | **8 GB** | **≥ 80 GB** (kit minimum 40 GB) | Follower 0.6 GB + rebuild-check 0.1 GB + `bloch-pos` signing |
 | Monitor | runs on A (and optionally on B) | n/a | < 50 MB | n/a | |
 
@@ -153,7 +155,7 @@ The 30 `bloch-expansion@` units on 136 are disabled and must stay so.
 
 Built twice from fresh trees and fresh targets at the reference WORK path
 `/home/ubuntu/hf-release-kit-20261020/l2-78d4921c-v2` (a bind mount in a private mount namespace).
-Both builds are byte-identical. Source: `45.77.142.123:~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/`.
+Both builds are byte-identical. Source: `HOST_B:~/l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/`.
 
 | Artifact | SHA-256 | v2 | Used by (phase) |
 | --- | --- | --- | --- |
@@ -287,7 +289,7 @@ Actions (owner):
 - D8: retire the 45.77 scratch processes.
 
 ```
-ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 'nproc; free -g; df -h /; systemctl list-units --all "bloch-*" --no-legend | grep -c running; sudo docker images --digests | grep sp1-gnark'
+ssh -i SSH_KEY_FILE ubuntu@HOST_A 'nproc; free -g; df -h /; systemctl list-units --all "bloch-*" --no-legend | grep -c running; sudo docker images --digests | grep sp1-gnark'
 ```
 
 GO when: 32 vCPU, ≥ 120 GiB available, ≥ 200 GB free, 0 running `bloch-*` units, and the gnark digest
@@ -301,23 +303,23 @@ Rollback: none needed.
 2. Stage on A, from the Mac. Each command is one block.
 
 ```
-ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkdir -p l2-golive-v2/artifacts l2-golive-v2/release-settler-v2
+ssh -i SSH_KEY_FILE ubuntu@HOST_A mkdir -p l2-golive-v2/artifacts l2-golive-v2/release-settler-v2
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/*' ubuntu@136.244.93.186:l2-golive-v2/artifacts/
+scp -3 -i SSH_KEY_FILE 'ubuntu@HOST_B:l2dexbridge-20261030/l2-close-r3/release/bloch-l2-2026-10-30-v21-native-78d4921c/*' ubuntu@HOST_A:l2-golive-v2/artifacts/
 ```
 
 ```
-scp -3 -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@136.244.93.186:l2-golive-v2/artifacts/
+scp -3 -i SSH_KEY_FILE 'ubuntu@HOST_B:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@HOST_B:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ubuntu@HOST_A:l2-golive-v2/artifacts/
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/mainnet ubuntu@136.244.93.186:l2-golive-v2/kit
+scp -r -i SSH_KEY_FILE ~/worktrees/go-live-fixes-r4-20261101/deployment/mainnet ubuntu@HOST_A:l2-golive-v2/kit
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-v2/release-settler-v2/
+scp -i SSH_KEY_FILE ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/settler_v3.py ubuntu@HOST_A:l2-golive-v2/release-settler-v2/
 ```
 
 `scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-v2/kit` first. The kit copy takes about 4 minutes over a long link.
@@ -544,7 +546,7 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 **Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `ba309912…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-v2/
+scp -i SSH_KEY_FILE ~/worktrees/go-live-fixes-r4-20261101/deployment/devnet/remote_prover.py ubuntu@HOST_A:l2-golive-v2/
 ```
 
 ```
@@ -866,24 +868,24 @@ for settled RPC v2.1. The `plan` command only renders, and it exits 0 even when 
 On A:
 
 ```
-sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh plan
+sudo ROLE=sequencer NAME=l2rpc-a PEER=HOST_B:18956 PEER_ALLOW=HOST_B bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh plan
 ```
 
 ```
-sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh apply
+sudo ROLE=sequencer NAME=l2rpc-a PEER=HOST_B:18956 PEER_ALLOW=HOST_B bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh apply
 ```
 
 On B (the commands assume 45.77; for a D3 VPS use its IP in both hosts' `PEER` and `PEER_ALLOW`):
 
 ```
-sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh plan
+sudo ROLE=replica NAME=l2rpc-b PEER=HOST_A:18956 PEER_ALLOW=HOST_A bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh plan
 ```
 
 ```
-sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh apply
+sudo ROLE=replica NAME=l2rpc-b PEER=HOST_A:18956 PEER_ALLOW=HOST_A bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh apply
 ```
 
-Then in the Cloudflare dashboard (zone blochl1.com): add the proxied A record `l2rpc` → 136.244.93.186, set
+Then in the Cloudflare dashboard (zone blochl1.com): add the proxied A record `l2rpc` → HOST_A, set
 SSL to Full (strict) for that hostname only, and turn Authenticated Origin Pulls on. Deploy the explorer last.
 Before that, re-check that the site still serves the bundle `index-D4WLsMRL.js`. If not, rebase.
 
@@ -918,10 +920,10 @@ transactions return -32053 until A is back, by design.
 Rollback, on each host, then delete the DNS record:
 
 ```
-sudo PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh rollback
+sudo PEER_ALLOW=HOST_B bash /home/ubuntu/l2-golive-v2/kit/public-rpc/setup-gateway.sh rollback
 ```
 
-(on B use `PEER_ALLOW=136.244.93.186`).
+(on B use `PEER_ALLOW=HOST_A`).
 
 ## P12. First deposit and settlement test — **MAINNET WRITE (owner funds, D6)**
 

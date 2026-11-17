@@ -1,5 +1,7 @@
 # Bloch L2 mainnet settler: install and first settlement
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Chain 700770, activated on Genesis-4 at epoch 5850 (slot 187200, 2026-10-17 21:31 UTC).
 The worker is `deployment/devnet/settler_v3.py` with `network_kind: "mainnet"`. The installer
 is `deployment/mainnet/install-settler-mainnet.py`. Every step that can reach mainnet is
@@ -144,7 +146,7 @@ It then runs:
 - `settler_v3.py --dry-run`: identity by quorum, a scratch L2 genesis, L2 block 1 against the
   live request, and SP1 **execute**. Report: `/var/lib/bloch-l2-mainnet-settler/dry-run-*/dry-run-report.json`.
 
-Reference result: on 2026-10-18 22:55 UTC this was run from 45.77.142.123 as `ubuntu` with the
+Reference result: on 2026-10-18 22:55 UTC this was run from HOST_B as `ubuntu` with the
 pinned host and guest.
 
 - quorum 3/3: source height 1, slot 187200, block `618c9b80…dc9f`, nothing accepted;

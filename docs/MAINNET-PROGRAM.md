@@ -1,5 +1,7 @@
 # Bloch L2 mainnet program and genesis (chain id 700770)
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Status 2026-10-14: **values derived, nothing deployed.** These are the inputs
 of the native activation `l2_settlement::mainnet::PROGRAM` (bloch-sis-pow,
 `crates/bloch-pos-committee/src/l2_settlement.rs`). The activation epoch, the
@@ -111,7 +113,7 @@ actual transition with the real verifier. The source block id depends on the
 whole committed policy (the boundary block's state root carries the L2 leaf),
 so the fixture must be regenerated whenever the PROGRAM or the native test
 chain changes. Proving took 14 min wall and 20 GB peak RSS at 6 threads on
-45.77.142.123.
+HOST_B.
 
 ## Mainnet prover (2026-10-18)
 
@@ -125,7 +127,7 @@ values the native activation pins (release 78b7343a `l2_settlement::mainnet::PRO
 ELF Keccak `6e4c8440…c073`, KoalaBear `389cfbde…ac0e`, BN254 `007139f7…ac0e`, policy
 `15486996…747d`, configuration `8ec1c804…8f2b`.
 
-### Measured proofs (45.77.142.123, Intel Cascade Lake, 32 vCPU, 125 GB, shared)
+### Measured proofs (HOST_B, Intel Cascade Lake, 32 vCPU, 125 GB, shared)
 
 `deployment/mainnet/prover/bench-prove-blocks.sh` (real Groth16, SP1 circuit v6.1.0,
 pinned Gnark image; prover in a `systemd --user` scope with MemoryMax and CPUQuota):
@@ -163,11 +165,11 @@ is bounded by one proof plus L1 inclusion. On this CPU class: one L2 block per
 circuits + Docker image + work), Docker with the pinned image pulled. Minimum: 16
 vCPU / 64 GB (one block per ~13–15 min).
 
-45.77.142.123 must NOT host mainnet proving: devnet4's settler already proves
+HOST_B must NOT host mainnet proving: devnet4's settler already proves
 there continuously (16 threads, local first, ~28 GB + ~18.5 GB Gnark, back to back),
 on top of ~33 GB of validators and services. During this benchmark MemAvailable
 fell to 13.6 GB when proofs overlapped, and the guard stopped every attempt at
-block C (23.7, 28.9 and 31.9 GB available). 140.82.35.231 (devnet4's remote prover) runs mainnet
+block C (23.7, 28.9 and 31.9 GB available). HOST_D (devnet4's remote prover) runs mainnet
 validators and is also not suitable.
 
 ### Install (prover host; not executed)

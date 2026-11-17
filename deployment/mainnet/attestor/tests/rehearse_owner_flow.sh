@@ -11,7 +11,7 @@
 #   WORK=/scratch/dir ./rehearse_owner_flow.sh
 #
 # The follower/produce binaries are only hashed and copied (no follower runs), so any build works.
-# Passphrases are typed through a real pty by tty_driver.py. Measured 2026-10-19 on 209.250.236.240.
+# Passphrases are typed through a real pty by tty_driver.py. Measured 2026-10-19 on HOST_C.
 set -euo pipefail
 umask 077
 K=$(cd "$(dirname "$0")/.." && pwd)

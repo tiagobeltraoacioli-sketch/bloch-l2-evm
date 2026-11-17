@@ -1,5 +1,7 @@
 # Bloch L2 mainnet attestor agent
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Chain 700770. Attestor set `1c06adbb…cc4b`, 3-of-5 hybrid ML-DSA-65 + Falcon-1024 keys, pinned
 in consensus (`l2_settlement::mainnet::ATTESTOR_SET`). Changing the set needs a hard fork.
 
@@ -166,7 +168,7 @@ that directory as the invoking user, writes the units to `/scratch/host-I/system
 them, and prints a `key-check` command instead of the systemd steps. `--rehearsal-set FILE` (only
 with `--prefix`) accepts a throwaway attestor set. `tests/rehearse_owner_flow.sh` runs the whole
 owner flow this way with throwaway keys (seal, verify, install for 3 operators, check, sign a
-synthetic root, aggregate 3-of-5, native verify, shred). Rehearsed on 2026-10-19 on 209.250.236.240.
+synthetic root, aggregate 3-of-5, native verify, shred). Rehearsed on 2026-10-19 on HOST_C.
 
 To uninstall, run `sudo ./install-attestor.sh rollback`. This removes the units and keeps the state
 and the key. `--purge-key` also shreds the host key and passphrase, after you type `PURGE`. It is not a binary rollback: for
@@ -323,7 +325,7 @@ The pause file stops all signing at once: `sudo touch /etc/bloch-l2-attestor/PAU
 
 ## Measured and known limits
 
-- **Live dry run, 2026-10-19, 45.77.142.123, read-only.** The run used the RC `bloch-l2-produce-dev`
+- **Live dry run, 2026-10-19, HOST_B, read-only.** The run used the RC `bloch-l2-produce-dev`
   of that day (`192eda33…`, superseded: do not install it) and a live mainnet follower.
   - Every pin matched: manifest, set file, the RPC quorum 3/3 (attestor set `1c06adbb…`, large-claim
     threshold 100 BLCH) and the rebuilt L2 genesis `632e45ae…`.

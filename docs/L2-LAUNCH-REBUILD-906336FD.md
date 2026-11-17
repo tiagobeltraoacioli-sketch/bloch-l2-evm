@@ -28,7 +28,7 @@ the native commit they link and its pinned lock.
 | L2 genesis, `mainnet.manifest`, `carryover.tsv.gz`, attestor set | `632e45ae…`, `7eef82a7…`, `4d1e2738…`, `1c06adbb…` | unchanged |
 | DA signer `bloch-pos` (settler) | `700631b0…` (78d4921c) | unchanged: it builds and signs DA transactions only, whose format and L1 checks did not change |
 
-Every kit pin of the moved items moved with them (`GO-LIVE-PINS.sha256` `614026a0…` at the kit commit that pins
+Every kit pin of the moved items moved with them (`GO-LIVE-PINS.sha256` `38a0d1b4…` at the kit commit that pins
 this release; `deployment/mainnet/test_launch_release_906336fd.py` checks every pinning file against the release's
 metadata in `deployment/mainnet/testdata/release-906336fd/`).
 
@@ -41,7 +41,7 @@ and two added checks. What the owner does differently:
 1. Check out the kit at the bloch-l2-evm `main` commit that contains this document (not the earlier kit tip named in
    `agents/PINS-NEXT.md`).
 2. Sign `4039f26a…`, following `docs/RELEASE-SIGNING.md` from section 2. The release folders are at
-   `~/l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/` on 45.77 and 136.
+   `~/l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/` on the two build hosts (HOST_B and HOST_A).
    New check before the copy: `~/bloch-l2-signing/from-4577` and `from-136` must not exist (an earlier copy would
    take the new one inside it).
 3. Plan P2 GO lines now read `artifacts/SHA256SUMS` = `4039f26a…` and `install-shadow.sh --verify` prints

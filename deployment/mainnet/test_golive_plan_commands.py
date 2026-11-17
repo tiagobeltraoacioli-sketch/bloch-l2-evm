@@ -47,7 +47,7 @@ class Plan(unittest.TestCase):
     def test_p2_stages_a_and_b_from_the_mac_copy(self):
         stage = [b for b in self.commands('scp ') if ':l2-golive-next/artifacts/' in b]
         targets = {b.split()[-1].split(':')[0] for b in stage}
-        self.assertEqual(targets, {'ubuntu@136.244.93.186', 'ubuntu@IP_OF_B'})
+        self.assertEqual(targets, {'ubuntu@HOST_A', 'ubuntu@IP_OF_B'})
         for block in stage:
             sources = shlex.split(block)[3:-1]
             self.assertTrue(sources and all(s.startswith('~/bloch-l2-signing/') or s.startswith(os.path.expanduser('~'))

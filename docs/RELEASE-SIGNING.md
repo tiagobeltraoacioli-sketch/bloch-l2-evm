@@ -1,5 +1,7 @@
 # Bloch L2 release signing ceremony
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Release `bloch-l2-2026-11-17-launch-native-906336fd` (round 18: the 926d2cf sources rebuilt against node release
 906336fd; the earlier release `bloch-l2-2026-11-03-next-native-78d4921c`, `6d3bd628…`, must never be signed), build commit `3d35a0f42f9b5f1a8657ee892dc3239a789a50ae`,
 native `906336fd35f157dac380523b59dee8a5a325175a` (node release 906336fd). Signing target: the release `SHA256SUMS`,
@@ -46,11 +48,11 @@ ls -d ~/bloch-l2-signing/from-4577 ~/bloch-l2-signing/from-136
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@45.77.142.123:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd ~/bloch-l2-signing/from-4577
+scp -r -i SSH_KEY_FILE ubuntu@HOST_B:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd ~/bloch-l2-signing/from-4577
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd ~/bloch-l2-signing/from-136
+scp -r -i SSH_KEY_FILE ubuntu@HOST_A:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd ~/bloch-l2-signing/from-136
 ```
 
 The next command must print nothing (identical trees, every byte):
@@ -177,17 +179,17 @@ Record that hash next to D7 in the owner documents.
 - Keep `~/bloch-l2-signing/from-4577` (with the signature) as the owner's archive copy of the release.
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@45.77.142.123:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@HOST_B:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@136.244.93.186:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@HOST_A:l2dexbridge-20261030/l2-launch-rebuild-r17/release/bloch-l2-2026-11-17-launch-native-906336fd/
 ```
 
 If A or B was staged before signing, copy it into their `artifacts` too:
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ubuntu@HOST_A:l2-golive-next/artifacts/
 ```
 
 ## 6. How operators and installers verify

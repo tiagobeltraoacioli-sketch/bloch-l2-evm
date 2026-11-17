@@ -1,8 +1,10 @@
 # devnet4 — reproducible preparation recipe (settlement V3)
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Status: **prepared, not run.** Nothing in this document has been executed on a
 server. It is the recipe an operator follows later on the L2 host
-`45.77.142.123`. Development network only: three validators on one host (one
+`HOST_B`. Development network only: three validators on one host (one
 failure domain), development allocation, no production finality.
 
 ## Why a new network
@@ -141,7 +143,7 @@ Step 4 requires the ignored helper test `print_policy_commitment_v3` in
 `bloch-l2-proof`, which prints `policy_commitment_v3()`; it is part of the
 native M2 branch.
 
-## Operator checklist on 45.77.142.123 (later; not executed here)
+## Operator checklist on HOST_B (later; not executed here)
 
 Preconditions (read-only):
 

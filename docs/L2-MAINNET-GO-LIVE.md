@@ -1,5 +1,7 @@
 # Bloch L2 mainnet (chain 700770): go-live plan for the launch build (3d35a0f against node release 906336fd)
 
+> **Host placeholders (publication review H398-6, 2026-11-17):** `HOST_A` = the IPv4 address of the settler, prover and follower-A host; `HOST_B` = that of the build host and follower-B host; `HOST_C`, `HOST_D` = the other project hosts named in older measurements; `SSH_KEY_FILE` = the path of the owner's SSH identity file. The values are in the owner's private copy; replace them before running a command.
+
 Status: **plan only, written 2026-11-02 for the next build.** Nothing in this document has been installed, started or broadcast. Every step that writes to a public chain is marked **MAINNET WRITE**, every publication **PUBLISH**, and every step that installs or starts something on a host is for the owner to run.
 
 **Known issues of this launch:** `deployment/mainnet/KNOWN-ISSUES.md` lists every item that stays open for the deposit-only launch (round 15: F312-4, F312-5, R308-19, R308-24 to R308-26 and the remainders of the second review pass), each with the symptom an operator sees (log line, monitor check) and the operator's action. Read it before P6 and keep it open during the launch.
@@ -71,8 +73,8 @@ Nothing here may be filled in by an operator or an agent. `TBD-OWNER` means the 
 | # | Decision | Recommendation | Blocks phase |
 | --- | --- | --- | --- |
 | **D1** | Go-live start epoch | Not before G0 holds. Earliest e7365 (2026-11-03 17:31 UTC). Recommended **e7450 (2026-11-04 16:11 UTC)**, after one day of clean finality after HF3. | all |
-| **D2** | Prover host | 136.244.93.186, co-located with the settler, while user transactions are off. Before D10, a dedicated 32 vCPU / 128 GB prover (§2). | P5, D10 |
-| **D3** | Follower B / replica RPC host | A small dedicated VPS (4 vCPU, 8 GB, 80 GB). 45.77.142.123 works but is the shared build host. | P3, P4, P11 |
+| **D2** | Prover host | HOST_A, co-located with the settler, while user transactions are off. Before D10, a dedicated 32 vCPU / 128 GB prover (§2). | P5, D10 |
+| **D3** | Follower B / replica RPC host | A small dedicated VPS (4 vCPU, 8 GB, 80 GB). HOST_B works but is the shared build host. | P3, P4, P11 |
 | **D4** | L1 RPC each follower reads | A → 80.240.16.185, B → 199.247.22.8. | P3 |
 | **D5** | Attestor operators: five people, five hosts, one index each, feed URLs | `TBD-OWNER`. No operator holds more than one key or shares a host with a validator, the settler or another attestor. | P10 |
 | **D6** | Addresses | The L2 core needs none. Still `TBD-OWNER`: (a) the wallet that funds the DA key (only for D10); (b) the wallet and L2 recipient of the test deposit and withdrawal. | P12 |
@@ -99,7 +101,7 @@ Without the 4097 stop, the limit at high heights is proof time, not a hard stop:
 
 | Role | Host | vCPU | RAM | Disk | Notes |
 | --- | --- | --- | --- | --- | --- |
-| A: settler + prover + follower A + RPC A + shadow + monitor + nginx (user transactions off) | 136.244.93.186 | 32 | 125 GiB | ≥ 200 GB | The prover cap check of the v2.1 plan §2 applies unchanged: fine while blocks are empty or deposit-only. |
+| A: settler + prover + follower A + RPC A + shadow + monitor + nginx (user transactions off) | HOST_A | 32 | 125 GiB | ≥ 200 GB | The prover cap check of the v2.1 plan §2 applies unchanged: fine while blocks are empty or deposit-only. |
 | Dedicated prover (before D10) | `TBD-OWNER` | 32 (16 physical cores) | 128 GB | ≥ 200 GB NVMe, Docker | 100 G slice + gnark 18.5 G outside it |
 | B: follower B + replica RPC + nginx | D3 | 4 | 8 GB | ≥ 80 GB | |
 | Attestor host (×5, inbound TCP 8787 open) | D5 | 4 | 8 GB | ≥ 80 GB | |
@@ -158,7 +160,7 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `614026a0c16c7c7ea6b5f00e023950107a6d93a382214d87e6e5ffcb67264157` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `38a0d1b499fc8ef646fd00717a6cd4f98358a4aa080408c93f8407bdff6f7511` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` |
 | `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
@@ -177,7 +179,7 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.js` | `14a4634d0538b79f57594499051c05074a56c5caf937464bfd0dfd7354405566` (agent 154 8d1c873; 201: subrequest size guard) |
 | `deployment/mainnet/public-rpc/l2rpc-gateway.conf.in` | `47cfa512a118de8a244ffcea6644f5f6ea5b992d7aa7171ffe4b0dbc2ddbeeb9` (agent 154 8d1c873; 201: subrequest size guard) |
-| `deployment/mainnet/public-rpc/render.py` | `c0d77915a6e8793d8fc7a41adb4874b474bb81484165070f62deffeb255d5f64` (agent 154 8d1c873; 201: `--sub-answer-max`) |
+| `deployment/mainnet/public-rpc/render.py` | `6522e47cfee5ddfbd693c94478268a04908a721b9e35a9b42938d2e8997bc814` (agent 154 8d1c873; 201: `--sub-answer-max`) |
 | `deployment/mainnet/attestor/install-attestor.sh` | `7fefb14294b14e9170e36b0d6456ab7204a484ab01b161bcb296ef39269d229f` (agent 203: RuntimeDirectory in the printed checks, purge text, launch release name; was `02a11a0a…`; round 15, agent 311: `upgrade-rollback` to a backup that holds the published post-fork follower is allowed after HF1) |
 | `deployment/mainnet/attestor/keykit/operator-pins-v2.sha256` | `de346957d159331673f627b1414b1cdc939069970fb76028271a28fca668c65c` |
 | `deployment/mainnet/attestor/attestor_agent.py` | `f2684764064c43552ccc3925a00ad5b3358ea579c21cbaa55907aa46ae2ff72d` (agent 203: 0400 runtime copy of a 0440 credential; was `208d7a0d…`) |
@@ -283,7 +285,7 @@ Actions (owner):
 - D8: retire the 45.77 scratch processes.
 
 ```
-ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 'nproc; free -g; df -h /; systemctl list-units --all "bloch-*" --no-legend | grep -c running; sudo docker images --digests | grep sp1-gnark'
+ssh -i SSH_KEY_FILE ubuntu@HOST_A 'nproc; free -g; df -h /; systemctl list-units --all "bloch-*" --no-legend | grep -c running; sudo docker images --digests | grep sp1-gnark'
 ```
 
 GO when: 32 vCPU, ≥ 120 GiB available, ≥ 200 GB free, 0 running `bloch-*` units, and the gnark digest
@@ -306,7 +308,7 @@ mkdir -p ~/bloch-l2-signing/staging
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 'ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@45.77.142.123:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ~/bloch-l2-signing/staging/
+scp -i SSH_KEY_FILE 'ubuntu@HOST_B:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/carryover.tsv.gz*' ubuntu@HOST_B:hf-release-kit-20261020/l2-agents/07-rpc/artifacts/mainnet.manifest ~/bloch-l2-signing/staging/
 ```
 
 ```
@@ -314,23 +316,23 @@ ls -l ~/bloch-l2-signing/from-4577/SHA256SUMS.minisig ~/bloch-l2-signing/staging
 ```
 
 ```
-ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@136.244.93.186 mkdir -p l2-golive-next/artifacts l2-golive-next/release-settler-v2
+ssh -i SSH_KEY_FILE ubuntu@HOST_A mkdir -p l2-golive-next/artifacts l2-golive-next/release-settler-v2
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/* ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/from-4577/* ubuntu@HOST_A:l2-golive-next/artifacts/
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/staging/* ubuntu@136.244.93.186:l2-golive-next/artifacts/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/staging/* ubuntu@HOST_A:l2-golive-next/artifacts/
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet ubuntu@136.244.93.186:l2-golive-next/kit
+scp -r -i SSH_KEY_FILE ~/worktrees/l2-launch-kit-20261103/deployment/mainnet ubuntu@HOST_A:l2-golive-next/kit
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/devnet/settler_v3.py ubuntu@136.244.93.186:l2-golive-next/release-settler-v2/
+scp -i SSH_KEY_FILE ~/worktrees/l2-launch-kit-20261103/deployment/devnet/settler_v3.py ubuntu@HOST_A:l2-golive-next/release-settler-v2/
 ```
 
 `scp -r` nests the tree inside `kit` if `kit` already exists, and the old files stay in use. On a second run, remove `l2-golive-next/kit` first. The release on 45.77 and 136 sits in agent scratch: copy it to a kept location before go-live (the v2.1 plan's W4 applies to it and to the staging files below).
@@ -338,19 +340,19 @@ scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit
 Stage B (D3, layout in §2) from the same Mac copies; `IP_OF_B` is the D3 host. Each command is one block:
 
 ```
-ssh -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ubuntu@IP_OF_B mkdir -p l2-golive-next/artifacts
+ssh -i SSH_KEY_FILE ubuntu@IP_OF_B mkdir -p l2-golive-next/artifacts
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/from-4577/* ubuntu@IP_OF_B:l2-golive-next/artifacts/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/from-4577/* ubuntu@IP_OF_B:l2-golive-next/artifacts/
 ```
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/bloch-l2-signing/staging/* ubuntu@IP_OF_B:l2-golive-next/artifacts/
+scp -i SSH_KEY_FILE ~/bloch-l2-signing/staging/* ubuntu@IP_OF_B:l2-golive-next/artifacts/
 ```
 
 ```
-scp -r -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/mainnet ubuntu@IP_OF_B:l2-golive-next/kit
+scp -r -i SSH_KEY_FILE ~/worktrees/l2-launch-kit-20261103/deployment/mainnet ubuntu@IP_OF_B:l2-golive-next/kit
 ```
 
 Then on B (the signature check of step 1 first):
@@ -386,7 +388,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `614026a0c16c7c7ea6b5f00e023950107a6d93a382214d87e6e5ffcb67264157` (§3.2), `artifacts/SHA256SUMS` to `4039f26a…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `38a0d1b499fc8ef646fd00717a6cd4f98358a4aa080408c93f8407bdff6f7511` (§3.2), `artifacts/SHA256SUMS` to `4039f26a…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 3d35a0f4, native 906336fd, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce, slot-epoch binding and first-key floor 8620` and `verify OK`;
 - `build.json` shows `l2_commit` 3d35a0f4…, `l2_tracked_changes: 0`.
 
@@ -602,7 +604,7 @@ Rollback: `sudo systemctl disable --now bloch-l2-mainnet-rpc`. Nothing depends o
 **Do not install from the settler-v2 staging `release-prover/`.** It holds the forbidden `remote_prover.py` `99bbc1bc…` and the old installer `ed9a001d…`, and its own `SHA256SUMS` passes. That `SHA256SUMS` proves nothing. Two checks reject a wrong file: the pin file below, and the installer, which refuses any `remote_prover.py` but `601a52f4…`. Assemble a new directory. The host and the guest come from the staging, the installer from the kit. `remote_prover.py` is under `deployment/devnet`, outside the P2 kit copy, so copy it from the Mac first:
 
 ```
-scp -i ~/Desktop/ssh-chaves/edgevana/edgevana_fleet_g4 ~/worktrees/l2-launch-kit-20261103/deployment/devnet/remote_prover.py ubuntu@136.244.93.186:l2-golive-next/
+scp -i SSH_KEY_FILE ~/worktrees/l2-launch-kit-20261103/deployment/devnet/remote_prover.py ubuntu@HOST_A:l2-golive-next/
 ```
 
 ```
@@ -976,24 +978,24 @@ Prerequisites: P4 on both hosts, and the gateway package from the kit. On each h
 On A:
 
 ```
-sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh plan
+sudo ROLE=sequencer NAME=l2rpc-a PEER=HOST_B:18956 PEER_ALLOW=HOST_B bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh plan
 ```
 
 ```
-sudo ROLE=sequencer NAME=l2rpc-a PEER=45.77.142.123:18956 PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh apply
+sudo ROLE=sequencer NAME=l2rpc-a PEER=HOST_B:18956 PEER_ALLOW=HOST_B bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh apply
 ```
 
 On B (the commands assume 45.77; for a D3 VPS use its IP in both hosts' `PEER` and `PEER_ALLOW`):
 
 ```
-sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh plan
+sudo ROLE=replica NAME=l2rpc-b PEER=HOST_A:18956 PEER_ALLOW=HOST_A bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh plan
 ```
 
 ```
-sudo ROLE=replica NAME=l2rpc-b PEER=136.244.93.186:18956 PEER_ALLOW=136.244.93.186 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh apply
+sudo ROLE=replica NAME=l2rpc-b PEER=HOST_A:18956 PEER_ALLOW=HOST_A bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh apply
 ```
 
-Then in the Cloudflare dashboard (zone blochl1.com): add the proxied A record `l2rpc` → 136.244.93.186, set
+Then in the Cloudflare dashboard (zone blochl1.com): add the proxied A record `l2rpc` → HOST_A, set
 SSL to Full (strict) for that hostname only, and turn Authenticated Origin Pulls on. Deploy the explorer last.
 Before that, re-check that the site still serves the bundle `index-D4WLsMRL.js`. If not, rebase.
 
@@ -1028,10 +1030,10 @@ transactions return -32053 until A is back, by design.
 Rollback, on each host, then delete the DNS record:
 
 ```
-sudo PEER_ALLOW=45.77.142.123 bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh rollback
+sudo PEER_ALLOW=HOST_B bash /home/ubuntu/l2-golive-next/kit/public-rpc/setup-gateway.sh rollback
 ```
 
-(on B use `PEER_ALLOW=136.244.93.186`).
+(on B use `PEER_ALLOW=HOST_A`).
 
 ## P12. First deposit and settlement test — **MAINNET WRITE (owner funds, D6)**
 
