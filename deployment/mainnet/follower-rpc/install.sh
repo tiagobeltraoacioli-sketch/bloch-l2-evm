@@ -45,10 +45,11 @@ R=${BLOCH_L2_INSTALL_ROOT:-}
 OPT=$R/opt/bloch/l2-mainnet ETC=$R/etc/bloch-l2-mainnet UNITS=$R/etc/systemd/system
 
 MANIFEST_SHA256=7eef82a70ef9b0e1dd86f86d33cba11fc10cdfc7395c2e5f6669613fa1beb2dd
-# The launch release this kit installs: SHA-256 of its signed SHA256SUMS (release bloch-l2-2026-11-03-next-native-78d4921c,
-# build 926d2cf). A release the same key signed earlier or later is refused (review R308-16); a later release ships
+# The launch release this kit installs: SHA-256 of its signed SHA256SUMS (release bloch-l2-2026-11-17-launch-native-906336fd,
+# build 3d35a0f against node release 906336fd; the earlier build 926d2cf / 78d4921c, 6d3bd628..., halts on the fleet's
+# chain after the KES bind: docs/L2-FOLLOWER-NODE-906336FD.md). A release the same key signed earlier or later is refused (review R308-16); a later release ships
 # with a kit that names it here.
-RELEASE_SHA256SUMS_SHA256=6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19
+RELEASE_SHA256SUMS_SHA256=4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb
 CARRYOVER_GZ_SHA256=$(cut -d' ' -f1 "$ART/carryover.tsv.gz.sha256" 2>/dev/null || true)
 [[ $L1 =~ ^http://([A-Za-z0-9.-]+):([0-9]+)/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
 L1_HOST=${BASH_REMATCH[1]}

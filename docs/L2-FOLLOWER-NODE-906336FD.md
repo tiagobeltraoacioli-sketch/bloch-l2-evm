@@ -1,6 +1,9 @@
 # The L2 follower and producer against node release 906336fd
 
-Status: **prepared, not released.** This branch (`codex/l2-follower-8620-r17-20261117`, from the launch kit
+Status: **released as the launch build (round 18):** release `bloch-l2-2026-11-17-launch-native-906336fd`, build commit
+`3d35a0f`, signing target `4039f26a…` (unsigned; plan §3.1). Below is the original text of agent 340, kept as written.
+
+Original status: **prepared, not released.** This branch (`codex/l2-follower-8620-r17-20261117`, from the launch kit
 `2de669e`) holds what a next L2 release needs; it builds no release and moves no binary pin. Rebuilding the L2
 binaries moves the launch identity (release 926d2cf, signing target `SHA256SUMS` `6d3bd628…9c19`): that is a
 decision of the coordinator and the owner.

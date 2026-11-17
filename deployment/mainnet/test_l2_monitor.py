@@ -553,14 +553,21 @@ class MonitorTests(unittest.TestCase):
         """Node release 906336fd arms two consensus rules at epoch 8620 (the vote slot-epoch binding and the KES
         first-key floor) and reports them in getchaininfo. Release 926d2cf was built against native 78d4921c, which
         has neither: its follower and producer replay other rules from that epoch on. An inert gate is nothing a
-        build needs to know."""
+        build needs to know. Round 18: the launch build links 906336fd, so the monitor's compiled list has both gates;
+        the earlier build is given as its own build.json (its gate list without the two), and must still be CRIT."""
         w = healthy()
         for node in w['l1'].values():
             forks = node['info']['hard_forks']
             forks['hf3_kes_vote_slot_epoch_binding'] = {'activation_epoch': 8620, 'active': False}
             forks['hf3_kes_first_key_floor'] = {'activation_epoch': 8620, 'active': False}
             forks['hf3_kes_register_epoch_binding'] = {'activation_epoch': None, 'active': False}
-        r, _ = run(w)
+        earlier = {k: v for k, v in m.V2_COMPILED_GATES.items()
+                   if k not in ('ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH', 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH')}
+        self.assertEqual(len(earlier), len(m.V2_COMPILED_GATES) - 2)
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': earlier}))
+            r, _ = run(w, '--build-json', str(bj))
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
         message = next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build')
         self.assertIn('hf3_kes_first_key_floor', message)
@@ -573,6 +580,9 @@ class MonitorTests(unittest.TestCase):
                 m.V2_COMPILED_GATES, ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH=8620,
                 KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH=8620, KES_REGISTER_EPOCH_BINDING_EPOCH='inert')}))
             r, _ = run(w, '--build-json', str(bj))
+        self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'OK')
+        # The launch build's own compiled list (no --build-json) agrees with the fleet's gates.
+        r, _ = run(w)
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'OK')
 
     def test_gate_check_reads_build_json(self):
@@ -1171,7 +1181,7 @@ class StuckNode(unittest.TestCase):
         self.assertTrue([c for c in r.checks if c['check'] == 'l1_stuck' and c['code'] == m.UNKNOWN])
 
     def test_identity_pins_untouched(self):
-        self.assertEqual(m.V2_BUILD['l2_commit'], '926d2cf50af11f389ad1ffa91c0b7720178b3472')
+        self.assertEqual(m.V2_BUILD['l2_commit'], '3d35a0f42f9b5f1a8657ee892dc3239a789a50ae')  # round 18: the launch rebuild of 926d2cf's sources
         self.assertEqual(m.MAINNET_PINS['attestor_set'], '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b')
 
 

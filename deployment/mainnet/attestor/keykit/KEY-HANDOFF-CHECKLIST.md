@@ -103,7 +103,7 @@ deployment/mainnet/attestor/keykit/make-operator-bundles.sh package --artifacts 
 
 - [ ] Each index prints `packaged attestor I: …/operator-I.tar (SHA-256)`. `PACKAGES.sha256` is public.
 - [ ] Each package holds the sealed key, the public key, the set, `IDENTITY.txt`,
-      `ARTIFACTS.sha256` (follower `cdf5da5c…`, producer `e3f1a290…` of release `bloch-l2-2026-11-03-next-native-78d4921c`, `bloch-pos` `093909a2…`,
+      `ARTIFACTS.sha256` (follower `d4d2b99a…`, producer `598873ae…` of release `bloch-l2-2026-11-17-launch-native-906336fd`, `bloch-pos` `093909a2…`,
       manifest `7eef82a7…`, carryover `4d1e2738…`), `INSTALL.md`, `ONBOARDING.md`, the kit and
       `check-operator-bundle.sh`, all listed in `CONTENTS.sha256`.
 - [ ] `--artifacts DIR` embeds the Linux binaries after checking them against the pins, so the operator fetches nothing. Without it, `INSTALL.md` step 2 sends the operator to "the place the coordinator gives you", which does not exist yet.

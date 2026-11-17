@@ -314,10 +314,10 @@ print(json.dumps({k: len(v) for k, v in s.items()}))' "$STATE/state.json"
 }
 
 # ------------------------------------------------------------------------------------------ upgrade
-# The launch build (release bloch-l2-2026-11-03-next-native-78d4921c, L2 926d2cf5 against L1 78d4921c). Override only for a later
+# The launch build (release bloch-l2-2026-11-17-launch-native-906336fd, L2 3d35a0f4 against node release 906336fd). Override only for a later
 # corrected build whose hashes the coordinator published.
-V2_FOLLOWER_SHA256=cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2
-V2_PRODUCE_SHA256=e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69
+V2_FOLLOWER_SHA256=d4d2b99a20f6093cbaf2b9cebead41b3c6b4bf5aad37f2a091752746a659fe96
+V2_PRODUCE_SHA256=598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db
 V2_BLOCH_POS_SHA256=093909a2bda70381bb3f71535029ceeb0b8b21378c3419c4c1dd0783a1a3387e
 L1_GENESIS_UNIX=1786656679 L1_EPOCH_SECONDS=960 HF1_EPOCH=7180
 ROLLBACK_LEAD_SECONDS=4200   # re-verify (~50 min) + check must finish before HF1 starts

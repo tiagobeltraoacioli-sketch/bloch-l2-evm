@@ -67,7 +67,7 @@ class InstallSignature(unittest.TestCase):
     def test_another_release_signed_by_the_release_key_is_refused(self):
         """Review R308-16: the installer names its release; the signature check gets --expect-sha256."""
         text = INSTALL.read_text()
-        self.assertRegex(text, r'(?m)^RELEASE_SHA256SUMS_SHA256=6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19$')
+        self.assertRegex(text, r'(?m)^RELEASE_SHA256SUMS_SHA256=4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f3037edf0cb$')
         self.assertIn('--expect-sha256 "$RELEASE_SHA256SUMS_SHA256"', text)
         # A valid signature by the pinned key over ANOTHER SHA256SUMS: stand in for the key with a copy of the
         # verifier that pins the test key, as an older signed release would verify under the real one.
@@ -89,7 +89,7 @@ class InstallSignature(unittest.TestCase):
                                '--canonical', str(self.canonical), '--canonical-user', getpass.getuser(),
                                '--txpool', str(self.txpool), '--dry-run'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertIn('expected 6d3bd62885ca269e', done.stderr)
+        self.assertIn('expected 4039f26a10cb7203', done.stderr)
         self.assertIn('release signature check failed', done.stderr)
 
     def test_allow_unsigned_skips_check_loudly(self):

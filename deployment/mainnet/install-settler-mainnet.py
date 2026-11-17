@@ -109,7 +109,7 @@ PINS = {
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
     'settler_v3.py': '9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
-    'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
+    'bloch-l2-produce-dev': '598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db',
 }
 FILES = ('settler_v3.py', 'bloch-evm-sp1-settlement-v3', 'bloch-l2-produce-dev', 'settlement_v3_mainnet',
          'bloch-pos', 'mainnet.manifest', 'l2_reorg_recover.py')

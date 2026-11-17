@@ -64,7 +64,7 @@ in `ARTIFACTS.sha256`, so the download source does not need to be trusted.
 ```
 
 It checks every bundle file, the pinned set, your public key, every artifact (including the
-follower `cdf5da5c…` and producer `e3f1a290…`), that this host can run them, and the sealed key
+follower `d4d2b99a…` and producer `598873ae…`), that this host can run them, and the sealed key
 header. With `--open` it asks for the **transport passphrase** at `Sealed attestor key passphrase:`
 and proves that the key opens and signs for index @INDEX@. Nothing is written.
 

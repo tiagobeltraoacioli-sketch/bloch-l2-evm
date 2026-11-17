@@ -1,6 +1,6 @@
 # Bloch L2 mainnet, deposit-only launch: known issues
 
-Release `926d2cf` (signing target `SHA256SUMS` `6d3bd628…`), launch kit of round 15.
+Release `bloch-l2-2026-11-17-launch-native-906336fd` (build commit 3d35a0f: the sources of 926d2cf against node release 906336fd; signing target `SHA256SUMS` `4039f26a…`), launch kit of round 15 with the round-18 rebuild.
 
 Each entry below stays open for the deposit-only launch by decision of the coordinator: closing it
 needs a new release build, or it does not affect a launch without user transactions. Each entry
@@ -164,7 +164,7 @@ a reused target directory, a `git replace` object.
 changes. The only sign is a release whose `SHA256SUMS` is not the published one.
 
 **What the operator does.** For this launch: nothing is built. Stage only the signed release whose
-`SHA256SUMS` hashes to `6d3bd628…`; it was reproduced on two hosts. For any later build: build in a
+`SHA256SUMS` hashes to `4039f26a…`; it was reproduced on two hosts. For any later build: build in a
 clean environment, that is from a fresh `git archive` of the pinned commits, under `env -i`, with
 `GIT_NO_REPLACE_OBJECTS=1`, an empty `CARGO_HOME` and a new target directory, on a host with no
 Cargo configuration outside the checkouts; then compare `SHA256SUMS` with a second host.

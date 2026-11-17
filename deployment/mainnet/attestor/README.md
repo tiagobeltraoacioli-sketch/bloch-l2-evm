@@ -44,7 +44,7 @@ The agent needs a `bloch-pos` built from bloch-sis-pow `codex/l2-attestor-keysto
 
 Consensus code is unchanged. The other binaries come from the next L2 release build
 `bloch-l2-2026-11-03-next-native-78d4921c` (build commit 926d2cf, `build-release.sh`):
-`bloch-l2-native-follower` `cdf5da5c…` and `bloch-l2-produce-dev` `e3f1a290…`.
+`bloch-l2-native-follower` `d4d2b99a…` and `bloch-l2-produce-dev` `598873ae…` (release `bloch-l2-2026-11-17-launch-native-906336fd`).
 
 ## What the agent does each cycle (default 60 s)
 
@@ -213,8 +213,8 @@ binary changes, one host at a time.
 
 Each attestor host had to run the v2 follower and producer **before epoch 7178 (15:39 UTC)**:
 
-- `bloch-l2-native-follower` `cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2`
-- `bloch-l2-produce-dev` `e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69`
+- `bloch-l2-native-follower` `d4d2b99a20f6093cbaf2b9cebead41b3c6b4bf5aad37f2a091752746a659fe96`
+- `bloch-l2-produce-dev` `598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db`
 
 These are the hashes of the launch build (release `bloch-l2-2026-11-03-next-native-78d4921c`, build commit 926d2cf), which replace v2.1's follower
 and producer. They are built into `install-attestor.sh` as the defaults. Use `--follower-sha256` and
@@ -260,8 +260,8 @@ same for you only while that `PAUSE` file and the stopped agent are untouched. O
 `PAUSE`, set it again or started the agent, the script treats both as yours: a later `--resume`
 changes nothing, and a later `upgrade` or `upgrade-rollback` keeps what it finds.
 
-At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower cdf5da5c, produce
-e3f1a290`. Post that line in the operators' group the coordinator set up; the next operator then starts.
+At the end it prints `REPORT: attestor I: upgrade check-ok, epoch X->Y, follower d4d2b99a, produce
+598873ae`. Post that line in the operators' group the coordinator set up; the next operator then starts.
 
 If a step fails, `PAUSE` stays in place, the agent stays stopped and the follower keeps running.
 Fix the cause, then continue from the follower start with

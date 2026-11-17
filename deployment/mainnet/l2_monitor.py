@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only health monitor for the Bloch L2 mainnet (chain id 700770; devnet4 700771).
 
-Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the next L2 build, provisional and unsigned (L2 926d2cf5, native
-78d4921c, follower cdf5da5c, produce-dev e3f1a290, settled-rpc 53e88565).
+Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the next L2 build, provisional and unsigned (L2 3d35a0f4, native
+906336fd, follower d4d2b99a, produce-dev 598873ae, settled-rpc 53e88565; release bloch-l2-2026-11-17-launch-native-906336fd).
 
 What it reads (it never writes to a chain, holds no key and opens no keystore):
   * every L2 settled-RPC backend (`--l2-rpc NAME=URL`, repeat): eth_chainId, the `latest`, `safe` and
@@ -72,15 +72,15 @@ MAINNET_PINS = {
     'attestor_set': '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b',
 }
 
-# ---- The v2.1 L2 build (bloch-l2-2026-10-30-v21-native-78d4921c: SHA256SUMS and build.json) ----
+# ---- The launch L2 build (bloch-l2-2026-11-17-launch-native-906336fd: SHA256SUMS and build.json) ----
 V2_BUILD = {
-    'l2_commit': '926d2cf50af11f389ad1ffa91c0b7720178b3472',
-    'native': '78d4921c3ec6ba41829f3878eed47f8d3bb96230',
-    'native_lock_sha256': 'a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9',
+    'l2_commit': '3d35a0f42f9b5f1a8657ee892dc3239a789a50ae',
+    'native': '906336fd35f157dac380523b59dee8a5a325175a',
+    'native_lock_sha256': 'ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa',
 }
 V2_SHA256 = {
-    'bloch-l2-native-follower': 'cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2',
-    'bloch-l2-produce-dev': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
+    'bloch-l2-native-follower': 'd4d2b99a20f6093cbaf2b9cebead41b3c6b4bf5aad37f2a091752746a659fe96',
+    'bloch-l2-produce-dev': '598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db',
     'bloch-l2-settled-rpc': '53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d',
     'sequencer_mainnet.py': '15daa26fe52d0f3c39befcfc43e68b660678826973fb72ed24190339ae6b88e2',
 }
@@ -98,8 +98,8 @@ GATE_CONSTANTS = {
     'hf3_kes_enforce': 'HF3_KES_ENFORCE_EPOCH',
     'hf3_slh': 'HF3_SLH_SUITE_EPOCH',
     'hf3_pq_migration': 'HF3_PQ_MIGRATION_EPOCH',
-    # Armed at 8620 by node release 906336fd (2026-11-13); native 78d4921c, which release 926d2cf links, has
-    # neither constant, so they are not in V2_COMPILED_GATES and check_gates reports them as not built in.
+    # Armed at 8620 by node release 906336fd (2026-11-13); the launch build links 906336fd and has both (the earlier
+    # build 926d2cf / 78d4921c had neither, and check_gates reported them as not built in).
     'hf3_kes_vote_slot_epoch_binding': 'ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH',
     'hf3_kes_first_key_floor': 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH',
     'hf3_kes_register_epoch_binding': 'KES_REGISTER_EPOCH_BINDING_EPOCH',
@@ -109,6 +109,7 @@ V2_COMPILED_GATES: Dict[str, Any] = {
     'HF2_SLASHING_V2_EPOCH': 7270, 'HF2_GROWTH_CAP_EPOCH': 7270, 'SIG_CANONICAL_ACTIVATION_EPOCH': 7270,
     'MLDSA_PIN_ACTIVATION_EPOCH': ['0', '7270'], 'HF3_KES_EPOCH': 7360, 'HF3_KES_ENFORCE_EPOCH': 8620,
     'HF3_SLH_SUITE_EPOCH': 7360, 'HF3_PQ_MIGRATION_EPOCH': 7360,
+    'ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH': 8620, 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH': 8620,
 }
 
 FINALITY_CLOSED_CODE = -32001  # bloch-l2-settled-rpc: safe and finalized refused without a valid follower status

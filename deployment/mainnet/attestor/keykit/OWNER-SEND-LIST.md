@@ -2,7 +2,7 @@
 
 Package from the current kit, never from `~/worktrees/attestor-custody-20261030` (commit 922fec4): that tree pins the old
 producer `7c1cc62b…`, which halts on the first settled deposit. `package` here refuses those pins, and also v2.1's follower `c18752fd…` and
-producer `fb0d5313…`: packages for this build pin follower `cdf5da5c…` and producer `e3f1a290…` (release `bloch-l2-2026-11-03-next-native-78d4921c`, build 926d2cf).
+producer `fb0d5313…`: packages for this build pin follower `d4d2b99a…` and producer `598873ae…` (release `bloch-l2-2026-11-17-launch-native-906336fd`, build 3d35a0f against node release 906336fd; packages cut for the earlier 926d2cf build, follower `cdf5da5c…`, are refused).
 
 Package only from a clean checkout of the final launch kit (the commit named in the latest PINS-NEXT
 notice, which carries the attestor text fixes and the runtime-directory passphrase copy of agent 203).
@@ -48,7 +48,7 @@ The reply template in `ONBOARDING.md` section 6: no secret in it. Check these be
 
 1. `check-ok` names `signer_index I` and set `1c06adbb…`.
 2. `curl -fsS http://THEIR_IPV4:8787/healthz` from your machine prints `ok`.
-3. Installed hashes: `bloch-pos 093909a2…`, follower `cdf5da5c…`, producer `e3f1a290…`.
+3. Installed hashes: `bloch-pos 093909a2…`, follower `d4d2b99a…`, producer `598873ae…`.
 4. Two epoch readings 16+ minutes apart, increasing.
 5. Offline backup re-sealed, both USB copies checked, every transport-bundle copy deleted: yes, yes, yes.
 
