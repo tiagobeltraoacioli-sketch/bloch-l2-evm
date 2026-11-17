@@ -31,8 +31,8 @@ epoch remains an owner input.
 
 | Repo | Branch | Tip | From |
 |---|---|---|---|
-| bloch-sis-pow | `codex/native-l2-dec-merge-r17-20261117` | `19aa156d` | the released node `906336fd` merged with `codex/l2-r17-20261117` `189f3178` (= `0861278c` plus scripts and a runbook); section 11 |
-| bloch-l2-evm | `codex/l2-dec-merge-r17-20261117` | see `git log` (this file is in the tip; the follower, producer and settled RPC were built at `3cbc421`, the later commits move pins and documents only) | `codex/l2-r17-pins-20261117` `99da262` |
+| bloch-sis-pow | `codex/native-l2-dec-merge-r17-20261117` | `711e60ba` | the released node `906336fd` merged with `codex/l2-r17-20261117` `189f3178` (= `0861278c` plus scripts and a runbook), section 11; then bloch-sis-pow `main` `857a10ac` (the deployed release `0067547f`) merged in, section 12 |
+| bloch-l2-evm | `codex/l2-dec-merge-r17-20261117` | see `git log` (this file is in the tip; the follower, producer and settled RPC were built at `904e6d4` against native `711e60ba`, the later commits move pins and documents only) | `codex/l2-r17-pins-20261117` `99da262` |
 
 Before the merge (rounds 15 to 17, sections 3 to 8 where they say so): native `codex/l2-r15-recipients-20261116`
 `0861278c` (from a2fc3d0f) and bloch-l2-evm `codex/l2-r15-recipients-20261116` (binaries built at c2938be).
@@ -56,8 +56,8 @@ L2 genesis `632e45ae…f468`, the activated program and its configuration `8ec1c
 | `settlement_v3_mainnet_v1_sparse` (activated rules, no recipient) | `ff34a548bc6d2632761dd53ab10e8462c88f7137f9606480fd4a2ccbf8da7098` | its identity reproduces the activated configuration `8ec1c804…` |
 | `settlement_v3_mainnet_sparse_eager` (measurement only) | `84adfc2ca90dbc8d3f2fb010d89c4a98a618e587b5cc5efb5c3c39c29dfd45e4` | |
 | `bloch-evm-sp1-settlement-v3` (SP1 host; features `source-settlement,node-artifact,sparse-witness`) | `3d89f5c3f5d8f8453eb38983d273feab0001c965a1c2c4206a06ef5b24d2c849` | `CANDIDATE_HOST_PIN` (settler installer), `PROVER_SHA256` (prover installer) |
-| `bloch-l2-produce-dev` | `c6b7ce1b921134b73da4a85d0944e630f26e44dce604a4e10f2c0db7622e4d61` (native `19aa156d`; before the merge `63c9cdf8…5a23`) | settler installer `PINS`, `install-shadow.sh` `PRODUCE_SHA256` |
-| `bloch-l2-native-follower` | `ee1b2c8ac780c0803dcdeda97ce143627c7c3b4556334f44588080bd3c1fd581` (native `19aa156d`; before the merge `051ebfe5…0ee3`) | |
+| `bloch-l2-produce-dev` | `779850edebbbb6033266909170c8e17f62b2b47d7c360f29426175e2d1cb7f75` (native `711e60ba`, section 12; native `19aa156d` gave `c6b7ce1b…4d61`, before the merge `63c9cdf8…5a23`) | settler installer `PINS`, `install-shadow.sh` `PRODUCE_SHA256` |
+| `bloch-l2-native-follower` | `989bae69debf8e0cac0962594c13dbd41f4a4e6d78453b66ea5fb0db5b81fc3e` (native `711e60ba`, section 12; native `19aa156d` gave `ee1b2c8a…d581`, before the merge `051ebfe5…0ee3`) | |
 | `bloch-l2-settled-rpc` | `3d116e378616ee8c88e8a93d97514df745ef23ba323040ebefe4f5d54c91351d` | |
 | `sequencer_mainnet.py` (shadow) | `1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae` | `install-shadow.sh` `SEQUENCER_SHA256` |
 | `remote_prover.py` | `40f954601a94d9ce2f237af37211cbba1c3e0e0c0a4944cc2ad40714584381c5` | prover installer `REMOTE_PROVER_SHA256` |
@@ -65,8 +65,8 @@ L2 genesis `632e45ae…f468`, the activated program and its configuration `8ec1c
 The candidate's `GO-LIVE-PINS.sha256` is printed by `python3 deployment/mainnet/refresh_kit_pins.py`.
 
 **`GO-LIVE-PINS.sha256` and `GO-LIVE-PINS-PROVER.sha256` of this branch are the December pin lists (review
-R335-4, round 17).** Their binary lines are the build of section 11: `artifacts/` (follower, producer, settled
-RPC, `build.json` `e88a0836…ef05`, the build's `SHA256SUMS` `b89b5879…957f`), the settler's producer and SP1
+R335-4, round 17).** Their binary lines are the build of section 12 (round 18): `artifacts/` (follower, producer,
+settled RPC, `build.json` `ed14d087…3d5a`, the build's `SHA256SUMS` `f7451834…b23d`), the settler's producer and SP1
 host, the prover's SP1 host, and one line for each December guest (`settlement_v3_mainnet_sparse`,
 `settlement_v3_mainnet_fallback`) beside the activated guest, which the settler proves with until the swap.
 `release-settler-v2/bloch-pos` stays the released node binary the settler host uses as DA key tool (the
@@ -84,6 +84,7 @@ line. What is still the launch's on this branch:
 - The four guest ELFs: built from b635566 in the pinned container on **two hosts** (build host A, image
   `sha256:b2badcc6…45ca`, twice in separate scratch directories with an empty crate registry; build host B, image
   `sha256:4cec7b91…a83b`, once): the three `SHA256SUMS` files are identical.
+- After the merge with `main` (native `711e60ba`, round 18): see section 12.
 - After the merge (native `19aa156d`): the SP1 host and the three binaries were built ONCE more from nothing on
   build host A (`build-prover-host.sh`, `build-release.sh`, L2 `3cbc421`). The SP1 host and the settled RPC came
   out as before the merge; the follower and the producer are new and are **not yet reproduced on a second host**.
@@ -132,7 +133,7 @@ line. What is still the launch's on this branch:
    `source-settlement,node-artifact,sparse-witness`). Compare `OUT-HOST/SHA256SUMS` with section 3.
 3. Identities: `bloch-evm-sp1-settlement-v3 --mainnet --sparse identity OUT/settlement_v3_mainnet_sparse` and
    `--mainnet identity OUT2/settlement_v3_mainnet`; they must print the values of section 3.
-4. Binaries: `JOBS=6 deployment/mainnet/build-release.sh WORK OUT` with native at `19aa156d` (the script checks
+4. Binaries: `JOBS=6 deployment/mainnet/build-release.sh WORK OUT` with native at `711e60ba` (the script checks
    the sources, applies the inert feature shim and refuses another native commit or lock).
 
 `WORK` may be any directory and the builder any user: steps 2 and 4 copy `WORK/src` to `/var/tmp/bloch-l2-build`

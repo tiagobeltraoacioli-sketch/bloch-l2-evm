@@ -159,14 +159,14 @@ Delivered 2026-11-03 01:50 UTC (agents/195-rpc-limits.md, agents/201-kit-final.m
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `741828a328c3835980b8acf563128b5cfbf6f469bfbb3d252b94ac38058bf00e` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `6b0dbee2fdc995fcaf664f2b408656359831fd9a117c645c4e353124028a030b` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b974e5cff38aa5aa7bb6fd330aa0facbd371aca9a73b88703ee4b81d21292ee7` |
 | `deployment/devnet/settler_v3.py` | `6a845943d4af4858bebf5979ebd32c9b092b355997d25a9d4aecc598af6e115d` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `136a081aff77c22d8023633d852aa799f46bbb9d3fa8dd653b88b1c6b123df76` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `1bfe29039ed6c6a22059505d8a9290f781050e15a838f08b72577d85eef0ebe1` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `40f954601a94d9ce2f237af37211cbba1c3e0e0c0a4944cc2ad40714584381c5` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `5faecfe9ba6c3c65a4b436d5a847255f902018153231b2c13d0609b22f9e6042` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
-| `deployment/mainnet/install-shadow.sh` | `0c630ba34ffd2124951b000f854b45b2996dac4e1b373606a84bff684e22b07d` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
+| `deployment/mainnet/install-shadow.sh` | `d29ecdbcac1410896b439540a48ff7368eed089790c2283cd0e1f6a771e4c14c` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
 | `deployment/mainnet/bloch-l2-mainnet-shadow.service` | `aaa0eb2d2cd5758faa1de371e4c661ecacf511543bcb8319b77bc249b575a5fb` (agent 155 H-1 `InaccessiblePaths`; 204: own user) |
 | `deployment/mainnet/follower-rpc/bloch-l2-mainnet-rpc.service` | `cb6afc4ca02d37cffb86048948c531fc566c8a609a6e05cefe3c5f94dd85e54c` (`LimitNOFILE=65536`; agent 155 H-1 `InaccessiblePaths`; 204: own RPC user) |
 | `deployment/mainnet/follower-rpc/install.sh` | `d2a41ac1abca8773e9abb94334e2b70d0bc5051b8033723869bbe08b6de88ab1` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
@@ -387,7 +387,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `741828a328c3835980b8acf563128b5cfbf6f469bfbb3d252b94ac38058bf00e` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `6b0dbee2fdc995fcaf664f2b408656359831fd9a117c645c4e353124028a030b` (§3.2), `artifacts/SHA256SUMS` to `6d3bd628…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 926d2cf5, native 78d4921c, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce 8620` and `verify OK` (agent 201 ran it on the 926d2cf release on 45.77 and 136);
 - `build.json` shows `l2_commit` 926d2cf5…, `l2_tracked_changes: 0`.
 
