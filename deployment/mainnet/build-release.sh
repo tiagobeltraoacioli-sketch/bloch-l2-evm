@@ -47,7 +47,19 @@ N=$W/src/bloch-validator-payout
 RETH=$W/src/reth-bloch-rpc-snapshot
 HERE=$L2/deployment/mainnet
 SR=$L2/integrations/settlement-recovery
-NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock}
+# Node release 906336fd (2026-11-13) arms two consensus rules at epoch 8620 that native 78d4921c does not have (the
+# vote slot-epoch binding and the KES first-key floor), so the release built against 78d4921c halts on the fleet's
+# chain once a validator registers its first KES key after KES binds (docs/L2-FOLLOWER-NODE-906336FD.md). The L2
+# sources build against 906336fd unchanged; its one pinned lock is follower-rpc/settlement-recovery.native-906336fd.Cargo.lock
+# (sha256 ab7b3a09..., the 78d4921c lock plus pqcrypto-mlkem and the mesh transport's dependencies). The default stays
+# 78d4921c, the signed release: NATIVE_COMMIT=906336fd35f157dac380523b59dee8a5a325175a selects the next one.
+NODE_906336FD_COMMIT=906336fd35f157dac380523b59dee8a5a325175a
+NODE_906336FD_LOCK_SHA256=ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa
+if [ "$NATIVE_COMMIT" = "$NODE_906336FD_COMMIT" ]; then
+  NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-906336fd.Cargo.lock}
+else
+  NATIVE_LOCK=${NATIVE_LOCK:-$HERE/follower-rpc/settlement-recovery.native-78d4921c.Cargo.lock}
+fi
 RELEASE_NATIVE_COMMIT=78d4921c3ec6ba41829f3878eed47f8d3bb96230
 RELEASE_LOCK_SHA256=a3c38a462a273fc07b618ebb2a6dda51377ea7d2deb8530c44a17bc4bf3908a9
 log() { echo "== $* ($(date -u +%FT%TZ))"; }
@@ -58,6 +70,10 @@ for d in "$L2" "$N" "$RETH"; do [ -d "$d" ] || die "missing $d"; done
 if [ "$NATIVE_COMMIT" = "$RELEASE_NATIVE_COMMIT" ]; then
   [ "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" = "$RELEASE_LOCK_SHA256" ] \
     || die "$NATIVE_LOCK is not the pinned lock $RELEASE_LOCK_SHA256 of native $RELEASE_NATIVE_COMMIT"
+fi
+if [ "$NATIVE_COMMIT" = "$NODE_906336FD_COMMIT" ]; then
+  [ "$(sha256sum "$NATIVE_LOCK" | cut -d' ' -f1)" = "$NODE_906336FD_LOCK_SHA256" ] \
+    || die "$NATIVE_LOCK is not the pinned lock $NODE_906336FD_LOCK_SHA256 of native $NODE_906336FD_COMMIT"
 fi
 [ "$(git -C "$N" rev-parse HEAD)" = "$NATIVE_COMMIT" ] || die "native checkout is not $NATIVE_COMMIT"
 [ "$(git -C "$RETH" rev-parse HEAD)" = "$RETH_COMMIT" ] || die "reth snapshot is not $RETH_COMMIT"
