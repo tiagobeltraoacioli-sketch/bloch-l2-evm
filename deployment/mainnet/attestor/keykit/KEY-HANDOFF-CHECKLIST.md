@@ -1,6 +1,6 @@
 # Mainnet attestor key custody and handoff checklist
 
-Applies to the five keys of set `1c06adbb…cc4b` (3-of-5) in `~/Desktop/L2-MAINNET-ATESTADORES`.
+Applies to the five keys of set `1c06adbb…cc4b` (3-of-5) in the owner's attestor key folder (its path is the owner's; set it once per terminal with the `export` below).
 
 **Goal:** each key is sealed for one operator and installed on that operator's host. Each operator
 holds an offline backup under a passphrase only they know. No plaintext `.sk` file is left anywhere,
@@ -66,6 +66,13 @@ While you still hold three or more bundles:
 - [ ] Check out the kit commit you will package from: the final launch kit named in the latest
       PINS-NEXT notice (it already holds the attestor branches of agents 128, 156 and 203). `package`
       refuses a dirty tree.
+- [ ] In the terminal you will use for every step below, name your attestor key folder once (replace
+      KEYS_FOLDER with its full path; the tool has no default and refuses without it):
+
+```
+export BLOCH_ATTESTOR_KEYS_DIR=KEYS_FOLDER
+```
+
 - [ ] Wi-Fi off. Then run `preflight`: it must show no `FAIL`.
 
 ```

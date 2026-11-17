@@ -415,7 +415,7 @@ Nothing needs signing until the first ≥ 100 BLCH withdrawal exists.
 aggregator, key handoff kit). Its README describes the cycle; the notes below are the original design.
 
 **Signing without recurring manual work.** Each of the five operators runs an *attestor agent*
-on their own host, with their own key. The keys stay in `~/Desktop/L2-MAINNET-ATESTADORES` until
+on their own host, with their own key. The keys stay in the owner's attestor key folder until
 each one is moved to its operator; they never sit on the settler host. The agent has these parts:
 
 1. **Its own follower.** A Genesis-4 node or the native follower replays L1 from the pinned

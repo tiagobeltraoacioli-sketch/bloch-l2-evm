@@ -158,7 +158,7 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `614026a0c16c7c7ea6b5f00e023950107a6d93a382214d87e6e5ffcb67264157` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `b0fd684c92609f27a8ac9782ca6d5ca41e586eb78499c203dab8c461e6e0cf57` |
 | `deployment/devnet/settler_v3.py` | `9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
@@ -386,7 +386,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `26df766bbb33d63e32608b1c4e51cfa30ade9aa9f08255cebd4ed53773a04bca` (§3.2), `artifacts/SHA256SUMS` to `4039f26a…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `614026a0c16c7c7ea6b5f00e023950107a6d93a382214d87e6e5ffcb67264157` (§3.2), `artifacts/SHA256SUMS` to `4039f26a…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 3d35a0f4, native 906336fd, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce, slot-epoch binding and first-key floor 8620` and `verify OK`;
 - `build.json` shows `l2_commit` 3d35a0f4…, `l2_tracked_changes: 0`.
 

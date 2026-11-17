@@ -28,7 +28,7 @@ the native commit they link and its pinned lock.
 | L2 genesis, `mainnet.manifest`, `carryover.tsv.gz`, attestor set | `632e45ae…`, `7eef82a7…`, `4d1e2738…`, `1c06adbb…` | unchanged |
 | DA signer `bloch-pos` (settler) | `700631b0…` (78d4921c) | unchanged: it builds and signs DA transactions only, whose format and L1 checks did not change |
 
-Every kit pin of the moved items moved with them (`GO-LIVE-PINS.sha256` `26df766b…` at the kit commit that pins
+Every kit pin of the moved items moved with them (`GO-LIVE-PINS.sha256` `614026a0…` at the kit commit that pins
 this release; `deployment/mainnet/test_launch_release_906336fd.py` checks every pinning file against the release's
 metadata in `deployment/mainnet/testdata/release-906336fd/`).
 

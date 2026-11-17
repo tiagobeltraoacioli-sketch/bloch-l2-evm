@@ -17,7 +17,8 @@
 #   make-operator-bundles.sh status           [common options]
 #
 # Common options: [--keys-dir DIR] [--out DIR] [--bloch-pos BIN] [--index I ...]
-# Defaults: --keys-dir ~/Desktop/L2-MAINNET-ATESTADORES, --out ~/L2-ATTESTOR-BUNDLES,
+# Required: --keys-dir DIR (or BLOCH_ATTESTOR_KEYS_DIR=DIR): the owner's folder with attestor-I.sk/.pk and attestors.set;
+# there is no default (publication review H398-4). Defaults: --out ~/L2-ATTESTOR-BUNDLES,
 # --bloch-pos ~/worktrees/l2-attestor-keystore-20261019/target/release/bloch-pos, all indices 0..4,
 # --pins keykit/operator-pins-v2.sha256.
 #
@@ -58,7 +59,7 @@ umask 077
 PINNED_SET_HASH=1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b
 PINNED_SET_SHA256=9bb94e333f76de0c726d4d3ae7f619b447b41def18b01615b51ac1261d13cde0
 KIT=$(cd "$(dirname "$0")/.." && pwd)
-KEYS="$HOME/Desktop/L2-MAINNET-ATESTADORES" OUT="$HOME/L2-ATTESTOR-BUNDLES"
+KEYS="${BLOCH_ATTESTOR_KEYS_DIR:-}" OUT="$HOME/L2-ATTESTOR-BUNDLES"
 BIN="$HOME/worktrees/l2-attestor-keystore-20261019/target/release/bloch-pos"
 PINS="$KIT/keykit/operator-pins-v2.sha256" ARTIFACTS= MEDIA= LABEL= EVENT= NOTE=
 EXPECT=$PINNED_SET_HASH INDICES=()
@@ -79,6 +80,7 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1";;
   esac
 done
+[ -n "$KEYS" ] || die "--keys-dir DIR (or BLOCH_ATTESTOR_KEYS_DIR=DIR) is required: the folder that holds attestor-I.sk, attestor-I.pk and attestors.set"
 [ ${#INDICES[@]} -gt 0 ] || INDICES=(0 1 2 3 4)
 for i in "${INDICES[@]}"; do [[ $i =~ ^[0-4]$ ]] || die "--index must be 0..4"; done
 case $MODE in
@@ -165,7 +167,7 @@ post_shred_check() {
   local left; left=$(cd "$KEYS" && ls -1 2>/dev/null | grep -E '\.sk$' || true)
   if [ -n "$left" ]; then echo "STILL PRESENT: $(echo $left)"; else echo "ok: no .sk file in $KEYS"; fi
   if [ -d "$HOME/.Trash" ]; then
-    if ls -1 "$HOME/.Trash" 2>/dev/null | grep -E '(attestor-[0-9]\.sk|L2-MAINNET-ATESTADORES)' >/dev/null; then
+    if ls -1 "$HOME/.Trash" 2>/dev/null | grep -E "(attestor-[0-9]\\.sk|^$(basename "$KEYS")\$)" >/dev/null; then
       echo "FOUND in the Trash: a copy of a key or the keys folder. Empty the Trash (Finder > Empty Trash)."
     else echo "ok: nothing named attestor-I.sk in the Trash"; fi
   fi

@@ -1,7 +1,7 @@
 """The launch release is the rebuild against node release 906336fd, and every kit pin names it.
 
 Release `bloch-l2-2026-11-17-launch-native-906336fd` (build commit 3d35a0f, native 906336fd, lock ab7b3a09...) was
-built from fresh clones at the reference WORK path on 45.77.142.123 and 136.244.93.186 and assembled on each host
+built from fresh clones at the reference WORK path on the two build hosts and assembled on each host
 independently; both folders are byte-identical. Its metadata files (BUILD-INFO, build.json, release.json, SHA256SUMS:
 the signing target) are kept in testdata/release-906336fd/. The binaries are not in the repository; their hashes are
 in SHA256SUMS and build.json, which these tests tie to every place of the kit that pins a binary of the release.

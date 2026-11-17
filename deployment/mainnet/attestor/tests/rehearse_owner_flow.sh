@@ -22,7 +22,7 @@ KEYS=$W/THROWAWAY-KEYS PASS=$W/THROWAWAY-PASS OUT=$W/bundles
 mkdir -p "$KEYS" "$PASS"
 step() { printf '\n######## %s\n' "$*"; }
 
-step "0. throwaway keys + set (stands in for ~/Desktop/L2-MAINNET-ATESTADORES)"
+step "0. throwaway keys + set (stands in for the owner's attestor key folder)"
 for i in 0 1 2 3 4; do
   "$POS" ws-keygen --out "$KEYS/attestor-$i" >/dev/null
   printf 'throwaway rehearsal words %s %s\n' "$i" "$(head -c 9 /dev/urandom | base64)" > "$PASS/pass-$i"
