@@ -275,7 +275,7 @@ fn export_from_state<T>(
     }
     let header = &block.header.0;
     let rules = spec.execution_at(number);
-    header.validate_parent(rules, &parent.0)?;
+    spec.rules().validate_link(header, &parent.0)?;
     let body = block.body.as_core();
     let context = BlockContext {
         number: header.number,
@@ -353,7 +353,7 @@ fn export_by_replay_with<T>(
         }
         let header = &block.header.0;
         let rules = spec.execution_at(height);
-        header.validate_parent(rules, &parent)?;
+        spec.rules().validate_link(header, &parent)?;
         let body = block.body.as_core();
         let context = BlockContext {
             number: header.number,

@@ -306,7 +306,7 @@ impl Snapshot {
         let context = BlockContext {
             number,
             timestamp: attributes.timestamp,
-            base_fee_per_gas: spec.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
+            base_fee_per_gas: chain.rules().base_fee_after(&header.0),
             prevrandao: attributes.prevrandao,
             anchor_root: attributes.anchor_root,
         };

@@ -1075,8 +1075,7 @@ impl Spool {
             .map_err(|e| format!("state unavailable: {e}"))?
             .ok_or("state unavailable: head header missing")?;
         // The rules of the block after the head (F387-1: the next rules floor its base fee).
-        let next_rules = provider.chain_spec().execution_at(header.0.number.saturating_add(1)).clone();
-        let next_base_fee = u128::from(next_rules.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used));
+        let next_base_fee = u128::from(provider.chain_spec().rules().base_fee_after(&header.0));
         let state = provider.latest().map_err(|e| format!("state unavailable: {e}"))?;
         let mut cache = std::collections::HashMap::new();
         let mut account = |address| {
@@ -1531,10 +1530,7 @@ fn floor_fee_suggestions(
                                 .map_err(|e| e.to_string())?
                                 .ok_or("head header missing")?;
                             // The rules of the block after the head (F387-1).
-                            let next_rules = factory.chain_spec().execution_at(header.0.number.saturating_add(1)).clone();
-                            Ok(u128::from(
-                                next_rules.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
-                            ))
+                            Ok(u128::from(factory.chain_spec().rules().base_fee_after(&header.0)))
                         })
                         .await
                         .map_err(|e| rpc_error(e.to_string()))?

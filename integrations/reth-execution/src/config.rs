@@ -46,10 +46,10 @@ pub struct BlochEvmConfig {
     factory: BlochRethBlockExecutorFactory,
     assembler: BlochNodeBlockAssembler,
     rpc_block_hashes: bool,
-    /// The chain's rule schedule, when it has one ([`Self::for_chain`]): the
-    /// header of the block being built takes its base fee from the rules of
-    /// that block, as the executor validates it (F387-1).
-    rules: Option<crate::RuleSchedule>,
+    /// The chain's rule schedule (one rule set unless [`Self::for_chain`] gave the
+    /// chain's): the header of the block being built takes its base fee from the
+    /// rules of that block, as the executor validates it (F387-1).
+    rules: crate::RuleSchedule,
 }
 impl BlochEvmConfig {
     /// Bind execution to a trusted specification and nonzero V2 domain.
@@ -60,7 +60,7 @@ impl BlochEvmConfig {
             factory: BlochRethBlockExecutorFactory::new(spec, domain),
             assembler: BlochNodeBlockAssembler::new(spec, domain),
             rpc_block_hashes: false,
-            rules: None,
+            rules: crate::RuleSchedule::single(spec.clone()),
         }
     }
     /// The configuration of a provider's chain: the base rules for everything a
@@ -68,8 +68,8 @@ impl BlochEvmConfig {
     pub fn for_chain(chain: &crate::BlochChainSpec) -> Self {
         let mut config = Self::new(chain.execution(), chain.domain());
         config.factory = config.factory.with_rules(chain.rules().clone());
-        config.rules = Some(chain.rules().clone());
-        config.assembler.rules = Some(chain.rules().clone());
+        config.rules = chain.rules().clone();
+        config.assembler.rules = chain.rules().clone();
         config
     }
     /// Only RPC construction enables provider ancestry and explicit block overrides.
@@ -97,11 +97,10 @@ impl BlochEvmConfig {
             .ok_or_else(|| BlockExecutionError::msg("V2 block number overflow"))?;
         // The base fee of the rules this block runs (F387-1): the next rules add
         // the base-fee floor, and the executor validates the header against them.
-        let rules = self.rules.as_ref().map_or(&self.spec, |rules| rules.at(number));
         Ok(BlockContext {
             number,
             timestamp: attributes.timestamp,
-            base_fee_per_gas: rules.next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used),
+            base_fee_per_gas: self.rules.base_fee_after(&parent.0),
             prevrandao: attributes.prevrandao,
             anchor_root: attributes.anchor_root,
         })
@@ -184,7 +183,9 @@ impl ConfigureEvm for BlochEvmConfig {
             .validate_configuration(&self.spec, self.domain)
             .map_err(BlockExecutionError::other)?;
         let body = block.body().as_core();
-        body.validate(&self.spec).map_err(BlockExecutionError::other)?;
+        self.rules
+            .validate_body(header.0.number, body)
+            .map_err(BlockExecutionError::other)?;
         if header.0.transactions_root != body.transactions_root() || header.0.deposits_hash != body.deposits_hash() {
             return Err(BlockExecutionError::msg("V2 body commitments disagree with header"));
         }
@@ -204,12 +205,15 @@ impl ConfigureEvm for BlochEvmConfig {
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<BlochBlockExecutionCtx, Self::Error> {
         let context = self.next_context(parent, &attributes)?;
-        NodeBodyV2 {
-            deposits: attributes.deposits.clone(),
-            transactions: vec![],
-        }
-        .validate(&self.spec)
-        .map_err(BlockExecutionError::other)?;
+        self.rules
+            .validate_body(
+                context.number,
+                &NodeBodyV2 {
+                    deposits: attributes.deposits.clone(),
+                    transactions: vec![],
+                },
+            )
+            .map_err(BlockExecutionError::other)?;
         Ok(BlochBlockExecutionCtx {
             previous_root: parent.0.state_root,
             context,
@@ -224,9 +228,10 @@ impl ConfigureEvm for BlochEvmConfig {
 pub struct BlochNodeBlockAssembler {
     spec: ChainSpec,
     domain: B256,
-    /// The chain's rule schedule ([`BlochEvmConfig::for_chain`]): the parent link of an
-    /// assembled block is judged on the rules of that block, as its header was built (F387-1).
-    rules: Option<crate::RuleSchedule>,
+    /// The chain's rule schedule (one rule set unless [`BlochEvmConfig::for_chain`] gave the
+    /// chain's): the parent link of an assembled block is judged on the rules of that block,
+    /// as its header was built (F387-1).
+    rules: crate::RuleSchedule,
 }
 impl BlochNodeBlockAssembler {
     /// Bind assembly to the same trusted configuration as execution.
@@ -234,12 +239,13 @@ impl BlochNodeBlockAssembler {
         Self {
             spec: spec.clone(),
             domain,
-            rules: None,
+            rules: crate::RuleSchedule::single(spec.clone()),
         }
     }
-    /// The rules block `number` runs: the schedule's, else the single configured rule set.
+    /// The rules block `number` runs: the chain's schedule, else the single configured rule set.
+    #[cfg(test)]
     pub(crate) fn rules_at(&self, number: u64) -> &ChainSpec {
-        self.rules.as_ref().map_or(&self.spec, |rules| rules.at(number))
+        self.rules.at(number)
     }
 }
 /// Final bundle values shadow original provider state, including storage wipes.
@@ -334,8 +340,8 @@ impl BlockAssembler<BlochRethBlockExecutorFactory> for BlochNodeBlockAssembler {
                 "V2 committed head disagrees with execution context",
             ));
         }
-        header
-            .validate_parent(self.rules_at(header.number), &input.parent.0)
+        self.rules
+            .validate_link(&header, &input.parent.0)
             .map_err(BlockExecutionError::other)?;
         let receipts = input
             .output

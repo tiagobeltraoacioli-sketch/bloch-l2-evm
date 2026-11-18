@@ -519,7 +519,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 Err(_) => 0,
             };
             // The block being built runs `schedule.at(number)`: its base fee has the next rules' floor (F387-1).
-            let next_base_fee = u128::from(schedule.at(number).next_base_fee(head.0.base_fee_per_gas, head.0.gas_used));
+            let next_base_fee = u128::from(schedule.base_fee_after(&head.0));
             let (pool, below_min_tip) = hold_below_min_tip(&rules(), pool, next_base_fee, min_tip);
             // Policy of this producer, not a block rule: a transaction that does not pay the write price for
             // the storage slots it adds is left pending, so no block of this producer creates an unpaid slot.
@@ -883,8 +883,8 @@ fn run(args: &[String]) -> Result<String, String> {
             .to_string())
         }
         "fees" => {
-            // Read-only: the head's base fee and the base fee of the block after it, on the rules of that
-            // block (F387-1).
+            // Read-only: the head's base fee and the base fee of the block after it, from the one place
+            // that knows which rules that block runs (RuleSchedule::base_fee_after; F387-1).
             only(rest, &["--target"])?;
             let factory = open(&target, &runtime, false)?;
             let number = factory.best_block_number().map_err(|e| e.to_string())?;
@@ -894,12 +894,12 @@ fn run(args: &[String]) -> Result<String, String> {
                       "rules": rule_set_name(&factory, number),
                       "next_rules_from": schedule.next_from(),
                       "base_fee": header.0.base_fee_per_gas, "gas_used": header.0.gas_used,
-                      "next_base_fee": schedule.at(number.saturating_add(1)).next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
+                      "next_base_fee": schedule.base_fee_after(&header.0),
                       "next_min_base_fee": schedule.at(number.saturating_add(1)).min_base_fee});
             // Before the switch the block after the head may be the first of the next rules (extend
             // --rule-set next): its base fee is then the next rules', floor included.
-            if let (Some(next), None) = (schedule.next(), schedule.next_from()) {
-                out["next_base_fee_if_switching"] = json!(next.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used));
+            if let Some(fee) = schedule.base_fee_after_switching(&header.0) {
+                out["next_base_fee_if_switching"] = json!(fee);
             }
             Ok(out.to_string())
         }

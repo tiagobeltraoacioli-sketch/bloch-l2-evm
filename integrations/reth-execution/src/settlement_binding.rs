@@ -239,13 +239,13 @@ fn load_snapshot(
             .checked_add(block.length() as u64)
             .filter(|total| *total <= limits.bytes)
             .ok_or_else(|| invalid("canonical settlement audit byte budget exceeded"))?;
-        block
-            .header
-            .0
-            .validate_parent(spec.execution_at(number), &blocks[number as usize - 1].header)
+        spec.rules()
+            .validate_link(&block.header.0, &blocks[number as usize - 1].header)
             .map_err(BlockExecutionError::other)?;
         let body = block.body.as_core();
-        body.validate(spec.execution()).map_err(BlockExecutionError::other)?;
+        spec.rules()
+            .validate_body(number, body)
+            .map_err(BlockExecutionError::other)?;
         if body.transactions_root() != block.header.0.transactions_root
             || body.deposits_hash() != block.header.0.deposits_hash
         {

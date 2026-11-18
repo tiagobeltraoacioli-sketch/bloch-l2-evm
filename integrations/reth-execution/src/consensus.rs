@@ -47,9 +47,9 @@ impl HeaderValidator<BlochNodeHeader> for BlochConsensus {
         self.validate_header(header)?;
         self.validate_header(parent)?;
         // The rules of the child block (F387-1): under the next rules its base fee has the floor.
-        header
-            .0
-            .validate_parent(self.spec.execution_at(header.0.number), &parent.0)
+        self.spec
+            .rules()
+            .validate_link(&header.0, &parent.0)
             .map_err(ConsensusError::other)
     }
 }
@@ -61,7 +61,10 @@ impl Consensus<BlochNodeBlock> for BlochConsensus {
     ) -> Result<(), ConsensusError> {
         self.validate_header(header)?;
         let body = body.as_core();
-        body.validate(self.spec.execution()).map_err(ConsensusError::other)?;
+        self.spec
+            .rules()
+            .validate_body(header.0.number, body)
+            .map_err(ConsensusError::other)?;
         if body.transactions_root() != header.0.transactions_root || body.deposits_hash() != header.0.deposits_hash {
             return Err(ConsensusError::msg("V2 body commitments disagree with header"));
         }
