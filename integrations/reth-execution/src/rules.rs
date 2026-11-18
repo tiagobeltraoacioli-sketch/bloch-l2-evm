@@ -133,6 +133,17 @@ impl RuleSchedule {
         }
     }
 
+    /// What a fee QUOTE should assume for the block after `parent` (never a rule: blocks are built and judged
+    /// with [`Self::base_fee_after`]). Before the switch nobody on the L2 knows whether the next block is the
+    /// first of the next rules, and on a chain whose fee has fallen under the floor that block starts at the
+    /// floor: a wallet that priced from the base rules' step would sign a fee cap the switch block leaves
+    /// under the tip floor, and wait (F404-2, review R406-5). The quote is therefore the higher of the two
+    /// until the switch is fixed, and [`Self::base_fee_after`] from then on and on a network with one rule set.
+    pub fn base_fee_quote(&self, parent: &NodeHeaderV2) -> u64 {
+        let next = self.base_fee_after(parent);
+        self.base_fee_after_switching(parent).map_or(next, |switching| next.max(switching))
+    }
+
     /// The link of `header` to its parent, judged on the rules of `header`'s
     /// block: what [`Self::base_fee_after`] builds, this accepts, and nothing else.
     pub fn validate_link(&self, header: &NodeHeaderV2, parent: &NodeHeaderV2) -> Result<(), NodeHeaderError> {
@@ -400,6 +411,35 @@ mod tests {
         let b = child(&rules, &a);
         assert!(b.base_fee_per_gas < 61_000_000, "block 800 is a base-rules block: no floor");
         rules.validate_link(&b, &a).unwrap();
+    }
+
+    /// F404-2 (review R406-5): before the switch the quote covers the case that the next block is the
+    /// switch block; it is never under what the next block will really carry, whichever rules it runs.
+    #[test]
+    fn f404_2_a_fee_quote_before_the_switch_is_not_under_the_floor_the_switch_block_starts_at() {
+        let (base, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
+        let floor = next.min_base_fee;
+        let rules = schedule();
+        // Chain 2 of the end-to-end test: head 580 on the base rules at 97,817,550.
+        let under = header(580, 97_817_550, 0);
+        assert_eq!(rules.base_fee_after(&under), 97_426_280, "what a base-rules block 581 carries");
+        assert_eq!(rules.base_fee_quote(&under), floor, "what a wallet must be able to pay if 581 is the switch");
+        // Above the floor, and with a busy parent, the quote is the higher of the two rule sets' values.
+        for (fee, used) in [(1_000_000_000, 0), (100_218_107, 0), (floor, base.gas_limit), (7, 0), (floor + 1, 21_000)] {
+            let parent = header(9, fee, used);
+            let (as_base, as_switch) = (base.next_base_fee(fee, used), next.next_base_fee(fee, used));
+            assert_eq!(rules.base_fee_quote(&parent), as_base.max(as_switch), "fee {fee}, gas {used}");
+            assert!(rules.base_fee_quote(&parent) >= rules.base_fee_after(&parent));
+        }
+        // Once the switch is fixed there is one answer, and the quote is it.
+        rules.switch_at(581).unwrap();
+        assert_eq!(rules.base_fee_quote(&under), rules.base_fee_after(&under));
+        assert_eq!(rules.base_fee_quote(&under), floor);
+        let earlier = header(400, 97_817_550, 0);
+        assert_eq!(rules.base_fee_quote(&earlier), base.next_base_fee(97_817_550, 0), "a base-rules block before the switch");
+        // One rule set: nothing to cover.
+        let single = RuleSchedule::single(ChainSpec::testnet_v3());
+        assert_eq!(single.base_fee_quote(&under), single.base_fee_after(&under));
     }
 
     /// Reads the sources: outside this module nothing in this crate, the producer or

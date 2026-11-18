@@ -1529,8 +1529,10 @@ fn floor_fee_suggestions(
                                 .sealed_header(best)
                                 .map_err(|e| e.to_string())?
                                 .ok_or("head header missing")?;
-                            // The rules of the block after the head (F387-1).
-                            Ok(u128::from(factory.chain_spec().rules().base_fee_after(&header.0)))
+                            // A quote, not a rule: the base fee of the block after the head on that block's
+                            // rules (F387-1), and before the switch not under what the switch block would
+                            // start at (F404-2).
+                            Ok(u128::from(factory.chain_spec().rules().base_fee_quote(&header.0)))
                         })
                         .await
                         .map_err(|e| rpc_error(e.to_string()))?
