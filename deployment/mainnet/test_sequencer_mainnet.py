@@ -425,7 +425,9 @@ class SequencerTest(unittest.TestCase):
     def forced_view(self):
         record = {'height': 9, 'l1_txid': '1c' * 32, 'envelope_hash': q.keccak256(bytes.fromhex(self.FORCED_ENVELOPE)).hex(),
                   'gas_limit': 21_000, 'envelope': self.FORCED_ENVELOPE}
-        return view(forced={'due': [record], 'due_hash': 'ab' * 32, 'queued': 1})
+        # The node's due_hash is the hash of the due records: the shadow compares it now (review R335-8; this
+        # fixture used to carry a made-up value, which the shadow never read).
+        return view(forced={'due': [record], 'due_hash': q.forced_hash([record]).hex(), 'queued': 1})
 
     def forced_shadow(self, users):
         """A shadow facing a settler block with one forced envelope and `users` sequencer transactions."""
@@ -476,6 +478,50 @@ class SequencerTest(unittest.TestCase):
         seq.rpc.views = [broken] * 3
         with self.assertRaisesRegex(q.Halt, 'does not hash to its envelope_hash'):
             seq.step()
+
+    def test_shadow_refuses_what_the_settler_refuses_in_the_due_records(self):
+        """Review R335-8: the shadow's reading of `forced.due` makes the settler's three checks (the per-settlement
+        record cap, the declared-gas cap, `due_hash`), with the settler's constants and the settler's result."""
+        sys.path.insert(0, str(HERE.parent / 'devnet'))
+        import settler_v3 as s
+        self.assertEqual((q.FORCED_MAX_PER_SETTLEMENT, q.FORCED_MAX_GAS_PER_SETTLEMENT),
+                         (s.FORCED_MAX_PER_SETTLEMENT, s.FORCED_MAX_GAS_PER_SETTLEMENT))
+        envelope = bytes.fromhex(self.FORCED_ENVELOPE)
+
+        def record(txid, gas=21_000, prefix=''):
+            return {'height': 9, 'l1_txid': prefix + txid * 32, 'envelope_hash': prefix + q.keccak256(envelope).hex(),
+                    'gas_limit': gas, 'envelope': prefix + self.FORCED_ENVELOPE}
+
+        def forced(due, **over):
+            return {'forced': {'due': due, 'due_hash': s.forced_hash(due).hex(), 'queued': len(due), **over}}
+
+        good = [forced([]), forced([record('1c')]), forced([record('1c', prefix='0x')]),
+                forced([record(f'{i:02x}', gas=18_750) for i in range(16)]),  # both caps exactly reached
+                forced([record('a1', gas=150_000), record('a2', gas=150_000)]),
+                forced([record('1c')], due_hash='0x' + s.forced_hash([record('1c')]).hex().upper()),
+                {'forced': {'due': [record('1c')], 'queued': 1}}]
+        for case in good:
+            self.assertEqual(q.forced_due(q.view_projection(case)), s.forced_due(case))
+            self.assertEqual(q.forced_hash(q.forced_due(case)), s.forced_hash(s.forced_due(case)))
+        bad = {
+            'per-settlement cap': forced([record(f'{i:02x}') for i in range(17)]),
+            'more gas': forced([record('a1', gas=150_000), record('a2', gas=150_001)]),
+            'due_hash': forced([record('1c')], due_hash='00' * 32),
+            'due_hash ': forced([record('1c'), record('1d')], due_hash=s.forced_hash([record('1d'), record('1c')]).hex()),
+            'malformed': {'forced': {'due': [{**record('1c'), 'l1_txid': '1c' * 31}], 'queued': 1}},  # a 31-byte txid
+        }
+        for name, case in bad.items():
+            for module in (q, s):
+                with self.subTest(name=name, module=module.__name__), self.assertRaisesRegex(module.Halt, name.strip()):
+                    module.forced_due(case)
+        # Through the shadow's own step: a wrong due_hash halts it before it builds anything.
+        seq, seen, _ = self.forced_shadow(users=0)
+        wrong = self.forced_view()
+        wrong['forced']['due_hash'] = 'ab' * 32
+        seq.rpc.views = [wrong] * 3
+        with self.assertRaisesRegex(q.Halt, 'due_hash does not match'):
+            seq.step()
+        self.assertEqual(seen, [])
 
     def test_shadow_configuration_guards(self):
         with self.assertRaisesRegex(q.Halt, 'leave user_transactions false'):

@@ -214,16 +214,38 @@ def view_projection(view):
     return out
 
 
+# The native per-settlement bounds of the forced queue (settler_v3.FORCED_MAX_PER_SETTLEMENT and
+# FORCED_MAX_GAS_PER_SETTLEMENT; native l2_settlement::forced). A test compares the two files.
+FORCED_MAX_PER_SETTLEMENT, FORCED_MAX_GAS_PER_SETTLEMENT = 16, 300_000
+
+
+def forced_record(r):
+    """The 80-byte native record: height BE8 || l1_txid || envelope_hash || gas_limit BE8 (settler_v3.forced_record)."""
+    txid, envelope_hash = bytes.fromhex(r['l1_txid']), bytes.fromhex(r['envelope_hash'])
+    if len(txid) != 32 or len(envelope_hash) != 32:
+        raise Halt('malformed native forced record')
+    return int(r['height']).to_bytes(8, 'big') + txid + envelope_hash + int(r['gas_limit']).to_bytes(8, 'big')
+
+
+def forced_hash(records):
+    """keccak256 of the concatenated forced records (keccak256(b'') when empty): the node's `forced.due_hash`."""
+    return keccak256(b''.join(forced_record(r) for r in records))
+
+
 def forced_due(view):
     """The forced records the next settlement must consume, as the producer takes them (`--forced FILE`): the
     settler's normal form (settler_v3.forced_due), read from L1 by this shadow itself. [] while the native queue is
-    not enabled or nothing is due. A record whose envelope the node does not have yet is a reason to wait."""
+    not enabled or nothing is due. A record whose envelope the node does not have yet is a reason to wait.
+
+    The same refusals as the settler's reading of the same data (review R335-8: this function used to omit the
+    per-settlement record cap, the declared-gas cap and the comparison with `due_hash`, so on a wrong L1 answer the
+    settler halted where the shadow went on)."""
     forced = view.get('forced') if isinstance(view, dict) else None
     if not isinstance(forced, dict):
         return []
     due = forced.get('due')
-    if not isinstance(due, list):
-        raise Halt('native forced.due is malformed')
+    if not isinstance(due, list) or len(due) > FORCED_MAX_PER_SETTLEMENT:
+        raise Halt('native forced.due is malformed or above the per-settlement cap')
     out = []
     for r in due:
         if isinstance(r, dict) and r.get('envelope') is None:
@@ -235,9 +257,14 @@ def forced_due(view):
             envelope = bytes.fromhex(record['envelope'])
         except (KeyError, TypeError, ValueError):
             raise Halt('native forced record is malformed or carries no envelope') from None
+        forced_record(record)
         if keccak256(envelope).hex() != record['envelope_hash']:
             raise Halt('native forced record envelope does not hash to its envelope_hash')
         out.append(record)
+    if sum(r['gas_limit'] for r in out) > FORCED_MAX_GAS_PER_SETTLEMENT:
+        raise Halt('native forced.due declares more gas than one settlement consumes')
+    if 'due_hash' in forced and str(forced['due_hash']).removeprefix('0x').lower() != forced_hash(out).hex():
+        raise Halt('native forced.due_hash does not match its records')
     return out
 
 

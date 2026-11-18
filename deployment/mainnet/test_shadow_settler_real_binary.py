@@ -262,7 +262,9 @@ class ForcedBlocksUnderTheNextRules(unittest.TestCase):
         seq.c = {**q.DEFAULTS, 'l2_db': str(self.root / 'shadow-db'), 'next_elf_keccak': 'set'}
         seq.rule_set = 'next'
         genesis = self.run_net('init', '--target', seq.c['l2_db'])['hash']
-        view = {'forced': {'due': [dict(self.record, l1_txid='0x' + self.record['l1_txid'])], 'due_hash': 'ab' * 32, 'queued': 1}}
+        # due_hash is the node's hash of the due records; the shadow compares it (review R335-8).
+        view = {'forced': {'due': [dict(self.record, l1_txid='0x' + self.record['l1_txid'])],
+                           'due_hash': q.forced_hash([self.record]).hex(), 'queued': 1}}
         due = q.forced_due(q.view_projection(view))
         forced = self.root / 'shadow-forced.json'
         forced.write_text(json.dumps(due, sort_keys=True))
