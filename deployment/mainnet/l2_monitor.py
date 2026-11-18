@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only health monitor for the Bloch L2 mainnet (chain id 700770; devnet4 700771).
 
-Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the December L2 build, provisional and unsigned (L2 7a3b695a, native
-b7cd752b = the merged December line on node release 0067547f, follower c4bf512e, produce-dev 364df3a3,
-settled-rpc 304a9f58).
+Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the December L2 build, provisional and unsigned (L2 f349f65c, native
+b7cd752b = the merged December line on node release 0067547f, follower 301e3730, produce-dev 99c65c2e,
+settled-rpc cd7ffda7).
 
 What it reads (it never writes to a chain, holds no key and opens no keystore):
   * every L2 settled-RPC backend (`--l2-rpc NAME=URL`, repeat): eth_chainId, the `latest`, `safe` and
@@ -75,15 +75,15 @@ MAINNET_PINS = {
 
 # ---- The December L2 build (docs/DECEMBER-BUILD-R15.md section 12: SHA256SUMS and build.json; round 18) ----
 V2_BUILD = {
-    'l2_commit': '7a3b695adb8b43e119371b08649d8217a40b4d6b',
+    'l2_commit': 'f349f65cb0125d1cac62dfc66c37a271b05d3a7a',
     'native': 'b7cd752ba1d1e8b8861b51a083310242bd6270cf',
     'native_lock_sha256': 'ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa',
 }
 V2_SHA256 = {
-    'bloch-l2-native-follower': 'c4bf512e5ad0f5ef4ab8c132c6dc2d6e7a23a1e21dcaee6b232fa1e70ea79e28',
-    'bloch-l2-produce-dev': '364df3a3e5cb991f87d614676675448b08456ad8ad4bbd9af1425a3a925e0bc0',
-    'bloch-l2-settled-rpc': '304a9f5823bfae7cc59ff3799a7c4131c008f2c57255bfe9a49bf3aae07c898f',
-    'sequencer_mainnet.py': '1ff6349bc57e407003810c354ff811600fc29727dfd5e1670765da907895a8ae',
+    'bloch-l2-native-follower': '301e37306f4624b7d7d2171e6c27d0ecca702d446fd1ff8d742f0d63bd741a8a',
+    'bloch-l2-produce-dev': '99c65c2ec23777f060edf93c532d2e7f34a17b2e246de8a050d316d90a8c458c',
+    'bloch-l2-settled-rpc': 'cd7ffda73e461592f0b06f17a88c7defee84ac6c7e2759c3c8d37b3f958fb818',
+    'sequencer_mainnet.py': '3ed3b67b44cf26b4e2ad8c9ff850c241a01e12147d2ee5ee6e69fbe34bba132c',
 }
 # getchaininfo.hard_forks name -> the params.rs constant the v2 follower/producer were compiled with,
 # and its value in the v2 build.json (`l1_activation_epochs`). A list means "any of" (cfg variants).

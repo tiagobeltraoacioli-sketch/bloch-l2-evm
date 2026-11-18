@@ -61,7 +61,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 | `settler_v3.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` of this tree (fork candidate: it moves with every settler change; enforced since agent 155; also recorded in the `/opt` path) |
 | `sequencer_policy_v2.py` | this branch, `deployment/devnet/` | the `PINS` value in `install-settler-mainnet.py` (enforced) |
 | `bloch-evm-sp1-settlement-v3` | `build-prover-host.sh` (features `source-settlement,node-artifact,sparse-witness`; serves `--mainnet-v1`, `--mainnet` and `--mainnet --sparse`) | `3d89f5c3…c849` (enforced; December build, `docs/DECEMBER-BUILD-R15.md`); the launch host `3a24c36d…973a` does not serve the next rules. Its `--mainnet-v1 identity` must equal the native program pins |
-| `bloch-l2-produce-dev` | December build `out/` (`build-release.sh`, native 711e60ba = the released node 906336fd merged with the December L2 line, then with main (deployed release 0067547f); `docs/DECEMBER-BUILD-R15.md`) | `364df3a3…0bc0` (enforced) |
+| `bloch-l2-produce-dev` | December build `out/` (`build-release.sh`, native 711e60ba = the released node 906336fd merged with the December L2 line, then with main (deployed release 0067547f); `docs/DECEMBER-BUILD-R15.md`) | `99c65c2e…0bc0` (enforced) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
 | `bloch-pos` | armed mainnet release 78d4921c (canonical container) | `700631b0…794e` (enforced) |
 | `mainnet.manifest` | `bloch-sis-pow genesis/mainnet.manifest` | `7eef82a7…b2dd` (enforced) |

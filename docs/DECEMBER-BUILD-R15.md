@@ -369,3 +369,84 @@ Python suites at `161553e` (host, clean clone): devnet 531, mainnet 527 (33 skip
 
 Not done: a second host; the end-to-end `extend` across the floor with the rebuilt producer (agent 387's D1 rig);
 the real-proof drills on these binaries.
+
+## 14. The parent link on the next rules (round 18, third launch of agent 382; superseded by section 15)
+
+Agent 387 re-tested section 13 on the real-proof net: the producer built the floored block, but the next block
+was refused with "V2 parent linkage or context mismatch": three validators of the parent link still judged the
+base fee on the base rules (`BlochConsensus::validate_header_against_parent`, the block assembler, the canonical
+settlement audit). `6a0cc18` (failing-first `d4a6759`) made them use the rules of the child block. That launch
+built `6a0cc18` twice (`…/l2-merge-r18/out5-release`, `out6-release`, byte-equal: follower `3d3d913c…127e`,
+producer `aef978a6…1944`, settled RPC `8dc40b05…4b43`, `SHA256SUMS` `7b0ca1d5…ce0e`) but stopped before it
+committed or posted those pins; they were never in a pin list and are recorded here only so that a binary with
+one of these hashes can be named.
+
+## 15. One source of the per-block rules; the round-19 December build (agent 404)
+
+**F387-1 closed, end to end.** Two tests drive the producer binary across the base-fee floor
+(`integrations/settlement-recovery/tests/rule_schedule.rs`, `f387_1_*`): the next rules from block 2 until the fee
+has been at the floor for four blocks (agent 387's case), and the base rules until the fee is under the floor,
+then the switch (the launch chain's case: the base rules have no floor, so about 580 quiet blocks after genesis
+every program swap happens under the floor, and the first next-rules block starts at 0.1 gwei, a step up from its
+parent). Each then runs `select`, exports the complete and the sparse artifact of the blocks at the floor, decodes
+them under the block's rules (and is refused under the other rule set), and rebuilds the whole chain from L1 data
+alone (`reconstruct`). On `f694f88` both fail ("block 575 … V2 parent linkage or context mismatch"; "the switch
+block 581 … V2 parent linkage or context mismatch"); on `6a0cc18` and after, both pass.
+
+**One source (`fadb157`, `3cd05e2`, `08b3a61`).** `RuleSchedule` (`integrations/reth-execution/src/rules.rs`)
+answers the base fee of the block after a parent and the link of a header to its parent, on the rules of the
+block in question; the 13 callers that used to pick a rule set themselves call it; a test reads the sources of
+`reth-execution` and `settlement-recovery` and fails on any other call of the kernel's `next_base_fee` or
+`validate_parent`. Where each check runs:
+
+| Site | Side | Rules it uses |
+|---|---|---|
+| producer: next header, tip hold, `fees` (`bloch-l2-produce-dev`, `BlochEvmConfig::next_context`) | host | `RuleSchedule` (block being built) |
+| block assembler, `BlochConsensus` (header against parent, body), `context_for_block` | host (producer, follower, settled RPC, shadow) | `RuleSchedule` (the block) |
+| canonical settlement audit (`settlement_binding.rs`) | host (follower, audit tool) | `RuleSchedule` |
+| proof export (`proof_export.rs`, both exports) | host (settler, shadow) | `RuleSchedule`; the artifact is built with the block's rules |
+| reth `next_block_base_fee`, pool maintenance, settled RPC spool head, `eth_gasPrice` floor, admission context | host (settled RPC) | `RuleSchedule` (block after the head) |
+| `execution-artifact` (`new`, `decode`: `validate_parent`) | host library (exporter and SP1 host) | the ONE rule set its caller passes; the artifact carries that rule set's configuration commitment and `decode` refuses another. Unchanged |
+| SP1 host `bloch-evm-sp1-settlement-v3` (`artifact.rs`, `fixture.rs`, `settlement.rs` cursor) | host (prover) | the rule set of the program being proven (`--mainnet` or `--mainnet-v1`, chosen by the settler from the program L1 reports); the cursor holds one program identity and one configuration. Unchanged |
+| guests (`settlement_v3_mainnet_sparse`, `settlement_v3_mainnet` fallback, `…_v1_sparse`) and the kernel they compile (`src/`: `executor.rs`, `node_execution`, `sparse_witness.rs`) | guest | the one rule set compiled into the program; the next-rules guests have had the floor since agent 197. Unchanged |
+
+**No guest identity moves.** No file of the root crate, of the three guest crates, of `execution-artifact` or
+of the SP1 host changed since the guests' build commit `b635566` (`git diff b635566 f349f65 -- src Cargo.toml
+Cargo.lock integrations/sp1-execution integrations/execution-artifact` prints nothing). Proven by rebuild: both guest
+crates built from `f349f65` in the pinned container (build host A, image `sha256:3aaa355d…6316`) give
+`81813124…b6d9`, `ff34a548…7098`, `84adfc2c…45e4` and `7528e26d…c3e1`, the values of section 3; the SP1 host
+rebuilt from `f349f65` is `3d89f5c3…c849`, as before. Equal ELFs have equal verification keys. The launch line is
+not involved.
+
+**The guests accept the floor blocks.** `deployment/mainnet/rehearsal/base-fee-floor/floor_drill.py` (no
+network, no key, no proof) on build host A, 2026-11-18: the release producer of this build extends both chains
+from a fresh mainnet genesis, and the release SP1 host executes the December guests (SP1 executor) on the
+artifacts the producer exports. 16 of 16 steps pass. Chain 1 (next rules from block 2): first block at the floor
+575, head 580; the sparse `PROGRAM_NEXT` guest matches the host statement on blocks 574, 575, 576 and 580, the
+complete fallback guest on 575 and 576; the activated-rules program refuses block 575 (configuration mismatch).
+Chain 2 (base rules to block 580, base fee 97,817,550; switch at 581): block 581 is at 100,000,000 and the chain
+goes on there; the activated-rules guest executes block 580, the sparse next guest 581 and 582, the fallback
+guest 581, and the activated-rules program refuses 581. Usage:
+`floor_drill.py RELEASE_DIR SP1_HOST SPARSE_ELF FALLBACK_ELF V1_SPARSE_ELF NEW_OUT_DIR`.
+
+**Also in this build:** `--rules mainnet-rehearsal` is compiled only with the cargo feature `rehearsal-rules`
+(review R335-5; the release producer refuses the flag by name); the shadow makes the settler's three checks on the
+due forced records (review R335-8; moves `sequencer_mainnet.py`); the producer has a read-only `fees` command.
+
+Build commit `f349f65`, native `b7cd752b`, lock `ab7b3a09…` (unchanged); supersedes sections 13 and 14:
+
+| Artifact | Section 13 (`7a3b695`) | Round 19 (`f349f65`) |
+|---|---|---|
+| `bloch-l2-native-follower` | `c4bf512e…7e28` | `301e37306f4624b7d7d2171e6c27d0ecca702d446fd1ff8d742f0d63bd741a8a` |
+| `bloch-l2-produce-dev` | `364df3a3…0bc0` | `99c65c2ec23777f060edf93c532d2e7f34a17b2e246de8a050d316d90a8c458c` |
+| `bloch-l2-settled-rpc` | `304a9f58…898f` | `cd7ffda73e461592f0b06f17a88c7defee84ac6c7e2759c3c8d37b3f958fb818` |
+| `sequencer_mainnet.py` | `1ff6349b…a8ae` | `3ed3b67b44cf26b4e2ad8c9ff850c241a01e12147d2ee5ee6e69fbe34bba132c` |
+| SP1 host, guest ELFs, keys, configuration `27d6ce9f…2783`, proof policy, L2 genesis `632e45ae…f468` | | unchanged (host and guests rebuilt) |
+| Build `SHA256SUMS` / `build.json` | `27cfa4a3…a2cf` / `94c3e3d2…688e` | `8496a3386e0de0831c7acc9b94e3511168f2d93304281179138fea74b5d5ab50` / `d9dcac1bcbaab2d0ea47cbc048d44e5ed9e055643c7f1b275801bdb6a236e32f` |
+
+The follower moves although its behaviour on a chain is the one of `6a0cc18`: it links `reth-execution`.
+`GO-LIVE-PINS.sha256` is printed by `python3 deployment/mainnet/refresh_kit_pins.py`.
+
+Not done: a second host; a real proof of a block at the floor (agent 405's D1 on these binaries); a follower of
+this build across L1 epoch 8620.
+
