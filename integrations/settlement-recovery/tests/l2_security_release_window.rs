@@ -25,8 +25,14 @@ fn a_small_first_claim_must_not_close_the_window_to_an_attested_large_claim() {
 
     let fresh = ReleaseWindow::default().at(&LIMITS, height, escrow);
     assert_eq!(fresh.cap, u128::from(100 * BLCH));
-    assert!(fresh.admits(large, true, true), "control: the attested claim passes as the window's first");
-    assert!(fresh.admits(large, true, false), "also under the activated program's rule");
+    assert!(
+        fresh.admits(large, true, true),
+        "control: the attested claim passes as the window's first"
+    );
+    assert!(
+        fresh.admits(large, true, false),
+        "also under the activated program's rule"
+    );
 
     let mut after_small = fresh;
     after_small.released = 1_000_000;
@@ -34,5 +40,8 @@ fn a_small_first_claim_must_not_close_the_window_to_an_attested_large_claim() {
         after_small.admits(large, true, true),
         "a 0.01 BLCH claim earlier in the window refuses the attested 200 BLCH claim"
     );
-    assert!(!after_small.admits(large, true, false), "the activated program's rule: the exemption is the first claim's only");
+    assert!(
+        !after_small.admits(large, true, false),
+        "the activated program's rule: the exemption is the first claim's only"
+    );
 }

@@ -24,7 +24,9 @@ impl TimestampRule {
             return Err("--timestamp-rule must be FROM_L2_NUMBER:L1_GENESIS_UNIX_SECS:L1_SLOT_MILLIS".into());
         };
         let number = |value: &str, field: &str| -> Result<u64, String> {
-            value.parse::<u64>().map_err(|_| format!("--timestamp-rule {field} must be decimal"))
+            value
+                .parse::<u64>()
+                .map_err(|_| format!("--timestamp-rule {field} must be decimal"))
         };
         let rule = Self {
             from_l2_number: number(from, "FROM_L2_NUMBER")?,
@@ -42,7 +44,11 @@ impl TimestampRule {
     /// network profile), so no block of the chain is ever stamped `parent + 1`
     /// by a development rule.
     pub fn from_genesis(l1_genesis_time: u64, l1_slot_millis: u64) -> Result<Self, String> {
-        let rule = Self { from_l2_number: 1, l1_genesis_time, l1_slot_millis };
+        let rule = Self {
+            from_l2_number: 1,
+            l1_genesis_time,
+            l1_slot_millis,
+        };
         rule.require_from_genesis()?;
         Ok(rule)
     }
@@ -51,14 +57,17 @@ impl TimestampRule {
     /// (devnet4 switched at block 228; mainnet must not).
     pub fn require_from_genesis(&self) -> Result<(), String> {
         if self.from_l2_number != 1 || self.l1_slot_millis == 0 {
-            return Err("the mainnet timestamp rule must apply from L2 block 1 (--timestamp-rule 1:GENESIS:SLOT_MS)".into());
+            return Err(
+                "the mainnet timestamp rule must apply from L2 block 1 (--timestamp-rule 1:GENESIS:SLOT_MS)".into(),
+            );
         }
         Ok(())
     }
 
     /// Start time (unix seconds) of native slot `slot`.
     pub fn l1_time(&self, slot: u64) -> Option<u64> {
-        self.l1_genesis_time.checked_add(slot.checked_mul(self.l1_slot_millis)? / 1000)
+        self.l1_genesis_time
+            .checked_add(slot.checked_mul(self.l1_slot_millis)? / 1000)
     }
 }
 
@@ -82,7 +91,11 @@ pub fn next_timestamp(
 mod tests {
     use super::*;
 
-    const RULE: TimestampRule = TimestampRule { from_l2_number: 10, l1_genesis_time: 1_000, l1_slot_millis: 2_000 };
+    const RULE: TimestampRule = TimestampRule {
+        from_l2_number: 10,
+        l1_genesis_time: 1_000,
+        l1_slot_millis: 2_000,
+    };
 
     #[test]
     fn history_before_activation_keeps_parent_plus_one() {
@@ -113,7 +126,10 @@ mod tests {
         assert_eq!(rule.from_l2_number, 1);
         assert_eq!(TimestampRule::parse("1:1000:2000").unwrap(), rule);
         assert!(TimestampRule::from_genesis(1_000, 0).is_err());
-        assert!(RULE.require_from_genesis().is_err(), "a devnet-style switch at block 10");
+        assert!(
+            RULE.require_from_genesis().is_err(),
+            "a devnet-style switch at block 10"
+        );
         // Block 1 already follows the anchored slot, even on a wall-clock genesis.
         assert_eq!(next_timestamp(Some(&rule), 1, 1_050, Some(30)), Some(1_060));
         assert_eq!(next_timestamp(Some(&rule), 1, 1_050, None), None);

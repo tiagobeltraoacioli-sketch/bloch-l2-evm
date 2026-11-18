@@ -187,7 +187,10 @@ pub fn load_native_manifest(
     if manifest_limit == 0 || manifest_limit > MIB || independent_network.is_zero() {
         return Err(E::Limit);
     }
-    let limits = NativeHistoryInputLimitsV1 { manifest_bytes: manifest_limit, ..Default::default() };
+    let limits = NativeHistoryInputLimitsV1 {
+        manifest_bytes: manifest_limit,
+        ..Default::default()
+    };
     let parent = manifest_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -285,9 +288,15 @@ pub fn load_flag_day_manifest(
     }
     match (&manifest.carryover, carryover_path) {
         (Some(_), Some(path)) => {
-            manifest.ingest_carryover(path).map_err(|_| E::Encoding("carryover snapshot"))?;
+            manifest
+                .ingest_carryover(path)
+                .map_err(|_| E::Encoding("carryover snapshot"))?;
         }
-        (Some(_), None) => return Err(E::Encoding("the manifest commits to a carryover; --carryover is required")),
+        (Some(_), None) => {
+            return Err(E::Encoding(
+                "the manifest commits to a carryover; --carryover is required",
+            ))
+        }
         (None, Some(_)) => return Err(E::Encoding("the manifest commits to no carryover")),
         (None, None) => {}
     }

@@ -2,10 +2,7 @@
 //! Bounded full native replay from independently pinned genesis state.
 //! This does not activate a network or publish an Ethereum finality tag.
 use alloy_primitives::B256;
-use bloch_l2_evm::{
-    l1::FinalizedCheckpoint,
-    native_settlement::SettlementPolicyV1,
-};
+use bloch_l2_evm::{l1::FinalizedCheckpoint, native_settlement::SettlementPolicyV1};
 use bloch_pos_committee::{
     attestation::{Attestation, SignatureVerifier},
     epoch_of,
@@ -359,8 +356,13 @@ fn check_flag_day_trust(genesis: &CommittedState, trust: NativeGenesisTrustV1) -
     use NativeFinalityErrorV1 as E;
     let p = trust.settlement_policy;
     let policy_commitment = p.commitment().map_err(|_| E::Trust)?;
-    let installed_natively = bloch_pos_committee::l2_settlement::activation_for(Some(p.network.0))
-        .is_some_and(|a| a.policy == Policy { attestor_set: a.policy.attestor_set, ..native_policy(p) });
+    let installed_natively = bloch_pos_committee::l2_settlement::activation_for(Some(p.network.0)).is_some_and(|a| {
+        a.policy
+            == Policy {
+                attestor_set: a.policy.attestor_set,
+                ..native_policy(p)
+            }
+    });
     if trust.state_root == B256::ZERO
         || genesis.l2_settlement().is_some()
         || genesis.slot() != 0
@@ -429,7 +431,11 @@ pub struct IncrementalNativeVerifierV1 {
 }
 
 impl IncrementalNativeVerifierV1 {
-    pub fn new(genesis: &CommittedState, trust: NativeGenesisTrustV1, max_blocks: usize) -> Result<Self, NativeFinalityErrorV1> {
+    pub fn new(
+        genesis: &CommittedState,
+        trust: NativeGenesisTrustV1,
+        max_blocks: usize,
+    ) -> Result<Self, NativeFinalityErrorV1> {
         if genesis.validator_count() > 4_096 || max_blocks == 0 {
             return Err(NativeFinalityErrorV1::Limit);
         }
@@ -501,15 +507,28 @@ impl IncrementalNativeVerifierV1 {
     }
 
     /// Apply one block after enforcing [`NativeBlockLimitsV1`].
-    pub fn apply(&mut self, block: &NativeReplayBlockV1, limits: NativeBlockLimitsV1) -> Result<(), NativeFinalityErrorV1> {
+    pub fn apply(
+        &mut self,
+        block: &NativeReplayBlockV1,
+        limits: NativeBlockLimitsV1,
+    ) -> Result<(), NativeFinalityErrorV1> {
         use NativeFinalityErrorV1 as E;
         let sizes_ok = block.envelope.proposer_sig.len() <= limits.signature_bytes
             && block.attestations.len() <= limits.attestations
             && block.transactions.len() <= limits.transactions
-            && block.attestations.iter().all(|a| a.signature.len() <= limits.signature_bytes);
+            && block
+                .attestations
+                .iter()
+                .all(|a| a.signature.len() <= limits.signature_bytes);
         let bytes = 304usize
             .saturating_add(block.envelope.proposer_sig.len())
-            .saturating_add(block.attestations.iter().map(|a| 132 + a.signature.len()).sum::<usize>())
+            .saturating_add(
+                block
+                    .attestations
+                    .iter()
+                    .map(|a| 132 + a.signature.len())
+                    .sum::<usize>(),
+            )
             .saturating_add(block.transactions.iter().map(Vec::len).sum::<usize>());
         let proofs = block
             .transactions
@@ -801,14 +820,26 @@ mod node_parity {
         let bound = bloch_crypto::crypto::sign_bound(sk, &message).unwrap();
         let v1 = bloch_crypto::crypto::sign(sk, &message).unwrap();
         let encode = |sig: &[u8]| {
-            KesSignature { index: 1, leaf_pk: pk.clone(), sig: sig.to_vec(), path: kes::auth_path(&leaves, 1) }.encode()
+            KesSignature {
+                index: 1,
+                leaf_pk: pk.clone(),
+                sig: sig.to_vec(),
+                path: kes::auth_path(&leaves, 1),
+            }
+            .encode()
         };
         let (kes_bound, kes_v1) = (encode(&bound), encode(&v1));
 
         // The leaf check itself: exactly the node's verdicts.
         let v = NativeConsensusVerifierV1;
-        assert_eq!(v.verify_kes_leaf(pk, &message, &bound), bloch_crypto::crypto::verify_bound(pk, &message, &bound));
-        assert_eq!(v.verify_kes_leaf(pk, &message, &v1), bloch_crypto::crypto::verify_bound(pk, &message, &v1));
+        assert_eq!(
+            v.verify_kes_leaf(pk, &message, &bound),
+            bloch_crypto::crypto::verify_bound(pk, &message, &bound)
+        );
+        assert_eq!(
+            v.verify_kes_leaf(pk, &message, &v1),
+            bloch_crypto::crypto::verify_bound(pk, &message, &v1)
+        );
         assert!(v.verify_kes_leaf(pk, &message, &bound));
         assert!(!v.verify_kes_leaf(pk, &message, &v1), "a v1 leaf is not a KES leaf");
         // The trait default (what the follower at 0044697 ran) refuses the
@@ -821,7 +852,10 @@ mod node_parity {
         let period = start + 1;
         assert!(v.verify_kes(&public, period, &message, &kes_bound));
         assert!(!v.verify_kes(&public, period, &message, &kes_v1));
-        assert!(!v.verify_kes(&public, start, &message, &kes_bound), "wrong period / leaf index");
+        assert!(
+            !v.verify_kes(&public, start, &message, &kes_bound),
+            "wrong period / leaf index"
+        );
         assert!(!v.verify_kes(&public, period, &[0xC4; 32], &kes_bound), "other message");
         let mut policies = vec![Compatible, CanonicalUnbound, Bound];
         #[cfg(bloch_native_mldsa_pin)]
@@ -830,7 +864,10 @@ mod node_parity {
             let w = PolicyVerifier::new(&v, p);
             assert!(w.verify_kes(&public, period, &message, &kes_bound), "{p:?}");
             assert!(!w.verify_kes(&public, period, &message, &kes_v1), "{p:?}");
-            assert!(!PolicyVerifier::new(&TraitDefaults, p).verify_kes(&public, period, &message, &kes_bound), "{p:?}");
+            assert!(
+                !PolicyVerifier::new(&TraitDefaults, p).verify_kes(&public, period, &message, &kes_bound),
+                "{p:?}"
+            );
         }
     }
 
@@ -850,23 +887,40 @@ mod node_parity {
         let root = [0x6D; 32];
         let v1 = bloch_crypto::crypto::sign(&sk, &root).unwrap();
         let v2 = bloch_crypto::crypto::sign_bound(&sk, &root).unwrap();
-        let mut table = vec![(P::Compatible, C::Compatible), (P::CanonicalUnbound, C::CanonicalUnbound), (P::Bound, C::Bound)];
+        let mut table = vec![
+            (P::Compatible, C::Compatible),
+            (P::CanonicalUnbound, C::CanonicalUnbound),
+            (P::Bound, C::Bound),
+        ];
         #[cfg(bloch_native_mldsa_pin)]
         table.push((P::CompatiblePinned, C::CompatiblePinned));
         for (p, c) in table {
             for sig in [&v1, &v2] {
                 let node = bloch_crypto::crypto::verify_with_policy(c, &pk, &root, sig);
-                assert_eq!(NativeConsensusVerifierV1.verify_with_key_under(p, &pk, &root, sig), node, "{p:?}");
-                assert_eq!(PolicyVerifier::new(&NativeConsensusVerifierV1, p).verify_with_key(&pk, &root, sig), node, "{p:?}");
+                assert_eq!(
+                    NativeConsensusVerifierV1.verify_with_key_under(p, &pk, &root, sig),
+                    node,
+                    "{p:?}"
+                );
+                assert_eq!(
+                    PolicyVerifier::new(&NativeConsensusVerifierV1, p).verify_with_key(&pk, &root, sig),
+                    node,
+                    "{p:?}"
+                );
             }
         }
         #[cfg(bloch_native_mldsa_pin)]
         {
-            use bloch_pos_committee::params::{MLDSA_PIN_ACTIVATION_EPOCH as PIN, SIG_CANONICAL_ACTIVATION_EPOCH as CANON};
+            use bloch_pos_committee::params::{
+                MLDSA_PIN_ACTIVATION_EPOCH as PIN, SIG_CANONICAL_ACTIVATION_EPOCH as CANON,
+            };
             let pinned = |sig: &[u8]| bloch_crypto::crypto::verify_pinned(&pk, &root, sig);
             assert!(NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v1));
             assert!(!NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v2));
-            assert_eq!(NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v1), pinned(&v1));
+            assert_eq!(
+                NativeConsensusVerifierV1.verify_with_key_under(P::CompatiblePinned, &pk, &root, &v1),
+                pinned(&v1)
+            );
             if PIN != u64::MAX {
                 // Transactions are judged under CompatiblePinned from the pin
                 // epoch on (and never under a canonical policy).
@@ -907,11 +961,22 @@ mod node_parity {
         for e in epochs {
             let gate = hf3_slh_suite_active(e);
             let node = |k: &[u8], s: &[u8]| bloch_crypto::crypto::verify_spend(k, &root, s, gate);
-            assert_eq!(v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), node(&slh_pk, &slh_sig), "epoch {e}");
+            assert_eq!(
+                v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e),
+                node(&slh_pk, &slh_sig),
+                "epoch {e}"
+            );
             assert_eq!(v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), gate, "epoch {e}");
             assert!(!v.verify_spend_at_epoch(&slh_pk, &root, &forged, e), "epoch {e}");
-            assert!(v.verify_spend_at_epoch(&pk, &root, &sig, e), "epoch {e}: 0x0001 spends unchanged");
-            assert_eq!(v.verify_spend_at_epoch(&pk, &root, &sig, e), node(&pk, &sig), "epoch {e}");
+            assert!(
+                v.verify_spend_at_epoch(&pk, &root, &sig, e),
+                "epoch {e}: 0x0001 spends unchanged"
+            );
+            assert_eq!(
+                v.verify_spend_at_epoch(&pk, &root, &sig, e),
+                node(&pk, &sig),
+                "epoch {e}"
+            );
             // Through the transaction-policy wrapper, as the transition calls it.
             #[cfg(bloch_native_sig_policy)]
             {
@@ -920,7 +985,10 @@ mod node_parity {
                 assert!(w.verify_spend_at_epoch(&pk, &root, &sig, e), "epoch {e}");
             }
             // The trait default never accepts the new suite.
-            assert!(!TraitDefaults.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e), "epoch {e}");
+            assert!(
+                !TraitDefaults.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, e),
+                "epoch {e}"
+            );
         }
         if GATE != u64::MAX {
             assert!(!v.verify_spend_at_epoch(&slh_pk, &root, &slh_sig, GATE - 1));

@@ -45,8 +45,8 @@ use alloy_primitives::{hex, B256};
 use bloch_pos_committee::interfaces::{ProposalEnvelope, StateReader};
 use bloch_pos_node::codec;
 use bloch_settlement_recovery::{
-    history::load_native_manifest,
     history::load_flag_day_manifest,
+    history::load_native_manifest,
     mainnet,
     native::{IncrementalNativeVerifierV1, NativeBlockLimitsV1, NativeGenesisTrustV1, NativeReplayBlockV1},
 };
@@ -125,8 +125,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
     for pair in args.chunks(2) {
         let name = pair[0].strip_prefix("--").ok_or("options must start with --")?;
         if ![
-            "manifest", "carryover", "network-pin", "rpc-port", "rpc-url", "state", "status", "poll-seconds", "max-blocks",
-            "max-fetch", "status-schema",
+            "manifest",
+            "carryover",
+            "network-pin",
+            "rpc-port",
+            "rpc-url",
+            "state",
+            "status",
+            "poll-seconds",
+            "max-blocks",
+            "max-fetch",
+            "status-schema",
         ]
         .contains(&name)
         {
@@ -138,10 +147,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let get = |n: &str| map.get(n).cloned().ok_or(format!("missing --{n}"));
     let num = |n: &str, d: u64| -> Result<u64, String> {
-        map.get(n).map_or(Ok(d), |v| v.parse().map_err(|_| format!("--{n} must be a number")))
+        map.get(n)
+            .map_or(Ok(d), |v| v.parse().map_err(|_| format!("--{n} must be a number")))
     };
     let pin_text = get("network-pin")?;
-    if pin_text.len() != 64 || !pin_text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if pin_text.len() != 64
+        || !pin_text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err("--network-pin must be 64 lowercase hex characters".into());
     }
     let rpc = match (map.get("rpc-port"), map.get("rpc-url")) {
@@ -174,7 +188,9 @@ fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
     let (host, port) = rest.rsplit_once(':').ok_or("--rpc-url needs an explicit :PORT")?;
     if host.is_empty()
         || host.len() > 253
-        || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
     {
         return Err("--rpc-url host must be a hostname or IPv4 address".into());
     }
@@ -191,7 +207,8 @@ fn rpc((host, port): &(String, u16), method: &str, params: Value) -> Result<Valu
         .map_err(|e| format!("rpc resolve: {e}"))?
         .next()
         .ok_or("rpc resolve: no address")?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|e| format!("rpc connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|e| format!("rpc connect: {e}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
     write!(
@@ -202,13 +219,22 @@ fn rpc((host, port): &(String, u16), method: &str, params: Value) -> Result<Valu
     )
     .map_err(|e| format!("rpc write: {e}"))?;
     let mut response = Vec::new();
-    stream.take(8 * 1_048_576).read_to_end(&mut response).map_err(|e| format!("rpc read: {e}"))?;
-    let split = response.windows(4).position(|w| w == b"\r\n\r\n").ok_or("rpc: malformed HTTP response")?;
+    stream
+        .take(8 * 1_048_576)
+        .read_to_end(&mut response)
+        .map_err(|e| format!("rpc read: {e}"))?;
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("rpc: malformed HTTP response")?;
     let reply: Value = serde_json::from_slice(&response[split + 4..]).map_err(|e| format!("rpc json: {e}"))?;
     if let Some(error) = reply.get("error") {
         return Err(format!("rpc {method}: {error}"));
     }
-    reply.get("result").cloned().ok_or_else(|| format!("rpc {method}: no result"))
+    reply
+        .get("result")
+        .cloned()
+        .ok_or_else(|| format!("rpc {method}: no result"))
 }
 
 fn decode_block(bytes: &[u8], expected_id: &B256) -> Result<NativeReplayBlockV1, String> {
@@ -217,7 +243,10 @@ fn decode_block(bytes: &[u8], expected_id: &B256) -> Result<NativeReplayBlockV1,
         return Err("native envelope is noncanonical or misidentified".into());
     }
     Ok(NativeReplayBlockV1 {
-        envelope: ProposalEnvelope { header: envelope.header, proposer_sig: envelope.proposer_sig },
+        envelope: ProposalEnvelope {
+            header: envelope.header,
+            proposer_sig: envelope.proposer_sig,
+        },
         attestations: envelope.body.attestations,
         transactions: envelope.body.transactions,
     })
@@ -226,9 +255,13 @@ fn decode_block(bytes: &[u8], expected_id: &B256) -> Result<NativeReplayBlockV1,
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
-    file.write_all(bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
     fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-    File::open(path.parent().unwrap_or(Path::new("/"))).and_then(|d| d.sync_all()).map_err(|e| e.to_string())
+    File::open(path.parent().unwrap_or(Path::new("/")))
+        .and_then(|d| d.sync_all())
+        .map_err(|e| e.to_string())
 }
 
 /// Newest settlements repeated in the status file.
@@ -248,7 +281,9 @@ struct SettlementLog {
 
 impl SettlementLog {
     fn beside(status: &Path) -> Self {
-        let stem = status.file_stem().map_or("status".into(), |s| s.to_string_lossy().into_owned());
+        let stem = status
+            .file_stem()
+            .map_or("status".into(), |s| s.to_string_lossy().into_owned());
         Self {
             path: status.with_file_name(format!("{stem}.settlements.jsonl")),
             file: None,
@@ -275,12 +310,19 @@ impl SettlementLog {
         match &mut self.file {
             Some(file) => {
                 if !text.is_empty() {
-                    file.write_all(&text).and_then(|_| file.sync_data()).map_err(|e| format!("settlement log: {e}"))?;
+                    file.write_all(&text)
+                        .and_then(|_| file.sync_data())
+                        .map_err(|e| format!("settlement log: {e}"))?;
                 }
             }
             None => {
                 write_atomic(&self.path, &text).map_err(|e| format!("settlement log: {e}"))?;
-                self.file = Some(OpenOptions::new().append(true).open(&self.path).map_err(|e| format!("settlement log: {e}"))?);
+                self.file = Some(
+                    OpenOptions::new()
+                        .append(true)
+                        .open(&self.path)
+                        .map_err(|e| format!("settlement log: {e}"))?,
+                );
             }
         }
         self.bytes += text.len() as u64;
@@ -306,7 +348,9 @@ impl SettlementLog {
 fn run(o: &Options) -> Result<(), String> {
     let magic = {
         let mut head = [0u8; 8];
-        File::open(&o.manifest).and_then(|mut f| f.read_exact(&mut head)).map_err(|e| format!("manifest: {e}"))?;
+        File::open(&o.manifest)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .map_err(|e| format!("manifest: {e}"))?;
         head
     };
     let (mut verifier, policy) = if &magic == b"BPOSMAN3" {
@@ -314,18 +358,31 @@ fn run(o: &Options) -> Result<(), String> {
             return Err("--carryover applies only to a funded (BPOSMAN1/2) manifest".into());
         }
         let (_, genesis, policy) = load_native_manifest(&o.manifest, o.pin, 1_048_576).map_err(|e| e.to_string())?;
-        let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
-        (IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?, policy)
+        let trust = NativeGenesisTrustV1 {
+            state_root: genesis.state_root().into(),
+            settlement_policy: policy,
+        };
+        (
+            IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?,
+            policy,
+        )
     } else {
         // The mainnet flag day is pinned in this build; any other flag-day
         // network only in a qualification build of the native crates
         // (private mainnet-path rehearsal), see mainnet::flag_day_policy.
-        let (policy, attestor_set) = mainnet::flag_day_policy(o.pin)
-            .ok_or_else(|| format!("a funded manifest must be the Genesis-4 mainnet ({})", mainnet::MAINNET_NETWORK))?;
+        let (policy, attestor_set) = mainnet::flag_day_policy(o.pin).ok_or_else(|| {
+            format!(
+                "a funded manifest must be the Genesis-4 mainnet ({})",
+                mainnet::MAINNET_NETWORK
+            )
+        })?;
         let started = SystemTime::now();
-        let (_, genesis) = load_flag_day_manifest(&o.manifest, o.carryover.as_deref(), o.pin, 1_048_576)
-            .map_err(|e| e.to_string())?;
-        let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
+        let (_, genesis) =
+            load_flag_day_manifest(&o.manifest, o.carryover.as_deref(), o.pin, 1_048_576).map_err(|e| e.to_string())?;
+        let trust = NativeGenesisTrustV1 {
+            state_root: genesis.state_root().into(),
+            settlement_policy: policy,
+        };
         eprintln!(
             "native follower: flag-day genesis {} state root {} loaded in {:?}",
             hex::encode(genesis.head().as_bytes()),
@@ -345,9 +402,14 @@ fn run(o: &Options) -> Result<(), String> {
     let started = SystemTime::now();
     if index_path.exists() {
         for line in BufReader::new(File::open(&index_path).map_err(|e| e.to_string())?).lines() {
-            let id: B256 = line.map_err(|e| e.to_string())?.parse().map_err(|_| "corrupt index line")?;
+            let id: B256 = line
+                .map_err(|e| e.to_string())?
+                .parse()
+                .map_err(|_| "corrupt index line")?;
             let bytes = fs::read(blocks_dir.join(format!("{}.bin", hex::encode(id)))).map_err(|e| e.to_string())?;
-            verifier.apply(&decode_block(&bytes, &id)?, limits).map_err(|e| format!("retained history: {e}"))?;
+            verifier
+                .apply(&decode_block(&bytes, &id)?, limits)
+                .map_err(|e| format!("retained history: {e}"))?;
         }
     }
     eprintln!(
@@ -355,7 +417,11 @@ fn run(o: &Options) -> Result<(), String> {
         verifier.applied(),
         started.elapsed().unwrap_or_default()
     );
-    let mut index = OpenOptions::new().create(true).append(true).open(&index_path).map_err(|e| e.to_string())?;
+    let mut index = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&index_path)
+        .map_err(|e| e.to_string())?;
 
     // 2. Follow finalized native blocks.
     let mut walk = None;
@@ -374,7 +440,10 @@ fn run(o: &Options) -> Result<(), String> {
                     write_atomic(&o.status, serde_json::to_string_pretty(&status).unwrap().as_bytes())?;
                 }
                 if added > 0 {
-                    eprintln!("native follower: verified {added} new blocks, head {}", hex::encode(verifier.head()));
+                    eprintln!(
+                        "native follower: verified {added} new blocks, head {}",
+                        hex::encode(verifier.head())
+                    );
                 }
             }
             Err(Follow::Transient(e)) => eprintln!("native follower: transient: {e}"),
@@ -416,18 +485,25 @@ fn follow_once(
         if hint == head {
             return Ok(0);
         }
-        *walk = Some(Walk { ids: Vec::new(), cursor: hint });
+        *walk = Some(Walk {
+            ids: Vec::new(),
+            cursor: hint,
+        });
     }
     let state = walk.as_mut().expect("walk set above");
     // Walk back from the hint to our verified head; the finalized prefix cannot reorganize.
     let mut fetched = 0;
     while state.cursor != head {
         if fetched >= o.max_fetch {
-            eprintln!("native follower: walking back to the verified head, {} blocks fetched so far", state.ids.len());
+            eprintln!(
+                "native follower: walking back to the verified head, {} blocks fetched so far",
+                state.ids.len()
+            );
             return Ok(0);
         }
         let raw = rpc(&o.rpc, "getblockraw", json!([hex::encode(state.cursor)])).map_err(Follow::Transient)?;
-        let bytes = hex::decode(raw.as_str().unwrap_or_default()).map_err(|_| Follow::Transient("bad raw hex".into()))?;
+        let bytes =
+            hex::decode(raw.as_str().unwrap_or_default()).map_err(|_| Follow::Transient("bad raw hex".into()))?;
         if bytes.len() < 36 || bytes.len() > 4 * 1_048_576 {
             return Err(Follow::Halt("native block outside size bounds".into()));
         }
@@ -437,7 +513,9 @@ fn follow_once(
         state.ids.push(state.cursor);
         fetched += 1;
         if parent.is_zero() || verifier.applied() + state.ids.len() > o.max_blocks {
-            return Err(Follow::Halt("node's finalized chain does not descend from the verified head".into()));
+            return Err(Follow::Halt(
+                "node's finalized chain does not descend from the verified head".into(),
+            ));
         }
         state.cursor = parent;
     }
@@ -448,11 +526,17 @@ fn follow_once(
         let pending = blocks_dir.join(format!("{}.pending", hex::encode(id)));
         let bytes = fs::read(&pending).map_err(|e| Follow::Halt(e.to_string()))?;
         let block = decode_block(&bytes, &id).map_err(Follow::Halt)?;
-        verifier.apply(&block, limits).map_err(|e| Follow::Halt(format!("native block {}: {e}", hex::encode(id))))?;
+        verifier
+            .apply(&block, limits)
+            .map_err(|e| Follow::Halt(format!("native block {}: {e}", hex::encode(id))))?;
         let path = blocks_dir.join(format!("{}.bin", hex::encode(id)));
-        File::open(&pending).and_then(|f| f.sync_all()).map_err(|e| Follow::Halt(e.to_string()))?;
+        File::open(&pending)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| Follow::Halt(e.to_string()))?;
         fs::rename(&pending, &path).map_err(|e| Follow::Halt(e.to_string()))?;
-        writeln!(index, "{}", hex::encode(id)).and_then(|_| index.sync_data()).map_err(|e| Follow::Halt(e.to_string()))?;
+        writeln!(index, "{}", hex::encode(id))
+            .and_then(|_| index.sync_data())
+            .map_err(|e| Follow::Halt(e.to_string()))?;
     }
     Ok(count)
 }
@@ -462,9 +546,15 @@ fn statement_json(statement: &[u8]) -> Result<Value, String> {
     use bloch_l2_evm::proof_statement::{SettlementStatementV2, SettlementStatementV3, SETTLEMENT_STATEMENT_V3_TAG};
     let (base, withdrawals) = if statement.starts_with(SETTLEMENT_STATEMENT_V3_TAG) {
         let v3 = SettlementStatementV3::decode(statement).map_err(|_| "statement V3 decode")?;
-        (v3.base, json!({"root": hex::encode(v3.withdrawal_root), "count": v3.withdrawal_count}))
+        (
+            v3.base,
+            json!({"root": hex::encode(v3.withdrawal_root), "count": v3.withdrawal_count}),
+        )
     } else {
-        (SettlementStatementV2::decode(statement).map_err(|_| "statement decode")?, Value::Null)
+        (
+            SettlementStatementV2::decode(statement).map_err(|_| "statement decode")?,
+            Value::Null,
+        )
     };
     Ok(json!({
         "l2_number": base.l2_number, "l2_hash": hex::encode(base.l2_header_hash),
@@ -499,7 +589,11 @@ fn status(
     let report = verified.report();
     let mut settlements = Vec::new();
     // v3 builds only what the log does not hold yet; v2 repeats the whole list in every file.
-    let known = if schema == StatusSchema::V3 { log.entries as usize } else { 0 };
+    let known = if schema == StatusSchema::V3 {
+        log.entries as usize
+    } else {
+        0
+    };
     for (slot, block, bytes) in verified.finalized_settlements().skip(known) {
         let tx = bloch_pos_committee::l2_settlement::Transaction::decode_async(bytes).ok_or("settlement decode")?;
         let mut entry = statement_json(&tx.statement)?;
@@ -515,7 +609,11 @@ fn status(
         log.append(settlements.clone())?;
     }
     // safe is never below finalized.
-    let newest = if schema == StatusSchema::V3 { log.recent.back() } else { settlements.last() };
+    let newest = if schema == StatusSchema::V3 {
+        log.recent.back()
+    } else {
+        settlements.last()
+    };
     let finalized_number = newest.and_then(|e| e["l2_number"].as_u64()).unwrap_or(0);
     let safe = safe.filter(|e| e["l2_number"].as_u64().is_some_and(|n| n >= finalized_number));
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -578,16 +676,33 @@ mod tests {
     fn the_status_schema_defaults_to_v2_and_refuses_anything_else() {
         let args = |extra: &[&str]| -> Vec<String> {
             let pin = "ab".repeat(32);
-            let mut all: Vec<String> = ["--manifest", "m", "--network-pin", &pin, "--rpc-port", "1", "--state", "d", "--status", "s"]
-                .iter()
-                .map(|a| a.to_string())
-                .collect();
+            let mut all: Vec<String> = [
+                "--manifest",
+                "m",
+                "--network-pin",
+                &pin,
+                "--rpc-port",
+                "1",
+                "--state",
+                "d",
+                "--status",
+                "s",
+            ]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
             all.extend(extra.iter().map(|a| a.to_string()));
             all
         };
         assert_eq!(parse(&args(&[])).map(|o| o.status_schema), Ok(StatusSchema::V2));
-        assert_eq!(parse(&args(&["--status-schema", "v2"])).map(|o| o.status_schema), Ok(StatusSchema::V2));
-        assert_eq!(parse(&args(&["--status-schema", "v3"])).map(|o| o.status_schema), Ok(StatusSchema::V3));
+        assert_eq!(
+            parse(&args(&["--status-schema", "v2"])).map(|o| o.status_schema),
+            Ok(StatusSchema::V2)
+        );
+        assert_eq!(
+            parse(&args(&["--status-schema", "v3"])).map(|o| o.status_schema),
+            Ok(StatusSchema::V3)
+        );
         assert!(parse(&args(&["--status-schema", "v4"])).is_err());
         assert!(parse(&args(&["--status-schema", ""])).is_err());
     }
@@ -608,16 +723,29 @@ mod tests {
         log.append(vec![]).unwrap();
         log.append(vec![json!({"l2_number": 2})]).unwrap();
         // The vector shared with the RPC and the Python readers.
-        assert_eq!(log.status_fields()["digest"], "e9e101a8fd7ec4784d28979c4a5472bdbcfe04ff5b9313928fd1f14a8d76b30c");
+        assert_eq!(
+            log.status_fields()["digest"],
+            "e9e101a8fd7ec4784d28979c4a5472bdbcfe04ff5b9313928fd1f14a8d76b30c"
+        );
         assert_eq!(log.status_fields()["bytes"], 32);
         assert_eq!(fs::read(&log.path).unwrap(), b"{\"l2_number\":1}\n{\"l2_number\":2}\n");
 
         // A restart with a torn append on disk rewrites the same bytes from the replay.
-        OpenOptions::new().append(true).open(&log.path).unwrap().write_all(b"{\"torn").unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&log.path)
+            .unwrap()
+            .write_all(b"{\"torn")
+            .unwrap();
         let mut restarted = SettlementLog::beside(&status);
-        restarted.append(vec![json!({"l2_number": 1}), json!({"l2_number": 2})]).unwrap();
+        restarted
+            .append(vec![json!({"l2_number": 1}), json!({"l2_number": 2})])
+            .unwrap();
         assert_eq!(restarted.status_fields(), log.status_fields());
-        assert_eq!(fs::read(&restarted.path).unwrap(), b"{\"l2_number\":1}\n{\"l2_number\":2}\n");
+        assert_eq!(
+            fs::read(&restarted.path).unwrap(),
+            b"{\"l2_number\":1}\n{\"l2_number\":2}\n"
+        );
 
         // Only the newest entries stay in the status.
         let mut long = SettlementLog::beside(&dir.join("long.json"));

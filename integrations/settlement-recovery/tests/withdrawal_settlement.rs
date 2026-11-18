@@ -49,7 +49,10 @@ fn sign(nonce: u64, to: Address, value: U256, input: Vec<u8>) -> String {
         max_priority_fee_per_gas: 1,
         ..Default::default()
     };
-    let signature: Signature = key().sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    let signature: Signature = key()
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .unwrap()
+        .into();
     hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
 }
 
@@ -76,8 +79,14 @@ fn produced_withdrawals_settle_under_the_native_rule_and_prove_natively() {
     // Block 1: deposit only. Block 2: two withdrawals. Block 3: a transfer.
     let plan: Vec<(Value, Vec<String>)> = vec![
         (deposit, vec![]),
-        (json!([]), vec![withdraw(0, alice, 2_000_000), withdraw(1, bob, 3_000_000)]),
-        (json!([]), vec![sign(2, Address::repeat_byte(0x55), U256::from(1_000u64), vec![])]),
+        (
+            json!([]),
+            vec![withdraw(0, alice, 2_000_000), withdraw(1, bob, 3_000_000)],
+        ),
+        (
+            json!([]),
+            vec![sign(2, Address::repeat_byte(0x55), U256::from(1_000u64), vec![])],
+        ),
     ];
     let spec = ChainSpec::testnet_v3();
     let domain = B256::repeat_byte(0xd3);
@@ -92,15 +101,35 @@ fn produced_withdrawals_settle_under_the_native_rule_and_prove_natively() {
         let pool = path(&format!("pool-{number}.json"));
         std::fs::write(&pool, json!(txs).to_string()).unwrap();
         let anchor = hex::encode([0xa0 + number as u8; 32]);
-        let block = produce(&["extend", "--target", &db, "--parent", &parent, "--anchor", &anchor,
-                              "--deposits", &deposits_file, "--txs", &pool])
+        let block = produce(&[
+            "extend",
+            "--target",
+            &db,
+            "--parent",
+            &parent,
+            "--anchor",
+            &anchor,
+            "--deposits",
+            &deposits_file,
+            "--txs",
+            &pool,
+        ])
         .unwrap();
         assert_eq!(block["transactions"].as_u64().unwrap(), txs.len() as u64, "{block}");
 
         // Execution only, as the guest: the exported witness re-executed
         // under the V3 rules yields the statement the proof would carry.
         let artifact_path = path(&format!("block-{number}.artifact"));
-        produce(&["export", "--target", &db, "--number", &number.to_string(), "--out", &artifact_path]).unwrap();
+        produce(&[
+            "export",
+            "--target",
+            &db,
+            "--number",
+            &number.to_string(),
+            "--out",
+            &artifact_path,
+        ])
+        .unwrap();
         let artifact = ExecutionArtifact::decode(&std::fs::read(&artifact_path).unwrap(), &spec, domain).unwrap();
         let minted = artifact.body().deposits.len() as u64;
         let context = SettlementContextV2 {
@@ -109,7 +138,11 @@ fn produced_withdrawals_settle_under_the_native_rule_and_prove_natively() {
             program_elf_keccak: B256::repeat_byte(0x43),
             program_vkey_koalabear: B256::repeat_byte(0x44),
             program_vkey_bn254: B256::repeat_byte(0x45),
-            previous_settlement: if number == 1 { B256::ZERO } else { B256::repeat_byte(0x48) },
+            previous_settlement: if number == 1 {
+                B256::ZERO
+            } else {
+                B256::repeat_byte(0x48)
+            },
             l1_slot: 10 + number,
             l1_height: 10 + number,
             source_commitment: B256::repeat_byte(0x46),
@@ -133,8 +166,12 @@ fn produced_withdrawals_settle_under_the_native_rule_and_prove_natively() {
         assert_eq!(statement.withdrawal_count, block["withdrawal_count"].as_u64().unwrap());
 
         // Framed as the native async settlement and decoded by the native codec.
-        let frame = Settlement { proof_policy: [3; 32], statement: statement.encode().to_vec(), proof: [1; 356] }
-            .encode_async();
+        let frame = Settlement {
+            proof_policy: [3; 32],
+            statement: statement.encode().to_vec(),
+            proof: [1; 356],
+        }
+        .encode_async();
         let native = Settlement::decode_async(&frame).unwrap();
         let added = withdrawal::check_successor(previous.as_deref(), &native.statement).unwrap();
         assert_eq!(added.is_some(), number == 2, "block {number}");
@@ -150,10 +187,20 @@ fn produced_withdrawals_settle_under_the_native_rule_and_prove_natively() {
 
     // The native rule refuses a settled tree that shrinks or moves without leaves.
     let tampered = |statement: &SettlementStatementV3, root: B256, count: u64| {
-        SettlementStatementV3 { withdrawal_root: root, withdrawal_count: count, ..*statement }.encode().to_vec()
+        SettlementStatementV3 {
+            withdrawal_root: root,
+            withdrawal_count: count,
+            ..*statement
+        }
+        .encode()
+        .to_vec()
     };
     let head = s2.encode().to_vec();
-    for (root, count) in [(s2.withdrawal_root, 1), (B256::repeat_byte(7), 2), (s2.withdrawal_root, 3)] {
+    for (root, count) in [
+        (s2.withdrawal_root, 1),
+        (B256::repeat_byte(7), 2),
+        (s2.withdrawal_root, 3),
+    ] {
         assert_eq!(
             withdrawal::check_successor(Some(&head), &tampered(s3, root, count)),
             Err(Reject::Withdrawals),
@@ -163,11 +210,21 @@ fn produced_withdrawals_settle_under_the_native_rule_and_prove_natively() {
 
     // The claim input for withdrawal 1 against the root settled for block 2,
     // checked with the native leaf and proof code.
-    let proof = produce(&["withdrawal-proof", "--target", &db, "--index", "1", "--number", "2", "--root",
-                          &hex::encode(s2.withdrawal_root), "--count", "2"])
+    let proof = produce(&[
+        "withdrawal-proof",
+        "--target",
+        &db,
+        "--index",
+        "1",
+        "--number",
+        "2",
+        "--root",
+        &hex::encode(s2.withdrawal_root),
+        "--count",
+        "2",
+    ])
     .unwrap();
-    let siblings: Vec<[u8; 32]> =
-        proof["siblings"].as_array().unwrap().iter().map(|v| h(v).0).collect();
+    let siblings: Vec<[u8; 32]> = proof["siblings"].as_array().unwrap().iter().map(|v| h(v).0).collect();
     let leaf = withdrawal::leaf(CHAIN_ID, 1, &bob, 3_000_000);
     assert_eq!(h(&proof["withdrawal"]["leaf"]).0, leaf);
     assert_eq!(

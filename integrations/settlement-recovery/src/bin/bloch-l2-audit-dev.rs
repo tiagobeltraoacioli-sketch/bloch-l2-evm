@@ -125,7 +125,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let mut values = BTreeMap::new();
     for pair in rest.chunks(2) {
-        let name = pair[0].strip_prefix("--").ok_or_else(|| format!("unexpected argument {}", pair[0]))?;
+        let name = pair[0]
+            .strip_prefix("--")
+            .ok_or_else(|| format!("unexpected argument {}", pair[0]))?;
         if !matches!(
             name,
             "manifest"
@@ -167,8 +169,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         return Err("--l2-floor-number must select an acknowledged non-genesis block".into());
     }
     let limits = ReplayLimits {
-        blocks: take("max-l2-blocks").map(|v| number(v, "max-l2-blocks")).transpose()?.unwrap_or(10_000),
-        bytes: take("max-l2-bytes").map(|v| number(v, "max-l2-bytes")).transpose()?.unwrap_or(64 * MIB),
+        blocks: take("max-l2-blocks")
+            .map(|v| number(v, "max-l2-blocks"))
+            .transpose()?
+            .unwrap_or(10_000),
+        bytes: take("max-l2-bytes")
+            .map(|v| number(v, "max-l2-bytes"))
+            .transpose()?
+            .unwrap_or(64 * MIB),
     };
     if limits.blocks == 0 || limits.blocks > 10_000 || limits.bytes == 0 || limits.bytes > 256 * MIB {
         return Err("L2 replay budget must be within 1..=10000 blocks and 1..=268435456 bytes".into());
@@ -203,7 +211,9 @@ fn hash(value: &str, name: &str) -> Result<B256, String> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return Err(format!("--{name} must be 64 lowercase hex characters without 0x"));
     }
-    let parsed = value.parse::<B256>().map_err(|_| format!("--{name} is not a 32-byte hash"))?;
+    let parsed = value
+        .parse::<B256>()
+        .map_err(|_| format!("--{name} is not a 32-byte hash"))?;
     if parsed.is_zero() {
         return Err(format!("--{name} must not be zero"));
     }
@@ -224,7 +234,8 @@ fn require_data_dir(path: &Path, label: &str) -> Result<(), String> {
         return Err(format!("{label} {} must be a real directory", path.display()));
     }
     for directory in ["db", "static", "rocks"] {
-        let child = fs::symlink_metadata(path.join(directory)).map_err(|_| format!("{label} is missing {directory}"))?;
+        let child =
+            fs::symlink_metadata(path.join(directory)).map_err(|_| format!("{label} is missing {directory}"))?;
         if !child.is_dir() {
             return Err(format!("{label} {directory} must be a real directory"));
         }
@@ -234,9 +245,16 @@ fn require_data_dir(path: &Path, label: &str) -> Result<(), String> {
 
 /// Resolve a path that may not exist yet through its existing parent.
 fn absolute_new(path: &Path) -> Result<PathBuf, String> {
-    let name = path.file_name().ok_or_else(|| format!("{} has no final component", path.display()))?;
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let parent = parent.canonicalize().map_err(|e| format!("{}: {e}", parent.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{} has no final component", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", parent.display()))?;
     Ok(parent.join(name))
 }
 
@@ -262,7 +280,10 @@ fn open_read_only(path: &Path, spec: Arc<BlochChainSpec>, runtime: &Runtime) -> 
 struct SourceView(PathBuf);
 impl SourceView {
     fn create(source: &Path, target: &Path) -> Result<Self, String> {
-        let name = target.file_name().ok_or("target has no final component")?.to_string_lossy();
+        let name = target
+            .file_name()
+            .ok_or("target has no final component")?
+            .to_string_lossy();
         let view = target.with_file_name(format!(".{name}.source-view"));
         fs::create_dir(&view).map_err(|e| format!("create source view {}: {e}", view.display()))?;
         let view = Self(view);
@@ -280,7 +301,12 @@ impl Drop for SourceView {
     }
 }
 
-fn open_writable(path: &Path, spec: Arc<BlochChainSpec>, runtime: &Runtime, create: bool) -> Result<BlochProviderFactory, String> {
+fn open_writable(
+    path: &Path,
+    spec: Arc<BlochChainSpec>,
+    runtime: &Runtime,
+    create: bool,
+) -> Result<BlochProviderFactory, String> {
     let db = if create {
         init_db_for::<_, BlochTables>(path.join("db"), DatabaseArguments::default())
     } else {
@@ -345,7 +371,9 @@ fn run(options: &Options) -> Result<B256, String> {
         proofs: 1024,
         bytes: 64 * MIB as usize,
     };
-    let verified = history.verify(native_limits).map_err(|e| format!("native replay: {e}"))?;
+    let verified = history
+        .verify(native_limits)
+        .map_err(|e| format!("native replay: {e}"))?;
     let native = *verified.report();
     if options.current_epoch < bloch_pos_committee::epoch_of(native.replayed_slot) {
         return Err("--current-epoch is earlier than the replayed native history".into());
@@ -460,7 +488,10 @@ fn run(options: &Options) -> Result<B256, String> {
     });
     let bytes = serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?;
     save_new(&report, &bytes).map_err(|e| {
-        format!("candidate {} committed but report write failed ({e}); reconcile explicitly", hex::encode(commitment))
+        format!(
+            "candidate {} committed but report write failed ({e}); reconcile explicitly",
+            hex::encode(commitment)
+        )
     })?;
     Ok(commitment)
 }

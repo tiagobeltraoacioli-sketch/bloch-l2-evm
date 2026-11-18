@@ -31,20 +31,21 @@ use bloch_l2_evm::{
     },
     ChainSpec,
 };
+use bloch_reth_execution::{
+    canonical::rewind_canonical_head,
+    prepare_genesis,
+    proof_export::{export_forced_with_report, export_sparse_forced_with_report, export_with_report},
+    BlochChainSpec, BlochNextBlockEnvCtx, BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
+};
 use bloch_settlement_recovery::reconstruct::{
     derive_settled_blocks, flag_day_first_slot, l2_registry_blocks, NativeBlockTransactions,
 };
 use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
-use bloch_reth_execution::{
-    canonical::rewind_canonical_head, prepare_genesis,
-    proof_export::{export_forced_with_report, export_sparse_forced_with_report, export_with_report}, BlochChainSpec, BlochNextBlockEnvCtx,
-    BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
-};
 use reth_db::mdbx::{init_db_for, open_db, DatabaseArguments};
 use reth_provider::{
     providers::{RocksDBBuilder, SaveBlocksMode, StaticFileProvider},
-    BlockNumReader, BlockReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider, ProviderFactory,
-    ReceiptProvider, StateProvider, StateProviderFactory,
+    BlockNumReader, BlockReader, ChainSpecProvider, DBProvider, DatabaseProviderFactory, HeaderProvider,
+    ProviderFactory, ReceiptProvider, StateProvider, StateProviderFactory,
 };
 use reth_tasks::{Runtime, RuntimeBuilder, RuntimeConfig};
 use serde_json::json;
@@ -215,7 +216,9 @@ fn block_attributes(
 ) -> Result<(u64, B256), String> {
     if let Some(derivation) = rules.block_derivation {
         let slot = anchor_slot.ok_or("the next rules need --anchor-slot")?;
-        let timestamp = derivation.timestamp(parent_timestamp, slot).ok_or("timestamp overflow")?;
+        let timestamp = derivation
+            .timestamp(parent_timestamp, slot)
+            .ok_or("timestamp overflow")?;
         return Ok((timestamp, derivation.prevrandao));
     }
     let timestamp = next_timestamp(rule, number, parent_timestamp, anchor_slot)
@@ -226,7 +229,8 @@ fn block_attributes(
 /// On mainnet every block after genesis follows the wall-clock rule.
 fn checked_rule(rule: Option<TimestampRule>) -> Result<Option<TimestampRule>, String> {
     if network().mainnet {
-        rule.as_ref().ok_or("--rules mainnet requires --timestamp-rule 1:L1_GENESIS_UNIX_SECS:L1_SLOT_MILLIS")?
+        rule.as_ref()
+            .ok_or("--rules mainnet requires --timestamp-rule 1:L1_GENESIS_UNIX_SECS:L1_SLOT_MILLIS")?
             .require_from_genesis()?;
     }
     Ok(rule)
@@ -269,7 +273,10 @@ fn option<'a>(args: &'a [String], name: &str) -> Result<&'a str, String> {
 /// `--timestamp-rule FROM:GENESIS:SLOT_MS`: L2 time follows the anchored L1 slot from
 /// L2 block FROM on (see `timestamp.rs`); absent, every block is `parent + 1`.
 fn timestamp_rule(args: &[String]) -> Result<Option<TimestampRule>, String> {
-    option(args, "--timestamp-rule").ok().map(TimestampRule::parse).transpose()
+    option(args, "--timestamp-rule")
+        .ok()
+        .map(TimestampRule::parse)
+        .transpose()
 }
 
 fn only(args: &[String], allowed: &[&str]) -> Result<(), String> {
@@ -300,7 +307,9 @@ fn rules() -> ChainSpec {
 }
 
 fn outbox() -> Address {
-    rules().withdrawal_outbox.expect("settlement V3 rules have the withdrawal outbox")
+    rules()
+        .withdrawal_outbox
+        .expect("settlement V3 rules have the withdrawal outbox")
 }
 
 fn spec() -> Result<Arc<BlochChainSpec>, String> {
@@ -312,7 +321,10 @@ fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFac
         init_db_for::<_, BlochTables>(path.join("db"), DatabaseArguments::default())
     } else {
         for directory in ["db", "static", "rocks"] {
-            if !fs::symlink_metadata(path.join(directory)).map(|m| m.is_dir()).unwrap_or(false) {
+            if !fs::symlink_metadata(path.join(directory))
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
                 return Err(format!("target is missing {directory}"));
             }
         }
@@ -323,13 +335,18 @@ fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFac
         Arc::new(db),
         spec()?,
         StaticFileProvider::read_write(path.join("static")).map_err(|e| e.to_string())?,
-        RocksDBBuilder::new(path.join("rocks")).with_default_tables().build().map_err(|e| e.to_string())?,
+        RocksDBBuilder::new(path.join("rocks"))
+            .with_default_tables()
+            .build()
+            .map_err(|e| e.to_string())?,
         runtime.clone(),
     )
     .map_err(|e| e.to_string())?;
     if !create {
         // A database opens only under the network (rules, domain, genesis) it was created for.
-        let sealed = <BlochProviderFactory as HeaderProvider>::sealed_header(&factory, 0).map_err(|e| e.to_string())?.ok_or("target has no genesis header")?;
+        let sealed = <BlochProviderFactory as HeaderProvider>::sealed_header(&factory, 0)
+            .map_err(|e| e.to_string())?
+            .ok_or("target has no genesis header")?;
         let genesis: &bloch_reth_execution::BlochNodeHeader = sealed.header();
         let selected = network();
         if (genesis.0.chain_id, genesis.0.domain, genesis.0.timestamp)
@@ -344,14 +361,22 @@ fn open(path: &Path, runtime: &Runtime, create: bool) -> Result<BlochProviderFac
         }
     }
     if !create {
-        factory.chain_spec().rules().discover(&factory).map_err(|e| e.to_string())?;
+        factory
+            .chain_spec()
+            .rules()
+            .discover(&factory)
+            .map_err(|e| e.to_string())?;
     }
     Ok(factory)
 }
 
 /// The name a report gives the rules of block `number`.
 fn rule_set_name(factory: &BlochProviderFactory, number: u64) -> &'static str {
-    if factory.chain_spec().rules().is_next(number) { "next" } else { "base" }
+    if factory.chain_spec().rules().is_next(number) {
+        "next"
+    } else {
+        "base"
+    }
 }
 
 fn run(args: &[String]) -> Result<String, String> {
@@ -360,13 +385,17 @@ fn run(args: &[String]) -> Result<String, String> {
     match command.as_str() {
         "address" => {
             only(rest, &["--key"])?;
-            return Ok(json!({"address": format!("{:x}", key_address(&read_key(option(rest, "--key")?)?)) }).to_string());
+            return Ok(
+                json!({"address": format!("{:x}", key_address(&read_key(option(rest, "--key")?)?)) }).to_string(),
+            );
         }
         "sign-tx" => return sign_tx(rest),
         _ => {}
     }
     let target = PathBuf::from(option(rest, "--target")?);
-    let runtime = RuntimeBuilder::new(RuntimeConfig::default()).build().map_err(|e| e.to_string())?;
+    let runtime = RuntimeBuilder::new(RuntimeConfig::default())
+        .build()
+        .map_err(|e| e.to_string())?;
     let result = (|| match command.as_str() {
         "init" => {
             only(rest, &["--target"])?;
@@ -376,18 +405,41 @@ fn run(args: &[String]) -> Result<String, String> {
                 .map_err(|e| e.to_string())?;
             let hash = genesis.recovered_block().hash();
             let writer = factory.database_provider_rw().map_err(|e| e.to_string())?;
-            writer.save_blocks(vec![genesis], SaveBlocksMode::Full).map_err(|e| e.to_string())?;
+            writer
+                .save_blocks(vec![genesis], SaveBlocksMode::Full)
+                .map_err(|e| e.to_string())?;
             writer.commit().map_err(|e| e.to_string())?;
             Ok(json!({"number": 0, "hash": hex::encode(hash)}).to_string())
         }
         "extend" | "select" => {
             let selecting = command == "select";
             let allowed: &[&str] = &[
-                "--target", "--parent", "--anchor", "--anchor-slot", "--timestamp-rule", "--deposits", "--txs",
-                "--max-gas", "--max-bytes", "--max-txs", "--min-tip-wei", "--rule-set", "--forced",
-                "--fresh-slot-price-wei", "--write-exempt", "--write-credits", "--write-wasted-gas", "--write-waiting",
-                "--write-uncovered-gas", "--write-uncovered-max-gas", "--write-max-tx-gas", "--write-seed",
-                "--write-reserve-divisor", "--as-given", "--order-check", "--write-seed-file",
+                "--target",
+                "--parent",
+                "--anchor",
+                "--anchor-slot",
+                "--timestamp-rule",
+                "--deposits",
+                "--txs",
+                "--max-gas",
+                "--max-bytes",
+                "--max-txs",
+                "--min-tip-wei",
+                "--rule-set",
+                "--forced",
+                "--fresh-slot-price-wei",
+                "--write-exempt",
+                "--write-credits",
+                "--write-wasted-gas",
+                "--write-waiting",
+                "--write-uncovered-gas",
+                "--write-uncovered-max-gas",
+                "--write-max-tx-gas",
+                "--write-seed",
+                "--write-reserve-divisor",
+                "--as-given",
+                "--order-check",
+                "--write-seed-file",
             ];
             // `select --order-check yes` is the shadow's check of a finished block's order: it needs the block's
             // own limits, the transaction cap included (the reserve keeps one eighth of the places).
@@ -433,7 +485,13 @@ fn run(args: &[String]) -> Result<String, String> {
                 Ok("base") => {}
                 Ok(other) => return Err(format!("--rule-set must be base or next, not {other}")),
             }
-            let (timestamp, prevrandao) = block_attributes(schedule.at(number), rule.as_ref(), number, head.0.timestamp, anchor_slot)?;
+            let (timestamp, prevrandao) = block_attributes(
+                schedule.at(number),
+                rule.as_ref(),
+                number,
+                head.0.timestamp,
+                anchor_slot,
+            )?;
             let attributes = BlochNextBlockEnvCtx {
                 timestamp,
                 prevrandao,
@@ -446,7 +504,10 @@ fn run(args: &[String]) -> Result<String, String> {
                     if rest.chunks(2).any(|p| p[0].starts_with("--max-")) {
                         return Err("--max-gas/--max-bytes/--max-txs require --txs".into());
                     }
-                    if rest.chunks(2).any(|p| p[0] == "--fresh-slot-price-wei" || p[0].starts_with("--write-")) {
+                    if rest
+                        .chunks(2)
+                        .any(|p| p[0] == "--fresh-slot-price-wei" || p[0].starts_with("--write-"))
+                    {
                         return Err("--fresh-slot-price-wei/--write-exempt require --txs".into());
                     }
                     None
@@ -461,7 +522,9 @@ fn run(args: &[String]) -> Result<String, String> {
                     let (selection, _) = coordinator
                         .select_pending_after_forced(&attributes, &forced, &[], SelectionLimits::protocol(&rules()))
                         .map_err(|e| e.to_string())?;
-                    let tip = coordinator.extend_raw(parent, attributes, &selection.included).map_err(|e| e.to_string())?;
+                    let tip = coordinator
+                        .extend_raw(parent, attributes, &selection.included)
+                        .map_err(|e| e.to_string())?;
                     write_forced_sidecar(&target, tip.0.number, &forced, selection.included.len())?;
                     let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                               "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
@@ -472,7 +535,9 @@ fn run(args: &[String]) -> Result<String, String> {
                     report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
                     return Ok(out.to_string());
                 }
-                let tip = coordinator.extend(parent, attributes, vec![]).map_err(|e| e.to_string())?;
+                let tip = coordinator
+                    .extend(parent, attributes, vec![])
+                    .map_err(|e| e.to_string())?;
                 let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
                           "state_root": hex::encode(tip.0.state_root), "parent": hex::encode(parent),
                           "anchor": hex::encode(anchor), "timestamp": timestamp, "deposits": deposits.len(),
@@ -487,11 +552,18 @@ fn run(args: &[String]) -> Result<String, String> {
                 if command == "select" {
                     return Err("--as-given is for extend".into());
                 }
-                if rest.chunks(2).any(|p| p[0].starts_with("--max-") || p[0].starts_with("--write-") || p[0] == "--fresh-slot-price-wei" || p[0] == "--min-tip-wei") {
+                if rest.chunks(2).any(|p| {
+                    p[0].starts_with("--max-")
+                        || p[0].starts_with("--write-")
+                        || p[0] == "--fresh-slot-price-wei"
+                        || p[0] == "--min-tip-wei"
+                }) {
                     return Err("--as-given builds the list as it is: it takes no selection option".into());
                 }
                 if pool.iter().any(|(file, _)| file.is_some()) {
-                    return Err("--as-given needs --txs FILE (a JSON list in block order), not a spool directory".into());
+                    return Err(
+                        "--as-given needs --txs FILE (a JSON list in block order), not a spool directory".into(),
+                    );
                 }
                 let forced_included = if forced.is_empty() {
                     vec![]
@@ -501,8 +573,14 @@ fn run(args: &[String]) -> Result<String, String> {
                         .map_err(|e| e.to_string())?;
                     selection.included
                 };
-                let body: Vec<_> = forced_included.iter().cloned().chain(pool.iter().map(|(_, raw)| raw.clone())).collect();
-                let tip = coordinator.extend_raw(parent, attributes, &body).map_err(|e| e.to_string())?;
+                let body: Vec<_> = forced_included
+                    .iter()
+                    .cloned()
+                    .chain(pool.iter().map(|(_, raw)| raw.clone()))
+                    .collect();
+                let tip = coordinator
+                    .extend_raw(parent, attributes, &body)
+                    .map_err(|e| e.to_string())?;
                 if !forced.is_empty() {
                     write_forced_sidecar(&target, tip.0.number, &forced, forced_included.len())?;
                 }
@@ -551,8 +629,15 @@ fn run(args: &[String]) -> Result<String, String> {
                     return Ok(out.to_string());
                 }
                 // The block is exactly what was judged, in the order it was judged in.
-                let body: Vec<_> = forced_selection.included.iter().chain(selection.transactions.iter()).cloned().collect();
-                let tip = coordinator.extend_raw(parent, attributes, &body).map_err(|e| e.to_string())?;
+                let body: Vec<_> = forced_selection
+                    .included
+                    .iter()
+                    .chain(selection.transactions.iter())
+                    .cloned()
+                    .collect();
+                let tip = coordinator
+                    .extend_raw(parent, attributes, &body)
+                    .map_err(|e| e.to_string())?;
                 if !forced.is_empty() {
                     write_forced_sidecar(&target, tip.0.number, &forced, forced_selection.included.len())?;
                 }
@@ -586,8 +671,15 @@ fn run(args: &[String]) -> Result<String, String> {
                     out["committed"] = json!(false);
                     return Ok(out.to_string());
                 }
-                let body: Vec<_> = forced_selection.included.iter().chain(selection.transactions.iter()).cloned().collect();
-                let tip = coordinator.extend_raw(parent, attributes, &body).map_err(|e| e.to_string())?;
+                let body: Vec<_> = forced_selection
+                    .included
+                    .iter()
+                    .chain(selection.transactions.iter())
+                    .cloned()
+                    .collect();
+                let tip = coordinator
+                    .extend_raw(parent, attributes, &body)
+                    .map_err(|e| e.to_string())?;
                 write_forced_sidecar(&target, tip.0.number, &forced, forced_selection.included.len())?;
                 let pruned = prune_spool(&pool, &candidates, &selection)?;
                 let mut out = json!({"number": tip.0.number, "hash": hex::encode(tip.hash()),
@@ -600,7 +692,9 @@ fn run(args: &[String]) -> Result<String, String> {
                           "limits": {"max_gas": limits.max_gas, "max_bytes": limits.max_bytes,
                                      "max_txs": limits.max_transactions},
                           "pruned": pruned});
-                if let (Some(fields), serde_json::Value::Object(report)) = (out.as_object_mut(), selection_report(&selection, below_min_tip)) {
+                if let (Some(fields), serde_json::Value::Object(report)) =
+                    (out.as_object_mut(), selection_report(&selection, below_min_tip))
+                {
                     fields.extend(report);
                 }
                 report_withdrawals(&mut out, &coordinator.provider(), tip.0.number, tip.hash())?;
@@ -608,7 +702,9 @@ fn run(args: &[String]) -> Result<String, String> {
             }
             if command == "select" {
                 // What `extend` would select, per transaction: nothing is committed or pruned.
-                let selection = coordinator.select_pending(&attributes, &candidates, limits).map_err(|e| e.to_string())?;
+                let selection = coordinator
+                    .select_pending(&attributes, &candidates, limits)
+                    .map_err(|e| e.to_string())?;
                 let mut report = selection_report(&selection, below_min_tip);
                 report["committed"] = json!(false);
                 return Ok(report.to_string());
@@ -618,13 +714,12 @@ fn run(args: &[String]) -> Result<String, String> {
                 .map_err(|e| e.to_string())?;
             // Committed: prune the spool of included and dropped entries.
             let mut pruned = 0usize;
-            let finished = selection
-                .dropped
-                .iter()
-                .map(|d| d.index)
-                .chain(selection.hashes.iter().filter_map(|h| {
-                    candidates.iter().position(|raw| alloy_primitives::keccak256(raw) == *h)
-                }));
+            let finished = selection.dropped.iter().map(|d| d.index).chain(
+                selection
+                    .hashes
+                    .iter()
+                    .filter_map(|h| candidates.iter().position(|raw| alloy_primitives::keccak256(raw) == *h)),
+            );
             for index in finished {
                 if let Some(file) = &pool[index].0 {
                     // The settled RPC may have evicted it meanwhile: gone is pruned.
@@ -650,14 +745,19 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "rewind" => {
             only(rest, &["--target", "--number", "--hash", "--respool"])?;
-            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let number: u64 = option(rest, "--number")?
+                .parse()
+                .map_err(|_| "--number must be decimal")?;
             let expected = hash(option(rest, "--hash")?, "--hash")?;
             let factory = open(&target, &runtime, false)?;
             let head = factory.best_block_number().map_err(|e| e.to_string())?;
             if head != number {
                 return Err(format!("the head is block {head}, not {number}"));
             }
-            let block = factory.block_by_number(number).map_err(|e| e.to_string())?.ok_or("head block is missing")?;
+            let block = factory
+                .block_by_number(number)
+                .map_err(|e| e.to_string())?
+                .ok_or("head block is missing")?;
             let mut respooled = 0usize;
             if let Ok(directory) = option(rest, "--respool") {
                 for raw in block.body.as_core().transactions.iter() {
@@ -678,10 +778,15 @@ fn run(args: &[String]) -> Result<String, String> {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("forced sidecar: {e}")),
             }
-            factory.chain_spec().rules().discover(&factory).map_err(|e| e.to_string())?;
+            factory
+                .chain_spec()
+                .rules()
+                .discover(&factory)
+                .map_err(|e| e.to_string())?;
             Ok(json!({"number": parent.0.number, "hash": hex::encode(parent.hash()),
                       "state_root": hex::encode(parent.0.state_root), "rewound": number,
-                      "rewound_hash": hex::encode(expected), "respooled": respooled}).to_string())
+                      "rewound_hash": hex::encode(expected), "respooled": respooled})
+            .to_string())
         }
         "export" => {
             only(rest, &["--target", "--number", "--out", "--witness"])?;
@@ -691,15 +796,24 @@ fn run(args: &[String]) -> Result<String, String> {
                 Ok("sparse") => true,
                 Ok(other) => return Err(format!("--witness must be complete or sparse, not {other}")),
             };
-            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let number: u64 = option(rest, "--number")?
+                .parse()
+                .map_err(|_| "--number must be decimal")?;
             let out = PathBuf::from(option(rest, "--out")?);
             let factory = open(&target, &runtime, false)?;
             // CANDIDATE: `--witness sparse` writes the artifact of the sparse-witness guest.
-            let forced = read_forced_sidecar(&target, number)?.map(|(forced, _)| forced).unwrap_or_default();
+            let forced = read_forced_sidecar(&target, number)?
+                .map(|(forced, _)| forced)
+                .unwrap_or_default();
             let (bytes, hash, anchor, state_entries) = if sparse {
                 let (artifact, state_entries) =
                     export_sparse_forced_with_report(&factory, number, &forced).map_err(|e| e.to_string())?;
-                (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, state_entries)
+                (
+                    artifact.encode().map_err(|e| e.to_string())?,
+                    artifact.header().hash(),
+                    artifact.context().anchor_root,
+                    state_entries,
+                )
             } else {
                 // CANDIDATE: a block that consumed forced records exports the complete artifact of the
                 // fallback guest, which carries them.
@@ -710,14 +824,27 @@ fn run(args: &[String]) -> Result<String, String> {
                 }
                 .map_err(|e| e.to_string())?;
                 let artifact = report.artifact;
-                (artifact.encode().map_err(|e| e.to_string())?, artifact.header().hash(), artifact.context().anchor_root, report.state_entries)
+                (
+                    artifact.encode().map_err(|e| e.to_string())?,
+                    artifact.header().hash(),
+                    artifact.context().anchor_root,
+                    report.state_entries,
+                )
             };
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&out)
+                .map_err(|e| e.to_string())?;
             file.write_all(&bytes).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
-            File::open(out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))
-                .and_then(|d| d.sync_all())
-                .map_err(|e| e.to_string())?;
+            File::open(
+                out.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )
+            .and_then(|d| d.sync_all())
+            .map_err(|e| e.to_string())?;
             Ok(json!({"number": number, "hash": hex::encode(hash),
                       "anchor": hex::encode(anchor), "bytes": bytes.len(),
                       "state_entries": state_entries, "sparse": sparse})
@@ -725,7 +852,9 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "hash" => {
             only(rest, &["--target", "--number"])?;
-            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let number: u64 = option(rest, "--number")?
+                .parse()
+                .map_err(|_| "--number must be decimal")?;
             let factory = open(&target, &runtime, false)?;
             let header = <BlochProviderFactory as HeaderProvider>::sealed_header(&factory, number)
                 .map_err(|e| e.to_string())?
@@ -734,7 +863,9 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "da" => {
             only(rest, &["--target", "--number", "--out"])?;
-            let number: u64 = option(rest, "--number")?.parse().map_err(|_| "--number must be decimal")?;
+            let number: u64 = option(rest, "--number")?
+                .parse()
+                .map_err(|_| "--number must be decimal")?;
             let out = PathBuf::from(option(rest, "--out")?);
             let factory = open(&target, &runtime, false)?;
             let block = factory
@@ -755,16 +886,25 @@ fn run(args: &[String]) -> Result<String, String> {
             let payload = encode_da_payload(transactions).map_err(|e| e.to_string())?;
             let chain_id = rules().chain_id;
             let commitment = da_commitment(chain_id, number, &payload);
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&out).map_err(|e| e.to_string())?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&out)
+                .map_err(|e| e.to_string())?;
             writeln!(file, "{}", hex::encode(&payload)).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
-            Ok(json!({"number": number, "hash": hex::encode(block.header.0.hash()), "chain_id": chain_id,
+            Ok(
+                json!({"number": number, "hash": hex::encode(block.header.0.hash()), "chain_id": chain_id,
                       "transactions": transactions.len(), "bytes": payload.len(),
                       "da_commitment": hex::encode(commitment)})
-            .to_string())
+                .to_string(),
+            )
         }
         "reconstruct" => {
-            only(rest, &["--target", "--l1", "--l1-follower", "--chain-id", "--timestamp-rule"])?;
+            only(
+                rest,
+                &["--target", "--l1", "--l1-follower", "--chain-id", "--timestamp-rule"],
+            )?;
             let rule = checked_rule(timestamp_rule(rest)?)?;
             let blocks = match (option(rest, "--l1"), option(rest, "--l1-follower")) {
                 (Ok(file), Err(_)) => read_l1_fixture(Path::new(file))?,
@@ -781,7 +921,9 @@ fn run(args: &[String]) -> Result<String, String> {
                 .map_err(|e| e.to_string())?;
             let genesis_header = genesis.recovered_block().clone_sealed_header();
             let writer = factory.database_provider_rw().map_err(|e| e.to_string())?;
-            writer.save_blocks(vec![genesis], SaveBlocksMode::Full).map_err(|e| e.to_string())?;
+            writer
+                .save_blocks(vec![genesis], SaveBlocksMode::Full)
+                .map_err(|e| e.to_string())?;
             writer.commit().map_err(|e| e.to_string())?;
             let settled = derive_settled_blocks(&blocks, chain_id, genesis_header.hash(), genesis_header.0.state_root)
                 .map_err(|e| e.to_string())?;
@@ -798,7 +940,10 @@ fn run(args: &[String]) -> Result<String, String> {
             for block in &settled {
                 let head = coordinator.head().clone();
                 if head.hash() != block.parent_hash || head.0.state_root != block.previous_state_root {
-                    return Err(format!("L2 block {}: rebuilt parent differs from the settled parent", block.number));
+                    return Err(format!(
+                        "L2 block {}: rebuilt parent differs from the settled parent",
+                        block.number
+                    ));
                 }
                 // The statement names the rules: L1 compared this field with its policy.
                 if let Some((base, next)) = configurations {
@@ -807,10 +952,20 @@ fn run(args: &[String]) -> Result<String, String> {
                             schedule.switch_at(block.number).map_err(|e| e.to_string())?;
                         }
                     } else if block.configuration != base || schedule.is_next(block.number) {
-                        return Err(format!("L2 block {}: settled under an unexpected configuration {}", block.number, hex::encode(block.configuration)));
+                        return Err(format!(
+                            "L2 block {}: settled under an unexpected configuration {}",
+                            block.number,
+                            hex::encode(block.configuration)
+                        ));
                     }
                 }
-                let (timestamp, prevrandao) = block_attributes(schedule.at(block.number), rule.as_ref(), block.number, head.0.timestamp, Some(block.anchor_slot))?;
+                let (timestamp, prevrandao) = block_attributes(
+                    schedule.at(block.number),
+                    rule.as_ref(),
+                    block.number,
+                    head.0.timestamp,
+                    Some(block.anchor_slot),
+                )?;
                 let attributes = BlochNextBlockEnvCtx {
                     timestamp,
                     prevrandao,
@@ -821,7 +976,12 @@ fn run(args: &[String]) -> Result<String, String> {
                 let mut body = Vec::new();
                 if !block.forced.is_empty() {
                     let (selection, _) = coordinator
-                        .select_pending_after_forced(&attributes, &block.forced, &[], SelectionLimits::protocol(&rules()))
+                        .select_pending_after_forced(
+                            &attributes,
+                            &block.forced,
+                            &[],
+                            SelectionLimits::protocol(&rules()),
+                        )
                         .map_err(|e| format!("L2 block {}: forced: {e}", block.number))?;
                     body.extend(selection.included);
                 }
@@ -834,7 +994,11 @@ fn run(args: &[String]) -> Result<String, String> {
                     write_forced_sidecar(&target, tip.0.number, &block.forced, forced_included)?;
                 }
                 let withdrawals = outbox_commitment(
-                    coordinator.provider().history_by_block_hash(tip.hash()).map_err(|e| e.to_string())?.as_ref(),
+                    coordinator
+                        .provider()
+                        .history_by_block_hash(tip.hash())
+                        .map_err(|e| e.to_string())?
+                        .as_ref(),
                 )?;
                 if block.withdrawals.is_some_and(|settled| settled != withdrawals) {
                     return Err(format!(
@@ -846,7 +1010,9 @@ fn run(args: &[String]) -> Result<String, String> {
                 }
                 let mismatch = tip.hash() != block.header_hash
                     || tip.0.state_root != block.state_root
-                    || block.transactions_root.is_some_and(|root| root != tip.0.transactions_root)
+                    || block
+                        .transactions_root
+                        .is_some_and(|root| root != tip.0.transactions_root)
                     || (block.forced.is_empty() && block.deposits_hash.is_some_and(|hash| hash != tip.0.deposits_hash));
                 if mismatch {
                     return Err(format!(
@@ -867,16 +1033,21 @@ fn run(args: &[String]) -> Result<String, String> {
                                    "withdrawal_root": hex::encode(withdrawals.root),
                                    "withdrawal_count": withdrawals.count}));
             }
-            Ok(json!({"genesis": hex::encode(genesis_header.hash()), "native_blocks": blocks.len(),
+            Ok(
+                json!({"genesis": hex::encode(genesis_header.hash()), "native_blocks": blocks.len(),
                       "settled": report.len(), "head": report.last().map(|b| b["hash"].clone()),
                       "next_rules_from": schedule.next_from(), "blocks": report})
-            .to_string())
+                .to_string(),
+            )
         }
         "head" => {
             only(rest, &["--target"])?;
             let factory = open(&target, &runtime, false)?;
             let number = factory.best_block_number().map_err(|e| e.to_string())?;
-            let header = factory.sealed_header(number).map_err(|e| e.to_string())?.ok_or("missing head header")?;
+            let header = factory
+                .sealed_header(number)
+                .map_err(|e| e.to_string())?
+                .ok_or("missing head header")?;
             let withdrawals = outbox_commitment(factory.latest().map_err(|e| e.to_string())?.as_ref())?;
             Ok(json!({"number": number, "hash": hex::encode(header.hash()),
                       "state_root": hex::encode(header.0.state_root),
@@ -891,7 +1062,10 @@ fn run(args: &[String]) -> Result<String, String> {
             only(rest, &["--target"])?;
             let factory = open(&target, &runtime, false)?;
             let number = factory.best_block_number().map_err(|e| e.to_string())?;
-            let header = factory.sealed_header(number).map_err(|e| e.to_string())?.ok_or("missing head header")?;
+            let header = factory
+                .sealed_header(number)
+                .map_err(|e| e.to_string())?
+                .ok_or("missing head header")?;
             let schedule = factory.chain_spec().rules().clone();
             let mut out = json!({"number": number, "hash": hex::encode(header.hash()),
                       "rules": rule_set_name(&factory, number),
@@ -908,7 +1082,9 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         "withdrawal-proof" => {
             only(rest, &["--target", "--index", "--number", "--root", "--count"])?;
-            let index: u64 = option(rest, "--index")?.parse().map_err(|_| "--index must be decimal")?;
+            let index: u64 = option(rest, "--index")?
+                .parse()
+                .map_err(|_| "--index must be decimal")?;
             let factory = open(&target, &runtime, false)?;
             let head = factory.best_block_number().map_err(|e| e.to_string())?;
             let number = match option(rest, "--number") {
@@ -925,7 +1101,10 @@ fn run(args: &[String]) -> Result<String, String> {
             let address: Address = parse_address(option(rest, "--address")?)?;
             let factory = open(&target, &runtime, false)?;
             let state = factory.latest().map_err(|e| e.to_string())?;
-            let account = state.basic_account(&address).map_err(|e| e.to_string())?.unwrap_or_default();
+            let account = state
+                .basic_account(&address)
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
             let (sats, dust) = account.balance.div_rem(U256::from(bloch_l2_evm::ATOM_SCALE));
             Ok(json!({"address": format!("{address:x}"), "number": factory.best_block_number().map_err(|e| e.to_string())?,
                       "balance_wei": account.balance.to_string(), "balance_sats": sats.to_string(),
@@ -972,10 +1151,26 @@ const SIGN_TX_DEFAULT_PRIORITY_FEE_WEI: u128 = 1_000_000_000;
 
 fn sign_tx(rest: &[String]) -> Result<String, String> {
     use alloy_consensus::{private::alloy_eips::eip2718::Encodable2718, SignableTransaction, TxEip1559, TxEnvelope};
-    only(rest, &["--key", "--nonce", "--to", "--value-wei", "--withdraw-to", "--sats", "--gas", "--max-fee-wei", "--priority-fee-wei", "--out"])?;
+    only(
+        rest,
+        &[
+            "--key",
+            "--nonce",
+            "--to",
+            "--value-wei",
+            "--withdraw-to",
+            "--sats",
+            "--gas",
+            "--max-fee-wei",
+            "--priority-fee-wei",
+            "--out",
+        ],
+    )?;
     let key = read_key(option(rest, "--key")?)?;
     let decimal = |name: &str| -> Result<u128, String> {
-        option(rest, name)?.parse().map_err(|_| format!("{name} must be decimal"))
+        option(rest, name)?
+            .parse()
+            .map_err(|_| format!("{name} must be decimal"))
     };
     let nonce = u64::try_from(decimal("--nonce")?).map_err(|_| "--nonce too large")?;
     let (to, value, input, default_gas) = match (option(rest, "--to"), option(rest, "--withdraw-to")) {
@@ -983,7 +1178,12 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
             if option(rest, "--sats").is_ok() {
                 return Err("--sats goes with --withdraw-to".into());
             }
-            (parse_address(to)?, U256::from(decimal("--value-wei")?), Vec::new(), 21_000)
+            (
+                parse_address(to)?,
+                U256::from(decimal("--value-wei")?),
+                Vec::new(),
+                21_000,
+            )
         }
         (Err(_), Ok(recipient)) => {
             if option(rest, "--value-wei").is_ok() {
@@ -1014,7 +1214,9 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
         Ok(_) => {
             let priority = decimal("--priority-fee-wei")?;
             if priority > max_fee_per_gas {
-                return Err(format!("--priority-fee-wei {priority} is above the fee cap {max_fee_per_gas} (--max-fee-wei)"));
+                return Err(format!(
+                    "--priority-fee-wei {priority} is above the fee cap {max_fee_per_gas} (--max-fee-wei)"
+                ));
             }
             priority
         }
@@ -1044,10 +1246,12 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
         .open(option(rest, "--out")?)
         .map_err(|e| format!("--out: {e}"))?;
     writeln!(out, "{}", hex::encode(&encoded)).map_err(|e| format!("--out: {e}"))?;
-    Ok(json!({"hash": hex::encode(hash), "from": format!("{:x}", key_address(&key)), "nonce": nonce,
+    Ok(
+        json!({"hash": hex::encode(hash), "from": format!("{:x}", key_address(&key)), "nonce": nonce,
               "to": format!("{to:x}"), "value_wei": value.to_string(), "gas_limit": gas_limit, "bytes": encoded.len(),
               "max_fee_wei": max_fee_per_gas.to_string(), "priority_fee_wei": max_priority_fee_per_gas.to_string()})
-    .to_string())
+        .to_string(),
+    )
 }
 
 /// The selection part of the extend and select reports. `tx_stats` is a report only: no block rule reads it.
@@ -1056,7 +1260,12 @@ fn extend_report(
     selection: &bloch_l2_evm::node_execution::select::BlockSelection,
     below_min_tip: usize,
 ) {
-    let slots = |items: &[(Address, u64)]| items.iter().map(|(a, n)| json!([hex::encode(a), n])).collect::<Vec<_>>();
+    let slots = |items: &[(Address, u64)]| {
+        items
+            .iter()
+            .map(|(a, n)| json!([hex::encode(a), n]))
+            .collect::<Vec<_>>()
+    };
     out["included"] = json!(selection.hashes.iter().map(hex::encode).collect::<Vec<_>>());
     out["deferred"] = json!(selection
         .deferred
@@ -1072,15 +1281,20 @@ fn extend_report(
     out["tx_stats"] = json!(selection
         .stats
         .iter()
-        .map(|t| json!({"hash": hex::encode(t.hash), "sender": hex::encode(t.sender), "nonce": t.nonce,
+        .map(
+            |t| json!({"hash": hex::encode(t.hash), "sender": hex::encode(t.sender), "nonce": t.nonce,
                         "gas_used": t.gas_used, "effective_tip": t.effective_tip.to_string(),
-                        "fresh_slots": slots(&t.fresh_slots), "cleared_slots": slots(&t.cleared_slots)}))
+                        "fresh_slots": slots(&t.fresh_slots), "cleared_slots": slots(&t.cleared_slots)})
+        )
         .collect::<Vec<_>>());
 }
 
 /// Native inbox records as L2 deposit mints. The native settlement rejects any
 /// body that does not mint exactly these records, so no field is defaulted.
-fn selection_report(selection: &bloch_l2_evm::node_execution::select::BlockSelection, below_min_tip: usize) -> serde_json::Value {
+fn selection_report(
+    selection: &bloch_l2_evm::node_execution::select::BlockSelection,
+    below_min_tip: usize,
+) -> serde_json::Value {
     let mut report = json!({});
     extend_report(&mut report, selection, below_min_tip);
     report
@@ -1096,12 +1310,18 @@ fn read_forced(path: &Path) -> Result<Vec<ForcedTransaction>, String> {
 }
 
 fn forced_from_json(list: &[serde_json::Value]) -> Result<Vec<ForcedTransaction>, String> {
-    let num = |v: &serde_json::Value, k: &str| v[k].as_u64().ok_or_else(|| format!("forced field {k} must be an integer"));
+    let num = |v: &serde_json::Value, k: &str| {
+        v[k].as_u64()
+            .ok_or_else(|| format!("forced field {k} must be an integer"))
+    };
     let bytes_of = |v: &serde_json::Value, k: &str| -> Result<Vec<u8>, String> {
-        hex::decode(v[k].as_str().unwrap_or_default().trim_start_matches("0x")).map_err(|_| format!("forced field {k} must be hex"))
+        hex::decode(v[k].as_str().unwrap_or_default().trim_start_matches("0x"))
+            .map_err(|_| format!("forced field {k} must be hex"))
     };
     let fixed = |v: &serde_json::Value, k: &str| -> Result<[u8; 32], String> {
-        bytes_of(v, k)?.try_into().map_err(|_| format!("forced field {k} must be 32 bytes"))
+        bytes_of(v, k)?
+            .try_into()
+            .map_err(|_| format!("forced field {k} must be 32 bytes"))
     };
     list.iter()
         .map(|v| {
@@ -1121,9 +1341,11 @@ fn forced_from_json(list: &[serde_json::Value]) -> Result<Vec<ForcedTransaction>
 fn forced_json(forced: &[ForcedTransaction]) -> serde_json::Value {
     json!(forced
         .iter()
-        .map(|f| json!({"height": f.record.l1_height, "l1_txid": hex::encode(f.record.l1_txid),
+        .map(
+            |f| json!({"height": f.record.l1_height, "l1_txid": hex::encode(f.record.l1_txid),
                         "envelope_hash": hex::encode(f.record.envelope_hash), "gas_limit": f.record.gas_limit,
-                        "envelope": hex::encode(&f.envelope)}))
+                        "envelope": hex::encode(&f.envelope)})
+        )
         .collect::<Vec<_>>())
 }
 
@@ -1141,13 +1363,20 @@ fn forced_sidecar(target: &Path, number: u64) -> PathBuf {
     target.join("forced").join(format!("{number:08}.json"))
 }
 
-fn write_forced_sidecar(target: &Path, number: u64, forced: &[ForcedTransaction], included: usize) -> Result<(), String> {
+fn write_forced_sidecar(
+    target: &Path,
+    number: u64,
+    forced: &[ForcedTransaction],
+    included: usize,
+) -> Result<(), String> {
     let path = forced_sidecar(target, number);
     fs::create_dir_all(path.parent().expect("sidecar has a parent")).map_err(|e| format!("forced sidecar: {e}"))?;
     let temporary = path.with_extension("json.tmp");
     let text = json!({"number": number, "included": included, "forced": forced_json(forced)}).to_string();
     let mut file = File::create(&temporary).map_err(|e| format!("forced sidecar: {e}"))?;
-    file.write_all(text.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("forced sidecar: {e}"))?;
+    file.write_all(text.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("forced sidecar: {e}"))?;
     fs::rename(&temporary, &path).map_err(|e| format!("forced sidecar: {e}"))
 }
 
@@ -1170,11 +1399,12 @@ fn prune_spool(
     selection: &bloch_l2_evm::node_execution::select::BlockSelection,
 ) -> Result<usize, String> {
     let mut pruned = 0usize;
-    let finished = selection
-        .dropped
-        .iter()
-        .map(|d| d.index)
-        .chain(selection.hashes.iter().filter_map(|h| candidates.iter().position(|raw| alloy_primitives::keccak256(raw) == *h)));
+    let finished = selection.dropped.iter().map(|d| d.index).chain(
+        selection
+            .hashes
+            .iter()
+            .filter_map(|h| candidates.iter().position(|raw| alloy_primitives::keccak256(raw) == *h)),
+    );
     for index in finished {
         if let Some(file) = &pool[index].0 {
             match fs::remove_file(file) {
@@ -1190,10 +1420,16 @@ fn prune_spool(
 fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> {
     let bytes = fs::read(path).map_err(|e| format!("deposits: {e}"))?;
     let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|e| format!("deposits: {e}"))?;
-    let num = |v: &serde_json::Value, k: &str| v[k].as_u64().ok_or_else(|| format!("deposit field {k} must be an integer"));
+    let num = |v: &serde_json::Value, k: &str| {
+        v[k].as_u64()
+            .ok_or_else(|| format!("deposit field {k} must be an integer"))
+    };
     let bytes_of = |v: &serde_json::Value, k: &str, n: usize| -> Result<Vec<u8>, String> {
-        let b = hex::decode(v[k].as_str().unwrap_or_default().trim_start_matches("0x")).map_err(|_| format!("deposit field {k} must be hex"))?;
-        if b.len() != n { return Err(format!("deposit field {k} must be {n} bytes")); }
+        let b = hex::decode(v[k].as_str().unwrap_or_default().trim_start_matches("0x"))
+            .map_err(|_| format!("deposit field {k} must be hex"))?;
+        if b.len() != n {
+            return Err(format!("deposit field {k} must be {n} bytes"));
+        }
         Ok(b)
     };
     list.iter()
@@ -1218,24 +1454,41 @@ fn read_deposits(path: &Path) -> Result<Vec<bloch_l2_evm::DepositMint>, String> 
 /// The producer's write price (sequencer policy v2) from the command line: the price per added storage slot,
 /// the exempt senders, the policy's credit ledger (a JSON object `{sender: "wei"}` in a file), the gas cap and
 /// the two pools of wasted gas. The order of uncovered senders is seeded by the block's anchor.
-fn write_price(args: &[String], block_gas_limit: u64, anchor: B256) -> Result<Option<bloch_l2_evm::node_execution::select::WritePrice>, String> {
+fn write_price(
+    args: &[String],
+    block_gas_limit: u64,
+    anchor: B256,
+) -> Result<Option<bloch_l2_evm::node_execution::select::WritePrice>, String> {
     let address = |text: &str, option: &str| {
-        text.trim_start_matches("0x").parse::<Address>().map_err(|_| format!("{option}: {text} is not an address"))
+        text.trim_start_matches("0x")
+            .parse::<Address>()
+            .map_err(|_| format!("{option}: {text} is not an address"))
     };
     let number = |name: &str, default: u64| match option(args, name) {
         Ok(text) => text.parse::<u64>().map_err(|_| format!("{name} must be decimal")),
         Err(_) => Ok(default),
     };
     let exempt = match option(args, "--write-exempt") {
-        Ok(text) => text.split(',').filter(|a| !a.is_empty()).map(|a| address(a, "--write-exempt")).collect::<Result<_, _>>()?,
+        Ok(text) => text
+            .split(',')
+            .filter(|a| !a.is_empty())
+            .map(|a| address(a, "--write-exempt"))
+            .collect::<Result<_, _>>()?,
         Err(_) => Default::default(),
     };
     let credits = match option(args, "--write-credits") {
         Ok(path) => {
             let map: std::collections::BTreeMap<String, String> =
-                serde_json::from_slice(&fs::read(path).map_err(|e| format!("--write-credits: {e}"))?).map_err(|e| format!("--write-credits: {e}"))?;
+                serde_json::from_slice(&fs::read(path).map_err(|e| format!("--write-credits: {e}"))?)
+                    .map_err(|e| format!("--write-credits: {e}"))?;
             map.iter()
-                .map(|(sender, wei)| Ok((address(sender, "--write-credits")?, wei.parse::<u128>().map_err(|_| format!("--write-credits: {wei} is not decimal wei"))?)))
+                .map(|(sender, wei)| {
+                    Ok((
+                        address(sender, "--write-credits")?,
+                        wei.parse::<u128>()
+                            .map_err(|_| format!("--write-credits: {wei} is not decimal wei"))?,
+                    ))
+                })
                 .collect::<Result<_, String>>()?
         }
         Err(_) => Default::default(),
@@ -1261,14 +1514,19 @@ fn write_price(args: &[String], block_gas_limit: u64, anchor: B256) -> Result<Op
                 .trim()
                 .parse::<B256>()
                 .map_err(|_| "--write-seed-file must hold 32 bytes of hex")?,
-            (_, Ok(text)) => text.trim_start_matches("0x").parse::<B256>().map_err(|_| "--write-seed must be 32 bytes of hex")?,
+            (_, Ok(text)) => text
+                .trim_start_matches("0x")
+                .parse::<B256>()
+                .map_err(|_| "--write-seed must be 32 bytes of hex")?,
             _ => anchor,
         },
         reserve_divisor: number("--write-reserve-divisor", 8)?,
     };
     match option(args, "--fresh-slot-price-wei") {
         Ok(text) => {
-            let per_slot = text.parse::<u128>().map_err(|_| "--fresh-slot-price-wei must be decimal")?;
+            let per_slot = text
+                .parse::<u128>()
+                .map_err(|_| "--fresh-slot-price-wei must be decimal")?;
             Ok((per_slot > 0).then_some(bloch_l2_evm::node_execution::select::WritePrice { per_slot, ..price }))
         }
         Err(_) if !args.chunks(2).any(|p| p[0].starts_with("--write-")) => Ok(None),
@@ -1286,7 +1544,11 @@ fn hold_waiting_senders(
         .map_err(|e| format!("--write-waiting: {e}"))?;
     let senders = list
         .iter()
-        .map(|a| a.trim_start_matches("0x").parse::<Address>().map_err(|_| format!("--write-waiting: {a} is not an address")))
+        .map(|a| {
+            a.trim_start_matches("0x")
+                .parse::<Address>()
+                .map_err(|_| format!("--write-waiting: {a} is not an address"))
+        })
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     let mut held = Vec::new();
     let kept = pool
@@ -1357,14 +1619,18 @@ fn hold_below_min_tip(
 /// Bytes are not authenticated here; selection drops invalid ones with a reason.
 fn read_pool(path: &Path) -> Result<Vec<(Option<PathBuf>, alloy_primitives::Bytes)>, String> {
     let decode = |text: &str| -> Result<alloy_primitives::Bytes, String> {
-        hex::decode(text.trim().trim_start_matches("0x")).map(Into::into).map_err(|_| "--txs entry is not hex".to_string())
+        hex::decode(text.trim().trim_start_matches("0x"))
+            .map(Into::into)
+            .map_err(|_| "--txs entry is not hex".to_string())
     };
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("--txs: {e}"))?;
     let entries = if metadata.is_dir() {
         let mut files = Vec::new();
         for entry in fs::read_dir(path).map_err(|e| format!("--txs: {e}"))? {
             let file = entry.map_err(|e| format!("--txs: {e}"))?.path();
-            if file.extension().is_some_and(|x| x == "tx") && fs::symlink_metadata(&file).map(|m| m.is_file()).unwrap_or(false) {
+            if file.extension().is_some_and(|x| x == "tx")
+                && fs::symlink_metadata(&file).map(|m| m.is_file()).unwrap_or(false)
+            {
                 files.push(file);
             }
         }
@@ -1383,9 +1649,11 @@ fn read_pool(path: &Path) -> Result<Vec<(Option<PathBuf>, alloy_primitives::Byte
         }
         entries
     } else {
-        let list: Vec<String> =
-            serde_json::from_slice(&fs::read(path).map_err(|e| format!("--txs: {e}"))?).map_err(|e| format!("--txs: {e}"))?;
-        list.iter().map(|text| Ok((None, decode(text)?))).collect::<Result<Vec<_>, String>>()?
+        let list: Vec<String> = serde_json::from_slice(&fs::read(path).map_err(|e| format!("--txs: {e}"))?)
+            .map_err(|e| format!("--txs: {e}"))?;
+        list.iter()
+            .map(|text| Ok((None, decode(text)?)))
+            .collect::<Result<Vec<_>, String>>()?
     };
     if entries.len() > MAX_POOL_ENTRIES {
         return Err(format!("--txs holds more than {MAX_POOL_ENTRIES} entries"));
@@ -1409,7 +1677,9 @@ fn read_l1_fixture(path: &Path) -> Result<Vec<NativeBlockTransactions>, String> 
                 .as_array()
                 .ok_or("block transactions must be a list")?
                 .iter()
-                .map(|tx| hex::decode(tx.as_str().unwrap_or_default()).map_err(|_| "transaction is not hex".to_string()))
+                .map(|tx| {
+                    hex::decode(tx.as_str().unwrap_or_default()).map_err(|_| "transaction is not hex".to_string())
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(NativeBlockTransactions { height, transactions })
         })
@@ -1442,16 +1712,25 @@ fn read_l1_follower(dir: &Path) -> Result<Vec<NativeBlockTransactions>, String> 
 /// exists or before the first withdrawal), as settlement V3 publishes them.
 fn outbox_commitment(state: &dyn StateProvider) -> Result<WithdrawalCommitment, String> {
     let slot = |key: U256| -> Result<U256, String> {
-        Ok(state.storage(outbox(), B256::from(key)).map_err(|e| e.to_string())?.unwrap_or_default())
+        Ok(state
+            .storage(outbox(), B256::from(key))
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default())
     };
     let count = u64::try_from(slot(OUTBOX_NONCE_SLOT)?).map_err(|_| "outbox counter exceeds u64")?;
-    let root = if count == 0 { empty_withdrawal_root() } else { B256::from(slot(OUTBOX_ROOT_SLOT)?) };
+    let root = if count == 0 {
+        empty_withdrawal_root()
+    } else {
+        B256::from(slot(OUTBOX_ROOT_SLOT)?)
+    };
     Ok(WithdrawalCommitment { root, count })
 }
 
 /// Outbox withdrawals initiated in block `number`, from its receipts' logs.
-fn block_withdrawals(provider: &impl ReceiptProvider<Receipt = bloch_reth_execution::BlochRethReceipt>, number: u64)
-    -> Result<Vec<Withdrawal>, String> {
+fn block_withdrawals(
+    provider: &impl ReceiptProvider<Receipt = bloch_reth_execution::BlochRethReceipt>,
+    number: u64,
+) -> Result<Vec<Withdrawal>, String> {
     let receipts = provider
         .receipts_by_block(number.into())
         .map_err(|e| e.to_string())?
@@ -1482,7 +1761,10 @@ fn report_withdrawals(
     let withdrawals = block_withdrawals(provider, number)?;
     out["withdrawal_root"] = json!(hex::encode(commitment.root));
     out["withdrawal_count"] = json!(commitment.count);
-    out["withdrawals"] = json!(withdrawals.iter().map(|w| withdrawal_json(w, number)).collect::<Vec<_>>());
+    out["withdrawals"] = json!(withdrawals
+        .iter()
+        .map(|w| withdrawal_json(w, number))
+        .collect::<Vec<_>>());
     Ok(())
 }
 
@@ -1523,8 +1805,8 @@ fn withdrawal_proof(
     if withdrawals.iter().enumerate().any(|(i, (w, _))| w.nonce != i as u64) {
         return Err("outbox events are not consecutive from nonce 0".into());
     }
-    let tree = WithdrawalTree::new(withdrawals.iter().map(|(w, _)| w.leaf(chain_id)).collect())
-        .map_err(|e| e.to_string())?;
+    let tree =
+        WithdrawalTree::new(withdrawals.iter().map(|(w, _)| w.leaf(chain_id)).collect()).map_err(|e| e.to_string())?;
     let hash = factory
         .sealed_header(number)
         .map_err(|e| e.to_string())?
@@ -1535,30 +1817,43 @@ fn withdrawal_proof(
     if tree.commitment() != stored {
         return Err(format!(
             "rebuilt tree ({} / {}) differs from the outbox state after block {number} ({} / {})",
-            hex::encode(tree.root()), tree.count(), hex::encode(stored.root), stored.count
+            hex::encode(tree.root()),
+            tree.count(),
+            hex::encode(stored.root),
+            stored.count
         ));
     }
     if let Some(settled) = settled {
         if settled != stored {
             return Err(format!(
                 "settled withdrawal root {} / count {} differ from block {number} ({} / {})",
-                hex::encode(settled.root), settled.count, hex::encode(stored.root), stored.count
+                hex::encode(settled.root),
+                settled.count,
+                hex::encode(stored.root),
+                stored.count
             ));
         }
     }
     let (withdrawal, block) = withdrawals
         .get(usize::try_from(index).map_err(|_| "--index too large")?)
-        .ok_or_else(|| format!("withdrawal {index} does not exist after block {number} (count {})", stored.count))?;
+        .ok_or_else(|| {
+            format!(
+                "withdrawal {index} does not exist after block {number} (count {})",
+                stored.count
+            )
+        })?;
     let siblings = tree.proof(index).ok_or("no proof")?;
     let leaf = withdrawal.leaf(chain_id);
     if !verify_withdrawal_proof(leaf, index, &siblings, stored.root) {
         return Err("internal error: the proof does not verify".into());
     }
-    Ok(json!({"chain_id": chain_id, "number": number, "withdrawal_root": hex::encode(stored.root),
+    Ok(
+        json!({"chain_id": chain_id, "number": number, "withdrawal_root": hex::encode(stored.root),
               "withdrawal_count": stored.count, "index": index,
               "withdrawal": withdrawal_json(withdrawal, *block),
               "siblings": siblings.iter().map(hex::encode).collect::<Vec<_>>()})
-    .to_string())
+        .to_string(),
+    )
 }
 
 /// Upper bound on blocks scanned by one withdrawal proof (receipts of every
@@ -1581,8 +1876,12 @@ fn limits(args: &[String], protocol: SelectionLimits) -> Result<SelectionLimits,
     };
     let limits = SelectionLimits {
         max_gas: value("--max-gas")?.unwrap_or(protocol.max_gas),
-        max_bytes: value("--max-bytes")?.map_or(Ok(protocol.max_bytes), |v| usize::try_from(v).map_err(|_| "--max-bytes too large".to_string()))?,
-        max_transactions: value("--max-txs")?.map_or(Ok(protocol.max_transactions), |v| usize::try_from(v).map_err(|_| "--max-txs too large".to_string()))?,
+        max_bytes: value("--max-bytes")?.map_or(Ok(protocol.max_bytes), |v| {
+            usize::try_from(v).map_err(|_| "--max-bytes too large".to_string())
+        })?,
+        max_transactions: value("--max-txs")?.map_or(Ok(protocol.max_transactions), |v| {
+            usize::try_from(v).map_err(|_| "--max-txs too large".to_string())
+        })?,
     };
     if limits.max_gas > protocol.max_gas
         || limits.max_bytes > protocol.max_bytes

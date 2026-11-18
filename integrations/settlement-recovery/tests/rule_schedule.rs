@@ -17,9 +17,13 @@ use bloch_l2_evm::{
 };
 use bloch_pos_committee::{
     l2_settlement::Transaction as Settlement,
-    transition::{funded::ADMISSION_PQ_KEY_BYTES, FundingInput, L2DataAvailability, L2Deposit, PosTransaction, TransferOutput},
+    transition::{
+        funded::ADMISSION_PQ_KEY_BYTES, FundingInput, L2DataAvailability, L2Deposit, PosTransaction, TransferOutput,
+    },
 };
-use bloch_settlement_recovery::reconstruct::{derive_settled_blocks_with_reset, NativeBlockTransactions, ReconstructError};
+use bloch_settlement_recovery::reconstruct::{
+    derive_settled_blocks_with_reset, NativeBlockTransactions, ReconstructError,
+};
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use std::process::Command;
@@ -34,11 +38,18 @@ fn domain() -> String {
 
 /// The release rules once the owner has set the fee-sweep recipient; until then
 /// the rehearsal network, whose next rules sweep to the placeholder (agent 163 B-1).
-const RULES: &str = if MAINNET_NEXT_RULES_RELEASABLE { "mainnet" } else { "mainnet-rehearsal" };
+const RULES: &str = if MAINNET_NEXT_RULES_RELEASABLE {
+    "mainnet"
+} else {
+    "mainnet-rehearsal"
+};
 // Review R335-5: the rehearsal rules are compiled only with the `rehearsal-rules` feature. A tree without
 // the owner's recipient must run these tests with it; a tree with the recipient needs no feature.
 #[cfg(not(feature = "rehearsal-rules"))]
-const _: () = assert!(MAINNET_NEXT_RULES_RELEASABLE, "no fee-sweep recipient: run these tests with --features rehearsal-rules");
+const _: () = assert!(
+    MAINNET_NEXT_RULES_RELEASABLE,
+    "no fee-sweep recipient: run these tests with --features rehearsal-rules"
+);
 
 /// Review R335-5: a producer built without the `rehearsal-rules` feature (every release build) refuses the
 /// placeholder recipient's rules by name, before it opens or creates anything.
@@ -49,12 +60,25 @@ fn r335_5_a_release_producer_refuses_the_rehearsal_rules() {
     let db = root.path().join("db");
     let genesis = MAINNET_GENESIS_TIMESTAMP.to_string();
     let out = Command::new(BIN)
-        .args(["init", "--target", db.to_str().unwrap(), "--rules", "mainnet-rehearsal", "--domain", &domain(), "--genesis-time", &genesis])
+        .args([
+            "init",
+            "--target",
+            db.to_str().unwrap(),
+            "--rules",
+            "mainnet-rehearsal",
+            "--domain",
+            &domain(),
+            "--genesis-time",
+            &genesis,
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let error = String::from_utf8_lossy(&out.stderr);
-    assert!(error.contains("compiled only with the cargo feature rehearsal-rules"), "{error}");
+    assert!(
+        error.contains("compiled only with the cargo feature rehearsal-rules"),
+        "{error}"
+    );
     assert!(!db.exists(), "nothing was created");
 }
 
@@ -92,7 +116,10 @@ fn transfer(nonce: u64) -> String {
         max_priority_fee_per_gas: 1,
         ..Default::default()
     };
-    let signature: Signature = key().sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    let signature: Signature = key()
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .unwrap()
+        .into();
     hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
 }
 
@@ -100,10 +127,16 @@ fn deposit(seed: u8, to: Address, sats: u64) -> PosTransaction {
     PosTransaction::L2Deposit(L2Deposit {
         network_domain: [0x91; 32],
         funding_pubkey: vec![0x5a; ADMISSION_PQ_KEY_BYTES],
-        inputs: vec![FundingInput { txid: [seed; 32], vout: 0 }],
+        inputs: vec![FundingInput {
+            txid: [seed; 32],
+            vout: 0,
+        }],
         amount_sat: sats,
         recipient: to.into_array(),
-        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        change: TransferOutput {
+            value: 0,
+            script_hash: [0; 32],
+        },
         tx_bytes: 9_000,
         tip_millisat_per_gas: 0,
         signature: vec![1; 64],
@@ -114,11 +147,17 @@ fn da(number: u64, payload: Vec<u8>) -> PosTransaction {
     PosTransaction::L2DataAvailability(L2DataAvailability {
         network_domain: [0x91; 32],
         funding_pubkey: vec![0x5a; ADMISSION_PQ_KEY_BYTES],
-        inputs: vec![FundingInput { txid: [0xee; 32], vout: number as u32 }],
+        inputs: vec![FundingInput {
+            txid: [0xee; 32],
+            vout: number as u32,
+        }],
         l2_chain_id: CHAIN_ID,
         l2_block_number: number,
         payload,
-        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        change: TransferOutput {
+            value: 0,
+            script_hash: [0; 32],
+        },
         tx_bytes: 200_000,
         tip_millisat_per_gas: 0,
         signature: vec![1; 64],
@@ -160,7 +199,11 @@ fn mint(r: &Value) -> DepositMint {
 
 fn settlement(block: &Produced, inbox_count: u64) -> PosTransaction {
     let deposits: Vec<DepositMint> = block.records.iter().map(mint).collect();
-    let transactions: Vec<Bytes> = block.payload.as_deref().map(|p| decode_da_payload(p).unwrap()).unwrap_or_default();
+    let transactions: Vec<Bytes> = block
+        .payload
+        .as_deref()
+        .map(|p| decode_da_payload(p).unwrap())
+        .unwrap_or_default();
     let statement = SettlementStatementV3 {
         base: SettlementStatementV2 {
             network: B256::repeat_byte(1),
@@ -188,12 +231,19 @@ fn settlement(block: &Produced, inbox_count: u64) -> PosTransaction {
             body_commitment: B256::repeat_byte(11),
         },
         deposits_hash: deposits_hash(&deposits),
-        transactions_root: NodeBodyV2 { deposits: vec![], transactions: transactions.clone() }.transactions_root(),
+        transactions_root: NodeBodyV2 {
+            deposits: vec![],
+            transactions: transactions.clone(),
+        }
+        .transactions_root(),
         receipts_root: B256::repeat_byte(12),
         user_tx_count: transactions.len() as u64,
         withdrawal_root: block.withdrawals.0,
         withdrawal_count: block.withdrawals.1,
-        da_commitment: block.payload.as_deref().map_or(B256::ZERO, |p| da_commitment(CHAIN_ID, block.number, p)),
+        da_commitment: block
+            .payload
+            .as_deref()
+            .map_or(B256::ZERO, |p| da_commitment(CHAIN_ID, block.number, p)),
     };
     PosTransaction::L2SettlementAsync(Box::new(Settlement {
         proof_policy: [3; 32],
@@ -216,10 +266,22 @@ impl Chain {
         let genesis = produce(&["init", "--target", &db]).unwrap();
         let head = produce(&["head", "--target", &db]).unwrap();
         assert_eq!(head["rules"], "base");
-        Self { root, db, parent: h(&genesis, "hash"), parent_root: h(&head, "state_root") }
+        Self {
+            root,
+            db,
+            parent: h(&genesis, "hash"),
+            parent_root: h(&head, "state_root"),
+        }
     }
 
-    fn extend(&mut self, number: u64, rule_set: Option<&str>, records: Vec<Value>, consumed: (u64, u64), txs: &[String]) -> Result<Produced, String> {
+    fn extend(
+        &mut self,
+        number: u64,
+        rule_set: Option<&str>,
+        records: Vec<Value>,
+        consumed: (u64, u64),
+        txs: &[String],
+    ) -> Result<Produced, String> {
         // One repeated byte as ever for the short chains; the floor chains have several hundred blocks.
         let anchor = match u8::try_from(number).ok().and_then(|n| 0xa0u8.checked_add(n)) {
             Some(byte) => B256::repeat_byte(byte),
@@ -236,8 +298,21 @@ impl Chain {
         let slot = (100 * number).to_string();
         let (parent, anchor_hex) = (hex::encode(self.parent), hex::encode(anchor));
         let mut args = vec![
-            "extend", "--target", &self.db, "--parent", &parent, "--anchor", &anchor_hex, "--deposits",
-            deposits.to_str().unwrap(), "--txs", pool.to_str().unwrap(), "--timestamp-rule", RULE, "--anchor-slot", &slot,
+            "extend",
+            "--target",
+            &self.db,
+            "--parent",
+            &parent,
+            "--anchor",
+            &anchor_hex,
+            "--deposits",
+            deposits.to_str().unwrap(),
+            "--txs",
+            pool.to_str().unwrap(),
+            "--timestamp-rule",
+            RULE,
+            "--anchor-slot",
+            &slot,
         ];
         if let Some(rule_set) = rule_set {
             args.extend(["--rule-set", rule_set]);
@@ -246,10 +321,29 @@ impl Chain {
         assert_eq!(block["number"], number);
         let next = rule_set == Some("next") || block["rules"] == "next";
         assert_eq!(block["rules"], if next { "next" } else { "base" });
-        let spec = if next { ChainSpec::mainnet_next_or_rehearsal() } else { ChainSpec::mainnet_v1() };
+        let spec = if next {
+            ChainSpec::mainnet_next_or_rehearsal()
+        } else {
+            ChainSpec::mainnet_v1()
+        };
         let payload = (!txs.is_empty()).then(|| {
-            let out = self.root.path().join(format!("da-{number}-{}.hex", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-            produce(&["da", "--target", &self.db, "--number", &number.to_string(), "--out", out.to_str().unwrap()]).unwrap();
+            let out = self.root.path().join(format!(
+                "da-{number}-{}.hex",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            produce(&[
+                "da",
+                "--target",
+                &self.db,
+                "--number",
+                &number.to_string(),
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .unwrap();
             hex::decode(std::fs::read_to_string(&out).unwrap().trim()).unwrap()
         });
         let produced = Produced {
@@ -264,7 +358,10 @@ impl Chain {
             consumed,
             payload,
             configuration: configuration_commitment(&spec).unwrap(),
-            withdrawals: (h(&block, "withdrawal_root"), block["withdrawal_count"].as_u64().unwrap()),
+            withdrawals: (
+                h(&block, "withdrawal_root"),
+                block["withdrawal_count"].as_u64().unwrap(),
+            ),
         };
         (self.parent, self.parent_root) = (produced.hash, produced.state_root);
         Ok(produced)
@@ -277,7 +374,16 @@ impl Chain {
 
     fn export(&self, number: u64, label: &str) -> Value {
         let out = self.root.path().join(format!("artifact-{number}-{label}"));
-        produce(&["export", "--target", &self.db, "--number", &number.to_string(), "--out", out.to_str().unwrap()]).unwrap()
+        produce(&[
+            "export",
+            "--target",
+            &self.db,
+            "--number",
+            &number.to_string(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .unwrap()
     }
 }
 
@@ -294,11 +400,15 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     let mut chain = Chain::new();
     let d1 = deposit(0x11, sender(), 100_000_000);
     let d1_txid = d1.txid();
-    let record = |height: u64, txid: [u8; 32]| json!({"height": height, "tx_index": 0, "txid": hex::encode(txid), "vout": 1,
-        "sats": 100_000_000u64, "recipient": hex::encode(sender())});
+    let record = |height: u64, txid: [u8; 32]| {
+        json!({"height": height, "tx_index": 0, "txid": hex::encode(txid), "vout": 1,
+        "sats": 100_000_000u64, "recipient": hex::encode(sender())})
+    };
 
     // Base rules: a deposit, then user transactions in the block before the swap.
-    let b1 = chain.extend(1, Some("base"), vec![record(2, d1_txid)], (0, 1), &[]).unwrap();
+    let b1 = chain
+        .extend(1, Some("base"), vec![record(2, d1_txid)], (0, 1), &[])
+        .unwrap();
     let b2 = chain.extend(2, None, vec![], (1, 1), &[transfer(0)]).unwrap();
     assert!(produce(&["head", "--target", &chain.db]).unwrap()["next_rules_from"].is_null());
     chain.export(2, "base");
@@ -309,15 +419,43 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     let spool = chain.root.path().join("spool");
     std::fs::create_dir(&spool).unwrap();
     assert!(
-        produce(&["rewind", "--target", &chain.db, "--number", "2", "--hash", &hex::encode(in_flight.hash)]).unwrap_err().contains("not 2"),
+        produce(&[
+            "rewind",
+            "--target",
+            &chain.db,
+            "--number",
+            "2",
+            "--hash",
+            &hex::encode(in_flight.hash)
+        ])
+        .unwrap_err()
+        .contains("not 2"),
         "a rewind names the head"
     );
     assert!(
-        produce(&["rewind", "--target", &chain.db, "--number", "3", "--hash", &hex::encode(b2.hash)]).unwrap_err().contains("not the block"),
+        produce(&[
+            "rewind",
+            "--target",
+            &chain.db,
+            "--number",
+            "3",
+            "--hash",
+            &hex::encode(b2.hash)
+        ])
+        .unwrap_err()
+        .contains("not the block"),
         "a rewind names the head's hash"
     );
     let rewound = produce(&[
-        "rewind", "--target", &chain.db, "--number", "3", "--hash", &hex::encode(in_flight.hash), "--respool", spool.to_str().unwrap(),
+        "rewind",
+        "--target",
+        &chain.db,
+        "--number",
+        "3",
+        "--hash",
+        &hex::encode(in_flight.hash),
+        "--respool",
+        spool.to_str().unwrap(),
     ])
     .unwrap();
     assert_eq!(rewound["number"], 2);
@@ -326,7 +464,10 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     let entries: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).collect();
     assert_eq!(std::fs::read_to_string(&entries[0]).unwrap().trim(), transfer(1));
     let head = produce(&["head", "--target", &chain.db]).unwrap();
-    assert_eq!((head["number"].as_u64(), h(&head, "state_root")), (Some(2), parent_root));
+    assert_eq!(
+        (head["number"].as_u64(), h(&head, "state_root")),
+        (Some(2), parent_root)
+    );
     (chain.parent, chain.parent_root) = (parent, parent_root);
 
     // The same number under the next rules: another hash and state root, same receipts-relevant body.
@@ -338,7 +479,10 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     chain.export(3, "next");
 
     // The switch is one-way and every later process derives it from the database.
-    assert!(chain.extend(4, Some("base"), vec![], (1, 1), &[]).unwrap_err().contains("past the switch"));
+    assert!(chain
+        .extend(4, Some("base"), vec![], (1, 1), &[])
+        .unwrap_err()
+        .contains("past the switch"));
     let b4 = chain.extend(4, None, vec![], (1, 1), &[transfer(2)]).unwrap();
     chain.export(4, "next");
     chain.export(2, "base-again");
@@ -357,11 +501,25 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     ];
     l1_fixture(&d, &blocks);
     let rebuilt = chain.root.path().join("rebuilt");
-    let report = produce(&["reconstruct", "--target", rebuilt.to_str().unwrap(), "--l1", d.to_str().unwrap(), "--timestamp-rule", RULE]).unwrap();
+    let report = produce(&[
+        "reconstruct",
+        "--target",
+        rebuilt.to_str().unwrap(),
+        "--l1",
+        d.to_str().unwrap(),
+        "--timestamp-rule",
+        RULE,
+    ])
+    .unwrap();
     assert_eq!(report["settled"], 4, "{report}");
     assert_eq!(report["next_rules_from"], 3);
     assert_eq!(h(&report, "head"), b4.hash);
-    let rules: Vec<_> = report["blocks"].as_array().unwrap().iter().map(|b| b["rules"].as_str().unwrap()).collect();
+    let rules: Vec<_> = report["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["rules"].as_str().unwrap())
+        .collect();
     assert_eq!(rules, ["base", "base", "next", "next"]);
     let rebuilt_head = produce(&["head", "--target", rebuilt.to_str().unwrap()]).unwrap();
     assert_eq!(h(&rebuilt_head, "hash"), b4.hash);
@@ -376,9 +534,17 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     tampered[6] = (8, vec![wrong]);
     l1_fixture(&d, &tampered);
     let bad = chain.root.path().join("rebuilt-bad");
-    assert!(produce(&["reconstruct", "--target", bad.to_str().unwrap(), "--l1", d.to_str().unwrap(), "--timestamp-rule", RULE])
-        .unwrap_err()
-        .contains("unexpected configuration"));
+    assert!(produce(&[
+        "reconstruct",
+        "--target",
+        bad.to_str().unwrap(),
+        "--l1",
+        d.to_str().unwrap(),
+        "--timestamp-rule",
+        RULE
+    ])
+    .unwrap_err()
+    .contains("unexpected configuration"));
 
     // A block under the base rules after the next rules does not rebuild either.
     let mut late_base = b4;
@@ -387,13 +553,27 @@ fn a_chain_crosses_the_swap_rewinds_the_unsettled_head_and_rebuilds_from_l1() {
     tampered[7] = (9, vec![settlement(&late_base, 1)]);
     l1_fixture(&d, &tampered);
     let bad = chain.root.path().join("rebuilt-bad-2");
-    assert!(produce(&["reconstruct", "--target", bad.to_str().unwrap(), "--l1", d.to_str().unwrap(), "--timestamp-rule", RULE])
-        .unwrap_err()
-        .contains("unexpected configuration"));
+    assert!(produce(&[
+        "reconstruct",
+        "--target",
+        bad.to_str().unwrap(),
+        "--l1",
+        d.to_str().unwrap(),
+        "--timestamp-rule",
+        RULE
+    ])
+    .unwrap_err()
+    .contains("unexpected configuration"));
 
     // The next rule set's vaults hold the sweep code from the switch on.
-    assert_eq!(in_flight.configuration, configuration_commitment(&ChainSpec::mainnet_v1()).unwrap());
-    assert_eq!(b3.configuration, configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap());
+    assert_eq!(
+        in_flight.configuration,
+        configuration_commitment(&ChainSpec::mainnet_v1()).unwrap()
+    );
+    assert_eq!(
+        b3.configuration,
+        configuration_commitment(&ChainSpec::mainnet_next_or_rehearsal()).unwrap()
+    );
 }
 
 #[test]
@@ -403,21 +583,38 @@ fn a_rewound_chain_equals_a_chain_that_never_built_the_block() {
     let d1 = deposit(0x21, sender(), 100_000_000);
     let record = json!({"height": 2, "tx_index": 0, "txid": hex::encode(d1.txid()), "vout": 1, "sats": 100_000_000u64, "recipient": hex::encode(sender())});
     for chain in [&mut rewound, &mut straight] {
-        chain.extend(1, Some("base"), vec![record.clone()], (0, 1), &[]).unwrap();
+        chain
+            .extend(1, Some("base"), vec![record.clone()], (0, 1), &[])
+            .unwrap();
         chain.extend(2, Some("base"), vec![], (1, 1), &[transfer(0)]).unwrap();
     }
     // Several rounds, so a leftover index or trie node from the removed block would show.
     for _ in 0..3 {
         let (parent, root) = (rewound.parent, rewound.parent_root);
-        let doomed = rewound.extend(3, Some("base"), vec![], (1, 1), &[transfer(1), transfer(2)]).unwrap();
-        produce(&["rewind", "--target", &rewound.db, "--number", "3", "--hash", &hex::encode(doomed.hash)]).unwrap();
+        let doomed = rewound
+            .extend(3, Some("base"), vec![], (1, 1), &[transfer(1), transfer(2)])
+            .unwrap();
+        produce(&[
+            "rewind",
+            "--target",
+            &rewound.db,
+            "--number",
+            "3",
+            "--hash",
+            &hex::encode(doomed.hash),
+        ])
+        .unwrap();
         (rewound.parent, rewound.parent_root) = (parent, root);
     }
     let a = rewound.extend(3, Some("base"), vec![], (1, 1), &[transfer(1)]).unwrap();
-    let b = straight.extend(3, Some("base"), vec![], (1, 1), &[transfer(1)]).unwrap();
+    let b = straight
+        .extend(3, Some("base"), vec![], (1, 1), &[transfer(1)])
+        .unwrap();
     assert_eq!((a.hash, a.state_root), (b.hash, b.state_root));
     let a = rewound.extend(4, Some("next"), vec![], (1, 1), &[transfer(2)]).unwrap();
-    let b = straight.extend(4, Some("next"), vec![], (1, 1), &[transfer(2)]).unwrap();
+    let b = straight
+        .extend(4, Some("next"), vec![], (1, 1), &[transfer(2)])
+        .unwrap();
     assert_eq!((a.hash, a.state_root), (b.hash, b.state_root));
     assert_eq!(rewound.export(4, "a")["hash"], straight.export(4, "b")["hash"]);
     let address = hex::encode(sender());
@@ -434,7 +631,16 @@ fn a_rewind_of_the_first_next_block_forgets_the_switch() {
     let (parent, root) = (chain.parent, chain.parent_root);
     let first = chain.extend(2, Some("next"), vec![], (0, 0), &[]).unwrap();
     assert_eq!(produce(&["head", "--target", &chain.db]).unwrap()["next_rules_from"], 2);
-    produce(&["rewind", "--target", &chain.db, "--number", "2", "--hash", &hex::encode(first.hash)]).unwrap();
+    produce(&[
+        "rewind",
+        "--target",
+        &chain.db,
+        "--number",
+        "2",
+        "--hash",
+        &hex::encode(first.hash),
+    ])
+    .unwrap();
     assert!(produce(&["head", "--target", &chain.db]).unwrap()["next_rules_from"].is_null());
     (chain.parent, chain.parent_root) = (parent, root);
     let again = chain.extend(2, Some("base"), vec![], (0, 0), &[]).unwrap();
@@ -442,7 +648,10 @@ fn a_rewind_of_the_first_next_block_forgets_the_switch() {
 }
 
 fn native(height: u64, txs: Vec<PosTransaction>) -> NativeBlockTransactions {
-    NativeBlockTransactions { height, transactions: txs.iter().map(|t| t.canonical_bytes()).collect() }
+    NativeBlockTransactions {
+        height,
+        transactions: txs.iter().map(|t| t.canonical_bytes()).collect(),
+    }
 }
 
 fn bare(number: u64, parent: B256, root: B256, hash: u8) -> Produced {
@@ -481,24 +690,43 @@ fn a_head_reset_drops_the_discarded_tail_from_a_rebuild() {
         Err(ReconstructError::Successor { number: 2, .. })
     ));
     let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)).unwrap();
-    assert_eq!(derived.iter().map(|b| (b.number, b.header_hash)).collect::<Vec<_>>(), [(1, k.hash), (2, new.hash)]);
+    assert_eq!(
+        derived.iter().map(|b| (b.number, b.header_hash)).collect::<Vec<_>>(),
+        [(1, k.hash), (2, new.hash)]
+    );
 
     // Back to the genesis.
     let genesis_child = bare(1, g_hash, g_root, 0x51);
-    let blocks = vec![native(1, vec![settlement(&k, 0)]), native(2, vec![settlement(&bad, 0)]), native(3, vec![settlement(&genesis_child, 0)])];
+    let blocks = vec![
+        native(1, vec![settlement(&k, 0)]),
+        native(2, vec![settlement(&bad, 0)]),
+        native(3, vec![settlement(&genesis_child, 0)]),
+    ];
     let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(0)).unwrap();
-    assert_eq!(derived.iter().map(|b| b.header_hash).collect::<Vec<_>>(), [genesis_child.hash]);
+    assert_eq!(
+        derived.iter().map(|b| b.header_hash).collect::<Vec<_>>(),
+        [genesis_child.hash]
+    );
 
     // A settlement that names another parent than the kept block is not a reset.
     let foreign = bare(2, B256::repeat_byte(0x77), k.state_root, 0x42);
-    let blocks = vec![native(1, vec![settlement(&k, 0)]), native(2, vec![settlement(&bad, 0)]), native(3, vec![settlement(&foreign, 0)])];
+    let blocks = vec![
+        native(1, vec![settlement(&k, 0)]),
+        native(2, vec![settlement(&bad, 0)]),
+        native(3, vec![settlement(&foreign, 0)]),
+    ];
     assert!(matches!(
         derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)),
         Err(ReconstructError::Successor { number: 2, .. })
     ));
     // Nor is the normal next block at the kept height.
     let blocks = vec![native(1, vec![settlement(&k, 0)]), native(2, vec![settlement(&new, 0)])];
-    assert_eq!(derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)).unwrap().len(), 2);
+    assert_eq!(
+        derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1))
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 // ── Forced inclusion (candidate): the rebuild mirrors the native forced queue ──
@@ -507,12 +735,18 @@ fn forced_tx(seed: u8, envelope: Vec<u8>) -> PosTransaction {
     PosTransaction::L2ForcedTransaction(bloch_pos_committee::transition::L2ForcedTransaction {
         network_domain: [0x91; 32],
         funding_pubkey: vec![0x5a; ADMISSION_PQ_KEY_BYTES],
-        inputs: vec![FundingInput { txid: [seed; 32], vout: 0 }],
+        inputs: vec![FundingInput {
+            txid: [seed; 32],
+            vout: 0,
+        }],
         l2_chain_id: CHAIN_ID,
         gas_limit: 21_000,
         max_surcharge_sat: 0,
         envelope,
-        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        change: TransferOutput {
+            value: 0,
+            script_hash: [0; 32],
+        },
         tx_bytes: 9_000,
         tip_millisat_per_gas: 0,
         signature: vec![1; 64],
@@ -521,7 +755,9 @@ fn forced_tx(seed: u8, envelope: Vec<u8>) -> PosTransaction {
 
 /// `settlement` with the deposits slot bound to these consumed forced records.
 fn settlement_forced(block: &Produced, records: &[bloch_l2_evm::forced_inclusion::ForcedRecord]) -> PosTransaction {
-    let PosTransaction::L2SettlementAsync(mut tx) = settlement(block, 0) else { unreachable!() };
+    let PosTransaction::L2SettlementAsync(mut tx) = settlement(block, 0) else {
+        unreachable!()
+    };
     let mut statement = SettlementStatementV3::decode(&tx.statement).unwrap();
     statement.deposits_hash = bloch_l2_evm::forced_inclusion::inbox_hash(statement.deposits_hash, records);
     tx.statement = statement.encode().to_vec();
@@ -529,7 +765,9 @@ fn settlement_forced(block: &Produced, records: &[bloch_l2_evm::forced_inclusion
 }
 
 fn record_of(height: u64, tx: &PosTransaction) -> bloch_l2_evm::forced_inclusion::ForcedRecord {
-    let PosTransaction::L2ForcedTransaction(forced) = tx else { unreachable!() };
+    let PosTransaction::L2ForcedTransaction(forced) = tx else {
+        unreachable!()
+    };
     bloch_l2_evm::forced_inclusion::ForcedRecord {
         l1_height: height,
         l1_txid: tx.txid(),
@@ -554,18 +792,30 @@ fn a_rebuild_finds_the_forced_records_each_settlement_consumed() {
         native(3, vec![settlement_forced(&three, &[rb])]),
     ];
     let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None).unwrap();
-    let consumed: Vec<Vec<_>> = derived.iter().map(|d| d.forced.iter().map(|f| f.record).collect()).collect();
+    let consumed: Vec<Vec<_>> = derived
+        .iter()
+        .map(|d| d.forced.iter().map(|f| f.record).collect())
+        .collect();
     assert_eq!(consumed, vec![vec![], vec![ra], vec![rb]]);
     assert_eq!(derived[1].forced[0].envelope.as_ref(), &[0x02, 0xaa]);
     // Both at once.
-    let blocks = vec![native(1, vec![a.clone(), b.clone(), settlement_forced(&one, &[ra, rb])])];
+    let blocks = vec![native(
+        1,
+        vec![a.clone(), b.clone(), settlement_forced(&one, &[ra, rb])],
+    )];
     let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None).unwrap();
     assert_eq!(derived[0].forced.len(), 2);
     // Out of queue order, or a record that was never queued: refused.
     let blocks = vec![native(1, vec![a.clone(), b.clone(), settlement_forced(&one, &[rb])])];
-    assert!(matches!(derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None), Err(ReconstructError::Deposits { number: 1 })));
+    assert!(matches!(
+        derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None),
+        Err(ReconstructError::Deposits { number: 1 })
+    ));
     let blocks = vec![native(1, vec![settlement_forced(&one, &[ra])])];
-    assert!(matches!(derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None), Err(ReconstructError::Deposits { number: 1 })));
+    assert!(matches!(
+        derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, None),
+        Err(ReconstructError::Deposits { number: 1 })
+    ));
 }
 
 #[test]
@@ -583,7 +833,10 @@ fn a_head_reset_queues_again_the_forced_records_of_the_dropped_blocks() {
         native(3, vec![settlement_forced(&new, &[ra])]),
     ];
     let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)).unwrap();
-    assert_eq!(derived.iter().map(|b| b.header_hash).collect::<Vec<_>>(), [k.hash, new.hash]);
+    assert_eq!(
+        derived.iter().map(|b| b.header_hash).collect::<Vec<_>>(),
+        [k.hash, new.hash]
+    );
     assert_eq!(derived[1].forced.iter().map(|f| f.record).collect::<Vec<_>>(), vec![ra]);
 }
 
@@ -612,17 +865,49 @@ fn check_artifacts(chain: &Chain, number: u64, own: &ChainSpec, other: &ChainSpe
     let complete = chain.root.path().join(format!("floor-artifact-{number}"));
     let sparse = chain.root.path().join(format!("floor-artifact-{number}-sparse"));
     let n = number.to_string();
-    produce(&["export", "--target", &chain.db, "--number", &n, "--out", complete.to_str().unwrap()]).unwrap();
-    produce(&["export", "--target", &chain.db, "--number", &n, "--out", sparse.to_str().unwrap(), "--witness", "sparse"]).unwrap();
+    produce(&[
+        "export",
+        "--target",
+        &chain.db,
+        "--number",
+        &n,
+        "--out",
+        complete.to_str().unwrap(),
+    ])
+    .unwrap();
+    produce(&[
+        "export",
+        "--target",
+        &chain.db,
+        "--number",
+        &n,
+        "--out",
+        sparse.to_str().unwrap(),
+        "--witness",
+        "sparse",
+    ])
+    .unwrap();
     let bytes = std::fs::read(&complete).unwrap();
     let artifact = bloch_execution_artifact::ExecutionArtifact::decode(&bytes, own, MAINNET_DOMAIN).unwrap();
-    assert_eq!((artifact.header().number, artifact.header().base_fee_per_gas), (number, base_fee));
+    assert_eq!(
+        (artifact.header().number, artifact.header().base_fee_per_gas),
+        (number, base_fee)
+    );
     assert_eq!(artifact.context().base_fee_per_gas, base_fee);
-    assert!(bloch_execution_artifact::ExecutionArtifact::decode(&bytes, other, MAINNET_DOMAIN).is_err(), "block {number}: the other rule set");
+    assert!(
+        bloch_execution_artifact::ExecutionArtifact::decode(&bytes, other, MAINNET_DOMAIN).is_err(),
+        "block {number}: the other rule set"
+    );
     let bytes = std::fs::read(&sparse).unwrap();
     let artifact = bloch_execution_artifact::SparseExecutionArtifact::decode(&bytes, own, MAINNET_DOMAIN).unwrap();
-    assert_eq!((artifact.header().number, artifact.header().base_fee_per_gas), (number, base_fee));
-    assert!(bloch_execution_artifact::SparseExecutionArtifact::decode(&bytes, other, MAINNET_DOMAIN).is_err(), "block {number}: the other rule set (sparse)");
+    assert_eq!(
+        (artifact.header().number, artifact.header().base_fee_per_gas),
+        (number, base_fee)
+    );
+    assert!(
+        bloch_execution_artifact::SparseExecutionArtifact::decode(&bytes, other, MAINNET_DOMAIN).is_err(),
+        "block {number}: the other rule set (sparse)"
+    );
 }
 
 /// Rebuild the chain from L1 data alone and compare the head and the switch.
@@ -630,7 +915,16 @@ fn check_rebuild(chain: &Chain, blocks: &[Produced], l1: Vec<(u64, Vec<PosTransa
     let d = chain.root.path().join("floor-l1.json");
     l1_fixture(&d, &l1);
     let rebuilt = chain.root.path().join("floor-rebuilt");
-    let report = produce(&["reconstruct", "--target", rebuilt.to_str().unwrap(), "--l1", d.to_str().unwrap(), "--timestamp-rule", RULE]).unwrap();
+    let report = produce(&[
+        "reconstruct",
+        "--target",
+        rebuilt.to_str().unwrap(),
+        "--l1",
+        d.to_str().unwrap(),
+        "--timestamp-rule",
+        RULE,
+    ])
+    .unwrap();
     let last = blocks.last().unwrap();
     assert_eq!(report["settled"], last.number, "every block rebuilds");
     assert_eq!(report["next_rules_from"], next_from);
@@ -644,7 +938,10 @@ fn check_rebuild(chain: &Chain, blocks: &[Produced], l1: Vec<(u64, Vec<PosTransa
 fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_rebuilds() {
     let (base, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
     let floor = next.min_base_fee;
-    assert!(floor > 0 && base.min_base_fee == 0, "the floor is a next-rules addition");
+    assert!(
+        floor > 0 && base.min_base_fee == 0,
+        "the floor is a next-rules addition"
+    );
     let mut chain = Chain::new();
     let d1 = deposit(0x31, sender(), 100_000_000);
     let record = json!({"height": 2, "tx_index": 0, "txid": hex::encode(d1.txid()), "vout": 1, "sats": 100_000_000u64, "recipient": hex::encode(sender())});
@@ -658,7 +955,14 @@ fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_reb
     // Quiet blocks until the fee has been at the floor for a while. Each block's base fee is what the
     // NEXT rules compute from its parent; the producer's own report of the next fee agrees.
     let mut fees = chain.fees();
-    assert_eq!((u(&fees, "number"), fees["rules"].as_str(), fees["next_rules_from"].as_u64()), (2, Some("next"), Some(2)));
+    assert_eq!(
+        (
+            u(&fees, "number"),
+            fees["rules"].as_str(),
+            fees["next_rules_from"].as_u64()
+        ),
+        (2, Some("next"), Some(2))
+    );
     assert!(fees.get("next_base_fee_if_switching").is_none(), "{fees}");
     let (mut first_floored, mut first_clamped) = (None, None);
     let last = loop {
@@ -675,17 +979,25 @@ fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_reb
         if expected == floor && first_floored.is_none() {
             first_floored = Some(number);
         }
-        let block = chain.extend(number, None, vec![], (1, 1), &[]).unwrap_or_else(|e| panic!("block {number} (base fee {expected}): {e}"));
+        let block = chain
+            .extend(number, None, vec![], (1, 1), &[])
+            .unwrap_or_else(|e| panic!("block {number} (base fee {expected}): {e}"));
         blocks.push(block);
         fees = chain.fees();
-        assert_eq!((u(&fees, "number"), u(&fees, "base_fee"), u(&fees, "gas_used")), (number, expected, 0));
+        assert_eq!(
+            (u(&fees, "number"), u(&fees, "base_fee"), u(&fees, "gas_used")),
+            (number, expected, 0)
+        );
         if first_clamped.is_some_and(|first| number >= first + 3) {
             break number;
         }
         assert!(number < 700, "the fee reaches the floor in about 575 blocks");
     };
     let (first_floored, first_clamped) = (first_floored.unwrap(), first_clamped.unwrap());
-    assert!(first_floored > 500 && first_clamped >= first_floored, "floor at {first_floored}, first clamped step at {first_clamped}");
+    assert!(
+        first_floored > 500 && first_clamped >= first_floored,
+        "floor at {first_floored}, first clamped step at {first_clamped}"
+    );
     assert_eq!(u(&fees, "base_fee"), floor);
 
     // A user transaction at the floor: selected, included, and the fee stays at the floor after it.
@@ -693,8 +1005,21 @@ fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_reb
     std::fs::write(&pool, json!([transfer(0)]).to_string()).unwrap();
     let (parent, anchor) = (hex::encode(chain.parent), hex::encode(B256::repeat_byte(0x77)));
     let selected = produce(&[
-        "select", "--target", &chain.db, "--parent", &parent, "--anchor", &anchor, "--txs", pool.to_str().unwrap(),
-        "--timestamp-rule", RULE, "--anchor-slot", &(100 * (last + 1)).to_string(), "--min-tip-wei", "1",
+        "select",
+        "--target",
+        &chain.db,
+        "--parent",
+        &parent,
+        "--anchor",
+        &anchor,
+        "--txs",
+        pool.to_str().unwrap(),
+        "--timestamp-rule",
+        RULE,
+        "--anchor-slot",
+        &(100 * (last + 1)).to_string(),
+        "--min-tip-wei",
+        "1",
     ])
     .unwrap();
     assert_eq!(selected["included"].as_array().unwrap().len(), 1, "{selected}");
@@ -704,7 +1029,10 @@ fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_reb
     blocks.push(with_tx);
     blocks.push(chain.extend(last + 2, None, vec![], (1, 1), &[]).unwrap());
     let end = chain.fees();
-    assert_eq!((u(&end, "number"), u(&end, "base_fee"), u(&end, "next_base_fee")), (last + 2, floor, floor));
+    assert_eq!(
+        (u(&end, "number"), u(&end, "base_fee"), u(&end, "next_base_fee")),
+        (last + 2, floor, floor)
+    );
 
     // The prover's inputs: the last block above the floor, the first at it, the first clamped one,
     // the block with the transaction and the head.
@@ -717,7 +1045,16 @@ fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_reb
     }
     let bytes = {
         let out = chain.root.path().join("floor-artifact-above");
-        produce(&["export", "--target", &chain.db, "--number", &above.to_string(), "--out", out.to_str().unwrap()]).unwrap();
+        produce(&[
+            "export",
+            "--target",
+            &chain.db,
+            "--number",
+            &above.to_string(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .unwrap();
         std::fs::read(out).unwrap()
     };
     let artifact = bloch_execution_artifact::ExecutionArtifact::decode(&bytes, &next, MAINNET_DOMAIN).unwrap();
@@ -758,9 +1095,16 @@ fn f387_1_a_chain_switches_to_the_next_rules_under_the_base_fee_floor_and_rebuil
         assert_eq!(u(&fees, "next_base_fee"), expected);
         assert_eq!(u(&fees, "next_min_base_fee"), 0);
         assert_eq!(u(&fees, "next_base_fee_if_switching"), step(&next, &fees));
-        blocks.push(chain.extend(number, None, vec![], (1, 1), &[]).unwrap_or_else(|e| panic!("base block {number}: {e}")));
+        blocks.push(
+            chain
+                .extend(number, None, vec![], (1, 1), &[])
+                .unwrap_or_else(|e| panic!("base block {number}: {e}")),
+        );
         fees = chain.fees();
-        assert_eq!((u(&fees, "number"), u(&fees, "base_fee"), fees["rules"].as_str()), (number, expected, Some("base")));
+        assert_eq!(
+            (u(&fees, "number"), u(&fees, "base_fee"), fees["rules"].as_str()),
+            (number, expected, Some("base"))
+        );
         assert!(number < 700, "the fee falls under the floor in about 580 blocks");
     }
     let under = u(&fees, "base_fee");
@@ -769,19 +1113,40 @@ fn f387_1_a_chain_switches_to_the_next_rules_under_the_base_fee_floor_and_rebuil
 
     // L1 replaced the program: the next block is the first of the next rules, at the floor.
     let switch = u(&fees, "number") + 1;
-    blocks.push(chain.extend(switch, Some("next"), vec![], (1, 1), &[transfer(0)]).unwrap_or_else(|e| panic!("the switch block {switch}: {e}")));
-    assert!(blocks.last().unwrap().payload.is_some(), "the transaction is in the switch block");
+    blocks.push(
+        chain
+            .extend(switch, Some("next"), vec![], (1, 1), &[transfer(0)])
+            .unwrap_or_else(|e| panic!("the switch block {switch}: {e}")),
+    );
+    assert!(
+        blocks.last().unwrap().payload.is_some(),
+        "the transaction is in the switch block"
+    );
     fees = chain.fees();
-    assert_eq!((u(&fees, "base_fee"), fees["rules"].as_str(), fees["next_rules_from"].as_u64()), (floor, Some("next"), Some(switch)));
+    assert_eq!(
+        (
+            u(&fees, "base_fee"),
+            fees["rules"].as_str(),
+            fees["next_rules_from"].as_u64()
+        ),
+        (floor, Some("next"), Some(switch))
+    );
     for number in switch + 1..=switch + 3 {
         assert_eq!(u(&fees, "next_base_fee"), floor);
-        blocks.push(chain.extend(number, None, vec![], (1, 1), &[]).unwrap_or_else(|e| panic!("block {number} after the switch: {e}")));
+        blocks.push(
+            chain
+                .extend(number, None, vec![], (1, 1), &[])
+                .unwrap_or_else(|e| panic!("block {number} after the switch: {e}")),
+        );
         fees = chain.fees();
         assert_eq!((u(&fees, "number"), u(&fees, "base_fee")), (number, floor));
     }
 
     // The base rules are refused after the switch, as ever; the switch block and its neighbours export.
-    assert!(chain.extend(switch + 4, Some("base"), vec![], (1, 1), &[]).unwrap_err().contains("past the switch"));
+    assert!(chain
+        .extend(switch + 4, Some("base"), vec![], (1, 1), &[])
+        .unwrap_err()
+        .contains("past the switch"));
     check_artifacts(&chain, switch - 1, &base, &next, under);
     for number in [switch, switch + 1, switch + 3] {
         check_artifacts(&chain, number, &next, &base, floor);

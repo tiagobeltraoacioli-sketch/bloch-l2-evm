@@ -17,6 +17,9 @@
 //! re-verifies signatures or proofs.
 
 use alloy_primitives::{Address, Bytes, B256};
+use bloch_l2_evm::forced_inclusion::{
+    inbox_hash, ForcedRecord, ForcedTransaction, MAX_GAS_PER_SETTLEMENT, MAX_PER_SETTLEMENT,
+};
 use bloch_l2_evm::{
     data_availability::{da_commitment, decode_da_payload},
     deposits_hash,
@@ -24,7 +27,6 @@ use bloch_l2_evm::{
     withdrawal::WithdrawalCommitment,
     DepositMint, DepositProvenance,
 };
-use bloch_l2_evm::forced_inclusion::{inbox_hash, ForcedRecord, ForcedTransaction, MAX_GAS_PER_SETTLEMENT, MAX_PER_SETTLEMENT};
 use bloch_pos_committee::{l2_settlement::InboxRecord, transition::PosTransaction};
 use std::collections::BTreeMap;
 
@@ -105,17 +107,26 @@ impl std::fmt::Display for ReconstructError {
             Self::Statement { height } => write!(f, "native block {height} carries an unknown settlement statement"),
             Self::Chain { height, chain_id } => write!(f, "native block {height} settles L2 chain {chain_id}"),
             Self::Successor { height, number } => {
-                write!(f, "native block {height} settlement of L2 block {number} does not extend the previous one")
+                write!(
+                    f,
+                    "native block {height} settlement of L2 block {number} does not extend the previous one"
+                )
             }
             Self::Inbox { height, number } => {
-                write!(f, "native block {height} settlement of L2 block {number} consumes unknown inbox records")
+                write!(
+                    f,
+                    "native block {height} settlement of L2 block {number} consumes unknown inbox records"
+                )
             }
             Self::Deposits { number } => write!(f, "L2 block {number}: deposits do not match deposits_hash"),
             Self::DataUnavailable { number, commitment } => {
                 write!(f, "L2 block {number}: no L1 data-availability batch {commitment}")
             }
             Self::Batch { number } => write!(f, "L2 block {number}: DA batch is malformed or has the wrong size"),
-            Self::Withdrawals { number } => write!(f, "L2 block {number}: withdrawal root/count do not extend the previous ones"),
+            Self::Withdrawals { number } => write!(
+                f,
+                "L2 block {number}: withdrawal root/count do not extend the previous ones"
+            ),
         }
     }
 }
@@ -203,8 +214,10 @@ pub fn derive_settled_blocks_with_reset(
         let mut published_here: Vec<((u64, B256), Vec<u8>)> = Vec::new();
         let mut deposit_index = 0u32;
         for (index, raw) in block.transactions.iter().enumerate() {
-            let tx = PosTransaction::from_canonical_bytes(raw)
-                .map_err(|_| ReconstructError::Decode { height: block.height, index })?;
+            let tx = PosTransaction::from_canonical_bytes(raw).map_err(|_| ReconstructError::Decode {
+                height: block.height,
+                index,
+            })?;
             match &tx {
                 PosTransaction::L2Deposit(deposit) => {
                     inbox.push(InboxRecord {
@@ -245,7 +258,10 @@ pub fn derive_settled_blocks_with_reset(
                         (v2, None)
                     };
                     if base.chain_id != chain_id {
-                        return Err(ReconstructError::Chain { height: block.height, chain_id: base.chain_id });
+                        return Err(ReconstructError::Chain {
+                            height: block.height,
+                            chain_id: base.chain_id,
+                        });
                     }
                     let number = base.l2_number;
                     if let Some(kept) = reset.filter(|kept| number == kept + 1 && head_number > *kept) {
@@ -254,15 +270,26 @@ pub fn derive_settled_blocks_with_reset(
                             Some(0) => (genesis_hash, genesis_state_root, WithdrawalCommitment::empty()),
                             Some(k) => {
                                 let block = &out[k - 1];
-                                (block.header_hash, block.state_root, block.withdrawals.unwrap_or_else(WithdrawalCommitment::empty))
+                                (
+                                    block.header_hash,
+                                    block.state_root,
+                                    block.withdrawals.unwrap_or_else(WithdrawalCommitment::empty),
+                                )
                             }
-                            None => return Err(ReconstructError::Successor { height: block.height, number }),
+                            None => {
+                                return Err(ReconstructError::Successor {
+                                    height: block.height,
+                                    number,
+                                })
+                            }
                         };
                         if base.l2_parent_hash == hash && base.l2_previous_state_root == root {
                             // The native head reset puts records consumed above the kept block back at
                             // the front of the queue, in their order.
-                            let dropped: Vec<ForcedTransaction> =
-                                out[target.unwrap_or_default()..].iter().flat_map(|b| b.forced.iter().cloned()).collect();
+                            let dropped: Vec<ForcedTransaction> = out[target.unwrap_or_default()..]
+                                .iter()
+                                .flat_map(|b| b.forced.iter().cloned())
+                                .collect();
                             for f in dropped.into_iter().rev() {
                                 forced_pending.push_front(f);
                             }
@@ -275,18 +302,29 @@ pub fn derive_settled_blocks_with_reset(
                         || base.l2_parent_hash != head_hash
                         || base.l2_previous_state_root != head_root
                     {
-                        return Err(ReconstructError::Successor { height: block.height, number });
+                        return Err(ReconstructError::Successor {
+                            height: block.height,
+                            number,
+                        });
                     }
-                    let range = usize::try_from(base.consumed_start).ok().zip(usize::try_from(base.consumed_end).ok());
+                    let range = usize::try_from(base.consumed_start)
+                        .ok()
+                        .zip(usize::try_from(base.consumed_end).ok());
                     let records = range
                         .filter(|(start, end)| start <= end)
                         .and_then(|(start, end)| inbox.get(start..end))
-                        .ok_or(ReconstructError::Inbox { height: block.height, number })?;
+                        .ok_or(ReconstructError::Inbox {
+                            height: block.height,
+                            number,
+                        })?;
                     let deposits: Vec<DepositMint> = records.iter().map(mint).collect();
                     let mut transactions = Vec::new();
                     let mut consumed_forced = Vec::new();
                     if let Some(v3) = &v3 {
-                        let next = WithdrawalCommitment { root: v3.withdrawal_root, count: v3.withdrawal_count };
+                        let next = WithdrawalCommitment {
+                            root: v3.withdrawal_root,
+                            count: v3.withdrawal_count,
+                        };
                         if next.count < head_withdrawals.count
                             || (next.count == head_withdrawals.count) != (next.root == head_withdrawals.root)
                         {
@@ -315,14 +353,22 @@ pub fn derive_settled_blocks_with_reset(
                             consumed_forced = forced_pending.drain(..n).collect();
                         }
                         if v3.user_tx_count > 0 {
-                            let payload = batches.get(&(number, v3.da_commitment)).ok_or(
-                                ReconstructError::DataUnavailable { number, commitment: v3.da_commitment },
-                            )?;
+                            let payload =
+                                batches
+                                    .get(&(number, v3.da_commitment))
+                                    .ok_or(ReconstructError::DataUnavailable {
+                                        number,
+                                        commitment: v3.da_commitment,
+                                    })?;
                             // Defensive: the map key is the commitment of these bytes.
                             if da_commitment(chain_id, number, payload) != v3.da_commitment {
-                                return Err(ReconstructError::DataUnavailable { number, commitment: v3.da_commitment });
+                                return Err(ReconstructError::DataUnavailable {
+                                    number,
+                                    commitment: v3.da_commitment,
+                                });
                             }
-                            transactions = decode_da_payload(payload).map_err(|_| ReconstructError::Batch { number })?;
+                            transactions =
+                                decode_da_payload(payload).map_err(|_| ReconstructError::Batch { number })?;
                             if transactions.len() as u64 != v3.user_tx_count {
                                 return Err(ReconstructError::Batch { number });
                             }
@@ -343,7 +389,10 @@ pub fn derive_settled_blocks_with_reset(
                         deposits_hash: v3.map(|v| v.deposits_hash),
                         transactions_root: v3.map(|v| v.transactions_root),
                         da_commitment: v3.map_or(B256::ZERO, |v| v.da_commitment),
-                        withdrawals: v3.map(|v| WithdrawalCommitment { root: v.withdrawal_root, count: v.withdrawal_count }),
+                        withdrawals: v3.map(|v| WithdrawalCommitment {
+                            root: v.withdrawal_root,
+                            count: v.withdrawal_count,
+                        }),
                         forced: consumed_forced,
                     });
                     (head_hash, head_root, head_number) = (base.l2_header_hash, base.l2_state_root, number);

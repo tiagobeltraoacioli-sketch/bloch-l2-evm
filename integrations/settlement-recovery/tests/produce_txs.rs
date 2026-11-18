@@ -237,38 +237,121 @@ fn sign_tx_transfers_and_withdraws_from_a_development_key() {
     )
     .unwrap();
     let parent = genesis["hash"].as_str().unwrap();
-    let one = produce(&["extend", "--target", db_s, "--parent", parent, "--anchor", &"ab".repeat(32),
-                        "--deposits", deposits.to_str().unwrap()])
+    let one = produce(&[
+        "extend",
+        "--target",
+        db_s,
+        "--parent",
+        parent,
+        "--anchor",
+        &"ab".repeat(32),
+        "--deposits",
+        deposits.to_str().unwrap(),
+    ])
     .unwrap();
     let account = produce(&["account", "--target", db_s, "--address", &hex::encode(sender)]).unwrap();
-    assert_eq!((account["balance_sats"].as_str(), account["nonce"].as_u64()), (Some("20000000000"), Some(0)));
+    assert_eq!(
+        (account["balance_sats"].as_str(), account["nonce"].as_u64()),
+        (Some("20000000000"), Some(0))
+    );
 
     let out = |name: &str| pool.join(name).to_str().unwrap().to_string();
     let recipient = "cd".repeat(32);
-    let transfer = produce(&["sign-tx", "--key", key_s, "--nonce", "0", "--to", &"55".repeat(20),
-                             "--value-wei", "1000", "--out", &out("0.tx")])
+    let transfer = produce(&[
+        "sign-tx",
+        "--key",
+        key_s,
+        "--nonce",
+        "0",
+        "--to",
+        &"55".repeat(20),
+        "--value-wei",
+        "1000",
+        "--out",
+        &out("0.tx"),
+    ])
     .unwrap();
     assert_eq!(transfer["from"], hex::encode(sender));
-    produce(&["sign-tx", "--key", key_s, "--nonce", "1", "--withdraw-to", &recipient, "--sats", "5000000000",
-              "--out", &out("1.tx")])
+    produce(&[
+        "sign-tx",
+        "--key",
+        key_s,
+        "--nonce",
+        "1",
+        "--withdraw-to",
+        &recipient,
+        "--sats",
+        "5000000000",
+        "--out",
+        &out("1.tx"),
+    ])
     .unwrap();
     // The outbox minimum and exclusive destinations are enforced before signing.
-    assert!(produce(&["sign-tx", "--key", key_s, "--nonce", "2", "--withdraw-to", &recipient, "--sats", "10",
-                      "--out", &out("2.tx")])
+    assert!(produce(&[
+        "sign-tx",
+        "--key",
+        key_s,
+        "--nonce",
+        "2",
+        "--withdraw-to",
+        &recipient,
+        "--sats",
+        "10",
+        "--out",
+        &out("2.tx")
+    ])
     .unwrap_err()
     .contains("minimum withdrawal"));
-    assert!(produce(&["sign-tx", "--key", key_s, "--nonce", "2", "--to", &"55".repeat(20), "--value-wei", "1",
-                      "--withdraw-to", &recipient, "--sats", "1000000", "--out", &out("2.tx")])
+    assert!(produce(&[
+        "sign-tx",
+        "--key",
+        key_s,
+        "--nonce",
+        "2",
+        "--to",
+        &"55".repeat(20),
+        "--value-wei",
+        "1",
+        "--withdraw-to",
+        &recipient,
+        "--sats",
+        "1000000",
+        "--out",
+        &out("2.tx")
+    ])
     .is_err());
     // An existing output is never overwritten.
-    assert!(produce(&["sign-tx", "--key", key_s, "--nonce", "0", "--to", &"55".repeat(20), "--value-wei", "1",
-                      "--out", &out("0.tx")])
+    assert!(produce(&[
+        "sign-tx",
+        "--key",
+        key_s,
+        "--nonce",
+        "0",
+        "--to",
+        &"55".repeat(20),
+        "--value-wei",
+        "1",
+        "--out",
+        &out("0.tx")
+    ])
     .is_err());
 
-    let two = produce(&["extend", "--target", db_s, "--parent", one["hash"].as_str().unwrap(), "--anchor",
-                        &"cd".repeat(32), "--txs", pool_s])
+    let two = produce(&[
+        "extend",
+        "--target",
+        db_s,
+        "--parent",
+        one["hash"].as_str().unwrap(),
+        "--anchor",
+        &"cd".repeat(32),
+        "--txs",
+        pool_s,
+    ])
     .unwrap();
-    assert_eq!((two["transactions"].as_u64(), two["withdrawal_count"].as_u64()), (Some(2), Some(1)));
+    assert_eq!(
+        (two["transactions"].as_u64(), two["withdrawal_count"].as_u64()),
+        (Some(2), Some(1))
+    );
     assert_eq!(two["withdrawals"][0]["l1_recipient"], recipient);
     assert_eq!(two["withdrawals"][0]["sats"], 5_000_000_000u64);
     let account = produce(&["account", "--target", db_s, "--address", &hex::encode(sender)]).unwrap();
@@ -278,7 +361,9 @@ fn sign_tx_transfers_and_withdraws_from_a_development_key() {
     assert!(spool(&pool).is_empty());
 
     std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o640)).unwrap();
-    assert!(produce(&["address", "--key", key_s]).unwrap_err().contains("owner only"));
+    assert!(produce(&["address", "--key", key_s])
+        .unwrap_err()
+        .contains("owner only"));
 }
 
 fn signed_by(seed: u8, nonce: u64, to: TxKind, input: Vec<u8>, tip: u128) -> String {
@@ -293,7 +378,10 @@ fn signed_by(seed: u8, nonce: u64, to: TxKind, input: Vec<u8>, tip: u128) -> Str
         max_priority_fee_per_gas: tip,
         ..Default::default()
     };
-    let signature: Signature = key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    let signature: Signature = key
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .unwrap()
+        .into();
     hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
 }
 
@@ -329,8 +417,25 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     let anchor = "ab".repeat(32);
     // Block 1: the deposits, and a contract whose only code is SSTORE(calldata[32..64], calldata[0..32]).
     let init = hex::decode("67600035602035550060005260086018f3").unwrap();
-    std::fs::write(pool.join("deploy.tx"), signed_by(seeds[0], 0, TxKind::Create, init, 30 * GWEI)).unwrap();
-    let one = produce(&["extend", "--target", db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", pool_s]).unwrap();
+    std::fs::write(
+        pool.join("deploy.tx"),
+        signed_by(seeds[0], 0, TxKind::Create, init, 30 * GWEI),
+    )
+    .unwrap();
+    let one = produce(&[
+        "extend",
+        "--target",
+        db_s,
+        "--parent",
+        &parent,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        deposits.to_str().unwrap(),
+        "--txs",
+        pool_s,
+    ])
+    .unwrap();
     assert_eq!(one["transactions"], 1, "{one}");
     let head = one["hash"].as_str().unwrap().to_string();
     let contract = address_of(seeds[0]).create(0);
@@ -343,19 +448,40 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     let empty = root.path().join("empty.json");
     std::fs::write(&empty, "[]").unwrap();
     let select = |extra: &[&str]| {
-        let mut args = vec!["select", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(), "--txs", pool_s];
+        let mut args = vec![
+            "select",
+            "--target",
+            db_s,
+            "--parent",
+            &head,
+            "--anchor",
+            &anchor,
+            "--deposits",
+            empty.to_str().unwrap(),
+            "--txs",
+            pool_s,
+        ];
         args.extend_from_slice(extra);
         produce(&args).unwrap()
     };
     // Nine senders write slot 5, each at a lower tip, every tip below the price of one new slot.
     for (i, seed) in seeds[1..].iter().enumerate() {
-        let raw = signed_by(*seed, 0, TxKind::Call(contract), store(1 + i as u8, 5), (9 - i as u128) * GWEI);
+        let raw = signed_by(
+            *seed,
+            0,
+            TxKind::Call(contract),
+            store(1 + i as u8, 5),
+            (9 - i as u128) * GWEI,
+        );
         std::fs::write(pool.join(format!("chain-{i}.tx")), raw).unwrap();
     }
     let unpriced = select(&[]);
     assert_eq!(unpriced["included"].as_array().unwrap().len(), 9);
     assert!(unpriced.get("unpaid").is_none());
-    assert_eq!(unpriced["tx_stats"][0]["fresh_slots"][0][1], 1, "the first writer creates the slot");
+    assert_eq!(
+        unpriced["tx_stats"][0]["fresh_slots"][0][1], 1,
+        "the first writer creates the slot"
+    );
     assert_eq!(unpriced["tx_stats"][1]["fresh_slots"].as_array().unwrap().len(), 0);
     // With the price, judged inside the selection: each writer would create the slot (the ones before it were
     // left out), none pays, all nine are left out in one pass.
@@ -365,12 +491,29 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     assert_eq!(priced["not_judged"].as_array().unwrap().len(), 0);
     assert_eq!(priced["write_price"]["passes"], 1);
     assert_eq!(priced["write_price"]["wasted_covered_gas"], 0);
-    let mut left: Vec<&str> = priced["unpaid"].as_array().unwrap().iter().map(|t| t["hash"].as_str().unwrap()).collect();
-    let mut chain: Vec<&str> = unpriced["included"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+    let mut left: Vec<&str> = priced["unpaid"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["hash"].as_str().unwrap())
+        .collect();
+    let mut chain: Vec<&str> = unpriced["included"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
     left.sort_unstable();
     chain.sort_unstable();
-    assert_eq!(left, chain, "the nine writers, in the seed's order (senders without credit are not ordered by tip)");
-    assert!(priced["unpaid"].as_array().unwrap().iter().all(|t| t["own_doing"] == true && t["covered"] == false));
+    assert_eq!(
+        left, chain,
+        "the nine writers, in the seed's order (senders without credit are not ordered by tip)"
+    );
+    assert!(priced["unpaid"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["own_doing"] == true && t["covered"] == false));
     assert_eq!(priced["tx_stats"].as_array().unwrap().len(), 0);
     // An exempt sender pays no write price: it creates the slot and the eight behind it add none.
     let first = hex::encode(address_of(seeds[1]));
@@ -379,10 +522,23 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     assert_eq!(exempt["unpaid"].as_array().unwrap().len(), 0);
     // A payer ahead of the chain creates the slot; nobody behind it owes anything. It is ahead because its sender
     // has paid fees before (credit); senders without credit are ordered by the block's seed, not by the tip they claim.
-    std::fs::write(pool.join("payer.tx"), signed_by(seeds[0], 1, TxKind::Call(contract), store(77, 5), 30 * GWEI)).unwrap();
+    std::fs::write(
+        pool.join("payer.tx"),
+        signed_by(seeds[0], 1, TxKind::Call(contract), store(77, 5), 30 * GWEI),
+    )
+    .unwrap();
     let credits = root.path().join("credits.json");
-    std::fs::write(&credits, serde_json::json!({hex::encode(address_of(seeds[0])): "1000000000000000000"}).to_string()).unwrap();
-    let paid = select(&["--fresh-slot-price-wei", PRICE, "--write-credits", credits.to_str().unwrap()]);
+    std::fs::write(
+        &credits,
+        serde_json::json!({hex::encode(address_of(seeds[0])): "1000000000000000000"}).to_string(),
+    )
+    .unwrap();
+    let paid = select(&[
+        "--fresh-slot-price-wei",
+        PRICE,
+        "--write-credits",
+        credits.to_str().unwrap(),
+    ]);
     assert_eq!(paid["included"].as_array().unwrap().len(), 10, "{paid}");
     assert_eq!(paid["unpaid"].as_array().unwrap().len(), 0);
     assert_eq!(paid["write_price"]["passes"], 1);
@@ -391,21 +547,56 @@ fn write_price_leaves_a_whole_chain_of_non_payers_pending() {
     let seeded = select(&["--fresh-slot-price-wei", PRICE]);
     let included = seeded["included"].as_array().unwrap().len();
     assert_eq!(included + seeded["unpaid"].as_array().unwrap().len(), 10, "{seeded}");
-    assert!(included >= 1 && seeded["unpaid"].as_array().unwrap().iter().all(|t| t["own_doing"] == true));
+    assert!(
+        included >= 1
+            && seeded["unpaid"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["own_doing"] == true)
+    );
     std::fs::remove_file(pool.join("payer.tx")).unwrap();
     // A non-payer is not refused for what an earlier non-payer did: an unpaid creator of slot 6 goes first, and
     // the payer of slot 6 behind it is judged on the block without it.
-    std::fs::write(pool.join("other-unpaid.tx"), signed_by(seeds[0], 1, TxKind::Call(contract), store(1, 6), 20 * GWEI)).unwrap();
+    std::fs::write(
+        pool.join("other-unpaid.tx"),
+        signed_by(seeds[0], 1, TxKind::Call(contract), store(1, 6), 20 * GWEI),
+    )
+    .unwrap();
     let mixed = select(&["--fresh-slot-price-wei", PRICE]);
     assert_eq!(mixed["unpaid"].as_array().unwrap().len(), 10, "{mixed}");
     assert_eq!(mixed["included"].as_array().unwrap().len(), 0);
     std::fs::remove_file(pool.join("other-unpaid.tx")).unwrap();
     // extend with the price builds the block without them and keeps their files; without --txs the flag is refused.
-    let err = produce(&["extend", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--fresh-slot-price-wei", PRICE]);
+    let err = produce(&[
+        "extend",
+        "--target",
+        db_s,
+        "--parent",
+        &head,
+        "--anchor",
+        &anchor,
+        "--fresh-slot-price-wei",
+        PRICE,
+    ]);
     assert!(err.unwrap_err().contains("require --txs"));
     let files_before = spool(&pool);
-    let two = produce(&["extend", "--target", db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(),
-                        "--txs", pool_s, "--fresh-slot-price-wei", PRICE]).unwrap();
+    let two = produce(&[
+        "extend",
+        "--target",
+        db_s,
+        "--parent",
+        &head,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        empty.to_str().unwrap(),
+        "--txs",
+        pool_s,
+        "--fresh-slot-price-wei",
+        PRICE,
+    ])
+    .unwrap();
     assert_eq!(two["transactions"], 0, "{two}");
     assert_eq!(two["unpaid"].as_array().unwrap().len(), 9);
     assert_eq!(two["not_judged"].as_array().unwrap().len(), 0);
@@ -432,32 +623,66 @@ fn adversarial(non_payers: usize, chain: bool, honest: usize, honest_calls: usiz
     let (db, pool) = (root.path().join("db"), root.path().join("pool"));
     std::fs::create_dir(&pool).unwrap();
     let (db_s, pool_s) = (db.to_str().unwrap().to_string(), pool.to_str().unwrap().to_string());
-    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let key_of = |i: usize| {
         let mut seed = [9u8; 32];
         seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
         SigningKey::from_bytes((&seed).into()).unwrap()
     };
     let sign = |i: usize, nonce: u64, to: TxKind, input: Vec<u8>, value: u64, gas: u64, tip: u128| {
-        let tx = TxEip1559 { chain_id: 700_771, nonce, to, input: input.into(), value: U256::from(value), gas_limit: gas,
-                             max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
-        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let tx = TxEip1559 {
+            chain_id: 700_771,
+            nonce,
+            to,
+            input: input.into(),
+            value: U256::from(value),
+            gas_limit: gas,
+            max_fee_per_gas: 200_000_000_000,
+            max_priority_fee_per_gas: tip,
+            ..Default::default()
+        };
+        let signature: Signature = key_of(i)
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
     };
     let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
     let total = non_payers + honest + honest_calls + 1;
     let deposits = root.path().join("deposits.json");
     let mints: Vec<_> = (0..total)
-        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
-                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .map(|i| {
+            serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))})
+        })
         .collect();
     std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
     let anchor = "ab".repeat(32);
     let deployer = total - 1;
     // SSTORE(calldata[32..64], calldata[0..32])
     let init = hex::decode("67600035602035550060005260086018f3").unwrap();
-    std::fs::write(pool.join("deploy.tx"), sign(deployer, 0, TxKind::Create, init, 0, 200_000, 30 * GWEI)).unwrap();
-    let one = produce(&["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", &pool_s]).unwrap();
+    std::fs::write(
+        pool.join("deploy.tx"),
+        sign(deployer, 0, TxKind::Create, init, 0, 200_000, 30 * GWEI),
+    )
+    .unwrap();
+    let one = produce(&[
+        "extend",
+        "--target",
+        &db_s,
+        "--parent",
+        &parent,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        deposits.to_str().unwrap(),
+        "--txs",
+        &pool_s,
+    ])
+    .unwrap();
     assert_eq!(one["transactions"], 1, "{one}");
     let head = one["hash"].as_str().unwrap().to_string();
     let contract = address(deployer).create(0);
@@ -471,24 +696,70 @@ fn adversarial(non_payers: usize, chain: bool, honest: usize, honest_calls: usiz
     for i in 0..non_payers {
         let slot = if chain { 1_000_000 } else { 1_000 + i as u64 };
         let tip = 3_900_000_000 - (i as u128);
-        std::fs::write(pool.join(format!("np-{i}.tx")), sign(i, 0, TxKind::Call(contract), store(1 + i as u64, slot), 0, 60_000, tip)).unwrap();
+        std::fs::write(
+            pool.join(format!("np-{i}.tx")),
+            sign(i, 0, TxKind::Call(contract), store(1 + i as u64, slot), 0, 60_000, tip),
+        )
+        .unwrap();
     }
     // Honest users at the decided maximum tip, 3 gwei, behind every non-payer: plain transfers, and contract calls
     // that add no slot (they store zero) and so owe no write price.
     for i in 0..honest {
-        std::fs::write(pool.join(format!("honest-{i}.tx")), sign(non_payers + i, 0, TxKind::Call(Address::repeat_byte(0x55)), vec![], 1_000, 21_000, 3 * GWEI)).unwrap();
+        std::fs::write(
+            pool.join(format!("honest-{i}.tx")),
+            sign(
+                non_payers + i,
+                0,
+                TxKind::Call(Address::repeat_byte(0x55)),
+                vec![],
+                1_000,
+                21_000,
+                3 * GWEI,
+            ),
+        )
+        .unwrap();
     }
     for i in 0..honest_calls {
-        std::fs::write(pool.join(format!("call-{i}.tx")), sign(non_payers + honest + i, 0, TxKind::Call(contract), store(0, 500 + i as u64), 0, 60_000, 3 * GWEI - 1 - i as u128)).unwrap();
+        std::fs::write(
+            pool.join(format!("call-{i}.tx")),
+            sign(
+                non_payers + honest + i,
+                0,
+                TxKind::Call(contract),
+                store(0, 500 + i as u64),
+                0,
+                60_000,
+                3 * GWEI - 1 - i as u128,
+            ),
+        )
+        .unwrap();
     }
     let empty = root.path().join("empty.json");
     std::fs::write(&empty, "[]").unwrap();
-    Adversarial { db: db_s, pool: pool_s, head, empty: empty.to_str().unwrap().to_string(), _root: root }
+    Adversarial {
+        db: db_s,
+        pool: pool_s,
+        head,
+        empty: empty.to_str().unwrap().to_string(),
+        _root: root,
+    }
 }
 
 fn adversarial_select(world: &Adversarial, extra: &[&str]) -> (Value, std::time::Duration) {
     let anchor = "ab".repeat(32);
-    let mut args = vec!["select", "--target", &world.db, "--parent", &world.head, "--anchor", &anchor, "--deposits", &world.empty, "--txs", &world.pool];
+    let mut args = vec![
+        "select",
+        "--target",
+        &world.db,
+        "--parent",
+        &world.head,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        &world.empty,
+        "--txs",
+        &world.pool,
+    ];
     args.extend_from_slice(extra);
     let started = std::time::Instant::now();
     let report = produce(&args).unwrap();
@@ -503,23 +774,58 @@ fn adversarial_select(world: &Adversarial, extra: &[&str]) -> (Value, std::time:
 fn eight_non_payers_ahead_in_tip_order_do_not_empty_the_block() {
     let world = adversarial(8, false, 20, 10);
     let (priced, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE]);
-    assert_eq!(priced["unpaid"].as_array().unwrap().len(), 8, "{}", priced["write_price"]);
+    assert_eq!(
+        priced["unpaid"].as_array().unwrap().len(),
+        8,
+        "{}",
+        priced["write_price"]
+    );
     assert_eq!(priced["not_judged"].as_array().unwrap().len(), 0);
-    assert_eq!(priced["included"].as_array().unwrap().len(), 30, "every honest transfer and paid call is in the block");
+    assert_eq!(
+        priced["included"].as_array().unwrap().len(),
+        30,
+        "every honest transfer and paid call is in the block"
+    );
     // Nothing in the block adds a slot it does not pay for.
     for t in priced["tx_stats"].as_array().unwrap() {
-        let fresh: u64 = t["fresh_slots"].as_array().unwrap().iter().map(|pair| pair[1].as_u64().unwrap()).sum();
-        let paid = t["gas_used"].as_u64().unwrap() as u128 * t["effective_tip"].as_str().unwrap().parse::<u128>().unwrap();
+        let fresh: u64 = t["fresh_slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| pair[1].as_u64().unwrap())
+            .sum();
+        let paid =
+            t["gas_used"].as_u64().unwrap() as u128 * t["effective_tip"].as_str().unwrap().parse::<u128>().unwrap();
         assert!(paid >= fresh as u128 * 200_000_000_000_000, "{t}");
     }
     // extend builds exactly that block and keeps the non-payers' files.
     let anchor = "ab".repeat(32);
-    let block = produce(&["extend", "--target", &world.db, "--parent", &world.head, "--anchor", &anchor, "--deposits", &world.empty,
-                          "--txs", &world.pool, "--fresh-slot-price-wei", ADV_PRICE]).unwrap();
+    let block = produce(&[
+        "extend",
+        "--target",
+        &world.db,
+        "--parent",
+        &world.head,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        &world.empty,
+        "--txs",
+        &world.pool,
+        "--fresh-slot-price-wei",
+        ADV_PRICE,
+    ])
+    .unwrap();
     assert_eq!(block["transactions"], 30, "{block}");
     assert_eq!(block["included"], priced["included"]);
     assert_eq!(block["unpaid"].as_array().unwrap().len(), 8);
-    assert_eq!(spool(Path::new(&world.pool)).iter().filter(|name| name.starts_with("np-")).count(), 8);
+    assert_eq!(
+        spool(Path::new(&world.pool))
+            .iter()
+            .filter(|name| name.starts_with("np-"))
+            .count(),
+        8
+    );
 }
 
 /// Review R308-3P-2, timed (the numbers are recorded in docs/SEQUENCER-POLICY-V2.md): 8, 64 and 400 non-payers
@@ -532,12 +838,17 @@ fn many_non_payers_at_a_high_tip_cost_one_pass_and_serve_every_payer() {
         let world = adversarial(count, chain, 20, 10);
         let (plain, plain_time) = adversarial_select(&world, &[]);
         // The honest senders have paid fees before (credit): they are covered and judged first, by tip.
-        let honest: Vec<String> = plain["tx_stats"].as_array().unwrap().iter()
+        let honest: Vec<String> = plain["tx_stats"]
+            .as_array()
+            .unwrap()
+            .iter()
             .filter(|t| t["effective_tip"].as_str().unwrap().parse::<u128>().unwrap() < 3_800_000_000)
-            .map(|t| t["sender"].as_str().unwrap().to_string()).collect();
+            .map(|t| t["sender"].as_str().unwrap().to_string())
+            .collect();
         let entries: Vec<(&String, u128)> = honest.iter().map(|k| (k, 1_000_000_000_000_000u128)).collect();
         let file = credits_file(&world, &entries);
-        let (priced, priced_time) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-credits", &file]);
+        let (priced, priced_time) =
+            adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-credits", &file]);
         eprintln!(
             "R308-3P-2 measured: {count} non-payers ({}), 30 honest: select without the price {:?} ({} included); with the price {:?}: included {}, unpaid {}, not judged {}, wasted gas {}",
             if chain { "chain on one slot" } else { "own slots" }, plain_time, plain["included"].as_array().unwrap().len(), priced_time,
@@ -547,18 +858,44 @@ fn many_non_payers_at_a_high_tip_cost_one_pass_and_serve_every_payer() {
         assert_eq!(priced["included"].as_array().unwrap().len(), 30, "{count} {chain}");
         // Every non-payer is executed and left out while the uncovered pool (half a block) lasts; past it the rest
         // is not executed. Either way none is included and no honest transaction is touched.
-        assert_eq!(priced["unpaid"].as_array().unwrap().len() + priced["not_judged"].as_array().unwrap().len(), count);
+        assert_eq!(
+            priced["unpaid"].as_array().unwrap().len() + priced["not_judged"].as_array().unwrap().len(),
+            count
+        );
         assert!(priced["write_price"]["wasted_uncovered_gas"].as_u64().unwrap() <= 15_000_000 + 60_000);
         assert_eq!(priced["write_price"]["passes"], 1);
-        assert!(priced_time < plain_time * 3 + std::time::Duration::from_secs(5), "{priced_time:?} against {plain_time:?}");
+        assert!(
+            priced_time < plain_time * 3 + std::time::Duration::from_secs(5),
+            "{priced_time:?} against {plain_time:?}"
+        );
         if count == 400 && !chain {
             // A small pool for uncovered senders: about three non-payers use it up. Honest senders with credit are
             // covered and unaffected; without credit only their plain transfers are then still executed.
-            let (covered, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-uncovered-gas", "100000", "--write-credits", &file]);
-            assert_eq!(covered["included"].as_array().unwrap().len(), 30, "covered senders do not depend on the uncovered pool");
+            let (covered, _) = adversarial_select(
+                &world,
+                &[
+                    "--fresh-slot-price-wei",
+                    ADV_PRICE,
+                    "--write-uncovered-gas",
+                    "100000",
+                    "--write-credits",
+                    &file,
+                ],
+            );
+            assert_eq!(
+                covered["included"].as_array().unwrap().len(),
+                30,
+                "covered senders do not depend on the uncovered pool"
+            );
             assert!(covered["unpaid"].as_array().unwrap().len() <= 4);
-            let (tight, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-uncovered-gas", "100000"]);
-            assert!(tight["included"].as_array().unwrap().len() >= 20, "the plain transfers at least");
+            let (tight, _) = adversarial_select(
+                &world,
+                &["--fresh-slot-price-wei", ADV_PRICE, "--write-uncovered-gas", "100000"],
+            );
+            assert!(
+                tight["included"].as_array().unwrap().len() >= 20,
+                "the plain transfers at least"
+            );
         }
     }
 }
@@ -573,16 +910,31 @@ fn large_non_payers(big: usize, calls: usize, transfers: usize, race: bool) -> (
     let (db, pool) = (root.path().join("db"), root.path().join("pool"));
     std::fs::create_dir(&pool).unwrap();
     let (db_s, pool_s) = (db.to_str().unwrap().to_string(), pool.to_str().unwrap().to_string());
-    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let key_of = |i: usize| {
         let mut seed = [11u8; 32];
         seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
         SigningKey::from_bytes((&seed).into()).unwrap()
     };
     let sign = |i: usize, nonce: u64, to: TxKind, input: Vec<u8>, value: u64, gas: u64, tip: u128| {
-        let tx = TxEip1559 { chain_id: 700_771, nonce, to, input: input.into(), value: U256::from(value), gas_limit: gas,
-                             max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
-        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let tx = TxEip1559 {
+            chain_id: 700_771,
+            nonce,
+            to,
+            input: input.into(),
+            value: U256::from(value),
+            gas_limit: gas,
+            max_fee_per_gas: 200_000_000_000,
+            max_priority_fee_per_gas: tip,
+            ..Default::default()
+        };
+        let signature: Signature = key_of(i)
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
     };
     let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
@@ -590,8 +942,10 @@ fn large_non_payers(big: usize, calls: usize, transfers: usize, race: bool) -> (
     let deployer = total - 1;
     let deposits = root.path().join("deposits.json");
     let mints: Vec<_> = (0..total + 2)
-        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
-                                    "sats": 1_000_000_000u64, "recipient": hex::encode(address(i))}))
+        .map(|i| {
+            serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 1_000_000_000u64, "recipient": hex::encode(address(i))})
+        })
         .collect();
     std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
     let anchor = "ab".repeat(32);
@@ -602,8 +956,16 @@ fn large_non_payers(big: usize, calls: usize, transfers: usize, race: bool) -> (
     // RETURN(offset 12, size 20): the runtime is right-aligned in the 32-byte word.
     let n = loop_init_fixed.len();
     loop_init_fixed[n - 2] = 0x0c;
-    std::fs::write(pool.join("deploy-0.tx"), sign(deployer, 0, TxKind::Create, store_init, 0, 200_000, 30 * GWEI)).unwrap();
-    std::fs::write(pool.join("deploy-1.tx"), sign(deployer, 1, TxKind::Create, loop_init_fixed, 0, 200_000, 30 * GWEI)).unwrap();
+    std::fs::write(
+        pool.join("deploy-0.tx"),
+        sign(deployer, 0, TxKind::Create, store_init, 0, 200_000, 30 * GWEI),
+    )
+    .unwrap();
+    std::fs::write(
+        pool.join("deploy-1.tx"),
+        sign(deployer, 1, TxKind::Create, loop_init_fixed, 0, 200_000, 30 * GWEI),
+    )
+    .unwrap();
     let (store, looper) = (address(deployer).create(0), address(deployer).create(1));
     let word = |value: u64| {
         let mut data = vec![0u8; 32];
@@ -616,38 +978,119 @@ fn large_non_payers(big: usize, calls: usize, transfers: usize, race: bool) -> (
         data
     };
     // Slot 900 of the store contract holds 5 from block 1 on (the recipient's non-zero balance of R308-4P-2).
-    std::fs::write(pool.join("deploy-2.tx"), sign(deployer, 2, TxKind::Call(store), pair(5, 900), 0, 100_000, 30 * GWEI)).unwrap();
-    let one = produce(&["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", &pool_s]).unwrap();
+    std::fs::write(
+        pool.join("deploy-2.tx"),
+        sign(deployer, 2, TxKind::Call(store), pair(5, 900), 0, 100_000, 30 * GWEI),
+    )
+    .unwrap();
+    let one = produce(&[
+        "extend",
+        "--target",
+        &db_s,
+        "--parent",
+        &parent,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        deposits.to_str().unwrap(),
+        "--txs",
+        &pool_s,
+    ])
+    .unwrap();
     assert_eq!(one["transactions"], 3, "{one}");
     let head = one["hash"].as_str().unwrap().to_string();
     if race {
         // The recipient empties slot 900 at 5 gwei (ahead); the user then writes it at 3 gwei: a new slot in this
         // block only. A third sender writes a slot nobody else touches at 3 gwei: unpaid on any state.
-        std::fs::write(pool.join("race-clear.tx"), sign(total, 0, TxKind::Call(store), pair(0, 900), 0, 100_000, 5 * GWEI)).unwrap();
-        std::fs::write(pool.join("race-user.tx"), sign(total + 1, 0, TxKind::Call(store), pair(7, 900), 0, 100_000, 3 * GWEI)).unwrap();
-        std::fs::write(pool.join("race-own.tx"), sign(deployer, 3, TxKind::Call(store), pair(7, 901), 0, 100_000, 3 * GWEI)).unwrap();
+        std::fs::write(
+            pool.join("race-clear.tx"),
+            sign(total, 0, TxKind::Call(store), pair(0, 900), 0, 100_000, 5 * GWEI),
+        )
+        .unwrap();
+        std::fs::write(
+            pool.join("race-user.tx"),
+            sign(total + 1, 0, TxKind::Call(store), pair(7, 900), 0, 100_000, 3 * GWEI),
+        )
+        .unwrap();
+        std::fs::write(
+            pool.join("race-own.tx"),
+            sign(deployer, 3, TxKind::Call(store), pair(7, 901), 0, 100_000, 3 * GWEI),
+        )
+        .unwrap();
     }
     for i in 0..big {
-        std::fs::write(pool.join(format!("big-{i}.tx")), sign(i, 0, TxKind::Call(looper), word(1_000_000 * (i as u64 + 1)), 0, 5_000_000, 7_900_000_000 - i as u128)).unwrap();
+        std::fs::write(
+            pool.join(format!("big-{i}.tx")),
+            sign(
+                i,
+                0,
+                TxKind::Call(looper),
+                word(1_000_000 * (i as u64 + 1)),
+                0,
+                5_000_000,
+                7_900_000_000 - i as u128,
+            ),
+        )
+        .unwrap();
     }
     for i in 0..calls {
         let mut data = word(0);
         data.extend(word(500 + i as u64));
-        std::fs::write(pool.join(format!("call-{i}.tx")), sign(big + i, 0, TxKind::Call(store), data, 0, 60_000, 3 * GWEI - 1 - i as u128)).unwrap();
+        std::fs::write(
+            pool.join(format!("call-{i}.tx")),
+            sign(
+                big + i,
+                0,
+                TxKind::Call(store),
+                data,
+                0,
+                60_000,
+                3 * GWEI - 1 - i as u128,
+            ),
+        )
+        .unwrap();
     }
     for i in 0..transfers {
-        std::fs::write(pool.join(format!("honest-{i}.tx")), sign(big + calls + i, 0, TxKind::Call(Address::repeat_byte(0x55)), vec![], 1_000, 21_000, 3 * GWEI)).unwrap();
+        std::fs::write(
+            pool.join(format!("honest-{i}.tx")),
+            sign(
+                big + calls + i,
+                0,
+                TxKind::Call(Address::repeat_byte(0x55)),
+                vec![],
+                1_000,
+                21_000,
+                3 * GWEI,
+            ),
+        )
+        .unwrap();
     }
     let empty = root.path().join("empty.json");
     std::fs::write(&empty, "[]").unwrap();
     let bigs = (0..big).map(|i| hex::encode(address(i))).collect();
     let callers = (big..big + calls).map(|i| hex::encode(address(i))).collect();
-    (Adversarial { db: db_s, pool: pool_s, head, empty: empty.to_str().unwrap().to_string(), _root: root }, bigs, callers)
+    (
+        Adversarial {
+            db: db_s,
+            pool: pool_s,
+            head,
+            empty: empty.to_str().unwrap().to_string(),
+            _root: root,
+        },
+        bigs,
+        callers,
+    )
 }
 
 fn credits_file(world: &Adversarial, entries: &[(&String, u128)]) -> String {
-    let path = Path::new(&world.db).parent().unwrap().join(format!("credits-{}.json", entries.len()));
-    let map: serde_json::Map<String, Value> = entries.iter().map(|(sender, wei)| ((*sender).clone(), Value::String(wei.to_string()))).collect();
+    let path = Path::new(&world.db)
+        .parent()
+        .unwrap()
+        .join(format!("credits-{}.json", entries.len()));
+    let map: serde_json::Map<String, Value> = entries
+        .iter()
+        .map(|(sender, wei)| ((*sender).clone(), Value::String(wei.to_string())))
+        .collect();
     std::fs::write(&path, Value::Object(map).to_string()).unwrap();
     path.to_str().unwrap().to_string()
 }
@@ -668,9 +1111,17 @@ fn large_non_payers_cannot_starve_contract_calls() {
     eprintln!("R308-4P-1 measured (a) 14 big writers with one-transfer credit: {time:?} included {} unpaid {} not judged {} {}",
               report["included"].as_array().unwrap().len(), report["unpaid"].as_array().unwrap().len(),
               report["not_judged"].as_array().unwrap().len(), report["write_price"]);
-    assert_eq!(report["included"].as_array().unwrap().len(), 20, "ten honest calls and ten transfers");
+    assert_eq!(
+        report["included"].as_array().unwrap().len(),
+        20,
+        "ten honest calls and ten transfers"
+    );
     assert!(time < std::time::Duration::from_secs(30), "{time:?}");
-    assert_eq!(report["unpaid"].as_array().unwrap().len(), 0, "an uncovered 5M-gas writer is not executed");
+    assert_eq!(
+        report["unpaid"].as_array().unwrap().len(),
+        0,
+        "an uncovered 5M-gas writer is not executed"
+    );
     assert_eq!(report["needs_credit"].as_array().unwrap().len(), 14);
     assert_eq!(report["not_judged"].as_array().unwrap().len(), 0);
     assert_eq!(report["write_price"]["wasted_covered_gas"], 0);
@@ -691,14 +1142,35 @@ fn large_non_payers_cannot_starve_contract_calls() {
     assert!(report["write_price"]["wasted_covered_gas"].as_u64().unwrap() <= 60_000_000 + 5_000_000);
     assert_eq!(report["write_price"]["wasted_uncovered_gas"], 0);
     assert_eq!(report["not_judged"].as_array().unwrap().len(), 0);
-    let included: Vec<&str> = report["tx_stats"].as_array().unwrap().iter().map(|t| t["sender"].as_str().unwrap()).collect();
+    let included: Vec<&str> = report["tx_stats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["sender"].as_str().unwrap())
+        .collect();
     for caller in &callers {
-        assert!(included.contains(&caller.as_str()), "every honest caller, with credit or without, is judged and included");
+        assert!(
+            included.contains(&caller.as_str()),
+            "every honest caller, with credit or without, is judged and included"
+        );
     }
     assert_eq!(included.len(), 20, "ten transfers and ten calls");
-    assert!(time < std::time::Duration::from_secs(30), "65M gas of covered waste, each judged twice: {time:?}");
+    assert!(
+        time < std::time::Duration::from_secs(30),
+        "65M gas of covered waste, each judged twice: {time:?}"
+    );
     // (c) With the per-transaction cap of the policy (5M is the default there; here 4M) the writers are not executed.
-    let (report, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-credits", &file, "--write-max-tx-gas", "4000000"]);
+    let (report, _) = adversarial_select(
+        &world,
+        &[
+            "--fresh-slot-price-wei",
+            ADV_PRICE,
+            "--write-credits",
+            &file,
+            "--write-max-tx-gas",
+            "4000000",
+        ],
+    );
     assert_eq!(report["included"].as_array().unwrap().len(), 20);
     assert_eq!(report["unpaid"].as_array().unwrap().len(), 0);
     assert_eq!(report["over_gas_cap"].as_array().unwrap().len(), 14);
@@ -714,9 +1186,21 @@ fn a_transaction_made_unpaid_by_an_earlier_one_is_not_its_senders_doing() {
     let unpaid = report["unpaid"].as_array().unwrap();
     assert_eq!(unpaid.len(), 2, "{report}");
     let by_doing: Vec<bool> = unpaid.iter().map(|t| t["own_doing"].as_bool().unwrap()).collect();
-    assert_eq!(by_doing.iter().filter(|own| **own).count(), 1, "the writer of slot 901: unpaid on the start state too");
-    assert_eq!(by_doing.iter().filter(|own| !**own).count(), 1, "the user racing the recipient: paid alone, unpaid here");
-    assert_eq!(report["included"].as_array().unwrap().len(), 3, "the recipient's clearing transaction and two transfers");
+    assert_eq!(
+        by_doing.iter().filter(|own| **own).count(),
+        1,
+        "the writer of slot 901: unpaid on the start state too"
+    );
+    assert_eq!(
+        by_doing.iter().filter(|own| !**own).count(),
+        1,
+        "the user racing the recipient: paid alone, unpaid here"
+    );
+    assert_eq!(
+        report["included"].as_array().unwrap().len(),
+        3,
+        "the recipient's clearing transaction and two transfers"
+    );
     // Without the recipient's transaction the user's one is included: it adds no slot.
     std::fs::remove_file(Path::new(&world.pool).join("race-clear.tx")).unwrap();
     let (report, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE]);
@@ -739,31 +1223,65 @@ fn r308_5p_1_three_covered_calls_at_the_gas_cap_do_not_shut_out_every_sender_wit
     let (db, pool) = (root.path().join("db"), root.path().join("pool"));
     std::fs::create_dir(&pool).unwrap();
     let (db_s, pool_s) = (db.to_str().unwrap().to_string(), pool.to_str().unwrap().to_string());
-    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let key_of = |i: usize| {
         let mut seed = [7u8; 32];
         seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
         SigningKey::from_bytes((&seed).into()).unwrap()
     };
     let sign = |i: usize, nonce: u64, to: TxKind, input: Vec<u8>, value: u64, gas: u64, tip: u128| {
-        let tx = TxEip1559 { chain_id: 700_771, nonce, to, input: input.into(), value: U256::from(value), gas_limit: gas,
-                             max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
-        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let tx = TxEip1559 {
+            chain_id: 700_771,
+            nonce,
+            to,
+            input: input.into(),
+            value: U256::from(value),
+            gas_limit: gas,
+            max_fee_per_gas: 200_000_000_000,
+            max_priority_fee_per_gas: tip,
+            ..Default::default()
+        };
+        let signature: Signature = key_of(i)
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
     };
     let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
     // 0..3 the three covered keys, 3..8 five senders without credit, 8 the deployer.
     let deposits = root.path().join("deposits.json");
     let mints: Vec<_> = (0..9)
-        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
-                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .map(|i| {
+            serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))})
+        })
         .collect();
     std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
     let anchor = "ab".repeat(32);
     // SSTORE(calldata[32..64], calldata[0..32])
     let init = hex::decode("67600035602035550060005260086018f3").unwrap();
-    std::fs::write(pool.join("deploy.tx"), sign(8, 0, TxKind::Create, init, 0, 200_000, 30 * GWEI)).unwrap();
-    let one = produce(&["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", &pool_s]).unwrap();
+    std::fs::write(
+        pool.join("deploy.tx"),
+        sign(8, 0, TxKind::Create, init, 0, 200_000, 30 * GWEI),
+    )
+    .unwrap();
+    let one = produce(&[
+        "extend",
+        "--target",
+        &db_s,
+        "--parent",
+        &parent,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        deposits.to_str().unwrap(),
+        "--txs",
+        &pool_s,
+    ])
+    .unwrap();
     assert_eq!(one["transactions"], 1, "{one}");
     let head = one["hash"].as_str().unwrap().to_string();
     let contract = address(8).create(0);
@@ -775,32 +1293,107 @@ fn r308_5p_1_three_covered_calls_at_the_gas_cap_do_not_shut_out_every_sender_wit
     // The three covered calls: they store zero (no new slot, so they pay and are included), declare 5M gas, and
     // bid one wei over the users' 3 gwei.
     for i in 0..3 {
-        std::fs::write(pool.join(format!("covered-{i}.tx")), sign(i, 0, TxKind::Call(contract), store_zero(500 + i as u64), 0, 5_000_000, 3 * GWEI + 1)).unwrap();
+        std::fs::write(
+            pool.join(format!("covered-{i}.tx")),
+            sign(
+                i,
+                0,
+                TxKind::Call(contract),
+                store_zero(500 + i as u64),
+                0,
+                5_000_000,
+                3 * GWEI + 1,
+            ),
+        )
+        .unwrap();
     }
     // Five senders without credit, at 100 gwei: three plain transfers and two small calls that add no slot.
     for i in 3..6 {
-        std::fs::write(pool.join(format!("new-transfer-{i}.tx")), sign(i, 0, TxKind::Call(Address::repeat_byte(0x55)), vec![], 1_000, 21_000, 100 * GWEI)).unwrap();
+        std::fs::write(
+            pool.join(format!("new-transfer-{i}.tx")),
+            sign(
+                i,
+                0,
+                TxKind::Call(Address::repeat_byte(0x55)),
+                vec![],
+                1_000,
+                21_000,
+                100 * GWEI,
+            ),
+        )
+        .unwrap();
     }
     for i in 6..8 {
-        std::fs::write(pool.join(format!("new-call-{i}.tx")), sign(i, 0, TxKind::Call(contract), store_zero(600 + i as u64), 0, 60_000, 100 * GWEI)).unwrap();
+        std::fs::write(
+            pool.join(format!("new-call-{i}.tx")),
+            sign(
+                i,
+                0,
+                TxKind::Call(contract),
+                store_zero(600 + i as u64),
+                0,
+                60_000,
+                100 * GWEI,
+            ),
+        )
+        .unwrap();
     }
     let empty = root.path().join("empty.json");
     std::fs::write(&empty, "[]").unwrap();
     let credits: serde_json::Map<String, Value> = (0..3)
-        .map(|i| (hex::encode(address(i)), Value::String((5_000_000u128 * (3 * GWEI + 1)).to_string())))
+        .map(|i| {
+            (
+                hex::encode(address(i)),
+                Value::String((5_000_000u128 * (3 * GWEI + 1)).to_string()),
+            )
+        })
         .collect();
     let file = root.path().join("credits.json");
     std::fs::write(&file, Value::Object(credits).to_string()).unwrap();
-    let report = produce(&["select", "--target", &db_s, "--parent", &head, "--anchor", &anchor, "--deposits", empty.to_str().unwrap(),
-                           "--txs", &pool_s, "--max-gas", "15000000", "--fresh-slot-price-wei", ADV_PRICE,
-                           "--write-credits", file.to_str().unwrap()]).unwrap();
-    let included: Vec<String> = report["tx_stats"].as_array().unwrap().iter()
-        .map(|t| t["sender"].as_str().unwrap().trim_start_matches("0x").to_lowercase()).collect();
-    let shut_out: Vec<usize> = (3..8).filter(|i| !included.contains(&hex::encode(address(*i)))).collect();
-    eprintln!("R308-5P-1: included {} of 8; senders without credit shut out: {shut_out:?}; deferred {}; write_price {}",
-              included.len(), report["deferred"], report["write_price"]);
-    assert!((0..3).all(|i| included.contains(&hex::encode(address(i)))), "the three covered calls are included and pay");
-    assert!(shut_out.is_empty(), "senders without credit at 100 gwei left out behind three covered calls at 3 gwei: {shut_out:?}; deferred: {}", report["deferred"]);
+    let report = produce(&[
+        "select",
+        "--target",
+        &db_s,
+        "--parent",
+        &head,
+        "--anchor",
+        &anchor,
+        "--deposits",
+        empty.to_str().unwrap(),
+        "--txs",
+        &pool_s,
+        "--max-gas",
+        "15000000",
+        "--fresh-slot-price-wei",
+        ADV_PRICE,
+        "--write-credits",
+        file.to_str().unwrap(),
+    ])
+    .unwrap();
+    let included: Vec<String> = report["tx_stats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["sender"].as_str().unwrap().trim_start_matches("0x").to_lowercase())
+        .collect();
+    let shut_out: Vec<usize> = (3..8)
+        .filter(|i| !included.contains(&hex::encode(address(*i))))
+        .collect();
+    eprintln!(
+        "R308-5P-1: included {} of 8; senders without credit shut out: {shut_out:?}; deferred {}; write_price {}",
+        included.len(),
+        report["deferred"],
+        report["write_price"]
+    );
+    assert!(
+        (0..3).all(|i| included.contains(&hex::encode(address(i)))),
+        "the three covered calls are included and pay"
+    );
+    assert!(
+        shut_out.is_empty(),
+        "senders without credit at 100 gwei left out behind three covered calls at 3 gwei: {shut_out:?}; deferred: {}",
+        report["deferred"]
+    );
 }
 
 /// Review R308-5P-2 (agent 308, fifth pass) on the real binary. With the write price on, the producer's block
@@ -825,16 +1418,29 @@ fn r308_5p_2_a_rebuild_from_the_blocks_own_transactions_gives_the_same_block() {
         SigningKey::from_bytes((&seed).into()).unwrap()
     };
     let transfer = |i: usize, tip: u128| {
-        let tx = TxEip1559 { chain_id: 700_771, nonce: 0, to: TxKind::Call(Address::repeat_byte(0x55)), value: U256::from(1_000u64),
-                             gas_limit: 21_000, max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
-        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let tx = TxEip1559 {
+            chain_id: 700_771,
+            nonce: 0,
+            to: TxKind::Call(Address::repeat_byte(0x55)),
+            value: U256::from(1_000u64),
+            gas_limit: 21_000,
+            max_fee_per_gas: 200_000_000_000,
+            max_priority_fee_per_gas: tip,
+            ..Default::default()
+        };
+        let signature: Signature = key_of(i)
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
     };
     let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
     let deposits = root.path().join("deposits.json");
     let mints: Vec<_> = (0..2)
-        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
-                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .map(|i| {
+            serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))})
+        })
         .collect();
     std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
     // Sender 0 has credit and bids 1 gwei; sender 1 has none and bids 5 gwei.
@@ -843,17 +1449,43 @@ fn r308_5p_2_a_rebuild_from_the_blocks_own_transactions_gives_the_same_block() {
         std::fs::write(pool.join(format!("t{i}.tx")), raw).unwrap();
     }
     let credits = root.path().join("credits.json");
-    std::fs::write(&credits, serde_json::json!({ hex::encode(address(0)): (21_000u128 * GWEI).to_string() }).to_string()).unwrap();
+    std::fs::write(
+        &credits,
+        serde_json::json!({ hex::encode(address(0)): (21_000u128 * GWEI).to_string() }).to_string(),
+    )
+    .unwrap();
     let anchor = "ab".repeat(32);
     const SEED: &str = "5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed";
     let build = |name: &str, txs: &str, priced: bool| {
         let db = root.path().join(name);
         let db_s = db.to_str().unwrap().to_string();
-        let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
-        let mut args = vec!["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", txs];
+        let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut args = vec![
+            "extend",
+            "--target",
+            &db_s,
+            "--parent",
+            &parent,
+            "--anchor",
+            &anchor,
+            "--deposits",
+            deposits.to_str().unwrap(),
+            "--txs",
+            txs,
+        ];
         let credits_s = credits.to_str().unwrap().to_string();
         if priced {
-            args.extend_from_slice(&["--fresh-slot-price-wei", ADV_PRICE, "--write-credits", &credits_s, "--write-seed", SEED]);
+            args.extend_from_slice(&[
+                "--fresh-slot-price-wei",
+                ADV_PRICE,
+                "--write-credits",
+                &credits_s,
+                "--write-seed",
+                SEED,
+            ]);
         } else {
             args.extend_from_slice(&["--as-given", "yes"]);
         }
@@ -862,30 +1494,88 @@ fn r308_5p_2_a_rebuild_from_the_blocks_own_transactions_gives_the_same_block() {
     let settler = build("settler-db", pool.to_str().unwrap(), true);
     assert_eq!(settler["transactions"], 2, "{settler}");
     // What the shadow is given: the block's transactions, in block order, as a list.
-    let order: Vec<String> = settler["included"].as_array().unwrap().iter().map(|h| h.as_str().unwrap().trim_start_matches("0x").to_string()).collect();
+    let order: Vec<String> = settler["included"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_str().unwrap().trim_start_matches("0x").to_string())
+        .collect();
     let by_hash = |raw: &String| hex::encode(alloy_primitives::keccak256(hex::decode(raw).unwrap()));
-    let in_block_order: Vec<&String> = order.iter().map(|h| raws.iter().find(|raw| &by_hash(raw) == h).expect("an included transaction")).collect();
+    let in_block_order: Vec<&String> = order
+        .iter()
+        .map(|h| {
+            raws.iter()
+                .find(|raw| &by_hash(raw) == h)
+                .expect("an included transaction")
+        })
+        .collect();
     let list = root.path().join("settler-transactions.json");
     std::fs::write(&list, serde_json::to_string(&in_block_order).unwrap()).unwrap();
     let shadow = build("shadow-db", list.to_str().unwrap(), false);
-    eprintln!("R308-5P-2: settler block {} order {:?}; rebuilt block {} order {}", settler["hash"], order, shadow["hash"], shadow["included"]);
+    eprintln!(
+        "R308-5P-2: settler block {} order {:?}; rebuilt block {} order {}",
+        settler["hash"], order, shadow["hash"], shadow["included"]
+    );
     assert_eq!(shadow["transactions"], 2, "{shadow}");
-    assert_eq!(shadow["hash"], settler["hash"], "the rebuild orders the same two transactions differently: settler {} rebuilt {}", settler["included"], shadow["included"]);
+    assert_eq!(
+        shadow["hash"], settler["hash"],
+        "the rebuild orders the same two transactions differently: settler {} rebuilt {}",
+        settler["included"], shadow["included"]
+    );
     // A plain `extend --txs` of the same list still selects by tip: that was the defect, and it is why the option exists.
     let by_tip = {
         let db = root.path().join("tip-db");
         let db_s = db.to_str().unwrap().to_string();
-        let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
-        produce(&["extend", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(), "--txs", list.to_str().unwrap()]).unwrap()
+        let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        produce(&[
+            "extend",
+            "--target",
+            &db_s,
+            "--parent",
+            &parent,
+            "--anchor",
+            &anchor,
+            "--deposits",
+            deposits.to_str().unwrap(),
+            "--txs",
+            list.to_str().unwrap(),
+        ])
+        .unwrap()
     };
     assert_ne!(by_tip["hash"], settler["hash"]);
     // The policy check of the shadow: the published inputs reproduce the order; a settler that put the uncovered
     // 5-gwei transfer first (against the policy) is caught, although that block is a valid block.
     let check_db = root.path().join("check-db");
     let check_s = check_db.to_str().unwrap().to_string();
-    let parent = produce(&["init", "--target", &check_s]).unwrap()["hash"].as_str().unwrap().to_string();
-    let reselect = |txs: &str| produce(&["select", "--target", &check_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(),
-                                         "--txs", txs, "--fresh-slot-price-wei", ADV_PRICE, "--write-credits", credits.to_str().unwrap(), "--write-seed", SEED]).unwrap();
+    let parent = produce(&["init", "--target", &check_s]).unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reselect = |txs: &str| {
+        produce(&[
+            "select",
+            "--target",
+            &check_s,
+            "--parent",
+            &parent,
+            "--anchor",
+            &anchor,
+            "--deposits",
+            deposits.to_str().unwrap(),
+            "--txs",
+            txs,
+            "--fresh-slot-price-wei",
+            ADV_PRICE,
+            "--write-credits",
+            credits.to_str().unwrap(),
+            "--write-seed",
+            SEED,
+        ])
+        .unwrap()
+    };
     assert_eq!(reselect(list.to_str().unwrap())["included"], settler["included"]);
     let reordered: Vec<&String> = in_block_order.iter().rev().cloned().collect();
     let bad = root.path().join("reordered.json");
@@ -893,7 +1583,11 @@ fn r308_5p_2_a_rebuild_from_the_blocks_own_transactions_gives_the_same_block() {
     let cheat = build("cheat-db", bad.to_str().unwrap(), false);
     assert_eq!(cheat["transactions"], 2, "a reordered block is still a valid block");
     assert_ne!(cheat["hash"], settler["hash"]);
-    assert_ne!(reselect(bad.to_str().unwrap())["included"], cheat["included"], "the policy check sees the reordering");
+    assert_ne!(
+        reselect(bad.to_str().unwrap())["included"],
+        cheat["included"],
+        "the policy check sees the reordering"
+    );
 }
 
 /// The reserve (coordinator decision after R308-5P-1; agents/311 section 16): covered transactions go first only
@@ -911,37 +1605,84 @@ fn one_eighth_of_the_block_is_kept_for_senders_without_credit_and_returns_when_u
         SigningKey::from_bytes((&seed).into()).unwrap()
     };
     let transfer = |i: usize, tip: u128| {
-        let tx = TxEip1559 { chain_id: 700_771, nonce: 0, to: TxKind::Call(Address::repeat_byte(0x55)), value: U256::from(1_000u64),
-                             gas_limit: 21_000, max_fee_per_gas: 200_000_000_000, max_priority_fee_per_gas: tip, ..Default::default() };
-        let signature: Signature = key_of(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+        let tx = TxEip1559 {
+            chain_id: 700_771,
+            nonce: 0,
+            to: TxKind::Call(Address::repeat_byte(0x55)),
+            value: U256::from(1_000u64),
+            gas_limit: 21_000,
+            max_fee_per_gas: 200_000_000_000,
+            max_priority_fee_per_gas: tip,
+            ..Default::default()
+        };
+        let signature: Signature = key_of(i)
+            .sign_prehash_recoverable(tx.signature_hash().as_slice())
+            .unwrap()
+            .into();
         hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
     };
     let address = |i: usize| Address::from_public_key(key_of(i).verifying_key());
     // 0..12: senders with credit at 5 gwei. 12..16: senders without credit at 1, 2, 3 and 4 gwei.
     let deposits = root.path().join("deposits.json");
     let mints: Vec<_> = (0..16)
-        .map(|i| serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
-                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))}))
+        .map(|i| {
+            serde_json::json!({"height": 3, "tx_index": i, "txid": format!("{:064x}", i + 1), "vout": 0,
+                                    "sats": 100_000_000u64, "recipient": hex::encode(address(i))})
+        })
         .collect();
     std::fs::write(&deposits, serde_json::Value::Array(mints).to_string()).unwrap();
     for i in 0..12 {
         std::fs::write(pool.join(format!("covered-{i:02}.tx")), transfer(i, 5 * GWEI)).unwrap();
     }
-    let credits: serde_json::Map<String, Value> = (0..12).map(|i| (hex::encode(address(i)), Value::String((21_000u128 * 5 * GWEI).to_string()))).collect();
+    let credits: serde_json::Map<String, Value> = (0..12)
+        .map(|i| {
+            (
+                hex::encode(address(i)),
+                Value::String((21_000u128 * 5 * GWEI).to_string()),
+            )
+        })
+        .collect();
     let file = root.path().join("credits.json");
     std::fs::write(&file, Value::Object(credits).to_string()).unwrap();
     let anchor = "ab".repeat(32);
     let db = root.path().join("db");
     let db_s = db.to_str().unwrap().to_string();
-    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"].as_str().unwrap().to_string();
+    let parent = produce(&["init", "--target", &db_s]).unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
     // Room for eight transfers; one eighth of it is one transfer.
     let select = |extra: &[&str]| {
-        let mut args = vec!["select", "--target", &db_s, "--parent", &parent, "--anchor", &anchor, "--deposits", deposits.to_str().unwrap(),
-                            "--txs", pool.to_str().unwrap(), "--max-gas", "168000", "--fresh-slot-price-wei", ADV_PRICE, "--write-credits", file.to_str().unwrap()];
+        let mut args = vec![
+            "select",
+            "--target",
+            &db_s,
+            "--parent",
+            &parent,
+            "--anchor",
+            &anchor,
+            "--deposits",
+            deposits.to_str().unwrap(),
+            "--txs",
+            pool.to_str().unwrap(),
+            "--max-gas",
+            "168000",
+            "--fresh-slot-price-wei",
+            ADV_PRICE,
+            "--write-credits",
+            file.to_str().unwrap(),
+        ];
         args.extend_from_slice(extra);
         produce(&args).unwrap()
     };
-    let senders = |report: &Value| -> Vec<String> { report["tx_stats"].as_array().unwrap().iter().map(|t| t["sender"].as_str().unwrap().to_string()).collect() };
+    let senders = |report: &Value| -> Vec<String> {
+        report["tx_stats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["sender"].as_str().unwrap().to_string())
+            .collect()
+    };
     // No sender without credit in the pool: the covered ones take all eight places (nothing is left unsold).
     let alone = select(&[]);
     assert_eq!(senders(&alone).len(), 8, "{alone}");
@@ -952,11 +1693,26 @@ fn one_eighth_of_the_block_is_kept_for_senders_without_credit_and_returns_when_u
     let mixed = select(&[]);
     let included = senders(&mixed);
     assert_eq!(included.len(), 8, "{mixed}");
-    assert_eq!(included.iter().filter(|s| (0..12).any(|i| **s == hex::encode(address(i)))).count(), 7);
-    assert_eq!(included[7], hex::encode(address(15)), "the reserve goes by tip among plain transfers: {mixed}");
+    assert_eq!(
+        included
+            .iter()
+            .filter(|s| (0..12).any(|i| **s == hex::encode(address(i))))
+            .count(),
+        7
+    );
+    assert_eq!(
+        included[7],
+        hex::encode(address(15)),
+        "the reserve goes by tip among plain transfers: {mixed}"
+    );
     // Without the reserve (divisor 0) the covered ones take everything, which is what R308-5P-1 used.
     let none = select(&["--write-reserve-divisor", "0"]);
-    assert!(senders(&none).iter().all(|s| (0..12).any(|i| *s == hex::encode(address(i)))), "{none}");
+    assert!(
+        senders(&none)
+            .iter()
+            .all(|s| (0..12).any(|i| *s == hex::encode(address(i)))),
+        "{none}"
+    );
 }
 
 /// Review R308-5P-3: the order of the calls of senders without credit follows the settler's seed, not the anchor,
@@ -974,9 +1730,21 @@ fn the_order_of_uncovered_calls_follows_the_seed_not_the_anchor() {
     // The settler passes its seed in a file, not on the command line (review R308-6P-3): the same order.
     let file = Path::new(&world.db).parent().unwrap().join("seed");
     std::fs::write(&file, "11".repeat(32) + "\n").unwrap();
-    let (by_file, _) = adversarial_select(&world, &["--fresh-slot-price-wei", ADV_PRICE, "--write-seed-file", file.to_str().unwrap()]);
+    let (by_file, _) = adversarial_select(
+        &world,
+        &[
+            "--fresh-slot-price-wei",
+            ADV_PRICE,
+            "--write-seed-file",
+            file.to_str().unwrap(),
+        ],
+    );
     assert_eq!(by_file["included"], a);
-    assert_eq!(a, order(&"11".repeat(32)), "one seed, one order: every call of a block plan and the shadow's check agree");
+    assert_eq!(
+        a,
+        order(&"11".repeat(32)),
+        "one seed, one order: every call of a block plan and the shadow's check agree"
+    );
 }
 
 /// F405-1 (agent 405): `sign-tx` hard-coded a 0.1 gwei priority fee, the settled RPC's compiled minimum, while
@@ -1004,39 +1772,100 @@ fn f405_1_sign_tx_signs_at_the_kits_tip_floor_unless_told_otherwise() {
         .to_string(),
     )
     .unwrap();
-    let one = produce(&["extend", "--target", db_s, "--parent", genesis["hash"].as_str().unwrap(), "--anchor",
-                        &"ab".repeat(32), "--deposits", deposits.to_str().unwrap()])
+    let one = produce(&[
+        "extend",
+        "--target",
+        db_s,
+        "--parent",
+        genesis["hash"].as_str().unwrap(),
+        "--anchor",
+        &"ab".repeat(32),
+        "--deposits",
+        deposits.to_str().unwrap(),
+    ])
     .unwrap();
     let sign = |name: &str, nonce: &str, extra: &[&str]| {
         let out = root.path().join(name);
-        let mut args = vec!["sign-tx", "--key", key_s, "--nonce", nonce, "--to", "5555555555555555555555555555555555555555",
-                            "--value-wei", "1000", "--out", out.to_str().unwrap()];
+        let mut args = vec![
+            "sign-tx",
+            "--key",
+            key_s,
+            "--nonce",
+            nonce,
+            "--to",
+            "5555555555555555555555555555555555555555",
+            "--value-wei",
+            "1000",
+            "--out",
+            out.to_str().unwrap(),
+        ];
         args.extend_from_slice(extra);
         produce(&args).map(|report| (report, out))
     };
     let select = |file: &std::path::Path| {
-        let pool = root.path().join(format!("pool-{}.json", file.file_name().unwrap().to_str().unwrap()));
-        std::fs::write(&pool, serde_json::json!([std::fs::read_to_string(file).unwrap().trim()]).to_string()).unwrap();
-        produce(&["select", "--target", db_s, "--parent", one["hash"].as_str().unwrap(), "--anchor", &"cd".repeat(32),
-                  "--txs", pool.to_str().unwrap(), "--min-tip-wei", KIT_FLOOR])
+        let pool = root
+            .path()
+            .join(format!("pool-{}.json", file.file_name().unwrap().to_str().unwrap()));
+        std::fs::write(
+            &pool,
+            serde_json::json!([std::fs::read_to_string(file).unwrap().trim()]).to_string(),
+        )
+        .unwrap();
+        produce(&[
+            "select",
+            "--target",
+            db_s,
+            "--parent",
+            one["hash"].as_str().unwrap(),
+            "--anchor",
+            &"cd".repeat(32),
+            "--txs",
+            pool.to_str().unwrap(),
+            "--min-tip-wei",
+            KIT_FLOOR,
+        ])
         .unwrap()
     };
     // The default: the kit's floor, and the kit's producer takes it.
     let (report, default) = sign("default.tx", "0", &[]).unwrap();
-    assert_eq!((report["priority_fee_wei"].as_str(), report["max_fee_wei"].as_str()), (Some(KIT_FLOOR), Some("2000000000")));
+    assert_eq!(
+        (report["priority_fee_wei"].as_str(), report["max_fee_wei"].as_str()),
+        (Some(KIT_FLOOR), Some("2000000000"))
+    );
     let selected = select(&default);
-    assert_eq!((selected["included"].as_array().unwrap().len(), selected["below_min_tip"].as_u64()), (1, Some(0)), "{selected}");
+    assert_eq!(
+        (
+            selected["included"].as_array().unwrap().len(),
+            selected["below_min_tip"].as_u64()
+        ),
+        (1, Some(0)),
+        "{selected}"
+    );
     // The old hard-coded value, now only when asked for: held under the kit's floor (405's observation).
     let (report, low) = sign("low.tx", "0", &["--priority-fee-wei", "100000000"]).unwrap();
     assert_eq!(report["priority_fee_wei"], "100000000");
     let selected = select(&low);
-    assert_eq!((selected["included"].as_array().unwrap().len(), selected["below_min_tip"].as_u64()), (0, Some(1)), "{selected}");
+    assert_eq!(
+        (
+            selected["included"].as_array().unwrap().len(),
+            selected["below_min_tip"].as_u64()
+        ),
+        (0, Some(1)),
+        "{selected}"
+    );
     // A fee cap under the default lowers the default to the cap, as before; an explicit priority fee above
     // the cap is refused, and nothing is written.
     let (report, _) = sign("capped.tx", "0", &["--max-fee-wei", "400000000"]).unwrap();
     assert_eq!(report["priority_fee_wei"], "400000000");
-    let refused = sign("above.tx", "0", &["--max-fee-wei", "400000000", "--priority-fee-wei", "400000001"]).unwrap_err();
+    let refused = sign(
+        "above.tx",
+        "0",
+        &["--max-fee-wei", "400000000", "--priority-fee-wei", "400000001"],
+    )
+    .unwrap_err();
     assert!(refused.contains("above the fee cap"), "{refused}");
     assert!(!root.path().join("above.tx").exists());
-    assert!(sign("bad.tx", "0", &["--priority-fee-wei", "1 gwei"]).unwrap_err().contains("must be decimal"));
+    assert!(sign("bad.tx", "0", &["--priority-fee-wei", "1 gwei"])
+        .unwrap_err()
+        .contains("must be decimal"));
 }

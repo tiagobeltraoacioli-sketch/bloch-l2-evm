@@ -19,7 +19,9 @@ use bloch_l2_evm::{
 };
 use bloch_pos_committee::{
     l2_settlement::Transaction as Settlement,
-    transition::{funded::ADMISSION_PQ_KEY_BYTES, FundingInput, L2DataAvailability, L2Deposit, PosTransaction, TransferOutput},
+    transition::{
+        funded::ADMISSION_PQ_KEY_BYTES, FundingInput, L2DataAvailability, L2Deposit, PosTransaction, TransferOutput,
+    },
 };
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
@@ -54,7 +56,10 @@ fn transfer(i: u8, nonce: u64) -> String {
         max_priority_fee_per_gas: 1,
         ..Default::default()
     };
-    let signature: Signature = key(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    let signature: Signature = key(i)
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .unwrap()
+        .into();
     hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
 }
 
@@ -73,7 +78,10 @@ fn withdraw(i: u8, nonce: u64, l1_recipient: B256, sats: u64) -> String {
         max_priority_fee_per_gas: 1,
         ..Default::default()
     };
-    let signature: Signature = key(i).sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap().into();
+    let signature: Signature = key(i)
+        .sign_prehash_recoverable(tx.signature_hash().as_slice())
+        .unwrap()
+        .into();
     hex::encode(TxEnvelope::from(tx.into_signed(signature)).encoded_2718())
 }
 
@@ -83,10 +91,16 @@ fn deposit(seed: u8, to: Address, sats: u64) -> PosTransaction {
     PosTransaction::L2Deposit(L2Deposit {
         network_domain: [0x91; 32],
         funding_pubkey: vec![0x5a; ADMISSION_PQ_KEY_BYTES],
-        inputs: vec![FundingInput { txid: [seed; 32], vout: 0 }],
+        inputs: vec![FundingInput {
+            txid: [seed; 32],
+            vout: 0,
+        }],
         amount_sat: sats,
         recipient: to.into_array(),
-        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        change: TransferOutput {
+            value: 0,
+            script_hash: [0; 32],
+        },
         tx_bytes: 9_000,
         tip_millisat_per_gas: 0,
         signature: vec![1; 64],
@@ -94,7 +108,9 @@ fn deposit(seed: u8, to: Address, sats: u64) -> PosTransaction {
 }
 /// Inbox record JSON for the producer, as the native chain derives it.
 fn record(tx: &PosTransaction, height: u64, tx_index: u32) -> Value {
-    let PosTransaction::L2Deposit(d) = tx else { unreachable!() };
+    let PosTransaction::L2Deposit(d) = tx else {
+        unreachable!()
+    };
     json!({"height": height, "tx_index": tx_index, "txid": hex::encode(tx.txid()), "vout": 1,
            "sats": d.amount_sat, "recipient": hex::encode(d.recipient)})
 }
@@ -114,11 +130,17 @@ fn da(number: u64, payload: Vec<u8>, chain: u64) -> PosTransaction {
     PosTransaction::L2DataAvailability(L2DataAvailability {
         network_domain: [0x91; 32],
         funding_pubkey: vec![0x5a; ADMISSION_PQ_KEY_BYTES],
-        inputs: vec![FundingInput { txid: [0xee; 32], vout: number as u32 }],
+        inputs: vec![FundingInput {
+            txid: [0xee; 32],
+            vout: number as u32,
+        }],
         l2_chain_id: chain,
         l2_block_number: number,
         payload,
-        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        change: TransferOutput {
+            value: 0,
+            script_hash: [0; 32],
+        },
         tx_bytes: 200_000,
         tip_millisat_per_gas: 0,
         signature: vec![1; 64],
@@ -145,7 +167,11 @@ struct Produced {
 
 fn settlement(block: &Produced, inbox_count: u64) -> PosTransaction {
     let deposits: Vec<DepositMint> = block.records.iter().map(mint).collect();
-    let transactions: Vec<Bytes> = block.payload.as_deref().map(|p| decode_da_payload(p).unwrap()).unwrap_or_default();
+    let transactions: Vec<Bytes> = block
+        .payload
+        .as_deref()
+        .map(|p| decode_da_payload(p).unwrap())
+        .unwrap_or_default();
     let statement = SettlementStatementV3 {
         base: SettlementStatementV2 {
             network: B256::repeat_byte(1),
@@ -173,7 +199,11 @@ fn settlement(block: &Produced, inbox_count: u64) -> PosTransaction {
             body_commitment: B256::repeat_byte(11),
         },
         deposits_hash: deposits_hash(&deposits),
-        transactions_root: NodeBodyV2 { deposits: vec![], transactions: transactions.clone() }.transactions_root(),
+        transactions_root: NodeBodyV2 {
+            deposits: vec![],
+            transactions: transactions.clone(),
+        }
+        .transactions_root(),
         receipts_root: B256::repeat_byte(12),
         user_tx_count: transactions.len() as u64,
         withdrawal_root: block.withdrawals.0,
@@ -224,7 +254,12 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
         (
             inbox[2..].to_vec(),
             (2, 3),
-            vec![transfer(1, 0), transfer(2, 0), withdraw(0, 2, l1_alice, 5_000_000), withdraw(2, 1, l1_bob, 7_000_000)],
+            vec![
+                transfer(1, 0),
+                transfer(2, 0),
+                withdraw(0, 2, l1_alice, 5_000_000),
+                withdraw(2, 1, l1_bob, 7_000_000),
+            ],
         ),
     ];
     let mut produced = Vec::new();
@@ -237,30 +272,60 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
         let pool = root.path().join(format!("pool-{number}.json"));
         std::fs::write(&pool, json!(txs).to_string()).unwrap();
         let block = produce(&[
-            "extend", "--target", &db, "--parent", &hex::encode(parent), "--anchor", &hex::encode(anchor),
-            "--deposits", deposits.to_str().unwrap(), "--txs", pool.to_str().unwrap(),
+            "extend",
+            "--target",
+            &db,
+            "--parent",
+            &hex::encode(parent),
+            "--anchor",
+            &hex::encode(anchor),
+            "--deposits",
+            deposits.to_str().unwrap(),
+            "--txs",
+            pool.to_str().unwrap(),
         ])
         .unwrap();
         assert_eq!(block["transactions"].as_u64().unwrap(), txs.len() as u64, "{block}");
         let payload = if txs.is_empty() {
             let out = root.path().join(format!("da-{number}.hex"));
-            assert!(produce(&["da", "--target", &db, "--number", &number.to_string(), "--out", out.to_str().unwrap()])
-                .unwrap_err()
-                .contains("nothing to publish"));
+            assert!(produce(&[
+                "da",
+                "--target",
+                &db,
+                "--number",
+                &number.to_string(),
+                "--out",
+                out.to_str().unwrap()
+            ])
+            .unwrap_err()
+            .contains("nothing to publish"));
             None
         } else {
             let out = root.path().join(format!("da-{number}.hex"));
-            let info =
-                produce(&["da", "--target", &db, "--number", &number.to_string(), "--out", out.to_str().unwrap()])
-                    .unwrap();
+            let info = produce(&[
+                "da",
+                "--target",
+                &db,
+                "--number",
+                &number.to_string(),
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .unwrap();
             let payload = hex::decode(std::fs::read_to_string(&out).unwrap().trim()).unwrap();
             assert_eq!(h(&info, "da_commitment"), da_commitment(CHAIN_ID, number, &payload));
             assert_eq!(info["transactions"], txs.len());
             let decoded = decode_da_payload(&payload).unwrap();
             // Exactly the included transactions, in block (selection) order.
-            let included: Vec<String> =
-                decoded.iter().map(|tx| hex::encode(alloy_primitives::keccak256(tx))).collect();
-            assert_eq!(Value::from(included), block["included"], "DA batch is the body, in order");
+            let included: Vec<String> = decoded
+                .iter()
+                .map(|tx| hex::encode(alloy_primitives::keccak256(tx)))
+                .collect();
+            assert_eq!(
+                Value::from(included),
+                block["included"],
+                "DA batch is the body, in order"
+            );
             Some(payload)
         };
         let p = Produced {
@@ -273,9 +338,15 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
             records,
             consumed,
             payload,
-            withdrawals: (h(&block, "withdrawal_root"), block["withdrawal_count"].as_u64().unwrap()),
+            withdrawals: (
+                h(&block, "withdrawal_root"),
+                block["withdrawal_count"].as_u64().unwrap(),
+            ),
         };
-        assert_eq!(block["withdrawals"].as_array().unwrap().len() as u64, if number == 3 { 2 } else { 0 });
+        assert_eq!(
+            block["withdrawals"].as_array().unwrap().len() as u64,
+            if number == 3 { 2 } else { 0 }
+        );
         (parent, parent_root) = (p.hash, p.state_root);
         produced.push(p);
     }
@@ -314,38 +385,84 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
     // Claim input: the proof of withdrawal 1 against the settled root of L2
     // block 3, rebuilt from receipts and checked against the outbox state.
     let (root3, count3) = (hex::encode(b3.withdrawals.0), b3.withdrawals.1.to_string());
-    let proof = produce(&["withdrawal-proof", "--target", &db, "--index", "1", "--number", "3", "--root", &root3,
-                          "--count", &count3])
+    let proof = produce(&[
+        "withdrawal-proof",
+        "--target",
+        &db,
+        "--index",
+        "1",
+        "--number",
+        "3",
+        "--root",
+        &root3,
+        "--count",
+        &count3,
+    ])
     .unwrap();
     assert_eq!(proof["withdrawal"]["nonce"], 1);
     assert_eq!(proof["withdrawal"]["sats"], 7_000_000);
     assert_eq!(proof["withdrawal"]["l2_block"], 3);
     assert_eq!(h(&proof["withdrawal"], "l1_recipient"), l1_bob);
-    let siblings: Vec<B256> = proof["siblings"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().parse().unwrap()).collect();
+    let siblings: Vec<B256> = proof["siblings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().parse().unwrap())
+        .collect();
     let leaf = withdrawal_leaf(CHAIN_ID, 1, l1_bob, 7_000_000);
-    assert!(verify_withdrawal_proof(leaf, 1, &siblings.try_into().unwrap(), b3.withdrawals.0));
+    assert!(verify_withdrawal_proof(
+        leaf,
+        1,
+        &siblings.try_into().unwrap(),
+        b3.withdrawals.0
+    ));
     let head = produce(&["head", "--target", &db]).unwrap();
-    assert_eq!((h(&head, "withdrawal_root"), head["withdrawal_count"].as_u64()), (b3.withdrawals.0, Some(2)));
+    assert_eq!(
+        (h(&head, "withdrawal_root"), head["withdrawal_count"].as_u64()),
+        (b3.withdrawals.0, Some(2))
+    );
     // Refused: a root the chain never had, a missing leaf, a block before it.
     let wrong = hex::encode(B256::repeat_byte(9));
-    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "0", "--root", &wrong, "--count", "2"])
-        .unwrap_err()
-        .contains("differ"));
-    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "2"]).unwrap_err().contains("does not exist"));
-    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "0", "--number", "2"])
+    assert!(produce(&[
+        "withdrawal-proof",
+        "--target",
+        &db,
+        "--index",
+        "0",
+        "--root",
+        &wrong,
+        "--count",
+        "2"
+    ])
+    .unwrap_err()
+    .contains("differ"));
+    assert!(produce(&["withdrawal-proof", "--target", &db, "--index", "2"])
         .unwrap_err()
         .contains("does not exist"));
+    assert!(
+        produce(&["withdrawal-proof", "--target", &db, "--index", "0", "--number", "2"])
+            .unwrap_err()
+            .contains("does not exist")
+    );
     // The rebuilt database is a usable canonical L2 database.
     let head = produce(&["head", "--target", &dir("rebuilt")]).unwrap();
-    assert_eq!((head["number"].as_u64(), h(&head, "state_root")), (Some(3), b3.state_root));
+    assert_eq!(
+        (head["number"].as_u64(), h(&head, "state_root")),
+        (Some(3), b3.state_root)
+    );
 
     // The same native blocks read from a native follower store (index +
     // blocks/<id>.bin, line i = height i) rebuild the same chain.
     let follower = root.path().join("follower");
     write_follower_store(&follower, &honest);
-    let from_store =
-        produce(&["reconstruct", "--target", &dir("rebuilt-follower"), "--l1-follower", follower.to_str().unwrap()])
-            .unwrap();
+    let from_store = produce(&[
+        "reconstruct",
+        "--target",
+        &dir("rebuilt-follower"),
+        "--l1-follower",
+        follower.to_str().unwrap(),
+    ])
+    .unwrap();
     assert_eq!(from_store["blocks"], report["blocks"]);
 
     // A prefix of L1 rebuilds only what was settled in it.
@@ -450,11 +567,17 @@ fn write_follower_store(dir: &Path, blocks: &[(u64, Vec<PosTransaction>)]) {
                 coherence_root: [0; 32],
             },
             proposer_sig: vec![],
-            body: Body { transactions, attestations: vec![] },
+            body: Body {
+                transactions,
+                attestations: vec![],
+            },
         };
         let id = *envelope.block_id().as_bytes();
-        std::fs::write(dir.join("blocks").join(format!("{}.bin", hex::encode(id))), bloch_pos_node::codec::encode_envelope(&envelope))
-            .unwrap();
+        std::fs::write(
+            dir.join("blocks").join(format!("{}.bin", hex::encode(id))),
+            bloch_pos_node::codec::encode_envelope(&envelope),
+        )
+        .unwrap();
         index.push_str(&format!("{}\n", hex::encode(id)));
         parent = id;
     }

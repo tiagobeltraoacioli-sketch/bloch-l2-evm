@@ -22,8 +22,8 @@ use bloch_pos_committee::{
     transition::{CommittedState, PosTransaction, Transition},
 };
 use bloch_settlement_recovery::native::{
-    verify_native_finality, NativeBlockLimitsV1, NativeConsensusVerifierV1, NativeFinalityErrorV1,
-    NativeGenesisTrustV1, NativeReplayBlockV1, NativeReplayLimitsV1, IncrementalNativeVerifierV1,
+    verify_native_finality, IncrementalNativeVerifierV1, NativeBlockLimitsV1, NativeConsensusVerifierV1,
+    NativeFinalityErrorV1, NativeGenesisTrustV1, NativeReplayBlockV1, NativeReplayLimitsV1,
 };
 use std::sync::OnceLock;
 
@@ -77,12 +77,25 @@ fn build(
     };
     let sign =
         |h: &BlockHeaderV4| bloch_crypto::crypto::sign(&keys[proposer as usize].1, &h.proposal_signing_root()).unwrap();
-    let probe = ProposalEnvelope { header, proposer_sig: sign(&header) };
+    let probe = ProposalEnvelope {
+        header,
+        proposer_sig: sign(&header),
+    };
     header.state_root = tr.compute_post_state(pre, &probe, &atts, &txs).unwrap().state_root();
-    let envelope = ProposalEnvelope { header, proposer_sig: sign(&header) };
+    let envelope = ProposalEnvelope {
+        header,
+        proposer_sig: sign(&header),
+    };
     // The native transition itself must accept every block built here.
     let post = tr.apply_block(pre, &envelope, &atts, &txs).unwrap();
-    (NativeReplayBlockV1 { envelope, attestations: atts, transactions: vec![] }, post)
+    (
+        NativeReplayBlockV1 {
+            envelope,
+            attestations: atts,
+            transactions: vec![],
+        },
+        post,
+    )
 }
 
 fn sign(v: u32, data: AttestationData) -> Attestation {

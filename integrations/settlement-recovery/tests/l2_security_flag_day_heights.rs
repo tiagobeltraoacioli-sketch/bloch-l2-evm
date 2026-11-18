@@ -17,7 +17,9 @@ use bloch_pos_committee::{
     l2_settlement::Transaction as Settlement,
     transition::{funded::ADMISSION_PQ_KEY_BYTES, FundingInput, L2Deposit, PosTransaction, TransferOutput},
 };
-use bloch_settlement_recovery::reconstruct::{derive_settled_blocks, flag_day_first_slot, l2_registry_blocks, NativeBlockTransactions};
+use bloch_settlement_recovery::reconstruct::{
+    derive_settled_blocks, flag_day_first_slot, l2_registry_blocks, NativeBlockTransactions,
+};
 
 const CHAIN_ID: u64 = 700_770;
 const OFFSET: u64 = 152_014;
@@ -32,7 +34,10 @@ fn rebuild_must_derive_the_inbox_height_the_native_chain_committed() {
         inputs: vec![FundingInput { txid: [1; 32], vout: 0 }],
         amount_sat: 5_000_000,
         recipient: recipient.into_array(),
-        change: TransferOutput { value: 0, script_hash: [0; 32] },
+        change: TransferOutput {
+            value: 0,
+            script_hash: [0; 32],
+        },
         tx_bytes: 9_000,
         tip_millisat_per_gas: 0,
         signature: vec![1; 64],
@@ -101,21 +106,38 @@ fn rebuild_must_derive_the_inbox_height_the_native_chain_committed() {
     // Control: chain heights, the numbering before the fix, are refused.
     let by_chain_height = l2_registry_blocks(chain, None);
     assert!(matches!(
-        derive_settled_blocks(&by_chain_height, CHAIN_ID, B256::repeat_byte(0x11), B256::repeat_byte(0x12)),
+        derive_settled_blocks(
+            &by_chain_height,
+            CHAIN_ID,
+            B256::repeat_byte(0x11),
+            B256::repeat_byte(0x12)
+        ),
         Err(bloch_settlement_recovery::reconstruct::ReconstructError::Deposits { number: 1 })
     ));
     let derived = derive_settled_blocks(&blocks, CHAIN_ID, B256::repeat_byte(0x11), B256::repeat_byte(0x12));
-    assert!(derived.is_ok(), "rebuild refuses a settlement the native chain would accept: {derived:?}");
+    assert!(
+        derived.is_ok(),
+        "rebuild refuses a settlement the native chain would accept: {derived:?}"
+    );
 }
 
 #[test]
 fn an_l2_at_genesis_keeps_chain_heights() {
     let blocks = l2_registry_blocks(vec![(5, vec![]), (9, vec![])], None);
     assert_eq!(blocks.iter().map(|b| b.height).collect::<Vec<_>>(), [1, 2]);
-    assert_eq!(blocks, vec![
-        NativeBlockTransactions { height: 1, transactions: vec![] },
-        NativeBlockTransactions { height: 2, transactions: vec![] },
-    ]);
+    assert_eq!(
+        blocks,
+        vec![
+            NativeBlockTransactions {
+                height: 1,
+                transactions: vec![]
+            },
+            NativeBlockTransactions {
+                height: 2,
+                transactions: vec![]
+            },
+        ]
+    );
 }
 
 #[test]
