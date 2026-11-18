@@ -434,7 +434,11 @@ impl Snapshot {
         let call = QuoteCall {
             sender: request.from,
             to: request.to,
-            data: request.data.clone().or_else(|| request.input.clone()).unwrap_or_default(),
+            data: request
+                .data
+                .clone()
+                .or_else(|| request.input.clone())
+                .unwrap_or_default(),
             value,
             gas_limit,
             nonce,
@@ -1118,8 +1122,16 @@ mod tests {
         let refused = world.send(&world.approve(1, 7, FLOOR, cap)).unwrap_err();
         let refusal = data(&refused);
         for field in [
-            "headHash", "headNumber", "baseFeePerGas", "requiredPriorityFeePerGas", "requiredMaxFeePerGas",
-            "gasUsed", "freshSlots", "chargedFreshSlots", "freshSlotPriceWei", "scope",
+            "headHash",
+            "headNumber",
+            "baseFeePerGas",
+            "requiredPriorityFeePerGas",
+            "requiredMaxFeePerGas",
+            "gasUsed",
+            "freshSlots",
+            "chargedFreshSlots",
+            "freshSlotPriceWei",
+            "scope",
         ] {
             assert_eq!(quote[field], refusal[field], "{field}");
         }
@@ -1134,7 +1146,10 @@ mod tests {
             .filter(|path| path.extension().is_some_and(|e| e == "tx"))
             .collect();
         assert_eq!(spooled.len(), 1);
-        assert_eq!(std::fs::metadata(&spooled[0]).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            std::fs::metadata(&spooled[0]).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 
     #[tokio::test]
@@ -1145,7 +1160,9 @@ mod tests {
         let none = snapshot.quote(&approve_request(0, None), &policy(vec![])).unwrap();
         assert_eq!(quantity(&none["freshSlots"]), 0);
         assert_eq!(quantity(&none["requiredPriorityFeePerGas"]), FLOOR);
-        let exempt = snapshot.quote(&approve_request(7, None), &policy(vec![sender()])).unwrap();
+        let exempt = snapshot
+            .quote(&approve_request(7, None), &policy(vec![sender()]))
+            .unwrap();
         assert_eq!(quantity(&exempt["freshSlots"]), 1);
         assert_eq!(quantity(&exempt["chargedFreshSlots"]), 0);
         assert_eq!(quantity(&exempt["requiredPriorityFeePerGas"]), FLOOR);
@@ -1165,14 +1182,19 @@ mod tests {
         let error = snapshot.quote(&poor, &policy(vec![])).unwrap_err();
         assert!(error.message().contains("below gas limit"), "{}", error.message());
         // Too little gas: the call cannot execute, so there is nothing to price.
-        let error = snapshot.quote(&approve_request(7, Some(21_000)), &policy(vec![])).unwrap_err();
+        let error = snapshot
+            .quote(&approve_request(7, Some(21_000)), &policy(vec![]))
+            .unwrap_err();
         assert!(error.message().contains("cannot execute"), "{}", error.message());
         // `data` and `input` that disagree are refused, as wallets expect.
         let mut both = approve_request(7, None);
         both.input = Some(Bytes::from_static(&[1]));
         assert!(snapshot.quote(&both, &policy(vec![])).is_err());
         // Unknown fields (state overrides, block tags) are not silently ignored.
-        assert!(serde_json::from_str::<QuoteRequest>(r#"{"from":"0x0000000000000000000000000000000000000001","stateOverride":{}}"#).is_err());
+        assert!(serde_json::from_str::<QuoteRequest>(
+            r#"{"from":"0x0000000000000000000000000000000000000001","stateOverride":{}}"#
+        )
+        .is_err());
     }
 
     #[test]

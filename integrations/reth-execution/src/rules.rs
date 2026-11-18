@@ -141,7 +141,8 @@ impl RuleSchedule {
     /// until the switch is fixed, and [`Self::base_fee_after`] from then on and on a network with one rule set.
     pub fn base_fee_quote(&self, parent: &NodeHeaderV2) -> u64 {
         let next = self.base_fee_after(parent);
-        self.base_fee_after_switching(parent).map_or(next, |switching| next.max(switching))
+        self.base_fee_after_switching(parent)
+            .map_or(next, |switching| next.max(switching))
     }
 
     /// The link of `header` to its parent, judged on the rules of `header`'s
@@ -339,10 +340,25 @@ mod tests {
     fn f387_1_the_base_fee_and_the_parent_link_are_the_rules_of_the_child_at_every_position() {
         let (base, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
         let floor = next.min_base_fee;
-        assert!(floor > 0 && base.min_base_fee == 0, "the floor is a next-rules addition");
+        assert!(
+            floor > 0 && base.min_base_fee == 0,
+            "the floor is a next-rules addition"
+        );
         let target = base.gas_target();
         // Fees around the floor, far above it and at the bottom; empty, at target and full parents.
-        let fees = [1, 7, floor / 2, floor - 1, floor, floor + 1, 100_134_788, 100_218_107, 100_401_761, 2 * floor, 1_000_000_000];
+        let fees = [
+            1,
+            7,
+            floor / 2,
+            floor - 1,
+            floor,
+            floor + 1,
+            100_134_788,
+            100_218_107,
+            100_401_761,
+            2 * floor,
+            1_000_000_000,
+        ];
         let gas = [0, 21_000, target, base.gas_limit];
         let (mut differing, mut cases) = (0u32, 0u32);
         for switch in [None, Some(1u64), Some(575), Some(576), Some(577), Some(1_000)] {
@@ -358,16 +374,27 @@ mod tests {
                         let other = if rules.is_next(number + 1) { &base } else { &next };
                         let built = child(&rules, &parent);
                         let expected = own.next_base_fee(fee, used);
-                        assert_eq!(built.base_fee_per_gas, expected, "switch {switch:?}, parent {number}, fee {fee}, gas {used}");
+                        assert_eq!(
+                            built.base_fee_per_gas, expected,
+                            "switch {switch:?}, parent {number}, fee {fee}, gas {used}"
+                        );
                         if rules.is_next(number + 1) {
-                            assert!(built.base_fee_per_gas >= floor, "a next-rules block is never under the floor");
+                            assert!(
+                                built.base_fee_per_gas >= floor,
+                                "a next-rules block is never under the floor"
+                            );
                         }
-                        rules.validate_link(&built, &parent).expect("the link the schedule built");
+                        rules
+                            .validate_link(&built, &parent)
+                            .expect("the link the schedule built");
                         let foreign = other.next_base_fee(fee, used);
                         cases += 1;
                         if foreign != expected {
                             differing += 1;
-                            let wrong = NodeHeaderV2 { base_fee_per_gas: foreign, ..built.clone() };
+                            let wrong = NodeHeaderV2 {
+                                base_fee_per_gas: foreign,
+                                ..built.clone()
+                            };
                             assert!(
                                 matches!(rules.validate_link(&wrong, &parent), Err(NodeHeaderError::Parent)),
                                 "the other rule set's base fee: switch {switch:?}, parent {number}, fee {fee}, gas {used}"
@@ -394,12 +421,22 @@ mod tests {
             head = child(&rules, &parent);
             rules.validate_link(&head, &parent).unwrap();
         }
-        assert!(head.base_fee_per_gas < next.min_base_fee / 2, "800 quiet base blocks: {}", head.base_fee_per_gas);
+        assert!(
+            head.base_fee_per_gas < next.min_base_fee / 2,
+            "800 quiet base blocks: {}",
+            head.base_fee_per_gas
+        );
         assert_eq!(rules.base_fee_after_switching(&head), Some(next.min_base_fee));
-        assert!(rules.base_fee_after(&head) < head.base_fee_per_gas, "not switched: the base rules' step");
+        assert!(
+            rules.base_fee_after(&head) < head.base_fee_per_gas,
+            "not switched: the base rules' step"
+        );
         rules.switch_at(801).unwrap();
         assert_eq!(rules.base_fee_after_switching(&head), None);
-        assert_eq!(RuleSchedule::single(ChainSpec::testnet_v3()).base_fee_after_switching(&head), None);
+        assert_eq!(
+            RuleSchedule::single(ChainSpec::testnet_v3()).base_fee_after_switching(&head),
+            None
+        );
         for _ in 0..3 {
             let parent = head.clone();
             head = child(&rules, &parent);
@@ -409,7 +446,10 @@ mod tests {
         // The base-rules history before the switch still links on the base rules.
         let a = header(799, 61_000_000, 0);
         let b = child(&rules, &a);
-        assert!(b.base_fee_per_gas < 61_000_000, "block 800 is a base-rules block: no floor");
+        assert!(
+            b.base_fee_per_gas < 61_000_000,
+            "block 800 is a base-rules block: no floor"
+        );
         rules.validate_link(&b, &a).unwrap();
     }
 
@@ -422,13 +462,31 @@ mod tests {
         let rules = schedule();
         // Chain 2 of the end-to-end test: head 580 on the base rules at 97,817,550.
         let under = header(580, 97_817_550, 0);
-        assert_eq!(rules.base_fee_after(&under), 97_426_280, "what a base-rules block 581 carries");
-        assert_eq!(rules.base_fee_quote(&under), floor, "what a wallet must be able to pay if 581 is the switch");
+        assert_eq!(
+            rules.base_fee_after(&under),
+            97_426_280,
+            "what a base-rules block 581 carries"
+        );
+        assert_eq!(
+            rules.base_fee_quote(&under),
+            floor,
+            "what a wallet must be able to pay if 581 is the switch"
+        );
         // Above the floor, and with a busy parent, the quote is the higher of the two rule sets' values.
-        for (fee, used) in [(1_000_000_000, 0), (100_218_107, 0), (floor, base.gas_limit), (7, 0), (floor + 1, 21_000)] {
+        for (fee, used) in [
+            (1_000_000_000, 0),
+            (100_218_107, 0),
+            (floor, base.gas_limit),
+            (7, 0),
+            (floor + 1, 21_000),
+        ] {
             let parent = header(9, fee, used);
             let (as_base, as_switch) = (base.next_base_fee(fee, used), next.next_base_fee(fee, used));
-            assert_eq!(rules.base_fee_quote(&parent), as_base.max(as_switch), "fee {fee}, gas {used}");
+            assert_eq!(
+                rules.base_fee_quote(&parent),
+                as_base.max(as_switch),
+                "fee {fee}, gas {used}"
+            );
             assert!(rules.base_fee_quote(&parent) >= rules.base_fee_after(&parent));
         }
         // Once the switch is fixed there is one answer, and the quote is it.
@@ -436,7 +494,11 @@ mod tests {
         assert_eq!(rules.base_fee_quote(&under), rules.base_fee_after(&under));
         assert_eq!(rules.base_fee_quote(&under), floor);
         let earlier = header(400, 97_817_550, 0);
-        assert_eq!(rules.base_fee_quote(&earlier), base.next_base_fee(97_817_550, 0), "a base-rules block before the switch");
+        assert_eq!(
+            rules.base_fee_quote(&earlier),
+            base.next_base_fee(97_817_550, 0),
+            "a base-rules block before the switch"
+        );
         // One rule set: nothing to cover.
         let single = RuleSchedule::single(ChainSpec::testnet_v3());
         assert_eq!(single.base_fee_quote(&under), single.base_fee_after(&under));
@@ -477,9 +539,16 @@ mod tests {
                 continue;
             }
             // The first test module: `#[cfg(test)]`, an optional `#[path]`, then `mod`.
-            let is_mod = |i: usize| lines.get(i).is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod "));
+            let is_mod = |i: usize| {
+                lines
+                    .get(i)
+                    .is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod "))
+            };
             let cut = (0..lines.len())
-                .find(|&i| lines[i] == "#[cfg(test)]" && (is_mod(i + 1) || (lines[i + 1].starts_with("#[path") && is_mod(i + 2))))
+                .find(|&i| {
+                    lines[i] == "#[cfg(test)]"
+                        && (is_mod(i + 1) || (lines[i + 1].starts_with("#[path") && is_mod(i + 2)))
+                })
                 .unwrap_or(lines.len());
             for (index, line) in lines[cut..].iter().enumerate() {
                 let test_only = line.is_empty()
@@ -491,7 +560,12 @@ mod tests {
                     || line.starts_with("mod ")
                     || line.starts_with("pub mod ")
                     || *line == "}";
-                assert!(test_only, "{}:{}: code after the first test module: {line}", file.display(), cut + index + 1);
+                assert!(
+                    test_only,
+                    "{}:{}: code after the first test module: {line}",
+                    file.display(),
+                    cut + index + 1
+                );
             }
             for (index, line) in lines[..cut].iter().enumerate() {
                 let code = line.split("//").next().unwrap();
@@ -511,7 +585,11 @@ mod tests {
             }
             scanned += cut;
         }
-        assert!(offenders.is_empty(), "a rule set chosen by the caller:\n{}", offenders.join("\n"));
+        assert!(
+            offenders.is_empty(),
+            "a rule set chosen by the caller:\n{}",
+            offenders.join("\n")
+        );
         // Not vacuous: the scan sees the two kernel calls this module makes, and real code.
         assert_eq!(seen_here, 3, "the scan finds this module's own three kernel calls");
         assert!(scanned > 8_000, "lines scanned: {scanned}");

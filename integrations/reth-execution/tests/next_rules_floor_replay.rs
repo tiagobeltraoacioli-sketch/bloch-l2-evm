@@ -46,7 +46,10 @@ fn open(path: &Path, spec: Arc<BlochChainSpec>) -> BlochProviderFactory {
         Arc::new(init_db_for::<_, BlochTables>(path.join("db"), DatabaseArguments::test()).unwrap()),
         spec,
         StaticFileProvider::read_write(path.join("static")).unwrap(),
-        RocksDBBuilder::new(path.join("rocks")).with_default_tables().build().unwrap(),
+        RocksDBBuilder::new(path.join("rocks"))
+            .with_default_tables()
+            .build()
+            .unwrap(),
         reth_tasks::Runtime::test(),
     )
     .unwrap()
@@ -57,7 +60,10 @@ fn open(path: &Path, spec: Arc<BlochChainSpec>) -> BlochProviderFactory {
 /// and the first block at the floor.
 fn build(source: &BlochProviderFactory, spec: &BlochChainSpec) -> (u64, u64) {
     let next = ChainSpec::mainnet_next_or_rehearsal();
-    let (floor, derivation) = (next.min_base_fee, next.block_derivation.expect("the next rules derive the block"));
+    let (floor, derivation) = (
+        next.min_base_fee,
+        next.block_derivation.expect("the next rules derive the block"),
+    );
     assert!(floor > 0);
     let genesis = prepare_genesis(spec, source.latest().unwrap().as_ref()).unwrap();
     let writer = source.database_provider_rw().unwrap();
@@ -103,14 +109,20 @@ fn r406_8_the_canonical_replay_and_the_settlement_audit_cross_the_base_fee_floor
     let spec = chain(true);
     let source = open(&directory.path().join("source"), spec.clone());
     let (height, first_at_floor) = build(&source, &spec);
-    assert!(first_at_floor > 500 && height == first_at_floor + 3, "floor at {first_at_floor}, head {height}");
+    assert!(
+        first_at_floor > 500 && height == first_at_floor + 3,
+        "floor at {first_at_floor}, head {height}"
+    );
     let head = source.sealed_header(height).unwrap().unwrap();
     let floor_fee = ChainSpec::mainnet_next_or_rehearsal().min_base_fee;
     // The blocks at the floor are blocks the BASE rules would not link: their step is under it.
     let at_floor = source.sealed_header(first_at_floor + 1).unwrap().unwrap();
     assert_eq!(at_floor.0.base_fee_per_gas, floor_fee);
     assert!(ChainSpec::mainnet_v1().next_base_fee(floor_fee, 0) < floor_fee);
-    let floor = ReplayFloor { number: height, hash: head.hash() };
+    let floor = ReplayFloor {
+        number: height,
+        hash: head.hash(),
+    };
 
     // 1. The canonical replay (validate_and_execute_block -> BlochConsensus) into fresh storage.
     let target = open(&directory.path().join("target"), spec.clone());
@@ -118,7 +130,10 @@ fn r406_8_the_canonical_replay_and_the_settlement_audit_cross_the_base_fee_floor
         .unwrap_or_else(|e| panic!("replay across the floor: {e}"));
     assert_eq!((outcome.blocks, outcome.head.hash()), (height, head.hash()));
     assert_eq!(target.best_block_number().unwrap(), height);
-    assert_eq!(target.sealed_header(first_at_floor).unwrap().unwrap(), source.sealed_header(first_at_floor).unwrap().unwrap());
+    assert_eq!(
+        target.sealed_header(first_at_floor).unwrap().unwrap(),
+        source.sealed_header(first_at_floor).unwrap().unwrap()
+    );
 
     // 2. The canonical settlement audit: its snapshot links every block to its parent before the consumer
     //    runs. The consumer audits nothing here, so the audit ends "incomplete": AFTER the snapshot was taken.
@@ -141,9 +156,14 @@ fn r406_8_the_canonical_replay_and_the_settlement_audit_cross_the_base_fee_floor
         snapshot_taken = true;
         Ok::<(), ()>(())
     });
-    assert!(snapshot_taken, "the snapshot links all {height} blocks, the ones at the floor included: {audit:?}");
+    assert!(
+        snapshot_taken,
+        "the snapshot links all {height} blocks, the ones at the floor included: {audit:?}"
+    );
     match audit {
-        Err(CanonicalSettlementAuditErrorV1::Canonical(error)) => assert!(error.to_string().contains("incomplete"), "{error}"),
+        Err(CanonicalSettlementAuditErrorV1::Canonical(error)) => {
+            assert!(error.to_string().contains("incomplete"), "{error}")
+        }
         other => panic!("an audit of no record is incomplete: {other:?}"),
     }
 
@@ -159,5 +179,8 @@ fn r406_8_the_canonical_replay_and_the_settlement_audit_cross_the_base_fee_floor
         reached = true;
         Ok::<(), ()>(())
     });
-    assert!(audit.is_err() && !reached, "on the base rules the links at the floor do not hold");
+    assert!(
+        audit.is_err() && !reached,
+        "on the base rules the links at the floor do not hold"
+    );
 }

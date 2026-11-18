@@ -378,7 +378,10 @@ mod next_rules_base_fee_tests {
         let base = ChainSpec::mainnet_v1();
         let next = ChainSpec::mainnet_next_or_rehearsal();
         let floor = next.min_base_fee;
-        assert!(floor > 0 && base.min_base_fee == 0, "the floor is a next-rules addition");
+        assert!(
+            floor > 0 && base.min_base_fee == 0,
+            "the floor is a next-rules addition"
+        );
         let rules = crate::RuleSchedule::new(base.clone(), next.clone()).unwrap();
         let chain = crate::BlochChainSpec::scheduled(rules.clone(), B256::repeat_byte(0x70), 1_786_656_679).unwrap();
         let config = BlochEvmConfig::for_chain(&chain);
@@ -402,11 +405,19 @@ mod next_rules_base_fee_tests {
         // From the switch on it runs the next rules: exactly what the executor requires.
         rules.switch_at(1).unwrap();
         let context = config.next_context(&parent, &attributes).unwrap();
-        assert_eq!(context.base_fee_per_gas, chain.execution_at(575).next_base_fee(parent.0.base_fee_per_gas, 0));
+        assert_eq!(
+            context.base_fee_per_gas,
+            chain.execution_at(575).next_base_fee(parent.0.base_fee_per_gas, 0)
+        );
         assert_eq!(context.base_fee_per_gas, floor, "the floor, not the step");
         // The assembler judges the parent link on the same rules (F387-1, second half).
         assert_eq!(config.assembler.rules_at(575).min_base_fee, floor);
-        assert_eq!(BlochNodeBlockAssembler::new(&base, B256::repeat_byte(0x70)).rules_at(575).min_base_fee, 0);
+        assert_eq!(
+            BlochNodeBlockAssembler::new(&base, B256::repeat_byte(0x70))
+                .rules_at(575)
+                .min_base_fee,
+            0
+        );
         // Above the floor both rule sets agree.
         parent.0.base_fee_per_gas = 2 * floor;
         let context = config.next_context(&parent, &attributes).unwrap();

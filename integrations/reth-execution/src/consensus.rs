@@ -160,7 +160,9 @@ mod next_rules_parent_tests {
             h.0.number = parent.0.number + 1;
             h.0.parent_hash = parent.0.hash();
             h.0.parent_state_root = parent.0.state_root;
-            h.0.base_fee_per_gas = chain.execution_at(h.0.number).next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used);
+            h.0.base_fee_per_gas = chain
+                .execution_at(h.0.number)
+                .next_base_fee(parent.0.base_fee_per_gas, parent.0.gas_used);
             h.0.gas_used = 0;
             h
         };
@@ -171,7 +173,10 @@ mod next_rules_parent_tests {
         let b575 = child_of(&b574);
         let b576 = child_of(&b575);
         assert_eq!((b575.0.base_fee_per_gas, b576.0.base_fee_per_gas), (floor, floor));
-        assert!(base.next_base_fee(floor, 0) < floor, "the base rules would step under the floor");
+        assert!(
+            base.next_base_fee(floor, 0) < floor,
+            "the base rules would step under the floor"
+        );
         let seal = |h: &BlochNodeHeader| SealedHeader::seal_slow(h.clone());
         consensus
             .validate_header_against_parent(&seal(&b575), &seal(&b574))
@@ -182,6 +187,8 @@ mod next_rules_parent_tests {
         // A header that took the base rules' unfloored step is refused under the next rules.
         let mut stepped = b576.clone();
         stepped.0.base_fee_per_gas = base.next_base_fee(floor, 0);
-        assert!(consensus.validate_header_against_parent(&seal(&stepped), &seal(&b575)).is_err());
+        assert!(consensus
+            .validate_header_against_parent(&seal(&stepped), &seal(&b575))
+            .is_err());
     }
 }

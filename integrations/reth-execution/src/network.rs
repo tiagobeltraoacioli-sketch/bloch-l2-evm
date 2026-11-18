@@ -242,8 +242,12 @@ mod tests {
             let refused = L2Network::parse("mainnet-rehearsal", Some(DOMAIN), Some("1800000000")).unwrap_err();
             assert_eq!(refused, REHEARSAL_RULES_NOT_COMPILED);
             // It is still told apart from an unknown name, and still wants its arguments.
-            assert!(L2Network::parse("mainnet-other", Some(DOMAIN), Some("1800000000")).unwrap_err().contains("must be v3, v2 or mainnet"));
-            assert!(L2Network::parse("mainnet-rehearsal", None, Some("1800000000")).unwrap_err().contains("--domain"));
+            assert!(L2Network::parse("mainnet-other", Some(DOMAIN), Some("1800000000"))
+                .unwrap_err()
+                .contains("must be v3, v2 or mainnet"));
+            assert!(L2Network::parse("mainnet-rehearsal", None, Some("1800000000"))
+                .unwrap_err()
+                .contains("--domain"));
         }
         assert_eq!(mainnet.rules.chain_id, MAINNET_CHAIN_ID);
         let spec = mainnet.chain_spec().unwrap();
