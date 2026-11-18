@@ -160,6 +160,11 @@ Steps that run again, in order, and what they took here:
 3. The SP1 host (6 minutes): it links the chain specification, so it is rebuilt and its new hash is the pin; then
    the identities with it (under 1 minute).
 4. `python3 S pins …`, commit native, `python3 S native-commit …`, `python3 S audit …` (seconds).
+   Between step 1 and `pins` the trees pin the new configuration beside the identities of the guests built for
+   the old one. Step 1 records that in `deployment/mainnet/SWEEP-PINS-PENDING.json` (committed with its edits);
+   while the record is there `native-commit`, `audit` and the kit build's gate (`gate --l2`, called by
+   `build-release.sh`) refuse, in whatever order they are run; the guest builds are not held; `pins` with
+   identities made for the new configuration removes it (review R335-1).
 5. `build-release.sh` on two hosts (12 minutes each), then the pins of the SP1 host, `bloch-l2-produce-dev` and
    `refresh_kit_pins.py --write` (seconds).
 6. Suites: native committee and node (15 minutes), L2 clean export (about 40 minutes with a cold cache).

@@ -232,7 +232,15 @@ CROSSINGS = ('deployment/mainnet/rehearsal/next-consensus/crossing.py',
              # agent 137's forced-inclusion crossing (fork candidate v3)
              'deployment/mainnet/rehearsal/forced-inclusion/crossing.py')
 NATIVE_PINS = 'crates/bloch-pos-committee/src/l2_settlement.rs'
+# Review R335-1: `apply` rewrites the configuration everywhere but cannot rewrite the guests' ELF and key identities
+# (they exist only after the pinned-container builds). Between `apply` and `pins` the trees therefore pin the NEW
+# configuration beside the identities of guests built for the OLD one, and nothing in the text shows it. This file
+# is the record of that state: `apply` writes it when the configuration moves, `pins` removes it, and `audit`,
+# `native-commit` and the release gate of a tree (`gate --l2`, which build-release.sh calls) refuse while it is
+# there. The guest builds themselves use `gate --chainspec` and are not held: they are what clears it.
+PINS_PENDING = 'deployment/mainnet/SWEEP-PINS-PENDING.json'
 SELF_FILES = {'set-sweep-recipient.py', 'test_set_sweep_recipient.py', 'SWEEP-RECIPIENT-PROCEDURE.md',
+              'SWEEP-PINS-PENDING.json',
               # agent 221's real rehearsal data (a statement of a past private run), never a pin
               'reset-target-fixture.json',
               # the audited sparse build f6eb456 (78c533fa, before forced inclusion and the floor): a record, never a pin
@@ -542,6 +550,48 @@ def short_forms(old, new):
         (old[:8], new[:8], True)]
 
 
+def pins_pending(l2):
+    """The record `apply` left, or None. A file that does not parse is still a pending state."""
+    p = l2 / PINS_PENDING
+    if not p.exists():
+        return None
+    try:
+        record = json.loads(p.read_text())
+        return record if isinstance(record, dict) else {'unreadable': True}
+    except (OSError, ValueError):
+        return {'unreadable': True}
+
+
+def pending_refusal(l2):
+    record = pins_pending(l2)
+    if record is None:
+        return None
+    return (f'{PINS_PENDING} is present: the trees pin configuration {record.get("configuration")} beside the ELF and '
+            f'key identities of guests built for {record.get("guests_built_for")}. Build both guests in the pinned '
+            'container from this tree and run `pins` (it removes the record)')
+
+
+def note_pins_pending(l2, old_cfg, recipient, new_cfg):
+    """After `apply`: keep, write or clear the record. The guests the trees pin were built for the configuration
+    the FIRST pending `apply` moved away from; a later `apply` keeps that, and one that returns to it clears the
+    record (the pinned identities are the right ones again)."""
+    p = l2 / PINS_PENDING
+    record = pins_pending(l2)
+    built_for = record.get('guests_built_for') if record and not record.get('unreadable') else old_cfg
+    if record is None and old_cfg == new_cfg:
+        return None
+    if built_for == new_cfg:
+        p.unlink()
+        return 'cleared'
+    p.write_text(json.dumps({
+        'guests_built_for': built_for, 'configuration': new_cfg, 'recipient': eip55(recipient),
+        'pinned_guest_elf_keccak': {name: settler_pin(l2, name)['elf_keccak'] for name in ('MAINNET_NEXT_SPARSE', 'MAINNET_NEXT')},
+        'what': 'set-sweep-recipient.py apply moved the next configuration; the guest identities above are of the '
+                'guests built before it. Removed by `pins`. While present: audit, native-commit and gate --l2 refuse.',
+    }, indent=2) + '\n')
+    return 'written'
+
+
 def cmd_apply(args):
     r = parse_address(args.address)
     l2, native = Path(args.l2).resolve(), Path(args.native).resolve()
@@ -581,8 +631,9 @@ def cmd_apply(args):
                         ed.write(p, t, t.replace(before, after), 'previous recipient')
     refresh_installer_pins(l2, ed)
     ed.report()
+    pending = None if args.dry_run else note_pins_pending(l2, old_cfg, r, new_cfg)
     print(json.dumps({'old_recipient': eip55(old), 'recipient': eip55(r), 'old_configuration': old_cfg,
-                      'min_base_fee': current_floor(l2),
+                      'min_base_fee': current_floor(l2), 'pins_pending_record': pending,
                       'configuration': new_cfg, 'next': 'build both guests in the pinned container on two hosts, '
                       'then run `pins` (see `audit` for the full rebuild list)'}, indent=2))
 
@@ -647,6 +698,10 @@ def cmd_pins(args):
         out[const] = {'configuration': cfg, **new, 'elf_bytes': size}
     refresh_installer_pins(l2, ed)
     ed.report()
+    if not args.dry_run and (l2 / PINS_PENDING).exists():
+        # Both identities were made for this tree's configuration (load_identity checked it): the record is settled.
+        (l2 / PINS_PENDING).unlink()
+        print(f'removed {PINS_PENDING}')
     print(json.dumps(out, indent=2))
     print('PROGRAM_NEXT_FINAL stays false: flip it (and hard_forks.rs test `assert!(!PROGRAM_NEXT_FINAL)`) only when '
           'the owner signs off the final reproducible guests.')
@@ -660,6 +715,8 @@ def cmd_native_commit(args):
     if not m:
         raise SystemExit(f'{BUILD_RELEASE}: CANDIDATE_NATIVE_COMMIT not found')
     old = m.group(1)
+    if pending_refusal(l2):
+        raise SystemExit(f'native-commit: {pending_refusal(l2)}')
     run = lambda *a: subprocess.run(['git', '-C', str(native), *a], capture_output=True, text=True)  # noqa: E731
     head = run('rev-parse', 'HEAD').stdout.strip()
     if run('status', '--porcelain', '--untracked-files=no').stdout.strip():
@@ -744,10 +801,12 @@ def cmd_audit(args):
               'placeholder': refusal is not None, 'configuration': cfg,
               'native_PROGRAM_NEXT_configuration_matches': native_cfg == cfg,
               'native_PROGRAM_NEXT_FINAL': 'pub const PROGRAM_NEXT_FINAL: bool = true;' in (native / NATIVE_PINS).read_text(),
+              'pins_pending': pins_pending(l2),
               'stale_values': hits, 'tbd_owner_sweep_mentions': notes, 'gate_problems': gate_problems,
               'rebuild': rebuild_list()}
     print(json.dumps(result, indent=2))
-    if hits or result['placeholder'] or not result['native_PROGRAM_NEXT_configuration_matches'] or result['gate_problems']:
+    if (hits or result['placeholder'] or not result['native_PROGRAM_NEXT_configuration_matches'] or result['gate_problems']
+            or result['pins_pending'] is not None):
         sys.exit(1)
 
 
@@ -760,6 +819,9 @@ def cmd_gate(args):
         where = Path(args.l2).resolve() / CHAINSPEC
         text = where.read_text()
     r, refusal = text_refusal(text, where)
+    if not refusal and not args.chainspec:
+        # A whole tree (the kit build): its pins must be those of guests built for its configuration (R335-1).
+        refusal = pending_refusal(Path(args.l2).resolve())
     if refusal:
         print(f'sweep-recipient gate: REFUSED: {refusal}', file=sys.stderr)
         sys.exit(3)
@@ -803,6 +865,8 @@ def cmd_set(args):
                    'Written by deployment/mainnet/set-sweep-recipient.py set. The next configuration commitment is '
                    f'{tree_configuration(l2, r)}; the guest ELF and key pins move after the '
                    'pinned-container builds (set-sweep-recipient.py pins).\n')
+        # The pending record is a new (or removed) file: `commit -a` alone would leave it out.
+        run(l2, 'add', '-A', '--', PINS_PENDING)
         for tree in (l2, native):
             if run(tree, 'status', '--porcelain', '--untracked-files=no').stdout.strip():
                 done = run(tree, 'commit', '-q', '-a', '-m', message)
