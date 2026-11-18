@@ -31,6 +31,11 @@ pub struct L2Network {
     pub mainnet: bool,
 }
 
+/// What a build without the `rehearsal-rules` feature answers to `--rules mainnet-rehearsal`.
+#[cfg(not(feature = "rehearsal-rules"))]
+pub const REHEARSAL_RULES_NOT_COMPILED: &str = "--rules mainnet-rehearsal (the placeholder fee-sweep recipient) is \
+compiled only with the cargo feature rehearsal-rules, which no release build has; use --rules mainnet";
+
 impl L2Network {
     /// devnet4: settlement V3 rules, development identity.
     pub fn devnet_v3() -> Self {
@@ -66,7 +71,10 @@ impl L2Network {
     /// to [`ChainSpec::mainnet_rehearsal`], whose sweep goes to the placeholder
     /// recipient. L1 never pins that configuration, so nothing this network
     /// produces can settle on mainnet; it exists for private rehearsals and the
-    /// native tests of the rule switch.
+    /// native tests of the rule switch. Compiled only with the cargo feature
+    /// `rehearsal-rules`, which no release build enables (review R335-5): a release
+    /// producer or settled RPC cannot be started on the placeholder recipient.
+    #[cfg(feature = "rehearsal-rules")]
     pub fn mainnet_rehearsal(domain: B256, genesis_timestamp: u64) -> Result<Self, String> {
         Self::mainnet_with_next(domain, genesis_timestamp, Some(ChainSpec::mainnet_rehearsal()))
     }
@@ -116,14 +124,15 @@ impl L2Network {
                     .parse::<u64>()
                     .map_err(|_| "--genesis-time must be decimal unix seconds")?;
                 if rules == "mainnet" {
-                    Self::mainnet(domain, genesis_time)
-                } else {
-                    Self::mainnet_rehearsal(domain, genesis_time)
+                    return Self::mainnet(domain, genesis_time);
                 }
+                #[cfg(feature = "rehearsal-rules")]
+                let rehearsal = Self::mainnet_rehearsal(domain, genesis_time);
+                #[cfg(not(feature = "rehearsal-rules"))]
+                let rehearsal = Err(REHEARSAL_RULES_NOT_COMPILED.into());
+                rehearsal
             }
-            other => Err(format!(
-                "--rules must be v3, v2, mainnet or mainnet-rehearsal, not {other}"
-            )),
+            other => Err(format!("--rules must be v3, v2 or mainnet, not {other}")),
         }
     }
 
@@ -219,10 +228,23 @@ mod tests {
         assert!(mainnet.mainnet);
         assert_eq!(mainnet.rules, ChainSpec::mainnet_v1());
         assert_eq!(mainnet.next_rules, ChainSpec::mainnet_next());
-        let rehearsal = L2Network::parse("mainnet-rehearsal", Some(DOMAIN), Some("1800000000")).unwrap();
-        assert!(rehearsal.mainnet);
-        assert_eq!(rehearsal.next_rules, Some(ChainSpec::mainnet_rehearsal()));
-        rehearsal.chain_spec().unwrap();
+        // Review R335-5: the placeholder recipient's rules exist only in a build with the
+        // `rehearsal-rules` feature; a release build (no features) refuses the flag by name.
+        #[cfg(feature = "rehearsal-rules")]
+        {
+            let rehearsal = L2Network::parse("mainnet-rehearsal", Some(DOMAIN), Some("1800000000")).unwrap();
+            assert!(rehearsal.mainnet);
+            assert_eq!(rehearsal.next_rules, Some(ChainSpec::mainnet_rehearsal()));
+            rehearsal.chain_spec().unwrap();
+        }
+        #[cfg(not(feature = "rehearsal-rules"))]
+        {
+            let refused = L2Network::parse("mainnet-rehearsal", Some(DOMAIN), Some("1800000000")).unwrap_err();
+            assert_eq!(refused, REHEARSAL_RULES_NOT_COMPILED);
+            // It is still told apart from an unknown name, and still wants its arguments.
+            assert!(L2Network::parse("mainnet-other", Some(DOMAIN), Some("1800000000")).unwrap_err().contains("must be v3, v2 or mainnet"));
+            assert!(L2Network::parse("mainnet-rehearsal", None, Some("1800000000")).unwrap_err().contains("--domain"));
+        }
         assert_eq!(mainnet.rules.chain_id, MAINNET_CHAIN_ID);
         let spec = mainnet.chain_spec().unwrap();
         assert_eq!(spec.chain().id(), 700_770);

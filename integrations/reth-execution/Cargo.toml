@@ -8,6 +8,12 @@ publish = false
 
 [workspace]
 
+[features]
+# REHEARSAL ONLY: compiles `--rules mainnet-rehearsal` (the next mainnet rules sweeping to the placeholder
+# recipient 0x...000fee01) into the producer and the settled RPC. Never enabled by build-release.sh, which
+# builds with no features; a release binary refuses the flag (review R335-5).
+rehearsal-rules = []
+
 [dependencies]
 eyre = "0.6"
 reth-network-api = { path = "../../../reth-bloch-rpc-snapshot/crates/net/network-api" }

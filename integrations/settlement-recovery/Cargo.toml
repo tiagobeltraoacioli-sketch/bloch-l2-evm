@@ -23,6 +23,8 @@ name = "bloch-l2-native-follower"
 path = "src/bin/bloch-l2-native-follower.rs"
 
 [features]
+# REHEARSAL ONLY: `--rules mainnet-rehearsal` in the producer (review R335-5); never in a release build.
+rehearsal-rules = ["bloch-reth-execution/rehearsal-rules"]
 # Development networks whose native consensus arms RANDAO re-commits from genesis.
 devnet-randao-recommit = ["bloch-pos-committee/devnet-randao-recommit", "bloch-pos-node/devnet-randao-recommit"]
 # Development networks with native L2 deposits (escrow inbox).

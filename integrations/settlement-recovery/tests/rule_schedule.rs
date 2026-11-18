@@ -35,6 +35,28 @@ fn domain() -> String {
 /// The release rules once the owner has set the fee-sweep recipient; until then
 /// the rehearsal network, whose next rules sweep to the placeholder (agent 163 B-1).
 const RULES: &str = if MAINNET_NEXT_RULES_RELEASABLE { "mainnet" } else { "mainnet-rehearsal" };
+// Review R335-5: the rehearsal rules are compiled only with the `rehearsal-rules` feature. A tree without
+// the owner's recipient must run these tests with it; a tree with the recipient needs no feature.
+#[cfg(not(feature = "rehearsal-rules"))]
+const _: () = assert!(MAINNET_NEXT_RULES_RELEASABLE, "no fee-sweep recipient: run these tests with --features rehearsal-rules");
+
+/// Review R335-5: a producer built without the `rehearsal-rules` feature (every release build) refuses the
+/// placeholder recipient's rules by name, before it opens or creates anything.
+#[cfg(not(feature = "rehearsal-rules"))]
+#[test]
+fn r335_5_a_release_producer_refuses_the_rehearsal_rules() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("db");
+    let genesis = MAINNET_GENESIS_TIMESTAMP.to_string();
+    let out = Command::new(BIN)
+        .args(["init", "--target", db.to_str().unwrap(), "--rules", "mainnet-rehearsal", "--domain", &domain(), "--genesis-time", &genesis])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("compiled only with the cargo feature rehearsal-rules"), "{error}");
+    assert!(!db.exists(), "nothing was created");
+}
 
 fn produce(args: &[&str]) -> Result<Value, String> {
     let genesis = MAINNET_GENESIS_TIMESTAMP.to_string();
