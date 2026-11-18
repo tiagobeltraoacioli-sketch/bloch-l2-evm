@@ -978,3 +978,65 @@ fn the_order_of_uncovered_calls_follows_the_seed_not_the_anchor() {
     assert_eq!(by_file["included"], a);
     assert_eq!(a, order(&"11".repeat(32)), "one seed, one order: every call of a block plan and the shadow's check agree");
 }
+
+/// F405-1 (agent 405): `sign-tx` hard-coded a 0.1 gwei priority fee, the settled RPC's compiled minimum, while
+/// the mainnet kit runs the producer and the RPC with a 1 gwei tip floor: a transfer the tool signed could never
+/// be included under the kit's own floor (405's run: "transactions": 0, "below_min_tip": 2). The default is now
+/// the kit's floor and `--priority-fee-wei` sets another one.
+#[test]
+fn f405_1_sign_tx_signs_at_the_kits_tip_floor_unless_told_otherwise() {
+    use std::os::unix::fs::PermissionsExt;
+    const KIT_FLOOR: &str = "1000000000";
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("db");
+    let db_s = db.to_str().unwrap();
+    let key_file = root.path().join("k.hex");
+    std::fs::write(&key_file, hex::encode([7u8; 32]) + "\n").unwrap();
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let key_s = key_file.to_str().unwrap();
+    let sender = Address::from_public_key(key().verifying_key());
+    let genesis = produce(&["init", "--target", db_s]).unwrap();
+    let deposits = root.path().join("deposits.json");
+    std::fs::write(
+        &deposits,
+        serde_json::json!([{"height": 3, "tx_index": 0, "txid": "11".repeat(32), "vout": 0,
+                            "sats": 20_000_000_000u64, "recipient": hex::encode(sender)}])
+        .to_string(),
+    )
+    .unwrap();
+    let one = produce(&["extend", "--target", db_s, "--parent", genesis["hash"].as_str().unwrap(), "--anchor",
+                        &"ab".repeat(32), "--deposits", deposits.to_str().unwrap()])
+    .unwrap();
+    let sign = |name: &str, nonce: &str, extra: &[&str]| {
+        let out = root.path().join(name);
+        let mut args = vec!["sign-tx", "--key", key_s, "--nonce", nonce, "--to", "5555555555555555555555555555555555555555",
+                            "--value-wei", "1000", "--out", out.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        produce(&args).map(|report| (report, out))
+    };
+    let select = |file: &std::path::Path| {
+        let pool = root.path().join(format!("pool-{}.json", file.file_name().unwrap().to_str().unwrap()));
+        std::fs::write(&pool, serde_json::json!([std::fs::read_to_string(file).unwrap().trim()]).to_string()).unwrap();
+        produce(&["select", "--target", db_s, "--parent", one["hash"].as_str().unwrap(), "--anchor", &"cd".repeat(32),
+                  "--txs", pool.to_str().unwrap(), "--min-tip-wei", KIT_FLOOR])
+        .unwrap()
+    };
+    // The default: the kit's floor, and the kit's producer takes it.
+    let (report, default) = sign("default.tx", "0", &[]).unwrap();
+    assert_eq!((report["priority_fee_wei"].as_str(), report["max_fee_wei"].as_str()), (Some(KIT_FLOOR), Some("2000000000")));
+    let selected = select(&default);
+    assert_eq!((selected["included"].as_array().unwrap().len(), selected["below_min_tip"].as_u64()), (1, Some(0)), "{selected}");
+    // The old hard-coded value, now only when asked for: held under the kit's floor (405's observation).
+    let (report, low) = sign("low.tx", "0", &["--priority-fee-wei", "100000000"]).unwrap();
+    assert_eq!(report["priority_fee_wei"], "100000000");
+    let selected = select(&low);
+    assert_eq!((selected["included"].as_array().unwrap().len(), selected["below_min_tip"].as_u64()), (0, Some(1)), "{selected}");
+    // A fee cap under the default lowers the default to the cap, as before; an explicit priority fee above
+    // the cap is refused, and nothing is written.
+    let (report, _) = sign("capped.tx", "0", &["--max-fee-wei", "400000000"]).unwrap();
+    assert_eq!(report["priority_fee_wei"], "400000000");
+    let refused = sign("above.tx", "0", &["--max-fee-wei", "400000000", "--priority-fee-wei", "400000001"]).unwrap_err();
+    assert!(refused.contains("above the fee cap"), "{refused}");
+    assert!(!root.path().join("above.tx").exists());
+    assert!(sign("bad.tx", "0", &["--priority-fee-wei", "1 gwei"]).unwrap_err().contains("must be decimal"));
+}

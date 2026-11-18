@@ -76,7 +76,7 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
   bloch-l2-produce-dev account --target DIR --address HEX20
   bloch-l2-produce-dev address --key FILE
   bloch-l2-produce-dev sign-tx --key FILE --nonce N (--to HEX20 --value-wei N | --withdraw-to HEX32 --sats N)
-                               [--gas N] [--max-fee-wei N] --out FILE
+                               [--gas N] [--max-fee-wei N] [--priority-fee-wei N] --out FILE
 
 extend appends one empty block (timestamp = parent + 1, prevrandao 0x07..07)
 whose anchor is the native-selected source block. With --timestamp-rule
@@ -149,7 +149,10 @@ the head. address prints the L2 address of a development secp256k1 key FILE
 txpool spool entry) from that key: a plain transfer, or with --withdraw-to an
 outbox initiateWithdrawal(l1Recipient) carrying --sats (the L1 recipient is
 the native owner script hash, SHA3-256 of the hybrid public key). The key
-FILE is a development hot key: never use it for value.
+FILE is a development hot key: never use it for value. Its priority fee is
+--priority-fee-wei, by default the mainnet kit's tip floor (1 gwei, what the kit gives
+the producer and the settled RPC as --min-tip-wei) or --max-fee-wei if that is lower;
+an explicit priority fee above the fee cap is refused.
 --rules mainnet selects ChainSpec::mainnet_v1 switching to ChainSpec::mainnet (chain
 id 700770) with the ceremony's --domain and wall-clock --genesis-time, and requires
 extend/reconstruct to use a --timestamp-rule from L2 block 1 (wall-clock time from
@@ -963,9 +966,13 @@ fn key_address(key: &k256::ecdsa::SigningKey) -> Address {
     Address::from_slice(&alloy_primitives::keccak256(&point.as_bytes()[1..])[12..])
 }
 
+/// `sign-tx` without `--priority-fee-wei`: the tip floor of the mainnet kit (`min_tip_wei` of
+/// install-settler-mainnet.py, `--min-tip-wei` of follower-rpc/install.sh; a kit test compares them).
+const SIGN_TX_DEFAULT_PRIORITY_FEE_WEI: u128 = 1_000_000_000;
+
 fn sign_tx(rest: &[String]) -> Result<String, String> {
     use alloy_consensus::{private::alloy_eips::eip2718::Encodable2718, SignableTransaction, TxEip1559, TxEnvelope};
-    only(rest, &["--key", "--nonce", "--to", "--value-wei", "--withdraw-to", "--sats", "--gas", "--max-fee-wei", "--out"])?;
+    only(rest, &["--key", "--nonce", "--to", "--value-wei", "--withdraw-to", "--sats", "--gas", "--max-fee-wei", "--priority-fee-wei", "--out"])?;
     let key = read_key(option(rest, "--key")?)?;
     let decimal = |name: &str| -> Result<u128, String> {
         option(rest, name)?.parse().map_err(|_| format!("{name} must be decimal"))
@@ -1001,6 +1008,18 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
         Ok(_) => decimal("--max-fee-wei")?,
         Err(_) => 2_000_000_000,
     };
+    // F405-1: the default is the tip floor the mainnet kit runs with, not the settled RPC's compiled 0.1 gwei:
+    // a transfer signed with that could never be included under the kit's own --min-tip-wei.
+    let max_priority_fee_per_gas = match option(rest, "--priority-fee-wei") {
+        Ok(_) => {
+            let priority = decimal("--priority-fee-wei")?;
+            if priority > max_fee_per_gas {
+                return Err(format!("--priority-fee-wei {priority} is above the fee cap {max_fee_per_gas} (--max-fee-wei)"));
+            }
+            priority
+        }
+        Err(_) => SIGN_TX_DEFAULT_PRIORITY_FEE_WEI.min(max_fee_per_gas),
+    };
     let tx = TxEip1559 {
         chain_id: rules().chain_id,
         nonce,
@@ -1009,8 +1028,7 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
         input: input.into(),
         gas_limit,
         max_fee_per_gas,
-        // The settled RPC's default minimum; set a lower --max-fee-wei only with care.
-        max_priority_fee_per_gas: 100_000_000u128.min(max_fee_per_gas),
+        max_priority_fee_per_gas,
         ..Default::default()
     };
     let signature: alloy_primitives::Signature = key
@@ -1027,7 +1045,8 @@ fn sign_tx(rest: &[String]) -> Result<String, String> {
         .map_err(|e| format!("--out: {e}"))?;
     writeln!(out, "{}", hex::encode(&encoded)).map_err(|e| format!("--out: {e}"))?;
     Ok(json!({"hash": hex::encode(hash), "from": format!("{:x}", key_address(&key)), "nonce": nonce,
-              "to": format!("{to:x}"), "value_wei": value.to_string(), "gas_limit": gas_limit, "bytes": encoded.len()})
+              "to": format!("{to:x}"), "value_wei": value.to_string(), "gas_limit": gas_limit, "bytes": encoded.len(),
+              "max_fee_wei": max_fee_per_gas.to_string(), "priority_fee_wei": max_priority_fee_per_gas.to_string()})
     .to_string())
 }
 

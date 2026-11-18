@@ -215,6 +215,15 @@ class Installer(unittest.TestCase):
         # The congestion ceiling of sequencer policy v2 stays above the floor (the settler halts otherwise).
         self.assertGreaterEqual(m.POLICY_V2.get('congestion_max_tip_wei', m.MIN_TIP_WEI), m.MIN_TIP_WEI)
 
+    def test_the_producers_sign_tx_signs_at_the_tip_floor(self):
+        # F405-1 (agent 405): `bloch-l2-produce-dev sign-tx` hard-coded a 0.1 gwei priority fee; every kit script that
+        # signs with it and then runs under this floor got transactions the producer never includes. The tool's
+        # default is this installer's number (its behaviour is tested with the binary in produce_txs.rs).
+        source = (HERE.parents[1] / 'integrations/settlement-recovery/src/bin/bloch-l2-produce-dev.rs').read_text()
+        self.assertIn(f'\nconst SIGN_TX_DEFAULT_PRIORITY_FEE_WEI: u128 = {m.MIN_TIP_WEI:_};\n', source)
+        self.assertIn('Err(_) => SIGN_TX_DEFAULT_PRIORITY_FEE_WEI.min(max_fee_per_gas),', source)
+        self.assertNotIn('max_priority_fee_per_gas: 100_000_000u128', source)
+
     def test_units_running_as_the_settler_user_hide_its_secrets(self):
         hidden = {'/run/docker.sock', str(DA_DIR), str(STATE / 'da.passphrase'), str(STATE / 'ssh'), str(DA_PASSPHRASE),
                   str(m.RUNTIME)}
