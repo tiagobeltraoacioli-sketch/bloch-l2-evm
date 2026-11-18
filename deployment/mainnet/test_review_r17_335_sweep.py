@@ -80,7 +80,8 @@ class GateOnTheSetTree(unittest.TestCase):
         self.assertNotEqual(self.gate(self.unset_text.replace(self.unset, f'// was: {self.line}\n{self.unset}')), 0)
 
     def test_the_rehearsal_recipient_is_refused_in_either_spelling(self):
-        rehearsal = '00000000000000000000000000000000000fee01'
+        rehearsal = m.PLACEHOLDER  # by name: the literal in a tracked file is a stale value for `audit`
+        self.assertTrue(rehearsal.endswith('fee01'))
         for text in (self.set_text.replace(OWNER, rehearsal),
                      self.set_text.replace(m.recipient_constant(OWNER), self.line.replace(A, rehearsal))):
             self.assertNotEqual(self.gate(text), 0)
