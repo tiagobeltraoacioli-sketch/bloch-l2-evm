@@ -248,7 +248,8 @@ fn l2_state_is_rebuilt_from_l1_deposits_da_batches_and_settlements() {
     // the third deposit funds a sender that spends it in the same block, and
     // two withdrawals go through the outbox (M4).
     let (l1_alice, l1_bob) = (B256::repeat_byte(0x77), B256::repeat_byte(0x78));
-    let plan: Vec<(Vec<Value>, (u64, u64), Vec<String>)> = vec![
+    type Step = (Vec<Value>, (u64, u64), Vec<String>); // inbox records, consumed range, user transactions
+    let plan: Vec<Step> = vec![
         (inbox[..2].to_vec(), (0, 2), vec![]),
         (vec![], (2, 2), vec![transfer(0, 0), transfer(0, 1)]),
         (

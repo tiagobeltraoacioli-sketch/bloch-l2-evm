@@ -801,6 +801,7 @@ mod node_parity {
     /// size bound must not refuse a valid one before the transition sees it.
     #[cfg(bloch_native_kes_leaf)]
     #[test]
+    #[allow(clippy::assertions_on_constants)] // two constants of two trees: the test is the place that compares them
     fn kes_signature_fits_the_replay_bound() {
         assert!(bloch_pos_committee::kes::MAX_SIGNATURE_LEN <= super::MAX_CONSENSUS_SIGNATURE_BYTES);
     }

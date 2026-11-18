@@ -178,8 +178,7 @@ fn chain(mode: Mode) -> (Vec<NativeReplayBlockV1>, Vec<CommittedState>) {
 fn checkpoint_root(blocks: &[NativeReplayBlockV1], epoch: u64) -> [u8; 32] {
     *blocks
         .iter()
-        .filter(|b| b.envelope.header.slot < epoch * 32)
-        .next_back()
+        .rfind(|b| b.envelope.header.slot < epoch * 32)
         .unwrap()
         .envelope
         .header

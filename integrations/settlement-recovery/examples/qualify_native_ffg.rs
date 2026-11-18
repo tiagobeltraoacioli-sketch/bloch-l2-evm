@@ -191,6 +191,9 @@ fn main() {
         assert!(Instant::now() < deadline, "proof wait expired");
         std::thread::sleep(Duration::from_millis(500));
     }
+    // The statement is a byte vector in this native tree and was a fixed array in earlier ones: the conversion
+    // is kept so that the example builds against both.
+    #[allow(clippy::useless_conversion)]
     let tx = bloch_pos_committee::l2_settlement::Transaction {
         proof_policy: p.proof_policy.0,
         statement: fs::read(root.join("canonical.values")).unwrap().try_into().unwrap(),

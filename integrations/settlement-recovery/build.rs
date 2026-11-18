@@ -64,7 +64,7 @@ fn trait_methods(source: &str) -> Vec<String> {
         .lines()
         .filter_map(|line| {
             let rest = line.trim_start().strip_prefix("fn ")?;
-            Some(rest.split(|c: char| c == '(' || c == '<').next()?.trim().to_owned())
+            Some(rest.split(['(', '<']).next()?.trim().to_owned())
         })
         .collect()
 }

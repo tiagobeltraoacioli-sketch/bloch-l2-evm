@@ -118,7 +118,7 @@ fn main() -> ExitCode {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() % 2 != 0 {
+    if !args.len().is_multiple_of(2) {
         return Err("options must be --name value pairs".into());
     }
     let mut map = std::collections::BTreeMap::new();

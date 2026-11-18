@@ -141,6 +141,9 @@ fn an_l2_at_genesis_keeps_chain_heights() {
 }
 
 #[test]
+// This crate has no such feature (it is the native crate's): the condition is always false here and the
+// assertion always runs. Kept as written; the name is not one cargo knows for this crate.
+#[allow(unexpected_cfgs)]
 fn mainnet_flag_day_is_the_slot_the_chain_reports() {
     // getl2settlement on mainnet: source { height: 1, slot: 187200 } before any settlement.
     if !cfg!(feature = "l2-activation-rehearsal") {

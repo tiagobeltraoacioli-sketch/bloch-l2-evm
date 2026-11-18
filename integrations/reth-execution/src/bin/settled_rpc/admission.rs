@@ -1419,7 +1419,8 @@ mod tests {
     async fn admission_quote_and_admission_agree_on_the_execution_rules() {
         let credit = u128::from(UNCOVERED_MAX_GAS + 1) * FLOOR;
         // (credit, exempt, gas limit, new-slot value) -> (reason, covered)
-        let cases: [(Option<u128>, bool, u64, u64, Option<&str>, bool); 8] = [
+        type Case<'a> = (Option<u128>, bool, u64, u64, Option<&'a str>, bool);
+        let cases: [Case; 8] = [
             (None, false, 200_000, 7, None, false),
             (None, false, UNCOVERED_MAX_GAS, 0, None, false),
             (None, false, UNCOVERED_MAX_GAS + 1, 0, Some("needs-credit"), false),

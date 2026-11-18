@@ -97,6 +97,9 @@ mod tests {
                 let configuration = bloch_l2_evm::proof_statement::configuration_commitment(&rules).unwrap();
                 assert_eq!(next.identities[0], configuration.0);
             }
+            // Both sides are constants of the two trees this crate is built against; the assertion must stay in
+            // this arm (a `const` block would be evaluated on a tree that has the recipient too).
+            #[allow(clippy::assertions_on_constants)]
             None => assert!(
                 !bloch_pos_committee::l2_settlement::mainnet::PROGRAM_NEXT_FINAL,
                 "the native next program is final while the L2 has no release fee-sweep recipient"

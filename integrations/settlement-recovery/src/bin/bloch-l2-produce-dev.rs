@@ -1534,12 +1534,15 @@ fn write_price(
     }
 }
 
+/// Pending candidates: the spool file each came from (none for a JSON list) and its raw bytes.
+type PoolEntries = Vec<(Option<PathBuf>, alloy_primitives::Bytes)>;
+
 /// Leave out every candidate whose sender is in the JSON list at `path`; returns the rest and the hashes left.
 fn hold_waiting_senders(
     spec: &bloch_l2_evm::ChainSpec,
-    pool: Vec<(Option<PathBuf>, alloy_primitives::Bytes)>,
+    pool: PoolEntries,
     path: &Path,
-) -> Result<(Vec<(Option<PathBuf>, alloy_primitives::Bytes)>, Vec<String>), String> {
+) -> Result<(PoolEntries, Vec<String>), String> {
     let list: Vec<String> = serde_json::from_slice(&fs::read(path).map_err(|e| format!("--write-waiting: {e}"))?)
         .map_err(|e| format!("--write-waiting: {e}"))?;
     let senders = list
