@@ -450,3 +450,28 @@ The follower moves although its behaviour on a chain is the one of `6a0cc18`: it
 Not done: a second host; a real proof of a block at the floor (agent 405's D1 on these binaries); a follower of
 this build across L1 epoch 8620.
 
+## 16. Round-19 follow-ups: the build of `3337c0b` (agent 404; supersedes section 15's three binaries)
+
+After reviewer 406's and agent 405's passes on section 15: `sign-tx` signs at the kit's 1 gwei tip floor unless
+`--priority-fee-wei` says otherwise (F405-1, `5f98e75`); before the switch `eth_gasPrice` assumes the higher of
+the two rule sets' next base fee (F404-2 / R406-5, `e3211ae`); the canonical replay and the settlement audit have
+a test over a chain at the floor (R406-8, `5987ebe`, test only); `KNOWN-ISSUES.md` says which build it is about
+(R406-4); reth-execution and settlement-recovery pass `cargo +1.98.1 fmt --check` and `clippy --all-targets -D
+warnings` (R406-7: `f56a6f5`, `faf9593` formatting only, `3337c0b` eight lints; a private copy of the pinned
+toolchain, the shared one has neither component). `integrations/execution-artifact` is not formatted: the SP1
+host links it.
+
+Build commit `3337c0b`, native `b7cd752b`, lock `ab7b3a09…`, L2 genesis `632e45ae…f468`:
+
+| Artifact | Section 15 (`f349f65`) | `3337c0b` |
+|---|---|---|
+| `bloch-l2-native-follower` | `301e3730…1a8a` | `f6a01ba0951d9862acda448898309031af386f86b45d2d4c0393b557a615fea1` |
+| `bloch-l2-produce-dev` | `99c65c2e…458c` | `45bd6ac4f706bb1a12e8d595b8b2c8477cf5cdc81d248f9f815ece90c9a84c91` |
+| `bloch-l2-settled-rpc` | `cd7ffda7…b818` | `83e6e72591e927c0d45ac927a5151ad25d2ea8b3ad7401e79dcbb80f626dbe62` |
+| `sequencer_mainnet.py`, SP1 host, guest ELFs, keys, configuration | | unchanged (`3ed3b67b…132c`, `3d89f5c3…c849` rebuilt; no guest input changed since section 15, where the guests were rebuilt) |
+| Build `SHA256SUMS` / `build.json` | `8496a338…ab50` / `d9dcac1b…e32f` | `153ef23f68b9f7fdfe375c9387e47b5430eac0115ad756399ec5f8d1086247f5` / `ecbfda8f98cb89e388cf7fb0ee0708ded0fce30033b4ec11ed248b8d28868f64` |
+
+The follower's behaviour is unchanged (formatting and one equivalent expression in its argument parser moved
+its bytes). Tests at `3337c0b` on build host A: reth-execution 39 suites, 230 passed, 1 ignored; settlement-
+recovery 14 suites, 70 passed; 0 failed. Not done: a second host; a real proof on these binaries.
+

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only health monitor for the Bloch L2 mainnet (chain id 700770; devnet4 700771).
 
-Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the December L2 build, provisional and unsigned (L2 f349f65c, native
-b7cd752b = the merged December line on node release 0067547f, follower 301e3730, produce-dev 99c65c2e,
-settled-rpc cd7ffda7).
+Runbook: docs/MAINNET-OPS-RUNBOOK.md. Build: the December L2 build, provisional and unsigned (L2 3337c0ba, native
+b7cd752b = the merged December line on node release 0067547f, follower f6a01ba0, produce-dev 45bd6ac4,
+settled-rpc 83e6e725).
 
 What it reads (it never writes to a chain, holds no key and opens no keystore):
   * every L2 settled-RPC backend (`--l2-rpc NAME=URL`, repeat): eth_chainId, the `latest`, `safe` and
@@ -75,14 +75,14 @@ MAINNET_PINS = {
 
 # ---- The December L2 build (docs/DECEMBER-BUILD-R15.md section 12: SHA256SUMS and build.json; round 18) ----
 V2_BUILD = {
-    'l2_commit': 'f349f65cb0125d1cac62dfc66c37a271b05d3a7a',
+    'l2_commit': '3337c0ba5949ba06cabd17cfea824e1bbb0e4b7c',
     'native': 'b7cd752ba1d1e8b8861b51a083310242bd6270cf',
     'native_lock_sha256': 'ab7b3a0901f142d5e2a3905c68cf97eb69eb5cc968407621e55f21f14668cafa',
 }
 V2_SHA256 = {
-    'bloch-l2-native-follower': '301e37306f4624b7d7d2171e6c27d0ecca702d446fd1ff8d742f0d63bd741a8a',
-    'bloch-l2-produce-dev': '99c65c2ec23777f060edf93c532d2e7f34a17b2e246de8a050d316d90a8c458c',
-    'bloch-l2-settled-rpc': 'cd7ffda73e461592f0b06f17a88c7defee84ac6c7e2759c3c8d37b3f958fb818',
+    'bloch-l2-native-follower': 'f6a01ba0951d9862acda448898309031af386f86b45d2d4c0393b557a615fea1',
+    'bloch-l2-produce-dev': '45bd6ac4f706bb1a12e8d595b8b2c8477cf5cdc81d248f9f815ece90c9a84c91',
+    'bloch-l2-settled-rpc': '83e6e72591e927c0d45ac927a5151ad25d2ea8b3ad7401e79dcbb80f626dbe62',
     'sequencer_mainnet.py': '3ed3b67b44cf26b4e2ad8c9ff850c241a01e12147d2ee5ee6e69fbe34bba132c',
 }
 # getchaininfo.hard_forks name -> the params.rs constant the v2 follower/producer were compiled with,

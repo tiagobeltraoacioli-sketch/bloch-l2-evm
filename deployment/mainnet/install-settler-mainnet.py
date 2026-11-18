@@ -128,7 +128,7 @@ PINS = {
     # released node 906336fd, then brought up to date with bloch-sis-pow main = deployed release 0067547f) with the
     # F387-1 fix (base-fee floor of the next rules); 779850ed... (no fix), c6b7ce1b... (native 19aa156d) and
     # 63c9cdf8... (native 0861278c) are superseded.
-    'bloch-l2-produce-dev': '99c65c2ec23777f060edf93c532d2e7f34a17b2e246de8a050d316d90a8c458c',
+    'bloch-l2-produce-dev': '45bd6ac4f706bb1a12e8d595b8b2c8477cf5cdc81d248f9f815ece90c9a84c91',
     # CANDIDATE, not scheduled: the sparse-witness guest that native PROGRAM_NEXT names. It moves with the
     # fee-sweep recipient (0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544, fixed) and with the audit's fixes.
     'settlement_v3_mainnet_sparse': '81813124c19b1a9bfe5755fc742fa36a48420134b71e18ef355e26e1c5f1b6d9',
