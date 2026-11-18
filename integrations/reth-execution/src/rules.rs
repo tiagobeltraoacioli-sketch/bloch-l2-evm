@@ -15,11 +15,25 @@
 //!   and no earlier rule set can put it there.
 //!
 //! The two rule sets may differ only in what [`RuleSchedule::new`] allows, so
-//! everything else in the stack (header layout, gas, fees, chain id) reads the
+//! everything else in the stack (header layout, gas limit, chain id) reads the
 //! base rules and needs no block number. The genesis is the same under both.
+//!
+//! What they may differ in includes the base-fee floor (`min_base_fee`), so the
+//! base fee of a block and the link of a block to its parent are NOT among the
+//! things the base rules answer (F387-1: three fixes in a row each found one more
+//! caller that asked the base rules). This module is the one place that answers
+//! them: [`RuleSchedule::base_fee_after`], [`RuleSchedule::validate_link`] and
+//! [`RuleSchedule::validate_body`] take the rules of the block in question, and
+//! no other code of this crate or of the producer and follower calls the kernel's
+//! `ChainSpec::next_base_fee` or `NodeHeaderV2::validate_parent` (the test
+//! `no_caller_asks_a_rule_set_of_its_own_choice` reads the sources).
 use alloy_evm::block::BlockExecutionError;
 use alloy_primitives::Bytes;
-use bloch_l2_evm::{chainspec::fee_vault_sweep_code, ChainSpec};
+use bloch_l2_evm::{
+    chainspec::fee_vault_sweep_code,
+    node_primitives::{NodeBodyError, NodeBodyV2, NodeHeaderError, NodeHeaderV2},
+    ChainSpec,
+};
 use reth_provider::{BlockNumReader, StateProvider};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -97,6 +111,37 @@ impl RuleSchedule {
             Some(next) if number >= self.next_from.load(Ordering::Acquire) => next,
             _ => &self.base,
         }
+    }
+
+    /// The base fee of the block after `parent`, under the rules of THAT block:
+    /// the EIP-1559 step, raised to the floor where the block's rules have one.
+    /// At the first block of the next rules the parent is a base-rules block and
+    /// the result is still the next rules' (the floor applies from that block).
+    pub fn base_fee_after(&self, parent: &NodeHeaderV2) -> u64 {
+        self.at(parent.number.saturating_add(1))
+            .next_base_fee(parent.base_fee_per_gas, parent.gas_used)
+    }
+
+    /// The base fee of the block after `parent` if that block is the FIRST of the
+    /// next rules (the producer's `extend --rule-set next`). `None` on a network
+    /// without a next rule set and once the switch is fixed, when
+    /// [`Self::base_fee_after`] already answers.
+    pub fn base_fee_after_switching(&self, parent: &NodeHeaderV2) -> Option<u64> {
+        match (&self.next, self.next_from()) {
+            (Some(next), None) => Some(next.next_base_fee(parent.base_fee_per_gas, parent.gas_used)),
+            _ => None,
+        }
+    }
+
+    /// The link of `header` to its parent, judged on the rules of `header`'s
+    /// block: what [`Self::base_fee_after`] builds, this accepts, and nothing else.
+    pub fn validate_link(&self, header: &NodeHeaderV2, parent: &NodeHeaderV2) -> Result<(), NodeHeaderError> {
+        header.validate_parent(self.at(header.number), parent)
+    }
+
+    /// The body of block `number`, on that block's rules.
+    pub fn validate_body(&self, number: u64, body: &NodeBodyV2) -> Result<(), NodeBodyError> {
+        body.validate(self.at(number))
     }
 
     /// Whether block `number` runs the next rules.
@@ -246,5 +291,189 @@ mod tests {
             scheduled.is_ok(),
             bloch_l2_evm::chainspec::MAINNET_FEE_SWEEP_RECIPIENT.is_some()
         );
+    }
+
+    // ---- F387-1: one source of the per-block rules for the base fee and the parent link ----
+
+    fn header(number: u64, base_fee: u64, gas_used: u64) -> NodeHeaderV2 {
+        let spec = ChainSpec::mainnet_v1();
+        NodeHeaderV2 {
+            domain: alloy_primitives::B256::repeat_byte(0x70),
+            chain_id: spec.chain_id,
+            number,
+            timestamp: 1_786_656_679 + number,
+            base_fee_per_gas: base_fee,
+            gas_limit: spec.gas_limit,
+            gas_used,
+            user_gas_used: 0,
+            beneficiary: spec.coinbase(),
+            ..NodeHeaderV2::default()
+        }
+    }
+
+    fn child(rules: &RuleSchedule, parent: &NodeHeaderV2) -> NodeHeaderV2 {
+        NodeHeaderV2 {
+            parent_hash: parent.hash(),
+            parent_state_root: parent.state_root,
+            ..header(parent.number + 1, rules.base_fee_after(parent), 0)
+        }
+    }
+
+    /// The property the three F387-1 fixes were after, stated once: for every parent
+    /// and every position of the switch, the base fee the schedule gives the child is
+    /// the one the child's own rules compute (what the executor and the guest of that
+    /// block's program require), the link built from it is accepted, and a link built
+    /// from the OTHER rule set's value is refused whenever the two differ.
+    #[test]
+    fn f387_1_the_base_fee_and_the_parent_link_are_the_rules_of_the_child_at_every_position() {
+        let (base, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
+        let floor = next.min_base_fee;
+        assert!(floor > 0 && base.min_base_fee == 0, "the floor is a next-rules addition");
+        let target = base.gas_target();
+        // Fees around the floor, far above it and at the bottom; empty, at target and full parents.
+        let fees = [1, 7, floor / 2, floor - 1, floor, floor + 1, 100_134_788, 100_218_107, 100_401_761, 2 * floor, 1_000_000_000];
+        let gas = [0, 21_000, target, base.gas_limit];
+        let (mut differing, mut cases) = (0u32, 0u32);
+        for switch in [None, Some(1u64), Some(575), Some(576), Some(577), Some(1_000)] {
+            let rules = schedule();
+            if let Some(number) = switch {
+                rules.switch_at(number).unwrap();
+            }
+            for number in [1u64, 574, 575, 576, 999] {
+                for fee in fees {
+                    for used in gas {
+                        let parent = header(number, fee, used);
+                        let own = rules.at(number + 1);
+                        let other = if rules.is_next(number + 1) { &base } else { &next };
+                        let built = child(&rules, &parent);
+                        let expected = own.next_base_fee(fee, used);
+                        assert_eq!(built.base_fee_per_gas, expected, "switch {switch:?}, parent {number}, fee {fee}, gas {used}");
+                        if rules.is_next(number + 1) {
+                            assert!(built.base_fee_per_gas >= floor, "a next-rules block is never under the floor");
+                        }
+                        rules.validate_link(&built, &parent).expect("the link the schedule built");
+                        let foreign = other.next_base_fee(fee, used);
+                        cases += 1;
+                        if foreign != expected {
+                            differing += 1;
+                            let wrong = NodeHeaderV2 { base_fee_per_gas: foreign, ..built.clone() };
+                            assert!(
+                                matches!(rules.validate_link(&wrong, &parent), Err(NodeHeaderError::Parent)),
+                                "the other rule set's base fee: switch {switch:?}, parent {number}, fee {fee}, gas {used}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 6 * 5 * 11 * 4);
+        assert!(differing > 200, "the cases reach under the floor: {differing}");
+    }
+
+    /// The launch chain runs the base rules first: its base fee falls under 0.1 gwei
+    /// after about 575 quiet blocks (800 here: under half of it). The first block of the next rules then starts at
+    /// the floor (a step up from its parent), and the blocks after it stay there.
+    #[test]
+    fn f387_1_the_first_next_block_after_a_base_fee_under_the_floor_starts_at_the_floor() {
+        let next = ChainSpec::mainnet_next_or_rehearsal();
+        let rules = schedule();
+        let mut head = header(0, 1_000_000_000, 0);
+        for _ in 0..800 {
+            let parent = head.clone();
+            head = child(&rules, &parent);
+            rules.validate_link(&head, &parent).unwrap();
+        }
+        assert!(head.base_fee_per_gas < next.min_base_fee / 2, "800 quiet base blocks: {}", head.base_fee_per_gas);
+        assert_eq!(rules.base_fee_after_switching(&head), Some(next.min_base_fee));
+        assert!(rules.base_fee_after(&head) < head.base_fee_per_gas, "not switched: the base rules' step");
+        rules.switch_at(801).unwrap();
+        assert_eq!(rules.base_fee_after_switching(&head), None);
+        assert_eq!(RuleSchedule::single(ChainSpec::testnet_v3()).base_fee_after_switching(&head), None);
+        for _ in 0..3 {
+            let parent = head.clone();
+            head = child(&rules, &parent);
+            assert_eq!(head.base_fee_per_gas, next.min_base_fee);
+            rules.validate_link(&head, &parent).unwrap();
+        }
+        // The base-rules history before the switch still links on the base rules.
+        let a = header(799, 61_000_000, 0);
+        let b = child(&rules, &a);
+        assert!(b.base_fee_per_gas < 61_000_000, "block 800 is a base-rules block: no floor");
+        rules.validate_link(&b, &a).unwrap();
+    }
+
+    /// Reads the sources: outside this module nothing in this crate, the producer or
+    /// the follower calls the kernel's `next_base_fee` or `validate_parent`, because
+    /// each such call names a rule set of the caller's choice (F387-1 was three of
+    /// them). Test modules may (they state kernel expectations); everything after a
+    /// file's first test module must be test modules only, so nothing hides there.
+    #[test]
+    fn no_caller_asks_a_rule_set_of_its_own_choice() {
+        use std::path::{Path, PathBuf};
+        fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        sources(&here.join("src"), &mut files);
+        sources(&here.join("../settlement-recovery/src"), &mut files);
+        files.sort();
+        assert!(files.len() > 40, "the two crates were found: {}", files.len());
+        let forbidden = ["validate_parent(", "next_base_fee("];
+        let (mut offenders, mut scanned, mut seen_here) = (Vec::new(), 0usize, 0usize);
+        for file in &files {
+            let name = file.file_name().unwrap().to_str().unwrap();
+            let text = std::fs::read_to_string(file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            if name.ends_with("_tests.rs") {
+                // A whole-file test module: it must be included as one.
+                continue;
+            }
+            // The first test module: `#[cfg(test)]`, an optional `#[path]`, then `mod`.
+            let is_mod = |i: usize| lines.get(i).is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod "));
+            let cut = (0..lines.len())
+                .find(|&i| lines[i] == "#[cfg(test)]" && (is_mod(i + 1) || (lines[i + 1].starts_with("#[path") && is_mod(i + 2))))
+                .unwrap_or(lines.len());
+            for (index, line) in lines[cut..].iter().enumerate() {
+                let test_only = line.is_empty()
+                    || line.starts_with(' ')
+                    || line.starts_with("//")
+                    || line.starts_with("#[cfg(test)]")
+                    || line.starts_with("#[cfg(all(test,")
+                    || line.starts_with("#[path")
+                    || line.starts_with("mod ")
+                    || line.starts_with("pub mod ")
+                    || *line == "}";
+                assert!(test_only, "{}:{}: code after the first test module: {line}", file.display(), cut + index + 1);
+            }
+            for (index, line) in lines[..cut].iter().enumerate() {
+                let code = line.split("//").next().unwrap();
+                for token in forbidden {
+                    for (at, _) in code.match_indices(token) {
+                        let before = &code[..at];
+                        if !(before.ends_with('.') || before.ends_with("::")) {
+                            continue; // a definition or another name ending in the token
+                        }
+                        if name == "rules.rs" && file.starts_with(here) {
+                            seen_here += 1;
+                        } else {
+                            offenders.push(format!("{}:{}: {}", file.display(), index + 1, line.trim()));
+                        }
+                    }
+                }
+            }
+            scanned += cut;
+        }
+        assert!(offenders.is_empty(), "a rule set chosen by the caller:\n{}", offenders.join("\n"));
+        // Not vacuous: the scan sees the two kernel calls this module makes, and real code.
+        assert_eq!(seen_here, 3, "the scan finds this module's own three kernel calls");
+        assert!(scanned > 8_000, "lines scanned: {scanned}");
     }
 }
