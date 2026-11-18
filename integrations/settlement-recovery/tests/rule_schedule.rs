@@ -198,7 +198,15 @@ impl Chain {
     }
 
     fn extend(&mut self, number: u64, rule_set: Option<&str>, records: Vec<Value>, consumed: (u64, u64), txs: &[String]) -> Result<Produced, String> {
-        let anchor = B256::repeat_byte(0xa0 + number as u8);
+        // One repeated byte as ever for the short chains; the floor chains have several hundred blocks.
+        let anchor = match u8::try_from(number).ok().and_then(|n| 0xa0u8.checked_add(n)) {
+            Some(byte) => B256::repeat_byte(byte),
+            None => {
+                let mut bytes = [0xa5u8; 32];
+                bytes[24..].copy_from_slice(&number.to_be_bytes());
+                B256::from(bytes)
+            }
+        };
         let deposits = self.root.path().join(format!("deposits-{number}-{rule_set:?}.json"));
         std::fs::write(&deposits, Value::from(records.clone()).to_string()).unwrap();
         let pool = self.root.path().join(format!("pool-{number}-{rule_set:?}.json"));
@@ -238,6 +246,11 @@ impl Chain {
         };
         (self.parent, self.parent_root) = (produced.hash, produced.state_root);
         Ok(produced)
+    }
+
+    /// The head's fees as the producer reports them (`fees`).
+    fn fees(&self) -> Value {
+        produce(&["fees", "--target", &self.db]).unwrap()
     }
 
     fn export(&self, number: u64, label: &str) -> Value {
@@ -550,4 +563,219 @@ fn a_head_reset_queues_again_the_forced_records_of_the_dropped_blocks() {
     let derived = derive_settled_blocks_with_reset(&blocks, CHAIN_ID, g_hash, g_root, Some(1)).unwrap();
     assert_eq!(derived.iter().map(|b| b.header_hash).collect::<Vec<_>>(), [k.hash, new.hash]);
     assert_eq!(derived[1].forced.iter().map(|f| f.record).collect::<Vec<_>>(), vec![ra]);
+}
+
+// ── F387-1 end to end: chains that cross the base-fee floor of the next rules ──
+//
+// Agent 387 found twice, on a real-proof net, that the settler's producer stops for ever at the first
+// block whose EIP-1559 step falls under the next rules' base-fee floor (0.1 gwei): first the header was
+// built on the base rules, then (after that was fixed) its parent link was still judged on them. A unit
+// test of each call did not catch the next one. These two tests drive the producer binary itself across
+// the floor (`extend`, as the settler does), then every other reader of the same chain: `fees`, `select`,
+// `export` of the complete and the sparse artifact (the prover's input), and `reconstruct` (the follower's
+// rebuild from L1 data alone). From 1 gwei the fee falls 0.4% per quiet block: about 575 blocks.
+
+fn u(v: &Value, k: &str) -> u64 {
+    v[k].as_u64().unwrap_or_else(|| panic!("{k} in {v}"))
+}
+
+/// What the kernel of each rule set computes: the expectation the chain is held to.
+fn step(spec: &ChainSpec, fees: &Value) -> u64 {
+    spec.next_base_fee(u(fees, "base_fee"), u(fees, "gas_used"))
+}
+
+/// The artifacts of block `number`, as the prover takes them: both witness forms export, decode under the
+/// rules of that block and carry its base fee; the other rule set's configuration does not decode them.
+fn check_artifacts(chain: &Chain, number: u64, own: &ChainSpec, other: &ChainSpec, base_fee: u64) {
+    let complete = chain.root.path().join(format!("floor-artifact-{number}"));
+    let sparse = chain.root.path().join(format!("floor-artifact-{number}-sparse"));
+    let n = number.to_string();
+    produce(&["export", "--target", &chain.db, "--number", &n, "--out", complete.to_str().unwrap()]).unwrap();
+    produce(&["export", "--target", &chain.db, "--number", &n, "--out", sparse.to_str().unwrap(), "--witness", "sparse"]).unwrap();
+    let bytes = std::fs::read(&complete).unwrap();
+    let artifact = bloch_execution_artifact::ExecutionArtifact::decode(&bytes, own, MAINNET_DOMAIN).unwrap();
+    assert_eq!((artifact.header().number, artifact.header().base_fee_per_gas), (number, base_fee));
+    assert_eq!(artifact.context().base_fee_per_gas, base_fee);
+    assert!(bloch_execution_artifact::ExecutionArtifact::decode(&bytes, other, MAINNET_DOMAIN).is_err(), "block {number}: the other rule set");
+    let bytes = std::fs::read(&sparse).unwrap();
+    let artifact = bloch_execution_artifact::SparseExecutionArtifact::decode(&bytes, own, MAINNET_DOMAIN).unwrap();
+    assert_eq!((artifact.header().number, artifact.header().base_fee_per_gas), (number, base_fee));
+    assert!(bloch_execution_artifact::SparseExecutionArtifact::decode(&bytes, other, MAINNET_DOMAIN).is_err(), "block {number}: the other rule set (sparse)");
+}
+
+/// Rebuild the chain from L1 data alone and compare the head and the switch.
+fn check_rebuild(chain: &Chain, blocks: &[Produced], l1: Vec<(u64, Vec<PosTransaction>)>, next_from: u64) {
+    let d = chain.root.path().join("floor-l1.json");
+    l1_fixture(&d, &l1);
+    let rebuilt = chain.root.path().join("floor-rebuilt");
+    let report = produce(&["reconstruct", "--target", rebuilt.to_str().unwrap(), "--l1", d.to_str().unwrap(), "--timestamp-rule", RULE]).unwrap();
+    let last = blocks.last().unwrap();
+    assert_eq!(report["settled"], last.number, "every block rebuilds");
+    assert_eq!(report["next_rules_from"], next_from);
+    assert_eq!(h(&report, "head"), last.hash);
+    let rebuilt_fees = produce(&["fees", "--target", rebuilt.to_str().unwrap()]).unwrap();
+    assert_eq!(rebuilt_fees, chain.fees(), "the rebuilt head has the same fees");
+}
+
+/// Agent 387's case: the next rules from early on, the fee falls to the floor under them and stays there.
+#[test]
+fn f387_1_a_chain_under_the_next_rules_extends_across_the_base_fee_floor_and_rebuilds() {
+    let (base, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
+    let floor = next.min_base_fee;
+    assert!(floor > 0 && base.min_base_fee == 0, "the floor is a next-rules addition");
+    let mut chain = Chain::new();
+    let d1 = deposit(0x31, sender(), 100_000_000);
+    let record = json!({"height": 2, "tx_index": 0, "txid": hex::encode(d1.txid()), "vout": 1, "sats": 100_000_000u64, "recipient": hex::encode(sender())});
+    let mut blocks = vec![chain.extend(1, Some("base"), vec![record], (0, 1), &[]).unwrap()];
+    let before = chain.fees();
+    assert_eq!(before["rules"], "base");
+    assert_eq!(u(&before, "next_base_fee"), step(&base, &before));
+    assert_eq!(u(&before, "next_base_fee_if_switching"), step(&next, &before));
+    blocks.push(chain.extend(2, Some("next"), vec![], (1, 1), &[]).unwrap());
+
+    // Quiet blocks until the fee has been at the floor for a while. Each block's base fee is what the
+    // NEXT rules compute from its parent; the producer's own report of the next fee agrees.
+    let mut fees = chain.fees();
+    assert_eq!((u(&fees, "number"), fees["rules"].as_str(), fees["next_rules_from"].as_u64()), (2, Some("next"), Some(2)));
+    assert!(fees.get("next_base_fee_if_switching").is_none(), "{fees}");
+    let (mut first_floored, mut first_clamped) = (None, None);
+    let last = loop {
+        let number = u(&fees, "number") + 1;
+        let expected = step(&next, &fees);
+        assert_eq!(u(&fees, "next_base_fee"), expected, "block {number}");
+        assert_eq!(u(&fees, "next_min_base_fee"), floor);
+        let clamped = step(&base, &fees) < floor;
+        if clamped && first_clamped.is_none() {
+            // The block 387's producer refused: the EIP-1559 step is under the floor.
+            first_clamped = Some(number);
+            assert_eq!(expected, floor);
+        }
+        if expected == floor && first_floored.is_none() {
+            first_floored = Some(number);
+        }
+        let block = chain.extend(number, None, vec![], (1, 1), &[]).unwrap_or_else(|e| panic!("block {number} (base fee {expected}): {e}"));
+        blocks.push(block);
+        fees = chain.fees();
+        assert_eq!((u(&fees, "number"), u(&fees, "base_fee"), u(&fees, "gas_used")), (number, expected, 0));
+        if first_clamped.is_some_and(|first| number >= first + 3) {
+            break number;
+        }
+        assert!(number < 700, "the fee reaches the floor in about 575 blocks");
+    };
+    let (first_floored, first_clamped) = (first_floored.unwrap(), first_clamped.unwrap());
+    assert!(first_floored > 500 && first_clamped >= first_floored, "floor at {first_floored}, first clamped step at {first_clamped}");
+    assert_eq!(u(&fees, "base_fee"), floor);
+
+    // A user transaction at the floor: selected, included, and the fee stays at the floor after it.
+    let pool = chain.root.path().join("floor-pool.json");
+    std::fs::write(&pool, json!([transfer(0)]).to_string()).unwrap();
+    let (parent, anchor) = (hex::encode(chain.parent), hex::encode(B256::repeat_byte(0x77)));
+    let selected = produce(&[
+        "select", "--target", &chain.db, "--parent", &parent, "--anchor", &anchor, "--txs", pool.to_str().unwrap(),
+        "--timestamp-rule", RULE, "--anchor-slot", &(100 * (last + 1)).to_string(), "--min-tip-wei", "1",
+    ])
+    .unwrap();
+    assert_eq!(selected["included"].as_array().unwrap().len(), 1, "{selected}");
+    assert_eq!(selected["below_min_tip"], 0);
+    let with_tx = chain.extend(last + 1, None, vec![], (1, 1), &[transfer(0)]).unwrap();
+    assert!(with_tx.payload.is_some());
+    blocks.push(with_tx);
+    blocks.push(chain.extend(last + 2, None, vec![], (1, 1), &[]).unwrap());
+    let end = chain.fees();
+    assert_eq!((u(&end, "number"), u(&end, "base_fee"), u(&end, "next_base_fee")), (last + 2, floor, floor));
+
+    // The prover's inputs: the last block above the floor, the first at it, the first clamped one,
+    // the block with the transaction and the head.
+    let above = blocks[(first_floored - 2) as usize].number;
+    assert_eq!(above, first_floored - 1);
+    let mut numbers = vec![first_floored, first_clamped, first_clamped + 1, last + 1, last + 2];
+    numbers.dedup(); // the first block at the floor is usually the first clamped one
+    for number in numbers {
+        check_artifacts(&chain, number, &next, &base, floor);
+    }
+    let bytes = {
+        let out = chain.root.path().join("floor-artifact-above");
+        produce(&["export", "--target", &chain.db, "--number", &above.to_string(), "--out", out.to_str().unwrap()]).unwrap();
+        std::fs::read(out).unwrap()
+    };
+    let artifact = bloch_execution_artifact::ExecutionArtifact::decode(&bytes, &next, MAINNET_DOMAIN).unwrap();
+    assert!(artifact.header().base_fee_per_gas > floor);
+
+    // The follower's rebuild from L1 data alone crosses the floor too.
+    let mut l1 = vec![(2, vec![d1])];
+    for block in &blocks {
+        let mut txs = Vec::new();
+        if let Some(payload) = &block.payload {
+            txs.push(da(block.number, payload.clone()));
+        }
+        // The data of a block on L1 before its settlement, each in its own L1 block.
+        if !txs.is_empty() {
+            l1.push((10 + 2 * block.number, txs));
+        }
+        l1.push((11 + 2 * block.number, vec![settlement(block, 1)]));
+    }
+    check_rebuild(&chain, &blocks, l1, 2);
+}
+
+/// The launch chain's case: the BASE rules have no floor, so by the time L1 replaces the program the fee
+/// is under 0.1 gwei. The first block of the next rules starts at the floor (a step up from its parent),
+/// and the chain goes on from there.
+#[test]
+fn f387_1_a_chain_switches_to_the_next_rules_under_the_base_fee_floor_and_rebuilds() {
+    let (base, next) = (ChainSpec::mainnet_v1(), ChainSpec::mainnet_next_or_rehearsal());
+    let floor = next.min_base_fee;
+    let mut chain = Chain::new();
+    let d1 = deposit(0x41, sender(), 100_000_000);
+    let record = json!({"height": 2, "tx_index": 0, "txid": hex::encode(d1.txid()), "vout": 1, "sats": 100_000_000u64, "recipient": hex::encode(sender())});
+    let mut blocks = vec![chain.extend(1, Some("base"), vec![record], (0, 1), &[]).unwrap()];
+    let mut fees = chain.fees();
+    // Base rules until the fee is well under the floor: the unfloored step, block after block.
+    while u(&fees, "base_fee") >= floor - floor / 50 {
+        let number = u(&fees, "number") + 1;
+        let expected = step(&base, &fees);
+        assert_eq!(u(&fees, "next_base_fee"), expected);
+        assert_eq!(u(&fees, "next_min_base_fee"), 0);
+        assert_eq!(u(&fees, "next_base_fee_if_switching"), step(&next, &fees));
+        blocks.push(chain.extend(number, None, vec![], (1, 1), &[]).unwrap_or_else(|e| panic!("base block {number}: {e}")));
+        fees = chain.fees();
+        assert_eq!((u(&fees, "number"), u(&fees, "base_fee"), fees["rules"].as_str()), (number, expected, Some("base")));
+        assert!(number < 700, "the fee falls under the floor in about 580 blocks");
+    }
+    let under = u(&fees, "base_fee");
+    assert!(under < floor && step(&base, &fees) < under);
+    assert_eq!(u(&fees, "next_base_fee_if_switching"), floor);
+
+    // L1 replaced the program: the next block is the first of the next rules, at the floor.
+    let switch = u(&fees, "number") + 1;
+    blocks.push(chain.extend(switch, Some("next"), vec![], (1, 1), &[transfer(0)]).unwrap_or_else(|e| panic!("the switch block {switch}: {e}")));
+    assert!(blocks.last().unwrap().payload.is_some(), "the transaction is in the switch block");
+    fees = chain.fees();
+    assert_eq!((u(&fees, "base_fee"), fees["rules"].as_str(), fees["next_rules_from"].as_u64()), (floor, Some("next"), Some(switch)));
+    for number in switch + 1..=switch + 3 {
+        assert_eq!(u(&fees, "next_base_fee"), floor);
+        blocks.push(chain.extend(number, None, vec![], (1, 1), &[]).unwrap_or_else(|e| panic!("block {number} after the switch: {e}")));
+        fees = chain.fees();
+        assert_eq!((u(&fees, "number"), u(&fees, "base_fee")), (number, floor));
+    }
+
+    // The base rules are refused after the switch, as ever; the switch block and its neighbours export.
+    assert!(chain.extend(switch + 4, Some("base"), vec![], (1, 1), &[]).unwrap_err().contains("past the switch"));
+    check_artifacts(&chain, switch - 1, &base, &next, under);
+    for number in [switch, switch + 1, switch + 3] {
+        check_artifacts(&chain, number, &next, &base, floor);
+    }
+
+    let mut l1 = vec![(2, vec![d1])];
+    for block in &blocks {
+        let mut txs = Vec::new();
+        if let Some(payload) = &block.payload {
+            txs.push(da(block.number, payload.clone()));
+        }
+        // The data of a block on L1 before its settlement, each in its own L1 block.
+        if !txs.is_empty() {
+            l1.push((10 + 2 * block.number, txs));
+        }
+        l1.push((11 + 2 * block.number, vec![settlement(block, 1)]));
+    }
+    check_rebuild(&chain, &blocks, l1, switch);
 }

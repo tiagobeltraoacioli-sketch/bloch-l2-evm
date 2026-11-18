@@ -68,6 +68,7 @@ usage (every command also takes [--rules v3|mainnet --domain HEX --genesis-time 
   bloch-l2-produce-dev rewind --target DIR --number N --hash HEX [--respool DIR]
   bloch-l2-produce-dev export --target DIR --number N --out FILE [--witness complete|sparse]
   bloch-l2-produce-dev head   --target DIR
+  bloch-l2-produce-dev fees   --target DIR
   bloch-l2-produce-dev da     --target DIR --number N --out FILE
   bloch-l2-produce-dev reconstruct --target NEW_DIR (--l1 FILE | --l1-follower DIR) [--chain-id N]
                                    [--timestamp-rule FROM:GENESIS:SLOT_MS]
@@ -880,6 +881,27 @@ fn run(args: &[String]) -> Result<String, String> {
                       "next_rules_from": factory.chain_spec().rules().next_from(),
                       "withdrawal_root": hex::encode(withdrawals.root), "withdrawal_count": withdrawals.count})
             .to_string())
+        }
+        "fees" => {
+            // Read-only: the head's base fee and the base fee of the block after it, on the rules of that
+            // block (F387-1).
+            only(rest, &["--target"])?;
+            let factory = open(&target, &runtime, false)?;
+            let number = factory.best_block_number().map_err(|e| e.to_string())?;
+            let header = factory.sealed_header(number).map_err(|e| e.to_string())?.ok_or("missing head header")?;
+            let schedule = factory.chain_spec().rules().clone();
+            let mut out = json!({"number": number, "hash": hex::encode(header.hash()),
+                      "rules": rule_set_name(&factory, number),
+                      "next_rules_from": schedule.next_from(),
+                      "base_fee": header.0.base_fee_per_gas, "gas_used": header.0.gas_used,
+                      "next_base_fee": schedule.at(number.saturating_add(1)).next_base_fee(header.0.base_fee_per_gas, header.0.gas_used),
+                      "next_min_base_fee": schedule.at(number.saturating_add(1)).min_base_fee});
+            // Before the switch the block after the head may be the first of the next rules (extend
+            // --rule-set next): its base fee is then the next rules', floor included.
+            if let (Some(next), None) = (schedule.next(), schedule.next_from()) {
+                out["next_base_fee_if_switching"] = json!(next.next_base_fee(header.0.base_fee_per_gas, header.0.gas_used));
+            }
+            Ok(out.to_string())
         }
         "withdrawal-proof" => {
             only(rest, &["--target", "--index", "--number", "--root", "--count"])?;
