@@ -1,6 +1,29 @@
-# Bloch L2 mainnet, deposit-only launch: known issues
+# Bloch L2 mainnet: known issues
 
-Release `926d2cf` (signing target `SHA256SUMS` `6d3bd628…`), launch kit of round 15.
+**Which build this copy is about (review R406-4).** This file is the copy of the DECEMBER line (the
+fork candidate: branch `codex/l2-dec-merge-r17-20261117`, build `f349f65` and later, unsigned,
+`docs/DECEMBER-BUILD-R15.md`). The list was written for the deposit-only launch kit, release `926d2cf`
+of round 15; the launch that is installed is described by the copy of this file on `main`, not by
+this one. For an operator of the December build:
+
+- Entry 2 (F312-5) does NOT apply: the settled RPC of this line writes spool files group-readable
+  (mode 0640, `fce8ee2`), so user transactions are a configuration decision here (D10), not a
+  missing build. The entry is kept below as written, marked, because it is what a host still on
+  the launch release shows.
+- Entry 1 (F312-4) DOES apply unchanged: `sequencer_mainnet.py` of this line has no recovery from a
+  foreign settlement either.
+- Entry 6 names the launch's signing target `6d3bd628…`. The December build has no signed release
+  and no signing target yet; its unsigned build hashes are in `docs/DECEMBER-BUILD-R15.md`
+  section 15 and `GO-LIVE-PINS.sha256`.
+- Entries 3 to 5 and 7 to 10 were not re-examined against the December build for this note
+  (`docs/AUDIT-OPEN-ITEMS-L2-R15.md` rows D1 to D4 say which of them the candidate fixes). Read each
+  as "may apply".
+- Not in the table because they are about the fork, not the launch: before the program swap the
+  settled RPC cannot know that the next block is the first of the next rules; on a chain whose
+  base fee is under 0.1 gwei `eth_gasPrice` therefore assumes the switch block's fee (0.1 gwei)
+  while `eth_feeHistory` still reports the base rules' next fee (F404-2). A transaction whose fee
+  cap leaves less than the tip floor above 0.1 gwei waits from the switch block on until it is
+  replaced. Nothing is lost.
 
 Each entry below stays open for the deposit-only launch by decision of the coordinator: closing it
 needs a new release build, or it does not affect a launch without user transactions. Each entry
@@ -16,7 +39,7 @@ installers use on host A.
 | # | Issue | Area | First sign |
 |---|---|---|---|
 | 1 | F312-4: a foreign settlement stops the shadow producer for good | shadow | `unit[shadow]` CRIT after `foreign_settlements` WARN |
-| 2 | F312-5: user transactions cannot be enabled on this release | settled RPC, settler | `producer-refused-spool … Permission denied`, empty blocks |
+| 2 | F312-5: user transactions cannot be enabled on the LAUNCH release (fixed on the December line) | settled RPC, settler | `producer-refused-spool … Permission denied`, empty blocks |
 | 3 | R308-24: a damaged `submitted.json` or a stray `orphaned` name restarts the settler for ever | settler | `retry` events, `unit[settler]` restarts, no `halt` |
 | 4 | R308-25: a settlement L1 refuses for good is rebroadcast for ever while one L1 RPC is down | settler | `submit-refused` with `"kind": "retry"` repeating |
 | 5 | R308-26: kept databases are pruned by wall-clock stamp | settler | a kept `canonical.orphaned-*` copy is missing |
@@ -45,6 +68,8 @@ independent check. No funds move and the L2 does not stop.
 `SETTLER-RUNBOOK.md`, section "Foreign settlements". Do not stop or restart the settler for this.
 
 ## 2. F312-5: user transactions cannot be enabled on this release
+
+**December line: fixed (`fce8ee2`); this entry describes the launch release `926d2cf` only.**
 
 **What it is.** The settled RPC of release `926d2cf`, running as its own user
 `bloch-l2-mainnet-rpc`, writes every spool file with mode 0600. The settler is only in the file's
