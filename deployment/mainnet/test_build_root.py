@@ -75,6 +75,31 @@ class StageBuildRoot(unittest.TestCase):
         self.assertIn('must be a regular file', result.stderr)
         self.assertEqual(victim.read_text(), 'keep')
 
+    def test_a_lock_file_of_another_user_is_refused_by_name(self):
+        """Review R384-3: the lock's name is in a world-writable directory. Another user's file there is not a
+        running build of the builder: it is refused as such, before it is opened, and nothing is staged."""
+        text = (HERE / 'build-root.sh').read_text()
+        self.assertIn('\nbuild_root_owned() { [ -O "$1" ]; }\n', text)   # the real check is ownership
+        work = self.tree('a')
+        self.lock.write_text('')
+        foreign = (f'. "{HERE}/build-root.sh"; BLOCH_BUILD_ROOT="{self.root}"; BLOCH_BUILD_LOCK="{self.lock}"; '
+                   'build_root_owned() { [ "$1" != "$BLOCH_BUILD_LOCK" ]; }; ' f'stage_build_root "{work}"')
+        result = subprocess.run(['bash', '-c', foreign], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('belongs to another user', result.stderr)
+        self.assertNotIn('another build holds', result.stderr)
+        self.assertFalse(self.root.exists(), 'the refused build must not have staged anything')
+        # The same for the directory (it already was refused; now through the same check).
+        self.root.mkdir()
+        (self.root / 'theirs').write_text('keep')
+        foreign = foreign.replace('[ "$1" != "$BLOCH_BUILD_LOCK" ]', '[ "$1" != "$BLOCH_BUILD_ROOT" ]')
+        result = subprocess.run(['bash', '-c', foreign], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('must be a directory owned by the user who builds', result.stderr)
+        self.assertEqual((self.root / 'theirs').read_text(), 'keep')
+        # The builder's own files pass.
+        self.assertEqual(self.stage(work).returncode, 0)
+
     def test_the_fixed_names(self):
         text = (HERE / 'build-root.sh').read_text()
         self.assertIn('\nBLOCH_BUILD_ROOT=/var/tmp/bloch-l2-build\n', text)
