@@ -83,3 +83,12 @@ The signed `release.json` is release evidence and is not edited. For the next re
 - the monitor's gate list (`l2_monitor.py`, `GATE_CONSTANTS` and the compiled values) knows the two gates above;
 - arming either gate on L1 needs, first, an L2 release that links a native commit carrying it: a follower built
   against `906336fd` does not have the rule and halts at the first block that depends on it.
+
+The same holds for the audit's own L1 gates (2026-11-23, all inert): `L2_SETTLER_AUTHORIZATION_ACTIVATION_EPOCH`,
+`L2_DA_SETTLER_SLOT_ACTIVATION_EPOCH` and the program switch. A `release.json` whose `compatible_l1_fleet` names
+`4cd9b887…` describes a release that replays the fleet as it is today, with those gates absent. The release that
+is compatible with a fleet carrying them must be built against that native commit, name it in
+`compatible_l1_fleet`, and say in its notes which of the gates its binaries know (`l1_activation_epochs` in
+`build.json`); a release built against `4cd9b887` must not be listed as compatible with a fleet on which any of
+them is armed: its follower refuses a settlement with an authorization trailer (it does not decode), and the
+monitor reports `l1_gates_vs_l2_build` CRIT.

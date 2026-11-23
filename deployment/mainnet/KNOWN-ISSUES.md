@@ -28,6 +28,7 @@ installers use on host A.
 | 11 | L2-01: deposit-only is the settler's configuration, not an L1 rule | L1, settler, shadow | `foreign_settlements` WARN with a V3 statement whose `user_tx_count` is not 0 |
 | 12 | L2-05: `safe` trusts the native node the follower reads | follower, settled RPC | none on screen |
 | 13 | L2-06: the settled RPC of `926d2cf` keeps serving `safe` when the follower stops | settled RPC | `l2_finality_status` and `follower_status` WARN/CRIT on age |
+| 14 | L2N-01: settlement is still permissionless; the settler side of both protections is in source only | L1, settler, prover | `foreign_settlements` CRIT |
 
 ## 1. F312-4: a foreign settlement stops the shadow producer for good
 
@@ -320,3 +321,24 @@ release build.
 **What the operator does.** Treat a CRIT on either as "safe is not current": restart the follower
 (`sudo systemctl restart bloch-l2-mainnet-follower`) and read its journal; if it halted, follow the
 entry its reason names.
+
+## 14. L2N-01: settlement is still permissionless; the settler side of both protections is in source only
+
+Identifier: audit AUDIT-L1L2-20261123, `L2N-01` (Critical by the audit's model; root cause D13/F1).
+
+**What it is.** Anyone with a valid proof can settle, and the deployed guest lets the prover choose the
+block's timestamp and `prevrandao`, so one outside settlement can leave a head nobody else can rebuild.
+Two protections are written and both are off: the L1 settler gate (settlements only from a registered
+key) and the bound guest program. The settler, the prover wrapper, the installer and the monitor of this
+branch know both (SETTLER-RUNBOOK.md, "Settler key, authorization and the program switch"), but nothing
+is armed on L1, no settler key exists, no set is pinned and the launch release has none of this code.
+The bound program's pins in `settler_v3.py` (`MAINNET_BOUND`) are candidate values, not a release.
+
+**What the operator sees.** Nothing until a foreign settlement: then `foreign_settlements` CRIT. If the
+foreign block is off-rule, the settler, shadow, follower and attestors halt (exit 3).
+
+**What the operator does.** Keep the escrow exposure at the cap the owner set (D13). On
+`foreign_settlements` CRIT stop accepting deposits at the wallet and call the owner: the only recovery
+from an off-rule head is an L1 release. Arming needs the checklist in the runbook; none of its steps is
+an operator decision.
+

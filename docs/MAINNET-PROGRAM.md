@@ -306,5 +306,31 @@ programs although none of their source lines changed: any addition to the
 core crate moves the compiled layout. The deployed programs are pinned by
 hash and are rebuilt from `b17b3ae` or earlier, never from a later commit.
 
+### Settler and prover wiring for the switch (2026-11-23, in source, not deployed)
+
+The interface the L2 side expects of the L1 program switch, and what the L2 side does with it:
+
+- **The gate.** One activation epoch, constant `L2_PROGRAM_SWITCH_ACTIVATION_EPOCH`, listed in
+  `HARD_FORK_GATES` so that `getchaininfo.hard_forks` reports it as
+  `l2_program_switch_activation_epoch: {"activation_epoch": N | null, "active": bool}` (the row a gate
+  without an RPC alias gets). `null` is inert. A settlement in a block of an epoch below N must name the
+  deployed `identities[3..6]`, from N on the bound ones; the proof policy, the statement format, the
+  domain and the L2 genesis do not change. If the L1 gate gets another name, `program_switch.l1_gate`
+  in the settler configuration names it; nothing else depends on the name.
+- **The settler** (`settler_v3.py`, `program_switch`): holds both programs, each with its guest and its
+  264-byte l2-config, both pinned (`MAINNET`, `MAINNET_BOUND`). It reads N from the L1 by quorum or from
+  its configuration (and halts if the two differ), proves under the bound program from `N - lead_epochs`
+  on, never submits a bound settlement before N, and proves a deployed-program settlement again if it was
+  not included before N. `MAINNET_BOUND` holds the candidate column of the table above; the release
+  replaces it with the released values (test `test_the_bound_pins_are_the_documented_candidate_values`
+  keeps the code and this table equal, and `MAINNET_BOUND_STATUS` says `candidate`).
+- **The prover**: locally `bloch-evm-sp1-settlement-v3 --mainnet-bound …` with the bound guest; on the
+  remote prover the command `prove-bound`, served only when its configuration pins the bound guest
+  (`"bound": {"guest", "guest_sha256"}`). `install-prover-mainnet.py` and the settler installer do not
+  install the bound guest yet: they pin files by hash, and the bound ELF has no release hash.
+- **Readers** (follower, replica, shadow, attestors): must link the native release that carries the
+  switch; their pinned policy (`settlement-recovery/src/mainnet.rs`) is still the deployed program only.
+  That change is not written.
+
 Until step 4, the only protection is the L1 stop-gap (settlements accepted
 from a registered settler key, native fix branch) and the D13 exposure cap.

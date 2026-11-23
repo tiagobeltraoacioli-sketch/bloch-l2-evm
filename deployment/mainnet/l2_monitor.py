@@ -103,6 +103,14 @@ GATE_CONSTANTS = {
     'hf3_kes_vote_slot_epoch_binding': 'ATTESTATION_SLOT_EPOCH_BINDING_ACTIVATION_EPOCH',
     'hf3_kes_first_key_floor': 'KES_FIRST_KEY_FLOOR_ACTIVATION_EPOCH',
     'hf3_kes_register_epoch_binding': 'KES_REGISTER_EPOCH_BINDING_EPOCH',
+    # Audit AUDIT-L1L2-20261123 (inert as written): the L1 reports a gate without an RPC alias under its lowercased
+    # constant name. Armed on L1 and absent from the L2 build's gate list = CRIT below, as for every gate: the
+    # follower, the shadow and the attestors must link the native release that carries the rule (a settlement with
+    # an authorization trailer does not decode in an older one). The program-switch name is the one the settler
+    # expects (settler_v3.PROGRAM_SWITCH_GATE).
+    'l2_settler_authorization_activation_epoch': 'L2_SETTLER_AUTHORIZATION_ACTIVATION_EPOCH',
+    'l2_da_settler_slot_activation_epoch': 'L2_DA_SETTLER_SLOT_ACTIVATION_EPOCH',
+    'l2_program_switch_activation_epoch': 'L2_PROGRAM_SWITCH_ACTIVATION_EPOCH',
 }
 V2_COMPILED_GATES: Dict[str, Any] = {
     'HF1_CLAIM_FINALITY_EPOCH': 7180, 'HF1_FROZEN_FINALITY_SET_EPOCH': 7180, 'HF1_OWN_TARGET_VOTES_EPOCH': 7186,
@@ -135,7 +143,18 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # Audit AUDIT-L1L2-20261123. L2N-20: an endpoint answers garbage in a field read outside
                          # the quorum projection. L1X-04: a DA batch is not recorded within the alert blocks (its
                          # slots are being out-tipped, or L1 is not including it).
-                         'rpc-endpoint-malformed', 'da-not-included'})
+                         'rpc-endpoint-malformed', 'da-not-included',
+                         # L2N-01, the settler gate and the program switch (settler_v3.py). A set rotation is an
+                         # operator action every on-call person must see; a refusal at a gate boundary, a proof
+                         # made again for the switch and a missed switch are expected once and worth a look when
+                         # they repeat (the repeat rule makes them CRIT). A halt of the worker (key not in the
+                         # set, signer refusal, refused settlement) is CRIT through `halt`, as before.
+                         'settler-set-rotated', 'settler-rotation-signed', 'settler-rotation-invalid',
+                         'settler-rotation-not-applied', 'settlement-refused-at-gate-boundary',
+                         'settlement-missed-program-switch', 'program-switch-reprove', 'l1-gate-not-reported',
+                         # L1X-04: with the L1 DA settler-slot rule armed, the DA batch is funded by a key that is
+                         # not a registered settler key and has no reserved place.
+                         'da-funding-key-not-registered'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 

@@ -289,8 +289,147 @@ the private stub has no native source to build a block from.
 | `da-tip-raised` | The DA batch was not recorded within `da.tip_escalation_blocks` native blocks (default 4) and was re-signed at twice the tip (audit L1X-04). Nothing to do: the fee is paid once, on the attempt that is included. |
 | `da-not-included` (`at_max_tip`) | The DA batch has waited `da.not_included_alert_blocks` native blocks (default 8). L1 admits four DA transactions per block, to the highest tip rates: either someone is out-tipping the batch or L1 is not including it. With `at_max_tip: true` the tip is at `da.max_tip_millisat_per_gas` and blocks with user transactions do not settle until the other party stops paying; deposits still settle. Raise the cap in the settler configuration if the price is acceptable. |
 | `rpc-endpoint-malformed` | One RPC answered a field the worker reads outside the quorum projection (`slot`, `height`, the fee, the inbox counts) with something that is not a number (audit L2N-20). It is counted as a missing vote. Look at the named endpoint. |
+| `settler-key-checked` | Once per start, with `settler_authorization`: the pinned signer opened the sealed settler keystore, found its key in the set file and signed a self-test value (audit L2N-01). Missing after a start with the block configured: the worker halted with `settler key check failed`. |
+| `settlement-authorized` | The settlement was signed by the settler key (`signer`, `set_hash`); `next_set_hash` is set on a rotation. Only behind the settler gate. |
+| `settlement-refused-at-gate-boundary`, `settlement-form-changed` | Within one epoch of the settler gate or the program switch a node judged the settlement on the other side of the boundary. The worker sends it again in the form the head requires (same proof). Expected once at the gate; look at it if it repeats. |
+| `settler-rotation-signed`, `settler-set-rotated` | A set rotation was signed, then accepted: the set file is the new set, the old one is beside it as `.previous`. `this_key_registered: false` means this host's key left the set: the worker halts at the next block and another registered key must settle. See "Settler key". |
+| `settler-rotation-invalid`, `settler-rotation-not-applied` | The rotation request file is not a valid set (ignored, settlement goes on), or the block the rotation was signed for was settled with another statement (the request stays for the next settlement). |
+| `program-selected`, `settlement-waiting-program-switch` | The block is proved under the bound program; a finished bound proof waits for the L1 switch epoch. |
+| `program-switch-reprove`, `settlement-missed-program-switch` | A proof of the deployed program was not included before the switch and is made again under the bound program (one proof lost, about 15 minutes). |
+| `l1-gate-not-reported` | The L1 RPCs do not list a gate this worker is configured to read from L1 (`"l1"`): they run a release that predates it. The gate counts as inert. |
+| `da-funding-key-not-registered` | The L1 DA settler-slot rule is armed and the DA funding key is not a registered settler key, so the batch has no reserved place (audit L1X-04). Set `da.settler_key`. |
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements": the settler needs no action, the SHADOW must be reinstalled each time. Otherwise no action unless they repeat. |
-| `halt` (exit 3, no auto-restart) | Operator review. Causes: a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
+| `halt` (exit 3, no auto-restart) | Operator review. Causes: (with `settler_authorization`) the settler key is not in the set file, the signer refused, or the settlement was refused while its request is unchanged, which behind the gate also means "this key is not in the registered set"; (with `program_switch`) a block prepared for the bound program while the switch is no longer scheduled; a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
+
+## Settler key, authorization and the program switch (audit AUDIT-L1L2-20261123, L2N-01, L1X-04)
+
+Nothing in this section is in force on mainnet. The three L1 gates are inert (`u64::MAX`) and the deployed
+worker has none of the three configuration blocks. Without the blocks the worker reads no gate, starts no signer
+and submits byte for byte what it submits today.
+
+Background. A settlement carries no sender, and the deployed guest lets the prover choose the block's timestamp
+and `prevrandao`; one outside proof can leave an L2 head nobody else can rebuild (L2N-01). Two protections exist
+in code, both off:
+
+1. **Settler authorization** (L1 gate `L2_SETTLER_AUTHORIZATION_ACTIVATION_EPOCH`): from the gate's epoch a
+   settlement is accepted only with a trailer signed by one of 1 to 3 registered settler keys.
+2. **Program switch** (L1 gate `L2_PROGRAM_SWITCH_ACTIVATION_EPOCH`, being written on L1): from the switch epoch
+   only proofs of `settlement_v3_mainnet_bound` are accepted, a program that derives the block context.
+
+### Configuration
+
+```
+"settler_authorization": {
+  "signer": ".../bloch-pos", "signer_sha256": "...",       the native release that has `l2-settler`
+  "genesis": ".../mainnet.manifest",
+  "keystore_dir": "/var/lib/bloch-l2-mainnet-settler-key", sealed keystore, 0700, the settler user's
+  "passphrase_file": "/run/bloch-l2-mainnet-settler/settler.passphrase",
+  "pubkey": "/etc/bloch-l2-mainnet-settler/public/settler.pubkey.hex",
+  "set": "/var/lib/bloch-l2-mainnet-settler/settler.set",  the registered set; the worker rewrites it at a rotation
+  "activation_epoch": "l1"                                 or an epoch; absent = never
+}
+"program_switch": {
+  "activation_epoch": "l1", "lead_epochs": 1,
+  "guest": ".../settlement_v3_mainnet_bound", "guest_sha256": "...",
+  "l2_config": ".../l2-config-bound.bin", "l2_config_sha256": "..."
+}
+"da": { "settler_key": true, "settler_slot_activation_epoch": "l1", ...tip policy... }
+```
+
+`"l1"` reads the epoch from `getchaininfo.hard_forks` by quorum (keys `l2_settler_authorization_activation_epoch`,
+`l2_program_switch_activation_epoch`, `l2_da_settler_slot_activation_epoch`; `l1_gate` overrides the name). A
+configured epoch must equal what the L1 reports, or the worker halts. No quorum on a gate is a retry, never a guess.
+
+The installer writes the first block: `install-settler-mainnet.py settler-key prepare`, then
+`settler-key enable --set FILE --confirm-mainnet` (add `--da-settler-key` for the DA block). `program_switch` has
+no installer step yet: its pins (`MAINNET_BOUND` in `settler_v3.py`) are candidate values until the release that
+carries the L1 switch (docs/MAINNET-PROGRAM.md).
+
+### What the worker does at each gate
+
+- Before the settler gate's epoch: the 1155-byte settlement, unsigned, exactly as today (a trailer would be
+  refused by every node). The key is still checked at every start (`settler-key-checked`), so a key that cannot
+  sign is found on the day the unit starts.
+- From the gate's epoch: `bloch-pos l2-settler authorize` appends `signer || signature || next set`. The form is
+  chosen at every broadcast from the L1 head epoch, so a proof made before the boundary is sent in the form the
+  including block requires; within one epoch of the boundary a refusal is retried in the other form, not a halt.
+- Program switch: a new proof is started under the bound program `lead_epochs` (default 1, about 16 minutes)
+  before the switch and is held until the switch (`settlement-waiting-program-switch`); a deployed-program proof
+  that is finished is still submitted until the switch, and proved again after it. Honest blocks are the same
+  under both programs, so no L2 block is rebuilt.
+- DA: with `da.settler_key` the DA transaction is funded and signed by the settler keystore, which is what the L1
+  DA settler-slot rule reserves a place for. The settler key then needs the DA fee balance; the separate DA key
+  is no longer used and its balance is swept (DA key procedures).
+
+### Settler key: generation, standby keys, backup
+
+Follow the key generation ceremony policy (class B, automated signing agent: generated on the host that signs,
+from the signed release, sealed at birth) and the settler key procedures of the CCSS policy set.
+
+1. Verify the release signature on the host (`minisign -Vm SHA256SUMS`, then `sha256sum -c`), as for every
+   installer.
+2. `sudo python3 install-settler-mainnet.py settler-key prepare`: sealed keystore (`BPOSKEY2`, Argon2id +
+   XChaCha20-Poly1305), passphrase generated on the host into a root-only file and never printed, public key in
+   `public/settler.pubkey.hex`. The command refuses to overwrite a key. Plaintext is not an option of this tool.
+3. Standby keys (recommended: at least one): on another host that stays offline, with the same release:
+   `bloch-pos keygen --dir DIR --index 0` with `BLOCH_KEYSTORE_PASSPHRASE_FILE` set, then
+   `bloch-pos keys inspect --dir DIR` (must say sealed) and `bloch-pos l2-settler pubkey --dir DIR --out standby.pubkey.hex`.
+   Only the public key file leaves that host.
+4. The owner assembles the set, the settler's key first: `bloch-pos l2-settler set --pubkey settler.pubkey.hex
+   --pubkey standby.pubkey.hex --out settler.set`. The printed set hash goes into the ceremony record; the file
+   is what the L1 release pins in `mainnet::SETTLER_SET`.
+5. Backups of each keystore and of each passphrase, separately, read back, in two places (key backup policy).
+   A standby key that exists only on one offline host is acceptable if a second standby exists.
+6. `settler-key enable --set settler.set --confirm-mainnet`, start the unit, read `settler-key-checked`.
+7. Ceremony record: date, key id, holder, host, release and its signature check, public key hash, set hash,
+   backup references, witness. Public data only.
+
+### Rotation (no L1 release)
+
+Any registered key can install a new set with one settlement. On the settler host: write the new set
+(`bloch-pos l2-settler set …`) to `<set>.next` (`/var/lib/bloch-l2-mainnet-settler/settler.set.next`). The next
+settlement the worker signs carries it (`settler-rotation-signed`); when it is accepted the worker replaces its
+set file (`settler-set-rotated`) and renames the request `.applied`. A request is final once
+`settler-rotation-signed` is logged. An empty L2 block is always settleable, so a rotation costs one proof.
+If the new set does not contain this host's key, the worker halts at the next block: start the worker of the
+host that holds a registered key.
+
+### The settler key is lost (host or disk)
+
+1. The worker has halted or the host is gone. Take the unsigned settlement of the pending block
+   (`<workdir>/<block>/transaction.bin`, hex) or prove one on the rebuilt host.
+2. On the standby host, offline: `bloch-pos l2-settler authorize --genesis mainnet.manifest --chain-id 700770
+   --tx unsigned.hex --set settler.set --dir STANDBY_DIR --next-set new.set --out signed.hex`, where `new.set`
+   holds the new settler key (generated on the rebuilt host) and the standby keys. `bloch-pos l2-settler verify`
+   on any machine confirms it before it is sent.
+3. Broadcast `signed.hex` (`sendrawtransaction`). After acceptance put `new.set` in place as the set file of the
+   rebuilt settler and start it.
+
+### The settler key is stolen or suspected
+
+The thief can settle, including the L2N-01 settlement itself, and can rotate the honest keys out. Act at once:
+stop the settler; with a standby key, authorize the next settlement with a `--next-set` that leaves the stolen
+key out (steps above). If the thief settled first: an off-rule head or a set without honest keys needs an L1
+release (head reset and a new set), the same instrument as before the gate. Incident log as in the key
+compromise protocol. With `da.settler_key` the stolen key also holds the DA fee balance: sweep it.
+
+### Every registered key is lost
+
+No settlement is valid until an L1 release installs a new set. The L2 state stays reconstructible, deposits made
+meanwhile stay in the L1 escrow, settled withdrawals remain claimable.
+
+### Before the owner arms either gate (checklist)
+
+1. Native release with the gate, the pinned set (settler gate) or the pinned bound program (switch), replayed,
+   qualified and rolled out to every validator.
+2. L2 release built against that native release: follower, replica, shadow, attestors and settled RPC decode a
+   settlement with a trailer only then (`l1_gates_vs_l2_build` is CRIT otherwise). Kit pins refreshed, signed.
+3. Settler: release installed, `settler_authorization` (and `program_switch`) configured, `settler-key-checked`
+   in the log, the set file equal to the pinned set, backups read back, a standby key tested with
+   `l2-settler check` on its host.
+4. Prover host: the bound guest installed and pinned (`"bound"` in its configuration) before the switch.
+5. One rehearsal on a private network with the armed native build: settle across the gate epoch, rotate once,
+   settle with the standby key, cross the program switch.
 
 ## Idle blocks
 
