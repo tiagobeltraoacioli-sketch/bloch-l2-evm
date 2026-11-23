@@ -114,6 +114,12 @@ Recommendation:
 
 - Fund **5 BLCH in two outputs**, which covers about 240 full batches at 100× the floor price.
 - The worker logs `da-funding-low` below 1 BLCH.
+- Tip policy (audit L1X-04). The batch starts at `da.tip_millisat_per_gas` (0). Not recorded within
+  `da.tip_escalation_blocks` native blocks (4), it is re-signed at twice the tip, from
+  `da.tip_step_millisat_per_gas` (10) when it started at zero, up to `da.max_tip_millisat_per_gas`
+  (1,000 = 100× the floor: 0.0205 BLCH of tip on a full batch). `tip_escalation_blocks: 0` switches it
+  off. Holding the four DA slots of every block against a tip of 1,000 costs the other party about
+  24.6 BLCH a day in junk batches; at tip 0 it cost 0.25 BLCH a day.
 - With `user_transactions: false` (the default), no funding is needed: empty and deposit-only
   blocks need no DA.
 
@@ -280,6 +286,9 @@ the private stub has no native source to build a block from.
 | `rpc-quorum-behind-floor` then `retry` and exit 1 | The same behind-floor answer has lasted `quorum_floor_stall_seconds` (default 1200 s; review r10 L1). The worker exits 1 after `max_consecutive_failures` retries and systemd restarts it, which resets the in-memory floor. If L1 really reorged, the restarted worker resubmits its block at the accepted number + 1 when the anchor is unchanged, or halts with its own reason (then use `l2_reorg_recover.py`). If two endpoints are stale, fix them: after the restart the worker halts on a database or anchor check, or after `max_unincluded_windows` of `settlement-not-included`. |
 | `prover-failed` `timeout: true` | A prover attempt ran out of time (exit 124 recorded). The next location in `remote_prover.order` is tried (review r10 L6). |
 | `da-funding-low` | Top up the DA fee key. |
+| `da-tip-raised` | The DA batch was not recorded within `da.tip_escalation_blocks` native blocks (default 4) and was re-signed at twice the tip (audit L1X-04). Nothing to do: the fee is paid once, on the attempt that is included. |
+| `da-not-included` (`at_max_tip`) | The DA batch has waited `da.not_included_alert_blocks` native blocks (default 8). L1 admits four DA transactions per block, to the highest tip rates: either someone is out-tipping the batch or L1 is not including it. With `at_max_tip: true` the tip is at `da.max_tip_millisat_per_gas` and blocks with user transactions do not settle until the other party stops paying; deposits still settle. Raise the cap in the settler configuration if the price is acceptable. |
+| `rpc-endpoint-malformed` | One RPC answered a field the worker reads outside the quorum projection (`slot`, `height`, the fee, the inbox counts) with something that is not a number (audit L2N-20). It is counted as a missing vote. Look at the named endpoint. |
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements": the settler needs no action, the SHADOW must be reinstalled each time. Otherwise no action unless they repeat. |
 | `halt` (exit 3, no auto-restart) | Operator review. Causes: a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
 

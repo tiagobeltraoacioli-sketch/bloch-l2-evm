@@ -708,10 +708,12 @@ class MonitorTests(unittest.TestCase):
             log.write_text(ev(90000) + '\n')
             r, _ = run(healthy(), '--event-log', f'settler={log}')
             self.assertNotIn('foreign_settlements[settler]', [c['check'] for c in r.checks])
+            # Audit L2N-01: the first foreign settlement inside the window is CRIT.
             log.write_text(ev(90000) + '\n' + ev(7200) + '\n')
             r, _ = run(healthy(), '--event-log', f'settler={log}')
-            self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
+            self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
             self.assertEqual(level(r, 'events[settler]'), 'OK')
+            self.assertEqual(m.PROFILES['mainnet']['foreign_recovered_crit'], 1)
             log.write_text(ev(7200) + '\n' + ev(60) + '\n')
             r, _ = run(healthy(), '--event-log', f'settler={log}')
             self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
@@ -723,7 +725,7 @@ class MonitorTests(unittest.TestCase):
             return 0, ev(7200) + '\n'
         r = m.Report()
         m.check_units(['settler=settler.service'], m.PROFILES['mainnet'], NOW, runner, r)
-        self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
+        self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
 
     def test_repeated_warn_events_escalate(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1345,7 +1347,7 @@ class MonitorGapTests(unittest.TestCase):
                 'rpc-endpoint-recovered', 'rpc-quorum-restored', 'transaction-built', 'submitted', 'remote-proof',
                 'prover-stages-done', 'prover-shm-removed', 'l2-block-produced', 'l2-block-reused', 'idle-hold', 'idle-end',
                 'da-submitted', 'da-included', 'da-wait-ended-block-settled', 'da-batch-reused', 'da-reuse-waiting-follower',
-                'da-fee-moved', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
+                'da-fee-moved', 'da-tip-raised', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
                 'foreign-settlement-recovered', 'foreign-settlement-waiting-finality',
                 'stopped'}
         graded = m.CRIT_EVENTS | m.WARN_EVENTS | m.PROGRESS_EVENTS | info

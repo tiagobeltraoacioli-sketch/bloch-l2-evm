@@ -131,7 +131,11 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          # Agent 193 (M2): some RPCs refused a broadcast; held bytes not included while L1 advances.
                          'submit-partial', 'settlement-not-included',
                          # Agent 198 (152 L1): a partial quorum stays behind the accepted floor.
-                         'rpc-quorum-behind-floor'})
+                         'rpc-quorum-behind-floor',
+                         # Audit AUDIT-L1L2-20261123. L2N-20: an endpoint answers garbage in a field read outside
+                         # the quorum projection. L1X-04: a DA batch is not recorded within the alert blocks (its
+                         # slots are being out-tipped, or L1 is not including it).
+                         'rpc-endpoint-malformed', 'da-not-included'})
 PROGRESS_EVENTS = frozenset({'accepted', 'proof-generated', 'shadow-match', 'signed', 'rebuild-check-ok',
                              'job-ready', 'root-skipped'})
 
@@ -173,7 +177,9 @@ _COMMON: Dict[str, Any] = {
     # Seconds one run may spend asking the attestor feeds (the unit's TimeoutStartSec is 120).
     'attest_probe_budget_s': 60,
     'event_window_seconds': 3600, 'event_repeat_crit': 5,
-    'foreign_window_seconds': 86400, 'foreign_recovered_crit': 2,
+    # Audit AUDIT-L1L2-20261123 (L2N-01): the first foreign settlement is CRIT, not WARN. Until the settlement
+    # program fixes the block context, a foreign block can be one nobody else can rebuild or extend.
+    'foreign_window_seconds': 86400, 'foreign_recovered_crit': 1,
     'l2_backend_spread_warn': 2, 'l2_backend_spread_crit': 8,
     # SETTLER-RUNBOOK: the worker logs da-funding-low below 1 BLCH; 0.1 BLCH is about 5 full batches at 100x the floor.
     'da_balance_warn_sat': 100_000_000, 'da_balance_crit_sat': 10_000_000,
@@ -1510,8 +1516,9 @@ def grade_events(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], win
 
 
 def grade_foreign(name: str, events: List[Dict[str, Any]], p: Dict[str, Any], r: Report) -> None:
-    """Foreign settlements recovered by the worker in the longer window. Funds are safe; more than one a day is
-    an attack on liveness. Silent when there is none, since only a settler logs this event."""
+    """Foreign settlements recovered by the worker in the longer window: CRIT from the first one (audit L2N-01).
+    A recovered one did follow the node's context rule, but it shows that someone else holds a prover for this
+    chain, and the next one need not be rebuildable. Silent when there is none, since only a settler logs it."""
     found = [ev for ev in events if ev['event'] == 'foreign-settlement-recovered']
     waiting = [ev for ev in events if ev['event'] == 'foreign-settlement-waiting-finality']
     if found or waiting:
