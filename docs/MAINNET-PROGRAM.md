@@ -238,6 +238,32 @@ commitment (`identities[3]`,
 (`identities[4..6]`). The proof policy `15486996…747d` stays as long as the SP1
 circuit version, the Groth16 wrapper key and the statement tag stay.
 
+Candidate values (2026-11-23, commit `21ec80c`; NOT a release, nothing pins them):
+
+| Field | Deployed `settlement_v3_mainnet` | Candidate `settlement_v3_mainnet_bound` |
+|---|---|---|
+| ELF SHA-256 | `203114bf34df280d7964fd3ea047907f4bca230ad0e7a0e4bea85b305ad7c473` | `ac2e1ca568fe28ffef7f2e55d4bc493d6348882b2e786bf3e5a10fefa9b38892` (3 101 968 bytes) |
+| `identities[3]` configuration | `8ec1c804e67190434fdf72b723103d26938797e90e1b652d366a1b053e3d8f2b` | `41ddb4dd4aae492e04f500d40be8471ac785e1264d32346dc0f1620d67cc928d` |
+| `identities[4]` ELF Keccak-256 | `6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073` | `c1dd6066941c83fc691f6b325b51ca771c680431df54d54d508c8593fcb6da6d` |
+| `identities[5]` KoalaBear key | `389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e` | `72730d65162c55a9604a8d905e125a1f332bec342419058167520c455dea4112` |
+| `identities[6]` BN254 key | `007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e` | `00e4e61aca58b156a702546c85e125a1f6657d868906416073a90622ddea4112` |
+
+Built with `build-reproducible.sh` (macOS x86_64, SP1 CLI 6.8.0, `succinct-1.96.0-64bit-v2`); two
+builds agree. The keys are from `bloch-evm-sp1-settlement-v3 --mainnet-bound identity` of a host
+built from the same commit; as a control the same host prints the deployed column for the ELF
+rebuilt from `b17b3ae`. `verify-reproducible.sh` from two checkouts was not run, and any later
+change to the core crate changes every value in the right column. The proof policy was not
+re-derived (the host was built without `source-settlement`).
+
+The candidate ELF was executed in the SP1 executor (no proof) on L2 block 1 as the real producer
+builds it with the mainnet parameters: 660 226 instructions, the committed statement equal to the
+host's. For a request that names another anchor slot than the one the block was stamped for, the
+candidate ELF aborts, and the deployed ELF commits a statement.
+
+A node artifact names the configuration of the rules it was exported under. The host accepts,
+for the candidate program, an artifact exported under the deployed mainnet rules: blocks and
+witnesses are the same under both rule sets, so the node need not change rules at the switch.
+
 What it takes before it protects mainnet (nothing below is done):
 
 1. Build the ELF with `build-reproducible.sh` at the release commit, verify it
@@ -252,9 +278,9 @@ What it takes before it protects mainnet (nothing below is done):
    the L2 release must know the switch epoch and both program identities.
 3. L2 release (signed, pins refreshed): prover host with the new ELF, settler
    configuration with the new `guest_sha256`, configuration commitment and
-   program keys, the node rule set switched to `ChainSpec::mainnet_outstanding_cap`
-   (`--rules mainnet` in the producer and the settled RPC; it changes no block
-   until the gross counter passes the cap), prover invoked
+   program keys (the node rule set can stay `ChainSpec::mainnet`: it gives the
+   same blocks until the gross counter passes the cap, and must become
+   `ChainSpec::mainnet_outstanding_cap` in a release well before that), prover invoked
    with `--mainnet-bound` from the switch on, follower and attestors linked to
    the native release that carries the switch.
 4. Order: L2 release on every operator host and native release on the

@@ -176,6 +176,25 @@ fn synthetic_context_for(program: [B256; 3], deposits: u64) -> SettlementContext
     }
 }
 
+/// The execution artifact a node exported for the selected program.
+///
+/// An artifact names the configuration of the rules it was recorded under.
+/// For `settlement_v3_mainnet_bound` that is normally still the deployed
+/// mainnet rule set: its blocks and witnesses are the same under the
+/// program's outstanding-cap rule set until the gross minted counter passes
+/// the cap (core tests `supply_cap_outstanding`), so the node need not switch
+/// rules when the program switches. Either rule set is accepted; the
+/// statement is always derived with the program's own rules.
+#[cfg(feature = "node-artifact")]
+fn load_node_artifact(path: &std::path::Path) -> Result<bloch_execution_artifact::ExecutionArtifact> {
+    use bloch_evm_sp1_host::artifact::load_selected_artifact_in;
+    if program() == Program::MainnetBound {
+        return Ok(load_selected_artifact_in(path, &ChainSpec::mainnet(), domain())
+            .or_else(|_| load_selected_artifact_in(path, &spec(), domain()))?);
+    }
+    Ok(load_selected_artifact_in(path, &spec(), domain())?)
+}
+
 /// Chained successor from the canonical L2 database export, as in V2, but a
 /// block with user transactions is accepted.
 #[cfg(feature = "node-artifact")]
@@ -208,7 +227,7 @@ fn native_artifact_qualification(
         return Err(io::Error::other("invalid native request position").into());
     }
     let previous_settlement = hash(7, true)?;
-    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact_in(artifact, &spec(), domain())?;
+    let artifact = load_node_artifact(artifact)?;
     if (artifact.header().number == 1) != (previous_settlement == B256::ZERO) {
         return Err(io::Error::other("only L2 block 1 may have no previous settlement").into());
     }
