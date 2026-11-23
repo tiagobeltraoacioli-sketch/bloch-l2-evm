@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Explicit V2 genesis and committed header metadata, separate from V1 state.
+pub mod bound;
 pub(crate) mod head;
 pub mod select;
 

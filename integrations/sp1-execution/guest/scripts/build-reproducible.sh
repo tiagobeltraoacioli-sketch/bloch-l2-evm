@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the SP1 guest programs (bloch-evm-synthetic-guest, settlement_v2,
-# settlement_v3, settlement_v3_mainnet) of one commit so that the ELF bytes do not depend on where the
+# settlement_v3, settlement_v3_mainnet, settlement_v3_mainnet_bound) of one commit so that the ELF bytes do not depend on where the
 # checkout or the Cargo home live.
 #
 # Two things made the ELF path-dependent (the same commit built at the M1 and
@@ -75,7 +75,7 @@ echo "building $commit in $src" >&2
   CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" ${CARGO_PROVE:-cargo prove} build --locked "--rustflags=$remap" >&2)
 
 elf_dir="$src/integrations/sp1-execution/guest/target/elf-compilation/riscv64im-succinct-zkvm-elf/release"
-for name in bloch-evm-synthetic-guest settlement_v2 settlement_v3 settlement_v3_mainnet; do
+for name in bloch-evm-synthetic-guest settlement_v2 settlement_v3 settlement_v3_mainnet settlement_v3_mainnet_bound; do
   # Count (not grep -q): an early grep exit would fail `strings` under pipefail.
   if [[ $(strings "$elf_dir/$name" | grep -cF -e "$root" -e "$cargo_home" -e "$repo") != 0 ]]; then
     echo "$name still embeds a local absolute path" >&2

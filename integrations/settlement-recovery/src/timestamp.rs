@@ -78,9 +78,71 @@ pub fn next_timestamp(
     }
 }
 
+/// `prevrandao` of L2 block `number` on parent `parent_hash`, anchored to the
+/// native block `anchor`. On mainnet it is the value the bound settlement
+/// program derives (`SettlementContextRule::mainnet`, audit finding L2N-01):
+/// the legacy constant below the compiled switch block, which is `u64::MAX`
+/// today, so every block keeps `0x07..07`. Other networks keep the constant.
+/// The producer and every rebuilder call this, so they cannot drift from the
+/// program.
+pub fn block_prevrandao(
+    mainnet: bool,
+    number: u64,
+    parent_hash: alloy_primitives::B256,
+    anchor: alloy_primitives::B256,
+) -> alloy_primitives::B256 {
+    use bloch_l2_evm::node_execution::bound::{SettlementContextRule, LEGACY_PREVRANDAO};
+    if mainnet {
+        SettlementContextRule::mainnet().prevrandao(number, parent_hash, anchor)
+    } else {
+        LEGACY_PREVRANDAO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit L2N-01: the node's mainnet rule and the rule compiled into the
+    /// bound settlement program give the same timestamp and prevrandao.
+    #[test]
+    fn the_mainnet_node_rule_equals_the_bound_program_rule() {
+        use alloy_primitives::B256;
+        use bloch_l2_evm::{
+            chainspec::{GENESIS4_SLOT_MS, MAINNET_GENESIS_TIMESTAMP},
+            node_execution::bound::{SettlementContextRule, LEGACY_PREVRANDAO},
+        };
+        let node = TimestampRule::from_genesis(MAINNET_GENESIS_TIMESTAMP, GENESIS4_SLOT_MS).unwrap();
+        assert_eq!(TimestampRule::parse("1:1786656679:30000").unwrap(), node);
+        let program = SettlementContextRule::mainnet();
+        let g = MAINNET_GENESIS_TIMESTAMP;
+        for (parent, slot) in [
+            (g, 0),
+            (g, 1),
+            (g, 187_200),
+            (g + 187_200 * 30, 187_200),
+            (g + 187_200 * 30 + 5, 187_201),
+            (g + 9_000_000, 300_000),
+            (u64::MAX - 1, 300_000),
+            (u64::MAX, 300_000),
+            (g, u64::MAX),
+            (g, u64::MAX / 30_000),
+        ] {
+            for number in [1, 2, 8_191, u64::MAX] {
+                assert_eq!(
+                    next_timestamp(Some(&node), number, parent, Some(slot)),
+                    program.timestamp(parent, slot),
+                    "parent {parent} slot {slot}"
+                );
+            }
+        }
+        let (parent, anchor) = (B256::repeat_byte(1), B256::repeat_byte(2));
+        for number in [1, 2, 1_000_000] {
+            assert_eq!(block_prevrandao(true, number, parent, anchor), program.prevrandao(number, parent, anchor));
+            assert_eq!(block_prevrandao(true, number, parent, anchor), LEGACY_PREVRANDAO, "inert switch block");
+            assert_eq!(block_prevrandao(false, number, parent, anchor), B256::repeat_byte(7));
+        }
+    }
 
     const RULE: TimestampRule = TimestampRule { from_l2_number: 10, l1_genesis_time: 1_000, l1_slot_millis: 2_000 };
 

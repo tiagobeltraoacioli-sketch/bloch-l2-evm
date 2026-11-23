@@ -195,3 +195,63 @@ selfcheck-remote-prover.sh bloch-l2-prover-mainnet@PROVER_IP KEY KNOWN_HOSTS A/n
 # rollback (refuses while a proof runs; new jobs are cut first):
 python3 install-prover-mainnet.py rollback --dry-run && python3 install-prover-mainnet.py rollback
 ```
+
+## Bound program `settlement_v3_mainnet_bound` (audit L2N-01, 2026-11-23): candidate, NOT deployed
+
+The deployed program accepts any `timestamp >= parent` and any `prevrandao`. Both
+reach the state root through the `BLOCK_INFO` head record and neither is a
+statement field, and a settlement transaction carries no sender, so one outside
+proof can settle a block nobody else can rebuild or extend (audit
+AUDIT-L1L2-20261123, L2N-01). `settlement_v3_mainnet_bound`
+(`integrations/sp1-execution/guest/src/bin/settlement_v3_mainnet_bound.rs`) is
+the same program with one more check, made before execution against the parent
+head read from the witnessed pre-state
+(`bloch_l2_evm::node_execution::bound`):
+
+- `timestamp == max(parent.timestamp + 1, 1786656679 + l1_slot * 30000 / 1000)`,
+  `l1_slot` being the statement's anchor slot, which L1 compares with the block
+  it pinned. This is `--timestamp-rule 1:1786656679:30000`, the rule the
+  producer and every rebuilder already apply;
+- `prevrandao == 0x07…07` below block `MAINNET_DERIVED_PREVRANDAO_FROM_BLOCK`
+  and `keccak256(l2_parent_hash || l1_block)` from it on. The constant ships as
+  `u64::MAX` (never), so the bound program accepts exactly the blocks honest
+  nodes build today, and for those blocks its 766 statement bytes equal the
+  deployed program's (test `l2n01_a_prover_chosen_context_no_longer_settles`).
+
+Statement format, execution rules, domain and configuration commitment
+(`identities[3]`) are unchanged. Different: the ELF and the two verifying keys
+(`identities[4..6]`). The proof policy `15486996…747d` stays as long as the SP1
+circuit version, the Groth16 wrapper key and the statement tag stay.
+
+What it takes before it protects mainnet (nothing below is done):
+
+1. Build the ELF with `build-reproducible.sh` at the release commit, verify it
+   from two checkouts, derive the keys with `bloch-evm-sp1-settlement-v3
+   --mainnet-bound identity ELF`, and prove one real block
+   (`--mainnet-bound prove-groth16 native-artifact`) for the native fixture.
+2. Native release: a gated program switch. From an activation epoch the L1
+   accepts settlements whose statement names the new `identities[4..6]` and
+   refuses the old ones (today `l2_settlement::mainnet::PROGRAM` is one
+   constant with no switch). The gate ships inert and is armed by the owner.
+   The follower pins the policy the flag day installs (`src/mainnet.rs`), so
+   the L2 release must know the switch epoch and both program identities.
+3. L2 release (signed, pins refreshed): prover host with the new ELF, settler
+   configuration with the new `guest_sha256` and program keys, prover invoked
+   with `--mainnet-bound` from the switch on, follower and attestors linked to
+   the native release that carries the switch.
+4. Order: L2 release on every operator host and native release on the
+   validator fleet first, both inert; then the owner arms the epoch. At the
+   switch the settler must submit only bound-program proofs; a proof of the old
+   program made before the switch and still pending is refused by L1 and is
+   re-proved.
+
+Because honest blocks are identical under both programs, the L2 block at which
+the switch lands does not matter and no L2 block needs to be rebuilt. That
+holds only while the switch block stays `u64::MAX`. Choosing a block from
+which `prevrandao` is derived is an owner decision; it must be compiled into
+the ELF and into the node release that builds blocks, with a block number
+still in the future when both are deployed (the old program accepts the
+derived value, the new one requires it from that block).
+
+Until step 4, the only protection is the L1 stop-gap (settlements accepted
+from a registered settler key, native fix branch) and the D13 exposure cap.
