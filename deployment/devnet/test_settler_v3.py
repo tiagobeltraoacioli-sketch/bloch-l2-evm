@@ -109,7 +109,9 @@ class Fake:
         if method == 'getl2settlement':
             return self.view()
         if method == 'getchaininfo':
-            return {'next_base_fee_millisat_per_gas': '10', 'epoch': self.epoch}
+            # `height` as a real node reports it: the acceptance wait reads it as a diagnostic, and an answer
+            # without it is now logged as malformed (audit L2N-20).
+            return {'next_base_fee_millisat_per_gas': '10', 'epoch': self.epoch, 'height': 1000}
         if method == 'getutxos':
             return {'utxos': [{'txid': '33' * 32, 'vout': 0, 'value_sat': '9000000', 'script_hash': params[0]},
                               {'txid': '34' * 32, 'vout': 1, 'value_sat': '1000', 'script_hash': params[0]}]}

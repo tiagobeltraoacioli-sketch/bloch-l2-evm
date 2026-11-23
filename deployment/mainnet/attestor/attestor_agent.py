@@ -41,18 +41,86 @@ Every event is one JSON line on stdout (journald). Exit 3 = pin/identity halt (n
 import argparse
 import datetime
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import attestor_lib as lib  # noqa: E402
+
+# The largest answer the agent reads (getl2settlement with its retained withdrawal roots) is far below this.
+RPC_MAX_RESPONSE_BYTES = 8_000_000
+
+
+def bounded_post(url, body, deadline, max_bytes, headers):
+    """POST `body` and return the whole answer, under ONE wall-clock deadline for the exchange (connect, send,
+    headers, body) and a byte cap. `urlopen(timeout=)` bounds each socket call, not the request: an endpoint that
+    sends one byte just inside every timeout holds the caller for as long as it likes, and `read()` has no size
+    limit (audit AUDIT-L1L2-20261123, L2N-20). Here a timer shuts the socket down at the deadline. The socket is
+    kept in a list because `http.client` sets `conn.sock = None` as soon as a `Connection: close` answer starts,
+    so a timer that looks at `conn.sock` then closes nothing (L2N-21)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        raise ValueError(f'not an http(s) URL: {url!r}')
+    factory = http.client.HTTPSConnection if parts.scheme == 'https' else http.client.HTTPConnection
+    conn = factory(parts.hostname, parts.port, timeout=min(15, deadline))
+    fired, held = threading.Event(), []
+
+    def expire():
+        fired.set()
+        for sock in held + [conn.sock]:
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    killer = threading.Timer(deadline, expire)
+    killer.daemon = True
+    killer.start()
+    try:
+        conn.connect()
+        held.append(conn.sock)
+        if fired.is_set():  # the deadline passed while connecting: the timer found no socket to shut
+            raise TimeoutError(f'no complete answer within {deadline} s')
+        conn.request('POST', (parts.path or '/') + (f'?{parts.query}' if parts.query else ''), body=body,
+                     headers={**headers, 'Connection': 'close'})
+        response = conn.getresponse()
+        chunks, total = [], 0
+        while not fired.is_set():
+            chunk = response.read1(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f'answer larger than {max_bytes} bytes')
+            chunks.append(chunk)
+        if fired.is_set():
+            raise TimeoutError(f'no complete answer within {deadline} s')
+        if response.status != 200:
+            raise ValueError(f'HTTP status {response.status}')
+        return b''.join(chunks)
+    except (OSError, http.client.HTTPException) as error:
+        if isinstance(error, TimeoutError):
+            raise
+        if fired.is_set():
+            raise TimeoutError(f'no complete answer within {deadline} s') from error
+        if isinstance(error, socket.timeout):  # one socket call waited out its own timeout
+            raise TimeoutError(f'endpoint silent for {min(15, deadline)} s') from error
+        raise
+    finally:
+        killer.cancel()
+        conn.close()
 
 VERSION = 'bloch-l2-attestor-agent/1'
 PINS = lib.MAINNET  # the command line always enforces the mainnet pins (tests construct Agent directly)
@@ -276,12 +344,13 @@ class Agent:
             raise Skip(f'follower settlements unreadable: {e}') from None
 
     def rpc(self, url, method, params=()):
+        """One JSON-RPC call. The whole exchange must end within twice `rpc_timeout_seconds` and 8 MB: an endpoint
+        that drips its answer is a missing vote of `view`, not a stalled agent (audit L2N-20)."""
         body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}).encode()
-        request = urllib.request.Request(url, data=body, headers={'content-type': 'application/json'})
-        with urllib.request.urlopen(request, timeout=self.c['rpc_timeout_seconds']) as response:
-            reply = json.loads(response.read(8_000_000))
-        if 'result' not in reply:
-            raise ValueError(f'{method}: {reply.get("error")}')
+        reply = json.loads(bounded_post(url, body, 2 * self.c['rpc_timeout_seconds'], RPC_MAX_RESPONSE_BYTES,
+                                        {'content-type': 'application/json'}))
+        if not isinstance(reply, dict) or 'result' not in reply:
+            raise ValueError(f'{method}: {reply.get("error") if isinstance(reply, dict) else "not a JSON-RPC object"}')
         return reply['result']
 
     def view(self):

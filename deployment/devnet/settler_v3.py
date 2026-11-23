@@ -147,12 +147,14 @@ pinned DA signer (whose keystore holds only DA fee funds).
 """
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -161,7 +163,6 @@ import threading
 import time
 import types
 import urllib.parse
-import urllib.request
 
 CONFIG = Path(os.environ.get('BLOCH_SETTLER_CONFIG', '/etc/bloch-l2-devnet4-settler/config.json'))
 TAG = b'BLOCH:EVM:SETTLEMENT:3'
@@ -639,11 +640,85 @@ def endpoint_url(endpoint):
     return endpoint if isinstance(endpoint, str) else f'http://127.0.0.1:{endpoint}'
 
 
-def rpc(port, method, params=()):
+# One native RPC exchange: the whole of it must fit in this time and this many bytes. The largest honest answers
+# (getl2settlement with its retained records, getutxos of 64 outputs) are far below a megabyte.
+RPC_DEADLINE_SECONDS, RPC_MAX_RESPONSE_BYTES = 30, 16 << 20
+
+
+def bounded_post(url, body, deadline, max_bytes, headers):
+    """POST `body` and return the whole answer, under ONE wall-clock deadline for the exchange (connect, send,
+    headers, body) and a byte cap. `urlopen(timeout=)` bounds each socket call, not the request: an endpoint that
+    sends one byte just inside every timeout holds the caller for as long as it likes, and `read()` has no size
+    limit (audit AUDIT-L1L2-20261123, L2N-20). Here a timer shuts the socket down at the deadline. The socket is
+    kept in a list because `http.client` sets `conn.sock = None` as soon as a `Connection: close` answer starts,
+    so a timer that looks at `conn.sock` then closes nothing (L2N-21)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        raise ValueError(f'not an http(s) URL: {url!r}')
+    factory = http.client.HTTPSConnection if parts.scheme == 'https' else http.client.HTTPConnection
+    conn = factory(parts.hostname, parts.port, timeout=min(15, deadline))
+    fired, held = threading.Event(), []
+
+    def expire():
+        fired.set()
+        for sock in held + [conn.sock]:
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    killer = threading.Timer(deadline, expire)
+    killer.daemon = True
+    killer.start()
+    try:
+        conn.connect()
+        held.append(conn.sock)
+        if fired.is_set():  # the deadline passed while connecting: the timer found no socket to shut
+            raise TimeoutError(f'no complete answer within {deadline} s')
+        conn.request('POST', (parts.path or '/') + (f'?{parts.query}' if parts.query else ''), body=body,
+                     headers={**headers, 'Connection': 'close'})
+        response = conn.getresponse()
+        chunks, total = [], 0
+        while not fired.is_set():
+            chunk = response.read1(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f'answer larger than {max_bytes} bytes')
+            chunks.append(chunk)
+        if fired.is_set():
+            raise TimeoutError(f'no complete answer within {deadline} s')
+        if response.status != 200:
+            raise ValueError(f'HTTP status {response.status}')
+        return b''.join(chunks)
+    except (OSError, http.client.HTTPException) as error:
+        if isinstance(error, TimeoutError):
+            raise
+        if fired.is_set():
+            raise TimeoutError(f'no complete answer within {deadline} s') from error
+        if isinstance(error, socket.timeout):  # one socket call waited out its own timeout
+            raise TimeoutError(f'endpoint silent for {min(15, deadline)} s') from error
+        raise
+    finally:
+        killer.cancel()
+        conn.close()
+
+
+def rpc(port, method, params=(), deadline=None, max_bytes=None):
+    """One JSON-RPC call. An endpoint that drips or floods its answer is a failed endpoint (the caller's backoff
+    applies), never a stalled worker."""
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}).encode()
-    request = urllib.request.Request(endpoint_url(port), data=body, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        reply = json.loads(response.read())
+    try:
+        answer = bounded_post(endpoint_url(port), body, RPC_DEADLINE_SECONDS if deadline is None else deadline,
+                              RPC_MAX_RESPONSE_BYTES if max_bytes is None else max_bytes,
+                              {'Content-Type': 'application/json'})
+    except TimeoutError as error:
+        raise TimeoutError(f'{method}: {error}') from error
+    reply = json.loads(answer)
+    if not isinstance(reply, dict):
+        raise RpcError(f'{method}: answer is not a JSON-RPC object')
     if 'error' in reply:
         raise RpcError(f'{method}: {reply["error"]}')
     return reply['result']
@@ -841,7 +916,27 @@ class Endpoints:
     def bounded_value(self, method, field):
         """An integer field no larger than one reported by an honest endpoint: the
         (faults + 1)-th largest of at least `quorum` answers (the median of three)."""
-        values = sorted(int(a[field]) for a in self.gather(method).values())
+        return self.bounded(method, lambda answer: int(answer[field]))
+
+    def bounded(self, method, extract, params=()):
+        """The (faults + 1)-th largest of the integers `extract` reads from at least `quorum` usable answers.
+        An answer `extract` cannot read is a missing vote (logged), like an endpoint that failed: one endpoint that
+        answers the quorum-checked fields honestly and garbage here cannot fail the read for the others (audit
+        L2N-20). The bound stays the conservative one: no larger than a value an honest endpoint reported."""
+        values = []
+        for port, answer in self.gather(method, params).items():
+            try:
+                value = extract(answer)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError('not an integer')
+                values.append(value)
+            except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+                log('rpc-endpoint-malformed', port=port, method=method,
+                    reason=f'{type(error).__name__}: {error}'[:200])
+        if len(values) < self.quorum:
+            raise RuntimeError(f'{method}: {len(values)} of {len(self.ports)} RPC endpoints gave a usable answer, '
+                               f'{self.quorum} needed')
+        values.sort()
         return values[max(0, len(values) - 1 - self.faults)]
 
     def common_utxos(self, script):
@@ -1334,9 +1429,8 @@ class Settler:
         """Deposits L1 holds and no settlement has consumed. `source.pending` cannot show this: the source freezes the
         inbox count right after an acceptance, so a deposit made later appears there only after one more settlement.
         Bounded by an honest endpoint's answer, so a lying endpoint cannot force a block."""
-        values = sorted(int(a['inbox']['count']) - int(a['inbox']['consumed'])
-                        for a in self.native.gather('getl2settlement').values())
-        return values[max(0, len(values) - 1 - self.native.faults)]
+        return self.native.bounded('getl2settlement',
+                                   lambda a: int(a['inbox']['count']) - int(a['inbox']['consumed']))
 
     def spool_demand(self, head):
         """Whether a spooled transaction may go into the next block on `head`. A file alone is not demand: the RPC admits

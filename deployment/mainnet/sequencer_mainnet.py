@@ -51,13 +51,16 @@ Dependency-free Python 3.9+.
 """
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
+import threading
 import time
-import urllib.request
+import urllib.parse
 
 # ---- Pinned mainnet identity (docs/MAINNET-PROGRAM.md; native 78b7343a l2_settlement::mainnet) ----
 CHAIN_ID = 700770
@@ -176,11 +179,79 @@ def l1_slot_time(slot):
     return L2_GENESIS_TIME + slot * L1_SLOT_MILLIS // 1000
 
 
+# The whole exchange with one L1 RPC must fit in twice its `rpc_timeout_seconds` and in this many bytes.
+RPC_MAX_RESPONSE_BYTES = 16 << 20
+
+
+def bounded_post(url, body, deadline, max_bytes, headers):
+    """POST `body` and return the whole answer, under ONE wall-clock deadline for the exchange (connect, send,
+    headers, body) and a byte cap. `urlopen(timeout=)` bounds each socket call, not the request: an endpoint that
+    sends one byte just inside every timeout holds the caller for as long as it likes, and `read()` has no size
+    limit (audit AUDIT-L1L2-20261123, L2N-20). Here a timer shuts the socket down at the deadline. The socket is
+    kept in a list because `http.client` sets `conn.sock = None` as soon as a `Connection: close` answer starts,
+    so a timer that looks at `conn.sock` then closes nothing (L2N-21)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        raise ValueError(f'not an http(s) URL: {url!r}')
+    factory = http.client.HTTPSConnection if parts.scheme == 'https' else http.client.HTTPConnection
+    conn = factory(parts.hostname, parts.port, timeout=min(15, deadline))
+    fired, held = threading.Event(), []
+
+    def expire():
+        fired.set()
+        for sock in held + [conn.sock]:
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    killer = threading.Timer(deadline, expire)
+    killer.daemon = True
+    killer.start()
+    try:
+        conn.connect()
+        held.append(conn.sock)
+        if fired.is_set():  # the deadline passed while connecting: the timer found no socket to shut
+            raise TimeoutError(f'no complete answer within {deadline} s')
+        conn.request('POST', (parts.path or '/') + (f'?{parts.query}' if parts.query else ''), body=body,
+                     headers={**headers, 'Connection': 'close'})
+        response = conn.getresponse()
+        chunks, total = [], 0
+        while not fired.is_set():
+            chunk = response.read1(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f'answer larger than {max_bytes} bytes')
+            chunks.append(chunk)
+        if fired.is_set():
+            raise TimeoutError(f'no complete answer within {deadline} s')
+        if response.status != 200:
+            raise ValueError(f'HTTP status {response.status}')
+        return b''.join(chunks)
+    except (OSError, http.client.HTTPException) as error:
+        if isinstance(error, TimeoutError):
+            raise
+        if fired.is_set():
+            raise TimeoutError(f'no complete answer within {deadline} s') from error
+        if isinstance(error, socket.timeout):  # one socket call waited out its own timeout
+            raise TimeoutError(f'endpoint silent for {min(15, deadline)} s') from error
+        raise
+    finally:
+        killer.cancel()
+        conn.close()
+
+
 def http_rpc(url, method, params=(), timeout=15):
+    """One JSON-RPC call; `timeout` is the per-operation timeout the configuration names, and the whole exchange
+    must end within twice that. An endpoint that drips or floods its answer is a missing vote, not a stalled loop."""
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}).encode()
-    request = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        reply = json.loads(response.read())
+    reply = json.loads(bounded_post(url, body, 2 * timeout, RPC_MAX_RESPONSE_BYTES,
+                                    {'Content-Type': 'application/json'}))
+    if not isinstance(reply, dict):
+        raise RuntimeError(f'{method}: answer is not a JSON-RPC object')
     if 'error' in reply:
         raise RuntimeError(f'{method}: {reply["error"]}')
     return reply['result']
