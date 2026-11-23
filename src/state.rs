@@ -275,6 +275,15 @@ pub enum DepositError {
         /// The cap in wei (`sats_to_wei(max_l1_sats)`).
         cap_wei: U256,
     },
+    /// Under [`crate::chainspec::SupplyCap::Outstanding`]: the ledger records
+    /// more withdrawn than minted. No execution produces this; a state that
+    /// shows it is refused rather than given a wrapped supply.
+    WithdrawnExceedsMinted {
+        /// Ledger slot 0 before this deposit.
+        minted_wei: U256,
+        /// Ledger slot 3.
+        withdrawn_wei: U256,
+    },
 }
 
 impl core::fmt::Display for DepositError {
@@ -295,6 +304,13 @@ impl core::fmt::Display for DepositError {
             } => write!(
                 f,
                 "cumulative minted supply {total_after_wei} wei would exceed the L1 cap {cap_wei} wei"
+            ),
+            DepositError::WithdrawnExceedsMinted {
+                minted_wei,
+                withdrawn_wei,
+            } => write!(
+                f,
+                "supply ledger records {withdrawn_wei} wei withdrawn of {minted_wei} wei minted"
             ),
         }
     }
@@ -828,9 +844,26 @@ pub(crate) fn apply_deposit<ExtDB: DatabaseRef>(
         .map_err(DepositApplyError::Db)?;
     let total_after = total.checked_add(wei).expect("total minted wei cannot overflow U256");
     let cap_wei = sats_to_wei(spec.max_l1_sats);
-    if total_after > cap_wei {
+    // The supply the cap bounds: everything ever minted (the deployed rule),
+    // or what is still on the L2 after withdrawals (audit finding L2N-02).
+    let capped = match spec.supply_cap {
+        crate::chainspec::SupplyCap::GrossMinted => total_after,
+        crate::chainspec::SupplyCap::Outstanding => {
+            let withdrawn = db
+                .storage(ledger, SUPPLY_LEDGER_WITHDRAWN_SLOT)
+                .map_err(DepositApplyError::Db)?;
+            if withdrawn > total {
+                return Err(DepositApplyError::Deposit(DepositError::WithdrawnExceedsMinted {
+                    minted_wei: total,
+                    withdrawn_wei: withdrawn,
+                }));
+            }
+            total_after - withdrawn
+        }
+    };
+    if capped > cap_wei {
         return Err(DepositApplyError::Deposit(DepositError::CumulativeSupplyExceeded {
-            total_after_wei: total_after,
+            total_after_wei: capped,
             cap_wei,
         }));
     }

@@ -170,6 +170,28 @@ pub struct ChainSpec {
     /// Settlement V3 requires it ([`ChainSpec::testnet_v3`]); the V2 testnet
     /// rules ([`ChainSpec::testnet`], devnet2/devnet3 history) have none.
     pub withdrawal_outbox: Option<Address>,
+    /// Which supply the deposit cap [`Self::max_l1_sats`] bounds. Every
+    /// deployed program compiles [`SupplyCap::GrossMinted`]; see
+    /// [`ChainSpec::mainnet_outstanding_cap`].
+    pub supply_cap: SupplyCap,
+}
+
+/// The quantity a deposit must keep at or below `sats_to_wei(max_l1_sats)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SupplyCap {
+    /// Everything ever minted by deposits (ledger slot 0). Withdrawals never
+    /// lower it, so deposit and withdrawal round trips use the cap up: once
+    /// cumulative deposits reach the L1 supply, the next deposit cannot be
+    /// executed although L1 accepted it (audit AUDIT-L1L2-20261123, L2N-02).
+    /// The rule of every program deployed so far; kept so they do not change.
+    #[default]
+    GrossMinted,
+    /// Minted minus withdrawn (ledger slots 0 and 3): the bridged supply
+    /// still on the L2, which equals the L1 escrow. On an L1 that conserves
+    /// its supply the escrow never exceeds it, so this cap never refuses a
+    /// deposit L1 accepted. EIP-6780 burns are not subtracted: the burned
+    /// wei's sats stay in the escrow, so they still count against it.
+    Outstanding,
 }
 
 /// Why a [`ChainSpec`] is not a valid configuration. The executor refuses to
@@ -199,6 +221,9 @@ pub enum ChainSpecError {
     /// Two system addresses (vaults, ledger, block info, EIP-4788 predeploy,
     /// withdrawal outbox) coincide.
     SystemAddressCollision(Address),
+    /// [`SupplyCap::Outstanding`] on a chain without the withdrawal outbox:
+    /// nothing would ever be subtracted.
+    OutstandingCapWithoutOutbox,
 }
 
 impl core::fmt::Display for ChainSpecError {
@@ -214,6 +239,9 @@ impl core::fmt::Display for ChainSpecError {
             ChainSpecError::ZeroDepositGas => write!(f, "deposit_gas must not be zero"),
             ChainSpecError::DepositGasAboveGasLimit => write!(f, "deposit_gas must not exceed gas_limit"),
             ChainSpecError::SystemAddressCollision(a) => write!(f, "system address {a} is used twice"),
+            ChainSpecError::OutstandingCapWithoutOutbox => {
+                write!(f, "the outstanding-supply deposit cap needs the withdrawal outbox")
+            }
         }
     }
 }
@@ -239,6 +267,7 @@ impl ChainSpec {
             max_l1_sats: MAX_L1_SATS,
             deposit_gas: DEPOSIT_GAS,
             withdrawal_outbox: None,
+            supply_cap: SupplyCap::GrossMinted,
         }
     }
 
@@ -265,6 +294,20 @@ impl ChainSpec {
         Self {
             chain_id: MAINNET_CHAIN_ID,
             ..Self::testnet_v3()
+        }
+    }
+
+    /// [`Self::mainnet`] with the deposit cap on the outstanding supply
+    /// ([`SupplyCap::Outstanding`], audit finding L2N-02). NOT the deployed
+    /// rules: a different configuration commitment (`BLOCH:EVM:CONFIG:3`),
+    /// compiled only by the candidate program `settlement_v3_mainnet_bound`.
+    /// State, headers and block hashes are the same as under [`Self::mainnet`]
+    /// for every block both accept; the two differ only once the gross minted
+    /// counter passes the cap, where [`Self::mainnet`] stops.
+    pub fn mainnet_outstanding_cap() -> Self {
+        Self {
+            supply_cap: SupplyCap::Outstanding,
+            ..Self::mainnet()
         }
     }
 
@@ -298,6 +341,9 @@ impl ChainSpec {
         }
         if self.deposit_gas > self.gas_limit {
             return Err(ChainSpecError::DepositGasAboveGasLimit);
+        }
+        if self.supply_cap == SupplyCap::Outstanding && self.withdrawal_outbox.is_none() {
+            return Err(ChainSpecError::OutstandingCapWithoutOutbox);
         }
         let system = [
             Some(self.base_fee_vault),

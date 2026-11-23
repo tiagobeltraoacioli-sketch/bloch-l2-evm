@@ -12,8 +12,10 @@
 //! (`ChainSpec::testnet_v3`, domain `0xd3…d3`), unchanged.
 //!
 //! A leading `--mainnet-bound` selects `settlement_v3_mainnet_bound` instead:
-//! the mainnet rules and domain, with the block context fixed by
-//! `SettlementContextRule::mainnet` (audit finding L2N-01). The expected
+//! the mainnet domain, the mainnet rules with the deposit cap on the
+//! outstanding supply (`ChainSpec::mainnet_outstanding_cap`, audit finding
+//! L2N-02) and the block context fixed by `SettlementContextRule::mainnet`
+//! (L2N-01). The expected
 //! statement is then derived with the bound function, so a fixture whose
 //! timestamp or prevrandao is not the derived one is refused here, before the
 //! guest runs. It is a different program from `settlement_v3_mainnet`, with its
@@ -51,17 +53,17 @@ fn program() -> Program {
     *PROGRAM.get().unwrap_or(&Program::Devnet)
 }
 
-/// Both mainnet programs compile the mainnet rules and domain.
+/// Both mainnet programs compile the mainnet domain and chain id.
 fn mainnet() -> bool {
     program() != Program::Devnet
 }
 
 /// The execution rules the selected guest compiles.
 fn spec() -> ChainSpec {
-    if mainnet() {
-        ChainSpec::mainnet()
-    } else {
-        ChainSpec::testnet_v3()
+    match program() {
+        Program::Devnet => ChainSpec::testnet_v3(),
+        Program::Mainnet => ChainSpec::mainnet(),
+        Program::MainnetBound => ChainSpec::mainnet_outstanding_cap(),
     }
 }
 
@@ -106,15 +108,15 @@ fn expect(execution: fixture::Fixture, context: SettlementContextV2) -> Result<Q
     expect_in(&spec(), domain(), execution, context)
 }
 
-/// The statement `settlement_v3_mainnet_bound` commits: the mainnet rules and
-/// domain, and only for the context `rule` derives.
+/// The statement `settlement_v3_mainnet_bound` commits: the mainnet domain, the
+/// outstanding-cap mainnet rules, and only for the context `rule` derives.
 fn expect_bound(
     rule: &SettlementContextRule,
     execution: fixture::Fixture,
     context: SettlementContextV2,
 ) -> Result<Qualification> {
     let expected = execute_settlement_statement_v3_bound(
-        &ChainSpec::mainnet(),
+        &ChainSpec::mainnet_outstanding_cap(),
         bloch_l2_evm::chainspec::MAINNET_DOMAIN,
         rule,
         &execution.witness,

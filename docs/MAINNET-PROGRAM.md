@@ -215,11 +215,26 @@ head read from the witnessed pre-state
 - `prevrandao == 0x07…07` below block `MAINNET_DERIVED_PREVRANDAO_FROM_BLOCK`
   and `keccak256(l2_parent_hash || l1_block)` from it on. The constant ships as
   `u64::MAX` (never), so the bound program accepts exactly the blocks honest
-  nodes build today, and for those blocks its 766 statement bytes equal the
-  deployed program's (test `l2n01_a_prover_chosen_context_no_longer_settles`).
+  nodes build today: same header hash and state root, and a statement that
+  differs from the deployed program's only in the configuration commitment
+  (tests `l2n01_a_prover_chosen_context_no_longer_settles`,
+  `the_candidate_program_statement_differs_from_the_deployed_one_only_in_the_configuration`).
 
-Statement format, execution rules, domain and configuration commitment
-(`identities[3]`) are unchanged. Different: the ELF and the two verifying keys
+The same program also carries the guest half of L2N-02: it compiles
+`ChainSpec::mainnet_outstanding_cap`, whose deposit cap bounds the outstanding
+supply (ledger slot 0 minus slot 3, minted minus withdrawn) instead of
+everything ever minted. The deployed rule refuses the first deposit after
+cumulative deposits reach 100 billion BLCH, a deposit L1 accepts and then
+requires every settlement to consume. The outstanding supply equals the L1
+escrow, which a conserving L1 never lets pass its supply, so the new cap cannot
+refuse a deposit L1 accepted. EIP-6780 burns are not subtracted (their sats
+stay in the escrow). State, headers and block hashes are identical under both
+rule sets until the gross counter passes the cap.
+
+Statement format and domain are unchanged. Different: the configuration
+commitment (`identities[3]`,
+`41ddb4dd4aae492e04f500d40be8471ac785e1264d32346dc0f1620d67cc928d`, tag
+`BLOCH:EVM:CONFIG:3:CANCUN`), the ELF and the two verifying keys
 (`identities[4..6]`). The proof policy `15486996…747d` stays as long as the SP1
 circuit version, the Groth16 wrapper key and the statement tag stay.
 
@@ -230,13 +245,16 @@ What it takes before it protects mainnet (nothing below is done):
    --mainnet-bound identity ELF`, and prove one real block
    (`--mainnet-bound prove-groth16 native-artifact`) for the native fixture.
 2. Native release: a gated program switch. From an activation epoch the L1
-   accepts settlements whose statement names the new `identities[4..6]` and
+   accepts settlements whose statement names the new `identities[3..6]` and
    refuses the old ones (today `l2_settlement::mainnet::PROGRAM` is one
    constant with no switch). The gate ships inert and is armed by the owner.
    The follower pins the policy the flag day installs (`src/mainnet.rs`), so
    the L2 release must know the switch epoch and both program identities.
 3. L2 release (signed, pins refreshed): prover host with the new ELF, settler
-   configuration with the new `guest_sha256` and program keys, prover invoked
+   configuration with the new `guest_sha256`, configuration commitment and
+   program keys, the node rule set switched to `ChainSpec::mainnet_outstanding_cap`
+   (`--rules mainnet` in the producer and the settled RPC; it changes no block
+   until the gross counter passes the cap), prover invoked
    with `--mainnet-bound` from the switch on, follower and attestors linked to
    the native release that carries the switch.
 4. Order: L2 release on every operator host and native release on the
@@ -252,6 +270,15 @@ which `prevrandao` is derived is an owner decision; it must be compiled into
 the ELF and into the node release that builds blocks, with a block number
 still in the future when both are deployed (the old program accepts the
 derived value, the new one requires it from that block).
+
+Reproducibility (measured 2026-11-23, macOS x86_64, SP1 CLI 6.8.0, compiler
+`succinct-1.96.0-64bit-v2`, fixed root `/tmp/bloch-guest-build`):
+`build-reproducible.sh --commit b17b3ae` gives the four pinned ELFs byte for
+byte (`63994ed7…`, `2b63bb74…`, `6fa44f9c…`, `203114bf…`). From the first
+commit of this work on, the same script gives other bytes for those four
+programs although none of their source lines changed: any addition to the
+core crate moves the compiled layout. The deployed programs are pinned by
+hash and are rebuilt from `b17b3ae` or earlier, never from a later commit.
 
 Until step 4, the only protection is the L1 stop-gap (settlements accepted
 from a registered settler key, native fix branch) and the D13 exposure cap.

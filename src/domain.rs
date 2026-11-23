@@ -133,6 +133,10 @@ impl EvmDomain {
         ] {
             bytes.extend_from_slice(value.as_slice());
         }
+        // Appended only for the non-default rule, so existing ids do not move.
+        if spec.supply_cap == crate::chainspec::SupplyCap::Outstanding {
+            bytes.extend_from_slice(b":SUPPLY-CAP:OUTSTANDING");
+        }
         Ok(Self {
             id: keccak256(bytes),
             spec,
