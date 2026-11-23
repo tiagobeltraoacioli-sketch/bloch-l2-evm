@@ -106,11 +106,10 @@ GATE_CONSTANTS = {
     # Audit AUDIT-L1L2-20261123 (inert as written): the L1 reports a gate without an RPC alias under its lowercased
     # constant name. Armed on L1 and absent from the L2 build's gate list = CRIT below, as for every gate: the
     # follower, the shadow and the attestors must link the native release that carries the rule (a settlement with
-    # an authorization trailer does not decode in an older one). The program-switch name is the one the settler
-    # expects (settler_v3.PROGRAM_SWITCH_GATE).
+    # an authorization trailer does not decode in an older one). The program switch is native commit 3a97df51.
     'l2_settler_authorization_activation_epoch': 'L2_SETTLER_AUTHORIZATION_ACTIVATION_EPOCH',
     'l2_da_settler_slot_activation_epoch': 'L2_DA_SETTLER_SLOT_ACTIVATION_EPOCH',
-    'l2_program_switch_activation_epoch': 'L2_PROGRAM_SWITCH_ACTIVATION_EPOCH',
+    'l2_settlement_program_switch_activation_epoch': 'L2_SETTLEMENT_PROGRAM_SWITCH_ACTIVATION_EPOCH',
 }
 V2_COMPILED_GATES: Dict[str, Any] = {
     'HF1_CLAIM_FINALITY_EPOCH': 7180, 'HF1_FROZEN_FINALITY_SET_EPOCH': 7180, 'HF1_OWN_TARGET_VOTES_EPOCH': 7186,
@@ -152,6 +151,7 @@ WARN_EVENTS = frozenset({'prover-failed', 'retry', 'acceptance-timeout', 'l1-not
                          'settler-set-rotated', 'settler-rotation-signed', 'settler-rotation-invalid',
                          'settler-rotation-not-applied', 'settlement-refused-at-gate-boundary',
                          'settlement-missed-program-switch', 'program-switch-reprove', 'l1-gate-not-reported',
+                         'l1-program-not-reported',
                          # L1X-04: with the L1 DA settler-slot rule armed, the DA batch is funded by a key that is
                          # not a registered settler key and has no reserved place.
                          'da-funding-key-not-registered'})

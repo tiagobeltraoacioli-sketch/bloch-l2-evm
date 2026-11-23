@@ -679,11 +679,13 @@ SETTLER_MAX_AUTHORIZATION_BYTES = 1 + 4 + PQ_SIGNATURE_MAX + 1 + SETTLER_MAX_KEY
 SETTLEMENT_COMMITMENT_DOMAIN = (b'BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-COMMITMENT:1'
                                 b'BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-TX:1')
 # getchaininfo.hard_forks keys of the L1 gates (a gate without an RPC alias is reported under its lowercased
-# constant name, native rpc/consensus_gates.rs). The program-switch name is the interface this worker expects of
-# the L1 switch (constant L2_PROGRAM_SWITCH_ACTIVATION_EPOCH); `program_switch.l1_gate` overrides it.
+# constant name, native rpc/consensus_gates.rs). The program switch is native commit 3a97df51
+# (L2_SETTLEMENT_PROGRAM_SWITCH_ACTIVATION_EPOCH, docs/L2-PROGRAM-SWITCH.md there), which also reports the program
+# in force and the pinned successor in getl2settlement.program; `l1_gate` in a configuration block overrides a name.
 SETTLER_GATE = 'l2_settler_authorization_activation_epoch'
 DA_SETTLER_SLOT_GATE = 'l2_da_settler_slot_activation_epoch'
-PROGRAM_SWITCH_GATE = 'l2_program_switch_activation_epoch'
+PROGRAM_SWITCH_GATE = 'l2_settlement_program_switch_activation_epoch'
+PROGRAM_IDENTITY_FIELDS = ('configuration', 'elf', 'vkey_koalabear', 'vkey_bn254')  # getl2settlement.program
 GATE_CACHE_SECONDS = 60
 
 
@@ -754,6 +756,26 @@ def gate_field(info, key):
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
         return 'malformed'
     return epoch
+
+
+def l2_config_program(config):
+    """The four program identities of an l2-config.bin (configuration, ELF Keccak, KoalaBear key, BN254 key), as the
+    L1 reports them in getl2settlement.program."""
+    return {name: config[32 + 32 * i:64 + 32 * i].hex() for i, name in enumerate(PROGRAM_IDENTITY_FIELDS)}
+
+
+def program_view(view):
+    """The program part of a getl2settlement answer (native 3a97df51): the identities in force and the pinned
+    successor with its epoch. None when the node does not report it (a release that predates the switch)."""
+    program = view.get('program') if isinstance(view, dict) else None
+    if not isinstance(program, dict):
+        return None
+    switch = program.get('switch') if isinstance(program.get('switch'), dict) else None
+    to = (switch or {}).get('to') if isinstance((switch or {}).get('to'), dict) else {}
+    return {'in_force': {k: program.get(k) for k in PROGRAM_IDENTITY_FIELDS},
+            'switch': None if switch is None else {'activation_epoch': switch.get('activation_epoch'),
+                                                   'taken': switch.get('taken'), 'final': switch.get('final'),
+                                                   'to': {k: to.get(k) for k in PROGRAM_IDENTITY_FIELDS}}}
 
 
 def check_activation(value, name):
@@ -2224,6 +2246,7 @@ class Settler:
         self.programs = {'deployed': {'name': 'deployed', 'prover_args': list(self.prover_args),
                                       'guest': self.c['guest'], 'l2_config': self.c['l2_config'],
                                       'remote_command': 'prove'}}
+        self.l1_program_missing_logged = False
         self.program = self.programs['deployed']
         switch = self.c.get('program_switch')
         if switch is None:
@@ -2263,6 +2286,32 @@ class Settler:
             return None
         return self.gate(switch.get('activation_epoch'), switch.get('l1_gate', PROGRAM_SWITCH_GATE))
 
+    def l1_program(self):
+        """What a quorum of the L1 reports about the settlement program (getl2settlement.program): the name of the
+        program in force ('deployed' or 'bound') and the switch epoch it pins, or None when the L1 does not report
+        it. The L1 is the authority here: a program in force that this worker does not hold, a pinned successor
+        other than this worker's bound program, or an epoch other than the gate's is a halt, never a guess."""
+        view, _ = self.native.agreed('getl2settlement', project=lambda v: {'program': program_view(v)})
+        if view is None:
+            raise RuntimeError('no RPC quorum on the L1 settlement program')
+        reported = view['program']
+        if reported is None:
+            if not self.l1_program_missing_logged:
+                self.l1_program_missing_logged = True
+                log('l1-program-not-reported')
+            return None
+        held = {name: l2_config_program(Path(program['l2_config']).read_bytes())
+                for name, program in self.programs.items()}
+        in_force = next((name for name, identities in held.items() if identities == reported['in_force']), None)
+        if in_force is None:
+            raise Halt(f'the L1 settles under a program this worker does not hold: {reported["in_force"]}')
+        switch = reported['switch']
+        if switch is not None and switch['to'] != held['bound']:
+            raise Halt('the successor program the L1 pins is not this worker\'s bound program '
+                       f'(L1 {switch["to"]}, worker {held["bound"]}): the pins of one side are out of date')
+        return {'in_force': in_force, 'activation_epoch': switch['activation_epoch'] if switch else None,
+                'final': bool(switch and switch.get('final'))}
+
     def select_program(self, number, directory):
         """Choose the program this block is proved with and remember it in the directory. Before the switch epoch
         the L1 accepts only the deployed program, from it on only the bound one. A proof takes about one epoch, so
@@ -2274,8 +2323,13 @@ class Settler:
         record = directory / 'program.json'
         proved = (directory / 'proved.json').exists()
         held = json.loads(record.read_text())['program'] if record.exists() else ('deployed' if proved else None)
-        activation = self.program_switch_epoch()
-        if activation is None:
+        activation, l1 = self.program_switch_epoch(), self.l1_program()
+        if l1 is not None and l1['activation_epoch'] != activation and not (activation is None and l1['in_force'] == 'bound'):
+            raise Halt(f'program switch: the gate says epoch {activation}, getl2settlement.program says '
+                       f'{l1["activation_epoch"]}')
+        if l1 is not None and l1['in_force'] == 'bound':
+            wanted, epoch = 'bound', None  # the switch was taken: nothing but the bound program settles
+        elif activation is None:
             if held == 'bound':
                 raise Halt(f'{directory} was prepared for the bound program, and the program switch is no longer '
                            'scheduled (configuration or L1 release changed)')
@@ -2283,8 +2337,10 @@ class Settler:
         else:
             epoch = self.l1_epoch()
             lead = self.c['program_switch'].get('lead_epochs', 1)
-            if held == 'bound' or epoch >= activation:
+            if held == 'bound' or (l1 is None and epoch >= activation):
                 wanted = 'bound'
+            elif l1 is not None and epoch >= activation and not proved:
+                wanted = 'bound'  # the gate's epoch has begun; the boundary block is not the head yet
             elif held == 'deployed' and proved:
                 wanted = 'deployed'  # valid until the switch: submit it, do not throw the proof away
             else:
@@ -2310,14 +2366,27 @@ class Settler:
                 path.replace(directory / f'{name}.{program}')
 
     def program_submittable(self, number):
-        """False while a bound-program settlement waits for the switch epoch (the L1 would refuse it)."""
+        """False while a bound-program settlement waits for the switch (the L1 would refuse it). When the L1 reports
+        the program in force, that decides: the settlement goes out once the boundary block is the head. Otherwise
+        the head epoch does."""
         if self.program['name'] != 'bound':
             return True
+        l1 = self.l1_program()
         activation, epoch = self.program_switch_epoch(), self.l1_epoch()
-        if activation is not None and epoch >= activation:
+        if (l1['in_force'] == 'bound') if l1 is not None else (activation is not None and epoch >= activation):
             return True
         log('settlement-waiting-program-switch', number=number, activation_epoch=activation, l1_epoch=epoch)
         return False
+
+    def program_switch_missed(self):
+        """Whether the L1 no longer accepts the deployed program while this block was proved under it."""
+        if self.program['name'] != 'deployed' or self.c.get('program_switch') is None:
+            return False
+        l1 = self.l1_program()
+        if l1 is not None:
+            return l1['in_force'] == 'bound'
+        activation = self.program_switch_epoch()
+        return activation is not None and activation <= self.l1_epoch()
 
     def init_settler_authorization(self):
         auth = self.c.get('settler_authorization')
@@ -2640,9 +2709,8 @@ class Settler:
                                '(policy, source, successor or proof' + (', or the settler authorization: is this '
                                'key in the registered set?' if authorized else '') + ') while its request is unchanged')
             if self.gated:
-                switch = self.program_switch_epoch()
-                if switch is not None and self.program['name'] == 'deployed' and switch <= self.l1_epoch():
-                    log('settlement-missed-program-switch', number=number, activation_epoch=switch)
+                if self.program_switch_missed():
+                    log('settlement-missed-program-switch', number=number)
                     return False  # the next cycle proves this block again under the bound program
                 now_wire, now_authorized = self.settlement_wire(number, directory, tx)
                 if now_wire != wire:

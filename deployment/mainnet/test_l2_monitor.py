@@ -591,7 +591,7 @@ class MonitorTests(unittest.TestCase):
         them is CRIT (a settlement with an authorization trailer does not decode there); a build that names them at
         the L1's epochs agrees."""
         names = ('l2_settler_authorization_activation_epoch', 'l2_da_settler_slot_activation_epoch',
-                 'l2_program_switch_activation_epoch')
+                 'l2_settlement_program_switch_activation_epoch')
         w = healthy()
         for node in w['l1'].values():
             for name in names:
@@ -1373,7 +1373,7 @@ class MonitorGapTests(unittest.TestCase):
         for event in ('settler-set-rotated', 'settler-rotation-signed', 'settler-rotation-invalid',
                       'settler-rotation-not-applied', 'settlement-refused-at-gate-boundary',
                       'settlement-missed-program-switch', 'program-switch-reprove', 'l1-gate-not-reported',
-                      'da-funding-key-not-registered'):
+                      'l1-program-not-reported', 'da-funding-key-not-registered'):
             r, _ = run(healthy(), '--unit', 'settler=s.service',
                        runner=journal({'s.service': [{'time': stamp(60), 'event': event}]}))
             self.assertEqual(level(r, 'events[settler]'), 'WARN', event)

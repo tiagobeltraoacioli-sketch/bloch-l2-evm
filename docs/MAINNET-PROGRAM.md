@@ -310,18 +310,22 @@ hash and are rebuilt from `b17b3ae` or earlier, never from a later commit.
 
 The interface the L2 side expects of the L1 program switch, and what the L2 side does with it:
 
-- **The gate.** One activation epoch, constant `L2_PROGRAM_SWITCH_ACTIVATION_EPOCH`, listed in
-  `HARD_FORK_GATES` so that `getchaininfo.hard_forks` reports it as
-  `l2_program_switch_activation_epoch: {"activation_epoch": N | null, "active": bool}` (the row a gate
-  without an RPC alias gets). `null` is inert. A settlement in a block of an epoch below N must name the
-  deployed `identities[3..6]`, from N on the bound ones; the proof policy, the statement format, the
-  domain and the L2 genesis do not change. If the L1 gate gets another name, `program_switch.l1_gate`
-  in the settler configuration names it; nothing else depends on the name.
+- **The gate.** Native commit `3a97df51` (branch `codex/audit-fixes-l1-swap-20261123`,
+  `docs/L2-PROGRAM-SWITCH.md` there): `L2_SETTLEMENT_PROGRAM_SWITCH_ACTIVATION_EPOCH`, inert, reported by
+  `getchaininfo.hard_forks` as `l2_settlement_program_switch_activation_epoch`. At the first block of
+  that epoch the installed mainnet L2 names the pinned successor (`mainnet::PROGRAM_SWITCH`); up to the
+  block before, only a settlement of the deployed program is valid, from that block on only one of the
+  successor, with no overlap. The proof policy, the statement format, the domain and the L2 genesis do
+  not change. `getl2settlement.program` reports the identities in force (`set`: `initial` /
+  `switched`) and the pinned successor with its epoch (`switch.to`, `switch.activation_epoch`,
+  `switch.final`). The successor it pins today is the candidate column above, marked not final.
 - **The settler** (`settler_v3.py`, `program_switch`): holds both programs, each with its guest and its
   264-byte l2-config, both pinned (`MAINNET`, `MAINNET_BOUND`). It reads N from the L1 by quorum or from
   its configuration (and halts if the two differ), proves under the bound program from `N - lead_epochs`
-  on, never submits a bound settlement before N, and proves a deployed-program settlement again if it was
-  not included before N. `MAINNET_BOUND` holds the candidate column of the table above; the release
+  on, submits a bound settlement only once the L1 reports the successor in force (the boundary block is
+  the head), and proves a deployed-program settlement again if it was not included before the boundary.
+  It halts if the program in force is one it does not hold or if the successor the L1 pins differs from
+  its own bound program: a rebuilt ELF on one side only is found before any proof is paid for. `MAINNET_BOUND` holds the candidate column of the table above; the release
   replaces it with the released values (test `test_the_bound_pins_are_the_documented_candidate_values`
   keeps the code and this table equal, and `MAINNET_BOUND_STATUS` says `candidate`).
 - **The prover**: locally `bloch-evm-sp1-settlement-v3 --mainnet-bound …` with the bound guest; on the

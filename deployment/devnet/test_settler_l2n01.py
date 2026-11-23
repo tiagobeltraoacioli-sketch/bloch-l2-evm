@@ -58,6 +58,19 @@ class GatedL1(t.Fake):
         self.report_gates = True
         self.refusals, self.after_refusal = [], None
         self.own, self.included = KEY(1), None
+        # getl2settlement.program (native 3a97df51): off = an L1 release that predates the switch.
+        self.report_program, self.successor, self.switch_taken = False, s.l2_config_program(BOUND_CONFIG), None
+
+    def view(self):
+        view = super().view()
+        if self.report_program:
+            taken = (self.switch is not None and self.epoch >= self.switch) if self.switch_taken is None else self.switch_taken
+            view['program'] = {'set': 'switched' if taken else 'initial',
+                               **s.l2_config_program(BOUND_CONFIG if taken else t.CONFIG_BYTES),
+                               'proof_policy': t.CONFIG_BYTES[160:192].hex(), 'supply_cap': 'gross-minted',
+                               'switch': {'activation_epoch': self.switch, 'taken': taken, 'final': False,
+                                          'to': {**self.successor, 'supply_cap': 'outstanding'}}}
+        return view
 
     def judged(self):
         return self.epoch if self.judge_epoch is None else self.judge_epoch
@@ -817,6 +830,95 @@ class ProgramSwitch(Base):
         self.assertEqual(hashlib.sha256(deployed).hexdigest(), s.MAINNET_L2_CONFIG_SHA256)
         self.assertEqual((deployed[:32], deployed[160:]), (candidate[:32], candidate[160:]))
         self.assertNotEqual(deployed[32:160], candidate[32:160])
+
+
+class ProgramReportedByTheL1(Base):
+    """The same switch with an L1 that reports the program in force and the pinned successor
+    (getl2settlement.program, native 3a97df51): the worker follows what the L1 says."""
+
+    def world(self, epoch, switch=200):
+        fake = GatedL1(self.root, t.statement(), switch=switch)
+        fake.epoch, fake.report_program = epoch, True
+        return fake
+
+    def test_before_at_and_after_the_switch(self):
+        for epoch, expected in ((100, t.CONFIG_BYTES), (200, BOUND_CONFIG), (300, BOUND_CONFIG)):
+            fake = self.world(epoch)
+            with mock.patch.object(s, 'log') as logged:
+                self.assertTrue(self.settler(fake, workdir=str(self.root / f'w{epoch}'),
+                                             program_switch=self.switch()).cycle())
+            self.assertEqual(t.broadcasts(fake.sent)[0][33 + s.T + 64:33 + s.T + 224], expected[:160])
+            self.assertEqual(fake.refusals, [])
+            self.assertEqual(events(logged, 'l1-program-not-reported'), [])
+
+    def test_a_bound_proof_goes_out_when_the_boundary_block_is_the_head_not_when_the_epoch_begins(self):
+        # The gate's epoch has begun by the clock of the endpoints, but no block of it exists yet: the L1 still
+        # settles under the deployed program and would refuse the bound settlement.
+        fake = self.world(200)
+        fake.switch_taken, fake.judge_epoch = False, 199
+        worker = self.settler(fake, program_switch=self.switch())
+        with mock.patch.object(s, 'log') as logged:
+            self.assertFalse(worker.cycle())
+        self.assertEqual(fake.sent, [])
+        self.assertEqual(len(events(logged, 'settlement-waiting-program-switch')), 1)
+        fake.switch_taken, fake.judge_epoch = True, 200  # the boundary block arrived
+        self.assertTrue(worker.cycle())
+        self.assertEqual(fake.refusals, [])
+        self.assertEqual(sum('prove-groth16' in c for c in fake.calls), 1)
+
+    def test_a_deployed_proof_overtaken_by_the_switch_is_proved_again(self):
+        fake = self.world(198)
+        worker = self.settler(fake, program_switch=self.switch())
+        with mock.patch.object(worker, 'submit_and_wait', return_value=False):
+            self.assertFalse(worker.cycle())
+        fake.epoch = 200
+        self.assertTrue(worker.cycle())
+        self.assertEqual(sum('prove-groth16' in c for c in fake.calls), 2)
+        self.assertEqual(t.broadcasts(fake.sent)[0][33 + s.T + 64:33 + s.T + 224], BOUND_CONFIG[:160])
+        self.assertEqual(fake.refusals, [])
+
+    def test_a_successor_the_worker_does_not_hold_is_a_halt_before_any_proof(self):
+        # The L1 release pins other candidate values than this kit (a rebuilt ELF on one side only).
+        fake = self.world(100)
+        fake.successor = {**fake.successor, 'elf': 'ee' * 32}
+        with self.assertRaisesRegex(s.Halt, "not this worker's bound program"):
+            self.settler(fake, program_switch=self.switch()).cycle()
+        self.assertEqual((fake.sent, sum('prove-groth16' in c for c in fake.calls)), ([], 0))
+
+    def test_a_program_in_force_the_worker_does_not_hold_is_a_halt(self):
+        fake = self.world(100)
+        real = fake.view
+        fake.view = lambda: {**real(), 'program': {**real()['program'], 'configuration': 'ab' * 32}}
+        with self.assertRaisesRegex(s.Halt, 'a program this worker does not hold'):
+            self.settler(fake, program_switch=self.switch()).cycle()
+        self.assertEqual(fake.sent, [])
+
+    def test_the_gate_and_the_reported_switch_epoch_must_agree(self):
+        fake = self.world(100)
+        real = fake.view
+        fake.view = lambda: {**real(), 'program': {**real()['program'], 'switch': {**real()['program']['switch'],
+                                                                                 'activation_epoch': 250}}}
+        with self.assertRaisesRegex(s.Halt, 'the gate says epoch 200, getl2settlement.program says 250'):
+            self.settler(fake, program_switch=self.switch()).cycle()
+
+    def test_an_l1_that_predates_the_switch_report_falls_back_to_the_epoch(self):
+        fake = self.world(200)
+        fake.report_program = False
+        with mock.patch.object(s, 'log') as logged:
+            self.assertTrue(self.settler(fake, program_switch=self.switch()).cycle())
+        self.assertEqual(len(events(logged, 'l1-program-not-reported')), 1)
+        self.assertEqual(t.broadcasts(fake.sent)[0][33 + s.T + 64:33 + s.T + 224], BOUND_CONFIG[:160])
+
+    def test_the_program_fields_are_those_of_the_l2_config(self):
+        config = s.mainnet_l2_config()
+        self.assertEqual(s.l2_config_program(config), {'configuration': s.MAINNET['configuration'],
+                                                       'elf': s.MAINNET['elf_keccak'],
+                                                       'vkey_koalabear': s.MAINNET['vkey_koalabear'],
+                                                       'vkey_bn254': s.MAINNET['vkey_bn254']})
+        self.assertEqual(s.l2_config_program(s.mainnet_l2_config(s.MAINNET_BOUND))['configuration'],
+                         s.MAINNET_BOUND['configuration'])
+        self.assertIsNone(s.program_view({'network': 'n'}))
+        self.assertEqual(s.PROGRAM_SWITCH_GATE, 'l2_settlement_program_switch_activation_epoch')
 
 
 class DaWithTheSettlerKey(Base):
