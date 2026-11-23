@@ -290,3 +290,38 @@ fn the_candidate_program_statement_differs_from_the_deployed_one_only_in_the_con
     same.base.configuration = old.base.configuration;
     assert_eq!(same.encode(), old.encode());
 }
+
+/// A witness recorded by a node that still runs the deployed rules verifies under the candidate rules: the
+/// witness carries the whole storage of every account it touches, so the extra read of the ledger's withdrawn
+/// slot needs nothing more. The node's rule set and the program's can therefore switch at different times.
+#[test]
+fn a_witness_recorded_under_the_deployed_rules_verifies_under_the_candidate_rules() {
+    let (deployed, candidate) = (ChainSpec::mainnet(), ChainSpec::mainnet_outstanding_cap());
+    let user = Address::from_public_key(key().verifying_key());
+    let mut state = genesis_v2(&deployed, MAINNET_GENESIS_TIMESTAMP).unwrap();
+    // Block 1: the ledger account does not exist yet. Block 2: it does. Block 3: after a withdrawal.
+    let bodies = [
+        NodeBodyV2 {
+            deposits: vec![deposit(user, 10, 50 * SATS_PER_BLCH)],
+            transactions: vec![],
+        },
+        NodeBodyV2 {
+            deposits: vec![deposit(user, 11, SATS_PER_BLCH)],
+            transactions: vec![withdraw(&deployed, 0, SATS_PER_BLCH)],
+        },
+        NodeBodyV2 {
+            deposits: vec![deposit(user, 12, SATS_PER_BLCH)],
+            transactions: vec![],
+        },
+    ];
+    for body in bodies {
+        let ctx = context(&deployed, &state);
+        let (witness, recorded) = generate_node_batch_witness(&state, &deployed, MAINNET_DOMAIN, &ctx, &body).unwrap();
+        let verified =
+            bloch_l2_evm::node_execution::verify_node_batch(&candidate, MAINNET_DOMAIN, &witness, &ctx, &body)
+                .expect("the deployed node's witness is enough for the candidate program");
+        assert_eq!(verified.header, recorded.header);
+        execute_node_block(&deployed, MAINNET_DOMAIN, &mut state, &ctx, &body).unwrap();
+    }
+    assert!(!state.total_withdrawn_wei().is_zero());
+}
