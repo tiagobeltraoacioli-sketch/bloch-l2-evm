@@ -130,13 +130,17 @@ impl Fixture {
                 consumed_end: 0,
                 body_commitment: keccak256(alloy_rlp::encode(block.body.as_core())),
             };
-            let tx = Transaction {
-                proof_policy: p.proof_policy.0,
-                statement: statement.encode().to_vec(),
-                // Deliberately invalid as a cryptographic proof. This fixture
-                // tests only the consumer's storage and correspondence checks.
-                proof: [9; bloch_pos_committee::l2_settlement::PROOF_BYTES],
-            };
+            // Decoded from its wire bytes, not built as a struct literal: the
+            // native type gains a field with the settler authorization (audit
+            // AUDIT-L1L2-20261123 L2N-01), and this fixture builds against the
+            // native release before and after it.
+            let mut wire = vec![bloch_pos_committee::l2_settlement::ASYNC_WIRE_TAG];
+            wire.extend_from_slice(&p.proof_policy.0);
+            wire.extend_from_slice(&statement.encode());
+            // Deliberately invalid as a cryptographic proof. This fixture
+            // tests only the consumer's storage and correspondence checks.
+            wire.extend_from_slice(&[9; bloch_pos_committee::l2_settlement::PROOF_BYTES]);
+            let tx = Transaction::decode_async(&wire).expect("canonical settlement");
             previous_settlement = tx.commitment().into();
             transactions.push(tx.encode_async());
         }

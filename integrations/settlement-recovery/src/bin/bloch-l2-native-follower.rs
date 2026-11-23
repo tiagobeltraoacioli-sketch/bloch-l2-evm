@@ -779,6 +779,42 @@ mod tests {
         json!({"l2_number": number, "l2_hash": format!("{number:064x}")})
     }
 
+    /// Audit AUDIT-L1L2-20261123 L2N-01. Behind the L1 settler gate a V3
+    /// settlement carries an authorization trailer after the proof. The
+    /// follower decodes a finalized settlement with the native release it
+    /// links, so it follows that release: one that carries the gate reads a
+    /// settlement with a trailer exactly like the unsigned one (same L2
+    /// fields, same commitment, which does not cover the trailer); one that
+    /// predates it does not decode the bytes, as no L1 node of that release
+    /// does. The bytes are the vector shared with the native repository
+    /// (real hybrid signatures; the native test verifies them).
+    /// `BLOCH_NATIVE_HAS_SETTLER_GATE=1` requires the first case.
+    #[test]
+    fn a_settlement_with_a_settler_authorization_follows_the_linked_native_release() {
+        use bloch_pos_committee::l2_settlement::Transaction;
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../../deployment/mainnet/testdata/settler-authorization-vector.json"
+        ))
+        .unwrap();
+        let bytes = |name: &str| hex::decode(vector[name].as_str().unwrap()).unwrap();
+        let unsigned = Transaction::decode_async(&bytes("unsigned_tx")).expect("the form deployed today");
+        assert_eq!(hex::encode(unsigned.commitment()), vector["commitment"].as_str().unwrap());
+        let expected = statement_json(&unsigned.statement).unwrap();
+        let mut decoded = 0;
+        for case in ["plain_authorized_tx", "rotation_authorized_tx"] {
+            if let Some(signed) = Transaction::decode_async(&bytes(case)) {
+                decoded += 1;
+                assert_eq!(statement_json(&signed.statement).unwrap(), expected);
+                assert_eq!(signed.commitment(), unsigned.commitment());
+            }
+        }
+        assert!(decoded == 0 || decoded == 2, "a release decodes every authorized settlement or none");
+        if std::env::var_os("BLOCH_NATIVE_HAS_SETTLER_GATE").is_some() {
+            assert_eq!(decoded, 2, "the linked native release does not decode a settler authorization");
+        }
+        eprintln!("settler authorization: the linked native release decodes the trailer: {}", decoded == 2);
+    }
+
     /// Review L2-05: `safe` is read only from a loopback native RPC.
     #[test]
     fn safe_is_read_only_from_a_loopback_native_rpc() {
