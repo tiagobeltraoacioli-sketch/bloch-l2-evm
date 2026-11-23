@@ -60,7 +60,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 
 | File | Source | SHA-256 |
 | --- | --- | --- |
-| `settler_v3.py` | this branch, `deployment/devnet/` | `2aa3a636…1768` (audit fixes of 2026-11-23, not deployed; the deployed settler is `9c592bd4…3007`; enforced since agent 155; also recorded in the `/opt` path) |
+| `settler_v3.py` | this branch, `deployment/devnet/` | `9b8f5245…5e48` (audit fixes of 2026-11-23, not deployed; the deployed settler is `9c592bd4…3007`; enforced since agent 155; also recorded in the `/opt` path) |
 | `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | `3a24c36d…973a` (enforced since agent 155), and its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
 | `bloch-l2-produce-dev` | the launch build against node release 906336fd: `598873ae…` (build commit 3d35a0f; the earlier 926d2cf / 78d4921c producer `e3f1a290…` halts after the KES bind) (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
