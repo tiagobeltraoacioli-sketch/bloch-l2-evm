@@ -27,6 +27,11 @@ program when its config has `"mainnet": true` (the pinned host then runs with
 `--mainnet`, i.e. ChainSpec::mainnet and MAINNET_DOMAIN). A forced command may
 name its config explicitly (`remote_prover.py --config PATH`), so a devnet and a
 mainnet prover can share one release of this file without sharing a config.
+Bound program (audit AUDIT-L1L2-20261123 L2N-01): the command `prove-bound` proves
+`settlement_v3_mainnet_bound` (host flag `--mainnet-bound`) with the guest pinned in the
+config's `"bound": {"guest": PATH, "guest_sha256": HEX}`; the settler asks for it from the L1
+program-switch epoch on. A prover without `bound` refuses the command (exit 64), and the
+settler then proves where its order says next. `prove` is unchanged.
 Exit codes: 0 proof written, 64 bad request, 70 prover failed, 75 busy.
 Dependency-free Python 3.9+.
 """
@@ -392,8 +397,9 @@ def main():
 
 
 def serve():
-    if os.environ.get('SSH_ORIGINAL_COMMAND', 'prove') != 'prove':
-        fail(64, 'only the "prove" command is served')
+    command = os.environ.get('SSH_ORIGINAL_COMMAND', 'prove')
+    if command not in ('prove', 'prove-bound'):
+        fail(64, 'only the "prove" and "prove-bound" commands are served')
     try:
         c = json.loads(config_path(sys.argv[1:], os.environ).read_text())
     except (ValueError, OSError) as error:
@@ -407,6 +413,15 @@ def serve():
     for key in ('prover', 'guest'):
         if digest(c[key]) != c[key + '_sha256']:
             fail(70, f'{key} differs from its pin')
+    program = ['--mainnet'] if c.get('mainnet') else []
+    guest = c['guest']
+    if command == 'prove-bound':
+        bound = c.get('bound')
+        if not c.get('mainnet') or not isinstance(bound, dict) or not bound.get('guest') or not bound.get('guest_sha256'):
+            fail(64, 'this prover does not serve the bound program (config: mainnet and bound.guest, bound.guest_sha256)')
+        if digest(bound['guest']) != bound['guest_sha256']:
+            fail(70, 'bound guest differs from its pin')
+        program, guest = ['--mainnet-bound'], bound['guest']
     if c.get('max_memory_bytes'):
         cap = cgroup_memory_cap()
         if cap is None or cap > c['max_memory_bytes']:
@@ -434,8 +449,8 @@ def serve():
                'BLOCH_NATIVE_L2_ARTIFACT': str(job / 'block.artifact'), **tuning}
         # `"mainnet": true` proves the mainnet program (settlement_v3_mainnet); the settler
         # verifies the result locally with the same flag, so a wrong program is never submitted.
-        argv = [c['prover'], *(['--mainnet'] if c.get('mainnet') else []), 'prove-groth16', 'native-artifact',
-                c['guest'], str(proof)]
+        # `prove-bound` proves settlement_v3_mainnet_bound instead (audit L2N-01), under the same rule.
+        argv = [c['prover'], *program, 'prove-groth16', 'native-artifact', guest, str(proof)]
         with (work / 'last-prove.log').open('w') as log:
             returncode = run_while_client_connected(argv, env, log, c.get('timeout_seconds', 3500))
         if returncode or not proof.is_file() or not 0 < proof.stat().st_size <= MAX_PROOF_BYTES:

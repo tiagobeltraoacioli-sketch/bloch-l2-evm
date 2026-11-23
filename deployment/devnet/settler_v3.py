@@ -137,13 +137,32 @@ Differences, all deliberate:
   producer, SP1 execute; with --prove also Groth16 + every pre-submit check)
   without ever calling sendrawtransaction or signing anything.
 
+* settler authorization (audit AUDIT-L1L2-20261123, L2N-01; optional `settler_authorization`): behind the L1 gate
+  `L2_SETTLER_AUTHORIZATION_ACTIVATION_EPOCH` a settlement is accepted only with a trailer signed by a registered
+  settler key over the exact settlement (native `l2_settlement::settler`). Before the gate's epoch nothing changes:
+  the worker broadcasts the 1155 bytes it broadcasts today, and a trailer would be refused. From that epoch on it
+  asks the pinned `bloch-pos l2-settler authorize` tool, which alone opens the sealed settler keystore, for the
+  trailer and broadcasts `settlement || signer || signature || next set`. The epoch is read from the L1
+  (`getchaininfo.hard_forks`, by quorum) or configured; the form is decided at every broadcast, so a settlement
+  proved before the boundary is sent in the form the block that includes it requires. The registered set is the
+  set file (the text the L1 release pins); a rotation request (a set file dropped at `rotation_request`) rides on
+  the next authorized settlement and the set file is replaced when that settlement is accepted.
+* program switch (L2N-01, optional `program_switch`): from the L1 program-switch epoch on the settlement is proved
+  with the bound guest (`settlement_v3_mainnet_bound`, prover `--mainnet-bound`) and carries its l2-config
+  identities; before it, the deployed program. A proof is started under the bound program `lead_epochs` (default 1)
+  before the switch and held until the switch; a deployed-program proof not included by then is proved again.
+* DA with the settler key (L1X-04, `da.settler_key`): with the L1 DA settler-slot rule armed one DA place per
+  block is kept for batches funded by a registered settler key; the DA transaction is then funded and signed by
+  the settler keystore, and a funding key outside the registered set is reported (`da-funding-key-not-registered`).
+
 Each cycle: read the native request all validators agree on, extend the
 canonical L2 database by exactly one block anchored to it, prove it, build the
 settlement transaction, submit it and wait for native acceptance. The worker
 never reads signing keys and never publishes L2 finality. Any divergence stops
 the worker (exit 3) for operator review. Dependency-free Python 3.9+. The
 worker never reads signing keys itself; with user transactions it invokes the
-pinned DA signer (whose keystore holds only DA fee funds).
+pinned DA signer (whose keystore holds only DA fee funds), and behind the
+settler gate the pinned settler signer (`bloch-pos l2-settler`).
 """
 import contextlib
 import hashlib
@@ -224,6 +243,17 @@ MAINNET = {
     'slot_ms': 30_000,
     'attestor_set': '1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b',  # 3-of-5
 }
+# The bound program `settlement_v3_mainnet_bound` (audit L2N-01, docs/MAINNET-PROGRAM.md). CANDIDATE values of
+# 2026-11-23 (commit 21ec80c), not a release: nothing on L1 pins them, and the release that carries the L1 program
+# switch replaces them with the values of the ELF built at the release commit (a test keeps them equal to the
+# document's table). They differ from the deployed program in the configuration commitment, the ELF and its keys.
+MAINNET_BOUND = {**MAINNET,
+                 'configuration': '41ddb4dd4aae492e04f500d40be8471ac785e1264d32346dc0f1620d67cc928d',
+                 'elf_keccak': 'c1dd6066941c83fc691f6b325b51ca771c680431df54d54d508c8593fcb6da6d',
+                 'vkey_koalabear': '72730d65162c55a9604a8d905e125a1f332bec342419058167520c455dea4112',
+                 'vkey_bn254': '00e4e61aca58b156a702546c85e125a1f6657d868906416073a90622ddea4112',
+                 'guest_sha256': 'ac2e1ca568fe28ffef7f2e55d4bc493d6348882b2e786bf3e5a10fefa9b38892'}
+MAINNET_BOUND_STATUS = 'candidate'  # 'release' once the values above are the released program's
 MAINNET_L2_CONFIG_SHA256 = '292f4fa8d5a949a26c20317cfc9360d53afda4779b298f1841107985ca5c4f6b'
 MAINNET_TIMESTAMP_RULE = f"1:{MAINNET['genesis_time']}:{MAINNET['slot_ms']}"
 MAINNET_PRODUCE_ARGS = ('--rules', 'mainnet', '--domain', MAINNET['l2_domain'],
@@ -231,9 +261,11 @@ MAINNET_PRODUCE_ARGS = ('--rules', 'mainnet', '--domain', MAINNET['l2_domain'],
 MAINNET_DEFAULTS = {'poll_seconds': 15, 'resubmit_seconds': 300, 'timestamp_rule': MAINNET_TIMESTAMP_RULE}
 
 
-def mainnet_l2_config():
-    """The 264-byte l2-config.bin of chain 700770 (layout of devnet4/make_l2_config.py)."""
-    out = b''.join(bytes.fromhex(MAINNET[k]) for k in ('l2_domain', 'configuration', 'elf_keccak',
+def mainnet_l2_config(program=None):
+    """The 264-byte l2-config.bin of chain 700770 (layout of devnet4/make_l2_config.py), of the deployed program
+    or of `program` (MAINNET_BOUND)."""
+    program = MAINNET if program is None else program
+    out = b''.join(bytes.fromhex(program[k]) for k in ('l2_domain', 'configuration', 'elf_keccak',
                                                          'vkey_koalabear', 'vkey_bn254', 'proof_policy'))
     out += MAINNET['chain_id'].to_bytes(8, 'little')
     return out + bytes.fromhex(MAINNET['l2_genesis']) + bytes.fromhex(MAINNET['l2_genesis_state'])
@@ -636,6 +668,99 @@ def da_batch_transactions(payload):
         out.append(payload[at + 4:at + 4 + size])
         at += 4 + size
     return out
+
+
+# ---- settler authorization (audit AUDIT-L1L2-20261123 L2N-01; native l2_settlement::settler, commit 5312e209) ----
+SETTLER_AUTH_DOMAIN = b'BLOCH:L2:SETTLER-AUTH:1'
+SETTLER_SET_DOMAIN = b'BLOCH:L2:SETTLER-SET:1'
+SETTLER_MAX_KEYS = 3
+PQ_KEY_BYTES, PQ_SIGNATURE_MAX = 3_749, 4_593  # funded::ADMISSION_PQ_KEY_BYTES / ADMISSION_PQ_SIGNATURE_MAX
+SETTLER_MAX_AUTHORIZATION_BYTES = 1 + 4 + PQ_SIGNATURE_MAX + 1 + SETTLER_MAX_KEYS * PQ_KEY_BYTES
+SETTLEMENT_COMMITMENT_DOMAIN = (b'BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-COMMITMENT:1'
+                                b'BLOCH:EXPERIMENTAL:NATIVE-SETTLEMENT-TX:1')
+# getchaininfo.hard_forks keys of the L1 gates (a gate without an RPC alias is reported under its lowercased
+# constant name, native rpc/consensus_gates.rs). The program-switch name is the interface this worker expects of
+# the L1 switch (constant L2_PROGRAM_SWITCH_ACTIVATION_EPOCH); `program_switch.l1_gate` overrides it.
+SETTLER_GATE = 'l2_settler_authorization_activation_epoch'
+DA_SETTLER_SLOT_GATE = 'l2_da_settler_slot_activation_epoch'
+PROGRAM_SWITCH_GATE = 'l2_program_switch_activation_epoch'
+GATE_CACHE_SECONDS = 60
+
+
+def settlement_commitment(tx):
+    """native l2_settlement::Transaction::commitment of a settlement's first 1155 bytes: SHA3-256 over the two
+    domain tags, the proof policy, the statement and the proof. The trailer is not part of it."""
+    return hashlib.sha3_256(SETTLEMENT_COMMITMENT_DOMAIN + tx[1:TRANSACTION_BYTES]).digest()
+
+
+def parse_settler_set(text):
+    """The keys of a settler set text (one enveloped hybrid public key in hex per line, the text the L1 release
+    pins in mainnet::SETTLER_SET), or None when it is not 1 to 3 distinct keys of the exact size."""
+    try:
+        keys = [bytes.fromhex(line.strip()) for line in text.splitlines() if line.strip()]
+    except ValueError:
+        return None
+    if not 1 <= len(keys) <= SETTLER_MAX_KEYS or any(len(k) != PQ_KEY_BYTES for k in keys) \
+            or len(set(keys)) != len(keys):
+        return None
+    return keys
+
+
+def settler_set_hash(keys):
+    return hashlib.sha3_256(SETTLER_SET_DOMAIN + bytes([len(keys)]) + b''.join(keys)).digest()
+
+
+def settler_digest(network, chain_id, commitment, next_set=None):
+    """What a registered key signs (native settler::digest): bound to the network, the chain, this exact
+    settlement (policy, statement, proof) and the next set."""
+    return hashlib.sha3_256(SETTLER_AUTH_DOMAIN + network + chain_id.to_bytes(8, 'big') + commitment
+                            + (settler_set_hash(next_set) if next_set else bytes(32))).digest()
+
+
+def encode_authorization(signer, signature, next_set=None):
+    """native settler::Authorization::encode: signer (u8) || signature length (u32 LE) || signature ||
+    next-set key count (u8, 0 = keep the set) || keys."""
+    return (bytes([signer]) + len(signature).to_bytes(4, 'little') + signature
+            + bytes([len(next_set or [])]) + b''.join(next_set or []))
+
+
+def decode_authorization(trailer):
+    """(signer, signature, next set or None) of a trailer, or None unless it is the one canonical encoding within
+    every bound of native settler::Authorization::decode."""
+    if len(trailer) < 6 or len(trailer) > SETTLER_MAX_AUTHORIZATION_BYTES:
+        return None
+    signer, length = trailer[0], int.from_bytes(trailer[1:5], 'little')
+    if signer >= SETTLER_MAX_KEYS or not 0 < length <= PQ_SIGNATURE_MAX or len(trailer) < 5 + length + 1:
+        return None
+    signature, count, rest = trailer[5:5 + length], trailer[5 + length], trailer[6 + length:]
+    if count > SETTLER_MAX_KEYS or len(rest) != count * PQ_KEY_BYTES:
+        return None
+    keys = [rest[i:i + PQ_KEY_BYTES] for i in range(0, len(rest), PQ_KEY_BYTES)]
+    if len(set(keys)) != len(keys):
+        return None
+    return signer, signature, (keys or None)
+
+
+def gate_field(info, key):
+    """The activation epoch a getchaininfo answer reports for an L1 gate: an integer, None while the gate is
+    inert, 'absent' when the node does not report the gate (a release that predates it)."""
+    forks = info.get('hard_forks') if isinstance(info, dict) else None
+    entry = forks.get(key) if isinstance(forks, dict) else None
+    if not isinstance(entry, dict) or 'activation_epoch' not in entry:
+        return 'absent'
+    epoch = entry['activation_epoch']
+    if epoch is None:
+        return None
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        return 'malformed'
+    return epoch
+
+
+def check_activation(value, name):
+    """An activation setting: absent/None (never), "l1" (read from the L1 by quorum) or an epoch."""
+    if value is None or value == 'l1' or (isinstance(value, int) and not isinstance(value, bool) and value >= 0):
+        return value
+    raise Halt(f'{name} must be "l1", a non-negative epoch or absent')
 
 
 def endpoint_url(endpoint):
@@ -1252,6 +1377,11 @@ class Settler:
             check_mainnet_config(self.c)
         elif self.rehearsal:
             check_rehearsal_config(self.c)
+        self.gate_cache, self.gate_absent_logged = {}, set()
+        self.settler_key_checked = False
+        self.da_slot_warned = None
+        self.init_programs()
+        self.init_settler_authorization()
         if self.c['user_transactions']:
             # Production guard (M2.6, M8): user transactions only where the native L2 admits them:
             # development networks and the activated mainnet profile (checked live as well).
@@ -1264,6 +1394,20 @@ class Settler:
             da = self.c.get('da')
             if not isinstance(da, dict):
                 raise Halt('user_transactions requires the da signer configuration')
+            if da.get('settler_key'):
+                # Audit L1X-04 (L1 rule 1ada9df7): the reserved DA place belongs to batches funded by a registered
+                # settler key, so the DA transaction is funded and signed by the settler keystore itself.
+                auth = self.c.get('settler_authorization')
+                if not auth:
+                    raise Halt('da.settler_key requires settler_authorization')
+                own = {'signer': auth['signer'], 'signer_sha256': auth['signer_sha256'], 'genesis': auth['genesis'],
+                       'funding_pubkey': auth['pubkey'], 'keystore_dir': auth['keystore_dir'],
+                       'passphrase_file': auth['passphrase_file']}
+                for key, value in own.items():
+                    if da.get(key, value) != value:
+                        raise Halt(f'da.settler_key: da.{key} must be the settler key\'s or absent')
+                da = self.c['da'] = {**da, **own}
+            check_activation(da.get('settler_slot_activation_epoch'), 'da.settler_slot_activation_epoch')
             for key in ('signer', 'signer_sha256', 'genesis', 'funding_pubkey', 'keystore_dir', 'passphrase_file'):
                 if not da.get(key):
                     raise Halt(f'da.{key} is required')
@@ -1321,6 +1465,8 @@ class Settler:
             raise Halt('max_unincluded_windows must be a non-negative integer')
         self.identity_checked = False
         self.dry_run = False
+        # Whether any L1 gate of the 2026-11-23 audit fixes is configured: without one, no gate is read.
+        self.gated = self.c.get('settler_authorization') is not None or self.c.get('program_switch') is not None
 
     def check_identity(self):
         """Once per process: the network a quorum reports is the configured one;
@@ -1601,7 +1747,7 @@ class Settler:
         for name, args in (('execute', ['execute']), ('prove', ['prove-groth16']), ('verify', ['verify-groth16'])):
             if name not in stages:
                 continue
-            argv = [self.c['prover'], *self.prover_args, *args, 'native-artifact', self.c['guest']] \
+            argv = [self.c['prover'], *self.program['prover_args'], *args, 'native-artifact', self.program['guest']] \
                 + ([] if name == 'execute' else [str(proof)])
             if name == 'prove':
                 proof.unlink(missing_ok=True)
@@ -1638,7 +1784,10 @@ class Settler:
         if 'verify' not in stages:
             log('prover-stages-done', directory=str(directory), steps=steps)
             return None
-        atomic_write(directory / 'proved.json', json.dumps({'steps': steps, 'proof_sha256': digest(proof)}, indent=2) + '\n')
+        proved = {'steps': steps, 'proof_sha256': digest(proof)}
+        if self.c.get('program_switch'):
+            proved['program'] = self.program['name']
+        atomic_write(directory / 'proved.json', json.dumps(proved, indent=2) + '\n')
         log('proof-generated', directory=str(directory), seconds=sum(s['seconds'] for s in steps))
         return proof
 
@@ -1730,7 +1879,8 @@ class Settler:
         argv = [r.get('ssh', '/usr/bin/ssh'), '-i', r['key'], '-p', str(r.get('port', 22)),
                 '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'UserKnownHostsFile=' + r['known_hosts'], '-o', 'ConnectTimeout=20',
-                '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', r['target'], 'prove']
+                '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', r['target'],
+                self.program['remote_command']]
         partial = directory / 'settlement.proof.partial'
         with partial.open('wb') as out, (directory / 'prove-remote.log').open('w') as err:
             result = self.run(argv, input=frame, stdout=out, stderr=err,
@@ -1876,11 +2026,30 @@ class Settler:
             count += signed is None or now - signed < window
         return count
 
+    def da_settler_slot_check(self, number):
+        """Audit L1X-04. With the L1 DA settler-slot rule armed (L2_DA_SETTLER_SLOT_ACTIVATION_EPOCH) one DA place per
+        block is kept for batches funded by a registered settler key. A funding key outside the registered set
+        still publishes, but competes for the other three places by tip: reported once per block, never a halt."""
+        da = self.c['da']
+        setting = da.get('settler_slot_activation_epoch')
+        if setting is None or self.da_slot_warned == number:
+            return
+        activation = self.gate(setting, da.get('settler_slot_l1_gate', DA_SETTLER_SLOT_GATE))
+        if activation is None or self.l1_epoch() < activation:
+            return
+        keys = self.settler_set() if self.c.get('settler_authorization') else []
+        funding = bytes.fromhex(Path(da['funding_pubkey']).read_text().strip())
+        if funding not in keys:
+            self.da_slot_warned = number
+            log('da-funding-key-not-registered', number=number, funding_script=self.da_script,
+                registered_keys=len(keys), activation_epoch=activation)
+
     def publish_da_attempt(self, number, directory, commitment):
         """One sign-or-rebroadcast and wait. True: recorded; False: give up this cycle; 'fee-moved': re-sign now."""
         if self.da_recorded(number, commitment):
             return True
         da = self.c['da']
+        self.da_settler_slot_check(number)
         base_fee = str(self.native.bounded_value('getchaininfo', 'next_base_fee_millisat_per_gas'))
         utxos = self.native.common_utxos(self.da_script)
         balance = sum(int(u['value_sat']) for u in utxos)
@@ -2017,9 +2186,346 @@ class Settler:
         log('da-inclusion-timeout', number=number)
         return False
 
+    # ---- L1 gates, the program switch and the settler authorization (audit L2N-01, L1X-04) ----
+    def gate(self, setting, key):
+        """The activation epoch of an L1 gate, or None while it does not apply. `setting` is None (never), "l1"
+        (what a quorum of endpoints reports in getchaininfo.hard_forks) or a configured epoch, which must agree
+        with what the L1 reports whenever it reports the gate. No quorum raises: the gate is never guessed."""
+        if setting is None:
+            return None
+        now, cached = self.clock(), self.gate_cache.get(key)
+        if cached is not None and now - cached[0] < GATE_CACHE_SECONDS:
+            reported = cached[1]
+        else:
+            view, _ = self.native.agreed('getchaininfo', project=lambda info: {'gate': gate_field(info, key)})
+            if view is None:
+                raise RuntimeError(f'no RPC quorum on the L1 gate {key}')
+            reported = view['gate']
+            self.gate_cache[key] = (now, reported)
+        if reported == 'malformed':
+            raise Halt(f'the L1 reports a malformed activation epoch for {key}')
+        if reported == 'absent':
+            if key not in self.gate_absent_logged:
+                self.gate_absent_logged.add(key)
+                log('l1-gate-not-reported', gate=key, configured=setting)
+            return None if setting == 'l1' else setting
+        if setting != 'l1' and reported != setting:
+            raise Halt(f'{key}: the configuration says epoch {setting}, the L1 reports '
+                       f'{"inert" if reported is None else reported}')
+        return reported
+
+    def l1_epoch(self):
+        """The L1 head epoch, no larger than an honest endpoint reports."""
+        return self.native.bounded_value('getchaininfo', 'epoch')
+
+    def init_programs(self):
+        """The deployed program and, with `program_switch`, the bound program that replaces it from the L1
+        program-switch epoch on (audit L2N-01, docs/MAINNET-PROGRAM.md)."""
+        self.programs = {'deployed': {'name': 'deployed', 'prover_args': list(self.prover_args),
+                                      'guest': self.c['guest'], 'l2_config': self.c['l2_config'],
+                                      'remote_command': 'prove'}}
+        self.program = self.programs['deployed']
+        switch = self.c.get('program_switch')
+        if switch is None:
+            return
+        if not isinstance(switch, dict):
+            raise Halt('program_switch must be an object')
+        for key in ('guest', 'guest_sha256', 'l2_config', 'l2_config_sha256'):
+            if not switch.get(key):
+                raise Halt(f'program_switch.{key} is required')
+        for key in ('guest', 'l2_config'):
+            if digest(switch[key]) != switch[key + '_sha256']:
+                raise Halt(f'program_switch.{key} differs from its pin')
+        check_activation(switch.get('activation_epoch'), 'program_switch.activation_epoch')
+        lead = switch.get('lead_epochs', 1)
+        if not isinstance(lead, int) or isinstance(lead, bool) or lead < 0:
+            raise Halt('program_switch.lead_epochs must be a non-negative integer')
+        if self.mainnet_path:
+            if 'prover_args' in switch:
+                raise Halt('program_switch.prover_args is fixed on the mainnet path (--mainnet-bound)')
+            if switch['guest_sha256'] != MAINNET_BOUND['guest_sha256'] \
+                    or 'settlement_v3_mainnet_bound' not in Path(switch['guest']).name:
+                raise Halt('program_switch.guest must be the pinned settlement_v3_mainnet_bound ELF')
+            if Path(switch['l2_config']).read_bytes() != mainnet_l2_config(MAINNET_BOUND):
+                raise Halt('program_switch.l2_config differs from the pinned bound program')
+            args = ['--mainnet-bound']
+        else:
+            args = switch.get('prover_args', [])
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args) \
+                    or 'settlement_v3' not in Path(switch['guest']).name:
+                raise Halt('program_switch needs a settlement V3 guest and prover_args as a list')
+        self.programs['bound'] = {'name': 'bound', 'prover_args': list(args), 'guest': switch['guest'],
+                                  'l2_config': switch['l2_config'], 'remote_command': 'prove-bound'}
+
+    def program_switch_epoch(self):
+        switch = self.c.get('program_switch')
+        if switch is None:
+            return None
+        return self.gate(switch.get('activation_epoch'), switch.get('l1_gate', PROGRAM_SWITCH_GATE))
+
+    def select_program(self, number, directory):
+        """Choose the program this block is proved with and remember it in the directory. Before the switch epoch
+        the L1 accepts only the deployed program, from it on only the bound one. A proof takes about one epoch, so
+        a NEW proof is started under the bound program `lead_epochs` before the switch (and is held until the
+        switch); a finished deployed-program proof is still submitted until the switch and proved again after it.
+        The choice only moves forward. Without `program_switch` nothing is read or written."""
+        if self.c.get('program_switch') is None:
+            return
+        record = directory / 'program.json'
+        proved = (directory / 'proved.json').exists()
+        held = json.loads(record.read_text())['program'] if record.exists() else ('deployed' if proved else None)
+        activation = self.program_switch_epoch()
+        if activation is None:
+            if held == 'bound':
+                raise Halt(f'{directory} was prepared for the bound program, and the program switch is no longer '
+                           'scheduled (configuration or L1 release changed)')
+            wanted, epoch = 'deployed', None
+        else:
+            epoch = self.l1_epoch()
+            lead = self.c['program_switch'].get('lead_epochs', 1)
+            if held == 'bound' or epoch >= activation:
+                wanted = 'bound'
+            elif held == 'deployed' and proved:
+                wanted = 'deployed'  # valid until the switch: submit it, do not throw the proof away
+            else:
+                wanted = 'bound' if epoch + lead >= activation else 'deployed'
+        if held is not None and held != wanted:
+            self.discard_proof(directory, held)
+            log('program-switch-reprove', number=number, directory=str(directory), previous=held, program=wanted,
+                activation_epoch=activation, l1_epoch=epoch)
+        if held != wanted:
+            atomic_write(record, json.dumps({'program': wanted, 'activation_epoch': activation}) + '\n')
+            if wanted == 'bound':
+                log('program-selected', number=number, program=wanted, activation_epoch=activation, l1_epoch=epoch)
+        self.program = self.programs[wanted]
+
+    @staticmethod
+    def discard_proof(directory, program):
+        """Set aside everything derived from a proof of `program` (kept beside the block for the record)."""
+        for name in ('settlement.proof', 'proved.json', 'transaction.bin', 'submitted.json', 'execute.log',
+                     'prove.log', 'verify.log', 'prove-remote.log', 'transaction-authorized.bin',
+                     'authorization.json'):
+            path = directory / name
+            if path.exists():
+                path.replace(directory / f'{name}.{program}')
+
+    def program_submittable(self, number):
+        """False while a bound-program settlement waits for the switch epoch (the L1 would refuse it)."""
+        if self.program['name'] != 'bound':
+            return True
+        activation, epoch = self.program_switch_epoch(), self.l1_epoch()
+        if activation is not None and epoch >= activation:
+            return True
+        log('settlement-waiting-program-switch', number=number, activation_epoch=activation, l1_epoch=epoch)
+        return False
+
+    def init_settler_authorization(self):
+        auth = self.c.get('settler_authorization')
+        if auth is None:
+            return
+        if not isinstance(auth, dict):
+            raise Halt('settler_authorization must be an object')
+        for key in ('signer', 'signer_sha256', 'genesis', 'keystore_dir', 'passphrase_file', 'pubkey', 'set'):
+            if not auth.get(key):
+                raise Halt(f'settler_authorization.{key} is required')
+        if digest(auth['signer']) != auth['signer_sha256']:
+            raise Halt('settler signer differs from its pin')
+        check_activation(auth.get('activation_epoch'), 'settler_authorization.activation_epoch')
+        self.settler_pubkey = self.read_settler_pubkey()
+        if self.settler_pubkey not in self.settler_set():
+            raise Halt('the settler key is not in the settler set file (after a rotation that removed it, a '
+                       'registered key must settle)')
+
+    def read_settler_pubkey(self):
+        try:
+            key = bytes.fromhex(Path(self.c['settler_authorization']['pubkey']).read_text().strip())
+        except (OSError, ValueError) as error:
+            raise Halt(f'settler_authorization.pubkey: {error}')
+        if len(key) != PQ_KEY_BYTES:
+            raise Halt(f'settler_authorization.pubkey must be a {PQ_KEY_BYTES}-byte enveloped hybrid public key')
+        return key
+
+    def settler_set(self):
+        """The registered settler set as this worker knows it: the set file (public data), read every time."""
+        path = Path(self.c['settler_authorization']['set'])
+        try:
+            keys = parse_settler_set(path.read_text())
+        except OSError as error:
+            raise Halt(f'settler set file: {error}')
+        if keys is None:
+            raise Halt(f'{path} is not a settler set (1 to {SETTLER_MAX_KEYS} distinct keys, hex, one per line)')
+        return keys
+
+    def settler_env(self):
+        auth = self.c['settler_authorization']
+        return {'PATH': '/usr/bin:/bin', 'HOME': self.c['home'], 'BLOCH_KEYSTORE_PASSPHRASE_FILE': auth['passphrase_file']}
+
+    def check_settler_key(self):
+        """Once per process, before the gate matters: the pinned signer opens the sealed keystore, finds its key in
+        the set and signs and verifies a self-test value (`bloch-pos l2-settler check`). A key that cannot sign is
+        found on the day the unit starts, not at the gate's epoch."""
+        auth = self.c.get('settler_authorization')
+        if auth is None or self.settler_key_checked or self.dry_run:
+            return
+        result = self.run([auth['signer'], 'l2-settler', 'check', '--set', auth['set'], '--dir', auth['keystore_dir']],
+                          env=self.settler_env(), capture_output=True, text=True, timeout=300)
+        if result.returncode:
+            raise Halt(f'settler key check failed: {(result.stderr or "").strip()[:400]}')
+        self.settler_key_checked = True
+        keys = self.settler_set()
+        log('settler-key-checked', signer=keys.index(self.settler_pubkey), keys=len(keys),
+            set_hash=settler_set_hash(keys).hex())
+
+    def settler_gate(self):
+        """(authorize, boundary): whether a settlement broadcast now must carry the authorization trailer, and
+        whether the L1 head is within one epoch of the gate (a node may then judge it on the other side)."""
+        auth = self.c.get('settler_authorization')
+        if auth is None:
+            return False, False
+        activation = self.gate(auth.get('activation_epoch'), auth.get('l1_gate', SETTLER_GATE))
+        if activation is None:
+            return False, False
+        epoch = self.l1_epoch()
+        return epoch >= activation, activation - 1 <= epoch <= activation
+
+    def gate_boundary(self):
+        """Whether a refusal may come from a node on the other side of the settler gate or the program switch."""
+        _, boundary = self.settler_gate()
+        if boundary:
+            return True
+        activation = self.program_switch_epoch()
+        return activation is not None and activation - 1 <= self.l1_epoch() <= activation
+
+    def rotation_request(self, keys):
+        """The next settler set an operator asked for (a set file at `rotation_request`, default `<set>.next`),
+        or (None, None). An unreadable or invalid request is reported and ignored: settlement goes on."""
+        auth = self.c['settler_authorization']
+        path = Path(auth.get('rotation_request', auth['set'] + '.next'))
+        if not path.exists():
+            return None, None
+        try:
+            wanted = parse_settler_set(path.read_text())
+        except OSError:
+            wanted = None
+        if wanted is None:
+            log('settler-rotation-invalid', request=str(path))
+            return None, None
+        if wanted == keys:
+            return None, None  # already the registered set
+        return wanted, path
+
+    def rotation_journal(self):
+        return Path(self.c['settler_authorization']['set'] + '.rotation.json')
+
+    def authorize(self, number, directory, tx):
+        """The settlement with its authorization trailer. The pinned signer alone opens the keystore; it signs
+        the exact bytes of `tx` (and the next set of a rotation) and verifies before it writes. What it returns
+        is checked here byte for byte except the signature: the 1155 unsigned bytes first, one canonical trailer,
+        this key's index in the set file, the requested next set and nothing else. An authorized settlement is
+        reused while the set is unchanged, so one block is never signed in two forms."""
+        auth = self.c['settler_authorization']
+        keys = self.settler_set()
+        if self.settler_pubkey not in keys:
+            raise Halt('the settler key is not in the settler set file: a registered key must settle '
+                       '(SETTLER-RUNBOOK.md, settler key procedures)')
+        set_hash = settler_set_hash(keys).hex()
+        wire_path, meta_path = directory / 'transaction-authorized.bin', directory / 'authorization.json'
+        if wire_path.exists() and meta_path.exists():
+            meta, wire = json.loads(meta_path.read_text()), wire_path.read_bytes()
+            if meta.get('set_hash') == set_hash and meta.get('tx_sha256') == hashlib.sha256(tx).hexdigest() \
+                    and wire[:TRANSACTION_BYTES] == tx:
+                return wire
+        next_set, request = self.rotation_request(keys)
+        unsigned, signed = directory / 'transaction-unsigned.hex', directory / 'transaction-authorized.hex'
+        atomic_write(unsigned, tx.hex() + '\n')
+        signed.unlink(missing_ok=True)
+        argv = [auth['signer'], 'l2-settler', 'authorize', '--genesis', auth['genesis'], '--chain-id', str(self.chain_id),
+                '--tx', str(unsigned), '--set', auth['set'], '--dir', auth['keystore_dir'], '--out', str(signed)]
+        if next_set is not None:
+            argv[-2:-2] = ['--next-set', str(request)]
+        result = self.run(argv, env=self.settler_env(), capture_output=True, text=True, timeout=300)
+        if result.returncode:
+            raise Halt(f'settler signer refused: {(result.stderr or "").strip()[:400]}')
+        try:
+            wire = bytes.fromhex(signed.read_text().strip())
+        except (OSError, ValueError) as error:
+            raise Halt(f'settler signer wrote no authorized settlement: {error}')
+        signed.unlink(missing_ok=True)
+        decoded = decode_authorization(wire[TRANSACTION_BYTES:]) if wire[:TRANSACTION_BYTES] == tx else None
+        if decoded is None:
+            raise Halt('the signed settlement is not this settlement followed by one canonical authorization')
+        signer, signature, signed_next = decoded
+        if signer != keys.index(self.settler_pubkey) or signed_next != next_set:
+            raise Halt('the authorization names another signer or another next set than requested')
+        commitment = settlement_commitment(tx)
+        meta = {'number': number, 'tx_sha256': hashlib.sha256(tx).hexdigest(), 'commitment': commitment.hex(),
+                'set_hash': set_hash, 'signer': signer, 'signature_bytes': len(signature),
+                'next_set_hash': settler_set_hash(next_set).hex() if next_set else None,
+                'digest': settler_digest(bytes.fromhex(self.c['network']), self.chain_id, commitment, next_set).hex()}
+        atomic_write(wire_path, wire)
+        atomic_write(meta_path, json.dumps(meta, indent=2) + '\n')
+        if next_set is not None:
+            atomic_write(self.rotation_journal(), json.dumps({
+                'number': number, 'directory': str(directory),
+                'statement_sha256': hashlib.sha256(tx[33:33 + VALUES_BYTES]).hexdigest(),
+                'from': set_hash, 'to': meta['next_set_hash'], 'request': str(request),
+                'next_set': ''.join(k.hex() + '\n' for k in next_set)}, indent=2) + '\n')
+            log('settler-rotation-signed', number=number, signer=signer, set_hash=set_hash,
+                next_set_hash=meta['next_set_hash'], next_keys=len(next_set))
+        log('settlement-authorized', number=number, signer=signer, set_hash=set_hash,
+            next_set_hash=meta['next_set_hash'], bytes=len(wire))
+        return wire
+
+    def settlement_wire(self, number, directory, tx):
+        """(bytes to broadcast now, authorized): `tx` as it is deployed today while the settler gate is not in
+        force, `tx` with the authorization trailer from the gate's epoch on."""
+        authorize, _ = self.settler_gate()
+        return (self.authorize(number, directory, tx), True) if authorize else (tx, False)
+
+    def reconcile_rotation(self, accepted):
+        """Apply a signed rotation once its settlement is the accepted head (or behind it): the set file becomes
+        the next set, the request is retired. A rotation whose block was settled with another statement did not
+        happen; its request stays for the next settlement."""
+        if self.c.get('settler_authorization') is None or not accepted:
+            return
+        journal = self.rotation_journal()
+        if not journal.exists():
+            return
+        j = json.loads(journal.read_text())
+        seen = statement_fields(accepted['statement'])['l2_number']
+        if seen < j['number']:
+            return
+        auth = self.c['settler_authorization']
+        if settler_set_hash(self.settler_set()).hex() == j['to']:
+            journal.unlink()
+            return
+        if seen == j['number']:
+            statement = accepted['statement']
+        else:
+            record = Path(j['directory']) / 'accepted.json'
+            if not record.exists():
+                raise Halt(f'a settler set rotation was signed for L2 block {j["number"]} and the head is now '
+                           f'{seen}, but this worker holds no record of which settlement was accepted there: check '
+                           f'the registered set on L1, correct {auth["set"]} and remove {journal}')
+            statement = json.loads(record.read_text())['statement']
+        if hashlib.sha256(bytes.fromhex(statement)).hexdigest() != j['statement_sha256']:
+            journal.unlink()
+            log('settler-rotation-not-applied', number=j['number'], reason='another statement was accepted there')
+            return
+        set_path = Path(auth['set'])
+        atomic_write(Path(auth['set'] + '.previous'), set_path.read_text())
+        atomic_write(set_path, j['next_set'])
+        request = Path(j['request'])
+        if request.exists() and parse_settler_set(request.read_text()) == parse_settler_set(j['next_set']):
+            request.replace(Path(str(request) + '.applied'))
+        journal.unlink()
+        keys = self.settler_set()
+        log('settler-set-rotated', number=j['number'], previous_set_hash=j['from'], set_hash=j['to'], keys=len(keys),
+            this_key_registered=self.settler_pubkey in keys)
+
     def transaction(self, directory, proof_path, accepted=None):
         values, proof = parse_proof_artifact(proof_path.read_bytes())
-        config = Path(self.c['l2_config']).read_bytes()
+        config = Path(self.program['l2_config']).read_bytes()
         request = (directory / 'native-request.txt').read_text().splitlines()
         checks = [values[T:T + 32].hex() == request[0], values[T + 32:T + 64].hex() == request[1],
                   values[T + 400:T + 432].hex() == request[2], int.from_bytes(values[T + 432:T + 440], 'big') == int(request[3]),
@@ -2099,7 +2605,10 @@ class Settler:
         if self.dry_run:
             raise Halt('dry run never broadcasts')
         height = self.l1_height()
-        sent = self.broadcast(number, directory, tx, record)
+        wire, authorized = self.settlement_wire(number, directory, tx)
+        if self.c.get('settler_authorization') is not None:
+            record['authorized'], record['wire_sha256'] = authorized, hashlib.sha256(wire).hexdigest()
+        sent = self.broadcast(number, directory, wire, record)
         last_sent = self.clock()
         deadline = self.clock() + self.c['acceptance_timeout_seconds']
         while self.clock() < deadline:
@@ -2113,11 +2622,29 @@ class Settler:
                 log('request-moved-after-submit', number=number)
                 return False
             if sent == 'terminal':
-                # The bytes are invalid against the request they were built for: never loop on them.
-                raise Halt(f'native nodes refuse the settlement of L2 block {number} '
-                           '(policy, source, successor or proof) while its request is unchanged')
+                if self.gated and self.gate_boundary():
+                    # Within one epoch of the settler gate or the program switch the refusing nodes may judge the
+                    # bytes on the other side of the boundary: send again in the form the head now requires.
+                    log('settlement-refused-at-gate-boundary', number=number, authorized=authorized,
+                        program=self.program['name'])
+                    sent = False
+                else:
+                    # The bytes are invalid against the request they were built for: never loop on them.
+                    raise Halt(f'native nodes refuse the settlement of L2 block {number} '
+                               '(policy, source, successor or proof' + (', or the settler authorization: is this '
+                               'key in the registered set?' if authorized else '') + ') while its request is unchanged')
+            if self.gated:
+                switch = self.program_switch_epoch()
+                if switch is not None and self.program['name'] == 'deployed' and switch <= self.l1_epoch():
+                    log('settlement-missed-program-switch', number=number, activation_epoch=switch)
+                    return False  # the next cycle proves this block again under the bound program
+                now_wire, now_authorized = self.settlement_wire(number, directory, tx)
+                if now_wire != wire:
+                    wire, authorized, sent = now_wire, now_authorized, False
+                    record['authorized'], record['wire_sha256'] = authorized, hashlib.sha256(wire).hexdigest()
+                    log('settlement-form-changed', number=number, authorized=authorized)
             if self.clock() - last_sent >= self.c['resubmit_seconds'] or not sent:
-                sent, last_sent = self.broadcast(number, directory, tx, record), self.clock()
+                sent, last_sent = self.broadcast(number, directory, wire, record), self.clock()
         now = self.l1_height()
         held = sent if isinstance(sent, list) else []
         log('acceptance-timeout', number=number, l1_height_at_submit=height, l1_height_now=now,
@@ -2147,19 +2674,23 @@ class Settler:
         atomic_write(directory / 'accepted.json', json.dumps(accepted, indent=2) + '\n')
         log('accepted', number=number, commitment=accepted['commitment'],
             l2_hash=statement_fields(accepted['statement'])['l2_hash'])
+        self.reconcile_rotation(accepted)
         return True
 
     def cycle(self):
         self.finish_swap()
         if not self.check_identity():
             return False
+        self.check_settler_key()
         view = self.native_view()
         if view is None or view.get('source') is None:
             return False
+        self.reconcile_rotation(view.get('accepted'))
         try:
             if self.c.get('skip_idle_blocks') and self.hold_block(view):
                 return False
             number, directory = self.prepare_block(view)
+            self.select_program(number, directory)
             proof = self.prove(directory, view=view)
             # A proof takes many minutes: never pay DA for a block another settlement made stale meanwhile.
             if proof is None:
@@ -2169,6 +2700,8 @@ class Settler:
                 return False
             tx = self.transaction(directory, proof, view.get('accepted'))
             values = tx[33:33 + VALUES_BYTES]
+            if not self.program_submittable(number):
+                return False
             if int.from_bytes(values[T + USER_TX_COUNT:T + USER_TX_COUNT + 8], 'big') and \
                     not self.publish_da(number, directory, values):
                 return False
@@ -2418,6 +2951,8 @@ def dry_run(config, prove=False, out=None, rpc=rpc, run=subprocess.run, sleep=ti
             if head.get('number') != 0 or head.get('hash') != config['l2_genesis']:
                 return done(False, reason=f'producer L2 genesis {head.get("hash")} differs from {config["l2_genesis"]}')
         number, directory = settler.prepare_block(view)
+        settler.select_program(number, directory)  # the program the L1 expects now (deployed, or bound at the switch)
+        report['program'] = settler.program['name']
         block = json.loads((directory / 'block.json').read_text()) if (directory / 'block.json').exists() else {}
         report['l2_block'] = {'number': number, **{k: block[k] for k in ('hash', 'deposits', 'transactions',
                                                                           'withdrawal_count') if k in block}}
