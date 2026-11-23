@@ -60,7 +60,7 @@ Put these in `DIR`. `prepare` checks each pin and refuses a mismatch.
 
 | File | Source | SHA-256 |
 | --- | --- | --- |
-| `settler_v3.py` | this branch, `deployment/devnet/` | `9b8f5245…5e48` (audit fixes of 2026-11-23, not deployed; the deployed settler is `9c592bd4…3007`; enforced since agent 155; also recorded in the `/opt` path) |
+| `settler_v3.py` | this branch, `deployment/devnet/` | `357afb58…8df7` (audit fixes of 2026-11-23, not deployed; the deployed settler is `9c592bd4…3007`; enforced since agent 155; also recorded in the `/opt` path) |
 | `bloch-evm-sp1-settlement-v3` | `build-program.sh` host step (any path; v2 build `3a24c36d…973a`, 10-19 build `505500af…aa07`) | `3a24c36d…973a` (enforced since agent 155), and its `--mainnet identity` must equal the native program pins (`identity.json` `22571783…659e`) |
 | `bloch-l2-produce-dev` | the launch build against node release 906336fd: `598873ae…` (build commit 3d35a0f; the earlier 926d2cf / 78d4921c producer `e3f1a290…` halts after the KES bind) (agents/PINS-NEXT.md). Not v2.1 `fb0d5313…`, and never v2 `7c1cc62b…`, which lacks the flag-day rebuild fix | `e3f1a290…7f69` (enforced since agent 155) |
 | `settlement_v3_mainnet` | reproducible guest | `203114bf…c473` (enforced) |
@@ -296,7 +296,7 @@ the private stub has no native source to build a block from.
 | `settler-rotation-invalid`, `settler-rotation-not-applied` | The rotation request file is not a valid set (ignored, settlement goes on), or the block the rotation was signed for was settled with another statement (the request stays for the next settlement). |
 | `program-selected`, `settlement-waiting-program-switch` | The block is proved under the bound program; a finished bound proof waits for the L1 switch epoch. |
 | `program-switch-reprove`, `settlement-missed-program-switch` | A proof of the deployed program was not included before the switch and is made again under the bound program (one proof lost, about 15 minutes). |
-| `l1-gate-not-reported` | The L1 RPCs do not list a gate this worker is configured to read from L1 (`"l1"`): they run a release that predates it. The gate counts as inert. |
+| `l1-gate-not-reported`, `l1-program-not-reported` | The L1 RPCs do not list a gate this worker is configured to read from L1 (`"l1"`), or do not report `getl2settlement.program`: they run a release that predates it. The gate counts as inert; without the program report the worker decides the switch by the head epoch alone. |
 | `da-funding-key-not-registered` | The L1 DA settler-slot rule is armed and the DA funding key is not a registered settler key, so the batch has no reserved place (audit L1X-04). Set `da.settler_key`. |
 | `foreign-settlement-waiting-finality`, `foreign-settlement-recovered` | Another party settled a block. See "Foreign settlements": the settler needs no action, the SHADOW must be reinstalled each time. Otherwise no action unless they repeat. |
 | `halt` (exit 3, no auto-restart) | Operator review. Causes: (with `settler_authorization`) the settler key is not in the set file, the signer refused, or the settlement was refused while its request is unchanged, which behind the gate also means "this key is not in the registered set"; (with `program_switch`) a block prepared for the bound program while the switch is no longer scheduled; a settlement held by the RPCs but not included for `max_unincluded_windows` windows, a foreign statement accepted for the same block without `foreign_recovery`, a foreign block that cannot be rebuilt from L1 (off-rule, finding F1), a terminal native refusal with an unchanged request, pin or identity mismatch, or producer or DB divergence. |
@@ -313,7 +313,8 @@ in code, both off:
 
 1. **Settler authorization** (L1 gate `L2_SETTLER_AUTHORIZATION_ACTIVATION_EPOCH`): from the gate's epoch a
    settlement is accepted only with a trailer signed by one of 1 to 3 registered settler keys.
-2. **Program switch** (L1 gate `L2_PROGRAM_SWITCH_ACTIVATION_EPOCH`, being written on L1): from the switch epoch
+2. **Program switch** (L1 gate `L2_SETTLEMENT_PROGRAM_SWITCH_ACTIVATION_EPOCH`, native commit `3a97df51`, see
+   `docs/L2-PROGRAM-SWITCH.md` there): from the first block of the switch epoch
    only proofs of `settlement_v3_mainnet_bound` are accepted, a program that derives the block context.
 
 ### Configuration
@@ -337,8 +338,11 @@ in code, both off:
 ```
 
 `"l1"` reads the epoch from `getchaininfo.hard_forks` by quorum (keys `l2_settler_authorization_activation_epoch`,
-`l2_program_switch_activation_epoch`, `l2_da_settler_slot_activation_epoch`; `l1_gate` overrides the name). A
-configured epoch must equal what the L1 reports, or the worker halts. No quorum on a gate is a retry, never a guess.
+`l2_settlement_program_switch_activation_epoch`, `l2_da_settler_slot_activation_epoch`; `l1_gate` overrides the
+name). A configured epoch must equal what the L1 reports, or the worker halts. No quorum on a gate is a retry, never
+a guess. For the program the worker also reads `getl2settlement.program`: the identities in force, and the pinned
+successor with its epoch. It halts if the L1 settles under a program it does not hold, if the successor the L1 pins
+is not its bound program (the pins of one side are out of date), or if that epoch differs from the gate's.
 
 The installer writes the first block: `install-settler-mainnet.py settler-key prepare`, then
 `settler-key enable --set FILE --confirm-mainnet` (add `--da-settler-key` for the DA block). `program_switch` has
@@ -354,7 +358,8 @@ carries the L1 switch (docs/MAINNET-PROGRAM.md).
   chosen at every broadcast from the L1 head epoch, so a proof made before the boundary is sent in the form the
   including block requires; within one epoch of the boundary a refusal is retried in the other form, not a halt.
 - Program switch: a new proof is started under the bound program `lead_epochs` (default 1, about 16 minutes)
-  before the switch and is held until the switch (`settlement-waiting-program-switch`); a deployed-program proof
+  before the switch and is held until the L1 reports the bound program in force, i.e. until the boundary block is
+  the head (`settlement-waiting-program-switch`); a deployed-program proof
   that is finished is still submitted until the switch, and proved again after it. Honest blocks are the same
   under both programs, so no L2 block is rebuilt.
 - DA: with `da.settler_key` the DA transaction is funded and signed by the settler keystore, which is what the L1

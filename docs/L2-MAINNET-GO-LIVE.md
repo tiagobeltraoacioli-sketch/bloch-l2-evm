@@ -160,11 +160,11 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 
 | File | SHA-256 |
 | --- | --- |
-| `deployment/mainnet/GO-LIVE-PINS.sha256` | `b18b4903aa94161f37dcf975715ab68cd7181bee489fbfc3dab3af64e5d2563b` |
+| `deployment/mainnet/GO-LIVE-PINS.sha256` | `e86b64eccb3164449dd45bd856c4c0ff44d929bbd6ee78bf3678952319e997d0` |
 | `deployment/mainnet/GO-LIVE-PINS-PROVER.sha256` | `ae020d67a26f7ec7403f7c963eecf62c0c086fed8597dc6481bcfdab385b534e` |
-| `deployment/devnet/settler_v3.py` | `9b8f5245c925e90f8802eca358bbed07e022e96bb20d04250974aba8edf95e48` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
+| `deployment/devnet/settler_v3.py` | `357afb580b3874dbcbc18f39b0af8da45460b5451020f4382479c2d0dd278df7` (agents 193 M1/M2, 198 L1/L6; the settler installer pins it) |
 | `deployment/mainnet/l2_reorg_recover.py` | `2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53` (agent 198, 152 L2-L4; the settler installer pins it) |
-| `deployment/mainnet/install-settler-mainnet.py` | `5052f0a620631a32938e967e2bcffbf87a35ccc9b8ab01033bea32f1d204647b` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
+| `deployment/mainnet/install-settler-mainnet.py` | `18a3560ac7637a5ead97d5224b07da9b11511ebc13b85969da2abfe9d4d16dc9` (agents 155 M-1/L-3, 193 D17/M1, 204 M-3 `upgrade`, M-4 passphrase, read group) |
 | `deployment/devnet/remote_prover.py` | `497c238a5c48a3e88f4fb006ee178c80318e3058405893c81420bd83f67a1779` (agent 193 M1; the prover installer pins it; **not** `183bd655…` or `3c11d9be…`) |
 | `deployment/mainnet/prover/install-prover-mainnet.py` | `276d0f6a301a6df7c0ccf5fd242d42658648f97fd52e2e1a6093a0d79b3c09c8` (agent 155 M-2: pins the SP1 host too; 204: stages outside `/tmp`) |
 | `deployment/mainnet/install-shadow.sh` | `495a083f10718c6e7bb348373f4b198dcfbbdb4dd5c00330b0109856a7b76f45` (agent 155 H-1/L-1; 235: L1 RPCs from the settler config; 204: own user `bloch-l2-mainnet-shadow`) |
@@ -173,7 +173,7 @@ Round 15 (agents 311, 308, 312): the hashes below and the P2 GO line are checked
 | `deployment/mainnet/follower-rpc/install.sh` | `8281b10ecf3098bad4439fc994b7baaf4a3ab15f151b199424a681877af6ac77` (agent 159: refuses an unsigned release; 201: fresh-host fix for 202 F-1, loud failure, resume; 204: `--rpc-user`) |
 | `deployment/mainnet/follower-rpc/l2_read_access.py` | `6dbc7b135f014b753be29a92314047035c8922cc5bad2c1a82eb16f562815c72` (agent 204: MDBX lock file for the own RPC user) |
 | `deployment/mainnet/verify_release_signature.py` | `f9105de83f637c2a11e245dede98213b088044584105a6463be8f22ce06196c5` (agent 159: pins release key `1A5D96A5C4955EF7`) |
-| `deployment/mainnet/l2_monitor.py` | `b0e8c96af9084b875f638eaf2065696e36974e7d534c9e4c50cc1a0514b09ee9` (agents 157, 187 F1, 198) |
+| `deployment/mainnet/l2_monitor.py` | `c627531d4d30d7cd8d1184e3803286943938f68432d83396370096eb5460b99b` (agents 157, 187 F1, 198) |
 | `deployment/mainnet/l1_monitor.py` | `b62c28f295ea93452152d7699c913fb9672c5b01957acd358472ec643790238a` (agent 187) |
 | `deployment/mainnet/l1_stuck_check.py` | `8afabaec3edcc5deb88c21c9e9a778f6450f0914ab0e1e62638523fb71d0da69` (agent 187 F1 fix) |
 | `deployment/mainnet/withdraw/bloch-l2-withdraw.py` | `1791d8cad3dc6b6a7e6b281a835aac72f69d0de8c0a4290a41d080ba60846ffc` |
@@ -388,7 +388,7 @@ bash /home/ubuntu/l2-golive-next/kit/install-shadow.sh --verify /home/ubuntu/l2-
 **GO when:**
 
 - `SHA256SUMS` is OK;
-- `kit/GO-LIVE-PINS.sha256` hashes to `b18b4903aa94161f37dcf975715ab68cd7181bee489fbfc3dab3af64e5d2563b` (§3.2), `artifacts/SHA256SUMS` to `4039f26a…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
+- `kit/GO-LIVE-PINS.sha256` hashes to `e86b64eccb3164449dd45bd856c4c0ff44d929bbd6ee78bf3678952319e997d0` (§3.2), `artifacts/SHA256SUMS` to `4039f26a…`, `verify_release_signature.py` ends with `signature OK`, and every other pin line is `OK`;
 - `install-shadow.sh --verify` prints `build.json OK: L2 3d35a0f4, native 906336fd, HF1 7180/7186, HF2 7270, HF3 7360, KES enforce, slot-epoch binding and first-key floor 8620` and `verify OK`;
 - `build.json` shows `l2_commit` 3d35a0f4…, `l2_tracked_changes: 0`.
 
