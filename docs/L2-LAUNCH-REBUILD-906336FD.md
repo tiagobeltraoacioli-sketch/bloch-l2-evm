@@ -67,3 +67,19 @@ and two added checks. What the owner does differently:
 - The guest was not rebuilt with its own macOS recipe (Rust is not built on the coordination Mac); unchanged guest
   inputs are proven by an identical Linux rebuild of `f0d53fe`, `926d2cf` and `3d35a0f` and by the source diff.
 - `docs/public/L2-MAINNET-GO-LIVE.md` still carries the earlier hashes (its redaction tool needs private lists).
+
+## 5. Next release: the fleet named in `release.json` (audit AUDIT-L1L2-20261123, L2N-04)
+
+`release.json` of this release lists `compatible_l1_fleet` `906336fd…` and `0067547f…`. Since 2026-11-19 the
+validator fleet runs `4cd9b887b2a2a171b26b55da5c53d08c427def1a` (signed node release
+`bloch-pos-2026-11-19-kes-bind`). The audit compared the consensus crates `906336fd..4cd9b887`: every rule added is
+inert (`L2_FAULT_ISOLATION_ACTIVATION_EPOCH` and `FUNDED_DELEGATION_GROWTH_CAP_ACTIVATION_EPOCH` are `u64::MAX`; the
+KES change is in an attribution helper; the L2 handlers only gain node-local fault boundaries), so the replay of this
+release agrees with the fleet today.
+
+The signed `release.json` is release evidence and is not edited. For the next release:
+
+- `compatible_l1_fleet` names `4cd9b887b2a2a171b26b55da5c53d08c427def1a`;
+- the monitor's gate list (`l2_monitor.py`, `GATE_CONSTANTS` and the compiled values) knows the two gates above;
+- arming either gate on L1 needs, first, an L2 release that links a native commit carrying it: a follower built
+  against `906336fd` does not have the rule and halts at the first block that depends on it.

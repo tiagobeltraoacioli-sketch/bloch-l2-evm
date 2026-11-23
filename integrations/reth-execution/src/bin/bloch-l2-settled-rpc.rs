@@ -1167,6 +1167,21 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<Close
     Ok(())
 }
 
+/// Age of the follower's status file (seconds since its `written_at_unix`)
+/// above which `safe` closes and the status reads `stale` (review L2-06). The
+/// follower rewrites the file at every poll (10 s on mainnet), so an older
+/// file means it stopped (a `Follow::Halt`, a full disk, a crash): what it
+/// proved stays proven, so `finalized` stands, but `safe` tracks the native
+/// head and an old answer is not one. It equals the monitor's
+/// `status_age_crit`.
+const STATUS_STALE_AFTER_S: u64 = 900;
+
+/// Whether a status written at `written_at_unix` is stale at `now_unix`. A
+/// status without a time is stale; one written in the future (clock skew) is not.
+fn status_stale(written_at_unix: Option<u64>, now_unix: u64) -> bool {
+    written_at_unix.is_none_or(|written| now_unix.saturating_sub(written) > STATUS_STALE_AFTER_S)
+}
+
 /// The `status` member of `bloch_finality`: state of the follower's file and, when known, its age.
 fn status_signal(state: &str, written_at_unix: Option<u64>, schema: Option<&str>) -> serde_json::Value {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -1604,6 +1619,7 @@ async fn main() -> Result<()> {
     let mut refused_log = None;
     let mut closed_why: Option<String> = None;
     let mut safe_why: Option<String> = None;
+    let mut stale_seen = false;
     let mut lag_seen = None;
     let mut unindexed: Vec<serde_json::Value> = Vec::new();
     let withdrawal_pending = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1658,7 +1674,21 @@ async fn main() -> Result<()> {
                                 }
                                 safe_why = levels.safe_refused.clone();
                             }
-                            levels_closed.set(false, levels.safe_refused.is_some());
+                            let written_at = levels.status["written_at_unix"].as_u64();
+                            let now_unix = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs());
+                            let stale = status_stale(written_at, now_unix);
+                            if stale != stale_seen {
+                                if stale {
+                                    println!("finality status stale: written more than {STATUS_STALE_AFTER_S} s ago; safe closed, finalized stands");
+                                } else {
+                                    println!("finality status fresh again; safe reopened");
+                                }
+                                stale_seen = stale;
+                            }
+                            let safe_closed = levels.safe_refused.is_some() || stale;
+                            levels_closed.set(false, safe_closed);
                             match levels.finalized {
                                 Some(header) if above(&header, &finalized) => {
                                     state.set_finalized(header.clone());
@@ -1708,7 +1738,7 @@ async fn main() -> Result<()> {
                             let latest = factory.sealed_header(head_number)?;
                             *finality.write().expect("finality lock") = serde_json::json!({
                                 "latest": level_json(&latest),
-                                "safe": if levels.safe_refused.is_some() { serde_json::Value::Null } else { level_json(&safe) },
+                                "safe": if safe_closed { serde_json::Value::Null } else { level_json(&safe) },
                                 "finalized": level_json(&finalized),
                                 "finalized_height": number_of(&finalized),
                                 "l2_genesis": s["l2_genesis"],
@@ -1718,7 +1748,7 @@ async fn main() -> Result<()> {
                                     "verified_tip": s["verified_tip"], "verified_blocks": s["verified_blocks"],
                                     "safe_settlement": s["safe_settlement"],
                                 },
-                                "status": status_signal("ok", s["written_at_unix"].as_u64(), s["schema"].as_str()),
+                                "status": status_signal(if stale { "stale" } else { "ok" }, s["written_at_unix"].as_u64(), s["schema"].as_str()),
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
@@ -1887,6 +1917,21 @@ mod tests {
     fn a_status_ahead_of_this_database_does_not_close_the_levels() {
         assert!(!closes_levels(&eyre::Report::new(NotLocalYet { number: 7, written_at: None, schema: None })));
         assert!(closes_levels(&eyre::eyre!("settled L2 block 7 differs from the local canonical header")));
+    }
+
+    /// Review L2-06: a follower status older than `STATUS_STALE_AFTER_S` is
+    /// stale (safe closes, finalized stands); a missing time is stale, a time
+    /// ahead of the clock is not.
+    #[test]
+    fn an_old_follower_status_is_stale() {
+        let now = 1_800_000_000;
+        assert!(!status_stale(Some(now), now));
+        assert!(!status_stale(Some(now - STATUS_STALE_AFTER_S), now));
+        assert!(status_stale(Some(now - STATUS_STALE_AFTER_S - 1), now));
+        assert!(status_stale(Some(0), now));
+        assert!(status_stale(None, now));
+        assert!(!status_stale(Some(now + 3_600), now), "clock skew is not staleness");
+        assert_eq!(STATUS_STALE_AFTER_S, 900, "the monitor's status_age_crit");
     }
 
     #[test]

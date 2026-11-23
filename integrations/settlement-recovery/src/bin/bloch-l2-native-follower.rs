@@ -6,7 +6,8 @@
 //! follows a native node RPC (loopback `--rpc-port`, or a read-only remote
 //! `--rpc-url`), fetching only new canonical envelopes up to the node-reported
 //! finalized root. The source is untrusted for finality: a wrong or withheld
-//! block halts or stalls the replay, it cannot forge a finalized level.
+//! block halts or stalls the replay, it cannot forge a finalized level. The
+//! `safe` settlement is read only from a loopback node (`safe_source_trusted`).
 //!
 //! What the source says before anything is verified is its word, not a
 //! verification result (audit AUDIT-L1L2-20261123, L2N-03). A reply that is
@@ -197,6 +198,24 @@ fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
     Ok((host.to_owned(), port.parse().map_err(|_| "bad --rpc-url port")?))
 }
 
+/// Whether `host` names this machine (`localhost` or an IPv4 address in 127.0.0.0/8).
+fn loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::Ipv4Addr>().is_ok_and(|address| address.is_loopback())
+}
+
+/// Whether the `safe` settlement may be read from the native RPC at `host`
+/// (review L2-05). `safe` is the settlement the node holds at its head, read
+/// without any proof: whoever controls that node, or an unauthenticated HTTP
+/// path to it, could report a settlement at the sequencer's current head and
+/// make the RPC publish `safe = latest` with nothing posted on L1. Only a
+/// loopback node (the operator's own, or an SSH tunnel to it) is trusted for
+/// it; from a remote URL `safe` is withheld and the RPC serves `finalized` as
+/// `safe`. Finality never depends on the source: it is replayed and verified.
+fn safe_source_trusted(host: &str) -> bool {
+    loopback_host(host)
+}
+
 /// Minimal JSON-RPC client (HTTP/1.0, connection closed per call). Only
 /// read-only native methods are ever called.
 fn rpc((host, port): &(String, u16), method: &str, params: Value) -> Result<Value, String> {
@@ -383,14 +402,26 @@ fn run(o: &Options) -> Result<(), String> {
     // 2. Follow finalized native blocks.
     let mut walk = None;
     let mut log = SettlementLog::beside(&o.status);
+    let safe_trusted = safe_source_trusted(&o.rpc.0);
+    if !safe_trusted {
+        eprintln!(
+            "native follower: the native RPC {} is not loopback: no safe settlement is reported (safe = finalized); \
+             run a local node or an SSH tunnel to it for safe",
+            o.rpc.0
+        );
+    }
     loop {
         match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index, &mut walk, &clock) {
             Ok(added) => {
-                let safe = match rpc(&o.rpc, "getl2settlement", json!([])) {
-                    Ok(view) => safe_settlement(&view),
-                    Err(e) => {
-                        eprintln!("native follower: transient: {e}");
-                        None
+                let safe = if !safe_trusted {
+                    None
+                } else {
+                    match rpc(&o.rpc, "getl2settlement", json!([])) {
+                        Ok(view) => safe_settlement(&view),
+                        Err(e) => {
+                            eprintln!("native follower: transient: {e}");
+                            None
+                        }
                     }
                 };
                 if let Some(status) = status(&verifier, &policy, safe, o.status_schema, &mut log)? {
@@ -746,6 +777,22 @@ mod tests {
 
     fn entry(number: u64) -> Value {
         json!({"l2_number": number, "l2_hash": format!("{number:064x}")})
+    }
+
+    /// Review L2-05: `safe` is read only from a loopback native RPC.
+    #[test]
+    fn safe_is_read_only_from_a_loopback_native_rpc() {
+        for host in ["127.0.0.1", "127.8.9.10", "localhost", "LOCALHOST"] {
+            assert!(safe_source_trusted(host), "{host}");
+        }
+        for host in ["10.0.0.5", "152.236.5.112", "node.example.org", "localhost.example.org", "128.0.0.1", "0.0.0.0"] {
+            assert!(!safe_source_trusted(host), "{host}");
+        }
+        let pin = "ab".repeat(32);
+        let base = ["--manifest", "m", "--network-pin", &pin, "--state", "d", "--status", "s"];
+        let with = |extra: [&str; 2]| -> Vec<String> { base.iter().chain(extra.iter()).map(|a| a.to_string()).collect() };
+        assert!(safe_source_trusted(&parse(&with(["--rpc-port", "8545"])).unwrap().rpc.0));
+        assert!(!safe_source_trusted(&parse(&with(["--rpc-url", "http://10.1.2.3:8545"])).unwrap().rpc.0));
     }
 
     #[test]
