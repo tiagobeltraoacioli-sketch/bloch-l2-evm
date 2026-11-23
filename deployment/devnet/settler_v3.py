@@ -2458,10 +2458,16 @@ class Settler:
         if signer != keys.index(self.settler_pubkey) or signed_next != next_set:
             raise Halt('the authorization names another signer or another next set than requested')
         commitment = settlement_commitment(tx)
+        digest = settler_digest(bytes.fromhex(self.c['network']), self.chain_id, commitment, next_set).hex()
+        # The signer prints what it signed. The worker derives the digest itself (network, chain, this settlement,
+        # the next set): a signer that signed anything else, for example on another genesis, is not broadcast.
+        reported = re.findall(r'^\s*digest\s*:\s*([0-9a-f]{64})\s*$', result.stdout or '', re.M)
+        if reported != [digest]:
+            raise Halt(f'the settler signer signed {reported or "an unreported digest"}, this settlement on this '
+                       f'network is {digest}')
         meta = {'number': number, 'tx_sha256': hashlib.sha256(tx).hexdigest(), 'commitment': commitment.hex(),
                 'set_hash': set_hash, 'signer': signer, 'signature_bytes': len(signature),
-                'next_set_hash': settler_set_hash(next_set).hex() if next_set else None,
-                'digest': settler_digest(bytes.fromhex(self.c['network']), self.chain_id, commitment, next_set).hex()}
+                'next_set_hash': settler_set_hash(next_set).hex() if next_set else None, 'digest': digest}
         atomic_write(wire_path, wire)
         atomic_write(meta_path, json.dumps(meta, indent=2) + '\n')
         if next_set is not None:

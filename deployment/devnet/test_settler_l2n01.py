@@ -144,7 +144,10 @@ class GatedL1(t.Fake):
                                   next_set)
         wire = tx + s.encode_authorization(keys.index(self.own), toy_sign(self.own, digest), next_set)
         Path(option('--out')).write_text(self.tamper(wire).hex() + '\n')
+        out.stdout = f'settlement {s.settlement_commitment(tx).hex()}\n  digest         : {self.signed_digest(digest).hex()}\n'
         return out
+
+    signed_digest = staticmethod(lambda digest: digest)
 
     tamper = staticmethod(lambda wire: wire)
 
@@ -432,6 +435,20 @@ class BehindTheGate(Base):
             with self.assertRaisesRegex(s.Halt, message):
                 worker.cycle()
             self.assertEqual(fake.sent, [], 'nothing unverified is broadcast')
+
+    def test_a_signer_that_signed_another_digest_is_not_broadcast(self):
+        # For example a signer pointed at another genesis manifest: its signature is over another network.
+        for name, report in (('other', lambda digest: bytes(32)), ('silent', None)):
+            fake = self.armed()
+            if report is None:
+                real = fake.signer
+                fake.signer = lambda argv: types.SimpleNamespace(**{**vars(real(argv)), 'stdout': ''})
+            else:
+                fake.signed_digest = report
+            worker = self.settler(fake, workdir=str(self.root / name), settler_authorization=self.authorization())
+            with self.assertRaisesRegex(s.Halt, 'the settler signer signed'):
+                worker.cycle()
+            self.assertEqual(fake.sent, [])
 
     def test_a_signer_refusal_stops_the_worker(self):
         fake = self.armed()
