@@ -785,7 +785,7 @@ fn spool_pending_nonce(
         let (original, spool, factory) = (original.clone(), spool.clone(), factory.clone());
         async move {
             let mut values: Vec<serde_json::Value> = params.parse()?;
-            let pending = values.get(1).and_then(|v| v.as_str()) == Some("pending");
+            let pending = values.get(1).and_then(|v| v.as_str()).is_some_and(bloch_reth_execution::rpc::is_pending_tag);
             if pending {
                 values[1] = serde_json::Value::String("latest".into());
             }
@@ -1103,8 +1103,10 @@ impl ClosedLevels {
         self.safe.store(safe, Ordering::Release);
     }
 
+    /// The eth API reads block tags without regard to case (alloy `BlockNumberOrTag::from_str` matches on
+    /// `to_lowercase`), so `"Finalized"` and `"SAFE"` name the same levels (audit AUDIT-L1L2-20261123, L2N-10).
     fn tag_closed(&self, tag: Option<&str>) -> bool {
-        match tag {
+        match tag.map(str::to_lowercase).as_deref() {
             Some("finalized") => self.finalized.load(Ordering::Acquire),
             Some("safe") => self.safe.load(Ordering::Acquire),
             _ => false,
@@ -1875,9 +1877,23 @@ mod tests {
         assert!(!check(json!(["0x10", false]), Some(0)));
         assert!(!check(json!(["0xabc"]), Some(1)));
         assert!(!check(json!([{"fromBlock": "0x1", "toBlock": "latest"}]), None));
+        // Audit L2N-10: the eth API reads tags without regard to case; so does the refusal.
+        for (finalized, safe) in [("Finalized", "Safe"), ("FINALIZED", "SAFE"), ("fInAlIzEd", "sAfE")] {
+            assert!(check(json!([finalized, false]), Some(0)), "{finalized}");
+            assert!(check(json!([safe, false]), Some(0)), "{safe}");
+            assert!(check(json!(["0xabc", finalized]), Some(1)));
+            assert!(check(json!(["0xabc", {"blockNumber": safe}]), Some(1)));
+            assert!(check(json!([{"fromBlock": finalized, "toBlock": "0x2"}]), None));
+            assert!(check(json!([{"fromBlock": "0x1", "toBlock": safe}]), None));
+        }
+        for open in ["Latest", "PENDING", "Earliest", "finalised", "safe ", "0xFINALIZED"] {
+            assert!(!check(json!([open, false]), Some(0)), "{open}");
+        }
         closed.set(false, true);
         assert!(check(json!(["safe", false]), Some(0)));
+        assert!(check(json!(["Safe", false]), Some(0)));
         assert!(!check(json!(["finalized", false]), Some(0)));
+        assert!(!check(json!(["Finalized", false]), Some(0)));
     }
 
     #[tokio::test]
@@ -1903,6 +1919,8 @@ mod tests {
         };
         assert!(ask("finalized").await.is_err(), "closed from the start");
         assert!(ask("safe").await.is_err());
+        assert!(ask("Finalized").await.is_err(), "a capitalised tag is the same level (L2N-10)");
+        assert!(ask("SAFE").await.is_err());
         assert!(settlement().await.is_err());
         assert_eq!(ask("latest").await.unwrap(), json!({"tag": "latest"}));
         closed.set(false, true);
