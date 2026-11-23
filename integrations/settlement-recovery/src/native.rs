@@ -500,6 +500,12 @@ impl IncrementalNativeVerifierV1 {
         self.applied
     }
 
+    /// Slot of the verified head: every block that can still be applied has a
+    /// greater slot.
+    pub fn slot(&self) -> u64 {
+        self.state.slot()
+    }
+
     /// Apply one block after enforcing [`NativeBlockLimitsV1`].
     pub fn apply(&mut self, block: &NativeReplayBlockV1, limits: NativeBlockLimitsV1) -> Result<(), NativeFinalityErrorV1> {
         use NativeFinalityErrorV1 as E;

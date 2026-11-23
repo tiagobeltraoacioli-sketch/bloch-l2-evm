@@ -8,6 +8,17 @@
 //! finalized root. The source is untrusted for finality: a wrong or withheld
 //! block halts or stalls the replay, it cannot forge a finalized level.
 //!
+//! What the source says before anything is verified is its word, not a
+//! verification result (audit AUDIT-L1L2-20261123, L2N-03). A reply that is
+//! not a block, a block that is not the one asked for, or a chain of blocks
+//! that cannot descend from the verified head (slots that do not decrease, a
+//! slot at or below the head's, a slot ahead of the clock, more blocks than
+//! `--max-blocks`) ends the walk for this round: its unverified files are
+//! removed and the follower asks again. Only a block that fails the replay
+//! itself is a halt (exit 3). Unverified blocks wait on disk as `.pending`
+//! files; none is written when that would leave less than `--min-free-bytes`
+//! free on the state filesystem, and all of them are removed at start.
+//!
 //! Mainnet (`BPOSMAN1` Genesis-4 manifest + `--carryover`): the genesis has no
 //! L2 registry; the native transition installs it at the epoch-5850 flag day and
 //! the follower halts unless it installs exactly the pinned mainnet policy
@@ -64,13 +75,15 @@ const USAGE: &str = "\
 usage: bloch-l2-native-follower --manifest PATH --network-pin HEX (--rpc-port N | --rpc-url http://HOST:PORT)
                                 --state DIR --status FILE [--carryover TSV]
                                 [--poll-seconds N] [--max-blocks N] [--max-fetch N]
-                                [--status-schema v2|v3]
+                                [--min-free-bytes N] [--status-schema v2|v3]
 Re-verifies retained history from the pinned genesis on start, then follows finalized
 native blocks from a native node RPC (read-only methods: getchaininfo, getblockraw,
 getl2settlement) and writes verified finality status. A BPOSMAN3 manifest is a
 development network with the L2 at genesis; the Genesis-4 mainnet manifest
 (BPOSMAN1, --network-pin f47d3e49...1966) needs --carryover (the decompressed
 carryover.tsv) and the L2 is checked at its epoch-5850 activation.
+--min-free-bytes (default 8589934592): fetched blocks wait unverified on disk; none is
+written when that would leave less free space than this on the --state filesystem.
 ";
 
 /// The file format of `--status`. See the module documentation.
@@ -92,6 +105,8 @@ struct Options {
     poll: Duration,
     max_blocks: usize,
     max_fetch: usize,
+    /// Free space the unverified walk leaves on the state filesystem.
+    min_free_bytes: u64,
     status_schema: StatusSchema,
 }
 
@@ -126,7 +141,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let name = pair[0].strip_prefix("--").ok_or("options must start with --")?;
         if ![
             "manifest", "carryover", "network-pin", "rpc-port", "rpc-url", "state", "status", "poll-seconds", "max-blocks",
-            "max-fetch", "status-schema",
+            "max-fetch", "min-free-bytes", "status-schema",
         ]
         .contains(&name)
         {
@@ -159,6 +174,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         poll: Duration::from_secs(num("poll-seconds", 10)?.clamp(1, 600)),
         max_blocks: num("max-blocks", 5_000_000)? as usize,
         max_fetch: num("max-fetch", 20_000)? as usize,
+        min_free_bytes: num("min-free-bytes", DEFAULT_MIN_FREE_BYTES)?,
         status_schema: match map.get("status-schema").map(String::as_str) {
             None | Some("v2") => StatusSchema::V2,
             Some("v3") => StatusSchema::V3,
@@ -309,13 +325,14 @@ fn run(o: &Options) -> Result<(), String> {
         File::open(&o.manifest).and_then(|mut f| f.read_exact(&mut head)).map_err(|e| format!("manifest: {e}"))?;
         head
     };
-    let (mut verifier, policy) = if &magic == b"BPOSMAN3" {
+    let (mut verifier, policy, clock) = if &magic == b"BPOSMAN3" {
         if o.carryover.is_some() {
             return Err("--carryover applies only to a funded (BPOSMAN1/2) manifest".into());
         }
-        let (_, genesis, policy) = load_native_manifest(&o.manifest, o.pin, 1_048_576).map_err(|e| e.to_string())?;
+        let (manifest, genesis, policy) = load_native_manifest(&o.manifest, o.pin, 1_048_576).map_err(|e| e.to_string())?;
         let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
-        (IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?, policy)
+        let clock = SlotClock { genesis_time_ms: manifest.genesis_time_ms, slot_ms: manifest.slot_ms };
+        (IncrementalNativeVerifierV1::new(&genesis, trust, o.max_blocks).map_err(|e| e.to_string())?, policy, clock)
     } else {
         // The mainnet flag day is pinned in this build; any other flag-day
         // network only in a qualification build of the native crates
@@ -323,8 +340,9 @@ fn run(o: &Options) -> Result<(), String> {
         let (policy, attestor_set) = mainnet::flag_day_policy(o.pin)
             .ok_or_else(|| format!("a funded manifest must be the Genesis-4 mainnet ({})", mainnet::MAINNET_NETWORK))?;
         let started = SystemTime::now();
-        let (_, genesis) = load_flag_day_manifest(&o.manifest, o.carryover.as_deref(), o.pin, 1_048_576)
+        let (manifest, genesis) = load_flag_day_manifest(&o.manifest, o.carryover.as_deref(), o.pin, 1_048_576)
             .map_err(|e| e.to_string())?;
+        let clock = SlotClock { genesis_time_ms: manifest.genesis_time_ms, slot_ms: manifest.slot_ms };
         let trust = NativeGenesisTrustV1 { state_root: genesis.state_root().into(), settlement_policy: policy };
         eprintln!(
             "native follower: flag-day genesis {} state root {} loaded in {:?}",
@@ -334,12 +352,17 @@ fn run(o: &Options) -> Result<(), String> {
         );
         let verifier = IncrementalNativeVerifierV1::new_flag_day(&genesis, trust, attestor_set, o.max_blocks)
             .map_err(|e| e.to_string())?;
-        (verifier, policy)
+        (verifier, policy, clock)
     };
     let limits = NativeBlockLimitsV1::default();
     let blocks_dir = o.state.join("blocks");
     fs::create_dir_all(&blocks_dir).map_err(|e| e.to_string())?;
     let index_path = o.state.join("index");
+    // Unverified blocks of an earlier process are never trusted, or kept.
+    let removed = remove_pending(&blocks_dir).map_err(|e| format!("blocks directory: {e}"))?;
+    if removed > 0 {
+        eprintln!("native follower: removed {removed} unverified .pending files of an earlier walk");
+    }
 
     // 1. Re-verify everything retained, from the pinned genesis.
     let started = SystemTime::now();
@@ -361,7 +384,7 @@ fn run(o: &Options) -> Result<(), String> {
     let mut walk = None;
     let mut log = SettlementLog::beside(&o.status);
     loop {
-        match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index, &mut walk) {
+        match follow_once(o, &mut verifier, limits, &blocks_dir, &mut index, &mut walk, &clock) {
             Ok(added) => {
                 let safe = match rpc(&o.rpc, "getl2settlement", json!([])) {
                     Ok(view) => safe_settlement(&view),
@@ -393,9 +416,160 @@ enum Follow {
 /// rounds (more than `--max-fetch` blocks). Fetched blocks wait on disk as
 /// `<id>.pending` (unverified, never listed in the index); only their ids stay
 /// in memory, newest first.
+#[derive(Default)]
 struct Walk {
     ids: Vec<B256>,
     cursor: B256,
+    /// Slot of the last block fetched (the child of `cursor`).
+    child_slot: Option<u64>,
+}
+
+/// Free space the walk leaves on the state filesystem unless `--min-free-bytes` says otherwise.
+const DEFAULT_MIN_FREE_BYTES: u64 = 8 * 1_073_741_824;
+/// Slots a hinted block may be ahead of this host's clock (32 minutes on mainnet).
+const CLOCK_SLACK_SLOTS: u64 = 64;
+
+/// Slot time of the followed network, from its pinned manifest.
+struct SlotClock {
+    genesis_time_ms: u64,
+    slot_ms: u64,
+}
+
+impl SlotClock {
+    /// The newest slot a block can honestly have now, with [`CLOCK_SLACK_SLOTS`].
+    /// `None` when the clock cannot say (a zero slot time, a clock before genesis).
+    fn newest_slot(&self, now_ms: u64) -> Option<u64> {
+        let elapsed = now_ms.checked_sub(self.genesis_time_ms)?;
+        Some((elapsed.checked_div(self.slot_ms)?).saturating_add(CLOCK_SLACK_SLOTS))
+    }
+}
+
+/// What bounds one round of the walk. Nothing here comes from the source.
+struct WalkBounds {
+    head: B256,
+    /// Slot of the verified head: every descendant has a greater slot.
+    head_slot: u64,
+    /// Blocks the verifier can still apply (`--max-blocks` minus applied).
+    room: usize,
+    max_fetch: usize,
+    min_free_bytes: u64,
+    /// Newest slot the first block of a walk may have.
+    newest_slot: Option<u64>,
+}
+
+/// The source's reply to `getblockraw`, as bytes within the envelope bounds.
+/// Every failure is the source's: the caller retries, it never halts.
+fn raw_block(reply: &Value) -> Result<Vec<u8>, String> {
+    let text = reply.as_str().ok_or("getblockraw reply is not a hex string")?;
+    if text.len() > 2 * 4 * 1_048_576 {
+        return Err("getblockraw reply is above the envelope bound".into());
+    }
+    let bytes = hex::decode(text).map_err(|_| "getblockraw reply is not hex")?;
+    if bytes.len() < 36 {
+        return Err("getblockraw reply is below the envelope bound".into());
+    }
+    Ok(bytes)
+}
+
+/// Slot and parent of a fetched envelope, after checking that it is canonical
+/// and is the block that was asked for (its id is the hash of its bytes).
+fn inspect_block(bytes: &[u8], id: &B256) -> Result<(u64, B256), String> {
+    let block = decode_block(bytes, id)?;
+    Ok((block.envelope.header.slot, B256::from(block.envelope.header.parent)))
+}
+
+/// Why block `slot` cannot be the next block of a walk towards a head at
+/// `head_slot`: on one chain slots strictly increase from parent to child.
+fn check_walk_slot(child_slot: Option<u64>, bounds: &WalkBounds, slot: u64) -> Result<(), String> {
+    match child_slot {
+        Some(child) if slot >= child => return Err(format!("slot {slot} is not below its child's slot {child}")),
+        None if bounds.newest_slot.is_some_and(|newest| slot > newest) => {
+            return Err(format!("slot {slot} is ahead of this host's clock"));
+        }
+        _ => {}
+    }
+    if slot <= bounds.head_slot {
+        return Err(format!("slot {slot} is not above the verified head's slot {}: not a descendant", bounds.head_slot));
+    }
+    Ok(())
+}
+
+/// Free bytes on the filesystem of `dir` for this (unprivileged) process.
+fn free_bytes(dir: &Path) -> std::io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a NUL-terminated string and `stat` is writable storage of the right type.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: statvfs returned 0, so it initialized `stat`.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+/// Remove every `.pending` file of `blocks_dir`; returns how many.
+fn remove_pending(blocks_dir: &Path) -> std::io::Result<usize> {
+    let mut removed = 0;
+    for entry in fs::read_dir(blocks_dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "pending") {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Drop a walk that will not be verified, with its unverified files.
+fn abandon(blocks_dir: &Path, walk: &mut Option<Walk>) {
+    for id in walk.take().into_iter().flat_map(|w| w.ids) {
+        let _ = fs::remove_file(blocks_dir.join(format!("{}.pending", hex::encode(id))));
+    }
+}
+
+/// One round of the walk from `walk.cursor` back to `bounds.head`: fetch,
+/// check what can be checked without the verifier, store as `.pending`.
+/// `Ok(true)`: the head was reached, `walk.ids` is the whole chain, newest
+/// first. `Ok(false)`: `max_fetch` blocks fetched, continue next round.
+/// `Err`: the source gave something that cannot be the chain above the head
+/// (or the disk has no room); the caller abandons the walk and retries.
+fn walk_back(
+    fetch: &mut dyn FnMut(&B256) -> Result<Value, String>,
+    inspect: &dyn Fn(&[u8], &B256) -> Result<(u64, B256), String>,
+    free: &dyn Fn() -> std::io::Result<u64>,
+    blocks_dir: &Path,
+    walk: &mut Walk,
+    bounds: &WalkBounds,
+) -> Result<bool, String> {
+    let mut fetched = 0;
+    while walk.cursor != bounds.head {
+        if fetched >= bounds.max_fetch {
+            return Ok(false);
+        }
+        if walk.cursor.is_zero() || walk.ids.len() >= bounds.room {
+            return Err("the source's finalized chain does not descend from the verified head".into());
+        }
+        let bytes = raw_block(&fetch(&walk.cursor)?)?;
+        let (slot, parent) = inspect(&bytes, &walk.cursor)?;
+        check_walk_slot(walk.child_slot, bounds, slot)?;
+        let available = free().map_err(|e| format!("free space of the state directory: {e}"))?;
+        if available.saturating_sub(bytes.len() as u64) < bounds.min_free_bytes {
+            return Err(format!(
+                "state filesystem has {available} bytes free, --min-free-bytes is {}: walk of {} unverified blocks dropped",
+                bounds.min_free_bytes,
+                walk.ids.len()
+            ));
+        }
+        let pending = blocks_dir.join(format!("{}.pending", hex::encode(walk.cursor)));
+        // Listed before it is written, so an abandoned walk removes a partial file too.
+        walk.ids.push(walk.cursor);
+        fs::write(&pending, &bytes).map_err(|e| format!("write {}: {e}", pending.display()))?;
+        walk.child_slot = Some(slot);
+        walk.cursor = parent;
+        fetched += 1;
+    }
+    Ok(true)
 }
 
 fn follow_once(
@@ -405,6 +579,7 @@ fn follow_once(
     blocks_dir: &Path,
     index: &mut File,
     walk: &mut Option<Walk>,
+    clock: &SlotClock,
 ) -> Result<usize, Follow> {
     let head = verifier.head();
     if walk.is_none() {
@@ -416,30 +591,39 @@ fn follow_once(
         if hint == head {
             return Ok(0);
         }
-        *walk = Some(Walk { ids: Vec::new(), cursor: hint });
+        *walk = Some(Walk { cursor: hint, ..Walk::default() });
     }
-    let state = walk.as_mut().expect("walk set above");
     // Walk back from the hint to our verified head; the finalized prefix cannot reorganize.
-    let mut fetched = 0;
-    while state.cursor != head {
-        if fetched >= o.max_fetch {
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let bounds = WalkBounds {
+        head,
+        head_slot: verifier.slot(),
+        room: o.max_blocks.saturating_sub(verifier.applied()),
+        max_fetch: o.max_fetch,
+        min_free_bytes: o.min_free_bytes,
+        newest_slot: clock.newest_slot(now_ms),
+    };
+    let state = walk.as_mut().expect("walk set above");
+    let reached = walk_back(
+        &mut |id| rpc(&o.rpc, "getblockraw", json!([hex::encode(id)])),
+        &inspect_block,
+        &|| free_bytes(blocks_dir),
+        blocks_dir,
+        state,
+        &bounds,
+    );
+    match reached {
+        Ok(true) => {}
+        Ok(false) => {
             eprintln!("native follower: walking back to the verified head, {} blocks fetched so far", state.ids.len());
             return Ok(0);
         }
-        let raw = rpc(&o.rpc, "getblockraw", json!([hex::encode(state.cursor)])).map_err(Follow::Transient)?;
-        let bytes = hex::decode(raw.as_str().unwrap_or_default()).map_err(|_| Follow::Transient("bad raw hex".into()))?;
-        if bytes.len() < 36 || bytes.len() > 4 * 1_048_576 {
-            return Err(Follow::Halt("native block outside size bounds".into()));
+        // The source's word, not a verification result: drop the walk and its files, ask again.
+        Err(e) => {
+            let dropped = state.ids.len();
+            abandon(blocks_dir, walk);
+            return Err(Follow::Transient(format!("{e} (walk of {dropped} unverified blocks dropped)")));
         }
-        let parent = B256::from_slice(&bytes[4..36]);
-        let pending = blocks_dir.join(format!("{}.pending", hex::encode(state.cursor)));
-        fs::write(&pending, &bytes).map_err(|e| Follow::Halt(e.to_string()))?;
-        state.ids.push(state.cursor);
-        fetched += 1;
-        if parent.is_zero() || verifier.applied() + state.ids.len() > o.max_blocks {
-            return Err(Follow::Halt("node's finalized chain does not descend from the verified head".into()));
-        }
-        state.cursor = parent;
     }
     let ids = std::mem::take(&mut state.ids);
     *walk = None;
@@ -616,5 +800,250 @@ mod tests {
         assert_eq!(long.recent.front().unwrap()["l2_number"], 137);
         assert_eq!(long.recent.back().unwrap()["l2_number"], 200);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- audit AUDIT-L1L2-20261123, L2N-03: the walk and the source's word ----
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("follower-walk-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn pending_files(dir: &Path) -> usize {
+        fs::read_dir(dir).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pending")).count()
+    }
+
+    /// A canonical native envelope with no signature, attestations or transactions.
+    fn envelope(parent: B256, slot: u64) -> (B256, Vec<u8>) {
+        use bloch_pos_committee::header::{BlockHeaderV4, VERSION_G4};
+        let header = BlockHeaderV4 {
+            version: VERSION_G4,
+            parent: parent.0,
+            state_root: [1; 32],
+            body_root: [2; 32],
+            slot,
+            proposer_index: 0,
+            randao_reveal: [3; 32],
+            randao_mix: [4; 32],
+            justified_root: [5; 32],
+            finalized_root: [6; 32],
+            attestation_root: [7; 32],
+            coherence_root: [8; 32],
+        };
+        let mut bytes = header.canonical_serialize().to_vec();
+        bytes.extend_from_slice(&[0u8; 12]); // empty signature, no attestations, no transactions
+        let id = B256::from(*codec::decode_envelope(&bytes).unwrap().block_id().as_bytes());
+        (id, bytes)
+    }
+
+    fn bounds(head: B256, head_slot: u64) -> WalkBounds {
+        WalkBounds { head, head_slot, room: 1_000, max_fetch: 1_000, min_free_bytes: 0, newest_slot: Some(1_000) }
+    }
+
+    fn plenty() -> std::io::Result<u64> {
+        Ok(u64::MAX)
+    }
+
+    /// A chain of `n` real envelopes above `head` at `head_slot`, keyed by id; returns the tip.
+    fn chain(head: B256, head_slot: u64, n: u64) -> (B256, std::collections::BTreeMap<B256, Vec<u8>>) {
+        let mut blocks = std::collections::BTreeMap::new();
+        let mut parent = head;
+        for i in 1..=n {
+            let (id, bytes) = envelope(parent, head_slot + i);
+            blocks.insert(id, bytes);
+            parent = id;
+        }
+        (parent, blocks)
+    }
+
+    #[test]
+    fn a_reply_that_is_not_a_block_is_the_sources_word_never_a_halt() {
+        // The finding's first PoC: `getblockraw -> null` was `Halt("native block outside size bounds")`.
+        for reply in [Value::Null, json!(7), json!(""), json!("zz"), json!("00"), json!({"raw": "00"}), json!(["00"])] {
+            assert!(raw_block(&reply).is_err(), "{reply}");
+        }
+        assert!(raw_block(&json!("00".repeat(4 * 1_048_576 + 1))).is_err(), "above the envelope bound");
+        assert_eq!(raw_block(&json!("ab".repeat(36))).unwrap(), vec![0xab; 36]);
+
+        let dir = scratch("null");
+        let head = B256::repeat_byte(0xaa);
+        let (tip, blocks) = chain(head, 10, 3);
+        // The source serves two real blocks and then `null`.
+        let mut served = 0;
+        let mut fetch = |id: &B256| -> Result<Value, String> {
+            served += 1;
+            Ok(if served == 3 { Value::Null } else { json!(hex::encode(&blocks[id])) })
+        };
+        let mut walk = Some(Walk { cursor: tip, ..Walk::default() });
+        let error = walk_back(&mut fetch, &inspect_block, &plenty, &dir, walk.as_mut().unwrap(), &bounds(head, 10))
+            .expect_err("a transient error for the caller, which retries");
+        assert_eq!(error, "getblockraw reply is not a hex string");
+        assert_eq!(pending_files(&dir), 2);
+        abandon(&dir, &mut walk);
+        assert!(walk.is_none());
+        assert_eq!(pending_files(&dir), 0, "an abandoned walk leaves nothing on disk");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_honest_chain_is_walked_over_several_rounds_and_ends_at_the_head() {
+        let dir = scratch("honest");
+        let head = B256::repeat_byte(0xaa);
+        let (tip, blocks) = chain(head, 10, 5);
+        let mut fetch = |id: &B256| -> Result<Value, String> { Ok(json!(hex::encode(&blocks[id]))) };
+        let mut walk = Walk { cursor: tip, ..Walk::default() };
+        let limits = WalkBounds { max_fetch: 2, ..bounds(head, 10) };
+        assert_eq!(walk_back(&mut fetch, &inspect_block, &plenty, &dir, &mut walk, &limits), Ok(false));
+        assert_eq!(walk_back(&mut fetch, &inspect_block, &plenty, &dir, &mut walk, &limits), Ok(false));
+        assert_eq!(walk_back(&mut fetch, &inspect_block, &plenty, &dir, &mut walk, &limits), Ok(true));
+        assert_eq!((walk.ids.len(), walk.ids[0], pending_files(&dir)), (5, tip, 5));
+        for id in &walk.ids {
+            assert_eq!(fs::read(dir.join(format!("{}.pending", hex::encode(id)))).unwrap(), blocks[id]);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_block_that_is_not_the_one_asked_for_is_refused_before_it_is_written() {
+        let dir = scratch("misidentified");
+        let head = B256::repeat_byte(0xaa);
+        let (tip, blocks) = chain(head, 10, 2);
+        let (_, other) = envelope(B256::repeat_byte(0x55), 12);
+        // Another canonical envelope under the asked id, then trailing bytes, then junk of envelope size.
+        let mut junk = blocks[&tip].clone();
+        junk.push(0);
+        for wrong in [other, junk, vec![0u8; 316]] {
+            let mut fetch = |_: &B256| -> Result<Value, String> { Ok(json!(hex::encode(&wrong))) };
+            let mut walk = Walk { cursor: tip, ..Walk::default() };
+            assert!(walk_back(&mut fetch, &inspect_block, &plenty, &dir, &mut walk, &bounds(head, 10)).is_err());
+            assert_eq!((walk.ids.len(), pending_files(&dir)), (0, 0));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The finding's second PoC: an endless chain of well-formed, hash-linked blocks that
+    /// never reaches the head. Slots decrease from child to parent, so the walk ends at the
+    /// head's slot, however long the fabricated chain is below it.
+    #[test]
+    fn an_endless_fake_chain_ends_at_the_heads_slot_and_leaves_no_file() {
+        let dir = scratch("endless");
+        let head = B256::repeat_byte(0xaa);
+        // 60 fabricated blocks at slots 1..=60 on another root; the verified head is at slot 10.
+        let (tip, blocks) = chain(B256::repeat_byte(0xbb), 0, 60);
+        let mut fetch = |id: &B256| -> Result<Value, String> { Ok(json!(hex::encode(&blocks[id]))) };
+        let mut walk = Some(Walk { cursor: tip, ..Walk::default() });
+        let error = walk_back(&mut fetch, &inspect_block, &plenty, &dir, walk.as_mut().unwrap(), &bounds(head, 10))
+            .expect_err("the chain does not descend from the head");
+        assert!(error.contains("slot 10 is not above the verified head's slot 10: not a descendant"), "{error}");
+        // Slots 60..=11 were stored; the block at the head's slot was not.
+        assert_eq!((walk.as_ref().unwrap().ids.len(), pending_files(&dir)), (50, 50));
+        abandon(&dir, &mut walk);
+        assert_eq!(pending_files(&dir), 0);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn slots_must_decrease_stay_above_the_head_and_not_run_ahead_of_the_clock() {
+        let b = bounds(B256::ZERO, 100);
+        assert_eq!(check_walk_slot(None, &b, 1_000), Ok(()));
+        assert!(check_walk_slot(None, &b, 1_001).unwrap_err().contains("ahead of this host's clock"));
+        assert_eq!(check_walk_slot(Some(500), &b, 499), Ok(()));
+        assert!(check_walk_slot(Some(500), &b, 500).unwrap_err().contains("not below its child's slot"));
+        assert!(check_walk_slot(Some(500), &b, 900).unwrap_err().contains("not below its child's slot"));
+        assert_eq!(check_walk_slot(Some(500), &b, 101), Ok(()));
+        assert!(check_walk_slot(Some(500), &b, 100).unwrap_err().contains("not a descendant"));
+        assert!(check_walk_slot(None, &b, 0).unwrap_err().contains("not a descendant"));
+        // The clock bound applies to the first block only; later ones are below it by the slot rule.
+        assert_eq!(check_walk_slot(Some(5_000), &b, 4_999), Ok(()));
+        // No clock (a zero slot time in the manifest): the slot rules still hold.
+        let no_clock = WalkBounds { newest_slot: None, ..bounds(B256::ZERO, 100) };
+        assert_eq!(check_walk_slot(None, &no_clock, u64::MAX), Ok(()));
+
+        let clock = SlotClock { genesis_time_ms: 1_786_656_679_962, slot_ms: 30_000 };
+        assert_eq!(clock.newest_slot(1_786_656_679_962), Some(CLOCK_SLACK_SLOTS));
+        assert_eq!(clock.newest_slot(1_786_656_679_962 + 30_000 * 200_000 + 29_999), Some(200_000 + CLOCK_SLACK_SLOTS));
+        assert_eq!(clock.newest_slot(0), None, "a clock before genesis bounds nothing");
+        assert_eq!(SlotClock { genesis_time_ms: 0, slot_ms: 0 }.newest_slot(5), None);
+
+        // A walk whose first block claims a slot ahead of the clock writes nothing.
+        let dir = scratch("clock");
+        let head = B256::repeat_byte(0xaa);
+        let (tip, blocks) = chain(head, 2_000, 3);
+        let mut fetch = |id: &B256| -> Result<Value, String> { Ok(json!(hex::encode(&blocks[id]))) };
+        let mut walk = Walk { cursor: tip, ..Walk::default() };
+        let error = walk_back(&mut fetch, &inspect_block, &plenty, &dir, &mut walk, &bounds(head, 100)).unwrap_err();
+        assert!(error.contains("ahead of this host's clock"), "{error}");
+        assert_eq!(pending_files(&dir), 0);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_block_room_and_at_the_free_space_reserve() {
+        let dir = scratch("room");
+        let head = B256::repeat_byte(0xaa);
+        let (tip, blocks) = chain(head, 10, 6);
+        let mut fetch = |id: &B256| -> Result<Value, String> { Ok(json!(hex::encode(&blocks[id]))) };
+
+        // --max-blocks leaves room for 4 more blocks: the fifth is not fetched.
+        let mut walk = Some(Walk { cursor: tip, ..Walk::default() });
+        let limits = WalkBounds { room: 4, ..bounds(head, 10) };
+        let error = walk_back(&mut fetch, &inspect_block, &plenty, &dir, walk.as_mut().unwrap(), &limits).unwrap_err();
+        assert!(error.contains("does not descend from the verified head"), "{error}");
+        assert_eq!(pending_files(&dir), 4);
+        abandon(&dir, &mut walk);
+        assert_eq!(pending_files(&dir), 0);
+
+        // The reserve: with 1,000 bytes free and a reserve of 800, a 316-byte block does not fit.
+        let mut walk = Walk { cursor: tip, ..Walk::default() };
+        let limits = WalkBounds { min_free_bytes: 800, ..bounds(head, 10) };
+        let error = walk_back(&mut fetch, &inspect_block, &|| Ok(1_000), &dir, &mut walk, &limits).unwrap_err();
+        assert!(error.contains("--min-free-bytes is 800"), "{error}");
+        assert_eq!((walk.ids.len(), pending_files(&dir)), (0, 0), "nothing is written below the reserve");
+        // An unreadable filesystem is not taken as room.
+        let unreadable = || Err(std::io::Error::other("statvfs"));
+        assert!(walk_back(&mut fetch, &inspect_block, &unreadable, &dir, &mut walk, &limits).is_err());
+        assert_eq!(pending_files(&dir), 0);
+        // The real call answers for a real directory.
+        assert!(free_bytes(&dir).unwrap() > 0);
+        assert!(free_bytes(&dir.join("missing")).is_err());
+
+        // A zero parent ends the walk before any fetch.
+        let mut walk = Walk { cursor: B256::ZERO, ..Walk::default() };
+        let mut never = |_: &B256| -> Result<Value, String> { panic!("no fetch for the zero id") };
+        assert!(walk_back(&mut never, &inspect_block, &plenty, &dir, &mut walk, &bounds(head, 10)).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pending_files_of_an_earlier_process_are_removed_at_start_and_verified_blocks_stay() {
+        let dir = scratch("start");
+        for name in ["aa.pending", "bb.pending", "cc.bin", "index"] {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(remove_pending(&dir).unwrap(), 2);
+        let mut left: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["cc.bin", "index"]);
+        assert_eq!(remove_pending(&dir).unwrap(), 0);
+        assert!(remove_pending(&dir.join("missing")).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_free_space_reserve_has_a_default_and_an_option() {
+        let args = |extra: &[&str]| -> Vec<String> {
+            let pin = "ab".repeat(32);
+            let mut all: Vec<String> = ["--manifest", "m", "--network-pin", &pin, "--rpc-port", "1", "--state", "d", "--status", "s"]
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
+            all.extend(extra.iter().map(|a| a.to_string()));
+            all
+        };
+        assert_eq!(parse(&args(&[])).map(|o| o.min_free_bytes), Ok(8 * 1_073_741_824));
+        assert_eq!(parse(&args(&["--min-free-bytes", "0"])).map(|o| o.min_free_bytes), Ok(0));
+        assert!(parse(&args(&["--min-free-bytes", "lots"])).is_err());
     }
 }
