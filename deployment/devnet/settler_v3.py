@@ -182,6 +182,9 @@ DA_TAG = 0x15
 DA_DOMAIN = b'BLOCH:L2:DA:1'
 DA_MAX_PAYLOAD_BYTES = 114_688
 DA_MAX_INPUTS = 16
+# DA tip policy defaults (audit L1X-04): the cap is 100 times the base fee floor, about 0.02 BLCH of tip on a full
+# batch; a batch not recorded within 4 native blocks (2 minutes) gets twice the tip; 8 blocks without it is an alert.
+DA_DEFAULT_MAX_TIP_MILLISAT_PER_GAS, DA_TIP_ESCALATION_BLOCKS, DA_NOT_INCLUDED_ALERT_BLOCKS = 1_000, 4, 8
 # L2 -> L1 withdrawals (bloch_l2_evm::withdrawal, native l2_settlement::withdrawal).
 WITHDRAWAL_DOMAIN = b'BLOCH:L2:WITHDRAW:1'
 WITHDRAWAL_TREE_DEPTH = 32
@@ -1807,8 +1810,59 @@ class Settler:
         commitment = values[T + DA_COMMITMENT:T + DA_COMMITMENT + 32]
         while True:
             outcome = self.publish_da_attempt(number, directory, commitment)
-            if outcome != 'fee-moved':
+            if outcome not in ('fee-moved', 'tip-raised'):
                 return outcome
+
+    # ---- DA tip policy (audit AUDIT-L1L2-20261123, L1X-04) ----
+    # Consensus admits four 0x15 transactions per native block and the proposer gives the slots to the highest
+    # tip rates, so anyone can keep this batch off L1 by out-tipping it with four junk batches per block. The
+    # answer on this side is a price: a batch that is not recorded within `da.tip_escalation_blocks` native
+    # blocks is re-signed at twice the tip (from `da.tip_step_millisat_per_gas` when it started at zero), up to
+    # `da.max_tip_millisat_per_gas`, and `da-not-included` is logged every `da.not_included_alert_blocks` blocks
+    # it has waited. Holding the slots then costs the attacker four times the junk gas at more than that cap in
+    # every block; the settler pays the raised tip once, on the attempt that is included.
+
+    def da_tip_policy(self):
+        """(start, step, cap, escalation blocks, alert blocks) in millisat per gas and native blocks."""
+        da = self.c['da']
+        start = int(da.get('tip_millisat_per_gas', 0))
+        step = max(1, int(da.get('tip_step_millisat_per_gas', MIN_BASE_FEE_MILLISAT_PER_GAS)))
+        cap = max(start, int(da.get('max_tip_millisat_per_gas', DA_DEFAULT_MAX_TIP_MILLISAT_PER_GAS)))
+        return (start, step, cap, int(da.get('tip_escalation_blocks', DA_TIP_ESCALATION_BLOCKS)),
+                int(da.get('not_included_alert_blocks', DA_NOT_INCLUDED_ALERT_BLOCKS)))
+
+    def da_next_tip(self, meta, height):
+        """The tip the next attempt is signed with: the last attempt's, doubled when that attempt has waited
+        `tip_escalation_blocks` native blocks, never above the cap. `meta` is the last attempt's (None: first)."""
+        start, step, cap, blocks, _ = self.da_tip_policy()
+        if meta is None:
+            return start
+        tip = int(meta.get('tip', start))
+        signed_at = meta.get('height')
+        if blocks <= 0 or height is None or signed_at is None or height - int(signed_at) < blocks:
+            return tip
+        return min(cap, max(step, 2 * tip))
+
+    def da_waited_blocks(self, directory, height):
+        """Native blocks since the first attempt of this block's batch was signed, or None when unknown."""
+        try:
+            first = json.loads((directory / 'da-meta-0.json').read_text()).get('height')
+        except (OSError, ValueError):
+            return None
+        return None if first is None or height is None else max(0, height - int(first))
+
+    def da_alert_not_included(self, number, directory, height, tip, attempt):
+        """`da-not-included`, once per `not_included_alert_blocks` native blocks the batch has waited."""
+        _, _, cap, _, alert_blocks = self.da_tip_policy()
+        waited = self.da_waited_blocks(directory, height)
+        if alert_blocks <= 0 or waited is None or waited < alert_blocks:
+            return
+        last = getattr(self, 'da_alerted', None)
+        if last and last[0] == number and waited - last[1] < alert_blocks:
+            return
+        self.da_alerted = (number, waited)
+        log('da-not-included', number=number, waited_blocks=waited, attempt=attempt, tip_millisat_per_gas=tip,
+            max_tip_millisat_per_gas=cap, at_max_tip=tip >= cap)
 
     def da_attempts_in_window(self, directory):
         """Signed attempts of this block within the mempool-retention window."""
@@ -1831,7 +1885,6 @@ class Settler:
         utxos = self.native.common_utxos(self.da_script)
         balance = sum(int(u['value_sat']) for u in utxos)
         payload_bytes = len((directory / 'da-payload.hex').read_text().strip()) // 2
-        estimate = da_fee_sat(payload_bytes, 1, int(base_fee), int(da.get('tip_millisat_per_gas', 0)))
         if balance < int(da.get('low_balance_sat', 0)):
             log('da-funding-low', balance_sat=balance, low_balance_sat=int(da['low_balance_sat']),
                 funding_script=self.da_script)
@@ -1848,6 +1901,10 @@ class Settler:
         # conservation at the including block's base fee, and every input must still be unspent.
         last = directory / f'da-meta-{attempt - 1}.json'
         meta = json.loads(last.read_text()) if attempt and last.exists() else None
+        height = self.l1_height()
+        held_tip = int(meta.get('tip', da.get('tip_millisat_per_gas', 0))) if meta else None
+        tip = self.da_next_tip(meta, height)
+        estimate = da_fee_sat(payload_bytes, 1, int(base_fee), tip)
         unspent = {f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos}
         if meta and (directory / f'da-signed-{attempt - 1}.hex').exists() and set(meta['inputs']) <= unspent:
             # A new attempt spends the previous one's inputs first, so two attempts can never both be included.
@@ -1855,12 +1912,17 @@ class Settler:
             utxos.sort(key=lambda u: first.get(f"{u['txid']}:{u['vout']}:{u['value_sat']}", len(first)))
             tx = bytes.fromhex((directory / f'da-signed-{attempt - 1}.hex').read_text().strip())
             limited = self.da_attempts_in_window(directory) >= int(da.get('max_attempts_per_window', 32))
-            if (meta['base_fee'] == base_fee and meta.get('form', []) == form) or (limited and meta.get('form', []) == form):
-                if limited and meta['base_fee'] != base_fee:
+            same = meta['base_fee'] == base_fee and tip == held_tip
+            if (same and meta.get('form', []) == form) or (limited and meta.get('form', []) == form):
+                if limited and not same:
                     log('da-resign-limited', number=number, attempts=attempt, signed_base_fee=meta['base_fee'],
-                        base_fee=base_fee)
-                return self.submit_da(number, directory, tx, commitment, attempt - 1, estimate,
-                                      None if limited else meta['base_fee'])
+                        base_fee=base_fee, tip_millisat_per_gas=held_tip, wanted_tip_millisat_per_gas=tip)
+                return self.submit_da(number, directory, tx, commitment, attempt - 1,
+                                      da_fee_sat(payload_bytes, 1, int(meta['base_fee']), held_tip),
+                                      None if limited else meta['base_fee'], None if limited else meta)
+            if tip != held_tip:
+                log('da-tip-raised', number=number, attempt=attempt, tip_millisat_per_gas=tip,
+                    previous_tip_millisat_per_gas=held_tip, waited_blocks=self.da_waited_blocks(directory, height))
         utxos = utxos[:DA_MAX_INPUTS]
         if not utxos:
             raise Halt('the DA funding key has no spendable outputs')
@@ -1871,7 +1933,7 @@ class Settler:
             unsigned.unlink(missing_ok=True)
             argv = [da['signer'], 'l2-da', 'prepare', '--genesis', da['genesis'], '--funding-pubkey', da['funding_pubkey'],
                     '--chain-id', str(self.chain_id), '--number', str(number), '--payload', str(directory / 'da-payload.hex'),
-                    '--base-fee', base_fee, '--tip', str(da.get('tip_millisat_per_gas', 0)), '--out', str(unsigned)]
+                    '--base-fee', base_fee, '--tip', str(tip), '--out', str(unsigned)]
             inputs = [f"{u['txid']}:{u['vout']}:{u['value_sat']}" for u in utxos[:count]]
             for item in inputs:
                 argv[3:3] = ['--input', item]
@@ -1889,9 +1951,10 @@ class Settler:
         payload = bytes.fromhex((directory / 'da-payload.hex').read_text().strip())
         if da_frame_fields(tx) != (self.chain_id, number, payload):
             raise Halt('signed DA transaction does not carry this block batch')
-        atomic_write(directory / f'da-meta-{attempt}.json', json.dumps({'base_fee': base_fee, 'inputs': inputs,
-                                                                        'form': form, 'signed_unix': int(self.wall())}) + '\n')
-        return self.submit_da(number, directory, tx, commitment, attempt, estimate, base_fee)
+        meta = {'base_fee': base_fee, 'inputs': inputs, 'form': form, 'signed_unix': int(self.wall()), 'tip': tip,
+                'height': height}
+        atomic_write(directory / f'da-meta-{attempt}.json', json.dumps(meta) + '\n')
+        return self.submit_da(number, directory, tx, commitment, attempt, estimate, base_fee, meta)
 
     def da_signature_form(self):
         """The `l2-da sign` signature flags for the next DA transaction (L1 hard fork
@@ -1917,10 +1980,13 @@ class Settler:
             return None
         return ['--for-epoch', str(epoch)]
 
-    def submit_da(self, number, directory, tx, commitment, attempt, estimate, signed_base_fee=None):
+    def submit_da(self, number, directory, tx, commitment, attempt, estimate, signed_base_fee=None, meta=None):
         """Send the DA bytes and wait for the record. With `signed_base_fee`, return 'fee-moved' as soon as the
-        next base fee differs from it: those bytes can then no longer be included, and waiting is pointless."""
+        next base fee differs from it: those bytes can then no longer be included, and waiting is pointless.
+        With `meta` (the attempt's record), return 'tip-raised' as soon as the tip policy asks for a higher tip
+        than this attempt carries; without it (the attempt window is used up) the worker only waits and alerts."""
         da = self.c['da']
+        tip = int((meta or {}).get('tip', da.get('tip_millisat_per_gas', 0)))
         ports, response = self.native.submit(tx.hex())
         log('da-submitted', number=number, bytes=len(tx), commitment=commitment.hex(), response=response.get('status'),
             ports=ports, attempt=attempt, fee_estimate_sat=estimate, signed_base_fee=signed_base_fee)
@@ -1936,6 +2002,10 @@ class Settler:
             if accepted and statement_fields(accepted['statement'])['l2_number'] >= number:
                 log('da-wait-ended-block-settled', number=number)
                 return False
+            height = self.l1_height()
+            self.da_alert_not_included(number, directory, height, tip, attempt)
+            if meta is not None and self.da_next_tip(meta, height) != tip:
+                return 'tip-raised'
             if signed_base_fee is not None:
                 try:
                     now = str(self.native.bounded_value('getchaininfo', 'next_base_fee_millisat_per_gas'))
