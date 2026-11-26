@@ -585,6 +585,36 @@ class MonitorTests(unittest.TestCase):
         r, _ = run(w)
         self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'OK')
 
+    def test_the_audit_gates_armed_on_l1_need_an_l2_build_that_has_them(self):
+        """Audit AUDIT-L1L2-20261123: the settler gate, the DA settler slot and the program switch are inert on L1
+        and nothing is reported. Armed on L1 while the follower, shadow and attestors link a native release without
+        them is CRIT (a settlement with an authorization trailer does not decode there); a build that names them at
+        the L1's epochs agrees."""
+        names = ('l2_settler_authorization_activation_epoch', 'l2_da_settler_slot_activation_epoch',
+                 'l2_settlement_program_switch_activation_epoch')
+        w = healthy()
+        for node in w['l1'].values():
+            for name in names:
+                node['info']['hard_forks'][name] = {'activation_epoch': None, 'active': False}
+        self.assertEqual(level(run(w)[0], 'l1_gates_vs_l2_build'), 'OK')
+        for node in w['l1'].values():
+            for name in names:
+                node['info']['hard_forks'][name] = {'activation_epoch': 9100, 'active': False}
+        r, _ = run(w)
+        self.assertEqual(level(r, 'l1_gates_vs_l2_build'), 'CRIT')
+        message = next(c['message'] for c in r.checks if c['check'] == 'l1_gates_vs_l2_build')
+        for name in names:
+            self.assertIn(f'{name}: L1 e9100, not built into the L2 binaries', message)
+        self.assertEqual({g['gate'] for g in r.facts['l1_gates_upcoming']} & set(names), set(names))
+        with tempfile.TemporaryDirectory() as d:
+            bj = Path(d, 'build.json')
+            bj.write_text(json.dumps({'l1_activation_epochs': dict(
+                m.V2_COMPILED_GATES, **{m.GATE_CONSTANTS[name]: 9100 for name in names})}))
+            self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'OK')
+            bj.write_text(json.dumps({'l1_activation_epochs': dict(
+                m.V2_COMPILED_GATES, **{m.GATE_CONSTANTS[name]: 9200 for name in names})}))
+            self.assertEqual(level(run(w, '--build-json', str(bj))[0], 'l1_gates_vs_l2_build'), 'CRIT')
+
     def test_gate_check_reads_build_json(self):
         with tempfile.TemporaryDirectory() as d:
             bj = Path(d, 'build.json')
@@ -708,10 +738,12 @@ class MonitorTests(unittest.TestCase):
             log.write_text(ev(90000) + '\n')
             r, _ = run(healthy(), '--event-log', f'settler={log}')
             self.assertNotIn('foreign_settlements[settler]', [c['check'] for c in r.checks])
+            # Audit L2N-01: the first foreign settlement inside the window is CRIT.
             log.write_text(ev(90000) + '\n' + ev(7200) + '\n')
             r, _ = run(healthy(), '--event-log', f'settler={log}')
-            self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
+            self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
             self.assertEqual(level(r, 'events[settler]'), 'OK')
+            self.assertEqual(m.PROFILES['mainnet']['foreign_recovered_crit'], 1)
             log.write_text(ev(7200) + '\n' + ev(60) + '\n')
             r, _ = run(healthy(), '--event-log', f'settler={log}')
             self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
@@ -723,7 +755,7 @@ class MonitorTests(unittest.TestCase):
             return 0, ev(7200) + '\n'
         r = m.Report()
         m.check_units(['settler=settler.service'], m.PROFILES['mainnet'], NOW, runner, r)
-        self.assertEqual(level(r, 'foreign_settlements[settler]'), 'WARN')
+        self.assertEqual(level(r, 'foreign_settlements[settler]'), 'CRIT')
 
     def test_repeated_warn_events_escalate(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1335,6 +1367,24 @@ class MonitorGapTests(unittest.TestCase):
                        runner=journal({'s.service': [{'time': stamp(60), 'event': event}]}))
             self.assertEqual(level(r, 'events[settler]'), 'WARN', event)
 
+    def test_settler_gate_and_program_switch_events_alert(self):
+        # Audit L2N-01 / L1X-04: a rotation, a refusal at a gate boundary, a proof made again for the switch and a
+        # DA funding key outside the registered set are each a warning; the worker's halt stays critical.
+        for event in ('settler-set-rotated', 'settler-rotation-signed', 'settler-rotation-invalid',
+                      'settler-rotation-not-applied', 'settlement-refused-at-gate-boundary',
+                      'settlement-missed-program-switch', 'program-switch-reprove', 'l1-gate-not-reported',
+                      'l1-program-not-reported', 'da-funding-key-not-registered'):
+            r, _ = run(healthy(), '--unit', 'settler=s.service',
+                       runner=journal({'s.service': [{'time': stamp(60), 'event': event}]}))
+            self.assertEqual(level(r, 'events[settler]'), 'WARN', event)
+        r, _ = run(healthy(), '--unit', 'settler=s.service', runner=journal({'s.service': [
+            {'time': stamp(60), 'event': 'halt', 'reason': 'the settler key is not in the settler set file'}]}))
+        self.assertEqual(level(r, 'events[settler]'), 'CRIT')
+        for event in ('settler-key-checked', 'settlement-authorized', 'program-selected'):
+            r, _ = run(healthy(), '--unit', 'settler=s.service',
+                       runner=journal({'s.service': [{'time': stamp(60), 'event': event}]}))
+            self.assertNotEqual(level(r, 'events[settler]'), 'WARN', event)
+
     def test_every_settler_event_is_classified(self):
         """settler_v3.py's log() names: each is graded, progress, or listed here as informational. A new event name fails
         this test until someone decides whether it alerts."""
@@ -1345,8 +1395,12 @@ class MonitorGapTests(unittest.TestCase):
                 'rpc-endpoint-recovered', 'rpc-quorum-restored', 'transaction-built', 'submitted', 'remote-proof',
                 'prover-stages-done', 'prover-shm-removed', 'l2-block-produced', 'l2-block-reused', 'idle-hold', 'idle-end',
                 'da-submitted', 'da-included', 'da-wait-ended-block-settled', 'da-batch-reused', 'da-reuse-waiting-follower',
-                'da-fee-moved', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
+                'da-fee-moved', 'da-tip-raised', 'request-moved-before-proof', 'request-moved-after-proof', 'request-moved-before-submit',
                 'foreign-settlement-recovered', 'foreign-settlement-waiting-finality',
+                # Audit L2N-01: the key check at start, an authorized settlement, the program chosen for a block,
+                # a bound proof waiting for the switch and a form change at the gate are the normal course.
+                'settler-key-checked', 'settlement-authorized', 'program-selected',
+                'settlement-waiting-program-switch', 'settlement-form-changed',
                 'stopped'}
         graded = m.CRIT_EVENTS | m.WARN_EVENTS | m.PROGRESS_EVENTS | info
         self.assertGreater(len(names), 40)

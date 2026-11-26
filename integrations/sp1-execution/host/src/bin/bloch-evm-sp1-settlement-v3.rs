@@ -10,6 +10,16 @@
 //! `ChainSpec::mainnet`, chain id 700770, `MAINNET_DOMAIN`) for every mode;
 //! without it the harness checks the devnet `settlement_v3` program
 //! (`ChainSpec::testnet_v3`, domain `0xd3…d3`), unchanged.
+//!
+//! A leading `--mainnet-bound` selects `settlement_v3_mainnet_bound` instead:
+//! the mainnet domain, the mainnet rules with the deposit cap on the
+//! outstanding supply (`ChainSpec::mainnet_outstanding_cap`, audit finding
+//! L2N-02) and the block context fixed by `SettlementContextRule::mainnet`
+//! (L2N-01). The expected
+//! statement is then derived with the bound function, so a fixture whose
+//! timestamp or prevrandao is not the derived one is refused here, before the
+//! guest runs. It is a different program from `settlement_v3_mainnet`, with its
+//! own ELF and keys; the native chain does not accept it until it pins them.
 #[allow(dead_code)]
 #[path = "../fixture.rs"]
 mod fixture;
@@ -17,6 +27,7 @@ mod fixture;
 use alloy_primitives::B256;
 use bloch_evm_sp1_host::verification::{ProgramIdentity, TrustedProgram};
 use bloch_l2_evm::{
+    node_execution::bound::{execute_settlement_statement_v3_bound, SettlementContextRule},
     proof_statement::{execute_settlement_statement_v3, SettlementContextV2, SettlementStatementV3},
     ChainSpec,
 };
@@ -26,18 +37,33 @@ use std::{error::Error, ffi::OsStr, fs, io, process::Command, time::Instant};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// The program the harness qualifies, selected once from the command line.
-static MAINNET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Program {
+    /// `settlement_v3` (devnet4).
+    Devnet,
+    /// `settlement_v3_mainnet`, the deployed mainnet program.
+    Mainnet,
+    /// `settlement_v3_mainnet_bound`: mainnet with the derived block context.
+    MainnetBound,
+}
 
+static PROGRAM: std::sync::OnceLock<Program> = std::sync::OnceLock::new();
+
+fn program() -> Program {
+    *PROGRAM.get().unwrap_or(&Program::Devnet)
+}
+
+/// Both mainnet programs compile the mainnet domain and chain id.
 fn mainnet() -> bool {
-    *MAINNET.get().unwrap_or(&false)
+    program() != Program::Devnet
 }
 
 /// The execution rules the selected guest compiles.
 fn spec() -> ChainSpec {
-    if mainnet() {
-        ChainSpec::mainnet()
-    } else {
-        ChainSpec::testnet_v3()
+    match program() {
+        Program::Devnet => ChainSpec::testnet_v3(),
+        Program::Mainnet => ChainSpec::mainnet(),
+        Program::MainnetBound => ChainSpec::mainnet_outstanding_cap(),
     }
 }
 
@@ -51,10 +77,10 @@ fn domain() -> B256 {
 }
 
 fn program_name() -> &'static str {
-    if mainnet() {
-        "settlement_v3_mainnet"
-    } else {
-        "settlement_v3"
+    match program() {
+        Program::Devnet => "settlement_v3",
+        Program::Mainnet => "settlement_v3_mainnet",
+        Program::MainnetBound => "settlement_v3_mainnet_bound",
     }
 }
 const QUALIFICATION_GNARK_IMAGE: &str =
@@ -76,7 +102,33 @@ fn stdin(fixture: &fixture::Fixture, context: SettlementContextV2) -> SP1Stdin {
 }
 
 fn expect(execution: fixture::Fixture, context: SettlementContextV2) -> Result<Qualification> {
+    if program() == Program::MainnetBound {
+        return expect_bound(&SettlementContextRule::mainnet(), execution, context);
+    }
     expect_in(&spec(), domain(), execution, context)
+}
+
+/// The statement `settlement_v3_mainnet_bound` commits: the mainnet domain, the
+/// outstanding-cap mainnet rules, and only for the context `rule` derives.
+fn expect_bound(
+    rule: &SettlementContextRule,
+    execution: fixture::Fixture,
+    context: SettlementContextV2,
+) -> Result<Qualification> {
+    let expected = execute_settlement_statement_v3_bound(
+        &ChainSpec::mainnet_outstanding_cap(),
+        bloch_l2_evm::chainspec::MAINNET_DOMAIN,
+        rule,
+        &execution.witness,
+        &execution.context,
+        &execution.body,
+        context,
+    )?;
+    Ok(Qualification {
+        execution,
+        context,
+        expected,
+    })
 }
 
 fn expect_in(spec: &ChainSpec, domain: B256, execution: fixture::Fixture, context: SettlementContextV2) -> Result<Qualification> {
@@ -124,6 +176,25 @@ fn synthetic_context_for(program: [B256; 3], deposits: u64) -> SettlementContext
     }
 }
 
+/// The execution artifact a node exported for the selected program.
+///
+/// An artifact names the configuration of the rules it was recorded under.
+/// For `settlement_v3_mainnet_bound` that is normally still the deployed
+/// mainnet rule set: its blocks and witnesses are the same under the
+/// program's outstanding-cap rule set until the gross minted counter passes
+/// the cap (core tests `supply_cap_outstanding`), so the node need not switch
+/// rules when the program switches. Either rule set is accepted; the
+/// statement is always derived with the program's own rules.
+#[cfg(feature = "node-artifact")]
+fn load_node_artifact(path: &std::path::Path) -> Result<bloch_execution_artifact::ExecutionArtifact> {
+    use bloch_evm_sp1_host::artifact::load_selected_artifact_in;
+    if program() == Program::MainnetBound {
+        return Ok(load_selected_artifact_in(path, &ChainSpec::mainnet(), domain())
+            .or_else(|_| load_selected_artifact_in(path, &spec(), domain()))?);
+    }
+    Ok(load_selected_artifact_in(path, &spec(), domain())?)
+}
+
 /// Chained successor from the canonical L2 database export, as in V2, but a
 /// block with user transactions is accepted.
 #[cfg(feature = "node-artifact")]
@@ -156,7 +227,7 @@ fn native_artifact_qualification(
         return Err(io::Error::other("invalid native request position").into());
     }
     let previous_settlement = hash(7, true)?;
-    let artifact = bloch_evm_sp1_host::artifact::load_selected_artifact_in(artifact, &spec(), domain())?;
+    let artifact = load_node_artifact(artifact)?;
     if (artifact.header().number == 1) != (previous_settlement == B256::ZERO) {
         return Err(io::Error::other("only L2 block 1 may have no previous settlement").into());
     }
@@ -207,6 +278,12 @@ fn native_artifact_qualification(
 
 fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification> {
     match name {
+        // The synthetic fixtures stamp block 1 with timestamp 1 on a genesis at
+        // 0: not what the mainnet context rule derives.
+        "empty" | "contract" if program() == Program::MainnetBound => Err(io::Error::other(
+            "the synthetic fixtures are not built by the mainnet context rule; qualify settlement_v3_mainnet_bound with native-artifact",
+        )
+        .into()),
         "empty" => expect(fixture::fixture_empty_in(&spec(), domain())?, synthetic_context(identity, 0)),
         // Deposit plus a signed deploy and call: two user transactions.
         "contract" if mainnet() => Err(io::Error::other("the contract fixture is devnet-only (development domain)").into()),
@@ -232,15 +309,19 @@ fn qualification(name: &str, identity: ProgramIdentity) -> Result<Qualification>
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
-    let selected = args.first().map(String::as_str) == Some("--mainnet");
-    if selected {
+    let usage = "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-bound] <execute|prove-groth16|verify-groth16> <empty|contract|native-artifact> TRUSTED_SETTLEMENT_V3_ELF [PROOF_FILE]";
+    let selected = match args.first().map(String::as_str) {
+        Some("--mainnet") => Program::Mainnet,
+        Some("--mainnet-bound") => Program::MainnetBound,
+        _ => Program::Devnet,
+    };
+    if selected != Program::Devnet {
         args.remove(0);
     }
-    MAINNET.set(selected).expect("program selected once");
+    PROGRAM.set(selected).expect("program selected once");
     if args.first().map(String::as_str) == Some("identity") {
         return print_identity(args.get(1).filter(|_| args.len() == 2).ok_or(
-            "usage: bloch-evm-sp1-settlement-v3 [--mainnet] identity TRUSTED_SETTLEMENT_V3_ELF",
+            "usage: bloch-evm-sp1-settlement-v3 [--mainnet|--mainnet-bound] identity TRUSTED_SETTLEMENT_V3_ELF",
         )?)
         .await;
     }
@@ -421,6 +502,14 @@ mod tests {
         assert!(m.windows(32).any(|w| w == configuration.as_slice()));
         assert!(m.windows(32).any(|w| w == MAINNET_DOMAIN.as_slice()));
         assert!(!m.windows(32).any(|w| w == B256::repeat_byte(0xd3).as_slice()));
+        // The bound mainnet program refuses the synthetic context (timestamp 1
+        // on a genesis at 0) that the deployed program accepts.
+        let refused = expect_bound(
+            &SettlementContextRule::mainnet(),
+            fixture::fixture_empty_in(&ChainSpec::mainnet(), MAINNET_DOMAIN).unwrap(),
+            synthetic_context_for(program, 0),
+        );
+        assert!(refused.err().is_some_and(|e| e.to_string().contains("is not the derived timestamp")));
         // The devnet harness keeps the devnet program parameters.
         assert!(!mainnet());
         assert_eq!((spec(), domain(), program_name()), (ChainSpec::testnet_v3(), B256::repeat_byte(0xd3), "settlement_v3"));

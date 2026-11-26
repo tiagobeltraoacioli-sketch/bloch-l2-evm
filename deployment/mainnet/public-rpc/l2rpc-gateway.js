@@ -202,8 +202,15 @@ function readTarget() {
   return 'local';
 }
 
+// The settled RPC reads block tags without regard to case (alloy BlockNumberOrTag matches on the lower-cased
+// string), so "Finalized" names a level, "Pending" is pending, and so on (audit AUDIT-L1L2-20261123, L2N-10).
+function tagOf(v) {
+  return typeof v === 'string' ? v.toLowerCase() : v;
+}
+
 function isLevel(v) {
-  return v === 'finalized' || v === 'safe';
+  const t = tagOf(v);
+  return t === 'finalized' || t === 'safe';
 }
 
 function namesFinalityLevel(method, params) {
@@ -278,8 +285,9 @@ function logsScopeError(params) {
     if (head === null) return 'Chain head unknown; retry shortly or use numeric fromBlock/toBlock.';
   }
   const resolve = (v) => {
-    if (v === undefined || v === null || v === 'latest' || v === 'pending' || v === 'safe' || v === 'finalized') return head;
-    if (v === 'earliest') return 0;
+    const t = tagOf(v);
+    if (t === undefined || t === null || t === 'latest' || t === 'pending' || t === 'safe' || t === 'finalized') return head;
+    if (t === 'earliest') return 0;
     return qty(v);
   };
   const from = resolve(f.fromBlock);
@@ -317,7 +325,7 @@ function classify(call) {
     const e = logsScopeError(call.params);
     if (e) return { reply: err(id, -32602, e) };
   }
-  if (m === 'eth_getTransactionCount' && Array.isArray(call.params) && call.params[1] === 'pending') {
+  if (m === 'eth_getTransactionCount' && Array.isArray(call.params) && tagOf(call.params[1]) === 'pending') {
     return { route: 'seqread' };
   }
   // Only the sequencer's RPC knows the sequencer's required tip (--required-tip-file); a replica suggests the floor.

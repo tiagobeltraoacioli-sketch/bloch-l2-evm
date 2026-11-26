@@ -121,10 +121,16 @@ pub const PENDING_AS_LATEST_METHODS: [&str; 6] = [
     "eth_getRawTransactionByBlockNumberAndIndex",
 ];
 
-/// Replace `"pending"` by `"latest"` in the first parameter.
+/// Whether `tag` is the `pending` block tag as the eth API reads it: without regard to case (alloy
+/// `BlockNumberOrTag::from_str` matches on `to_lowercase`).
+pub fn is_pending_tag(tag: &str) -> bool {
+    tag.to_lowercase() == "pending"
+}
+
+/// Replace `"pending"` (in any case) by `"latest"` in the first parameter.
 pub fn pending_param_as_latest(mut params: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     if let Some(first) = params.first_mut() {
-        if first.as_str() == Some("pending") {
+        if first.as_str().is_some_and(is_pending_tag) {
             *first = serde_json::Value::String("latest".into());
         }
     }
@@ -316,6 +322,11 @@ mod tests {
         assert_eq!(rewrite(json!(["finalized"])), json!(["finalized"]));
         assert_eq!(rewrite(json!([])), json!([]));
         assert_eq!(rewrite(json!(["0x1", "pending"])), json!(["0x1", "pending"]));
+        // Audit L2N-10: the eth API reads "Pending" as pending; so does the rewrite.
+        assert_eq!(rewrite(json!(["Pending", true])), json!(["latest", true]));
+        assert_eq!(rewrite(json!(["PENDING"])), json!(["latest"]));
+        assert_eq!(rewrite(json!(["Latest"])), json!(["Latest"]));
+        assert!(is_pending_tag("pEnDiNg") && !is_pending_tag("pending ") && !is_pending_tag("0x0"));
     }
 
     #[tokio::test]

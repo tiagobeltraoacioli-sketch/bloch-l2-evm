@@ -7,6 +7,17 @@
 #   sudo ./install.sh --artifacts DIR --l1-rpc-url http://HOST:PORT \
 #        --canonical /var/lib/bloch-l2-mainnet/canonical --canonical-user bloch-l2-mainnet \
 #        --txpool /var/lib/bloch-l2-mainnet/txpool [--rpc-user USER --read-group GROUP] [--dry-run] [--allow-unsigned]
+#        [--l1-rpc-remote-trusted]
+#
+# --l1-rpc-url (review L2-05): the follower verifies finality by replay, but reads the `safe` settlement from this
+# node without any proof, over plain HTTP. Whoever controls that node or the network path can make the RPC publish
+# safe = latest with nothing posted on L1. A loopback URL (a local node, or an SSH tunnel to the operator's node) is
+# accepted; any other host is refused unless --l1-rpc-remote-trusted states that the node and the path are the
+# operator's own (same host network, private link). finalized never depends on this choice.
+# A follower built from a source that has the loopback rule (every release after
+# bloch-l2-2026-11-17-launch-native-906336fd) does not read `safe` from a remote node at all: with a remote URL
+# it reports no safe settlement and the RPC serves finalized as safe. The statement is then only about the replay
+# source.
 #
 # --rpc-user/--read-group (review r10 decision 4; the sequencer host uses bloch-l2-mainnet-rpc and
 # bloch-l2-mainnet-l2read, created by install-settler-mainnet.py prepare): the RPC runs as its own system user
@@ -27,17 +38,18 @@
 set -Eeuo pipefail
 trap 'echo "install.sh: FAILED at line $LINENO: $BASH_COMMAND (nothing was started; fix the cause and run it again: it resumes)" >&2' ERR
 HERE=$(cd "$(dirname "$0")" && pwd)
-ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0 RPC_USER= READ_GROUP=
+ART= L1= CANONICAL= CANON_USER= TXPOOL= DRY=0 UNSIGNED=0 RPC_USER= READ_GROUP= REMOTE_L1=0
 while [ $# -gt 0 ]; do
   case $1 in
     --artifacts) ART=$2; shift 2;; --l1-rpc-url) L1=$2; shift 2;;
     --canonical) CANONICAL=$2; shift 2;; --canonical-user) CANON_USER=$2; shift 2;;
     --txpool) TXPOOL=$2; shift 2;; --dry-run) DRY=1; shift;; --allow-unsigned) UNSIGNED=1; shift;;
     --rpc-user) RPC_USER=$2; shift 2;; --read-group) READ_GROUP=$2; shift 2;;
+    --l1-rpc-remote-trusted) REMOTE_L1=1; shift;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
-[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,27p "$0"; exit 2; }
+[ -n "$ART" ] && [ -n "$L1" ] && [ -n "$CANONICAL" ] && [ -n "$CANON_USER" ] && [ -n "$TXPOOL" ] || { sed -n 2,38p "$0"; exit 2; }
 [ -n "$RPC_USER$READ_GROUP" ] && { [ -z "$RPC_USER" ] || [ -z "$READ_GROUP" ]; } && { echo "install.sh: --rpc-user and --read-group go together" >&2; exit 2; }
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 die() { trap - ERR; echo "install.sh: $*" >&2; exit 1; }
@@ -53,6 +65,10 @@ RELEASE_SHA256SUMS_SHA256=4039f26a10cb7203ad1d54a3512217f501371bf0c692157c39424f
 CARRYOVER_GZ_SHA256=$(cut -d' ' -f1 "$ART/carryover.tsv.gz.sha256" 2>/dev/null || true)
 [[ $L1 =~ ^http://([A-Za-z0-9.-]+):([0-9]+)/?$ ]] || die "--l1-rpc-url must be http://HOST:PORT"
 L1_HOST=${BASH_REMATCH[1]}
+if [[ ! $L1_HOST =~ ^(localhost|127\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+  [ $REMOTE_L1 = 1 ] || die "--l1-rpc-url host $L1_HOST is not loopback: safe would trust that node and an unauthenticated HTTP path (review L2-05). Use a local node or an SSH tunnel, or pass --l1-rpc-remote-trusted if the node and the path are the operator's own"
+  echo "WARNING: --l1-rpc-remote-trusted: safe trusts the native node at $L1_HOST and the network path to it (finalized does not); a follower with the loopback rule reads no safe from a remote node and the RPC serves finalized as safe" >&2
+fi
 [ "$(id -u)" = 0 ] || [ $DRY = 1 ] || [ -n "$R" ] || die "run as root"
 id "$CANON_USER" >/dev/null 2>&1 || die "canonical user $CANON_USER does not exist (sequencer installs it)"
 [ -d "$CANONICAL/db" ] && [ -d "$CANONICAL/static" ] && [ -d "$CANONICAL/rocks" ] || die "$CANONICAL is not an initialized L2 database"

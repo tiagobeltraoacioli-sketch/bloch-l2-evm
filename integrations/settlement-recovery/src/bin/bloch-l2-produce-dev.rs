@@ -32,7 +32,7 @@ use bloch_l2_evm::{
 use bloch_settlement_recovery::reconstruct::{
     derive_settled_blocks, flag_day_first_slot, l2_registry_blocks, NativeBlockTransactions,
 };
-use bloch_settlement_recovery::timestamp::{next_timestamp, TimestampRule};
+use bloch_settlement_recovery::timestamp::{block_prevrandao, next_timestamp, TimestampRule};
 use bloch_reth_execution::{
     prepare_genesis, proof_export::export_with_report, BlochChainSpec, BlochNextBlockEnvCtx,
     BlochProviderFactory, BlochTables, CanonicalCoordinator, L2Network,
@@ -335,7 +335,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 .ok_or("timestamp overflow, or --anchor-slot missing under --timestamp-rule")?;
             let attributes = BlochNextBlockEnvCtx {
                 timestamp,
-                prevrandao: B256::repeat_byte(7),
+                prevrandao: block_prevrandao(network().mainnet, head.0.number + 1, head.hash(), anchor),
                 anchor_root: anchor,
                 deposits: deposits.clone(),
             };
@@ -490,7 +490,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 let attributes = BlochNextBlockEnvCtx {
                     timestamp: next_timestamp(rule.as_ref(), block.number, head.0.timestamp, Some(block.anchor_slot))
                         .ok_or("timestamp overflow")?,
-                    prevrandao: B256::repeat_byte(7),
+                    prevrandao: block_prevrandao(network().mainnet, block.number, head.hash(), block.anchor),
                     anchor_root: block.anchor,
                     deposits: block.deposits.clone(),
                 };

@@ -785,7 +785,7 @@ fn spool_pending_nonce(
         let (original, spool, factory) = (original.clone(), spool.clone(), factory.clone());
         async move {
             let mut values: Vec<serde_json::Value> = params.parse()?;
-            let pending = values.get(1).and_then(|v| v.as_str()) == Some("pending");
+            let pending = values.get(1).and_then(|v| v.as_str()).is_some_and(bloch_reth_execution::rpc::is_pending_tag);
             if pending {
                 values[1] = serde_json::Value::String("latest".into());
             }
@@ -1103,8 +1103,10 @@ impl ClosedLevels {
         self.safe.store(safe, Ordering::Release);
     }
 
+    /// The eth API reads block tags without regard to case (alloy `BlockNumberOrTag::from_str` matches on
+    /// `to_lowercase`), so `"Finalized"` and `"SAFE"` name the same levels (audit AUDIT-L1L2-20261123, L2N-10).
     fn tag_closed(&self, tag: Option<&str>) -> bool {
-        match tag {
+        match tag.map(str::to_lowercase).as_deref() {
             Some("finalized") => self.finalized.load(Ordering::Acquire),
             Some("safe") => self.safe.load(Ordering::Acquire),
             _ => false,
@@ -1165,6 +1167,21 @@ fn refuse_closed_levels(module: &mut jsonrpsee::RpcModule<()>, closed: Arc<Close
         })?;
     }
     Ok(())
+}
+
+/// Age of the follower's status file (seconds since its `written_at_unix`)
+/// above which `safe` closes and the status reads `stale` (review L2-06). The
+/// follower rewrites the file at every poll (10 s on mainnet), so an older
+/// file means it stopped (a `Follow::Halt`, a full disk, a crash): what it
+/// proved stays proven, so `finalized` stands, but `safe` tracks the native
+/// head and an old answer is not one. It equals the monitor's
+/// `status_age_crit`.
+const STATUS_STALE_AFTER_S: u64 = 900;
+
+/// Whether a status written at `written_at_unix` is stale at `now_unix`. A
+/// status without a time is stale; one written in the future (clock skew) is not.
+fn status_stale(written_at_unix: Option<u64>, now_unix: u64) -> bool {
+    written_at_unix.is_none_or(|written| now_unix.saturating_sub(written) > STATUS_STALE_AFTER_S)
 }
 
 /// The `status` member of `bloch_finality`: state of the follower's file and, when known, its age.
@@ -1604,6 +1621,7 @@ async fn main() -> Result<()> {
     let mut refused_log = None;
     let mut closed_why: Option<String> = None;
     let mut safe_why: Option<String> = None;
+    let mut stale_seen = false;
     let mut lag_seen = None;
     let mut unindexed: Vec<serde_json::Value> = Vec::new();
     let withdrawal_pending = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1658,7 +1676,21 @@ async fn main() -> Result<()> {
                                 }
                                 safe_why = levels.safe_refused.clone();
                             }
-                            levels_closed.set(false, levels.safe_refused.is_some());
+                            let written_at = levels.status["written_at_unix"].as_u64();
+                            let now_unix = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs());
+                            let stale = status_stale(written_at, now_unix);
+                            if stale != stale_seen {
+                                if stale {
+                                    println!("finality status stale: written more than {STATUS_STALE_AFTER_S} s ago; safe closed, finalized stands");
+                                } else {
+                                    println!("finality status fresh again; safe reopened");
+                                }
+                                stale_seen = stale;
+                            }
+                            let safe_closed = levels.safe_refused.is_some() || stale;
+                            levels_closed.set(false, safe_closed);
                             match levels.finalized {
                                 Some(header) if above(&header, &finalized) => {
                                     state.set_finalized(header.clone());
@@ -1708,7 +1740,7 @@ async fn main() -> Result<()> {
                             let latest = factory.sealed_header(head_number)?;
                             *finality.write().expect("finality lock") = serde_json::json!({
                                 "latest": level_json(&latest),
-                                "safe": if levels.safe_refused.is_some() { serde_json::Value::Null } else { level_json(&safe) },
+                                "safe": if safe_closed { serde_json::Value::Null } else { level_json(&safe) },
                                 "finalized": level_json(&finalized),
                                 "finalized_height": number_of(&finalized),
                                 "l2_genesis": s["l2_genesis"],
@@ -1718,7 +1750,7 @@ async fn main() -> Result<()> {
                                     "verified_tip": s["verified_tip"], "verified_blocks": s["verified_blocks"],
                                     "safe_settlement": s["safe_settlement"],
                                 },
-                                "status": status_signal("ok", s["written_at_unix"].as_u64(), s["schema"].as_str()),
+                                "status": status_signal(if stale { "stale" } else { "ok" }, s["written_at_unix"].as_u64(), s["schema"].as_str()),
                                 "trust": "finalized: native FFG replay from the pinned genesis; safe: the local native node's head; no checkpoint signatures",
                             });
                         }
@@ -1845,9 +1877,23 @@ mod tests {
         assert!(!check(json!(["0x10", false]), Some(0)));
         assert!(!check(json!(["0xabc"]), Some(1)));
         assert!(!check(json!([{"fromBlock": "0x1", "toBlock": "latest"}]), None));
+        // Audit L2N-10: the eth API reads tags without regard to case; so does the refusal.
+        for (finalized, safe) in [("Finalized", "Safe"), ("FINALIZED", "SAFE"), ("fInAlIzEd", "sAfE")] {
+            assert!(check(json!([finalized, false]), Some(0)), "{finalized}");
+            assert!(check(json!([safe, false]), Some(0)), "{safe}");
+            assert!(check(json!(["0xabc", finalized]), Some(1)));
+            assert!(check(json!(["0xabc", {"blockNumber": safe}]), Some(1)));
+            assert!(check(json!([{"fromBlock": finalized, "toBlock": "0x2"}]), None));
+            assert!(check(json!([{"fromBlock": "0x1", "toBlock": safe}]), None));
+        }
+        for open in ["Latest", "PENDING", "Earliest", "finalised", "safe ", "0xFINALIZED"] {
+            assert!(!check(json!([open, false]), Some(0)), "{open}");
+        }
         closed.set(false, true);
         assert!(check(json!(["safe", false]), Some(0)));
+        assert!(check(json!(["Safe", false]), Some(0)));
         assert!(!check(json!(["finalized", false]), Some(0)));
+        assert!(!check(json!(["Finalized", false]), Some(0)));
     }
 
     #[tokio::test]
@@ -1873,6 +1919,8 @@ mod tests {
         };
         assert!(ask("finalized").await.is_err(), "closed from the start");
         assert!(ask("safe").await.is_err());
+        assert!(ask("Finalized").await.is_err(), "a capitalised tag is the same level (L2N-10)");
+        assert!(ask("SAFE").await.is_err());
         assert!(settlement().await.is_err());
         assert_eq!(ask("latest").await.unwrap(), json!({"tag": "latest"}));
         closed.set(false, true);
@@ -1887,6 +1935,21 @@ mod tests {
     fn a_status_ahead_of_this_database_does_not_close_the_levels() {
         assert!(!closes_levels(&eyre::Report::new(NotLocalYet { number: 7, written_at: None, schema: None })));
         assert!(closes_levels(&eyre::eyre!("settled L2 block 7 differs from the local canonical header")));
+    }
+
+    /// Review L2-06: a follower status older than `STATUS_STALE_AFTER_S` is
+    /// stale (safe closes, finalized stands); a missing time is stale, a time
+    /// ahead of the clock is not.
+    #[test]
+    fn an_old_follower_status_is_stale() {
+        let now = 1_800_000_000;
+        assert!(!status_stale(Some(now), now));
+        assert!(!status_stale(Some(now - STATUS_STALE_AFTER_S), now));
+        assert!(status_stale(Some(now - STATUS_STALE_AFTER_S - 1), now));
+        assert!(status_stale(Some(0), now));
+        assert!(status_stale(None, now));
+        assert!(!status_stale(Some(now + 3_600), now), "clock skew is not staleness");
+        assert_eq!(STATUS_STALE_AFTER_S, 900, "the monitor's status_age_crit");
     }
 
     #[test]

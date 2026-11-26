@@ -46,6 +46,21 @@ only `start` lets the worker submit settlements to Bloch L1 mainnet.
       A failed check leaves the old release, config and unit running as before (review r10 M-3).
   sudo python3 install-settler-mainnet.py upgrade --rollback --confirm-mainnet
       Switches back to the release the last upgrade replaced (its kept config and directory).
+  sudo python3 install-settler-mainnet.py settler-key prepare
+      Audit L2N-01 (L1 settler gate, inert until the owner arms it). Needs a release whose bloch-pos has
+      `l2-settler`. Creates a NEW sealed settler keystore in /var/lib/bloch-l2-mainnet-settler-key (0700, the
+      settler user's) with a passphrase generated here (root-only settler.passphrase, never printed), and
+      writes its public key to public/settler.pubkey.hex: the only thing that leaves the host, for the set
+      file the L1 release pins. Standby keys are generated the same way on their own offline hosts.
+  sudo python3 install-settler-mainnet.py settler-key enable --set FILE [--activation-epoch l1|N]
+        [--da-settler-key] --confirm-mainnet
+      FILE is the settler set (`bloch-pos l2-settler set`), this host's key in it. Checks the key with the
+      pinned signer (`l2-settler check`), installs the set as the worker's own file (it rewrites it at a
+      rotation), adds settler_authorization to the configuration (old config kept as
+      config.json.pre-settler-key) and rewrites the unit so the passphrase reaches the worker like the DA
+      one. Before the gate's epoch (default: read from the L1) the worker settles exactly as before.
+      --da-settler-key also funds and signs DA with the settler key (L1 DA settler-slot rule).
+      The unit must be stopped; start it afterwards.
   sudo python3 install-settler-mainnet.py rollback
       Stops and disables the unit and removes the unit file. Keeps the L2 database,
       the work directory, the DA keystore and its passphrase (never deleted here).
@@ -88,6 +103,12 @@ UPGRADE = ETC / 'upgrade.json'
 DA_PASSPHRASE = ETC / 'da.passphrase'
 RUNTIME = Path('/run/bloch-l2-mainnet-settler')
 DA_RUNTIME_PASSPHRASE = RUNTIME / 'da.passphrase'
+# The settler key (audit L2N-01): the same custody as the DA key, in a directory of its own.
+SETTLER_DIR = Path('/var/lib/bloch-l2-mainnet-settler-key')
+SETTLER_PASSPHRASE = ETC / 'settler.passphrase'
+SETTLER_RUNTIME_PASSPHRASE = RUNTIME / 'settler.passphrase'
+SETTLER_PUBKEY = PUBLIC / 'settler.pubkey.hex'
+SETTLER_SET = STATE / 'settler.set'  # public data; the worker replaces it when a rotation it signed is accepted
 # Absolute: as_settler runs with PATH=/usr/bin:/bin, and on Ubuntu 24.04 runuser is only in /usr/sbin.
 RUNUSER = '/usr/sbin/runuser'
 # The L1 RPCs come from configure --rpc-urls or $L1_RPC_URLS, never from this file (reviews r11 235/240: no
@@ -107,7 +128,7 @@ PINS = {
     'l2_reorg_recover.py': '2a648b315edf1d884aab287bf7f8eaf85b753ef7205dc0784c542298f0609a53',
     # The worker itself, its SP1 host and its producer (GO-LIVE-PINS.sha256 release-settler-v2/). Every file
     # this installer copies is pinned here: the worker runs with the DA key, so none is trusted on first use.
-    'settler_v3.py': '9c592bd4d08b80ac72a7a708a25a16b526333235e94b6f3d300139427e423007',
+    'settler_v3.py': '357afb580b3874dbcbc18f39b0af8da45460b5451020f4382479c2d0dd278df7',
     'bloch-evm-sp1-settlement-v3': '3a24c36d9e761b02f6da05b43647c2513768e80c055941c5c0df2420a504973a',
     'bloch-l2-produce-dev': '598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db',
 }
@@ -359,7 +380,7 @@ Environment=BLOCH_SETTLER_CONFIG={ETC}/config.json
 RuntimeDirectory={RUNTIME.name}
 RuntimeDirectoryMode=0700
 ExecStartPre=+/usr/bin/install -m 0400 -o {USER} -g {USER} {DA_PASSPHRASE} {DA_RUNTIME_PASSPHRASE}
-Environment=HOME={STATE}
+{settler_key_lines()}Environment=HOME={STATE}
 Environment=TMPDIR={STATE}/tmp
 ExecStart=/usr/bin/python3 -u {rel}/settler_v3.py
 Restart=on-failure
@@ -381,7 +402,7 @@ NoNewPrivileges=true
 PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths={STATE} {DA_DIR}
+ReadWritePaths={STATE} {DA_DIR}{f' {SETTLER_DIR}' if SETTLER_PASSPHRASE.is_file() else ''}
 # Kernel, cgroup and privilege surfaces the worker never uses (it runs Docker through the socket, not here).
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -402,6 +423,16 @@ MemorySwapMax=0
 [Install]
 WantedBy=multi-user.target
 '''
+
+
+def settler_key_lines():
+    """The unit lines of the settler key, once `settler-key prepare` made it: without one the unit is byte for
+    byte what it was."""
+    if not SETTLER_PASSPHRASE.is_file():
+        return ''
+    return (f'# The settler passphrase (audit L2N-01): the same path as the DA one, a 0400 copy of {USER}.\n'
+            f'ExecStartPre=+/usr/bin/install -m 0400 -o {USER} -g {USER} {SETTLER_PASSPHRASE} '
+            f'{SETTLER_RUNTIME_PASSPHRASE}\n')
 
 
 def write_unit(rel):
@@ -430,8 +461,11 @@ def release_config(config, rel):
     new = {**config, 'produce': str(rel / 'bloch-l2-produce-dev'),
            'prover': str(rel / 'bloch-evm-sp1-settlement-v3'), 'prover_sha256': digest(rel / 'bloch-evm-sp1-settlement-v3'),
            'guest': str(rel / 'settlement_v3_mainnet'), 'guest_sha256': digest(rel / 'settlement_v3_mainnet')}
-    new['da'] = {**config['da'], 'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
-                 'genesis': str(rel / 'mainnet.manifest')}
+    signer = {'signer': str(rel / 'bloch-pos'), 'signer_sha256': digest(rel / 'bloch-pos'),
+              'genesis': str(rel / 'mainnet.manifest')}
+    new['da'] = {**config['da'], **({} if config['da'].get('settler_key') else signer)}
+    if 'settler_authorization' in config:
+        new['settler_authorization'] = {**config['settler_authorization'], **signer}
     return new
 
 
@@ -516,6 +550,80 @@ def upgrade_rollback():
     print(json.dumps({'rolled_back_to': previous.name, 'from': current.name, 'started': was_active}, indent=2))
 
 
+def settler_key(args):
+    """Audit L2N-01: the settler's signing key and its entry in the configuration (see the module docstring)."""
+    command = args[0] if args else ''
+    assert command in ('prepare', 'enable'), 'settler-key prepare | settler-key enable --set FILE'
+    assert STATE.is_dir(), 'run prepare first'
+    rel = release()
+    signer = rel / 'bloch-pos'
+    run([signer, 'l2-settler', '--help'])  # a release without the settler tool stops here
+    if command == 'prepare':
+        assert not SETTLER_DIR.exists() and not SETTLER_PASSPHRASE.exists() and not SETTLER_PUBKEY.exists(), \
+            'a settler key exists: it is never overwritten (see SETTLER-RUNBOOK.md, settler key)'
+        owner = pwd.getpwnam(USER)
+        SETTLER_DIR.mkdir(mode=0o700)
+        with os.fdopen(os.open(SETTLER_PASSPHRASE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400), 'w') as out:
+            out.write(secrets.token_hex(48) + '\n')
+        env = {'PATH': '/usr/bin:/bin', 'BLOCH_KEYSTORE_PASSPHRASE_FILE': str(SETTLER_PASSPHRASE)}
+        run([signer, 'keygen', '--dir', SETTLER_DIR, '--index', '0'], env=env)
+        assert 'sealed' in run([signer, 'keys', 'inspect', '--dir', SETTLER_DIR])
+        run([signer, 'l2-settler', 'pubkey', '--dir', SETTLER_DIR, '--out', SETTLER_PUBKEY], env=env)
+        pubkey = bytes.fromhex(SETTLER_PUBKEY.read_text().strip())
+        assert len(pubkey) == 3749
+        SETTLER_PUBKEY.chmod(0o644)
+        for path in [SETTLER_DIR, *SETTLER_DIR.iterdir()]:
+            os.chown(path, owner.pw_uid, owner.pw_gid)
+        print(json.dumps({'settler_keystore': str(SETTLER_DIR), 'settler_pubkey_file': str(SETTLER_PUBKEY),
+                          'settler_pubkey_sha3': hashlib.sha3_256(pubkey).hexdigest(),
+                          'next': 'back up the keystore and the passphrase separately (key backup policy); give '
+                                  'the public key file to the owner for the settler set; then settler-key enable'},
+                         indent=2))
+        return
+    assert '--confirm-mainnet' in args, 'enable changes how the mainnet worker settles: pass --confirm-mainnet'
+    assert CONFIG.exists() and SETTLER_PASSPHRASE.is_file() and SETTLER_PUBKEY.is_file(), \
+        'configure and settler-key prepare first'
+    assert not unit_active(), f'stop {UNIT_NAME} first'
+    config = json.loads(CONFIG.read_text())
+    assert 'settler_authorization' not in config, 'already enabled'
+    settler = settler_module(rel)
+    text = Path(option(args, '--set', '')).read_text()
+    keys = settler.parse_settler_set(text)
+    assert keys is not None, '--set is not a settler set (1 to 3 distinct keys, hex, one per line)'
+    assert bytes.fromhex(SETTLER_PUBKEY.read_text().strip()) in keys, "this host's settler key is not in --set"
+    activation = option(args, '--activation-epoch', 'l1')
+    activation = activation if activation == 'l1' else int(activation)
+    assert not SETTLER_SET.exists(), f'{SETTLER_SET} exists'
+    owner = pwd.getpwnam(USER)
+    SETTLER_SET.write_text(''.join(k.hex() + '\n' for k in keys))
+    os.chown(SETTLER_SET, owner.pw_uid, owner.pw_gid)
+    SETTLER_SET.chmod(0o640)
+    try:
+        run([signer, 'l2-settler', 'check', '--set', SETTLER_SET, '--dir', SETTLER_DIR],
+            env={'PATH': '/usr/bin:/bin', 'BLOCH_KEYSTORE_PASSPHRASE_FILE': str(SETTLER_PASSPHRASE)})
+        config['settler_authorization'] = {
+            'signer': str(signer), 'signer_sha256': digest(signer), 'genesis': str(rel / 'mainnet.manifest'),
+            'keystore_dir': str(SETTLER_DIR), 'passphrase_file': str(SETTLER_RUNTIME_PASSPHRASE),
+            'pubkey': str(SETTLER_PUBKEY), 'set': str(SETTLER_SET), 'activation_epoch': activation}
+        if '--da-settler-key' in args:
+            policy = {k: v for k, v in config['da'].items()
+                      if k not in ('signer', 'signer_sha256', 'genesis', 'funding_pubkey', 'keystore_dir', 'passphrase_file')}
+            config['da'] = {**policy, 'settler_key': True, 'settler_slot_activation_epoch': 'l1'}
+        settler.Settler(config)  # every pin and the set, offline
+    except BaseException:
+        SETTLER_SET.unlink()
+        raise
+    shutil.copy2(CONFIG, ETC / 'config.json.pre-settler-key')
+    PENDING.write_text(json.dumps(config, indent=2) + '\n')
+    PENDING.chmod(0o644)
+    os.replace(PENDING, CONFIG)
+    write_unit(rel)
+    print(json.dumps({'settler_authorization': 'configured', 'activation_epoch': activation,
+                      'set_hash': settler.settler_set_hash(keys).hex(), 'keys': len(keys),
+                      'da_settler_key': '--da-settler-key' in args,
+                      'next': f'systemctl start {UNIT_NAME}; the log shows settler-key-checked'}, indent=2))
+
+
 def rollback(_args):
     if UNIT.exists():
         subprocess.run(['systemctl', 'disable', '--now', UNIT_NAME], check=False)
@@ -529,7 +637,7 @@ def rollback(_args):
 if __name__ == '__main__':
     assert os.geteuid() == 0, 'run as root'
     commands = {'prepare': prepare, 'configure': configure, 'dry-run': dry_run, 'start': start, 'upgrade': upgrade,
-                'rollback': rollback}
+                'settler-key': settler_key, 'rollback': rollback}
     command = sys.argv[1] if len(sys.argv) > 1 else ''
     if command not in commands:
         raise SystemExit(__doc__)

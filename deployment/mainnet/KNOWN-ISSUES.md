@@ -25,6 +25,10 @@ installers use on host A.
 | 8 | R308-2P-9, R308-18: limits of the attestor's signing memory | attestor | `halt` "refusing a second signature", `marker-not-written` |
 | 9 | R308-2P-12: address rules of the installers | shadow, attestor | no new `shadow-match` after a DNS change |
 | 10 | R308-21: what `upgrade` and rollback do not cover | attestor, settler, follower installers | see the entry |
+| 11 | L2-01: deposit-only is the settler's configuration, not an L1 rule | L1, settler, shadow | `foreign_settlements` WARN with a V3 statement whose `user_tx_count` is not 0 |
+| 12 | L2-05: `safe` trusts the native node the follower reads | follower, settled RPC | none on screen |
+| 13 | L2-06: the settled RPC of `926d2cf` keeps serving `safe` when the follower stops | settled RPC | `l2_finality_status` and `follower_status` WARN/CRIT on age |
+| 14 | L2N-01: settlement is still permissionless; the settler side of both protections is in source only | L1, settler, prover | `foreign_settlements` CRIT |
 
 ## 1. F312-4: a foreign settlement stops the shadow producer for good
 
@@ -256,3 +260,85 @@ section 0 before starting. After an interrupted follower install nothing was sta
 remove the unit files that the refusal names and run the installer again from the start. After an
 attestor `upgrade-rollback`, run `install-attestor.sh status` and read the agent's `check-ok` line
 that the rollback prints.
+
+## 11. L2-01: deposit-only is the settler's configuration, not an L1 rule
+
+Identifier: audit `L2-01` of 2026-11-14.
+
+**What it is.** The L2 that L1 installed at the epoch-5850 flag day committed a profile that admits user
+transactions, DA (0x15) and claims (0x16). "Deposit-only" is what this kit's settler does (D10 off),
+not what L1 enforces: anyone with a prover (about 30 GiB) can publish a DA batch and settle a V3
+block with user transactions, after which the outbox and claims are live, on binaries that never
+ran user transactions (C8). It is also a foreign settlement, so entry 1 (F312-4) stops the shadow.
+Audit AUDIT-L1L2-20261123 (L2N-01) found that a foreign settlement does not need user transactions
+to do more than entry 1 describes: read that finding before relying on this entry for the exposure
+cap (D13).
+The native branch `codex/l2-native-audit-fixes-20261114` adds the consensus rule
+(`params::L2_DEPOSIT_ONLY_EPOCH`, inert): arming it is an owner decision and a fleet release.
+
+**What the operator sees.** `foreign_settlements` WARN; the foreign statement's `user_tx_count` is
+not 0 (`getl2settlement`). Then entry 1.
+
+**What the operator does.** Treat it as a foreign settlement (entry 1), and report it to the
+coordinator at once: user transactions are open on L1 from then on, whatever the settler does.
+
+## 12. L2-05: `safe` trusts the native node the follower reads
+
+Identifier: audit `L2-05` of 2026-11-14.
+
+**What it is.** `finalized` is replayed and verified by the follower. `safe` is the settlement the
+native node at `--l1-rpc-url` reports at its head, read without a proof over plain HTTP: whoever
+controls that node or the network path can make the RPC publish `safe` equal to `latest` with
+nothing posted on L1 (or hold `safe` at `finalized`).
+
+**What the operator sees.** Nothing by itself.
+
+**What the operator does.** Install with a loopback `--l1-rpc-url` (a local node, or an SSH tunnel to
+the operator's node). `follower-rpc/install.sh` refuses any other host unless
+`--l1-rpc-remote-trusted` states that the node and the path are the operator's own. Exchanges and
+wallets credit on `finalized`, not `safe`.
+
+The follower source of this branch also carries the rule in the binary (audit
+AUDIT-L1L2-20261123, L2N-04): it asks for `safe` only from `localhost` or 127.0.0.0/8, and with a
+remote `--rpc-url` reports no safe settlement, so the RPC serves `finalized` as `safe`. It reaches
+a host with the next release build. Followers A and B of the launch read remote nodes: until they
+are re-pointed to a loopback URL, `safe` on the launch release trusts those nodes, and on the next
+release equals `finalized`.
+
+## 13. L2-06: the settled RPC of the launch release keeps serving `safe` when the follower stops
+
+Identifier: audit `L2-06` of 2026-11-14. The launch release
+`bloch-l2-2026-11-17-launch-native-906336fd` carries the settled RPC of `926d2cf`, byte for byte.
+
+**What it is.** When the follower stops (entry 1, a `Follow::Halt`, a full disk), the settled RPC of
+this release keeps answering `status: ok` with the last levels; only `age_s` grows. The fix (safe
+closes and the status reads `stale` after 900 s) is in the source of this branch and needs the next
+release build.
+
+**What the operator sees.** `l2_finality_status` and `follower_status` WARN after 300 s, CRIT after
+900 s (`l2_monitor.py`, age of the status).
+
+**What the operator does.** Treat a CRIT on either as "safe is not current": restart the follower
+(`sudo systemctl restart bloch-l2-mainnet-follower`) and read its journal; if it halted, follow the
+entry its reason names.
+
+## 14. L2N-01: settlement is still permissionless; the settler side of both protections is in source only
+
+Identifier: audit AUDIT-L1L2-20261123, `L2N-01` (Critical by the audit's model; root cause D13/F1).
+
+**What it is.** Anyone with a valid proof can settle, and the deployed guest lets the prover choose the
+block's timestamp and `prevrandao`, so one outside settlement can leave a head nobody else can rebuild.
+Two protections are written and both are off: the L1 settler gate (settlements only from a registered
+key) and the bound guest program. The settler, the prover wrapper, the installer and the monitor of this
+branch know both (SETTLER-RUNBOOK.md, "Settler key, authorization and the program switch"), but nothing
+is armed on L1, no settler key exists, no set is pinned and the launch release has none of this code.
+The bound program's pins in `settler_v3.py` (`MAINNET_BOUND`) are candidate values, not a release.
+
+**What the operator sees.** Nothing until a foreign settlement: then `foreign_settlements` CRIT. If the
+foreign block is off-rule, the settler, shadow, follower and attestors halt (exit 3).
+
+**What the operator does.** Keep the escrow exposure at the cap the owner set (D13). On
+`foreign_settlements` CRIT stop accepting deposits at the wallet and call the owner: the only recovery
+from an off-rule head is an L1 release. Arming needs the checklist in the runbook; none of its steps is
+an operator decision.
+

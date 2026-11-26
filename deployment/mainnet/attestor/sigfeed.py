@@ -275,11 +275,16 @@ def fetch(url, max_bytes=MAX_FILE, deadline=5.0, ca_file=None):
     else:
         conn = http.client.HTTPConnection(u.hostname, u.port, timeout=deadline)
     fired = threading.Event()
+    # The connected socket, kept here for the timer: http.client sets `conn.sock = None` as soon as the headers
+    # of a "Connection: close" answer are read (the response object owns the socket from then on), so a timer
+    # that looks only at `conn.sock` closes nothing while the body is read (audit AUDIT-L1L2-20261123, L2N-21).
+    held = []
 
     def expire():
         fired.set()
-        if conn.sock is not None:
-            close_quietly(conn.sock)
+        for sock in held + [conn.sock]:
+            if sock is not None:
+                close_quietly(sock)
 
     killer = threading.Timer(deadline, expire)
     killer.daemon = True
@@ -290,6 +295,10 @@ def fetch(url, max_bytes=MAX_FILE, deadline=5.0, ca_file=None):
         killer.cancel()
         conn.close()
         raise FetchError('deadline' if fired.is_set() else 'unreachable', type(e).__name__) from e
+    held.append(conn.sock)
+    if fired.is_set():  # the deadline passed while connecting, before there was a socket to close
+        conn.close()
+        raise FetchError('deadline', url)
     answered = False
     try:
         conn.request('GET', target, headers={'Accept-Encoding': 'identity', 'Connection': 'close'})
@@ -309,6 +318,8 @@ def fetch(url, max_bytes=MAX_FILE, deadline=5.0, ca_file=None):
         chunks, total = [], 0
         while True:
             chunk = response.read1(65536)
+            if fired.is_set():
+                raise FetchError('deadline', url)
             if not chunk:
                 break
             total += len(chunk)

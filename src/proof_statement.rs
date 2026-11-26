@@ -590,7 +590,9 @@ pub fn execute_settlement_statement_v3(
 /// `BLOCH:EVM:CONFIG:2:CANCUN`, the same fields, then the outbox address (raw
 /// 20 bytes) and [`crate::withdrawal::MIN_WITHDRAWAL_SATS`] (u64): the
 /// withdrawal rules are part of the configuration a verifier pins. Chains
-/// without the outbox keep the version 1 bytes.
+/// without the outbox keep the version 1 bytes. A chain whose deposit cap
+/// bounds the outstanding supply ([`crate::chainspec::SupplyCap::Outstanding`])
+/// uses the tag `BLOCH:EVM:CONFIG:3:CANCUN` with the version 2 fields.
 pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError> {
     spec.validate()?;
     // Exhaustive destructuring makes new configuration fields a compile error.
@@ -610,11 +612,15 @@ pub fn configuration_commitment(spec: &ChainSpec) -> Result<B256, ChainSpecError
         max_l1_sats,
         deposit_gas,
         withdrawal_outbox,
+        supply_cap,
     } = spec;
-    let tag: &[u8] = if withdrawal_outbox.is_some() {
-        b"BLOCH:EVM:CONFIG:2:CANCUN"
-    } else {
-        b"BLOCH:EVM:CONFIG:1:CANCUN"
+    // Version 3 has the version 2 fields and no more: the tag itself states
+    // that the deposit cap bounds the outstanding supply. `validate` admits
+    // that rule only with the outbox, so version 3 always has the outbox.
+    let tag: &[u8] = match (supply_cap, withdrawal_outbox.is_some()) {
+        (crate::chainspec::SupplyCap::Outstanding, _) => b"BLOCH:EVM:CONFIG:3:CANCUN",
+        (crate::chainspec::SupplyCap::GrossMinted, true) => b"BLOCH:EVM:CONFIG:2:CANCUN",
+        (crate::chainspec::SupplyCap::GrossMinted, false) => b"BLOCH:EVM:CONFIG:1:CANCUN",
     };
     let mut bytes = Vec::from(tag);
     for value in [
